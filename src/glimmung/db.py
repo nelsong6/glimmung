@@ -1,7 +1,6 @@
 import logging
 from typing import Any
 
-from azure.cosmos import PartitionKey
 from azure.cosmos.aio import ContainerProxy, CosmosClient, DatabaseProxy
 from azure.identity.aio import DefaultAzureCredential
 
@@ -29,23 +28,19 @@ class Cosmos:
         self.leases: ContainerProxy | None = None
 
     async def start(self) -> None:
+        # Database + containers are pre-created by tofu/ (per-app pattern,
+        # matches kill-me / plant-agent / my-homepage). The runtime pod
+        # workload identity only has data-plane Cosmos perms — control-plane
+        # CREATE DATABASE / CREATE CONTAINER is not allowed. get_*_client
+        # returns a proxy without making any API call; write operations
+        # against it use the workload identity's data-plane permissions.
         self._credential = DefaultAzureCredential()
         self._client = CosmosClient(self._settings.cosmos_endpoint, credential=self._credential)
-        self._db = await self._client.create_database_if_not_exists(self._settings.cosmos_database)
-
-        self.projects = await self._db.create_container_if_not_exists(
-            id="projects",
-            partition_key=PartitionKey(path="/name"),
-        )
-        self.hosts = await self._db.create_container_if_not_exists(
-            id="hosts",
-            partition_key=PartitionKey(path="/name"),
-        )
-        self.leases = await self._db.create_container_if_not_exists(
-            id="leases",
-            partition_key=PartitionKey(path="/project"),
-        )
-        log.info("cosmos containers ready: projects, hosts, leases")
+        self._db = self._client.get_database_client(self._settings.cosmos_database)
+        self.projects = self._db.get_container_client("projects")
+        self.hosts = self._db.get_container_client("hosts")
+        self.leases = self._db.get_container_client("leases")
+        log.info("cosmos clients ready: projects, hosts, leases")
 
     async def stop(self) -> None:
         if self._client is not None:
