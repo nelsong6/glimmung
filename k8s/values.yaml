@@ -15,12 +15,36 @@ cosmos:
   endpoint: https://infra-cosmos-serverless.documents.azure.com:443/
   database: glimmung
 
-# Ingress — Phase 1 keeps glimmung internal-only (test via port-forward).
-# Phase 2 will add HTTPRoute + bearer-token auth alongside the GitHub App.
+# Phase 2: ingress at glimmung.romaine.life. The XListenerSet adds a
+# dedicated HTTPS listener on the shared envoy-gateway with TLS
+# termination from the cert-manager Certificate. ExternalDNS picks the
+# A record up off the HTTPRoute's parentRef on the main Gateway.
 ingress:
-  enabled: false
+  enabled: true
   hostname: glimmung.romaine.life
   gatewayName: main
   gatewayNamespace: envoy-gateway-system
   certIssuer: letsencrypt-prod
   tlsSecret: glimmung-tls
+
+# ExternalSecret — pulls GitHub App credentials, webhook secret, and
+# admin token from Key Vault into a Secret the deployment envFroms.
+# Keys must already exist in romaine-kv: github-app-id,
+# github-app-installation-id, github-app-private-key, github-webhook-secret.
+# glimmung-admin-token is created by glimmung's own tofu (see tofu/keyvault.tf).
+externalSecret:
+  storeName: romaine-kv
+  storeKind: ClusterSecretStore
+  refreshInterval: 1h
+  secretName: glimmung-secrets
+  keys:
+    - envVar: GITHUB_APP_ID
+      kvKey: github-app-id
+    - envVar: GITHUB_APP_INSTALLATION_ID
+      kvKey: github-app-installation-id
+    - envVar: GITHUB_APP_PRIVATE_KEY
+      kvKey: github-app-private-key
+    - envVar: GITHUB_WEBHOOK_SECRET
+      kvKey: github-webhook-secret
+    - envVar: ADMIN_TOKEN
+      kvKey: glimmung-admin-token

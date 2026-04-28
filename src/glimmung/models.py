@@ -15,9 +15,22 @@ class LeaseState(str, Enum):
 class Project(BaseModel):
     id: str
     name: str
-    token_hash: str | None = None
+    github_repo: str = ""             # e.g. "nelsong6/spirelens"
+    workflow_filename: str = ""       # e.g. "issue-agent.yaml"
+    workflow_ref: str = "main"
+    trigger_label: str = "issue-agent"
+    default_requirements: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
+
+
+class ProjectRegister(BaseModel):
+    name: str
+    github_repo: str
+    workflow_filename: str
+    workflow_ref: str = "main"
+    trigger_label: str = "issue-agent"
+    default_requirements: dict[str, Any] = Field(default_factory=dict)
 
 
 class Host(BaseModel):

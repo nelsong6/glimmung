@@ -1,9 +1,12 @@
-"""Lease lifecycle: acquire, heartbeat, release, sweep.
+"""Lease lifecycle: acquire, heartbeat, release, sweep, promote.
 
 Acquisition is the only interesting bit — it uses optimistic concurrency
 on the hosts container's `_etag` to grab a free host without colliding
 with concurrent acquirers. The retry loop is bounded by the number of
 free hosts (always small at this scale).
+
+`promote_pending` re-tries pending leases against current free capacity.
+Called periodically and after every release.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -139,6 +142,59 @@ async def release(cosmos: Cosmos, lease_id: str, project: str) -> Lease:
     lease_doc["releasedAt"] = _utcnow_iso()
     await cosmos.leases.replace_item(item=lease_id, body=lease_doc)
     return Lease.model_validate(_camel_to_snake(lease_doc))
+
+
+async def try_assign_pending(cosmos: Cosmos, lease_doc: dict[str, Any]) -> Host | None:
+    """Try to assign a free host to an already-persisted pending lease.
+    Returns the host if successful, None if no capacity matches."""
+    requirements = lease_doc.get("requirements", {})
+    candidates_raw = await query_all(
+        cosmos.hosts,
+        "SELECT * FROM c WHERE (NOT IS_DEFINED(c.currentLeaseId) OR c.currentLeaseId = null) AND c.drained = false",
+    )
+    candidates = [c for c in candidates_raw if _matches(c.get("capabilities", {}), requirements)]
+    candidates.sort(key=lambda h: h.get("lastUsedAt") or "")
+
+    now = _utcnow_iso()
+    for candidate in candidates:
+        try:
+            updated = {
+                **candidate,
+                "currentLeaseId": lease_doc["id"],
+                "lastUsedAt": now,
+                "lastHeartbeat": now,
+            }
+            await cosmos.hosts.replace_item(
+                item=candidate["id"],
+                body=updated,
+                etag=candidate["_etag"],
+                match_condition=MatchConditions.IfNotModified,
+            )
+            lease_doc["host"] = candidate["name"]
+            lease_doc["state"] = LeaseState.ACTIVE.value
+            lease_doc["assignedAt"] = now
+            await cosmos.leases.replace_item(item=lease_doc["id"], body=lease_doc)
+            return Host.model_validate(_camel_to_snake(updated))
+        except CosmosAccessConditionFailedError:
+            continue
+    return None
+
+
+async def promote_pending(cosmos: Cosmos) -> list[tuple[dict[str, Any], Host]]:
+    """Walk pending leases (oldest first) and try to assign each. Returns
+    list of (lease_doc, host) for newly-assigned leases so the caller can
+    fire workflow_dispatch for them."""
+    pending = await query_all(
+        cosmos.leases,
+        "SELECT * FROM c WHERE c.state = @s ORDER BY c.requestedAt ASC",
+        parameters=[{"name": "@s", "value": LeaseState.PENDING.value}],
+    )
+    assigned: list[tuple[dict[str, Any], Host]] = []
+    for lease_doc in pending:
+        host = await try_assign_pending(cosmos, lease_doc)
+        if host is not None:
+            assigned.append((lease_doc, host))
+    return assigned
 
 
 async def sweep_expired(cosmos: Cosmos, settings: Settings) -> int:

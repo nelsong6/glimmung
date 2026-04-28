@@ -27,6 +27,9 @@ spec:
               value: {{ .Values.cosmos.endpoint | quote }}
             - name: COSMOS_DATABASE
               value: {{ .Values.cosmos.database | quote }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.externalSecret.secretName }}
           readinessProbe:
             httpGet:
               path: /healthz

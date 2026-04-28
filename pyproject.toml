@@ -17,6 +17,7 @@ dependencies = [
   # without it DefaultAzureCredential's async client raises ImportError
   # at first use.
   "aiohttp>=3.10",
+  "pyjwt[crypto]>=2.9",
 ]
 
 [project.optional-dependencies]

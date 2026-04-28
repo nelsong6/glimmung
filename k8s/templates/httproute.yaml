@@ -1,0 +1,32 @@
+{{- if .Values.ingress.enabled -}}
+# Dual parentRef: XListenerSet for HTTPS serving, Gateway main for HTTP (and
+# so ExternalDNS creates the A record — external-dns#5694 tracks native
+# XListenerSet source support).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: glimmung
+  namespace: {{ .Values.namespace }}
+spec:
+  hostnames:
+    - {{ .Values.ingress.hostname }}
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ .Values.ingress.gatewayName }}
+      namespace: {{ .Values.ingress.gatewayNamespace }}
+    - group: gateway.networking.x-k8s.io
+      kind: XListenerSet
+      name: glimmung
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: glimmung
+          port: 80
+          weight: 1
+{{- end }}
