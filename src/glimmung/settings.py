@@ -4,9 +4,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="GLIMMUNG_", env_file=".env", extra="ignore")
+    # Bare env var names — matches the tank-operator pattern. A repo-prefixed
+    # prefix collides with the K8s-injected {SERVICE_NAME}_PORT env vars
+    # because the service name and the prefix match.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    http_port: int = 8000
+    port: int = 8000
     log_level: str = "INFO"
 
     cosmos_endpoint: str = "https://infra-cosmos-serverless.documents.azure.com:443/"
@@ -15,7 +18,6 @@ class Settings(BaseSettings):
     # Default lease TTL — heartbeat must arrive within this window or the
     # sweep job reclaims the host.
     lease_default_ttl_seconds: int = 900
-    lease_heartbeat_grace_seconds: int = 60
 
     # Sweep job cadence
     sweep_interval_seconds: int = 60
