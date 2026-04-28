@@ -157,6 +157,134 @@ header .quote {
   line-height: 1.4;
 }
 
+header .auth {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: 20px;
+  font-size: 0.85rem;
+}
+header .auth .user {
+  color: #999;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+header .auth .link {
+  background: transparent;
+  border: 1px solid #2a2a2e;
+  color: #d4d4d4;
+  padding: 4px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: inherit;
+}
+header .auth .link:hover {
+  background: #15151a;
+  border-color: #3a3a3e;
+}
+
+.admin-panel {
+  border: 1px solid #2a2a2e;
+  border-radius: 4px;
+  background: #15151a;
+  margin-bottom: 24px;
+  overflow: hidden;
+}
+.admin-tabs {
+  display: flex;
+  border-bottom: 1px solid #2a2a2e;
+}
+.admin-tabs .tab {
+  flex: 1;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #999;
+  padding: 12px 16px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+.admin-tabs .tab:hover {
+  background: #1a1a1f;
+  color: #d4d4d4;
+}
+.admin-tabs .tab.selected {
+  color: #4ade80;
+  border-bottom-color: #4ade80;
+}
+.admin-form {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.admin-form label {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 0.9rem;
+}
+.admin-form label > span {
+  width: 160px;
+  color: #888;
+  font-size: 0.85rem;
+}
+.admin-form input[type="text"],
+.admin-form input:not([type="checkbox"]) {
+  flex: 1;
+  background: #0e0e10;
+  border: 1px solid #2a2a2e;
+  color: #d4d4d4;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 0.9rem;
+}
+.admin-form input.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+}
+.admin-form input:focus {
+  outline: none;
+  border-color: #4ade80;
+}
+.admin-form label.checkbox {
+  align-items: center;
+}
+.admin-form label.checkbox input[type="checkbox"] {
+  width: auto;
+  flex: none;
+}
+.admin-form button[type="submit"] {
+  align-self: flex-start;
+  background: #14532d;
+  color: #4ade80;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+.admin-form button[type="submit"]:hover:not(:disabled) {
+  background: #166534;
+}
+.admin-form button[type="submit"]:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.admin-form .error {
+  background: #3f1c1c;
+  color: #f87171;
+  padding: 8px 12px;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
 .filter-hint {
   font-size: 0.75rem;
   color: #555;

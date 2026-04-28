@@ -145,6 +145,23 @@ async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/v1/config")
+async def public_config() -> dict[str, str]:
+    """Public config consumed by the frontend at bootstrap. The client_id is
+    not secret but is operationally managed (rotates on tofu re-create), so
+    serve it from here instead of baking into the JS bundle.
+
+    Frontend uses MSAL with the standard openid/profile/email scopes and
+    sends the resulting ID token to the backend; backend validates it with
+    audience=entra_client_id. No custom API scope needed (matches the
+    tank-operator pattern exactly)."""
+    settings = app.state.settings
+    return {
+        "entra_client_id": settings.entra_client_id,
+        "authority": "https://login.microsoftonline.com/common",
+    }
+
+
 # ─── Lease lifecycle (capability-based via lease_id) ──────────────────────────
 
 

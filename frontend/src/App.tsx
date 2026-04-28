@@ -1,4 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
+import { AdminPanel } from "./AdminPanel";
+import { currentAccount, initAuth, signIn, signOut } from "./auth";
+import type { AccountInfo } from "@azure/msal-browser";
 
 type Host = {
   name: string;
@@ -51,6 +54,21 @@ export function App() {
   const [conn, setConn] = useState<Connection>("dead");
   const [lastUpdate, setLastUpdate] = useState<number>(0);
   const [selected, setSelected] = useState<string>(ALL);
+  const [account, setAccount] = useState<AccountInfo | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [showAdmin, setShowAdmin] = useState(false);
+
+  useEffect(() => {
+    initAuth()
+      .then(() => {
+        setAccount(currentAccount());
+        setAuthReady(true);
+      })
+      .catch((e) => {
+        console.error("auth init failed", e);
+        setAuthReady(true);
+      });
+  }, []);
 
   useEffect(() => {
     let es: EventSource | null = null;
@@ -150,7 +168,49 @@ export function App() {
           <div className="quote">
             “The Glimmung scanned the assembled list of beings he had summoned. From a thousand worlds they had come, each with a craft to contribute.”
           </div>
+          <div className="auth">
+            {!authReady ? null : account ? (
+              <>
+                <span className="user">{account.username}</span>
+                <button
+                  type="button"
+                  className="link"
+                  onClick={() => setShowAdmin((s) => !s)}
+                >
+                  {showAdmin ? "hide admin" : "admin"}
+                </button>
+                <button
+                  type="button"
+                  className="link"
+                  onClick={async () => {
+                    await signOut();
+                    setAccount(null);
+                    setShowAdmin(false);
+                  }}
+                >
+                  sign out
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                className="link"
+                onClick={async () => {
+                  try {
+                    const acc = await signIn();
+                    setAccount(acc);
+                  } catch (e) {
+                    console.error("sign-in failed", e);
+                  }
+                }}
+              >
+                sign in
+              </button>
+            )}
+          </div>
         </header>
+
+        {account && showAdmin && <AdminPanel onSuccess={() => setShowAdmin(false)} />}
 
         <h2>Hosts</h2>
         {snap === null ? (
