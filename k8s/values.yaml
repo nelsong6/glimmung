@@ -28,10 +28,11 @@ ingress:
   tlsSecret: glimmung-tls
 
 # ExternalSecret — pulls GitHub App credentials, webhook secret, and
-# admin token from Key Vault into a Secret the deployment envFroms.
-# Keys must already exist in romaine-kv: github-app-id,
-# github-app-installation-id, github-app-private-key, github-webhook-secret.
-# glimmung-admin-token is created by glimmung's own tofu (see tofu/keyvault.tf).
+# Entra config from Key Vault into a Secret the deployment envFroms.
+# The github-* keys are glimmung's *dedicated* App (a GitHub App has only
+# one webhook URL, so glimmung can't co-tenant on the shared App used by
+# mcp-github / diagrams). Created by Nelson via the GitHub UI; the four
+# `glimmung-github-*` KV secrets are set by hand.
 externalSecret:
   storeName: romaine-kv
   storeKind: ClusterSecretStore
@@ -39,13 +40,13 @@ externalSecret:
   secretName: glimmung-secrets
   keys:
     - envVar: GITHUB_APP_ID
-      kvKey: github-app-id
+      kvKey: glimmung-github-app-id
     - envVar: GITHUB_APP_INSTALLATION_ID
-      kvKey: github-app-installation-id
+      kvKey: glimmung-github-app-installation-id
     - envVar: GITHUB_APP_PRIVATE_KEY
-      kvKey: github-app-private-key
+      kvKey: glimmung-github-app-private-key
     - envVar: GITHUB_WEBHOOK_SECRET
-      kvKey: github-webhook-secret
+      kvKey: glimmung-github-webhook-secret
     - envVar: ENTRA_CLIENT_ID
       kvKey: glimmung-oauth-client-id
     - envVar: ALLOWED_EMAILS
