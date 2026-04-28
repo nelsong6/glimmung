@@ -23,11 +23,14 @@ class Settings(BaseSettings):
     github_app_private_key: str = ""
     github_webhook_secret: str = ""
 
-    # Shared admin bearer token for /v1/projects, /v1/hosts, and other
-    # operator-only endpoints. Heartbeat/release endpoints are NOT
-    # bearer-auth'd — the lease_id (a ULID) is unguessable, so possessing
-    # it is itself the capability ("capability-based security").
-    admin_token: str = ""
+    # Entra ID for admin endpoints (POST /v1/projects, /v1/hosts). Pattern
+    # matches tank-operator: validate Entra access token via JWKS, check
+    # audience = entra_client_id, check email in allowed_emails. CLI mints
+    # via `az account get-access-token --resource <client-id>`. Heartbeat
+    # and release endpoints stay unauthenticated — the lease_id is the
+    # capability (ULID, unguessable).
+    entra_client_id: str = ""
+    allowed_emails: str = ""  # comma-separated; auth.py splits + lowercases
 
     # Default lease TTL — heartbeat must arrive within this window or the
     # sweep job reclaims the host.

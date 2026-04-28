@@ -35,7 +35,7 @@ Dockerfile            # builds the python wheel
 | GET    | `/v1/state`                       | Snapshot: hosts + pending leases + active leases. |
 | GET    | `/healthz`                        | Liveness/readiness. |
 
-### Admin (Bearer `ADMIN_TOKEN`)
+### Admin (Entra ID — JWKS-validated bearer token)
 
 | Method | Path                              | Purpose |
 |---|---|---|
@@ -68,16 +68,18 @@ Runtime pod auth via the `infra-shared-identity` workload identity, which has `C
 
 ## One-time setup
 
-Glimmung depends on a handful of Key Vault secrets. Most already exist (the `github-*` keys are shared with `mcp-github`). One needs to be created:
+KV keys consumed by glimmung:
 
-```sh
-az keyvault secret set \
-  --vault-name romaine-kv \
-  --name glimmung-admin-token \
-  --value "$(openssl rand -base64 32)"
-```
+| KV secret                          | Source                                  |
+|---|---|
+| `github-app-id`                    | shared with `mcp-github`                |
+| `github-app-installation-id`       | shared with `mcp-github`                |
+| `github-app-private-key`           | shared with `mcp-github`                |
+| `github-webhook-secret`            | shared (the GitHub App webhook secret)  |
+| `glimmung-oauth-client-id`         | created by `glimmung/tofu/oauth.tf`     |
+| `glimmung-oauth-allowed-emails`    | created by `glimmung/tofu/oauth.tf`     |
 
-ESO will sync into the K8s Secret on its next refresh interval (1h by default; `kubectl annotate externalsecret glimmung-secrets force-sync=$(date +%s)` to kick it).
+The two glimmung-specific secrets are managed by [`tofu/oauth.tf`](tofu/oauth.tf) — `tofu apply` creates the Entra app reg and writes both keys. The `github-*` keys already exist.
 
 GitHub App webhook URL must be set in the App's settings page to:
 
@@ -87,11 +89,20 @@ https://glimmung.romaine.life/v1/webhook/github
 
 with `Issues` checked under "Subscribe to events". The shared `github-webhook-secret` already in KV is what glimmung verifies signatures against.
 
+## Admin auth (CLI)
+
+Mint an Entra access token for the glimmung audience:
+
+```sh
+CLIENT_ID=$(az keyvault secret show --vault-name romaine-kv --name glimmung-oauth-client-id --query value -o tsv)
+TOKEN=$(az account get-access-token --resource "$CLIENT_ID" --query accessToken -o tsv)
+```
+
 ## Registering a project
 
 ```sh
 curl -sS -X POST https://glimmung.romaine.life/v1/projects \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "spirelens",
@@ -106,7 +117,7 @@ curl -sS -X POST https://glimmung.romaine.life/v1/projects \
 
 ```sh
 curl -sS -X POST https://glimmung.romaine.life/v1/hosts \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "win-a",

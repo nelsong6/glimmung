@@ -11,3 +11,10 @@ data "azurerm_cosmosdb_account" "infra" {
   name                = "infra-cosmos-serverless"
   resource_group_name = local.infra.resource_group_name
 }
+
+data "azuread_client_config" "current" {}
+
+data "azurerm_key_vault" "main" {
+  name                = var.key_vault_name
+  resource_group_name = local.infra.resource_group_name
+}

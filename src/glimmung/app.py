@@ -3,12 +3,12 @@ import json
 import logging
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from hashlib import sha256
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Path, Request
+from fastapi import Depends, FastAPI, HTTPException, Path, Request
 
 from glimmung import leases as lease_ops
+from glimmung.auth import require_entra_user
 from glimmung.db import Cosmos, query_all
 from glimmung.github_app import (
     GitHubAppTokenMinter,
@@ -132,21 +132,6 @@ def _project_to_doc(p: ProjectRegister) -> dict[str, Any]:
     }
 
 
-async def require_admin(authorization: str | None = Header(default=None)) -> None:
-    settings = get_settings()
-    if not settings.admin_token:
-        raise HTTPException(503, "admin endpoints disabled (admin_token not configured)")
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(401, "missing bearer token")
-    presented = authorization.removeprefix("Bearer ").strip()
-    if not _safe_compare(presented, settings.admin_token):
-        raise HTTPException(401, "invalid admin token")
-
-
-def _safe_compare(a: str, b: str) -> bool:
-    return sha256(a.encode()).digest() == sha256(b.encode()).digest()
-
-
 app = FastAPI(title="glimmung", version="0.1.0", lifespan=lifespan)
 
 
@@ -213,7 +198,7 @@ async def state() -> StateSnapshot:
 # ─── Admin: projects + hosts ─────────────────────────────────────────────────
 
 
-@app.post("/v1/projects", response_model=Project, dependencies=[Depends(require_admin)])
+@app.post("/v1/projects", response_model=Project, dependencies=[Depends(require_entra_user)])
 async def register_project(p: ProjectRegister) -> Project:
     doc = _project_to_doc(p)
     cosmos: Cosmos = app.state.cosmos
@@ -227,13 +212,13 @@ async def register_project(p: ProjectRegister) -> Project:
     return Project.model_validate(lease_ops._camel_to_snake(doc))
 
 
-@app.get("/v1/projects", response_model=list[Project], dependencies=[Depends(require_admin)])
+@app.get("/v1/projects", response_model=list[Project], dependencies=[Depends(require_entra_user)])
 async def list_projects() -> list[Project]:
     docs = await query_all(app.state.cosmos.projects, "SELECT * FROM c")
     return [Project.model_validate(lease_ops._camel_to_snake(d)) for d in docs]
 
 
-@app.post("/v1/hosts", response_model=Host, dependencies=[Depends(require_admin)])
+@app.post("/v1/hosts", response_model=Host, dependencies=[Depends(require_entra_user)])
 async def register_host(host: dict[str, Any]) -> Host:
     name = host.get("name")
     if not name:
