@@ -33,8 +33,10 @@ class Settings(BaseSettings):
     allowed_emails: str = ""  # comma-separated; auth.py splits + lowercases
 
     # Default lease TTL — heartbeat must arrive within this window or the
-    # sweep job reclaims the host.
-    lease_default_ttl_seconds: int = 900
+    # sweep job reclaims the host. 1h covers spirelens's 30-minute
+    # implementation phase comfortably; phases heartbeat at start to reset
+    # the clock between transitions.
+    lease_default_ttl_seconds: int = 3600
 
     # Sweep job cadence
     sweep_interval_seconds: int = 60
