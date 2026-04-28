@@ -1,11 +1,16 @@
 import asyncio
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from pathlib import Path as FsPath
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Path, Request
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from sse_starlette.sse import EventSourceResponse
 
 from glimmung import leases as lease_ops
 from glimmung.auth import require_entra_user
@@ -173,9 +178,7 @@ async def release_lease(lease_id: str = Path(...), project: str = "") -> Lease:
     return await lease_ops.release(app.state.cosmos, lease_id, project)
 
 
-@app.get("/v1/state", response_model=StateSnapshot)
-async def state() -> StateSnapshot:
-    cosmos: Cosmos = app.state.cosmos
+async def _compute_snapshot(cosmos: Cosmos) -> StateSnapshot:
     host_docs = await query_all(cosmos.hosts, "SELECT * FROM c")
     pending_docs = await query_all(
         cosmos.leases,
@@ -187,12 +190,35 @@ async def state() -> StateSnapshot:
         "SELECT * FROM c WHERE c.state = @s",
         parameters=[{"name": "@s", "value": LeaseState.ACTIVE.value}],
     )
-
     return StateSnapshot(
         hosts=[Host.model_validate(lease_ops._camel_to_snake(h)) for h in host_docs],
         pending_leases=[Lease.model_validate(lease_ops._camel_to_snake(p)) for p in pending_docs],
         active_leases=[Lease.model_validate(lease_ops._camel_to_snake(a)) for a in active_docs],
     )
+
+
+@app.get("/v1/state", response_model=StateSnapshot)
+async def state() -> StateSnapshot:
+    return await _compute_snapshot(app.state.cosmos)
+
+
+@app.get("/v1/events")
+async def events(request: Request):
+    """SSE stream of state snapshots. Phase 3 v1: poll-and-push every
+    snapshot_interval_seconds. A future revision can switch to event-driven
+    fan-out (broadcast channel + Cosmos Change Feed) — same wire format."""
+    async def gen():
+        cosmos: Cosmos = app.state.cosmos
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                snap = await _compute_snapshot(cosmos)
+                yield {"event": "state", "data": snap.model_dump_json()}
+                await asyncio.sleep(2)
+        except asyncio.CancelledError:
+            return
+    return EventSourceResponse(gen())
 
 
 # ─── Admin: projects + hosts ─────────────────────────────────────────────────
@@ -317,3 +343,18 @@ async def github_webhook(request: Request) -> dict[str, Any]:
         )
 
     return {"lease_id": lease.id, "state": lease.state.value, "host": host.name if host else None}
+
+
+# ─── Static frontend ──────────────────────────────────────────────────────────
+# Mounted last so the API routes win. Frontend is built into /app/static by
+# the multi-stage Dockerfile; locally it lives at <repo>/frontend/dist.
+
+_static_env = os.environ.get("GLIMMUNG_STATIC_DIR")
+_static = FsPath(_static_env) if _static_env else FsPath(__file__).resolve().parent / "static"
+if _static.exists():
+    if (_static / "assets").exists():
+        app.mount("/assets", StaticFiles(directory=_static / "assets"), name="assets")
+
+    @app.get("/")
+    async def serve_index() -> FileResponse:
+        return FileResponse(_static / "index.html")

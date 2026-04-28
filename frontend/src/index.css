@@ -1,0 +1,86 @@
+:root {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-size: 14px;
+  color: #d4d4d4;
+  background: #0e0e10;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; padding: 24px; }
+
+h1, h2 { font-weight: 600; margin: 0 0 12px 0; }
+h1 { font-size: 1.6rem; letter-spacing: -0.01em; }
+h2 { font-size: 1.05rem; color: #999; text-transform: uppercase; letter-spacing: 0.05em; }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 24px;
+  font-variant-numeric: tabular-nums;
+}
+th, td {
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid #2a2a2e;
+}
+th {
+  font-weight: 500;
+  font-size: 0.85rem;
+  color: #888;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; color: #b8b8b8; }
+td.dim { color: #666; }
+
+.pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+.pill.free   { background: #14532d; color: #4ade80; }
+.pill.busy   { background: #422006; color: #fb923c; }
+.pill.drain  { background: #3f1c1c; color: #f87171; }
+.pill.pending { background: #1e3a5f; color: #60a5fa; }
+.pill.active  { background: #422006; color: #fb923c; }
+
+.empty {
+  padding: 16px;
+  color: #555;
+  font-style: italic;
+  border: 1px dashed #2a2a2e;
+  border-radius: 4px;
+  text-align: center;
+}
+
+.connection {
+  display: inline-block;
+  margin-left: 12px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.connection.live { background: #14532d; color: #4ade80; }
+.connection.stale { background: #422006; color: #fb923c; }
+.connection.dead { background: #3f1c1c; color: #f87171; }
+
+header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 32px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #2a2a2e;
+}
+header .quote {
+  margin-left: auto;
+  font-style: italic;
+  color: #555;
+  max-width: 50%;
+  text-align: right;
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
