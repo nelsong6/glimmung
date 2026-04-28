@@ -180,6 +180,7 @@ async def release_lease(lease_id: str = Path(...), project: str = "") -> Lease:
 
 async def _compute_snapshot(cosmos: Cosmos) -> StateSnapshot:
     host_docs = await query_all(cosmos.hosts, "SELECT * FROM c")
+    project_docs = await query_all(cosmos.projects, "SELECT * FROM c")
     pending_docs = await query_all(
         cosmos.leases,
         "SELECT * FROM c WHERE c.state = @s",
@@ -194,6 +195,7 @@ async def _compute_snapshot(cosmos: Cosmos) -> StateSnapshot:
         hosts=[Host.model_validate(lease_ops._camel_to_snake(h)) for h in host_docs],
         pending_leases=[Lease.model_validate(lease_ops._camel_to_snake(p)) for p in pending_docs],
         active_leases=[Lease.model_validate(lease_ops._camel_to_snake(a)) for a in active_docs],
+        projects=[Project.model_validate(lease_ops._camel_to_snake(d)) for d in project_docs],
     )
 
 

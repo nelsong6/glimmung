@@ -73,3 +73,4 @@ class StateSnapshot(BaseModel):
     hosts: list[Host]
     pending_leases: list[Lease]
     active_leases: list[Lease]
+    projects: list[Project] = Field(default_factory=list)
