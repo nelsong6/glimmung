@@ -465,10 +465,10 @@ async def github_webhook(request: Request) -> dict[str, Any]:
         return {"ignored": f"no workflow matched action={action} label={label}"}
 
     metadata = {
-        "issueNumber": issue.get("number"),
-        "issueTitle": issue.get("title", "")[:200],
-        "ghEvent": event,
-        "ghAction": action,
+        "issue_number": str(issue.get("number", "")),
+        "issue_title": str(issue.get("title", ""))[:200],
+        "gh_event": event,
+        "gh_action": action or "",
     }
 
     lease, host = await lease_ops.acquire(
