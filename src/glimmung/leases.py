@@ -263,6 +263,11 @@ def _camel_to_snake(d: dict[str, Any]) -> dict[str, Any]:
         "assignedAt": "assigned_at",
         "releasedAt": "released_at",
         "ttlSeconds": "ttl_seconds",
+        "githubRepo": "github_repo",
+        "workflowFilename": "workflow_filename",
+        "workflowRef": "workflow_ref",
+        "triggerLabel": "trigger_label",
+        "defaultRequirements": "default_requirements",
     }
     out: dict[str, Any] = {}
     for k, v in d.items():
