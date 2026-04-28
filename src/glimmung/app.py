@@ -117,6 +117,41 @@ async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host
         log.exception("workflow_dispatch failed for lease %s", lease_doc["id"])
 
 
+async def _handle_workflow_run(payload: dict[str, Any]) -> dict[str, Any]:
+    """Belt-and-suspenders release path: when a workflow run finishes for any
+    reason (success, failure, cancelled, runner died), GitHub fires
+    workflow_run.completed. We pull our lease_id back out of the dispatch
+    inputs (which we set ourselves at acquire time) and release. release()
+    is idempotent — if the workflow's own release step already fired, this
+    is a no-op."""
+    if payload.get("action") != "completed":
+        return {"ignored": f"workflow_run.{payload.get('action')}"}
+
+    run = payload.get("workflow_run") or {}
+    inputs = run.get("inputs") or {}
+    lease_id = inputs.get("lease_id")
+    if not lease_id:
+        return {"ignored": "no lease_id in inputs"}
+
+    repo = (payload.get("repository") or {}).get("full_name", "")
+    cosmos: Cosmos = app.state.cosmos
+    matching = await query_all(
+        cosmos.projects,
+        "SELECT * FROM c WHERE c.githubRepo = @r",
+        parameters=[{"name": "@r", "value": repo}],
+    )
+    if not matching:
+        return {"ignored": "no project for repo"}
+    project = matching[0]["name"]
+
+    try:
+        released = await lease_ops.release(cosmos, lease_id, project)
+        return {"released": lease_id, "state": released.state.value}
+    except Exception as e:
+        log.exception("workflow_run release failed for %s", lease_id)
+        return {"error": str(e), "lease_id": lease_id}
+
+
 async def _read_project(cosmos: Cosmos, name: str) -> dict[str, Any] | None:
     try:
         return await cosmos.projects.read_item(item=name, partition_key=name)
@@ -176,6 +211,21 @@ async def create_lease(request: LeaseRequest) -> LeaseResponse:
         ttl_seconds=request.ttl_seconds,
     )
     return LeaseResponse(lease=lease, host=host)
+
+
+@app.get("/v1/lease/{lease_id}", response_model=Lease)
+async def read_lease(lease_id: str = Path(...), project: str = "") -> Lease:
+    """Read a lease by id. Capability auth: possessing the (ULID) lease_id is
+    the proof of authorization. The verify-lease step in consumer workflows
+    hits this and asserts state=active + host matches inputs.host."""
+    if not project:
+        raise HTTPException(400, "project query param required")
+    cosmos: Cosmos = app.state.cosmos
+    try:
+        doc = await cosmos.leases.read_item(item=lease_id, partition_key=project)
+    except Exception:
+        raise HTTPException(404, "lease not found")
+    return Lease.model_validate(lease_ops._camel_to_snake(doc))
 
 
 @app.post("/v1/lease/{lease_id}/heartbeat", response_model=Lease)
@@ -306,10 +356,12 @@ async def github_webhook(request: Request) -> dict[str, Any]:
         raise HTTPException(401, "invalid signature")
 
     event = request.headers.get("X-GitHub-Event", "")
+    payload = json.loads(body)
+
+    if event == "workflow_run":
+        return await _handle_workflow_run(payload)
     if event != "issues":
         return {"ignored": event}
-
-    payload = json.loads(body)
     action = payload.get("action")
     issue = payload.get("issue", {})
     repo = payload.get("repository", {}).get("full_name", "")
