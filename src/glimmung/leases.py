@@ -9,8 +9,9 @@ free hosts (always small at this scale).
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-import ulid
+from azure.core import MatchConditions
 from azure.cosmos.exceptions import CosmosAccessConditionFailedError, CosmosResourceNotFoundError
+from ulid import ULID
 
 from glimmung.db import Cosmos, query_all
 from glimmung.models import Host, Lease, LeaseState
@@ -48,7 +49,7 @@ async def acquire(
     can poll or be notified later. If a host is found, the lease is `active`.
     """
     now = _utcnow_iso()
-    lease_id = str(ulid.new())
+    lease_id = str(ULID())
     ttl = ttl_seconds or settings.lease_default_ttl_seconds
 
     # Cross-partition query — hosts container is small, this is cheap.
@@ -72,7 +73,7 @@ async def acquire(
                 item=candidate["id"],
                 body=updated,
                 etag=candidate["_etag"],
-                match_condition="IfMatch",
+                match_condition=MatchConditions.IfNotModified,
             )
             lease = Lease(
                 id=lease_id,
