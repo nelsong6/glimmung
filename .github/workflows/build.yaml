@@ -54,8 +54,10 @@ jobs:
           # Targeted sed: only the line beginning with two spaces + `tag:` under image.
           # Quote the value so all-digit short-SHAs (e.g. 6432731) aren't parsed as
           # numbers by YAML and emitted as scientific notation.
-          sed -i -E "s|^(  tag: ).*$|\1\"${tag}\"|" k8s/values.yaml
-
+          bump() {
+            sed -i -E "s|^(  tag: ).*$|\1\"${tag}\"|" k8s/values.yaml
+          }
+          bump
           if git diff --quiet k8s/values.yaml; then
             echo "no tag change"
             exit 0
@@ -65,8 +67,17 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add k8s/values.yaml
           git commit -m "chart: bump image tag to ${tag} [skip ci]"
+          # Concurrent builds race on this same line. On rebase conflict the
+          # latest tag wins — re-apply our sed against the post-rebase tree
+          # and continue.
           for i in 1 2 3; do
             if git push; then exit 0; fi
-            git pull --rebase origin main
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git checkout --theirs k8s/values.yaml
+              bump
+              git add k8s/values.yaml
+              git rebase --continue || git rebase --skip
+            fi
           done
           git push
