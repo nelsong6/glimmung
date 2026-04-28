@@ -11,119 +11,123 @@ The agentic-CI pattern (issue label → run Claude on a host with GUI / state re
 
 GitHub Actions remains the execution layer (dumb runner). Glimmung owns the queue, the lease lifecycle, the dashboard, and the cross-project orchestration.
 
-Full design: [issue #1](https://github.com/nelsong6/glimmung/issues/1).
+Full design + intent: [issue #1](https://github.com/nelsong6/glimmung/issues/1).
+
+## Mental model
+
+```
+Project ──< Workflow ──< Lease ──── Host (venue)
+(repo)     (one trigger,           (matched via
+            one yaml,               capabilities)
+            one set of
+            requirements)
+```
+
+- **Project** = a repo (e.g. `spirelens`), declares the github_repo only.
+- **Workflow** = a specific automation pattern under a project (e.g. `issue-agent`), declares its trigger label, workflow filename, and required capabilities.
+- **Lease** = "this workflow wants to run, and got assigned this host." Lifecycle: pending → active → released | expired.
+- **Host** = a virtual venue we invent (named whatever — typically the GHA runner-route label so the workflow's `runs-on` works directly). Capabilities are our own vocabulary; the only thing glimmung uses to decide what venues match what workflows.
+
+The "agent" — Claude Code, Codex, whatever runs inside the workflow — is opaque to glimmung. We dispatch a venue to a workflow; the workflow runs an agent on it.
 
 ## Layout
 
 ```
 src/glimmung/         # FastAPI app, Cosmos client, lease lifecycle, GH webhook
+frontend/             # Vite + React dashboard (live SSE state, MSAL admin)
 k8s/                  # Helm chart, ArgoCD-synced from main
-tofu/                 # Cosmos database + containers (per-app pattern)
-Dockerfile            # builds the python wheel
+tofu/                 # Cosmos database + containers + Entra app reg
+Dockerfile            # multi-stage: node frontend build → python backend
 .github/workflows/    # build + ACR push + chart bump + tofu plan/apply
 ```
 
 ## API
 
-### Lease lifecycle (capability-based — possessing the lease_id is the auth)
+### Lease lifecycle (capability auth via lease_id; ULID is unguessable)
 
 | Method | Path                              | Purpose |
 |---|---|---|
-| POST   | `/v1/lease`                       | Request a host. Returns lease + host (or pending lease if no capacity). |
+| POST   | `/v1/lease`                       | Acquire (`{project, workflow?, requirements, metadata}`). Returns lease + host (or pending lease if no capacity). |
+| GET    | `/v1/lease/{id}?project=<name>`   | Read a lease. Used by consumer workflows for the verify-lease step. |
 | POST   | `/v1/lease/{id}/heartbeat`        | Keep the lease alive. `?project=<name>` required. |
 | POST   | `/v1/lease/{id}/release`          | Release the lease. Idempotent. |
-| GET    | `/v1/state`                       | Snapshot: hosts + pending leases + active leases. |
+| GET    | `/v1/state`                       | Snapshot: hosts + workflows + projects + pending + active leases. |
+| GET    | `/v1/events`                      | Server-Sent Events stream — yields `{event: "state", data: <snapshot>}` every 2s. |
+| GET    | `/v1/config`                      | Public — `{entra_client_id, authority}` for SPA MSAL bootstrap. |
 | GET    | `/healthz`                        | Liveness/readiness. |
 
-### Admin (Entra ID — JWKS-validated bearer token)
+### Admin (Entra ID JWKS-validated bearer token; email allowlist gate)
 
 | Method | Path                              | Purpose |
 |---|---|---|
-| POST   | `/v1/projects`                    | Register/upsert a project. |
+| POST   | `/v1/projects`                    | Register/upsert a project (`{name, github_repo}`). |
 | GET    | `/v1/projects`                    | List projects. |
+| POST   | `/v1/workflows`                   | Register/upsert a workflow under a project. |
+| GET    | `/v1/workflows`                   | List workflows. |
 | POST   | `/v1/hosts`                       | Register/update a host. |
 
 ### GitHub webhook
 
 | Method | Path                              | Purpose |
 |---|---|---|
-| POST   | `/v1/webhook/github`              | Receives `issues` events from the configured GitHub App. |
+| POST   | `/v1/webhook/github`              | Receives `issues` and `workflow_run` events. |
 
-The webhook handler:
-1. Verifies `X-Hub-Signature-256` against `GITHUB_WEBHOOK_SECRET`
-2. Ignores events other than `issues`
-3. Looks up the project by `repository.full_name`
-4. If the issue's labels include the project's `triggerLabel` (or the action is `labeled` with that label), creates a pending lease
-5. If a host is free and matches the project's `defaultRequirements`, fires `workflow_dispatch` against the project's configured workflow
+The handler:
+
+1. Verifies `X-Hub-Signature-256` against `GITHUB_WEBHOOK_SECRET`.
+2. **`issues`** → look up project by `repository.full_name`, find the workflow whose `trigger_label` matches (action=labeled with that label, or action=opened/reopened with the label already on the issue), atomic-acquire a host via optimistic CAS on `_etag`, fire `workflow_dispatch` with `{lease_id, host, issue_number, ...}`.
+3. **`workflow_run.completed`** → pull lease_id back out of `workflow_run.inputs`, look up project by repo, call `release()`. Belt-and-suspenders alongside any in-workflow release step. Idempotent.
+4. Other events → ignore.
 
 ## Storage
 
-Cosmos DB NoSQL on the shared `infra-cosmos-serverless` account. Database `glimmung`, three containers (all pre-created by [`tofu/db.tf`](tofu/db.tf)):
+Cosmos DB NoSQL on the shared `infra-cosmos-serverless` account. Database `glimmung`, four containers (all pre-created by [`tofu/db.tf`](tofu/db.tf)):
 
 - `projects` (partition key `/name`)
+- `workflows` (partition key `/project`)
 - `hosts` (partition key `/name`)
 - `leases` (partition key `/project`)
 
-Runtime pod auth via the `infra-shared-identity` workload identity, which has `Cosmos DB Built-in Data Contributor` at the account scope (granted in [`infra-bootstrap/tofu/cosmos-serverless.tf`](https://github.com/nelsong6/infra-bootstrap/blob/main/tofu/cosmos-serverless.tf)). Container clients are obtained via `get_*_client` (no API call); reads/writes use the data-plane permissions.
+Runtime pod auth via the `infra-shared-identity` workload identity, which has `Cosmos DB Built-in Data Contributor` at the account scope (granted in [`infra-bootstrap/tofu/cosmos-serverless.tf`](https://github.com/nelsong6/infra-bootstrap/blob/main/tofu/cosmos-serverless.tf)). Container clients are obtained via `get_*_client` (no API call); reads/writes use the data-plane permissions. CREATE DATABASE / CREATE CONTAINER is control-plane and runs only via tofu under the app SP.
+
+## Lock semantics
+
+Optimistic concurrency on the host doc's `_etag`. Acquire reads matching candidates, sorts by `lastUsedAt` (NULLs first → bin-pack toward unused venues), tries each via `replace_item(match_condition=IfNotModified)`. 412 PreconditionFailed → try the next. Bounded retry; loop terminates after exhausting candidates.
+
+Release paths:
+- **Fast**: workflow's own release step (if it has one).
+- **Safety net**: `workflow_run.completed` webhook handler. Covers UI-cancellation, runner-died, network blips mid-step.
+- **Backstop**: 15-min sweep on stale heartbeat (`ttl_seconds`-driven; default 1h).
 
 ## One-time setup
 
 KV keys consumed by glimmung:
 
-| KV secret                          | Source                                  |
+| KV secret                          | Source                                                                       |
 |---|---|
-| `github-app-id`                    | shared with `mcp-github`                |
-| `github-app-installation-id`       | shared with `mcp-github`                |
-| `github-app-private-key`           | shared with `mcp-github`                |
-| `github-webhook-secret`            | shared (the GitHub App webhook secret)  |
-| `glimmung-oauth-client-id`         | created by `glimmung/tofu/oauth.tf`     |
-| `glimmung-oauth-allowed-emails`    | created by `glimmung/tofu/oauth.tf`     |
+| `glimmung-github-app-id`           | dedicated GitHub App (created by hand; one App = one webhook URL, can't co-tenant) |
+| `glimmung-github-app-installation-id` | same                                                                      |
+| `glimmung-github-app-private-key`  | same                                                                         |
+| `glimmung-github-webhook-secret`   | same                                                                         |
+| `glimmung-oauth-client-id`         | created by `glimmung/tofu/oauth.tf` (Entra app reg)                          |
+| `glimmung-oauth-allowed-emails`    | same                                                                         |
 
-The two glimmung-specific secrets are managed by [`tofu/oauth.tf`](tofu/oauth.tf) — `tofu apply` creates the Entra app reg and writes both keys. The `github-*` keys already exist.
+The Entra side is fully tofu-managed. The GitHub App is created via the GitHub UI — one webhook URL per App means glimmung needs its own (the shared `github-app-*` keys still serve mcp-github / diagrams). Configure the App with:
 
-GitHub App webhook URL must be set in the App's settings page to:
+- Webhook URL: `https://glimmung.romaine.life/v1/webhook/github`
+- Subscribe to events: **Issues**, **Workflow runs**
+- Permissions: Actions `read+write`, Issues `read`, Metadata `read`
+- Install on whichever repos use it
 
-```
-https://glimmung.romaine.life/v1/webhook/github
-```
+## Admin (dashboard)
 
-with `Issues` checked under "Subscribe to events". The shared `github-webhook-secret` already in KV is what glimmung verifies signatures against.
+Visit https://glimmung.romaine.life/, click **sign in** (top right) — MSAL popup against the `glimmung-oauth` Entra app. Once signed in (email must be in the allowlist), click **admin** to reveal the registration tabs:
 
-## Admin auth (CLI)
+- **Register project** → name + github_repo
+- **Register workflow** → project (dropdown), name, filename, ref, trigger_label, requirements
+- **Register host** → name + capabilities
 
-Mint an Entra access token for the glimmung audience:
-
-```sh
-CLIENT_ID=$(az keyvault secret show --vault-name romaine-kv --name glimmung-oauth-client-id --query value -o tsv)
-TOKEN=$(az account get-access-token --resource "$CLIENT_ID" --query accessToken -o tsv)
-```
-
-## Registering a project
-
-```sh
-curl -sS -X POST https://glimmung.romaine.life/v1/projects \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "spirelens",
-    "github_repo": "nelsong6/spirelens",
-    "workflow_filename": "issue-agent.yaml",
-    "trigger_label": "issue-agent",
-    "default_requirements": {"apps": ["sts2"]}
-  }'
-```
-
-## Registering a host
-
-```sh
-curl -sS -X POST https://glimmung.romaine.life/v1/hosts \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "win-a",
-    "capabilities": {"os": "windows", "apps": ["sts2"]}
-  }'
-```
+The dashboard's left sidebar shows projects expandable into their workflows. Clicking a workflow filters the lease tables and highlights eligible hosts.
 
 ## Running locally
 
@@ -134,10 +138,17 @@ COSMOS_ENDPOINT=https://infra-cosmos-serverless.documents.azure.com:443/ \
   python -m glimmung
 ```
 
+For the frontend:
+
+```sh
+cd frontend && npm install && npm run dev
+# proxies /v1/* to localhost:8000
+```
+
 ## Phases
 
 1. **Phase 1** ✓ — lease primitive, sweep job, Cosmos backend.
-2. **Phase 2** ✓ — GitHub App webhook receiver, `workflow_dispatch` firing, ingress at `glimmung.romaine.life`.
-3. **Phase 2.5** — Migrate spirelens `issue-agent.yaml` to consume glimmung leases.
-4. **Phase 3** — Dashboard with SSE driven by Cosmos Change Feed.
-5. **Phase 4** — Migrate ambience, tank-operator agent flows.
+2. **Phase 2** ✓ — GitHub App webhook receiver, `workflow_dispatch` firing, ingress at `glimmung.romaine.life`, Entra ID auth on admin endpoints.
+3. **Phase 3** ✓ — Dashboard with SSE, project side pane, workflow as first-class abstraction, MSAL sign-in + admin panel.
+4. **Phase 2.5** ✓ — Migrate spirelens `issue-agent.yaml` to consume glimmung leases. (Numbered out of order; see [glimmung issue #2](https://github.com/nelsong6/glimmung/issues/2) for the build order that actually happened.)
+5. **Phase 4** — Runner-grounding (verify GHA runner is online before dispatching), dashboard cancel/preempt, migrate ambience + tank-operator agent flows.
