@@ -1,0 +1,6 @@
+apiVersion: v2
+name: glimmung
+description: Agent dispatcher — leasable host queue for self-hosted runner work.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

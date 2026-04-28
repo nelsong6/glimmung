@@ -1,0 +1,26 @@
+image:
+  repository: romainecr.azurecr.io/glimmung
+  # SHA-pinned. The build workflow rewrites this line on every push to main
+  # via a `[skip ci]` follow-up commit. Quote the value so all-digit short
+  # SHAs aren't reformatted as scientific notation by YAML.
+  tag: "placeholder"
+  pullPolicy: IfNotPresent
+
+namespace: glimmung
+serviceAccount: infra-shared
+replicas: 1
+
+# Cosmos DB — endpoint of the shared serverless account, database is glimmung's own.
+cosmos:
+  endpoint: https://infra-cosmos-serverless.documents.azure.com:443/
+  database: glimmung
+
+# Ingress — Phase 1 keeps glimmung internal-only (test via port-forward).
+# Phase 2 will add HTTPRoute + bearer-token auth alongside the GitHub App.
+ingress:
+  enabled: false
+  hostname: glimmung.romaine.life
+  gatewayName: main
+  gatewayNamespace: envoy-gateway-system
+  certIssuer: letsencrypt-prod
+  tlsSecret: glimmung-tls
