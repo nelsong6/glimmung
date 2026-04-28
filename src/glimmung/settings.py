@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="GLIMMUNG_", env_file=".env", extra="ignore")
 
-    port: int = 8000
+    http_port: int = 8000
     log_level: str = "INFO"
 
     cosmos_endpoint: str = "https://infra-cosmos-serverless.documents.azure.com:443/"

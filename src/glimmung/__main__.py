@@ -8,7 +8,7 @@ def main() -> None:
     uvicorn.run(
         "glimmung.app:app",
         host="0.0.0.0",
-        port=settings.port,
+        port=settings.http_port,
         log_level=settings.log_level.lower(),
     )
 

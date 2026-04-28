@@ -15,6 +15,11 @@ spec:
         azure.workload.identity/use: "true"
     spec:
       serviceAccountName: {{ .Values.serviceAccount }}
+      # Don't auto-inject {SERVICE_NAME}_PORT=tcp://… style env vars from
+      # every Service in the namespace. They're a pre-DNS legacy pattern,
+      # they pollute the env, and they collide with our own GLIMMUNG_*
+      # config variables. Use cluster DNS instead.
+      enableServiceLinks: false
       containers:
         - name: glimmung
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
