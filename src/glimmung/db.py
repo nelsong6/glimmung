@@ -24,6 +24,7 @@ class Cosmos:
         self._client: CosmosClient | None = None
         self._db: DatabaseProxy | None = None
         self.projects: ContainerProxy | None = None
+        self.workflows: ContainerProxy | None = None
         self.hosts: ContainerProxy | None = None
         self.leases: ContainerProxy | None = None
 
@@ -38,9 +39,10 @@ class Cosmos:
         self._client = CosmosClient(self._settings.cosmos_endpoint, credential=self._credential)
         self._db = self._client.get_database_client(self._settings.cosmos_database)
         self.projects = self._db.get_container_client("projects")
+        self.workflows = self._db.get_container_client("workflows")
         self.hosts = self._db.get_container_client("hosts")
         self.leases = self._db.get_container_client("leases")
-        log.info("cosmos clients ready: projects, hosts, leases")
+        log.info("cosmos clients ready: projects, workflows, hosts, leases")
 
     async def stop(self) -> None:
         if self._client is not None:

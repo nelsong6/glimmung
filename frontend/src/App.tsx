@@ -16,6 +16,7 @@ type Host = {
 type Lease = {
   id: string;
   project: string;
+  workflow: string | null;
   host: string | null;
   state: "pending" | "active" | "released" | "expired";
   requirements: Record<string, unknown>;
@@ -30,6 +31,14 @@ type Project = {
   id: string;
   name: string;
   github_repo: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+};
+
+type Workflow = {
+  id: string;
+  project: string;
+  name: string;
   workflow_filename: string;
   workflow_ref: string;
   trigger_label: string;
@@ -43,17 +52,23 @@ type Snapshot = {
   pending_leases: Lease[];
   active_leases: Lease[];
   projects: Project[];
+  workflows: Workflow[];
 };
 
 type Connection = "live" | "stale" | "dead";
 
-const ALL = "__all__";
+type Selection =
+  | { kind: "all" }
+  | { kind: "project"; project: string }
+  | { kind: "workflow"; project: string; workflow: string };
+
+const ALL: Selection = { kind: "all" };
 
 export function App() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [conn, setConn] = useState<Connection>("dead");
   const [lastUpdate, setLastUpdate] = useState<number>(0);
-  const [selected, setSelected] = useState<string>(ALL);
+  const [selected, setSelected] = useState<Selection>(ALL);
   const [account, setAccount] = useState<AccountInfo | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [showAdmin, setShowAdmin] = useState(false);
@@ -99,19 +114,29 @@ export function App() {
     };
   }, [lastUpdate]);
 
-  const filteredPending = useMemo(() => {
-    if (!snap) return [];
-    return selected === ALL ? snap.pending_leases : snap.pending_leases.filter((l) => l.project === selected);
-  }, [snap, selected]);
+  const matchesSelection = (l: Lease): boolean => {
+    if (selected.kind === "all") return true;
+    if (selected.kind === "project") return l.project === selected.project;
+    return l.project === selected.project && l.workflow === selected.workflow;
+  };
 
-  const filteredActive = useMemo(() => {
-    if (!snap) return [];
-    return selected === ALL ? snap.active_leases : snap.active_leases.filter((l) => l.project === selected);
+  const filteredPending = useMemo(
+    () => (snap ? snap.pending_leases.filter(matchesSelection) : []),
+    [snap, selected]
+  );
+  const filteredActive = useMemo(
+    () => (snap ? snap.active_leases.filter(matchesSelection) : []),
+    [snap, selected]
+  );
+
+  const selectedWorkflow = useMemo(() => {
+    if (!snap || selected.kind !== "workflow") return null;
+    return snap.workflows.find((w) => w.project === selected.project && w.name === selected.workflow) ?? null;
   }, [snap, selected]);
 
   const selectedProject = useMemo(() => {
-    if (!snap || selected === ALL) return null;
-    return snap.projects.find((p) => p.name === selected) ?? null;
+    if (!snap || selected.kind === "all") return null;
+    return snap.projects.find((p) => p.name === selected.project) ?? null;
   }, [snap, selected]);
 
   const matchesRequirements = (host: Host, reqs: Record<string, unknown>): boolean => {
@@ -127,13 +152,15 @@ export function App() {
     return true;
   };
 
+  const eligibilityReqs = selectedWorkflow?.default_requirements ?? null;
+
   return (
     <div className="layout">
       <aside className="sidebar">
         <div className="sidebar-title">Projects</div>
         <button
           type="button"
-          className={`project-row ${selected === ALL ? "selected" : ""}`}
+          className={`project-row ${selected.kind === "all" ? "selected" : ""}`}
           onClick={() => setSelected(ALL)}
         >
           <span className="name">All</span>
@@ -145,18 +172,56 @@ export function App() {
           .slice()
           .sort((a, b) => a.name.localeCompare(b.name))
           .map((p) => {
-            const active = snap.active_leases.filter((l) => l.project === p.name).length;
-            const pending = snap.pending_leases.filter((l) => l.project === p.name).length;
+            const projWorkflows = snap.workflows.filter((w) => w.project === p.name);
+            const isProjectSelected =
+              selected.kind === "project" && selected.project === p.name;
+            const isWorkflowOfProjectSelected =
+              selected.kind === "workflow" && selected.project === p.name;
+            const projActive = snap.active_leases.filter((l) => l.project === p.name).length;
+            const projPending = snap.pending_leases.filter((l) => l.project === p.name).length;
             return (
-              <button
-                type="button"
-                key={p.name}
-                className={`project-row ${selected === p.name ? "selected" : ""}`}
-                onClick={() => setSelected(p.name)}
-              >
-                <span className="name">{p.name}</span>
-                <span className="count">{active + pending}</span>
-              </button>
+              <div key={p.name} className="project-group">
+                <button
+                  type="button"
+                  className={`project-row ${isProjectSelected ? "selected" : ""}`}
+                  onClick={() => setSelected({ kind: "project", project: p.name })}
+                >
+                  <span className="name">{p.name}</span>
+                  <span className="count">{projActive + projPending}</span>
+                </button>
+                {(isProjectSelected || isWorkflowOfProjectSelected) &&
+                  projWorkflows
+                    .slice()
+                    .sort((a, b) => a.name.localeCompare(b.name))
+                    .map((w) => {
+                      const wActive = snap.active_leases.filter(
+                        (l) => l.project === p.name && l.workflow === w.name
+                      ).length;
+                      const wPending = snap.pending_leases.filter(
+                        (l) => l.project === p.name && l.workflow === w.name
+                      ).length;
+                      const isSel =
+                        selected.kind === "workflow" &&
+                        selected.project === p.name &&
+                        selected.workflow === w.name;
+                      return (
+                        <button
+                          type="button"
+                          key={w.name}
+                          className={`workflow-row ${isSel ? "selected" : ""}`}
+                          onClick={() =>
+                            setSelected({ kind: "workflow", project: p.name, workflow: w.name })
+                          }
+                        >
+                          <span className="name">{w.name}</span>
+                          <span className="count">{wActive + wPending}</span>
+                        </button>
+                      );
+                    })}
+                {(isProjectSelected || isWorkflowOfProjectSelected) && projWorkflows.length === 0 && (
+                  <div className="workflow-empty">no workflows</div>
+                )}
+              </div>
             );
           })}
       </aside>
@@ -172,11 +237,7 @@ export function App() {
             {!authReady ? null : account ? (
               <>
                 <span className="user">{account.username}</span>
-                <button
-                  type="button"
-                  className="link"
-                  onClick={() => setShowAdmin((s) => !s)}
-                >
+                <button type="button" className="link" onClick={() => setShowAdmin((s) => !s)}>
                   {showAdmin ? "hide admin" : "admin"}
                 </button>
                 <button
@@ -197,8 +258,7 @@ export function App() {
                 className="link"
                 onClick={async () => {
                   try {
-                    const acc = await signIn();
-                    setAccount(acc);
+                    setAccount(await signIn());
                   } catch (e) {
                     console.error("sign-in failed", e);
                   }
@@ -210,13 +270,15 @@ export function App() {
           </div>
         </header>
 
-        {account && showAdmin && <AdminPanel onSuccess={() => setShowAdmin(false)} />}
+        {account && showAdmin && (
+          <AdminPanel projects={snap?.projects ?? []} onSuccess={() => setShowAdmin(false)} />
+        )}
 
         <h2>Hosts</h2>
         {snap === null ? (
           <div className="empty">Connecting…</div>
         ) : snap.hosts.length === 0 ? (
-          <div className="empty">No hosts registered. POST /v1/hosts to add one.</div>
+          <div className="empty">No hosts registered. Sign in and use the admin panel to add one.</div>
         ) : (
           <table>
             <thead>
@@ -231,9 +293,7 @@ export function App() {
             </thead>
             <tbody>
               {snap.hosts.map((h) => {
-                const eligible =
-                  selectedProject !== null &&
-                  matchesRequirements(h, selectedProject.default_requirements);
+                const eligible = eligibilityReqs !== null && matchesRequirements(h, eligibilityReqs);
                 return (
                   <tr key={h.name} className={eligible ? "eligible" : ""}>
                     <td className="mono">{h.name}</td>
@@ -259,7 +319,7 @@ export function App() {
 
         <h2>
           Pending queue ({filteredPending.length})
-          {selected !== ALL && <span className="filter-hint"> — filtered to {selected}</span>}
+          <FilterHint selected={selected} />
         </h2>
         {filteredPending.length === 0 ? (
           <div className="empty">No leases waiting.</div>
@@ -269,6 +329,7 @@ export function App() {
               <tr>
                 <th>Lease</th>
                 <th>Project</th>
+                <th>Workflow</th>
                 <th>Requirements</th>
                 <th>Metadata</th>
                 <th>Requested</th>
@@ -279,6 +340,7 @@ export function App() {
                 <tr key={l.id}>
                   <td className="mono">{l.id.slice(0, 8)}…</td>
                   <td>{l.project}</td>
+                  <td className="mono dim">{l.workflow ?? "—"}</td>
                   <td className="mono">{JSON.stringify(l.requirements)}</td>
                   <td className="mono dim">{JSON.stringify(l.metadata)}</td>
                   <td className="mono dim">{relTime(l.requested_at)}</td>
@@ -290,7 +352,7 @@ export function App() {
 
         <h2>
           Active ({filteredActive.length})
-          {selected !== ALL && <span className="filter-hint"> — filtered to {selected}</span>}
+          <FilterHint selected={selected} />
         </h2>
         {filteredActive.length === 0 ? (
           <div className="empty">No active leases.</div>
@@ -300,6 +362,7 @@ export function App() {
               <tr>
                 <th>Lease</th>
                 <th>Project</th>
+                <th>Workflow</th>
                 <th>Host</th>
                 <th>Metadata</th>
                 <th>Assigned</th>
@@ -310,6 +373,7 @@ export function App() {
                 <tr key={l.id}>
                   <td className="mono">{l.id.slice(0, 8)}…</td>
                   <td>{l.project}</td>
+                  <td className="mono dim">{l.workflow ?? "—"}</td>
                   <td className="mono">{l.host ?? "—"}</td>
                   <td className="mono dim">{JSON.stringify(l.metadata)}</td>
                   <td className="mono dim">{relTime(l.assigned_at)}</td>
@@ -319,29 +383,49 @@ export function App() {
           </table>
         )}
 
-        {selectedProject && (
+        {selectedWorkflow && (
           <>
-            <h2>Project info</h2>
+            <h2>Workflow info</h2>
             <div className="project-info">
               <div className="row">
-                <span className="key">github</span>
-                <span className="val mono">{selectedProject.github_repo}</span>
+                <span className="key">project</span>
+                <span className="val mono">{selectedWorkflow.project}</span>
               </div>
               <div className="row">
                 <span className="key">workflow</span>
+                <span className="val mono">{selectedWorkflow.name}</span>
+              </div>
+              <div className="row">
+                <span className="key">file</span>
                 <span className="val mono">
-                  {selectedProject.workflow_filename}@{selectedProject.workflow_ref}
+                  {selectedWorkflow.workflow_filename}@{selectedWorkflow.workflow_ref}
                 </span>
               </div>
               <div className="row">
                 <span className="key">trigger label</span>
-                <span className="val mono">{selectedProject.trigger_label}</span>
+                <span className="val mono">{selectedWorkflow.trigger_label}</span>
               </div>
               <div className="row">
                 <span className="key">requires</span>
                 <span className="val mono">
-                  {JSON.stringify(selectedProject.default_requirements)}
+                  {JSON.stringify(selectedWorkflow.default_requirements)}
                 </span>
+              </div>
+            </div>
+          </>
+        )}
+
+        {selectedProject && !selectedWorkflow && (
+          <>
+            <h2>Project info</h2>
+            <div className="project-info">
+              <div className="row">
+                <span className="key">name</span>
+                <span className="val mono">{selectedProject.name}</span>
+              </div>
+              <div className="row">
+                <span className="key">github</span>
+                <span className="val mono">{selectedProject.github_repo}</span>
               </div>
             </div>
           </>
@@ -349,6 +433,15 @@ export function App() {
       </main>
     </div>
   );
+}
+
+function FilterHint({ selected }: { selected: Selection }) {
+  if (selected.kind === "all") return null;
+  const text =
+    selected.kind === "project"
+      ? `filtered to ${selected.project}`
+      : `filtered to ${selected.project}.${selected.workflow}`;
+  return <span className="filter-hint"> — {text}</span>;
 }
 
 function relTime(iso: string | null): string {

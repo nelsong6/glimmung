@@ -43,6 +43,7 @@ async def acquire(
     settings: Settings,
     *,
     project: str,
+    workflow: str | None = None,
     requirements: dict[str, Any],
     metadata: dict[str, Any],
     ttl_seconds: int | None = None,
@@ -81,6 +82,7 @@ async def acquire(
             lease = Lease(
                 id=lease_id,
                 project=project,
+                workflow=workflow,
                 host=candidate["name"],
                 state=LeaseState.ACTIVE,
                 requirements=requirements,
@@ -100,6 +102,7 @@ async def acquire(
     pending = Lease(
         id=lease_id,
         project=project,
+        workflow=workflow,
         host=None,
         state=LeaseState.PENDING,
         requirements=requirements,
@@ -236,6 +239,7 @@ def _lease_to_doc(lease: Lease) -> dict[str, Any]:
     return {
         "id": lease.id,
         "project": lease.project,
+        "workflow": lease.workflow,
         "host": lease.host,
         "state": lease.state.value,
         "requirements": lease.requirements,

@@ -15,11 +15,7 @@ class LeaseState(str, Enum):
 class Project(BaseModel):
     id: str
     name: str
-    github_repo: str = ""             # e.g. "nelsong6/spirelens"
-    workflow_filename: str = ""       # e.g. "issue-agent.yaml"
-    workflow_ref: str = "main"
-    trigger_label: str = "issue-agent"
-    default_requirements: dict[str, Any] = Field(default_factory=dict)
+    github_repo: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
 
@@ -27,6 +23,24 @@ class Project(BaseModel):
 class ProjectRegister(BaseModel):
     name: str
     github_repo: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class Workflow(BaseModel):
+    id: str                     # workflow name (e.g. "issue-agent")
+    project: str                # partition key
+    name: str                   # = id; canonical handle is f"{project}.{name}"
+    workflow_filename: str
+    workflow_ref: str = "main"
+    trigger_label: str = "issue-agent"
+    default_requirements: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class WorkflowRegister(BaseModel):
+    project: str                # must reference an existing Project
+    name: str
     workflow_filename: str
     workflow_ref: str = "main"
     trigger_label: str = "issue-agent"
@@ -47,6 +61,7 @@ class Host(BaseModel):
 class Lease(BaseModel):
     id: str
     project: str
+    workflow: str | None = None         # workflow name; null on legacy / non-workflow leases
     host: str | None = None
     state: LeaseState = LeaseState.PENDING
     requirements: dict[str, Any] = Field(default_factory=dict)
@@ -59,6 +74,7 @@ class Lease(BaseModel):
 
 class LeaseRequest(BaseModel):
     project: str
+    workflow: str | None = None
     requirements: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
     ttl_seconds: int | None = None
@@ -74,3 +90,4 @@ class StateSnapshot(BaseModel):
     pending_leases: list[Lease]
     active_leases: list[Lease]
     projects: list[Project] = Field(default_factory=list)
+    workflows: list[Workflow] = Field(default_factory=list)

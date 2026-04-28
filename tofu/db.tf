@@ -42,6 +42,21 @@ resource "azurerm_cosmosdb_sql_container" "hosts" {
   }
 }
 
+resource "azurerm_cosmosdb_sql_container" "workflows" {
+  name                = "workflows"
+  resource_group_name = local.infra.resource_group_name
+  account_name        = data.azurerm_cosmosdb_account.infra.name
+  database_name       = azurerm_cosmosdb_sql_database.glimmung.name
+  partition_key_paths = ["/project"]
+
+  indexing_policy {
+    indexing_mode = "consistent"
+    included_path {
+      path = "/*"
+    }
+  }
+}
+
 resource "azurerm_cosmosdb_sql_container" "leases" {
   name                = "leases"
   resource_group_name = local.infra.resource_group_name

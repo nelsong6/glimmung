@@ -29,6 +29,8 @@ from glimmung.models import (
     Project,
     ProjectRegister,
     StateSnapshot,
+    Workflow,
+    WorkflowRegister,
 )
 from glimmung.settings import Settings, get_settings
 
@@ -90,13 +92,24 @@ async def _promote_loop(app: FastAPI, settings: Settings) -> None:
 
 
 async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host: Host) -> None:
-    """If the lease's project has a configured workflow, fire workflow_dispatch."""
+    """Fire workflow_dispatch for the lease's (project, workflow). Both must
+    exist in Cosmos and the project must have a github_repo set."""
     minter: GitHubAppTokenMinter | None = app.state.gh_minter
     if minter is None:
         return
 
-    project_doc = await _read_project(app.state.cosmos, lease_doc["project"])
-    if not project_doc or not project_doc.get("githubRepo") or not project_doc.get("workflowFilename"):
+    cosmos: Cosmos = app.state.cosmos
+    project_doc = await _read_project(cosmos, lease_doc["project"])
+    if not project_doc or not project_doc.get("githubRepo"):
+        return
+
+    workflow_name = lease_doc.get("workflow")
+    if not workflow_name:
+        log.warning("lease %s has no workflow; skipping dispatch", lease_doc["id"])
+        return
+
+    workflow_doc = await _read_workflow(cosmos, lease_doc["project"], workflow_name)
+    if not workflow_doc or not workflow_doc.get("workflowFilename"):
         return
 
     inputs = {
@@ -108,11 +121,15 @@ async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host
         await dispatch_workflow(
             minter,
             repo=project_doc["githubRepo"],
-            workflow_filename=project_doc["workflowFilename"],
-            ref=project_doc.get("workflowRef") or "main",
+            workflow_filename=workflow_doc["workflowFilename"],
+            ref=workflow_doc.get("workflowRef") or "main",
             inputs=inputs,
         )
-        log.info("dispatched %s on %s for lease %s", project_doc["workflowFilename"], host.name, lease_doc["id"])
+        log.info(
+            "dispatched %s on %s for lease %s (project=%s workflow=%s)",
+            workflow_doc["workflowFilename"], host.name, lease_doc["id"],
+            lease_doc["project"], workflow_name,
+        )
     except Exception:
         log.exception("workflow_dispatch failed for lease %s", lease_doc["id"])
 
@@ -159,15 +176,32 @@ async def _read_project(cosmos: Cosmos, name: str) -> dict[str, Any] | None:
         return None
 
 
+async def _read_workflow(cosmos: Cosmos, project: str, name: str) -> dict[str, Any] | None:
+    try:
+        return await cosmos.workflows.read_item(item=name, partition_key=project)
+    except Exception:
+        return None
+
+
 def _project_to_doc(p: ProjectRegister) -> dict[str, Any]:
     return {
         "id": p.name,
         "name": p.name,
         "githubRepo": p.github_repo,
-        "workflowFilename": p.workflow_filename,
-        "workflowRef": p.workflow_ref,
-        "triggerLabel": p.trigger_label,
-        "defaultRequirements": p.default_requirements,
+        "metadata": p.metadata,
+        "createdAt": datetime.now(UTC).isoformat(),
+    }
+
+
+def _workflow_to_doc(w: WorkflowRegister) -> dict[str, Any]:
+    return {
+        "id": w.name,
+        "project": w.project,
+        "name": w.name,
+        "workflowFilename": w.workflow_filename,
+        "workflowRef": w.workflow_ref,
+        "triggerLabel": w.trigger_label,
+        "defaultRequirements": w.default_requirements,
         "createdAt": datetime.now(UTC).isoformat(),
     }
 
@@ -206,6 +240,7 @@ async def create_lease(request: LeaseRequest) -> LeaseResponse:
         app.state.cosmos,
         app.state.settings,
         project=request.project,
+        workflow=request.workflow,
         requirements=request.requirements,
         metadata=request.metadata,
         ttl_seconds=request.ttl_seconds,
@@ -248,6 +283,7 @@ async def release_lease(lease_id: str = Path(...), project: str = "") -> Lease:
 async def _compute_snapshot(cosmos: Cosmos) -> StateSnapshot:
     host_docs = await query_all(cosmos.hosts, "SELECT * FROM c")
     project_docs = await query_all(cosmos.projects, "SELECT * FROM c")
+    workflow_docs = await query_all(cosmos.workflows, "SELECT * FROM c")
     pending_docs = await query_all(
         cosmos.leases,
         "SELECT * FROM c WHERE c.state = @s",
@@ -263,6 +299,7 @@ async def _compute_snapshot(cosmos: Cosmos) -> StateSnapshot:
         pending_leases=[Lease.model_validate(lease_ops._camel_to_snake(p)) for p in pending_docs],
         active_leases=[Lease.model_validate(lease_ops._camel_to_snake(a)) for a in active_docs],
         projects=[Project.model_validate(lease_ops._camel_to_snake(d)) for d in project_docs],
+        workflows=[Workflow.model_validate(lease_ops._camel_to_snake(d)) for d in workflow_docs],
     )
 
 
@@ -311,6 +348,28 @@ async def register_project(p: ProjectRegister) -> Project:
 async def list_projects() -> list[Project]:
     docs = await query_all(app.state.cosmos.projects, "SELECT * FROM c")
     return [Project.model_validate(lease_ops._camel_to_snake(d)) for d in docs]
+
+
+@app.post("/v1/workflows", response_model=Workflow, dependencies=[Depends(require_entra_user)])
+async def register_workflow(w: WorkflowRegister) -> Workflow:
+    cosmos: Cosmos = app.state.cosmos
+    project_doc = await _read_project(cosmos, w.project)
+    if not project_doc:
+        raise HTTPException(400, f"project {w.project!r} does not exist; register it first")
+    doc = _workflow_to_doc(w)
+    try:
+        existing = await cosmos.workflows.read_item(item=w.name, partition_key=w.project)
+        doc["createdAt"] = existing.get("createdAt", doc["createdAt"])
+        await cosmos.workflows.replace_item(item=w.name, body=doc)
+    except Exception:
+        await cosmos.workflows.create_item(doc)
+    return Workflow.model_validate(lease_ops._camel_to_snake(doc))
+
+
+@app.get("/v1/workflows", response_model=list[Workflow], dependencies=[Depends(require_entra_user)])
+async def list_workflows() -> list[Workflow]:
+    docs = await query_all(app.state.cosmos.workflows, "SELECT * FROM c")
+    return [Workflow.model_validate(lease_ops._camel_to_snake(d)) for d in docs]
 
 
 @app.post("/v1/hosts", response_model=Host, dependencies=[Depends(require_entra_user)])
@@ -380,16 +439,30 @@ async def github_webhook(request: Request) -> dict[str, Any]:
     if not matching:
         return {"ignored": "no project for repo"}
     project_doc = matching[0]
+    project_name = project_doc["name"]
 
-    # Decide whether this event triggers a lease.
-    trigger_label = project_doc.get("triggerLabel", "issue-agent")
+    # Resolve which workflow under this project this event triggers, if any.
     label_names = {l["name"] for l in issue.get("labels", []) if isinstance(l, dict)}
-    fires = (
-        (action == "labeled" and label == trigger_label)
-        or (action in ("opened", "reopened") and trigger_label in label_names)
+    workflows_for_project = await query_all(
+        cosmos.workflows,
+        "SELECT * FROM c WHERE c.project = @p",
+        parameters=[{"name": "@p", "value": project_name}],
     )
-    if not fires:
-        return {"ignored": f"action={action} label={label}"}
+    matched_workflow: dict[str, Any] | None = None
+    for w in sorted(workflows_for_project, key=lambda d: d.get("name", "")):
+        trigger = w.get("triggerLabel", "")
+        if not trigger:
+            continue
+        fires = (
+            (action == "labeled" and label == trigger)
+            or (action in ("opened", "reopened") and trigger in label_names)
+        )
+        if fires:
+            matched_workflow = w
+            break
+
+    if matched_workflow is None:
+        return {"ignored": f"no workflow matched action={action} label={label}"}
 
     metadata = {
         "issueNumber": issue.get("number"),
@@ -401,19 +474,25 @@ async def github_webhook(request: Request) -> dict[str, Any]:
     lease, host = await lease_ops.acquire(
         cosmos,
         settings,
-        project=project_doc["name"],
-        requirements=project_doc.get("defaultRequirements", {}),
+        project=project_name,
+        workflow=matched_workflow["name"],
+        requirements=matched_workflow.get("defaultRequirements", {}),
         metadata=metadata,
     )
 
     if host is not None:
         await _maybe_dispatch_workflow(
             app,
-            {**lease_ops._lease_to_doc(lease), "id": lease.id, "project": lease.project},
+            {**lease_ops._lease_to_doc(lease), "id": lease.id, "project": lease.project, "workflow": lease.workflow},
             host,
         )
 
-    return {"lease_id": lease.id, "state": lease.state.value, "host": host.name if host else None}
+    return {
+        "lease_id": lease.id,
+        "state": lease.state.value,
+        "host": host.name if host else None,
+        "workflow": matched_workflow["name"],
+    }
 
 
 # ─── Static frontend ──────────────────────────────────────────────────────────
