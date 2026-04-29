@@ -53,11 +53,15 @@ class Settings(BaseSettings):
     k8s_sa_token_path: str = "/var/run/secrets/kubernetes.io/serviceaccount/token"
     k8s_ca_cert_path: str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 
-    # Default lease TTL — heartbeat must arrive within this window or the
-    # sweep job reclaims the host. 1h covers spirelens's 30-minute
-    # implementation phase comfortably; phases heartbeat at start to reset
-    # the clock between transitions.
-    lease_default_ttl_seconds: int = 3600
+    # Default lease TTL — sweep_expired reclaims any host whose
+    # lastHeartbeat is older than this. Sized to be comfortably longer
+    # than the longest project workflow's worst-case wall time so callers
+    # can rely on workflow_run.completed (or an explicit release call)
+    # for cleanup without per-phase heartbeats. spirelens runs ~85 min
+    # worst case (max(test-plan, implementation) + verification + build/
+    # prep/screenshot overhead); 4h leaves headroom for webhook latency
+    # and slow-path scenarios.
+    lease_default_ttl_seconds: int = 14400
 
     # Sweep job cadence
     sweep_interval_seconds: int = 60
