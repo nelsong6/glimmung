@@ -10,6 +10,15 @@ namespace: glimmung
 serviceAccount: infra-shared
 replicas: 1
 
+# In-cluster admin auth via Kubernetes service-account tokens. When enabled,
+# admin endpoints (/v1/projects, /v1/workflows, /v1/hosts) accept a bearer
+# token whose subject — resolved through TokenReview — matches an entry in
+# K8S_SA_ALLOWLIST (default `tank-operator/tank-operator`, set in
+# settings.py). Toggling this off removes the ClusterRoleBinding that grants
+# the pod's SA `system:auth-delegator`, leaving Entra as the only admin path.
+k8sSaAuth:
+  enabled: true
+
 # Cosmos DB — endpoint of the shared serverless account, database is glimmung's own.
 cosmos:
   endpoint: https://infra-cosmos-serverless.documents.azure.com:443/

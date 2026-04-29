@@ -1,0 +1,20 @@
+# Lets glimmung's pod call TokenReview on the cluster API server, which is
+# how the in-app SA-token validator (src/glimmung/auth.py::_verify_k8s_sa_token)
+# checks bearer tokens presented by tank-operator (and any other in-cluster
+# caller listed in K8S_SA_ALLOWLIST). Same primitive the mcp-* deployments
+# bind for their kube-rbac-proxy sidecars; here it's the app itself doing
+# the review because glimmung needs to keep its public listener.
+{{- if .Values.k8sSaAuth.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: glimmung-auth-delegator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccount }}
+    namespace: {{ .Values.namespace }}
+{{- end }}

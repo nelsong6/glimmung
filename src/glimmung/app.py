@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
 from glimmung import leases as lease_ops
-from glimmung.auth import require_entra_user
+from glimmung.auth import require_admin_user
 from glimmung.db import Cosmos, query_all
 from glimmung.github_app import (
     GitHubAppTokenMinter,
@@ -330,7 +330,7 @@ async def events(request: Request):
 # ─── Admin: projects + hosts ─────────────────────────────────────────────────
 
 
-@app.post("/v1/projects", response_model=Project, dependencies=[Depends(require_entra_user)])
+@app.post("/v1/projects", response_model=Project, dependencies=[Depends(require_admin_user)])
 async def register_project(p: ProjectRegister) -> Project:
     doc = _project_to_doc(p)
     cosmos: Cosmos = app.state.cosmos
@@ -344,13 +344,13 @@ async def register_project(p: ProjectRegister) -> Project:
     return Project.model_validate(lease_ops._camel_to_snake(doc))
 
 
-@app.get("/v1/projects", response_model=list[Project], dependencies=[Depends(require_entra_user)])
+@app.get("/v1/projects", response_model=list[Project], dependencies=[Depends(require_admin_user)])
 async def list_projects() -> list[Project]:
     docs = await query_all(app.state.cosmos.projects, "SELECT * FROM c")
     return [Project.model_validate(lease_ops._camel_to_snake(d)) for d in docs]
 
 
-@app.post("/v1/workflows", response_model=Workflow, dependencies=[Depends(require_entra_user)])
+@app.post("/v1/workflows", response_model=Workflow, dependencies=[Depends(require_admin_user)])
 async def register_workflow(w: WorkflowRegister) -> Workflow:
     cosmos: Cosmos = app.state.cosmos
     project_doc = await _read_project(cosmos, w.project)
@@ -366,13 +366,13 @@ async def register_workflow(w: WorkflowRegister) -> Workflow:
     return Workflow.model_validate(lease_ops._camel_to_snake(doc))
 
 
-@app.get("/v1/workflows", response_model=list[Workflow], dependencies=[Depends(require_entra_user)])
+@app.get("/v1/workflows", response_model=list[Workflow], dependencies=[Depends(require_admin_user)])
 async def list_workflows() -> list[Workflow]:
     docs = await query_all(app.state.cosmos.workflows, "SELECT * FROM c")
     return [Workflow.model_validate(lease_ops._camel_to_snake(d)) for d in docs]
 
 
-@app.post("/v1/hosts", response_model=Host, dependencies=[Depends(require_entra_user)])
+@app.post("/v1/hosts", response_model=Host, dependencies=[Depends(require_admin_user)])
 async def register_host(host: dict[str, Any]) -> Host:
     name = host.get("name")
     if not name:
