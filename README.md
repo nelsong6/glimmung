@@ -56,7 +56,7 @@ Dockerfile            # multi-stage: node frontend build → python backend
 | GET    | `/v1/config`                      | Public — `{entra_client_id, authority}` for SPA MSAL bootstrap. |
 | GET    | `/healthz`                        | Liveness/readiness. |
 
-### Admin (Entra ID JWKS-validated bearer token; email allowlist gate)
+### Admin (Entra ID JWKS-validated bearer token, OR cluster SA token; email or `<ns>/<sa>` allowlist gate)
 
 | Method | Path                              | Purpose |
 |---|---|---|
@@ -65,6 +65,13 @@ Dockerfile            # multi-stage: node frontend build → python backend
 | POST   | `/v1/workflows`                   | Register/upsert a workflow under a project. |
 | GET    | `/v1/workflows`                   | List workflows. |
 | POST   | `/v1/hosts`                       | Register/update a host. |
+
+Admin endpoints accept **either** auth path:
+
+- **Entra ID** — humans + CLI. `az account get-access-token --resource <client-id>` mints a token; backend validates it via JWKS and checks the email claim against `ALLOWED_EMAILS`. The dashboard uses MSAL.js to do the same thing.
+- **K8s service-account token** — in-cluster callers (tank-operator, future agents). The pod presents its projected SA token as `Authorization: Bearer <token>`; backend validates it via `TokenReview` against the cluster API server and checks the resolved `system:serviceaccount:<ns>:<name>` against `K8S_SA_ALLOWLIST` (default `tank-operator/tank-operator`). Glimmung's pod SA is bound to `system:auth-delegator` ([k8s/templates/auth-delegator.yaml](k8s/templates/auth-delegator.yaml)) so the review call is permitted. Same RBAC primitive the mcp-* deployments use; the validation runs in-app instead of via a kube-rbac-proxy sidecar because glimmung's listener is publicly exposed.
+
+The two paths are routed by the unverified `iss` claim — Microsoft issuer vs. cluster issuer — and each goes through its own validator. To allowlist additional SAs, set `K8S_SA_ALLOWLIST="ns1/sa1,ns2/sa2"`.
 
 ### GitHub webhook
 

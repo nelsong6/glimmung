@@ -32,6 +32,22 @@ class Settings(BaseSettings):
     entra_client_id: str = ""
     allowed_emails: str = ""  # comma-separated; auth.py splits + lowercases
 
+    # Kubernetes SA-token alternative for admin endpoints — for in-cluster
+    # callers (tank-operator, future agents) that already carry a projected
+    # SA token. auth.py validates the bearer via TokenReview against the
+    # cluster API server; the pod's own SA needs `system:auth-delegator`
+    # (see k8s/templates/auth-delegator.yaml). Same RBAC primitive the
+    # mcp-* deployments use; no kube-rbac-proxy sidecar because glimmung is
+    # publicly exposed and can't bind upstream-loopback-only.
+    #
+    # Allowlist is comma-separated `<namespace>/<sa-name>` pairs. Empty
+    # disables the path; Entra remains the only admin auth.
+    k8s_sa_allowlist: str = "tank-operator/tank-operator"
+    k8s_api_host: str = "https://kubernetes.default.svc"
+    # Standard projected paths inside the pod; overridable for tests.
+    k8s_sa_token_path: str = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    k8s_ca_cert_path: str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+
     # Default lease TTL — heartbeat must arrive within this window or the
     # sweep job reclaims the host. 1h covers spirelens's 30-minute
     # implementation phase comfortably; phases heartbeat at start to reset
