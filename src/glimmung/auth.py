@@ -97,8 +97,11 @@ def _verify_entra_token(token: str) -> dict[str, Any]:
     if not settings.entra_client_id:
         raise HTTPException(503, "ENTRA_CLIENT_ID not configured")
 
-    signing_key = _jwks_client.get_signing_key_from_jwt(token)
+    # JWKS lookup parses the unverified header, so a non-JWT bearer raises
+    # PyJWTError here too — keep both calls under the same handler so callers
+    # see 401, not 500.
     try:
+        signing_key = _jwks_client.get_signing_key_from_jwt(token)
         payload = jwt.decode(
             token,
             signing_key.key,
