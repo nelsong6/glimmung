@@ -1,0 +1,19 @@
+# glimmung's pod calls TokenReview to validate inbound k8s SA tokens for the
+# admin endpoints' SA-auth path (see src/glimmung/auth.py). Bind to the
+# built-in system:auth-delegator ClusterRole, which grants exactly:
+#   - authentication.k8s.io/tokenreviews: create
+#   - authorization.k8s.io/subjectaccessreviews: create
+# The SAR side is unused today but harmless to inherit; if we ever scope
+# delegated authz beyond an in-process allowlist, it's already there.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: glimmung-auth-delegator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccount }}
+    namespace: {{ .Values.namespace }}
