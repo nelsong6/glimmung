@@ -3,26 +3,24 @@ image:
   # SHA-pinned. The build workflow rewrites this line on every push to main
   # via a `[skip ci]` follow-up commit. Quote the value so all-digit short
   # SHAs aren't reformatted as scientific notation by YAML.
-  tag: "e3fa06b"
+  tag: "4857e66"
   pullPolicy: IfNotPresent
 
 namespace: glimmung
 serviceAccount: infra-shared
 replicas: 1
 
-# In-cluster admin auth via Kubernetes service-account tokens. When enabled,
-# admin endpoints (/v1/projects, /v1/workflows, /v1/hosts) accept a bearer
-# token whose subject — resolved through TokenReview — matches an entry in
-# K8S_SA_ALLOWLIST (default `tank-operator/tank-operator`, set in
-# settings.py). Toggling this off removes the ClusterRoleBinding that grants
-# the pod's SA `system:auth-delegator`, leaving Entra as the only admin path.
-k8sSaAuth:
-  enabled: true
-
 # Cosmos DB — endpoint of the shared serverless account, database is glimmung's own.
 cosmos:
   endpoint: https://infra-cosmos-serverless.documents.azure.com:443/
   database: glimmung
+
+# In-cluster k8s ServiceAccount allowlist for admin endpoints (see
+# src/glimmung/auth.py). Subjects in `system:serviceaccount:<ns>:<name>`
+# form, comma-joined. Static list lives in chart values rather than KV
+# because (a) it changes rarely, (b) it's not secret, (c) source-of-truth
+# in git is reviewable. Add a new SA → bump this string → ArgoCD syncs.
+allowedServiceAccounts: "system:serviceaccount:tank-operator-sessions:claude-session"
 
 # Phase 2: ingress at glimmung.romaine.life. The XListenerSet adds a
 # dedicated HTTPS listener on the shared envoy-gateway with TLS
