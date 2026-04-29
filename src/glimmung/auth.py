@@ -50,17 +50,24 @@ _jwks_client = PyJWKClient(_JWKS_URL, cache_keys=True, lifespan=3600)
 _ALG = "RS256"
 # Cluster-issued SA tokens carry this issuer in the JWT header. Kubelet's
 # legacy tokens use the literal "kubernetes/serviceaccount"; bound (projected)
-# tokens use the cluster's OIDC issuer URL. Either way, we only use the header
-# to *route* between the two validation paths — TokenReview is the actual
-# authority on whether the token is valid, so a header guess that's wrong just
-# means we 401 a legitimate Entra token (caller retries with a properly-shaped
-# bearer). We don't fall back token-type → token-type because that doubles the
-# error blast radius on misconfigured callers.
+# tokens use the cluster's OIDC issuer URL. AKS uses a regional subdomain
+# under `oic.prod-aks.azure.com` (note: `oic`, not `oidc`) — match the
+# substring so any region/cluster works without per-cluster config. The
+# matcher tolerates exact, prefix, or substring hits because AKS embeds
+# tenant + cluster ID in the URL between the host and trailing slash.
+#
+# We only use the header to *route* between the two validation paths —
+# TokenReview is the actual authority on whether the token is valid, so a
+# header guess that's wrong just means we 401 a legitimate Entra token
+# (caller retries with a properly-shaped bearer). We don't fall back
+# token-type → token-type because that doubles the error blast radius on
+# misconfigured callers.
 _K8S_SA_ISSUER_HINTS = (
     "kubernetes/serviceaccount",
     "https://kubernetes.default.svc",
-    # AKS projected-token issuer prefix.
-    "https://oidc.prod-aks.azure.com/",
+    # AKS projected-token issuer pattern (region varies):
+    #   https://<region>.oic.prod-aks.azure.com/<tenant>/<cluster>/
+    ".oic.prod-aks.azure.com/",
 )
 
 
@@ -119,9 +126,9 @@ def _verify_entra_token(token: str) -> dict[str, Any]:
 
 
 def _looks_like_k8s_sa_token(token: str) -> bool:
-    """Cheap iss-prefix check on the unverified JWT body to route between the
-    two validators. TokenReview is the actual authority — this is just for
-    picking the right code path."""
+    """Cheap iss check on the unverified JWT body to route between the two
+    validators. TokenReview is the actual authority — this is just for
+    picking the right code path. Matches exact, prefix, or substring hints."""
     parts = token.split(".")
     if len(parts) != 3:
         return False
@@ -132,7 +139,7 @@ def _looks_like_k8s_sa_token(token: str) -> bool:
     except (ValueError, json.JSONDecodeError):
         return False
     iss = str(claims.get("iss", ""))
-    return any(iss == hint or iss.startswith(hint) for hint in _K8S_SA_ISSUER_HINTS)
+    return any(iss == hint or iss.startswith(hint) or hint in iss for hint in _K8S_SA_ISSUER_HINTS)
 
 
 async def _verify_k8s_sa_token(token: str) -> str:
