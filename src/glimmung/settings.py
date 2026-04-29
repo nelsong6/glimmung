@@ -40,9 +40,14 @@ class Settings(BaseSettings):
     # mcp-* deployments use; no kube-rbac-proxy sidecar because glimmung is
     # publicly exposed and can't bind upstream-loopback-only.
     #
-    # Allowlist is comma-separated `<namespace>/<sa-name>` pairs. Empty
-    # disables the path; Entra remains the only admin auth.
-    k8s_sa_allowlist: str = "tank-operator/tank-operator"
+    # Allowlist is comma-separated `<namespace>/<sa-name>` pairs. Entries:
+    #   - tank-operator/tank-operator: orchestrator pod (long-running)
+    #   - tank-operator-sessions/claude-session: per-session pods where
+    #     Claude runs; needed for in-conversation registration of new
+    #     projects/workflows/hosts (the original CLI flow requires Entra
+    #     login on a workstation, which session pods don't have).
+    # Empty disables the path; Entra remains the only admin auth.
+    k8s_sa_allowlist: str = "tank-operator/tank-operator,tank-operator-sessions/claude-session"
     k8s_api_host: str = "https://kubernetes.default.svc"
     # Standard projected paths inside the pod; overridable for tests.
     k8s_sa_token_path: str = "/var/run/secrets/kubernetes.io/serviceaccount/token"
