@@ -48,20 +48,6 @@ _JWKS_URL = "https://login.microsoftonline.com/common/discovery/v2.0/keys"
 _ENTRA_ISSUER_PATTERN = re.compile(r"^https://login\.microsoftonline\.com/.+/v2\.0$")
 _jwks_client = PyJWKClient(_JWKS_URL, cache_keys=True, lifespan=3600)
 _ALG = "RS256"
-# Cluster-issued SA tokens carry this issuer in the JWT header. Kubelet's
-# legacy tokens use the literal "kubernetes/serviceaccount"; bound (projected)
-# tokens use the cluster's OIDC issuer URL. Either way, we only use the header
-# to *route* between the two validation paths — TokenReview is the actual
-# authority on whether the token is valid, so a header guess that's wrong just
-# means we 401 a legitimate Entra token (caller retries with a properly-shaped
-# bearer). We don't fall back token-type → token-type because that doubles the
-# error blast radius on misconfigured callers.
-_K8S_SA_ISSUER_HINTS = (
-    "kubernetes/serviceaccount",
-    "https://kubernetes.default.svc",
-    # AKS projected-token issuer prefix.
-    "https://oidc.prod-aks.azure.com/",
-)
 
 
 @dataclass
@@ -119,9 +105,12 @@ def _verify_entra_token(token: str) -> dict[str, Any]:
 
 
 def _looks_like_k8s_sa_token(token: str) -> bool:
-    """Cheap iss-prefix check on the unverified JWT body to route between the
-    two validators. TokenReview is the actual authority — this is just for
-    picking the right code path."""
+    """Route by claim *shape* on the unverified JWT body. K8s SA tokens
+    always include a top-level `kubernetes.io` claim (with the serviceaccount
+    sub-object); Entra tokens never do. Iss-prefix matching is too brittle —
+    AKS issuers are regional (`westus2.oic.prod-aks.azure.com`, not
+    `oidc.prod-aks.azure.com`) and any future cluster move would silently
+    misroute. TokenReview remains the actual authority on validity."""
     parts = token.split(".")
     if len(parts) != 3:
         return False
@@ -131,8 +120,7 @@ def _looks_like_k8s_sa_token(token: str) -> bool:
         claims = json.loads(base64.urlsafe_b64decode(body))
     except (ValueError, json.JSONDecodeError):
         return False
-    iss = str(claims.get("iss", ""))
-    return any(iss == hint or iss.startswith(hint) for hint in _K8S_SA_ISSUER_HINTS)
+    return isinstance(claims.get("kubernetes.io"), dict)
 
 
 async def _verify_k8s_sa_token(token: str) -> str:
