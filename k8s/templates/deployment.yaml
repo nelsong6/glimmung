@@ -27,6 +27,8 @@ spec:
               value: {{ .Values.cosmos.endpoint | quote }}
             - name: COSMOS_DATABASE
               value: {{ .Values.cosmos.database | quote }}
+            - name: ALLOWED_SERVICE_ACCOUNTS
+              value: {{ .Values.allowedServiceAccounts | quote }}
           envFrom:
             - secretRef:
                 name: {{ .Values.externalSecret.secretName }}
