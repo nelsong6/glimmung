@@ -104,7 +104,7 @@ Optimistic concurrency on the host doc's `_etag`. Acquire reads matching candida
 Release paths:
 - **Fast**: workflow's own release step (if it has one).
 - **Safety net**: `workflow_run.completed` webhook handler. Covers UI-cancellation, runner-died, network blips mid-step.
-- **Backstop**: 15-min sweep on stale heartbeat (`ttl_seconds`-driven; default 1h).
+- **Backstop**: 60-second sweep on stale heartbeat (`ttl_seconds`-driven; default 4h, sized to outlast the longest known caller workflow so heartbeats are optional).
 
 ## One-time setup
 
