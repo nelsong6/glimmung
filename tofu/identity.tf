@@ -37,12 +37,18 @@ resource "azurerm_user_assigned_identity" "glimmung" {
 # scoped to the glimmung database only — not the account. Other apps' data on
 # the same `infra-cosmos-serverless` account stays unreachable from this
 # identity even if a glimmung pod is compromised.
+#
+# `scope` is hand-built rather than `azurerm_cosmosdb_sql_database.glimmung.id`
+# because Cosmos data-plane RBAC uses its own path scheme (`/dbs/<name>`)
+# distinct from the ARM resource ID (`/sqlDatabases/<name>`); passing the
+# ARM ID gets rejected by the Cosmos service with "Expected path segment
+# [dbs] at position [0] but found [sqlDatabases]."
 resource "azurerm_cosmosdb_sql_role_assignment" "glimmung_cosmos" {
   resource_group_name = local.infra.resource_group_name
   account_name        = data.azurerm_cosmosdb_account.infra.name
   role_definition_id  = "${data.azurerm_cosmosdb_account.infra.id}/sqlRoleDefinitions/00000000-0000-0000-0000-000000000002"
   principal_id        = azurerm_user_assigned_identity.glimmung.principal_id
-  scope               = azurerm_cosmosdb_sql_database.glimmung.id
+  scope               = "${data.azurerm_cosmosdb_account.infra.id}/dbs/${azurerm_cosmosdb_sql_database.glimmung.name}"
 }
 
 # Prod pod: exact-match subject. The SA name `infra-shared` is a relic of
@@ -57,8 +63,14 @@ resource "azurerm_federated_identity_credential" "glimmung_prod" {
 }
 
 # Per-issue agent-CI pods: claims-matching expression. AKS issues OIDC
-# tokens with `sub=system:serviceaccount:<ns>:<sa>`; the regex matches any
-# `glimmung-issue-*` namespace running under `infra-shared`.
+# tokens with `sub=system:serviceaccount:<ns>:<sa>`; the expression matches
+# any `glimmung-issue-*` namespace whose pod is running under SA
+# `infra-shared`. The combined startsWith/endsWith form replaces a single
+# regex `matches()` call: Microsoft's flexible-FIC grammar (the one that
+# parses `claimsMatchingExpression.value`) doesn't accept method-call
+# syntax like `claims['sub'].matches(...)` — it rejects the `.` between
+# the indexer and the method with "symbol '.': Input doesn't match any
+# rule in grammar!". `startsWith`/`endsWith`/`&&` ARE in the grammar.
 #
 # Provisioned via azapi rather than azurerm_federated_identity_credential
 # because the azurerm provider (pinned to 4.70 by infra-bootstrap's shared
@@ -75,7 +87,7 @@ resource "azapi_resource" "glimmung_per_issue_fic" {
       issuer    = data.azurerm_kubernetes_cluster.infra.oidc_issuer_url
       audiences = ["api://AzureADTokenExchange"]
       claimsMatchingExpression = {
-        value           = "claims['sub'].matches('system:serviceaccount:glimmung-issue-[^:]+:infra-shared')"
+        value           = "claims['sub'].startsWith('system:serviceaccount:glimmung-issue-') && claims['sub'].endsWith(':infra-shared')"
         languageVersion = 1
       }
     }
