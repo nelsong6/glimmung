@@ -44,6 +44,11 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@v4
 
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: "1.9.0"
+
       - name: Install glimmung-agent package
         run: |
           set -euo pipefail
@@ -57,10 +62,33 @@ jobs:
           tenant-id: ${{ vars.ARM_TENANT_ID }}
           subscription-id: ${{ vars.ARM_SUBSCRIPTION_ID }}
 
-      - name: Set AKS context
+      - name: Read infra-bootstrap tofu outputs
+        # Same pattern as agent-run.yml — see that workflow for rationale.
         env:
-          AZURE_AKS_RESOURCE_GROUP: ${{ vars.AZURE_AKS_RESOURCE_GROUP }}
-          AZURE_AKS_CLUSTER_NAME: ${{ vars.AZURE_AKS_CLUSTER_NAME }}
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ vars.ARM_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ vars.ARM_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.ARM_SUBSCRIPTION_ID }}
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d)
+          cat > "${work}/main.tf" <<'EOF'
+          terraform { backend "azurerm" {} }
+          EOF
+          (
+            cd "${work}"
+            tofu init \
+              -backend-config="resource_group_name=infra" \
+              -backend-config="storage_account_name=nelsontofu" \
+              -backend-config="container_name=tfstate" \
+              -backend-config="key=infra-bootstrap.tfstate"
+            {
+              echo "AZURE_AKS_RESOURCE_GROUP=$(tofu output -raw resource_group_name)"
+              echo "AZURE_AKS_CLUSTER_NAME=$(tofu output -raw aks_cluster_name)"
+            } >> "$GITHUB_ENV"
+          )
+
+      - name: Set AKS context
         run: |
           set -euo pipefail
           az aks get-credentials \
