@@ -1,0 +1,6 @@
+apiVersion: v2
+name: glimmung-issue
+description: Per-issue agent-CI validation env — Deployment + Service + HTTPRoute installed alongside prod glimmung in the `glimmung` namespace, distinguished by Helm release name. Uninstall is `helm uninstall <release>`.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

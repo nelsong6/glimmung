@@ -1,0 +1,38 @@
+# Per-issue helm release values. The agent-run.yml workflow overrides
+# `image.tag`, `hostname`, and `prNumber` on each install via --set;
+# everything else is shared with prod (same SA, same Secret, same
+# Cosmos endpoint).
+
+image:
+  repository: romainecr.azurecr.io/glimmung
+  # Set per-install to the issue tag (e.g. issue-12-RUNID-abc1234). No
+  # default — `helm install` should fail loudly if the workflow forgot
+  # to pass it, rather than silently deploy a stale tag.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Public hostname for the validation env. Set per-install to
+# <slug>.glimmung.dev.romaine.life by the workflow. The HTTPRoute
+# attaches to the wildcard XListenerSet provisioned by the prod chart
+# (k8s/templates/wildcard-listenerset.yaml), so no per-install cert or
+# listener is needed.
+hostname: ""
+
+# Existing infrastructure in the glimmung namespace that this chart's
+# resources reference. These match prod's k8s/values.yaml; they're
+# duplicated here rather than imported because the issue chart has no
+# dependency on the prod chart's release.
+serviceAccount: infra-shared
+secretName: glimmung-secrets
+cosmos:
+  endpoint: https://infra-cosmos-serverless.documents.azure.com:443/
+  database: glimmung
+
+# The wildcard XListenerSet that per-install HTTPRoutes attach to (in
+# the same `glimmung` namespace where this chart installs).
+attachListenerSet: glimmung-wildcard
+
+# Surfaced for cleanup-by-label. The agent-run workflow sets
+# --set prNumber=<N> after the PR opens so the cleanup workflow
+# (agent-pr-cleanup.yml) can find releases by label and uninstall them.
+prNumber: ""

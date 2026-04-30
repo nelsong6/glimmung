@@ -1,0 +1,40 @@
+{{- if .Values.wildcardCertificate.enabled -}}
+{{- /*
+One XListenerSet attaching both a wildcard listener and a base-host
+listener (TLS wildcards only match a single label, so glimmung.dev.romaine.life
+itself needs its own listener entry distinct from *.glimmung.dev.romaine.life).
+Both listeners terminate with the wildcard cert (multi-SAN).
+
+allowedRoutes.namespaces.from=All lets HTTPRoutes attach from any
+namespace without per-namespace ReferenceGrants — currently unused
+(per-issue HTTPRoutes live in this same namespace) but cheap to keep
+for future flexibility.
+*/ -}}
+apiVersion: gateway.networking.x-k8s.io/v1alpha1
+kind: XListenerSet
+metadata:
+  name: {{ .Values.wildcardCertificate.name }}
+  namespace: {{ .Values.namespace }}
+spec:
+  parentRef:
+    group: gateway.networking.k8s.io
+    kind: Gateway
+    name: {{ .Values.ingress.gatewayName }}
+    namespace: {{ .Values.ingress.gatewayNamespace }}
+  listeners:
+    {{- range $i, $host := .Values.wildcardCertificate.hosts }}
+    - name: {{ printf "https-%d" $i }}
+      protocol: HTTPS
+      port: 443
+      hostname: {{ $host | quote }}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - group: ""
+            kind: Secret
+            name: {{ $.Values.wildcardCertificate.tlsSecret }}
+      allowedRoutes:
+        namespaces:
+          from: {{ $.Values.wildcardCertificate.allowedFromNamespaces }}
+    {{- end }}
+{{- end }}

@@ -1,0 +1,33 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: glimmung-issue
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- if .Values.prNumber }}
+    glimmung.io/pr: {{ .Values.prNumber | quote }}
+    {{- end }}
+spec:
+  hostnames:
+    - {{ .Values.hostname }}
+  parentRefs:
+    # Wildcard XListenerSet provisioned by the prod chart
+    # (k8s/templates/wildcard-listenerset.yaml). Lives in the same
+    # `glimmung` namespace where this chart installs, so no
+    # ReferenceGrant is needed.
+    - group: gateway.networking.x-k8s.io
+      kind: XListenerSet
+      name: {{ .Values.attachListenerSet }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: {{ .Release.Name }}
+          port: 80
+          weight: 1

@@ -1,0 +1,27 @@
+{{- if .Values.wildcardCertificate.enabled -}}
+{{- /*
+Wildcard cert covering glimmung.dev.romaine.life and every per-issue
+hostname under *.glimmung.dev.romaine.life. Issued via DNS-01 (HTTP-01
+cannot do wildcards). The resulting Secret backs the wildcard
+XListenerSet in this same namespace; per-issue helm releases attach
+their HTTPRoute to that listener instead of provisioning their own
+cert and listener.
+
+Mirrors ambience's wildcard cert (chart/ambience/templates/wildcard-certificate.yaml)
+so the agentic-CI flow can transplant with no per-app surgery.
+*/ -}}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Values.wildcardCertificate.tlsSecret }}
+  namespace: {{ .Values.namespace }}
+spec:
+  secretName: {{ .Values.wildcardCertificate.tlsSecret }}
+  issuerRef:
+    name: {{ .Values.wildcardCertificate.issuer }}
+    kind: ClusterIssuer
+  dnsNames:
+    {{- range .Values.wildcardCertificate.hosts }}
+    - {{ . | quote }}
+    {{- end }}
+{{- end }}
