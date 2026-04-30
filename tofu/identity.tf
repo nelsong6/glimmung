@@ -9,13 +9,13 @@
 # every opted-in app could read every other app's data plane. This file
 # replaces that arrangement with an identity scoped to glimmung's blast
 # radius only: data-plane on the `glimmung` Cosmos database, nothing else.
+# Pattern mirrors tank-operator/infra/{api_proxy,credential_refresher}.tf.
 #
-# Two federated credentials cover the two ways a glimmung pod runs today:
-#   1. Prod pod in the `glimmung` namespace under SA `infra-shared`.
-#   2. Per-issue agent-CI pods in `glimmung-issue-<N>-<run>-<sha>`
-#      namespaces (created on the fly), same SA name. Subject claims for
-#      these can't be enumerated, so the second cred uses a claims-matching
-#      expression to accept any namespace fitting the pattern.
+# One federated credential, exact-match subject. Both prod and per-issue
+# agent-CI helm releases run in the `glimmung` namespace under SA
+# `infra-shared`, distinguished by Helm release name (resource names
+# templated off `.Release.Name`). A single subject covers both because
+# they live in the same namespace.
 # ============================================================================
 
 data "azurerm_resource_group" "infra" {
@@ -51,47 +51,13 @@ resource "azurerm_cosmosdb_sql_role_assignment" "glimmung_cosmos" {
   scope               = "${data.azurerm_cosmosdb_account.infra.id}/dbs/${azurerm_cosmosdb_sql_database.glimmung.name}"
 }
 
-# Prod pod: exact-match subject. The SA name `infra-shared` is a relic of
-# the shared-identity era; renaming the SA is a separate cleanup.
-resource "azurerm_federated_identity_credential" "glimmung_prod" {
-  name                = "aks-glimmung-prod"
+resource "azurerm_federated_identity_credential" "glimmung" {
+  name                = "aks-glimmung"
   resource_group_name = local.infra.resource_group_name
   parent_id           = azurerm_user_assigned_identity.glimmung.id
   audience            = ["api://AzureADTokenExchange"]
   issuer              = data.azurerm_kubernetes_cluster.infra.oidc_issuer_url
   subject             = "system:serviceaccount:glimmung:infra-shared"
-}
-
-# Per-issue agent-CI pods: claims-matching expression. AKS issues OIDC
-# tokens with `sub=system:serviceaccount:<ns>:<sa>`; the expression matches
-# any `glimmung-issue-*` namespace whose pod is running under SA
-# `infra-shared`. The combined startsWith/endsWith form replaces a single
-# regex `matches()` call: Microsoft's flexible-FIC grammar (the one that
-# parses `claimsMatchingExpression.value`) doesn't accept method-call
-# syntax like `claims['sub'].matches(...)` — it rejects the `.` between
-# the indexer and the method with "symbol '.': Input doesn't match any
-# rule in grammar!". `startsWith`/`endsWith`/`&&` ARE in the grammar.
-#
-# Provisioned via azapi rather than azurerm_federated_identity_credential
-# because the azurerm provider (pinned to 4.70 by infra-bootstrap's shared
-# providers) doesn't expose `claimsMatchingExpression` yet — the resource
-# only accepts a literal `subject` string. API version 2025-01-31-preview
-# is the first one whose schema (as bundled with azapi 2.9.0) exposes
-# `claimsMatchingExpression`.
-resource "azapi_resource" "glimmung_per_issue_fic" {
-  type      = "Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2025-01-31-preview"
-  parent_id = azurerm_user_assigned_identity.glimmung.id
-  name      = "aks-glimmung-per-issue"
-  body = {
-    properties = {
-      issuer    = data.azurerm_kubernetes_cluster.infra.oidc_issuer_url
-      audiences = ["api://AzureADTokenExchange"]
-      claimsMatchingExpression = {
-        value           = "claims['sub'].startsWith('system:serviceaccount:glimmung-issue-') && claims['sub'].endsWith(':infra-shared')"
-        languageVersion = 1
-      }
-    }
-  }
 }
 
 # Surface the client-id so k8s/values.yaml can pin the SA annotation
