@@ -1,0 +1,107 @@
+name: Agent PR Cleanup
+
+run-name: "Cleanup #${{ github.event.pull_request.number }} (${{ github.event.pull_request.head.ref }})"
+
+# Reaps the per-issue helm release + agent namespace + ACR tags when an
+# agent-opened PR closes. Glimmung diverges from ambience: the
+# validation env lives as a helm release in the prod `glimmung`
+# namespace (release-name-distinguished) rather than its own per-issue
+# namespace, so cleanup is `helm uninstall <release>` (found by label)
+# rather than `kubectl delete namespace`. The agent Job's namespace
+# (`glimmung-issue-<N>-<run>-<sha>`) is separate and gets deleted
+# alongside.
+#
+# Only fires for PRs whose head ref starts with `agent/issue-` — manual
+# PRs don't have an agent env and the job is a no-op anyway.
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  cleanup:
+    name: Reap agent validation env
+    if: startsWith(github.event.pull_request.head.ref, 'agent/issue-')
+    runs-on: ubuntu-latest
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Install glimmung-agent package
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install ./mcp
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.ARM_CLIENT_ID }}
+          tenant-id: ${{ vars.ARM_TENANT_ID }}
+          subscription-id: ${{ vars.ARM_SUBSCRIPTION_ID }}
+
+      - name: Set AKS context
+        env:
+          AZURE_AKS_RESOURCE_GROUP: ${{ vars.AZURE_AKS_RESOURCE_GROUP }}
+          AZURE_AKS_CLUSTER_NAME: ${{ vars.AZURE_AKS_CLUSTER_NAME }}
+        run: |
+          set -euo pipefail
+          az aks get-credentials \
+            --resource-group "$AZURE_AKS_RESOURCE_GROUP" \
+            --name "$AZURE_AKS_CLUSTER_NAME" \
+            --overwrite-existing
+
+      - name: Reap helm releases + agent namespaces + ACR tags
+        run: |
+          set -euo pipefail
+          # Helm releases: find Deployments labeled `glimmung.io/pr=<N>`
+          # in the prod `glimmung` namespace; their `app.kubernetes.io/instance`
+          # label is the helm release name.
+          mapfile -t releases < <(kubectl -n glimmung get deployment \
+            -l "glimmung.io/pr=${PR_NUMBER}" \
+            -o jsonpath='{range .items[*]}{.metadata.labels.app\.kubernetes\.io/instance}{"\n"}{end}')
+          if [ "${#releases[@]}" -eq 0 ] || [ -z "${releases[0]:-}" ]; then
+            echo "no helm releases labeled glimmung.io/pr=${PR_NUMBER}; nothing to reap on the chart side"
+          else
+            for release in "${releases[@]}"; do
+              [ -z "$release" ] && continue
+              echo "uninstalling helm release ${release} from glimmung namespace"
+              python -m glimmung_agent.cli destroy-validation-preview \
+                --release "${release}" --namespace glimmung || true
+              # Image tag matches the release name (issue chart's
+              # default), with a -r2 sibling for the rebuild.
+              az acr repository delete --name romainecr --image "glimmung:${release}" --yes || true
+              az acr repository delete --name romainecr --image "glimmung:${release}-r2" --yes || true
+            done
+          fi
+
+          # Agent namespaces: separately labeled with the same key.
+          mapfile -t namespaces < <(kubectl get ns \
+            -l "glimmung.io/pr=${PR_NUMBER}" \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+          if [ "${#namespaces[@]}" -eq 0 ] || [ -z "${namespaces[0]:-}" ]; then
+            echo "no agent namespaces labeled glimmung.io/pr=${PR_NUMBER}; nothing to reap there"
+            exit 0
+          fi
+          for ns in "${namespaces[@]}"; do
+            [ -z "$ns" ] && continue
+            echo "deleting agent namespace ${ns}"
+            kubectl delete namespace "$ns" --ignore-not-found=true --wait=false || true
+          done

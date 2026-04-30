@@ -1,0 +1,609 @@
+name: Agent Run
+
+run-name: "#${{ inputs.issue_number }} ${{ inputs.issue_title }} (${{ inputs.host }})"
+
+# Glimmung itself dispatches this workflow. https://glimmung.romaine.life/v1/webhook/github
+# receives the GitHub `issues` event, atomically claims a host, fires
+# this workflow_dispatch with lease_id + host + issue_number. Heavy
+# lifting (Claude run + screenshot/notes capture) happens inside an
+# in-cluster k8s Job that talks to tank-operator's claude-api-proxy
+# for subscription-token auth — the GHA runner only orchestrates and
+# copies evidence out.
+#
+# Layout differs from ambience: per-issue helm releases install into
+# the prod `glimmung` namespace (release-name-distinguished) so they
+# share the prod SA + glimmung-identity workload identity, which is
+# the only way to run live-data Cosmos calls without flexible-FIC
+# subject matching (Microsoft's grammar parser doesn't accept
+# `claims['sub'].matches(...)`). The agent Job lives in a separate
+# `glimmung-issue-<N>-<run>-<sha>` namespace because the reflector
+# in tank-operator-sessions auto-replicates the claude-oauth-ca
+# ConfigMap to namespaces matching that pattern; the prod glimmung
+# namespace doesn't need the CA.
+
+on:
+  workflow_dispatch:
+    inputs:
+      lease_id:
+        description: Glimmung lease ID (ULID)
+        required: true
+        type: string
+      host:
+        description: Glimmung slot host (e.g. glimmung-slot-1)
+        required: true
+        type: string
+      issue_number:
+        description: Issue number to address
+        required: true
+        type: string
+      issue_title:
+        description: Issue title (informational)
+        required: false
+        type: string
+      gh_event:
+        description: Originating GitHub event (informational)
+        required: false
+        type: string
+      gh_action:
+        description: Originating GitHub action (informational)
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+  issues: write
+  pull-requests: write
+
+env:
+  GLIMMUNG_BASE: https://glimmung.romaine.life
+  GLIMMUNG_PROJECT: glimmung
+  AGENT_CONTAINER_TAG: latest
+  PYTHONUNBUFFERED: "1"
+  PYTHONIOENCODING: "utf-8"
+
+jobs:
+  route:
+    name: Verify glimmung lease
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify glimmung lease
+        env:
+          LEASE_ID: ${{ inputs.lease_id }}
+          HOST: ${{ inputs.host }}
+        run: |
+          set -euo pipefail
+          resp=$(curl -fsS "${GLIMMUNG_BASE}/v1/lease/${LEASE_ID}?project=${GLIMMUNG_PROJECT}")
+          state=$(printf '%s' "$resp" | jq -r .state)
+          host=$(printf '%s' "$resp" | jq -r .host)
+          if [[ "$state" != "active" ]]; then
+            echo "::error::lease ${LEASE_ID} state=${state} (expected active)"
+            exit 1
+          fi
+          if [[ "$host" != "$HOST" ]]; then
+            echo "::error::lease ${LEASE_ID} host=${host} (expected ${HOST})"
+            exit 1
+          fi
+          echo "lease verified: ${LEASE_ID} active on ${HOST}"
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.ARM_CLIENT_ID }}
+          tenant-id: ${{ vars.ARM_TENANT_ID }}
+          subscription-id: ${{ vars.ARM_SUBSCRIPTION_ID }}
+
+      - name: Fetch GitHub App credentials from Key Vault
+        env:
+          KV_NAME: ${{ vars.KEY_VAULT_NAME }}
+        run: |
+          set -euo pipefail
+          app_id=$(az keyvault secret show --vault-name "$KV_NAME" --name "github-app-id" --query value -o tsv)
+          pem=$(az keyvault secret show --vault-name "$KV_NAME" --name "github-app-private-key" --query value -o tsv)
+          echo "::add-mask::${app_id}"
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            echo "::add-mask::${line}"
+          done <<< "$pem"
+          echo "GH_APP_ID=${app_id}" >> "$GITHUB_ENV"
+          {
+            echo "GH_APP_PRIVATE_KEY<<KEY_EOF"
+            echo "$pem"
+            echo "KEY_EOF"
+          } >> "$GITHUB_ENV"
+
+      - name: Mint GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ env.GH_APP_ID }}
+          private-key: ${{ env.GH_APP_PRIVATE_KEY }}
+
+      - name: Comment with run link
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          HOST: ${{ inputs.host }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ISSUE_NUMBER}" ]; then
+            echo "no issue_number; skipping run-start comment"
+            exit 0
+          fi
+          body="agent run started: ${RUN_URL} (host \`${HOST}\`)"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments" \
+            -f "body=${body}" >/dev/null \
+            || echo "::warning::failed to post run-start comment on #${ISSUE_NUMBER}; continuing"
+
+  agent:
+    name: Run agent + open PR
+    needs: route
+    runs-on: ubuntu-latest
+    env:
+      ISSUE_NUMBER: ${{ inputs.issue_number }}
+      ISSUE_TITLE: ${{ inputs.issue_title }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Install glimmung-agent package
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install ./mcp
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.ARM_CLIENT_ID }}
+          tenant-id: ${{ vars.ARM_TENANT_ID }}
+          subscription-id: ${{ vars.ARM_SUBSCRIPTION_ID }}
+
+      - name: Fetch GitHub App credentials from Key Vault
+        env:
+          KV_NAME: ${{ vars.KEY_VAULT_NAME }}
+        run: |
+          set -euo pipefail
+          app_id=$(az keyvault secret show --vault-name "$KV_NAME" --name "github-app-id" --query value -o tsv)
+          pem=$(az keyvault secret show --vault-name "$KV_NAME" --name "github-app-private-key" --query value -o tsv)
+          echo "::add-mask::${app_id}"
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            echo "::add-mask::${line}"
+          done <<< "$pem"
+          echo "GH_APP_ID=${app_id}" >> "$GITHUB_ENV"
+          {
+            echo "GH_APP_PRIVATE_KEY<<KEY_EOF"
+            echo "$pem"
+            echo "KEY_EOF"
+          } >> "$GITHUB_ENV"
+
+      - name: Mint GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ env.GH_APP_ID }}
+          private-key: ${{ env.GH_APP_PRIVATE_KEY }}
+
+      - name: Set AKS context
+        env:
+          AZURE_AKS_RESOURCE_GROUP: ${{ vars.AZURE_AKS_RESOURCE_GROUP }}
+          AZURE_AKS_CLUSTER_NAME: ${{ vars.AZURE_AKS_CLUSTER_NAME }}
+        run: |
+          set -euo pipefail
+          az aks get-credentials \
+            --resource-group "$AZURE_AKS_RESOURCE_GROUP" \
+            --name "$AZURE_AKS_CLUSTER_NAME" \
+            --overwrite-existing
+
+      - name: Compute run-scoped variables
+        run: |
+          set -euo pipefail
+          short_sha=$(git rev-parse --short=7 HEAD)
+          slug="issue-${ISSUE_NUMBER}-${GITHUB_RUN_ID}-${short_sha}"
+          # Per-issue helm release lives in the prod `glimmung` namespace,
+          # release-name-distinguished. Agent Job lives in a separate
+          # per-run namespace so the reflector's `glimmung-issue-.*`
+          # match pattern auto-replicates the claude-oauth-ca ConfigMap
+          # without polluting the prod glimmung namespace.
+          {
+            echo "RELEASE_NAME=${slug}"
+            echo "PROD_NAMESPACE=glimmung"
+            echo "AGENT_NAMESPACE=glimmung-${slug}"
+            echo "VALIDATION_HOST=${slug}.glimmung.dev.romaine.life"
+            echo "VALIDATION_URL=https://${slug}.glimmung.dev.romaine.life"
+            echo "JOB_NAME=agent-${slug}"
+            echo "BRANCH_NAME=agent/issue-${ISSUE_NUMBER}-${GITHUB_RUN_ID}"
+            echo "IMAGE_TAG=${slug}"
+            echo "ISSUE_URL=https://github.com/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}"
+          } >> "$GITHUB_ENV"
+
+      - name: Build preview image
+        run: |
+          set -euo pipefail
+          python -m glimmung_agent.cli build-preview-image --image-tag "${IMAGE_TAG}" > /tmp/preview-image.json
+
+      - name: Deploy issue release into glimmung namespace
+        run: |
+          set -euo pipefail
+          python -m glimmung_agent.cli deploy-validation-preview \
+            --release "${RELEASE_NAME}" \
+            --namespace "${PROD_NAMESPACE}" \
+            --image-tag "${IMAGE_TAG}" \
+            --public-host "${VALIDATION_HOST}"
+
+      - name: Wait for validation env to be ready
+        run: |
+          set -euo pipefail
+          python -m glimmung_agent.cli wait-public-preview --url "${VALIDATION_URL}"
+
+      - name: Create per-run agent namespace
+        run: |
+          set -euo pipefail
+          # Reflector in tank-operator-sessions matches `glimmung-issue-.*`
+          # and auto-replicates the claude-oauth-ca ConfigMap into this
+          # namespace shortly after creation.
+          kubectl create namespace "${AGENT_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Resolve claude-api-proxy ClusterIP
+        run: |
+          set -euo pipefail
+          ip=$(kubectl -n tank-operator get svc claude-api-proxy -o jsonpath='{.spec.clusterIP}')
+          if [ -z "$ip" ]; then
+            echo "::error::claude-api-proxy Service not found in tank-operator namespace"
+            exit 1
+          fi
+          echo "PROXY_IP=${ip}" >> "$GITHUB_ENV"
+
+      - name: Provision agent ConfigMap + GitHub-token Secret
+        run: |
+          set -euo pipefail
+          kubectl -n "${AGENT_NAMESPACE}" create configmap agent-config \
+            --from-file=prompt.md=.github/agent/prompt.md \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n "${AGENT_NAMESPACE}" create secret generic agent-github-token \
+            --from-literal=token="${GITHUB_TOKEN}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Apply agent Job
+        run: |
+          set -euo pipefail
+          python -m glimmung_agent.cli apply-agent-job \
+            --namespace "${AGENT_NAMESPACE}" \
+            --job-name "${JOB_NAME}" \
+            --issue-number "${ISSUE_NUMBER}" \
+            --issue-title "${ISSUE_TITLE}" \
+            --issue-url "${ISSUE_URL}" \
+            --validation-url "${VALIDATION_URL}" \
+            --branch-name "${BRANCH_NAME}" \
+            --proxy-ip "${PROXY_IP}" \
+            --agent-container-tag "${AGENT_CONTAINER_TAG}"
+
+      - name: Stream + wait for Job
+        id: job
+        run: |
+          set -euo pipefail
+          python -m glimmung_agent.cli wait-agent-job \
+            --namespace "${AGENT_NAMESPACE}" \
+            --job-name "${JOB_NAME}" \
+            --timeout-seconds 1800
+
+      - name: Capture agent event log
+        if: always()
+        run: |
+          set -euo pipefail
+          pod=$(kubectl -n "${AGENT_NAMESPACE}" get pods -l "job-name=${JOB_NAME}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+          if [ -z "${pod}" ]; then
+            echo "no pod found for job ${JOB_NAME}; skipping event capture"
+            : > /tmp/agent-pod.log
+            : > /tmp/agent-events.jsonl
+            exit 0
+          fi
+          kubectl -n "${AGENT_NAMESPACE}" logs "${pod}" > /tmp/agent-pod.log || true
+          grep -E '^\{' /tmp/agent-pod.log > /tmp/agent-events.jsonl || true
+          echo "captured $(wc -l < /tmp/agent-events.jsonl) event lines from ${pod}"
+
+      - name: Capture agent evidence from pod log
+        id: evidence
+        if: success()
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/evidence
+          if grep -q '===EVIDENCE-TAR-START===' /tmp/agent-pod.log; then
+            sed -n '/===EVIDENCE-TAR-START===/,/===EVIDENCE-TAR-END===/{//!p;}' \
+              /tmp/agent-pod.log \
+              | base64 -d \
+              | tar -xzf - -C /tmp/evidence
+          else
+            echo "::warning::no evidence tar markers found in agent pod log"
+          fi
+          echo "evidence files extracted:"
+          find /tmp/evidence -type f 2>/dev/null | sort || true
+          have_screenshots=false
+          if compgen -G "/tmp/evidence/screenshots/*.png" >/dev/null; then
+            have_screenshots=true
+          fi
+          have_notes=false
+          if [ -s /tmp/evidence/notes.md ]; then
+            have_notes=true
+          fi
+          deep_validation_url=""
+          if [ -s /tmp/evidence/validation-path.txt ]; then
+            path=$(head -1 /tmp/evidence/validation-path.txt | tr -d '[:space:]')
+            case "${path}" in
+              /*) deep_validation_url="${VALIDATION_URL}${path}" ;;
+              "") ;;
+              *) echo "::warning::validation-path.txt content '${path}' missing leading slash; falling back to bare host" ;;
+            esac
+          fi
+          echo "have_screenshots=${have_screenshots}" >> "$GITHUB_OUTPUT"
+          echo "have_notes=${have_notes}" >> "$GITHUB_OUTPUT"
+          echo "deep_validation_url=${deep_validation_url}" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch agent branch onto runner
+        if: success()
+        run: |
+          set -euo pipefail
+          git fetch origin "${BRANCH_NAME}"
+          git checkout -B "${BRANCH_NAME}" "origin/${BRANCH_NAME}"
+
+      - name: Rebuild validation env from agent branch
+        if: success()
+        run: |
+          set -euo pipefail
+          rebuild_tag="${IMAGE_TAG}-r2"
+          echo "REBUILT_IMAGE_TAG=${rebuild_tag}" >> "$GITHUB_ENV"
+          python -m glimmung_agent.cli rebuild-validation-image \
+            --release "${RELEASE_NAME}" \
+            --namespace "${PROD_NAMESPACE}" \
+            --branch "${BRANCH_NAME}" \
+            --image-tag "${rebuild_tag}"
+
+      - name: Wait for rebuilt validation env
+        if: success()
+        run: |
+          set -euo pipefail
+          python -m glimmung_agent.cli wait-public-preview --url "${VALIDATION_URL}"
+
+      - name: Refresh Azure OIDC login
+        # azure/login@v2's OIDC JWT is valid for 5 minutes; agent +
+        # rebuild + capture takes 10-15 min, so the cached JWT is stale
+        # by upload time and `az storage` hits AADSTS700024. Re-login
+        # mints a fresh one.
+        if: success() && steps.evidence.outputs.have_screenshots == 'true'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.ARM_CLIENT_ID }}
+          tenant-id: ${{ vars.ARM_TENANT_ID }}
+          subscription-id: ${{ vars.ARM_SUBSCRIPTION_ID }}
+
+      - name: Upload screenshots to Azure blob
+        id: upload
+        if: success() && steps.evidence.outputs.have_screenshots == 'true'
+        continue-on-error: true
+        env:
+          STORAGE_ACCOUNT: ${{ vars.AGENT_SCREENSHOT_STORAGE_ACCOUNT }}
+          CONTAINER: ${{ vars.AGENT_SCREENSHOT_CONTAINER }}
+          CONTAINER_URL: ${{ vars.AGENT_SCREENSHOT_CONTAINER_URL }}
+          MAX_SCREENSHOTS: "20"
+        run: |
+          set -euo pipefail
+          prefix="issue-${ISSUE_NUMBER}/${GITHUB_RUN_ID}"
+
+          staging=$(mktemp -d)
+          mapfile -t pngs < <(find /tmp/evidence/screenshots -maxdepth 1 -type f -name '*.png' | sort)
+          total=${#pngs[@]}
+          taken=0
+          for f in "${pngs[@]}"; do
+            [ "${taken}" -lt "${MAX_SCREENSHOTS}" ] || break
+            cp "${f}" "${staging}/"
+            taken=$((taken + 1))
+          done
+          echo "uploading ${taken}/${total} screenshots (cap ${MAX_SCREENSHOTS})"
+
+          upload_ok=true
+          if ! az storage blob upload-batch \
+              --account-name "${STORAGE_ACCOUNT}" \
+              --destination "${CONTAINER}" \
+              --destination-path "${prefix}" \
+              --source "${staging}" \
+              --auth-mode login \
+              --overwrite true; then
+            upload_ok=false
+            echo "::warning::screenshot upload failed; PR body will note this"
+          fi
+
+          {
+            echo "markdown<<EOF_MD"
+            echo "## Screenshots"
+            echo ""
+            if [ "${upload_ok}" = "false" ]; then
+              echo "_Screenshot upload failed — see [run logs](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})._"
+              echo ""
+            else
+              if [ "${total}" -gt "${taken}" ]; then
+                echo "_Showing first ${taken} of ${total} screenshots._"
+                echo ""
+              fi
+              for f in "${staging}"/*.png; do
+                [ -e "${f}" ] || continue
+                base=$(basename "${f}")
+                echo "### ${base%.png}"
+                echo ""
+                echo "![${base%.png}](${CONTAINER_URL}/${prefix}/${base})"
+                echo ""
+              done
+            fi
+            echo "EOF_MD"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Open pull request and label release
+        if: success()
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SCREENSHOTS_MD: ${{ steps.upload.outputs.markdown }}
+          HAVE_NOTES: ${{ steps.evidence.outputs.have_notes }}
+          DEEP_VALIDATION_URL: ${{ steps.evidence.outputs.deep_validation_url }}
+        run: |
+          set -euo pipefail
+          if [ -n "${DEEP_VALIDATION_URL}" ]; then
+            link_url="${DEEP_VALIDATION_URL}"
+          else
+            link_url="${VALIDATION_URL}"
+          fi
+          body_file=$(mktemp)
+          {
+            echo "Closes #${ISSUE_NUMBER}."
+            echo ""
+            echo "Validation env (until PR closes): <a href=\"${link_url}\" target=\"_blank\" rel=\"noopener noreferrer\">${link_url}</a>"
+            echo ""
+            if [ "${HAVE_NOTES}" = "true" ]; then
+              cat /tmp/evidence/notes.md
+              echo ""
+            fi
+            if [ -n "${SCREENSHOTS_MD:-}" ]; then
+              printf '%s\n' "${SCREENSHOTS_MD}"
+              echo ""
+            fi
+            echo "Generated by glimmung-leased agent run on host \`${{ inputs.host }}\` (lease \`${{ inputs.lease_id }}\`)."
+          } > "${body_file}"
+          pr_url=$(gh pr create \
+            --base main \
+            --head "${BRANCH_NAME}" \
+            --title "agent: ${ISSUE_TITLE} (#${ISSUE_NUMBER})" \
+            --body-file "${body_file}")
+          echo "${pr_url}"
+          pr_number=$(printf '%s' "${pr_url}" | grep -oE 'pull/[0-9]+' | tr -dc '0-9')
+          echo "PR_NUMBER=${pr_number}" >> "$GITHUB_ENV"
+          if [ -z "${pr_number}" ]; then
+            echo "::warning::could not parse PR number from ${pr_url}; cleanup will need to find this release by hand"
+            exit 0
+          fi
+          # Label both the per-issue helm release (in glimmung namespace)
+          # AND the agent namespace, so cleanup can find both by label.
+          python -m glimmung_agent.cli label-release-pr \
+            --release "${RELEASE_NAME}" \
+            --namespace "${PROD_NAMESPACE}" \
+            --pr-number "${pr_number}" \
+            || echo "::warning::failed to label release ${RELEASE_NAME} with glimmung.io/pr=${pr_number}"
+          kubectl label namespace "${AGENT_NAMESPACE}" "glimmung.io/pr=${pr_number}" --overwrite \
+            || echo "::warning::failed to label namespace ${AGENT_NAMESPACE} with glimmung.io/pr=${pr_number}"
+
+      - name: Summarize agent run
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          events=/tmp/agent-events.jsonl
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          body_file=$(mktemp)
+
+          if [ -s "${events}" ]; then
+            cost=$(jq -r 'select(.type=="result") | .total_cost_usd // 0' "${events}" \
+              | awk '{s+=$1} END {printf "%.4f", s}')
+            turns=$(jq -r 'select(.type=="result") | .num_turns // 0' "${events}" \
+              | awk '{s+=$1} END {printf "%d", s}')
+            input=$(jq -r 'select(.type=="result") | .usage.input_tokens // 0' "${events}" \
+              | awk '{s+=$1} END {printf "%d", s}')
+            output=$(jq -r 'select(.type=="result") | .usage.output_tokens // 0' "${events}" \
+              | awk '{s+=$1} END {printf "%d", s}')
+            cache_create=$(jq -r 'select(.type=="result") | .usage.cache_creation_input_tokens // 0' "${events}" \
+              | awk '{s+=$1} END {printf "%d", s}')
+            cache_read=$(jq -r 'select(.type=="result") | .usage.cache_read_input_tokens // 0' "${events}" \
+              | awk '{s+=$1} END {printf "%d", s}')
+            tools=$(jq -r 'select(.type=="assistant") | .message.content[]? | select(.type=="tool_use") | .name' "${events}" \
+              | wc -l | tr -d ' ')
+            tool_breakdown=$(jq -r 'select(.type=="assistant") | .message.content[]? | select(.type=="tool_use") | .name' "${events}" \
+              | sort | uniq -c | sort -rn | awk '{printf "  - %s: %d\n", $2, $1}')
+            {
+              echo "## Agent run summary"
+              echo ""
+              echo "| Metric | Value |"
+              echo "| --- | ---: |"
+              echo "| Status | ${JOB_STATUS} |"
+              echo "| Run | [${GITHUB_RUN_ID}](${run_url}) |"
+              echo "| Issue | #${ISSUE_NUMBER} |"
+              echo "| Cost | \$${cost} |"
+              echo "| Turns | ${turns} |"
+              echo "| Tool calls | ${tools} |"
+              echo "| Input tokens | ${input} |"
+              echo "| Output tokens | ${output} |"
+              echo "| Cache creation tokens | ${cache_create} |"
+              echo "| Cache read tokens | ${cache_read} |"
+              echo ""
+              if [ -n "${tool_breakdown}" ]; then
+                echo "### Tool calls"
+                echo ""
+                printf '%s\n' "${tool_breakdown}"
+              fi
+            } > "${body_file}"
+          else
+            {
+              echo "## Agent run summary"
+              echo ""
+              echo "| Metric | Value |"
+              echo "| --- | ---: |"
+              echo "| Status | ${JOB_STATUS} |"
+              echo "| Run | [${GITHUB_RUN_ID}](${run_url}) |"
+              echo "| Issue | #${ISSUE_NUMBER} |"
+              echo ""
+              echo "_No agent events captured — see run logs for failure detail._"
+            } > "${body_file}"
+          fi
+
+          cat "${body_file}" >> "${GITHUB_STEP_SUMMARY}"
+          if [ -n "${ISSUE_NUMBER:-}" ]; then
+            gh issue comment "${ISSUE_NUMBER}" --body-file "${body_file}" \
+              || echo "::warning::failed to post summary on issue #${ISSUE_NUMBER}; continuing"
+          fi
+          if [ -n "${PR_NUMBER:-}" ]; then
+            gh pr comment "${PR_NUMBER}" --body-file "${body_file}" \
+              || echo "::warning::failed to post summary comment on PR #${PR_NUMBER}; continuing"
+          fi
+
+      - name: Tear down validation env on failure
+        # Successful runs leave the env up for human review;
+        # agent-pr-cleanup.yml reaps it on PR close. Failed runs
+        # would otherwise orphan a helm release + agent namespace + ACR tags.
+        if: failure() || cancelled()
+        run: |
+          set -euo pipefail
+          python -m glimmung_agent.cli destroy-validation-preview \
+            --release "${RELEASE_NAME}" \
+            --namespace "${PROD_NAMESPACE}" || true
+          kubectl delete namespace "${AGENT_NAMESPACE}" --ignore-not-found=true --wait=false || true
+          if [ -n "${IMAGE_TAG:-}" ]; then
+            az acr repository delete --name romainecr --image "glimmung:${IMAGE_TAG}" --yes || true
+          fi
+          if [ -n "${REBUILT_IMAGE_TAG:-}" ]; then
+            az acr repository delete --name romainecr --image "glimmung:${REBUILT_IMAGE_TAG}" --yes || true
+          fi
+
+  release-lease:
+    name: Release glimmung lease
+    needs: [route, agent]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Release lease
+        run: |
+          set -euo pipefail
+          curl -fsS -X POST "${GLIMMUNG_BASE}/v1/lease/${{ inputs.lease_id }}/release?project=${GLIMMUNG_PROJECT}" >/dev/null
