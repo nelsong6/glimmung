@@ -10,6 +10,7 @@
  */
 import { useEffect, useState } from "react";
 import { authedFetch } from "./auth";
+import { IssueDetailView } from "./IssueDetailView";
 
 type IssueRow = {
   project: string;
@@ -40,6 +41,8 @@ type DispatchStatus =
   | { kind: "result"; key: string; result: DispatchResult }
   | { kind: "error"; key: string; message: string };
 
+type Selected = { repo: string; issue_number: number } | null;
+
 export function IssuesView({
   signedIn,
   projectFilter,
@@ -51,6 +54,7 @@ export function IssuesView({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [dispatchStatus, setDispatchStatus] = useState<DispatchStatus>({ kind: "idle" });
+  const [selected, setSelected] = useState<Selected>(null);
 
   const refresh = async () => {
     if (!signedIn) {
@@ -101,6 +105,19 @@ export function IssuesView({
 
   if (!signedIn) {
     return <div className="empty">Sign in to view issues.</div>;
+  }
+
+  if (selected) {
+    return (
+      <IssueDetailView
+        repo={selected.repo}
+        issueNumber={selected.issue_number}
+        onBack={() => {
+          setSelected(null);
+          void refresh();
+        }}
+      />
+    );
   }
 
   const visibleRows = rows
@@ -159,7 +176,16 @@ export function IssuesView({
                   <td className="mono">
                     <a href={row.html_url} target="_blank" rel="noreferrer">#{row.number}</a>
                   </td>
-                  <td>{row.title}</td>
+                  <td>
+                    <button
+                      type="button"
+                      className="link"
+                      onClick={() => setSelected({ repo: row.repo, issue_number: row.number })}
+                      style={{ textAlign: "left" }}
+                    >
+                      {row.title}
+                    </button>
+                  </td>
                   <td className="mono dim">
                     {row.labels.length === 0 ? "—" : row.labels.join(", ")}
                   </td>
