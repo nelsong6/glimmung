@@ -998,6 +998,22 @@ async def github_webhook(request: Request) -> dict[str, Any]:
     project_name = matching[0]["name"]
 
     label_names = [lab["name"] for lab in issue.get("labels", []) if isinstance(lab, dict)]
+
+    # Mirror the GH-side issue state into the glimmung `issues` container
+    # (#28 consumer-PR-3). Runs unconditionally before dispatch matching
+    # so even non-trigger actions (a label change that doesn't match any
+    # workflow, an edit, a close) keep Cosmos in sync. The eventual PR
+    # 2 cutover (`/v1/issues` reads from Cosmos) depends on this being
+    # the canonical sync path. Idempotent with the dispatch-path mint:
+    # both call `ensure_issue_for_github`, whichever wins seeds the
+    # Issue and the other reuses.
+    mirror_outcome = await _mirror_github_issue(
+        cosmos,
+        project=project_name,
+        repo=repo,
+        action=action or "",
+        issue_payload=issue,
+    )
     workflows_for_project = await query_all(
         cosmos.workflows,
         "SELECT * FROM c WHERE c.project = @p",
@@ -1017,7 +1033,7 @@ async def github_webhook(request: Request) -> dict[str, Any]:
             break
 
     if matched_workflow_name is None:
-        return {"ignored": f"no workflow matched action={action} label={label}"}
+        return {"ignored": f"no workflow matched action={action} label={label}", "mirror": mirror_outcome}
 
     result = await dispatch_run(
         app,
@@ -1037,7 +1053,86 @@ async def github_webhook(request: Request) -> dict[str, Any]:
             "gh_action": action or "",
         },
     )
-    return result.model_dump()
+    out = result.model_dump()
+    out["mirror"] = mirror_outcome
+    return out
+
+
+async def _mirror_github_issue(
+    cosmos: Cosmos,
+    *,
+    project: str,
+    repo: str,
+    action: str,
+    issue_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Sync a GH issue's state into the glimmung `issues` container.
+
+    Called for every `issues` webhook event. Actions that change the
+    open/closed state (`closed`, `reopened`) drive the Issue state
+    machine; `edited` / `labeled` / `unlabeled` patch fields; `opened`
+    is treated as ensure-and-stamp-fields (the dispatch path may have
+    minted a placeholder Issue earlier, so even on a fresh `opened` we
+    still update title/body/labels in case they differ from the
+    minted defaults).
+
+    Other actions (`deleted`, `transferred`, `pinned`, `assigned`, …)
+    are no-ops for now — the substrate's read path doesn't surface
+    them, and tracking them would just bloat update churn.
+    """
+    issue_number = issue_payload.get("number")
+    if issue_number is None:
+        return {"ignored": "no issue number"}
+
+    title = issue_payload.get("title") or ""
+    body = issue_payload.get("body") or ""
+    labels = [
+        lab["name"] for lab in (issue_payload.get("labels") or [])
+        if isinstance(lab, dict) and "name" in lab
+    ]
+    gh_state = issue_payload.get("state") or "open"
+
+    # Ensure the Issue exists. ensure_issue_for_github populates the
+    # denormalized GH coords; on a real `opened` event we want the
+    # Issue's title/body/labels to match GH, not the placeholder
+    # `repo#N` title that `ensure_issue_for_github` synthesizes when
+    # the dispatch-path mints first. So we always patch after the
+    # ensure, except for actions where there's nothing to patch.
+    issue, etag, created = await issue_ops.ensure_issue_for_github(
+        cosmos,
+        project=project,
+        repo=repo,
+        issue_number=int(issue_number),
+        title=title,
+        body=body,
+        labels=labels,
+    )
+    outcome: dict[str, Any] = {
+        "issue_id": issue.id,
+        "created": created,
+    }
+
+    if action in ("opened", "edited", "labeled", "unlabeled", "reopened"):
+        # Patch the user-editable fields. ensure_issue_for_github only
+        # honors title/body/labels on create; for an existing Issue we
+        # need an explicit update to keep Cosmos in sync with GH edits.
+        if not created:
+            issue, etag = await issue_ops.update_issue(
+                cosmos, issue=issue, etag=etag,
+                title=title or None,
+                body=body if body else None,
+                labels=labels,
+            )
+            outcome["patched"] = True
+
+    if action == "reopened" and gh_state == "open":
+        issue, etag = await issue_ops.reopen_issue(cosmos, issue=issue, etag=etag)
+        outcome["reopened"] = True
+    elif action == "closed" or gh_state == "closed":
+        issue, etag = await issue_ops.close_issue(cosmos, issue=issue, etag=etag)
+        outcome["closed"] = True
+
+    return outcome
 
 
 # ─── PR webhook handlers (#19) ───────────────────────────────────────────────
