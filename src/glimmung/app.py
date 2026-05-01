@@ -25,8 +25,7 @@ from glimmung.decision import abort_explanation, decide
 from glimmung.github_app import (
     GitHubAppTokenMinter,
     dispatch_workflow,
-    get_issue,
-    list_open_issues,
+    list_open_issues as gh_list_open_issues,
     post_issue_comment,
     verify_webhook_signature,
 )
@@ -1309,56 +1308,61 @@ class DispatchRequest(BaseModel):
     dependencies=[Depends(require_admin_user)],
 )
 async def list_issues() -> list[IssueRow]:
-    """All open issues across registered repos. Live GH API call per
-    request via the GH App installation token. Filters out PRs (the GH
-    REST issues endpoint returns them by default).
+    """All open glimmung Issues with a GH-syndication link, across
+    registered projects. Sourced from the Cosmos `issues` container
+    (#28-consumer-2 cutover) — populated by the GH-issue webhook
+    mirror (#34) and the dispatch-path mint (#33). Glimmung-native
+    Issues without a `metadata.github_issue_url` are excluded until
+    there's UI for them.
 
     Labels are surfaced informationally only — they're a courtesy
     syndication surface in the post-#20 model, not a dispatch
     primitive. The dispatch button on each row is the trigger."""
-    cosmos: Cosmos = app.state.cosmos
-    minter: GitHubAppTokenMinter | None = app.state.gh_minter
-    if minter is None:
-        raise HTTPException(503, "github app credentials not configured")
+    return await _list_issues_from_cosmos(app.state.cosmos)
 
-    project_docs = await query_all(cosmos.projects, "SELECT * FROM c")
+
+async def _list_issues_from_cosmos(cosmos: Cosmos) -> list[IssueRow]:
+    """Read-path for `/v1/issues`; lifted out so tests can drive it
+    directly without standing up a FastAPI client. Returns the same
+    `(project, -number)` ordering the UI table assumes."""
+    issues = await issue_ops.list_open_issues(cosmos)
     rows: list[IssueRow] = []
-    for project_doc in project_docs:
-        repo = project_doc.get("githubRepo") or ""
-        if not repo:
+    for issue in issues:
+        url = issue.metadata.github_issue_url
+        repo = issue.metadata.github_issue_repo
+        number = issue.metadata.github_issue_number
+        if url is None or repo is None or number is None:
             continue
-        try:
-            issues = await list_open_issues(minter, repo=repo)
-        except Exception:
-            log.exception("list_open_issues failed for %s; skipping", repo)
-            continue
-        for issue in issues:
-            number = int(issue["number"])
-            labels = [lab["name"] for lab in issue.get("labels", []) if isinstance(lab, dict)]
-            row = IssueRow(
-                project=project_doc["name"],
-                repo=repo,
-                number=number,
-                title=str(issue.get("title", "")),
-                labels=labels,
-                html_url=str(issue.get("html_url", "")),
-            )
+        row = IssueRow(
+            project=issue.project,
+            repo=repo,
+            number=number,
+            title=issue.title,
+            labels=list(issue.labels),
+            html_url=url,
+        )
+        latest_run = await run_ops.find_run_by_issue_id(cosmos, issue_id=issue.id)
+        if latest_run is None:
+            # Pre-#33 Runs predate `Run.issue_id`; fall back to the
+            # legacy `(project, issue_number)` lookup so the Issues
+            # view keeps showing last-run state for them. Cleanup-PR
+            # drops this once those Runs are migrated.
             latest_run = await run_ops.get_latest_run(
-                cosmos, project=project_doc["name"], issue_number=number,
+                cosmos, project=issue.project, issue_number=number,
             )
-            if latest_run is not None:
-                row.last_run_id = latest_run.id
-                row.last_run_state = latest_run.state.value
-                row.last_run_abort_reason = latest_run.abort_reason
-            existing_lock = await lock_ops.read_lock(
-                cosmos, scope="issue", key=f"{repo}#{number}",
-            )
-            row.issue_lock_held = (
-                existing_lock is not None
-                and existing_lock.state.value == "held"
-                and existing_lock.expires_at > datetime.now(UTC)
-            )
-            rows.append(row)
+        if latest_run is not None:
+            row.last_run_id = latest_run.id
+            row.last_run_state = latest_run.state.value
+            row.last_run_abort_reason = latest_run.abort_reason
+        existing_lock = await lock_ops.read_lock(
+            cosmos, scope="issue", key=f"{repo}#{number}",
+        )
+        row.issue_lock_held = (
+            existing_lock is not None
+            and existing_lock.state.value == "held"
+            and existing_lock.expires_at > datetime.now(UTC)
+        )
+        rows.append(row)
 
     rows.sort(key=lambda r: (r.project, -r.number))
     return rows
@@ -1374,42 +1378,40 @@ async def issue_detail(
     repo_name: str = Path(...),
     issue_number: int = Path(...),
 ) -> IssueDetail:
-    """Detail view: title + body + last-run summary + lock state. Live
-    GH API call. Three-segment path so the repo owner/name pair stays
-    URL-friendly without a query param."""
-    cosmos: Cosmos = app.state.cosmos
-    minter: GitHubAppTokenMinter | None = app.state.gh_minter
-    if minter is None:
-        raise HTTPException(503, "github app credentials not configured")
-
+    """Detail view: title + body + last-run summary + lock state.
+    Sourced from the Cosmos `issues` container (#28-consumer-2). Three-
+    segment path so the repo owner/name pair stays URL-friendly without
+    a query param. 404 if no glimmung Issue mirrors the GH issue —
+    rare post-#34 except for pre-existing untouched issues, which
+    `/v1/admin/backfill-issues` lands."""
     repo = f"{repo_owner}/{repo_name}"
-    matching = await query_all(
-        cosmos.projects,
-        "SELECT * FROM c WHERE c.githubRepo = @r",
-        parameters=[{"name": "@r", "value": repo}],
+    return await _load_issue_detail(
+        app.state.cosmos, repo=repo, issue_number=issue_number,
     )
-    if not matching:
-        raise HTTPException(404, f"no project registered for {repo!r}")
-    project_name = matching[0]["name"]
 
-    try:
-        issue = await get_issue(minter, repo=repo, issue_number=issue_number)
-    except Exception:
-        log.exception("get_issue failed for %s#%d", repo, issue_number)
-        raise HTTPException(502, "github api error fetching issue")
 
+async def _load_issue_detail(
+    cosmos: Cosmos, *, repo: str, issue_number: int,
+) -> IssueDetail:
+    url = issue_ops.github_issue_url_for(repo, issue_number)
+    found = await issue_ops.find_issue_by_github_url(cosmos, github_issue_url=url)
+    if found is None:
+        raise HTTPException(404, f"no glimmung issue mirrors {url}")
+    issue, _ = found
     detail = IssueDetail(
-        project=project_name,
+        project=issue.project,
         repo=repo,
         number=issue_number,
-        title=str(issue.get("title", "")),
-        body=str(issue.get("body") or ""),
-        labels=[lab["name"] for lab in issue.get("labels", []) if isinstance(lab, dict)],
-        html_url=str(issue.get("html_url", "")),
+        title=issue.title,
+        body=issue.body,
+        labels=list(issue.labels),
+        html_url=url,
     )
-    latest_run = await run_ops.get_latest_run(
-        cosmos, project=project_name, issue_number=issue_number,
-    )
+    latest_run = await run_ops.find_run_by_issue_id(cosmos, issue_id=issue.id)
+    if latest_run is None:
+        latest_run = await run_ops.get_latest_run(
+            cosmos, project=issue.project, issue_number=issue_number,
+        )
     if latest_run is not None:
         detail.last_run_id = latest_run.id
         detail.last_run_state = latest_run.state.value
@@ -1439,6 +1441,84 @@ async def dispatch_run_endpoint(req: DispatchRequest) -> DispatchResult:
         issue_number=req.issue_number,
         trigger_source={"kind": "glimmung_ui"},
         workflow_name=req.workflow,
+    )
+
+
+# ─── one-shot Issues backfill (#28-consumer-2) ───────────────────────────────
+
+
+class BackfillIssuesResult(BaseModel):
+    repos_processed: int
+    issues_created: int
+    issues_patched: int
+    issues_unchanged: int
+    skipped_repos: list[dict[str, str]] = Field(default_factory=list)
+
+
+@app.post(
+    "/v1/admin/backfill-issues",
+    response_model=BackfillIssuesResult,
+    dependencies=[Depends(require_admin_user)],
+)
+async def backfill_issues() -> BackfillIssuesResult:
+    """Walk every registered repo's open GH issues and mirror them
+    into the Cosmos `issues` container. Idempotent — `_mirror_github_
+    issue` ensures-or-patches; safe to re-run. The post-#34 webhook
+    mirror keeps ongoing GH activity in sync, but pre-existing issues
+    that haven't seen any webhook event since the substrate landed
+    won't surface in the Issues view until this runs once."""
+    minter: GitHubAppTokenMinter | None = app.state.gh_minter
+    if minter is None:
+        raise HTTPException(503, "github app credentials not configured")
+    return await _backfill_issues_impl(
+        app.state.cosmos, list_open=gh_list_open_issues, minter=minter,
+    )
+
+
+async def _backfill_issues_impl(
+    cosmos: Cosmos,
+    *,
+    list_open: Any,
+    minter: Any,
+) -> BackfillIssuesResult:
+    """Backfill driver. `list_open` is a callable matching
+    `github_app.list_open_issues`; tests pass a stub so we don't reach
+    out to the real GH API."""
+    project_docs = await query_all(cosmos.projects, "SELECT * FROM c")
+    created = patched = unchanged = 0
+    repos = 0
+    skipped: list[dict[str, str]] = []
+    for project_doc in project_docs:
+        repo = project_doc.get("githubRepo") or ""
+        if not repo:
+            continue
+        try:
+            gh_issues = await list_open(minter, repo=repo)
+        except Exception as exc:
+            log.exception("backfill: list_open_issues failed for %s", repo)
+            skipped.append({"repo": repo, "error": str(exc)})
+            continue
+        repos += 1
+        for gh_issue in gh_issues:
+            outcome = await _mirror_github_issue(
+                cosmos,
+                project=project_doc["name"],
+                repo=repo,
+                action="opened",
+                issue_payload=gh_issue,
+            )
+            if outcome.get("created"):
+                created += 1
+            elif outcome.get("patched"):
+                patched += 1
+            else:
+                unchanged += 1
+    return BackfillIssuesResult(
+        repos_processed=repos,
+        issues_created=created,
+        issues_patched=patched,
+        issues_unchanged=unchanged,
+        skipped_repos=skipped,
     )
 
 
