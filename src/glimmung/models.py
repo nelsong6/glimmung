@@ -210,3 +210,39 @@ class Run(BaseModel):
 # the file).
 Workflow.model_rebuild()
 WorkflowRegister.model_rebuild()
+
+
+# ─── Lock primitive (W1 substrate) ───────────────────────────────────────────
+#
+# A generic mutual-exclusion primitive. Used by #19's per-PR triage
+# serialization, by #20's per-issue dispatch serialization, by future
+# signal-drain locks, and so on. Single primitive, one Cosmos container,
+# one sweep loop.
+#
+# Doc id is deterministic: f"{scope}::{quote(key)}" — Cosmos enforces
+# uniqueness on id+partition_key, so concurrent claims race through
+# create_item conflicts rather than through application logic. Partition
+# key is `/scope` so per-scope diagnostic queries stay single-partition.
+#
+# State machine:
+#   HELD  ── release_lock by holder ──> RELEASED  ── another claim ──> HELD
+#   HELD  ── expires_at < now ────────> EXPIRED   ── another claim ──> HELD
+#                                       (sweep marks; take-over doesn't wait)
+
+
+class LockState(str, Enum):
+    HELD = "held"
+    RELEASED = "released"
+    EXPIRED = "expired"
+
+
+class Lock(BaseModel):
+    id: str                              # f"{scope}::{quote(key)}"
+    scope: str                           # partition key; "pr" | "issue" | …
+    key: str                             # caller-supplied; e.g. "<repo>#<num>"
+    state: LockState
+    held_by: str                         # caller-supplied holder id (signal_id, run_id, …)
+    claimed_at: datetime
+    expires_at: datetime
+    last_heartbeat_at: datetime | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)

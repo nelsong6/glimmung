@@ -88,13 +88,14 @@ The handler:
 
 ## Storage
 
-Cosmos DB NoSQL on the shared `infra-cosmos-serverless` account. Database `glimmung`, five containers (all pre-created by [`tofu/db.tf`](tofu/db.tf)):
+Cosmos DB NoSQL on the shared `infra-cosmos-serverless` account. Database `glimmung`, six containers (all pre-created by [`tofu/db.tf`](tofu/db.tf)):
 
 - `projects` (partition key `/name`)
 - `workflows` (partition key `/project`)
 - `hosts` (partition key `/name`)
 - `leases` (partition key `/project`)
 - `runs` (partition key `/project`) — verify-loop run state, see below
+- `locks` (partition key `/scope`) — generic mutual-exclusion primitive, see below
 
 Runtime pod auth via the `infra-shared-identity` workload identity, which has `Cosmos DB Built-in Data Contributor` at the account scope (granted in [`infra-bootstrap/tofu/cosmos-serverless.tf`](https://github.com/nelsong6/infra-bootstrap/blob/main/tofu/cosmos-serverless.tf)). Container clients are obtained via `get_*_client` (no API call); reads/writes use the data-plane permissions. CREATE DATABASE / CREATE CONTAINER is control-plane and runs only via tofu under the app SP.
 
@@ -234,6 +235,34 @@ Pure function `decide(run) -> RunDecision` lives in [`src/glimmung/decision.py`]
 - `ABORT_MALFORMED` — verification artifact missing or schema-invalid.
 
 Decision logic and edge-case coverage live in [`tests/test_decision.py`](tests/test_decision.py).
+
+## Lock primitive (W1 substrate)
+
+Generic mutual-exclusion claim keyed by `(scope, key)`. Used by per-PR triage serialization (#19), per-issue dispatch serialization (#20), signal-drain locks, and any future critical-section need that's mutual exclusion on a logical entity (not host capacity — that's [`leases.py`](src/glimmung/leases.py), a different problem).
+
+API in [`src/glimmung/locks.py`](src/glimmung/locks.py):
+
+| Call | Behavior |
+|---|---|
+| `claim_lock(scope, key, holder_id, ttl_seconds, metadata?)` | Atomic create or take-over (when prior lock is RELEASED, EXPIRED, or HELD-but-time-expired). Raises `LockBusy(existing)` if currently held. |
+| `release_lock(scope, key, holder_id)` | Idempotent. Returns `True` if we transitioned HELD→RELEASED, `False` otherwise (not ours / already released / never existed). |
+| `extend_lock(scope, key, holder_id, ttl_seconds)` | Heartbeat. Validates holder. Raises `LockBusy` if the lock is no longer ours. |
+| `read_lock(scope, key)` | Diagnostic point-read. Returns `Lock \| None`. Doesn't normalize state for expiry. |
+| `sweep_expired_locks()` | Background loop in [`app.py`](src/glimmung/app.py); marks HELD-but-time-expired locks as EXPIRED. Cosmetic — claimers can take over directly without waiting. |
+
+### Doc id
+
+Deterministic: `f"{scope}::{urllib.parse.quote(key, safe='')}"`. Cosmos forbids `/`, `\`, `?`, `#` in ids; URL-encoding handles all four uniformly. Same scope + same key → same doc → Cosmos's `id`-uniqueness constraint enforces "only one active claimer at a time" for free.
+
+### Holder semantics
+
+`holder_id` is opaque to the primitive. Callers pick a stable identifier for their critical section — typically a signal_id, a run_id, or a fresh ULID per claim attempt. `release_lock` and `extend_lock` validate `holder_id` matches before acting.
+
+`claim_lock` is **strict**: a second claim by the same `holder_id` while the lock is held also raises `LockBusy`. Callers wanting refresh-or-claim should use `extend_lock`. Restart-after-crash: pick a new `holder_id`; the previous instance's claim expires via TTL.
+
+### Test coverage
+
+29 unit tests in [`tests/test_locks.py`](tests/test_locks.py), all backed by the in-memory Cosmos fake at [`tests/cosmos_fake.py`](tests/cosmos_fake.py) so `_etag`/`IfNotModified` semantics + TTL behavior are exercised deterministically.
 
 ## Phases
 

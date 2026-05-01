@@ -10,7 +10,7 @@ log = logging.getLogger(__name__)
 
 
 class Cosmos:
-    """Owns the Cosmos client and the three containers.
+    """Owns the Cosmos client and the six containers.
 
     Containers are created on startup if they don't exist. Auth is via
     workload identity (DefaultAzureCredential picks up the AKS-injected
@@ -28,6 +28,7 @@ class Cosmos:
         self.hosts: ContainerProxy | None = None
         self.leases: ContainerProxy | None = None
         self.runs: ContainerProxy | None = None
+        self.locks: ContainerProxy | None = None
 
     async def start(self) -> None:
         # Database + containers are pre-created by tofu/ (per-app pattern,
@@ -44,7 +45,8 @@ class Cosmos:
         self.hosts = self._db.get_container_client("hosts")
         self.leases = self._db.get_container_client("leases")
         self.runs = self._db.get_container_client("runs")
-        log.info("cosmos clients ready: projects, workflows, hosts, leases, runs")
+        self.locks = self._db.get_container_client("locks")
+        log.info("cosmos clients ready: projects, workflows, hosts, leases, runs, locks")
 
     async def stop(self) -> None:
         if self._client is not None:
