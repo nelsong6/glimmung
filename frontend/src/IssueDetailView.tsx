@@ -12,17 +12,23 @@ import { useEffect, useMemo, useState } from "react";
 import { authedFetch } from "./auth";
 
 type IssueDetail = {
+  id: string;
   project: string;
-  repo: string;
-  number: number;
+  repo: string | null;
+  number: number | null;
   title: string;
   body: string;
+  state: string;
   labels: string[];
-  html_url: string;
+  html_url: string | null;
   last_run_id: string | null;
   last_run_state: string | null;
   issue_lock_held: boolean;
 };
+
+export type IssueDetailTarget =
+  | { kind: "gh"; repo: string; issue_number: number }
+  | { kind: "native"; project: string; issue_id: string };
 
 type GraphNode = {
   id: string;
@@ -58,33 +64,53 @@ type Layout = {
 };
 
 export function IssueDetailView({
-  repo,
-  issueNumber,
+  target,
   onBack,
 }: {
-  repo: string;
-  issueNumber: number;
+  target: IssueDetailTarget;
   onBack: () => void;
 }) {
   const [detail, setDetail] = useState<IssueDetail | null>(null);
   const [graph, setGraph] = useState<IssueGraph | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<GraphNode | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [refreshTick, setRefreshTick] = useState(0);
+
+  // GH-anchored issues have a graph endpoint keyed off (repo, number);
+  // native issues don't yet, so the lineage view is suppressed for them.
+  const detailUrl =
+    target.kind === "gh"
+      ? `/v1/issues/${target.repo}/${target.issue_number}`
+      : `/v1/issues/by-id/${encodeURIComponent(target.project)}/${encodeURIComponent(target.issue_id)}`;
+  const graphUrl =
+    target.kind === "gh"
+      ? `/v1/issues/${target.repo}/${target.issue_number}/graph`
+      : null;
+  const heading =
+    target.kind === "gh"
+      ? `${target.repo}#${target.issue_number}`
+      : `${target.project} (native)`;
 
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
       setError(null);
       try {
-        const [d, g] = await Promise.all([
-          authedFetch(`/v1/issues/${repo}/${issueNumber}`),
-          authedFetch(`/v1/issues/${repo}/${issueNumber}/graph`),
-        ]);
-        if (!d.ok) throw new Error(`/v1/issues/${repo}/${issueNumber} -> ${d.status}`);
-        if (!g.ok) throw new Error(`/v1/issues/${repo}/${issueNumber}/graph -> ${g.status}`);
+        const requests: Promise<Response>[] = [authedFetch(detailUrl)];
+        if (graphUrl) requests.push(authedFetch(graphUrl));
+        const responses = await Promise.all(requests);
+        const d = responses[0];
+        if (!d.ok) throw new Error(`${detailUrl} -> ${d.status}`);
         if (cancelled) return;
         setDetail((await d.json()) as IssueDetail);
-        setGraph((await g.json()) as IssueGraph);
+        if (graphUrl && responses[1]) {
+          const g = responses[1];
+          if (!g.ok) throw new Error(`${graphUrl} -> ${g.status}`);
+          setGraph((await g.json()) as IssueGraph);
+        } else {
+          setGraph(null);
+        }
       } catch (e) {
         if (!cancelled) setError(String(e));
       }
@@ -93,7 +119,7 @@ export function IssueDetailView({
     return () => {
       cancelled = true;
     };
-  }, [repo, issueNumber]);
+  }, [detailUrl, graphUrl, refreshTick]);
 
   const layout = useMemo<Layout | null>(() => {
     if (!graph) return null;
@@ -106,90 +132,212 @@ export function IssueDetailView({
         <button type="button" className="link" onClick={onBack} style={{ marginRight: "1rem" }}>
           ← back
         </button>
-        {repo}#{issueNumber}
+        {heading}
+        {detail && (
+          <button
+            type="button"
+            className="link"
+            onClick={() => setEditing((e) => !e)}
+            style={{ marginLeft: "1rem", fontSize: "0.85rem" }}
+          >
+            {editing ? "cancel edit" : "edit"}
+          </button>
+        )}
       </h2>
       {error && <div className="empty error">{error}</div>}
       {detail === null && !error ? (
         <div className="empty">Loading…</div>
       ) : detail ? (
         <>
-          <div className="project-info">
-            <div className="row">
-              <span className="key">title</span>
-              <span className="val">
-                <a href={detail.html_url} target="_blank" rel="noreferrer">
-                  {detail.title}
-                </a>
-              </span>
-            </div>
-            <div className="row">
-              <span className="key">project</span>
-              <span className="val mono">{detail.project}</span>
-            </div>
-            <div className="row">
-              <span className="key">labels</span>
-              <span className="val mono dim">
-                {detail.labels.length === 0 ? "—" : detail.labels.join(", ")}
-              </span>
-            </div>
-            <div className="row">
-              <span className="key">last run</span>
-              <span className="val">
-                {detail.last_run_state ? (
-                  <span className={`pill ${runStatePill(detail.last_run_state)}`}>
-                    {detail.last_run_state}
-                  </span>
-                ) : (
-                  "—"
-                )}
-                {detail.issue_lock_held && (
-                  <span className="pill busy" style={{ marginLeft: "0.5rem" }}>
-                    in flight
-                  </span>
-                )}
-              </span>
-            </div>
-          </div>
-
-          {detail.body.trim() && (
+          {editing ? (
+            <IssueEditForm
+              detail={detail}
+              onCancel={() => setEditing(false)}
+              onSaved={() => {
+                setEditing(false);
+                setRefreshTick((t) => t + 1);
+              }}
+            />
+          ) : (
             <>
-              <h2>Body</h2>
-              <pre style={{
-                whiteSpace: "pre-wrap",
-                fontFamily: "inherit",
-                background: "#0a0a0c",
-                padding: "0.75rem 1rem",
-                border: "1px solid #2a2a2e",
-                borderRadius: "4px",
-                margin: 0,
-              }}>
-                {detail.body}
-              </pre>
+              <div className="project-info">
+                <div className="row">
+                  <span className="key">title</span>
+                  <span className="val">
+                    {detail.html_url ? (
+                      <a href={detail.html_url} target="_blank" rel="noreferrer">
+                        {detail.title}
+                      </a>
+                    ) : (
+                      detail.title
+                    )}
+                  </span>
+                </div>
+                <div className="row">
+                  <span className="key">project</span>
+                  <span className="val mono">{detail.project}</span>
+                </div>
+                <div className="row">
+                  <span className="key">state</span>
+                  <span className="val mono">{detail.state}</span>
+                </div>
+                <div className="row">
+                  <span className="key">labels</span>
+                  <span className="val mono dim">
+                    {detail.labels.length === 0 ? "—" : detail.labels.join(", ")}
+                  </span>
+                </div>
+                <div className="row">
+                  <span className="key">last run</span>
+                  <span className="val">
+                    {detail.last_run_state ? (
+                      <span className={`pill ${runStatePill(detail.last_run_state)}`}>
+                        {detail.last_run_state}
+                      </span>
+                    ) : (
+                      "—"
+                    )}
+                    {detail.issue_lock_held && (
+                      <span className="pill busy" style={{ marginLeft: "0.5rem" }}>
+                        in flight
+                      </span>
+                    )}
+                  </span>
+                </div>
+              </div>
+
+              {detail.body.trim() && (
+                <>
+                  <h2>Body</h2>
+                  <pre style={{
+                    whiteSpace: "pre-wrap",
+                    fontFamily: "inherit",
+                    background: "#0a0a0c",
+                    padding: "0.75rem 1rem",
+                    border: "1px solid #2a2a2e",
+                    borderRadius: "4px",
+                    margin: 0,
+                  }}>
+                    {detail.body}
+                  </pre>
+                </>
+              )}
             </>
           )}
 
-          <h2>Lineage graph</h2>
-          {graph && layout ? (
-            graph.nodes.length === 1 ? (
-              <div className="empty">No runs yet — dispatch from the Issues page.</div>
-            ) : (
-              <GraphCanvas
-                graph={graph}
-                layout={layout}
-                selected={selected}
-                onSelect={setSelected}
-              />
-            )
-          ) : (
-            <div className="empty">Loading graph…</div>
-          )}
+          {graphUrl && (
+            <>
+              <h2>Lineage graph</h2>
+              {graph && layout ? (
+                graph.nodes.length === 1 ? (
+                  <div className="empty">No runs yet — dispatch from the Issues page.</div>
+                ) : (
+                  <GraphCanvas
+                    graph={graph}
+                    layout={layout}
+                    selected={selected}
+                    onSelect={setSelected}
+                  />
+                )
+              ) : (
+                <div className="empty">Loading graph…</div>
+              )}
 
-          {selected && (
-            <NodeDetailPanel node={selected} onClose={() => setSelected(null)} />
+              {selected && (
+                <NodeDetailPanel node={selected} onClose={() => setSelected(null)} />
+              )}
+            </>
           )}
         </>
       ) : null}
     </>
+  );
+}
+
+function IssueEditForm({
+  detail,
+  onCancel,
+  onSaved,
+}: {
+  detail: IssueDetail;
+  onCancel: () => void;
+  onSaved: () => void;
+}) {
+  const [title, setTitle] = useState(detail.title);
+  const [body, setBody] = useState(detail.body);
+  const [labels, setLabels] = useState(detail.labels.join(", "));
+  const [state, setState] = useState(detail.state);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setBusy(true);
+    try {
+      const labelList = labels
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      const url = `/v1/issues/by-id/${encodeURIComponent(detail.project)}/${encodeURIComponent(detail.id)}`;
+      const r = await authedFetch(url, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title,
+          body,
+          labels: labelList,
+          state,
+        }),
+      });
+      if (!r.ok) {
+        setError(`${r.status}: ${await r.text()}`);
+        return;
+      }
+      onSaved();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form onSubmit={submit} className="admin-form" style={{ marginTop: "0.5rem" }}>
+      <label>
+        <span>Title</span>
+        <input value={title} onChange={(e) => setTitle(e.target.value)} required />
+      </label>
+      <label>
+        <span>Body</span>
+        <textarea
+          value={body}
+          onChange={(e) => setBody(e.target.value)}
+          rows={10}
+          style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "0.85rem" }}
+        />
+      </label>
+      <label>
+        <span>Labels (comma-separated)</span>
+        <input value={labels} onChange={(e) => setLabels(e.target.value)} className="mono" />
+      </label>
+      <label>
+        <span>State</span>
+        <select value={state} onChange={(e) => setState(e.target.value)}>
+          <option value="open">open</option>
+          <option value="closed">closed</option>
+        </select>
+      </label>
+      {error && <div className="error">{error}</div>}
+      <div style={{ display: "flex", gap: "0.5rem" }}>
+        <button type="submit" disabled={busy}>
+          {busy ? "Saving…" : "Save"}
+        </button>
+        <button type="button" className="link" onClick={onCancel} disabled={busy}>
+          cancel
+        </button>
+      </div>
+    </form>
   );
 }
 
