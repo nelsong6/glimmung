@@ -155,6 +155,85 @@ async def get_latest_run(
     return Run.model_validate(_strip_meta(docs[0]))
 
 
+async def find_run_by_pr(
+    cosmos: Cosmos,
+    *,
+    issue_repo: str,
+    pr_number: int,
+) -> tuple[Run, str] | None:
+    """Look up the Run linked to a PR. Cross-partition because the
+    `pull_request` webhook handler doesn't know the project name —
+    only the repo. Returns `(run, etag)`. Used by the triage signal
+    drain to find the Run a PR-feedback signal targets."""
+    docs = await query_all(
+        cosmos.runs,
+        "SELECT * FROM c WHERE c.issue_repo = @r AND c.pr_number = @p",
+        parameters=[
+            {"name": "@r", "value": issue_repo},
+            {"name": "@p", "value": pr_number},
+        ],
+    )
+    if not docs:
+        return None
+    if len(docs) > 1:
+        log.warning(
+            "multiple runs linked to PR %s#%d: %s",
+            issue_repo, pr_number, [d["id"] for d in docs],
+        )
+        docs.sort(key=lambda d: d.get("created_at", ""), reverse=True)
+    doc = docs[0]
+    return Run.model_validate(_strip_meta(doc)), doc["_etag"]
+
+
+async def link_pr_to_run(
+    cosmos: Cosmos,
+    *,
+    run: Run,
+    etag: str,
+    pr_number: int,
+    pr_branch: str,
+) -> tuple[Run, str]:
+    """Stamp `pr_number` + `pr_branch` on a Run. Called by the
+    `pull_request.opened` webhook handler when the new PR's body
+    references the issue (`Closes #N`)."""
+    def apply(r: Run) -> Run:
+        return r.model_copy(update={
+            "pr_number": pr_number,
+            "pr_branch": pr_branch,
+            "updated_at": _now(),
+        })
+    return await _retry_on_conflict(cosmos, run, etag, apply)
+
+
+async def reopen_for_triage(
+    cosmos: Cosmos,
+    *,
+    run: Run,
+    etag: str,
+    triage_workflow_filename: str,
+    pr_lock_holder_id: str,
+    issue_lock_holder_id: str,
+) -> tuple[Run, str]:
+    """Re-open a PASSED Run for triage: state PASSED → IN_PROGRESS,
+    append a new TRIAGE PhaseAttempt, stamp both lock holders so the
+    workflow_run.completed terminal handler can release both locks."""
+    def apply(r: Run) -> Run:
+        next_idx = (r.attempts[-1].attempt_index + 1) if r.attempts else 0
+        r.attempts.append(PhaseAttempt(
+            attempt_index=next_idx,
+            phase=RunPhase.TRIAGE,
+            workflow_filename=triage_workflow_filename,
+            dispatched_at=_now(),
+        ))
+        return r.model_copy(update={
+            "state": RunState.IN_PROGRESS,
+            "pr_lock_holder_id": pr_lock_holder_id,
+            "issue_lock_holder_id": issue_lock_holder_id,
+            "updated_at": _now(),
+        })
+    return await _retry_on_conflict(cosmos, run, etag, apply)
+
+
 async def find_run_by_workflow_run(
     cosmos: Cosmos,
     *,
