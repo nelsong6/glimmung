@@ -13,12 +13,14 @@ import { authedFetch } from "./auth";
 import { IssueDetailView } from "./IssueDetailView";
 
 type IssueRow = {
+  id: string;
   project: string;
-  repo: string;
-  number: number;
+  repo: string | null;
+  number: number | null;
   title: string;
+  state: string;
   labels: string[];
-  html_url: string;
+  html_url: string | null;
   last_run_id: string | null;
   last_run_state: string | null;
   last_run_abort_reason: string | null;
@@ -41,7 +43,10 @@ type DispatchStatus =
   | { kind: "result"; key: string; result: DispatchResult }
   | { kind: "error"; key: string; message: string };
 
-type Selected = { repo: string; issue_number: number } | null;
+type Selected =
+  | { kind: "gh"; repo: string; issue_number: number }
+  | { kind: "native"; project: string; issue_id: string }
+  | null;
 
 export function IssuesView({
   signedIn,
@@ -84,11 +89,16 @@ export function IssuesView({
   const dispatch = async (row: IssueRow) => {
     const key = rowKey(row);
     setDispatchStatus({ kind: "dispatching", key });
+    // Native issues have no repo/number — dispatch by glimmung id;
+    // GH-anchored ones use the legacy (repo, issue_number) shape.
+    const payload = row.repo && row.number !== null
+      ? { repo: row.repo, issue_number: row.number }
+      : { issue_id: row.id, project: row.project };
     try {
       const r = await authedFetch("/v1/runs/dispatch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo: row.repo, issue_number: row.number }),
+        body: JSON.stringify(payload),
       });
       if (!r.ok) {
         const text = await r.text();
@@ -110,8 +120,7 @@ export function IssuesView({
   if (selected) {
     return (
       <IssueDetailView
-        repo={selected.repo}
-        issueNumber={selected.issue_number}
+        target={selected}
         onBack={() => {
           setSelected(null);
           void refresh();
@@ -174,13 +183,21 @@ export function IssuesView({
                 <tr key={key}>
                   <td>{row.project}</td>
                   <td className="mono">
-                    <a href={row.html_url} target="_blank" rel="noreferrer">#{row.number}</a>
+                    {row.html_url && row.number !== null ? (
+                      <a href={row.html_url} target="_blank" rel="noreferrer">#{row.number}</a>
+                    ) : (
+                      <span className="dim" title="glimmung-native, no GitHub counterpart">native</span>
+                    )}
                   </td>
                   <td>
                     <button
                       type="button"
                       className="link"
-                      onClick={() => setSelected({ repo: row.repo, issue_number: row.number })}
+                      onClick={() => setSelected(
+                        row.repo && row.number !== null
+                          ? { kind: "gh", repo: row.repo, issue_number: row.number }
+                          : { kind: "native", project: row.project, issue_id: row.id }
+                      )}
                       style={{ textAlign: "left" }}
                     >
                       {row.title}
@@ -230,7 +247,9 @@ export function IssuesView({
 }
 
 function rowKey(row: IssueRow): string {
-  return `${row.repo}#${row.number}`;
+  return row.repo && row.number !== null
+    ? `${row.repo}#${row.number}`
+    : `glimmung/${row.id}`;
 }
 
 function renderLastRun(row: IssueRow): string {
