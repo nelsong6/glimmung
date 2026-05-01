@@ -38,6 +38,7 @@ def _cosmos() -> SimpleNamespace:
         leases=FakeContainer("leases", "/project"),
         runs=FakeContainer("runs", "/project"),
         locks=FakeContainer("locks", "/scope"),
+        issues=FakeContainer("issues", "/project"),
     )
 
 
@@ -395,6 +396,178 @@ async def test_dispatch_honors_agent_budget_label_at_run_creation(app):
     )]
     assert len(runs) == 1
     assert runs[0]["budget"] == {"max_attempts": 5, "max_cost_usd": 50.0}
+
+
+# ─── glimmung-Issue plumbing (#28 consumer-PR-1) ─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_dispatch_mints_glimmung_issue_and_stamps_issue_id_on_run(app):
+    """First dispatch on a (repo, issue_number) creates a glimmung Issue
+    with denormalized GH coords, and the resulting Run carries the
+    Issue's id as its `issue_id`."""
+    await _register_project(app, "ambience", "nelsong6/ambience")
+    await _register_workflow(
+        app, project="ambience", name="issue-agent",
+        retry_workflow_filename="agent-retry.yml",
+    )
+    await _register_host(app, "runner-1")
+
+    result = await dispatch_run(
+        app, repo="nelsong6/ambience", issue_number=42,
+        trigger_source={"kind": "glimmung_ui"},
+    )
+    assert result.state == "dispatched"
+
+    # Issue exists with the stitched URL + denormalized coords.
+    issue_docs = [d async for d in app.state.cosmos.issues.query_items(
+        "SELECT * FROM c WHERE c.project = @p",
+        parameters=[{"name": "@p", "value": "ambience"}],
+    )]
+    assert len(issue_docs) == 1
+    issue = issue_docs[0]
+    assert issue["metadata"]["github_issue_url"] == "https://github.com/nelsong6/ambience/issues/42"
+    assert issue["metadata"]["github_issue_repo"] == "nelsong6/ambience"
+    assert issue["metadata"]["github_issue_number"] == 42
+
+    # Run carries the Issue id as canonical handle.
+    run_docs = [d async for d in app.state.cosmos.runs.query_items(
+        "SELECT * FROM c WHERE c.id = @id",
+        parameters=[{"name": "@id", "value": result.run_id}],
+    )]
+    assert run_docs[0]["issue_id"] == issue["id"]
+    # And the denormalized GH coords stay on Run during the transition.
+    assert run_docs[0]["issue_repo"] == "nelsong6/ambience"
+    assert run_docs[0]["issue_number"] == 42
+
+
+@pytest.mark.asyncio
+async def test_dispatch_reuses_existing_glimmung_issue_on_redispatch(app):
+    """Second dispatch on the same (repo, issue_number) — after the
+    first one's lock released — finds the existing Issue rather than
+    minting a duplicate."""
+    from glimmung import locks as lock_ops
+
+    await _register_project(app, "ambience", "nelsong6/ambience")
+    await _register_workflow(
+        app, project="ambience", name="issue-agent",
+        retry_workflow_filename="agent-retry.yml",
+    )
+    await _register_host(app, "runner-1")
+    await _register_host(app, "runner-2")
+
+    first = await dispatch_run(
+        app, repo="nelsong6/ambience", issue_number=42,
+        trigger_source={"kind": "glimmung_ui"},
+    )
+    await lock_ops.release_lock(
+        app.state.cosmos, scope="issue",
+        key="nelsong6/ambience#42", holder_id=first.issue_lock_holder_id,
+    )
+    second = await dispatch_run(
+        app, repo="nelsong6/ambience", issue_number=42,
+        trigger_source={"kind": "glimmung_ui"},
+    )
+    assert second.state == "dispatched"
+
+    # Still exactly one Issue doc.
+    issue_docs = [d async for d in app.state.cosmos.issues.query_items(
+        "SELECT * FROM c", parameters=[],
+    )]
+    assert len(issue_docs) == 1
+
+    # Both Runs reference the same issue_id.
+    run_docs = [d async for d in app.state.cosmos.runs.query_items(
+        "SELECT * FROM c", parameters=[],
+    )]
+    issue_ids = {d["issue_id"] for d in run_docs}
+    assert issue_ids == {issue_docs[0]["id"]}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_does_not_mint_issue_on_no_project(app):
+    """Failed dispatches (no_project / no_workflow) are no-ops on the
+    issues container — Issues only land when we're committed to
+    dispatching."""
+    result = await dispatch_run(
+        app, repo="someone-else/private-repo", issue_number=1,
+        trigger_source={"kind": "glimmung_ui"},
+    )
+    assert result.state == "no_project"
+
+    issue_docs = [d async for d in app.state.cosmos.issues.query_items(
+        "SELECT * FROM c", parameters=[],
+    )]
+    assert issue_docs == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_does_not_mint_issue_on_no_workflow(app):
+    await _register_project(app, "ambience", "nelsong6/ambience")
+    # No workflows registered.
+    result = await dispatch_run(
+        app, repo="nelsong6/ambience", issue_number=1,
+        trigger_source={"kind": "glimmung_ui"},
+    )
+    assert result.state == "no_workflow"
+
+    issue_docs = [d async for d in app.state.cosmos.issues.query_items(
+        "SELECT * FROM c", parameters=[],
+    )]
+    assert issue_docs == []
+
+
+@pytest.mark.asyncio
+async def test_find_run_by_issue_id_returns_most_recent_run_cross_partition(app):
+    """The PR `Closes #N` parser doesn't know the project, so the
+    lookup is cross-partition by issue_id alone. Verify it picks the
+    most-recent run when an issue has multiple runs (initial + retry,
+    etc.)."""
+    from glimmung import locks as lock_ops
+    from glimmung import runs as run_ops
+
+    await _register_project(app, "ambience", "nelsong6/ambience")
+    await _register_workflow(
+        app, project="ambience", name="issue-agent",
+        retry_workflow_filename="agent-retry.yml",
+    )
+    await _register_host(app, "runner-1")
+    await _register_host(app, "runner-2")
+
+    first = await dispatch_run(
+        app, repo="nelsong6/ambience", issue_number=42,
+        trigger_source={"kind": "glimmung_ui"},
+    )
+    # Release the lock so a second dispatch can land on the same issue.
+    await lock_ops.release_lock(
+        app.state.cosmos, scope="issue",
+        key="nelsong6/ambience#42", holder_id=first.issue_lock_holder_id,
+    )
+    second = await dispatch_run(
+        app, repo="nelsong6/ambience", issue_number=42,
+        trigger_source={"kind": "glimmung_ui"},
+    )
+
+    issue_docs = [d async for d in app.state.cosmos.issues.query_items(
+        "SELECT * FROM c", parameters=[],
+    )]
+    issue_id = issue_docs[0]["id"]
+
+    found = await run_ops.find_run_by_issue_id(
+        app.state.cosmos, issue_id=issue_id,
+    )
+    assert found is not None
+    # Most recent first → second dispatch wins.
+    assert found.id == second.run_id
+
+
+@pytest.mark.asyncio
+async def test_find_run_by_issue_id_returns_none_when_no_match(app):
+    from glimmung import runs as run_ops
+    found = await run_ops.find_run_by_issue_id(
+        app.state.cosmos, issue_id="01HZZZNOPE",
+    )
+    assert found is None
 
 
 @pytest.mark.asyncio

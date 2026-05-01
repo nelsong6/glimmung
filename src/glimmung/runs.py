@@ -51,6 +51,7 @@ async def create_run(
     issue_number: int,
     budget: BudgetConfig,
     initial_workflow_filename: str,
+    issue_id: str = "",
     issue_lock_holder_id: str | None = None,
     trigger_source: dict[str, Any] | None = None,
 ) -> Run:
@@ -72,6 +73,7 @@ async def create_run(
         id=str(ULID()),
         project=project,
         workflow=workflow,
+        issue_id=issue_id,
         issue_repo=issue_repo,
         issue_number=issue_number,
         state=RunState.IN_PROGRESS,
@@ -148,6 +150,27 @@ async def get_latest_run(
             {"name": "@p", "value": project},
             {"name": "@n", "value": issue_number},
         ],
+    )
+    if not docs:
+        return None
+    docs.sort(key=lambda d: d.get("created_at", ""), reverse=True)
+    return Run.model_validate(_strip_meta(docs[0]))
+
+
+async def find_run_by_issue_id(
+    cosmos: Cosmos,
+    *,
+    issue_id: str,
+) -> Run | None:
+    """Most-recent Run for a glimmung issue id, regardless of state.
+    Cross-partition because the caller (PR `Closes #N` parser) only
+    knows the issue, not the project. Used by `_handle_pull_request`
+    after `find_issue_by_github_url` resolves a `Closes #N` to a
+    glimmung Issue."""
+    docs = await query_all(
+        cosmos.runs,
+        "SELECT * FROM c WHERE c.issue_id = @i",
+        parameters=[{"name": "@i", "value": issue_id}],
     )
     if not docs:
         return None

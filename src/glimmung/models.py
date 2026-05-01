@@ -212,6 +212,13 @@ class Run(BaseModel):
     id: str                                      # ULID
     project: str                                 # partition key
     workflow: str                                # workflow name (e.g. "issue-agent")
+    # Canonical glimmung-issue handle (#28 consumer-PR-1). Optional
+    # during transition: pre-#28-consumer Runs predate the issues
+    # container and have an empty string here. New Runs always set it.
+    # The eventual cleanup PR drops `issue_repo` + `issue_number` and
+    # forces this to be required; callers reach for GH coords through
+    # the linked Issue's metadata.
+    issue_id: str = ""
     issue_repo: str                              # "<owner>/<repo>" — for GH API calls
     issue_number: int
     state: RunState = RunState.IN_PROGRESS
@@ -380,11 +387,16 @@ class IssueSource(str, Enum):
 
 class IssueMetadata(BaseModel):
     source: IssueSource = IssueSource.MANUAL
-    # Link-out only. Never the read path: glimmung's `id` is the canonical
-    # issue handle, and `find_issue_by_github_url` is the only place we
-    # resolve a GH URL back to a glimmung Issue (used by the consumer PR
-    # that rewires `Closes #N` parsing).
+    # GH-issue link-out. `github_issue_url` is the canonical handle for
+    # `find_issue_by_github_url`; `github_issue_repo` and
+    # `github_issue_number` are denormalized so dispatch / completion /
+    # comment-posting paths can read GH coords without parsing a URL on
+    # every call. All three move together: an Issue minted from a GH
+    # webhook or dispatch shim has all three set; one minted from
+    # Slack/CLI/scheduled has none of them.
     github_issue_url: str | None = None
+    github_issue_repo: str | None = None
+    github_issue_number: int | None = None
 
 
 class Issue(BaseModel):
