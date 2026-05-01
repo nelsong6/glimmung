@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
 from glimmung import leases as lease_ops
+from glimmung import locks as lock_ops
 from glimmung import runs as run_ops
 from glimmung.auth import require_admin_user
 from glimmung.budget import resolve_budget
@@ -66,12 +67,17 @@ async def lifespan(app: FastAPI):
 
     sweep_task = asyncio.create_task(_sweep_loop(cosmos, settings))
     promote_task = asyncio.create_task(_promote_loop(app, settings))
+    lock_sweep_task = asyncio.create_task(_lock_sweep_loop(cosmos, settings))
     try:
         yield
     finally:
         sweep_task.cancel()
         promote_task.cancel()
-        await asyncio.gather(sweep_task, promote_task, return_exceptions=True)
+        lock_sweep_task.cancel()
+        await asyncio.gather(
+            sweep_task, promote_task, lock_sweep_task,
+            return_exceptions=True,
+        )
         await cosmos.stop()
 
 
@@ -83,6 +89,18 @@ async def _sweep_loop(cosmos: Cosmos, settings: Settings) -> None:
                 log.info("sweep expired %d leases", count)
         except Exception:
             log.exception("sweep failed; will retry")
+        await asyncio.sleep(settings.sweep_interval_seconds)
+
+
+async def _lock_sweep_loop(cosmos: Cosmos, settings: Settings) -> None:
+    """Mark expired locks as EXPIRED. Cosmetic — claim_lock can take over
+    a HELD-but-time-expired lock directly — but keeps the dashboard
+    honest about which scope/key pairs are truly held vs. abandoned."""
+    while True:
+        try:
+            await lock_ops.sweep_expired_locks(cosmos)
+        except Exception:
+            log.exception("lock sweep failed; will retry")
         await asyncio.sleep(settings.sweep_interval_seconds)
 
 
