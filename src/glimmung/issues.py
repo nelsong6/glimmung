@@ -68,13 +68,15 @@ async def create_issue(
     labels: list[str] | None = None,
     source: IssueSource = IssueSource.MANUAL,
     github_issue_url: str | None = None,
+    github_issue_repo: str | None = None,
+    github_issue_number: int | None = None,
 ) -> Issue:
     """Mint a new Issue in OPEN state. Returns the persisted Issue.
 
-    `source` defaults to MANUAL — UI/CLI creation. The GH-webhook
-    consumer PR sets `source=GITHUB_WEBHOOK_IMPORT` and threads the GH
-    issue URL through `github_issue_url` so future `Closes #N` parsing
-    can resolve back via `find_issue_by_github_url`."""
+    `source` defaults to MANUAL — UI/CLI creation. The GH-anchored
+    paths (webhook import + dispatch shim) pass all three GH fields
+    so the denormalized coords land on the Issue at creation. Issues
+    minted from non-GH sources (Slack, scheduled) leave them None."""
     now = _now()
     issue = Issue(
         id=str(ULID()),
@@ -83,7 +85,12 @@ async def create_issue(
         body=body,
         labels=labels or [],
         state=IssueState.OPEN,
-        metadata=IssueMetadata(source=source, github_issue_url=github_issue_url),
+        metadata=IssueMetadata(
+            source=source,
+            github_issue_url=github_issue_url,
+            github_issue_repo=github_issue_repo,
+            github_issue_number=github_issue_number,
+        ),
         created_at=now,
         updated_at=now,
     )
@@ -207,6 +214,63 @@ async def list_open_issues(
             parameters=[{"name": "@s", "value": IssueState.OPEN.value}],
         )
     return [Issue.model_validate(_strip_meta(d)) for d in docs]
+
+
+def github_issue_url_for(repo: str, issue_number: int) -> str:
+    """Canonical glimmung-side rendering of a GH issue URL. The webhook
+    payload's html_url is what we'd ideally store, but `Closes #N`
+    parsing only sees `(repo, N)` — so the dispatch shim and PR-link
+    parser both stitch the URL the same way to keep `find_issue_by_
+    github_url` lookups deterministic."""
+    return f"https://github.com/{repo}/issues/{issue_number}"
+
+
+async def ensure_issue_for_github(
+    cosmos: Cosmos,
+    *,
+    project: str,
+    repo: str,
+    issue_number: int,
+    title: str = "",
+    body: str = "",
+    labels: list[str] | None = None,
+    source: IssueSource = IssueSource.GITHUB_WEBHOOK_IMPORT,
+) -> tuple[Issue, str, bool]:
+    """Find or mint a glimmung Issue mirroring a GH issue. Returns
+    `(issue, etag, created)`; `created=True` if this call minted the
+    Issue, `False` if it already existed.
+
+    The dispatch shim uses this to ensure every (repo, issue_number)
+    has a glimmung Issue before `dispatch_run` keys off `issue_id`.
+    The eventual GH-webhook mirror consumer-PR uses the same helper
+    on `issues.opened` events so direct GH-issue creation also lands
+    a glimmung Issue. Title/body/labels passed here only apply on
+    create; existing Issues are left alone (mirror-PR does the
+    update path)."""
+    url = github_issue_url_for(repo, issue_number)
+    existing = await find_issue_by_github_url(cosmos, github_issue_url=url)
+    if existing is not None:
+        issue, etag = existing
+        return issue, etag, False
+
+    issue = await create_issue(
+        cosmos,
+        project=project,
+        title=title or f"{repo}#{issue_number}",
+        body=body,
+        labels=labels,
+        source=source,
+        github_issue_url=url,
+        github_issue_repo=repo,
+        github_issue_number=issue_number,
+    )
+    # `create_issue` doesn't return an etag (point-write); read it back
+    # so callers can chain into update_issue / close_issue without an
+    # extra round-trip if they want.
+    refreshed = await read_issue(cosmos, project=project, issue_id=issue.id)
+    if refreshed is None:
+        raise RuntimeError(f"ensure_issue_for_github: just-created issue {issue.id} not readable")
+    return refreshed[0], refreshed[1], True
 
 
 async def find_issue_by_github_url(

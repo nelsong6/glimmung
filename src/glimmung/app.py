@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
+from glimmung import issues as issue_ops
 from glimmung import leases as lease_ops
 from glimmung import locks as lock_ops
 from glimmung import runs as run_ops
@@ -1088,12 +1089,26 @@ async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
 
     linked: list[str] = []
     for issue_number in issue_refs:
-        # Look up the most recent Run for this issue regardless of state
-        # — typically PASSED (PR opened after verify passed) but a run
-        # in IN_PROGRESS would also link cleanly.
-        run = await run_ops.get_latest_run(
-            cosmos, project=project, issue_number=issue_number,
+        # `Closes #N` only carries the GH issue number. Resolve it
+        # through the glimmung Issue first (#28-consumer-PR-1): match
+        # by stitched github_issue_url, then look up the Run by the
+        # canonical glimmung issue_id. Falls back to the legacy
+        # `(project, issue_number)` query when no Issue exists for
+        # this URL — covers Runs created before the dispatch shim
+        # started minting Issues. The cleanup PR removes that branch
+        # along with `Run.issue_number`.
+        issue_url = issue_ops.github_issue_url_for(repo, issue_number)
+        run = None
+        issue_lookup = await issue_ops.find_issue_by_github_url(
+            cosmos, github_issue_url=issue_url,
         )
+        if issue_lookup is not None:
+            issue, _issue_etag = issue_lookup
+            run = await run_ops.find_run_by_issue_id(cosmos, issue_id=issue.id)
+        if run is None:
+            run = await run_ops.get_latest_run(
+                cosmos, project=project, issue_number=issue_number,
+            )
         if run is None:
             continue
         # Re-read with etag for the link mutation.

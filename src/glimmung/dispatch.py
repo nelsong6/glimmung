@@ -36,13 +36,14 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from ulid import ULID
 
+from glimmung import issues as issue_ops
 from glimmung import leases as lease_ops
 from glimmung import locks as lock_ops
 from glimmung import runs as run_ops
 from glimmung.budget import resolve_budget
 from glimmung.db import Cosmos, query_all
 from glimmung.locks import LockBusy
-from glimmung.models import BudgetConfig
+from glimmung.models import BudgetConfig, IssueSource
 
 log = logging.getLogger(__name__)
 
@@ -113,6 +114,29 @@ async def dispatch_run(
         return DispatchResult(state="no_workflow", detail=picker_detail)
     workflow_actual_name: str = workflow_doc["name"]
 
+    # 2b. Ensure a glimmung Issue exists for this (repo, issue_number).
+    # Sequenced after project + workflow resolution so failed dispatches
+    # (no_project / no_workflow) are no-ops on the issues container —
+    # we only mint when we're committed to dispatching. The Issue is
+    # marked GITHUB_WEBHOOK_IMPORT regardless of trigger_source: the
+    # underlying issue lives in GH and we're mirroring it. (MANUAL is
+    # reserved for glimmung-native issues with no GH counterpart, e.g.
+    # the future Slack-to-glimmung path.) The Issue's id becomes the
+    # Run's `issue_id`, which downstream consumers (PR-link parser,
+    # /v1/issues view) key off.
+    issue, _issue_etag, issue_created = await issue_ops.ensure_issue_for_github(
+        cosmos,
+        project=project_name,
+        repo=repo,
+        issue_number=issue_number,
+        source=IssueSource.GITHUB_WEBHOOK_IMPORT,
+    )
+    if issue_created:
+        log.info(
+            "dispatch_run: minted glimmung issue %s for %s#%d",
+            issue.id, repo, issue_number,
+        )
+
     # 3. Claim the per-issue lock.
     holder_id = str(ULID())
     lock_key = f"{repo}#{issue_number}"
@@ -182,6 +206,7 @@ async def dispatch_run(
             cosmos,
             project=project_name,
             workflow=workflow_actual_name,
+            issue_id=issue.id,
             issue_repo=repo,
             issue_number=issue_number,
             budget=budget,
