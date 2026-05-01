@@ -73,27 +73,36 @@ class DispatchResult(BaseModel):
 async def dispatch_run(
     app: FastAPI,
     *,
-    repo: str,
-    issue_number: int,
+    repo: str | None = None,
+    issue_number: int | None = None,
+    issue_id: str | None = None,
+    project: str | None = None,
     trigger_source: dict[str, Any],
     workflow_name: str | None = None,
     issue_labels: list[str] | None = None,
     extra_metadata: dict[str, Any] | None = None,
 ) -> DispatchResult:
-    """Start an agent run on `(repo, issue_number)`.
+    """Start an agent run on a glimmung Issue.
+
+    Two ways to identify the target:
+    - GH-anchored: pass `repo` + `issue_number`. The Issue is minted /
+      reused via `ensure_issue_for_github` (source = GITHUB_WEBHOOK_IMPORT).
+      This is the legacy path and the one any GH-driven trigger source
+      still uses.
+    - Glimmung-native (#50): pass `issue_id` (+ optional `project`,
+      resolved from the doc when omitted). The Issue must exist; no
+      mint happens here. Used by UI dispatch on issues created via
+      `POST /v1/issues`.
 
     `trigger_source` is recorded on the Run for observability. Required
     fields by convention: `kind` (one of `label_webhook`, `glimmung_ui`,
     `scheduled`, `cli`, `signal_drain`), plus kind-specific extras
-    (`label`, `actor`, etc.). The decision engine doesn't read it; it's
-    for W6.
+    (`label`, `actor`, etc.). The decision engine doesn't read it.
 
     `workflow_name`: if provided, that exact workflow is dispatched.
     If not provided, glimmung picks the project's only registered
     workflow; if there are 0 or 2+, returns `no_workflow` and the
-    caller has to disambiguate. The label-webhook path always passes an
-    explicit workflow_name (the one whose trigger_label matched). The
-    UI path can omit it for projects with one workflow.
+    caller has to disambiguate.
 
     `issue_labels` are passed to budget resolution (`agent-budget:NxM`
     label support). Labels remain a courtesy syndication surface from
@@ -102,11 +111,33 @@ async def dispatch_run(
     cosmos: Cosmos = app.state.cosmos
     settings = app.state.settings
 
-    # 1. Resolve project from repo.
-    project_doc = await _resolve_project(cosmos, repo)
-    if project_doc is None:
-        return DispatchResult(state="no_project", detail=f"no project for repo {repo!r}")
-    project_name: str = project_doc["name"]
+    # 1. Resolve the target Issue + project. Two entry shapes converge
+    # to (issue, project_name) before workflow resolution.
+    issue = None
+    if issue_id is not None:
+        # Native path: caller already has a glimmung issue id. Project
+        # may be passed for a single-partition point read; if omitted,
+        # we cross-partition find it by id.
+        if project is None:
+            issue = await _find_issue_anywhere(cosmos, issue_id=issue_id)
+        else:
+            found = await issue_ops.read_issue(
+                cosmos, project=project, issue_id=issue_id,
+            )
+            issue = found[0] if found else None
+        if issue is None:
+            return DispatchResult(state="no_project", detail=f"no glimmung issue {issue_id!r}")
+        project_name = issue.project
+        repo = issue.metadata.github_issue_repo
+        issue_number = issue.metadata.github_issue_number
+    else:
+        if repo is None or issue_number is None:
+            raise ValueError("dispatch_run requires either issue_id or (repo + issue_number)")
+        # GH-anchored path: project from repo lookup.
+        project_doc = await _resolve_project(cosmos, repo)
+        if project_doc is None:
+            return DispatchResult(state="no_project", detail=f"no project for repo {repo!r}")
+        project_name = project_doc["name"]
 
     # 2. Resolve workflow.
     workflow_doc, picker_detail = await _resolve_workflow(cosmos, project_name, workflow_name)
@@ -115,31 +146,33 @@ async def dispatch_run(
     workflow_actual_name: str = workflow_doc["name"]
 
     # 2b. Ensure a glimmung Issue exists for this (repo, issue_number).
-    # Sequenced after project + workflow resolution so failed dispatches
-    # (no_project / no_workflow) are no-ops on the issues container —
-    # we only mint when we're committed to dispatching. The Issue is
-    # marked GITHUB_WEBHOOK_IMPORT regardless of trigger_source: the
-    # underlying issue lives in GH and we're mirroring it. (MANUAL is
-    # reserved for glimmung-native issues with no GH counterpart, e.g.
-    # the future Slack-to-glimmung path.) The Issue's id becomes the
-    # Run's `issue_id`, which downstream consumers (PR-link parser,
-    # /v1/issues view) key off.
-    issue, _issue_etag, issue_created = await issue_ops.ensure_issue_for_github(
-        cosmos,
-        project=project_name,
-        repo=repo,
-        issue_number=issue_number,
-        source=IssueSource.GITHUB_WEBHOOK_IMPORT,
-    )
-    if issue_created:
-        log.info(
-            "dispatch_run: minted glimmung issue %s for %s#%d",
-            issue.id, repo, issue_number,
+    # Skipped when the caller passed an explicit issue_id — that issue
+    # already exists. Sequenced after project + workflow resolution so
+    # failed dispatches (no_project / no_workflow) are no-ops on the
+    # issues container — we only mint when we're committed to dispatching.
+    if issue is None:
+        assert repo is not None and issue_number is not None  # narrowed above
+        issue, _issue_etag, issue_created = await issue_ops.ensure_issue_for_github(
+            cosmos,
+            project=project_name,
+            repo=repo,
+            issue_number=issue_number,
+            source=IssueSource.GITHUB_WEBHOOK_IMPORT,
         )
+        if issue_created:
+            log.info(
+                "dispatch_run: minted glimmung issue %s for %s#%d",
+                issue.id, repo, issue_number,
+            )
 
-    # 3. Claim the per-issue lock.
+    # 3. Claim the per-issue lock. Native issues with no GH coords lock
+    # on their glimmung id; GH-anchored issues use the repo#N key so
+    # webhook-driven dispatches keep colliding with UI-driven ones.
     holder_id = str(ULID())
-    lock_key = f"{repo}#{issue_number}"
+    lock_key = (
+        f"{repo}#{issue_number}" if (repo and issue_number is not None)
+        else f"glimmung/{issue.id}"
+    )
     try:
         await lock_ops.claim_lock(
             cosmos,
@@ -165,11 +198,13 @@ async def dispatch_run(
 
     # 4. Lease + workflow_dispatch.
     metadata: dict[str, Any] = {
-        "issue_number": str(issue_number),
-        "issue_repo": repo,
+        "issue_id": issue.id,
         "issue_lock_holder_id": holder_id,
         **(extra_metadata or {}),
     }
+    if repo and issue_number is not None:
+        metadata["issue_number"] = str(issue_number)
+        metadata["issue_repo"] = repo
     requirements = workflow_doc.get("defaultRequirements", {}) or {}
     lease, host = await lease_ops.acquire(
         cosmos,
@@ -207,8 +242,8 @@ async def dispatch_run(
             project=project_name,
             workflow=workflow_actual_name,
             issue_id=issue.id,
-            issue_repo=repo,
-            issue_number=issue_number,
+            issue_repo=repo or "",
+            issue_number=issue_number or 0,
             budget=budget,
             initial_workflow_filename=workflow_doc["workflowFilename"],
             issue_lock_holder_id=holder_id,
@@ -224,6 +259,21 @@ async def dispatch_run(
         workflow=workflow_actual_name,
         issue_lock_holder_id=holder_id,
     )
+
+
+async def _find_issue_anywhere(cosmos: Cosmos, *, issue_id: str):
+    """Cross-partition lookup of an Issue by id. Used when the dispatch
+    caller has the id but not the project. Returns the `Issue` or None."""
+    docs = await query_all(
+        cosmos.issues,
+        "SELECT * FROM c WHERE c.id = @i",
+        parameters=[{"name": "@i", "value": issue_id}],
+    )
+    if not docs:
+        return None
+    from glimmung.models import Issue
+    doc = {k: v for k, v in docs[0].items() if not k.startswith("_")}
+    return Issue.model_validate(doc)
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
