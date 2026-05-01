@@ -1,4 +1,4 @@
-# Cosmos DB NoSQL Database. Containers: projects, hosts, workflows, leases, runs, locks.
+# Cosmos DB NoSQL Database. Containers: projects, hosts, workflows, leases, runs, locks, signals, issues.
 # Created here at the control plane; the runtime pod (workload identity) only
 # needs data-plane perms which are already granted on infra-shared-identity at
 # the account scope (infra-bootstrap/tofu/cosmos-serverless.tf line 45).
@@ -127,6 +127,28 @@ resource "azurerm_cosmosdb_sql_container" "signals" {
   account_name        = data.azurerm_cosmosdb_account.infra.name
   database_name       = azurerm_cosmosdb_sql_database.glimmung.name
   partition_key_paths = ["/target_repo"]
+
+  indexing_policy {
+    indexing_mode = "consistent"
+    included_path {
+      path = "/*"
+    }
+  }
+}
+
+# Glimmung-native issues (#28). Replaces live-GH polling with a
+# first-class issue model: glimmung is the orchestrator / source of
+# truth, GitHub is one of N possible syndication targets. A glimmung
+# Issue may carry `metadata.github_issue_url` to link out, but it
+# exists and is dispatchable whether or not a GH counterpart exists.
+# Same partition strategy as workflows / runs (`/project`) — listing
+# open issues for a project stays single-partition.
+resource "azurerm_cosmosdb_sql_container" "issues" {
+  name                = "issues"
+  resource_group_name = local.infra.resource_group_name
+  account_name        = data.azurerm_cosmosdb_account.infra.name
+  database_name       = azurerm_cosmosdb_sql_database.glimmung.name
+  partition_key_paths = ["/project"]
 
   indexing_policy {
     indexing_mode = "consistent"

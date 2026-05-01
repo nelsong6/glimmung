@@ -40,7 +40,7 @@ class FakeContainer:
         self._items: dict[tuple[str, str], dict[str, Any]] = {}
         self._etag_counter = 0
 
-    # ─── etag helper ─────────────────────────────────────────────────────────
+    # ─── etag helper ────────────────────────────────────────────
 
     def _next_etag(self) -> str:
         self._etag_counter += 1
@@ -51,14 +51,14 @@ class FakeContainer:
         the etag on successful reads/writes."""
         return {**doc}
 
-    # ─── partition-key resolution ────────────────────────────────────────────
+    # ─── partition-key resolution ──────────────────────────────────
 
     def _pk_value(self, doc: dict[str, Any]) -> str:
         if self._pk_field not in doc:
             raise ValueError(f"doc missing partition key field {self._pk_field!r}: {doc}")
         return doc[self._pk_field]
 
-    # ─── public API mirror ───────────────────────────────────────────────────
+    # ─── public API mirror ──────────────────────────────────────────
 
     async def create_item(self, body: dict[str, Any]) -> dict[str, Any]:
         pk = self._pk_value(body)
@@ -147,7 +147,7 @@ class _AsyncIter:
         return {**item}
 
 
-# ─── tiny SQL-ish evaluator ──────────────────────────────────────────────────
+# ─── tiny SQL-ish evaluator ─────────────────────────────────────────
 
 
 _WHERE_CLAUSE = re.compile(
@@ -239,6 +239,30 @@ def _evaluate_where(where: str, row: dict[str, Any], params: dict[str, Any]) -> 
     return _evaluate_cond(where, row, params)
 
 
+def _resolve_path(row: dict[str, Any], path: str) -> Any:
+    """Walk a dotted path like `metadata.github_issue_url` through nested
+    dicts. Returns `None` if any segment is missing or the value isn't a
+    dict, matching Cosmos's behavior of treating undefined paths as null
+    in equality predicates."""
+    current: Any = row
+    for segment in path.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(segment)
+    return current
+
+
+def _path_defined(row: dict[str, Any], path: str) -> bool:
+    """Mirror Cosmos's IS_DEFINED semantics for a dotted path: every
+    segment must exist (the leaf can be null)."""
+    current: Any = row
+    for segment in path.split("."):
+        if not isinstance(current, dict) or segment not in current:
+            return False
+        current = current[segment]
+    return True
+
+
 def _evaluate_cond(cond: str, row: dict[str, Any], params: dict[str, Any]) -> bool:
     cond = cond.strip()
 
@@ -262,21 +286,21 @@ def _evaluate_cond(cond: str, row: dict[str, Any], params: dict[str, Any]) -> bo
         if _split_top_level(cond, "AND", "OR").__len__() > 1:
             return _evaluate_where(cond, row, params)
 
-    # IS_DEFINED(c.field)
-    m = re.match(r"^IS_DEFINED\(c\.(\w+)\)$", cond, re.IGNORECASE)
+    # IS_DEFINED(c.path) — supports dotted paths like c.metadata.github_issue_url
+    m = re.match(r"^IS_DEFINED\(c\.([\w.]+)\)$", cond, re.IGNORECASE)
     if m:
-        return m.group(1) in row
+        return _path_defined(row, m.group(1))
 
-    # NOT IS_DEFINED(c.field)
-    m = re.match(r"^NOT\s+IS_DEFINED\(c\.(\w+)\)$", cond, re.IGNORECASE)
+    # NOT IS_DEFINED(c.path)
+    m = re.match(r"^NOT\s+IS_DEFINED\(c\.([\w.]+)\)$", cond, re.IGNORECASE)
     if m:
-        return m.group(1) not in row
+        return not _path_defined(row, m.group(1))
 
-    # c.field <op> @param
-    m = re.match(r"^c\.(\w+)\s*(=|!=|<|>|<=|>=)\s*(@\w+|null|true|false)$", cond, re.IGNORECASE)
+    # c.path <op> @param — supports dotted paths
+    m = re.match(r"^c\.([\w.]+)\s*(=|!=|<|>|<=|>=)\s*(@\w+|null|true|false)$", cond, re.IGNORECASE)
     if m:
         field, op, rhs = m.group(1), m.group(2), m.group(3)
-        actual = row.get(field)
+        actual = _resolve_path(row, field)
         if rhs == "null":
             expected: Any = None
         elif rhs.lower() == "true":
@@ -303,7 +327,7 @@ def _evaluate_cond(cond: str, row: dict[str, Any], params: dict[str, Any]) -> bo
     raise NotImplementedError(f"FakeContainer can't evaluate condition: {cond!r}")
 
 
-# ─── time injection ──────────────────────────────────────────────────────────
+# ─── time injection ──────────────────────────────────────────────
 
 
 class FrozenClock:
