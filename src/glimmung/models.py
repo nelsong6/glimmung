@@ -109,7 +109,7 @@ class StateSnapshot(BaseModel):
     workflows: list[Workflow] = Field(default_factory=list)
 
 
-# ─── Verify-loop substrate (#18) ─────────────────────────────────────────────
+# ─── Verify-loop substrate (#18) ───────────────────────────────────
 #
 # A `Run` is the orchestrator's per-issue record. It is created when the
 # issue webhook fires and a workflow with `retry_workflow_filename` set is
@@ -248,7 +248,7 @@ Workflow.model_rebuild()
 WorkflowRegister.model_rebuild()
 
 
-# ─── Lock primitive (W1 substrate) ───────────────────────────────────────────
+# ─── Lock primitive (W1 substrate) ───────────────────────────────────
 #
 # A generic mutual-exclusion primitive. Used by #19's per-PR triage
 # serialization, by #20's per-issue dispatch serialization, by future
@@ -284,7 +284,7 @@ class Lock(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-# ─── Signal bus (#19) ────────────────────────────────────────────────────────
+# ─── Signal bus (#19) ────────────────────────────────────────────
 #
 # A `Signal` is a unit of work for the orchestrator's decision engine.
 # Webhooks (GH PR review, GH issue/PR comment), the glimmung UI (reject
@@ -347,3 +347,55 @@ class SignalEnqueueRequest(BaseModel):
     target_id: str
     source: SignalSource = SignalSource.GLIMMUNG_UI
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+# ─── Glimmung-native issues (#28) ──────────────────────────────────
+#
+# A glimmung Issue is a first-class control-plane object: title, body,
+# labels, lifecycle. Stored in the `issues` Cosmos container, partitioned
+# by `/project`. GitHub is one of N possible syndication targets; an Issue
+# may carry `metadata.github_issue_url` to link out, but it exists and is
+# dispatchable whether or not a GH counterpart exists.
+#
+# Future trigger sources (Slack message → glimmung issue, scheduled
+# re-run, glimmung-internal CLI) drop in cleanly under this model — they
+# create a glimmung Issue with a different `metadata.source` and the
+# downstream dispatch path doesn't change.
+
+
+class IssueState(str, Enum):
+    OPEN = "open"
+    CLOSED = "closed"
+
+
+class IssueSource(str, Enum):
+    """Where the Issue came from. Surfaced for observability + future
+    routing (e.g. a Slack-sourced issue might get a different default
+    workflow). Not consumed by the dispatch path itself."""
+    MANUAL = "manual"
+    GITHUB_WEBHOOK_IMPORT = "github_webhook_import"
+    SLACK = "slack"
+    SCHEDULED = "scheduled"
+
+
+class IssueMetadata(BaseModel):
+    source: IssueSource = IssueSource.MANUAL
+    # Link-out only. Never the read path: glimmung's `id` is the canonical
+    # issue handle, and `find_issue_by_github_url` is the only place we
+    # resolve a GH URL back to a glimmung Issue (used by the consumer PR
+    # that rewires `Closes #N` parsing).
+    github_issue_url: str | None = None
+
+
+class Issue(BaseModel):
+    schema_version: int = 1
+    id: str                                  # ULID; canonical glimmung-issue-id
+    project: str                             # partition key
+    title: str
+    body: str = ""
+    labels: list[str] = Field(default_factory=list)
+    state: IssueState = IssueState.OPEN
+    metadata: IssueMetadata = Field(default_factory=IssueMetadata)
+    created_at: datetime
+    updated_at: datetime
+    closed_at: datetime | None = None
