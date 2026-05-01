@@ -1324,8 +1324,46 @@ async def list_issues() -> list[IssueRow]:
 async def _list_issues_from_cosmos(cosmos: Cosmos) -> list[IssueRow]:
     """Read-path for `/v1/issues`; lifted out so tests can drive it
     directly without standing up a FastAPI client. Returns the same
-    `(project, -number)` ordering the UI table assumes."""
+    `(project, -number)` ordering the UI table assumes.
+
+    Bulk-loads `runs` and `locks` once instead of per-issue queries —
+    with N issues the per-issue path was N cross-partition runs reads
+    plus N lock point-reads (~70ms each on the runs side), so 67 open
+    issues took ~5s. One cross-partition runs scan + one single-
+    partition `scope=issue` locks scan keeps the endpoint sub-second
+    at this scale; if/when the runs container grows large enough that
+    a full scan stops fitting in budget, narrow it by `issue_id IN`
+    over the open-issue set."""
     issues = await issue_ops.list_open_issues(cosmos)
+    if not issues:
+        return []
+
+    run_docs = await query_all(cosmos.runs, "SELECT * FROM c")
+    runs_by_issue_id: dict[str, dict[str, Any]] = {}
+    runs_by_project_number: dict[tuple[str, int], dict[str, Any]] = {}
+    for doc in run_docs:
+        created = doc.get("created_at", "")
+        issue_id = doc.get("issue_id") or ""
+        if issue_id:
+            cur = runs_by_issue_id.get(issue_id)
+            if cur is None or created > cur.get("created_at", ""):
+                runs_by_issue_id[issue_id] = doc
+        project = doc.get("project")
+        number = doc.get("issue_number")
+        if project and number is not None:
+            key = (project, int(number))
+            cur = runs_by_project_number.get(key)
+            if cur is None or created > cur.get("created_at", ""):
+                runs_by_project_number[key] = doc
+
+    lock_docs = await query_all(
+        cosmos.locks,
+        "SELECT * FROM c WHERE c.scope = @s",
+        parameters=[{"name": "@s", "value": "issue"}],
+    )
+    locks_by_key = {doc["key"]: doc for doc in lock_docs}
+
+    now = datetime.now(UTC)
     rows: list[IssueRow] = []
     for issue in issues:
         url = issue.metadata.github_issue_url
@@ -1341,27 +1379,23 @@ async def _list_issues_from_cosmos(cosmos: Cosmos) -> list[IssueRow]:
             labels=list(issue.labels),
             html_url=url,
         )
-        latest_run = await run_ops.find_run_by_issue_id(cosmos, issue_id=issue.id)
-        if latest_run is None:
-            # Pre-#33 Runs predate `Run.issue_id`; fall back to the
-            # legacy `(project, issue_number)` lookup so the Issues
-            # view keeps showing last-run state for them. Cleanup-PR
-            # drops this once those Runs are migrated.
-            latest_run = await run_ops.get_latest_run(
-                cosmos, project=issue.project, issue_number=number,
-            )
-        if latest_run is not None:
-            row.last_run_id = latest_run.id
-            row.last_run_state = latest_run.state.value
-            row.last_run_abort_reason = latest_run.abort_reason
-        existing_lock = await lock_ops.read_lock(
-            cosmos, scope="issue", key=f"{repo}#{number}",
+        # Pre-#33 Runs predate `Run.issue_id`; the (project, number)
+        # fallback covers them so the Issues view keeps showing last-
+        # run state. Cleanup-PR drops the fallback once those Runs are
+        # migrated.
+        run_doc = (
+            runs_by_issue_id.get(issue.id)
+            or runs_by_project_number.get((issue.project, number))
         )
-        row.issue_lock_held = (
-            existing_lock is not None
-            and existing_lock.state.value == "held"
-            and existing_lock.expires_at > datetime.now(UTC)
-        )
+        if run_doc is not None:
+            row.last_run_id = run_doc["id"]
+            row.last_run_state = run_doc["state"]
+            row.last_run_abort_reason = run_doc.get("abort_reason")
+        lock_doc = locks_by_key.get(f"{repo}#{number}")
+        if lock_doc is not None and lock_doc.get("state") == "held":
+            expires_at = datetime.fromisoformat(lock_doc["expires_at"])
+            if expires_at > now:
+                row.issue_lock_held = True
         rows.append(row)
 
     rows.sort(key=lambda r: (r.project, -r.number))
