@@ -24,6 +24,7 @@ from glimmung.db import Cosmos, query_all
 from glimmung.decision import abort_explanation, decide
 from glimmung.github_app import (
     GitHubAppTokenMinter,
+    cancel_workflow_run,
     dispatch_workflow,
     list_open_issues as gh_list_open_issues,
     post_issue_comment,
@@ -826,6 +827,174 @@ async def release_lease(lease_id: str = Path(...), project: str = "") -> Lease:
     if not project:
         raise HTTPException(400, "project query param required")
     return await lease_ops.release(app.state.cosmos, lease_id, project)
+
+
+class CancelLeaseResult(BaseModel):
+    """Outcome of POST /v1/lease/{lease_id}/cancel.
+
+    `state`:
+      - `cancelled`: lease released and (if Run-tracked + GH-dispatched)
+        a GH workflow_run cancel was POSTed. The actual GH-side state
+        flip arrives later via `workflow_run.completed`; the handler is
+        idempotent so this doesn't conflict.
+      - `no_active_run`: lease released, but there was no associated Run
+        with a GH workflow_run_id to cancel. Either a non-Run-tracked
+        lease, or a Run that hadn't yet been dispatched at GH-side
+        (lease still in PENDING when cancelled, or the dispatch_workflow
+        call hadn't completed). Lease + locks still released.
+      - `already_terminal`: lease was already RELEASED or EXPIRED, or the
+        Run was already in a terminal state. No side effects beyond a
+        re-read.
+    """
+    state: str
+    lease_id: str
+    run_id: str | None = None
+    gh_run_cancelled: bool | None = None
+    issue_lock_released: bool | None = None
+    pr_lock_released: bool | None = None
+
+
+async def _cancel_lease(
+    cosmos: Cosmos,
+    minter: GitHubAppTokenMinter | None,
+    lease_id: str,
+    project: str,
+) -> CancelLeaseResult:
+    """Operator-initiated cancel of an active lease (#30).
+
+    Mirrors the release path of `_handle_workflow_run`: cancels the GH
+    workflow_run (so the runner stops working a doomed job), marks the
+    Run ABORTED with reason="cancelled_via_ui", releases the lease, and
+    releases any locks the Run was holding (issue + PR scopes). All
+    sub-steps are idempotent — safe under a race with the natural
+    `workflow_run.completed` arrival.
+
+    Free function (rather than a method on the endpoint) so the test
+    suite can drive it directly with a `cosmos_fake`-backed cosmos and
+    a stub minter, matching the existing test pattern around
+    `_handle_workflow_run`.
+    """
+    # 1. Read the lease.
+    try:
+        lease_doc = await cosmos.leases.read_item(item=lease_id, partition_key=project)
+    except Exception:
+        raise HTTPException(404, f"lease {lease_id} not found in project {project!r}")
+
+    if lease_doc["state"] in (LeaseState.RELEASED.value, LeaseState.EXPIRED.value):
+        return CancelLeaseResult(state="already_terminal", lease_id=lease_id)
+
+    metadata = lease_doc.get("metadata") or {}
+    issue_repo: str | None = metadata.get("issue_repo")
+    issue_number_raw = metadata.get("issue_number")
+    issue_lock_holder_id: str | None = metadata.get("issue_lock_holder_id")
+    issue_number: int | None = None
+    if issue_number_raw:
+        try:
+            issue_number = int(issue_number_raw)
+        except ValueError:
+            issue_number = None
+
+    # 2. Find the active Run for this lease's issue, if any.
+    run = None
+    run_etag: str | None = None
+    if issue_number is not None:
+        run_lookup = await run_ops.get_active_run(
+            cosmos, project=project, issue_number=issue_number,
+        )
+        if run_lookup is not None:
+            run, run_etag = run_lookup
+
+    # 3. GH cancel + Run abort. Skipped if there's no Run, or the Run
+    # has no dispatched GH workflow_run yet (e.g. PENDING lease).
+    gh_cancelled: bool | None = None
+    if run is not None and run.attempts and issue_repo and minter is not None:
+        latest = run.attempts[-1]
+        gh_run_id = latest.workflow_run_id
+        if gh_run_id is not None:
+            try:
+                gh_cancelled = await cancel_workflow_run(
+                    minter, repo=issue_repo, run_id=gh_run_id,
+                )
+            except Exception:
+                log.exception(
+                    "cancel_lease: GH cancel failed for run %s (workflow_run_id=%d); "
+                    "proceeding with lease release",
+                    run.id, gh_run_id,
+                )
+                gh_cancelled = False
+
+    if run is not None and run_etag is not None:
+        try:
+            await run_ops.mark_aborted(
+                cosmos, run=run, etag=run_etag, reason="cancelled_via_ui",
+            )
+        except Exception:
+            log.exception("cancel_lease: failed to mark run %s aborted", run.id)
+
+    # 4. Release the lease.
+    try:
+        await lease_ops.release(cosmos, lease_id, project)
+    except Exception:
+        log.exception("cancel_lease: lease release failed for %s", lease_id)
+        raise HTTPException(500, f"lease release failed for {lease_id}")
+
+    # 5. Release the issue lock (if held) and PR lock (if Run was holding one).
+    issue_lock_released: bool | None = None
+    if issue_lock_holder_id and issue_repo and issue_number is not None:
+        try:
+            issue_lock_released = bool(await lock_ops.release_lock(
+                cosmos, scope="issue",
+                key=f"{issue_repo}#{issue_number}",
+                holder_id=issue_lock_holder_id,
+            ))
+        except Exception:
+            log.exception(
+                "cancel_lease: issue lock release failed for %s#%s holder=%s",
+                issue_repo, issue_number, issue_lock_holder_id,
+            )
+
+    pr_lock_released: bool | None = None
+    if run is not None and run.pr_lock_holder_id and run.pr_number and issue_repo:
+        try:
+            pr_lock_released = bool(await lock_ops.release_lock(
+                cosmos, scope="pr",
+                key=f"{issue_repo}#{run.pr_number}",
+                holder_id=run.pr_lock_holder_id,
+            ))
+        except Exception:
+            log.exception(
+                "cancel_lease: pr lock release failed for %s#%s holder=%s",
+                issue_repo, run.pr_number, run.pr_lock_holder_id,
+            )
+
+    state = "cancelled" if (run is not None and gh_cancelled is not None) else "no_active_run"
+    return CancelLeaseResult(
+        state=state,
+        lease_id=lease_id,
+        run_id=run.id if run is not None else None,
+        gh_run_cancelled=gh_cancelled,
+        issue_lock_released=issue_lock_released,
+        pr_lock_released=pr_lock_released,
+    )
+
+
+@app.post(
+    "/v1/lease/{lease_id}/cancel",
+    response_model=CancelLeaseResult,
+    dependencies=[Depends(require_admin_user)],
+)
+async def cancel_lease(lease_id: str = Path(...), project: str = "") -> CancelLeaseResult:
+    """Admin-only endpoint that frees a host immediately by cancelling the
+    GH workflow run and releasing the lease + locks. See `_cancel_lease`
+    for the body of the operation."""
+    if not project:
+        raise HTTPException(400, "project query param required")
+    return await _cancel_lease(
+        app.state.cosmos,
+        getattr(app.state, "gh_minter", None),
+        lease_id,
+        project,
+    )
 
 
 async def _compute_snapshot(cosmos: Cosmos) -> StateSnapshot:
