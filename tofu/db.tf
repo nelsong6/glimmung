@@ -114,3 +114,24 @@ resource "azurerm_cosmosdb_sql_container" "locks" {
     }
   }
 }
+
+# Signal bus (#19). Webhooks (GH PR review, GH PR/issue comment), the
+# glimmung UI (reject button), and future automations enqueue Signals
+# here; a background drain loop processes them through the per-target
+# lock primitive + decision engine. Partition by `/target_repo` so per-
+# repo drain queries stay single-partition; cross-repo diagnostic
+# queries are rare and tolerable as cross-partition scans.
+resource "azurerm_cosmosdb_sql_container" "signals" {
+  name                = "signals"
+  resource_group_name = local.infra.resource_group_name
+  account_name        = data.azurerm_cosmosdb_account.infra.name
+  database_name       = azurerm_cosmosdb_sql_database.glimmung.name
+  partition_key_paths = ["/target_repo"]
+
+  indexing_policy {
+    indexing_mode = "consistent"
+    included_path {
+      path = "/*"
+    }
+  }
+}
