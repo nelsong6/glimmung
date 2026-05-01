@@ -16,6 +16,7 @@ from sse_starlette.sse import EventSourceResponse
 from glimmung import leases as lease_ops
 from glimmung import locks as lock_ops
 from glimmung import runs as run_ops
+from glimmung import signals as signal_ops
 from glimmung.dispatch import DispatchResult, dispatch_run
 from glimmung.auth import require_admin_user
 from glimmung.db import Cosmos, query_all
@@ -28,6 +29,7 @@ from glimmung.github_app import (
     post_issue_comment,
     verify_webhook_signature,
 )
+from glimmung.locks import LockBusy
 from glimmung.models import (
     Host,
     Lease,
@@ -38,10 +40,17 @@ from glimmung.models import (
     ProjectRegister,
     Run,
     RunDecision,
+    Signal,
+    SignalEnqueueRequest,
+    SignalSource,
+    SignalTargetType,
     StateSnapshot,
+    TriageDecision,
     Workflow,
     WorkflowRegister,
 )
+from glimmung.triage import abort_explanation as triage_abort_explanation
+from glimmung.triage import decide_triage, feedback_text
 from glimmung.settings import Settings, get_settings
 from glimmung.verification import fetch_verification
 
@@ -70,14 +79,16 @@ async def lifespan(app: FastAPI):
     sweep_task = asyncio.create_task(_sweep_loop(cosmos, settings))
     promote_task = asyncio.create_task(_promote_loop(app, settings))
     lock_sweep_task = asyncio.create_task(_lock_sweep_loop(cosmos, settings))
+    drain_task = asyncio.create_task(_signal_drain_loop(app, settings))
     try:
         yield
     finally:
         sweep_task.cancel()
         promote_task.cancel()
         lock_sweep_task.cancel()
+        drain_task.cancel()
         await asyncio.gather(
-            sweep_task, promote_task, lock_sweep_task,
+            sweep_task, promote_task, lock_sweep_task, drain_task,
             return_exceptions=True,
         )
         await cosmos.stop()
@@ -104,6 +115,127 @@ async def _lock_sweep_loop(cosmos: Cosmos, settings: Settings) -> None:
         except Exception:
             log.exception("lock sweep failed; will retry")
         await asyncio.sleep(settings.sweep_interval_seconds)
+
+
+async def _signal_drain_loop(app: FastAPI, settings: Settings) -> None:
+    """Process the signal bus (#19). Each tick walks pending signals
+    oldest-first, claims the per-target lock from #22, runs the
+    triage decision engine, and applies the side effect (workflow
+    dispatch, comment, no-op). Per-target serialization is free —
+    signals on a target whose lock is held stay PENDING and re-evaluate
+    next tick.
+
+    Tick interval is fast (every 2s) so user actions feel responsive;
+    cost is negligible (cross-partition pending query is one round-trip
+    on a tiny container)."""
+    drain_interval = max(2, settings.sweep_interval_seconds // 30)
+    while True:
+        try:
+            await signal_ops.drain_signals(
+                app.state.cosmos,
+                settings=settings,
+                decide_fn=lambda s: _triage_decide(app, s),
+                apply_fn=lambda s, d, h: _triage_apply(app, s, d, h),
+            )
+        except Exception:
+            log.exception("signal drain failed; will retry")
+        await asyncio.sleep(drain_interval)
+
+
+async def _triage_decide(app: FastAPI, signal: Signal) -> tuple[str, bool]:
+    """Drain decide_fn for triage: look up the Run linked to the PR,
+    invoke the pure decision engine, return (decision_value, hold_lock).
+    `hold_lock=True` only for DISPATCH_TRIAGE — the triage workflow's
+    terminal handler (`_handle_workflow_run`) releases the lock on
+    Run terminal transition."""
+    cosmos: Cosmos = app.state.cosmos
+
+    run: Run | None = None
+    if signal.target_type == SignalTargetType.PR:
+        try:
+            pr_number = int(signal.target_id)
+        except ValueError:
+            log.warning("triage_decide: signal %s target_id %r is not an int",
+                        signal.id, signal.target_id)
+            return (TriageDecision.ABORT_NO_RUN.value, False)
+        lookup = await run_ops.find_run_by_pr(
+            cosmos, issue_repo=signal.target_repo, pr_number=pr_number,
+        )
+        run = lookup[0] if lookup else None
+    # Issue/Run scoped signals don't yet have triage decision logic;
+    # IGNORE them so they don't sit in PENDING forever.
+    elif signal.target_type != SignalTargetType.PR:
+        return (TriageDecision.IGNORE.value, False)
+
+    decision = decide_triage(signal=signal, run=run)
+    hold_lock = decision == TriageDecision.DISPATCH_TRIAGE
+    return (decision.value, hold_lock)
+
+
+async def _triage_apply(
+    app: FastAPI,
+    signal: Signal,
+    decision: str,
+    holder_id: str,
+) -> None:
+    """Drain apply_fn for triage: side effects according to the decision.
+    Lock release semantics are caller-managed: the drain releases for
+    IGNORE/ABORT (since `_triage_decide` returned hold_lock=False); for
+    DISPATCH_TRIAGE the lock stays held and the workflow_run.completed
+    terminal handler releases it."""
+    cosmos: Cosmos = app.state.cosmos
+
+    if decision == TriageDecision.IGNORE.value:
+        return
+
+    # Look up the run + post a comment / dispatch as appropriate.
+    run: Run | None = None
+    etag: str | None = None
+    if signal.target_type == SignalTargetType.PR:
+        try:
+            pr_number = int(signal.target_id)
+        except ValueError:
+            return
+        lookup = await run_ops.find_run_by_pr(
+            cosmos, issue_repo=signal.target_repo, pr_number=pr_number,
+        )
+        if lookup is not None:
+            run, etag = lookup
+
+    if decision == TriageDecision.DISPATCH_TRIAGE.value:
+        if run is None or etag is None:
+            log.warning("triage_apply: DISPATCH_TRIAGE but no run; signal %s", signal.id)
+            return
+        await _dispatch_triage(app, signal=signal, run=run, etag=etag, holder_id=holder_id)
+        return
+
+    # Any abort decision: post a comment to the PR explaining why no
+    # action was taken. The lock has already been released by the drain.
+    if decision in (
+        TriageDecision.ABORT_NO_RUN.value,
+        TriageDecision.ABORT_BUDGET_ATTEMPTS.value,
+        TriageDecision.ABORT_BUDGET_COST.value,
+    ):
+        try:
+            decision_enum = TriageDecision(decision)
+        except ValueError:
+            return
+        body = triage_abort_explanation(decision_enum, run, signal)
+        minter: GitHubAppTokenMinter | None = app.state.gh_minter
+        if minter is None:
+            log.info("triage_apply: no GH minter; would have posted: %s", body[:80])
+            return
+        try:
+            pr_number = int(signal.target_id)
+            await post_issue_comment(
+                minter, repo=signal.target_repo,
+                issue_number=pr_number, body=body,
+            )
+        except Exception:
+            log.exception(
+                "triage_apply: failed to post abort comment on %s#%s",
+                signal.target_repo, signal.target_id,
+            )
 
 
 async def _promote_loop(app: FastAPI, settings: Settings) -> None:
@@ -274,6 +406,39 @@ async def _handle_workflow_run(payload: dict[str, Any]) -> dict[str, Any]:
                 repo, issue_number, issue_lock_holder_id,
             )
 
+    # (4) PR-lock release — only fires when a triage cycle reached a
+    # terminal Run state. The Run document carries pr_number +
+    # pr_lock_holder_id (set by _dispatch_triage when re-opening for
+    # triage). Release uses run.pr_lock_holder_id; idempotent.
+    if run_reached_terminal and is_run_tracked and run_lookup is not None:
+        run_for_locks, _ = run_lookup  # the original run, not the post-decision one
+        # Re-read the run to get the *latest* pr_lock_holder_id (in
+        # case the Run was re-opened for triage between when we read
+        # it above and now). Cheap point-read.
+        try:
+            doc = await cosmos.runs.read_item(
+                item=run_for_locks.id, partition_key=run_for_locks.project,
+            )
+            pr_lock_holder = doc.get("pr_lock_holder_id")
+            pr_number = doc.get("pr_number")
+        except Exception:
+            pr_lock_holder = run_for_locks.pr_lock_holder_id
+            pr_number = run_for_locks.pr_number
+
+        if pr_lock_holder and pr_number:
+            try:
+                released_pr_lock = await lock_ops.release_lock(
+                    cosmos, scope="pr",
+                    key=f"{repo}#{pr_number}",
+                    holder_id=pr_lock_holder,
+                )
+                result["pr_lock_released"] = released_pr_lock
+            except Exception:
+                log.exception(
+                    "pr lock release failed for %s#%s holder=%s",
+                    repo, pr_number, pr_lock_holder,
+                )
+
     return result
 
 
@@ -422,6 +587,133 @@ async def _dispatch_retry(
         log.exception("retry workflow_dispatch failed for run %s", run.id)
 
 
+async def _dispatch_triage(
+    app: FastAPI,
+    *,
+    signal: Signal,
+    run: Run,
+    etag: str,
+    holder_id: str,
+) -> None:
+    """Re-open a Run for triage and fire the consumer's triage workflow.
+
+    Triage state machine: PASSED → IN_PROGRESS, with a new TRIAGE
+    PhaseAttempt appended. Both the issue lock and the PR lock are
+    held with `holder_id` (the signal_id, set on the Run for terminal
+    handler release). The triage workflow runs impl + verify with
+    `feedback_text` as additional context; on terminal Run transition
+    (PASS / ABORT_*) the workflow_run.completed handler releases both
+    locks. RETRY decisions within a triage cycle dispatch the regular
+    retry workflow and keep both locks held."""
+    cosmos: Cosmos = app.state.cosmos
+    settings: Settings = app.state.settings
+    minter: GitHubAppTokenMinter | None = app.state.gh_minter
+
+    workflow_doc = await _read_workflow(cosmos, run.project, run.workflow)
+    if not workflow_doc:
+        log.warning(
+            "triage: workflow %s/%s vanished; cannot dispatch",
+            run.project, run.workflow,
+        )
+        return
+    triage_filename = (
+        workflow_doc.get("triageWorkflowFilename")
+        or workflow_doc.get("triage_workflow_filename")
+        or ""
+    )
+    if not triage_filename:
+        log.warning(
+            "triage: workflow %s/%s has no triage_workflow_filename; cannot dispatch",
+            run.project, run.workflow,
+        )
+        return
+
+    # Claim the issue lock with the signal as holder. If the issue
+    # lock is currently held (rare: original Run is still in-flight,
+    # or a prior triage is still in flight on the same issue), bail
+    # — drain will retry next tick.
+    try:
+        await lock_ops.claim_lock(
+            cosmos, scope="issue",
+            key=f"{run.issue_repo}#{run.issue_number}",
+            holder_id=holder_id,
+            ttl_seconds=settings.lease_default_ttl_seconds,
+            metadata={"triage_signal_id": signal.id, "phase": "triage"},
+        )
+    except LockBusy as busy:
+        log.warning(
+            "triage: issue lock %s#%d is held by %s; deferring signal %s",
+            run.issue_repo, run.issue_number, busy.lock.held_by, signal.id,
+        )
+        return
+
+    # Re-open the Run + append the TRIAGE attempt before dispatching,
+    # so a webhook redelivery of the previous completion can detect
+    # and skip duplicate decision cycles.
+    run, etag = await run_ops.reopen_for_triage(
+        cosmos, run=run, etag=etag,
+        triage_workflow_filename=triage_filename,
+        pr_lock_holder_id=holder_id,
+        issue_lock_holder_id=holder_id,
+    )
+
+    metadata = {
+        "issue_number": str(run.issue_number),
+        "issue_repo": run.issue_repo,
+        "run_id": run.id,
+        "phase": "triage",
+        "attempt_index": str(len(run.attempts) - 1),
+        "issue_lock_holder_id": holder_id,
+    }
+    lease, host = await lease_ops.acquire(
+        cosmos, settings,
+        project=run.project, workflow=run.workflow,
+        requirements=workflow_doc.get("defaultRequirements", {}),
+        metadata=metadata,
+    )
+
+    if host is None:
+        log.warning(
+            "triage: no host available for run %s; lease %s pending. "
+            "Manual re-dispatch may be required.",
+            run.id, lease.id,
+        )
+        return
+
+    if minter is None:
+        log.warning("triage: no GH minter; cannot dispatch workflow for run %s", run.id)
+        return
+
+    feedback = feedback_text(signal)
+    inputs = {
+        "host": host.name,
+        "lease_id": lease.id,
+        "issue_number": str(run.issue_number),
+        "pr_number": str(run.pr_number) if run.pr_number is not None else "",
+        "run_id": run.id,
+        "attempt_index": str(len(run.attempts) - 1),
+        "feedback": feedback,
+        "prior_verification_artifact_url": "",
+    }
+    try:
+        await dispatch_workflow(
+            minter,
+            repo=run.issue_repo,
+            workflow_filename=triage_filename,
+            ref=workflow_doc.get("workflowRef") or "main",
+            inputs=inputs,
+        )
+        log.info(
+            "dispatched triage %s on %s for run %s (attempt %d, signal %s)",
+            triage_filename, host.name, run.id, len(run.attempts) - 1, signal.id,
+        )
+    except Exception:
+        log.exception(
+            "triage workflow_dispatch failed for run %s signal %s",
+            run.id, signal.id,
+        )
+
+
 async def _read_project(cosmos: Cosmos, name: str) -> dict[str, Any] | None:
     try:
         return await cosmos.projects.read_item(item=name, partition_key=name)
@@ -456,6 +748,7 @@ def _workflow_to_doc(w: WorkflowRegister) -> dict[str, Any]:
         "triggerLabel": w.trigger_label,
         "defaultRequirements": w.default_requirements,
         "retryWorkflowFilename": w.retry_workflow_filename,
+        "triageWorkflowFilename": w.triage_workflow_filename,
         "defaultBudget": w.default_budget.model_dump() if w.default_budget else None,
         "createdAt": datetime.now(UTC).isoformat(),
     }
@@ -674,6 +967,10 @@ async def github_webhook(request: Request) -> dict[str, Any]:
 
     if event == "workflow_run":
         return await _handle_workflow_run(payload)
+    if event == "pull_request":
+        return await _handle_pull_request(payload)
+    if event == "pull_request_review":
+        return await _handle_pull_request_review(payload)
     if event != "issues":
         return {"ignored": event}
     action = payload.get("action")
@@ -740,6 +1037,122 @@ async def github_webhook(request: Request) -> dict[str, Any]:
         },
     )
     return result.model_dump()
+
+
+# ─── PR webhook handlers (#19) ───────────────────────────────────────────────
+
+
+_CLOSES_KEYWORDS_RE = None  # set on first call below
+def _parse_issue_refs(body: str) -> list[int]:
+    """Extract issue numbers from PR body 'Closes #N' / 'Fixes #N' /
+    'Resolves #N' patterns (case-insensitive). Conservative — only
+    same-repo references; cross-repo `owner/repo#N` is ignored
+    because we only auto-link within the project."""
+    import re
+    global _CLOSES_KEYWORDS_RE
+    if _CLOSES_KEYWORDS_RE is None:
+        _CLOSES_KEYWORDS_RE = re.compile(
+            r"\b(?:closes|fixes|resolves)\s+#(\d+)\b",
+            re.IGNORECASE,
+        )
+    return [int(m.group(1)) for m in _CLOSES_KEYWORDS_RE.finditer(body)]
+
+
+async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
+    """`pull_request.opened` and `pull_request.reopened` — auto-link
+    the new PR to a Run by parsing the PR body for `Closes #N`."""
+    if payload.get("action") not in ("opened", "reopened"):
+        return {"ignored": f"pull_request.{payload.get('action')}"}
+
+    pr = payload.get("pull_request") or {}
+    repo = (payload.get("repository") or {}).get("full_name", "")
+    pr_number = pr.get("number")
+    if not repo or not pr_number:
+        return {"ignored": "missing fields"}
+
+    pr_branch = ((pr.get("head") or {}).get("ref") or "")
+    body = pr.get("body") or ""
+    issue_refs = _parse_issue_refs(body)
+    if not issue_refs:
+        return {"ignored": "pr body has no issue ref"}
+
+    cosmos: Cosmos = app.state.cosmos
+    matching = await query_all(
+        cosmos.projects,
+        "SELECT * FROM c WHERE c.githubRepo = @r",
+        parameters=[{"name": "@r", "value": repo}],
+    )
+    if not matching:
+        return {"ignored": "no project for repo"}
+    project = matching[0]["name"]
+
+    linked: list[str] = []
+    for issue_number in issue_refs:
+        # Look up the most recent Run for this issue regardless of state
+        # — typically PASSED (PR opened after verify passed) but a run
+        # in IN_PROGRESS would also link cleanly.
+        run = await run_ops.get_latest_run(
+            cosmos, project=project, issue_number=issue_number,
+        )
+        if run is None:
+            continue
+        # Re-read with etag for the link mutation.
+        try:
+            doc = await cosmos.runs.read_item(item=run.id, partition_key=run.project)
+        except Exception:
+            continue
+        from glimmung.runs import _strip_meta as _strip
+        run, etag = (Run.model_validate(_strip(doc)), doc["_etag"])
+        try:
+            await run_ops.link_pr_to_run(
+                cosmos, run=run, etag=etag,
+                pr_number=int(pr_number), pr_branch=pr_branch,
+            )
+            linked.append(run.id)
+            log.info(
+                "linked PR %s#%d to run %s (issue #%d, branch %s)",
+                repo, pr_number, run.id, issue_number, pr_branch,
+            )
+        except Exception:
+            log.exception(
+                "link_pr_to_run failed for run %s pr %s#%d",
+                run.id, repo, pr_number,
+            )
+
+    return {"linked_runs": linked, "issue_refs": issue_refs}
+
+
+async def _handle_pull_request_review(payload: dict[str, Any]) -> dict[str, Any]:
+    """`pull_request_review.submitted` — enqueue a GH_REVIEW signal so
+    the drain loop can route it through the triage decision engine.
+
+    Other actions (`edited`, `dismissed`) are ignored — only the
+    initial submission is decisional."""
+    if payload.get("action") != "submitted":
+        return {"ignored": f"pull_request_review.{payload.get('action')}"}
+
+    pr = payload.get("pull_request") or {}
+    review = payload.get("review") or {}
+    repo = (payload.get("repository") or {}).get("full_name", "")
+    pr_number = pr.get("number")
+    if not repo or not pr_number:
+        return {"ignored": "missing fields"}
+
+    cosmos: Cosmos = app.state.cosmos
+    sig = await signal_ops.enqueue_signal(
+        cosmos,
+        target_type=SignalTargetType.PR,
+        target_repo=repo,
+        target_id=str(pr_number),
+        source=SignalSource.GH_REVIEW,
+        payload={
+            "state": review.get("state") or "",
+            "body": review.get("body") or "",
+            "reviewer": (review.get("user") or {}).get("login") or "",
+            "review_id": review.get("id"),
+        },
+    )
+    return {"enqueued_signal": sig.id}
 
 
 # ─── Issues view + UI-initiated dispatch (#20) ────────────────────────────────
@@ -916,6 +1329,198 @@ async def dispatch_run_endpoint(req: DispatchRequest) -> DispatchResult:
         issue_number=req.issue_number,
         trigger_source={"kind": "glimmung_ui"},
         workflow_name=req.workflow,
+    )
+
+
+# ─── PR view + reject signal (#19) ────────────────────────────────────────────
+
+
+class PrRow(BaseModel):
+    """One row in the PR view: an agent-opened PR linked to a Run."""
+    project: str
+    repo: str
+    pr_number: int
+    pr_branch: str | None = None
+    issue_number: int
+    run_id: str
+    run_state: str       # "in_progress" | "passed" | "aborted"
+    run_attempts: int
+    run_cumulative_cost_usd: float
+    pr_lock_held: bool = False  # triage in flight
+
+
+class PrDetail(BaseModel):
+    project: str
+    repo: str
+    pr_number: int
+    pr_branch: str | None = None
+    issue_number: int
+    issue_title: str | None = None
+    pr_title: str | None = None
+    pr_body: str | None = None
+    pr_html_url: str | None = None
+    run_id: str
+    run_state: str
+    run_attempts: int
+    run_cumulative_cost_usd: float
+    run_attempt_history: list[dict[str, Any]] = Field(default_factory=list)
+    pr_lock_held: bool = False
+
+
+@app.get(
+    "/v1/prs",
+    response_model=list[PrRow],
+    dependencies=[Depends(require_admin_user)],
+)
+async def list_prs() -> list[PrRow]:
+    """Agent-opened PRs across registered repos. Sourced from the
+    `runs` container — each Run with `pr_number` set has a row.
+    Multiple Runs on the same PR (rare) collapse to the most recent."""
+    cosmos: Cosmos = app.state.cosmos
+    docs = await query_all(
+        cosmos.runs,
+        "SELECT * FROM c WHERE IS_DEFINED(c.pr_number) AND c.pr_number != null",
+    )
+    rows: list[PrRow] = []
+    seen: set[tuple[str, int]] = set()
+    docs.sort(key=lambda d: d.get("created_at", ""), reverse=True)
+    for d in docs:
+        repo = d.get("issue_repo") or ""
+        pr_num = d.get("pr_number")
+        if not repo or pr_num is None:
+            continue
+        if (repo, pr_num) in seen:
+            continue
+        seen.add((repo, pr_num))
+
+        existing_lock = await lock_ops.read_lock(
+            cosmos, scope="pr", key=f"{repo}#{pr_num}",
+        )
+        held = (
+            existing_lock is not None
+            and existing_lock.state.value == "held"
+            and existing_lock.expires_at > datetime.now(UTC)
+        )
+        rows.append(PrRow(
+            project=d.get("project") or "",
+            repo=repo,
+            pr_number=int(pr_num),
+            pr_branch=d.get("pr_branch"),
+            issue_number=int(d.get("issue_number") or 0),
+            run_id=d.get("id") or "",
+            run_state=d.get("state") or "",
+            run_attempts=len(d.get("attempts") or []),
+            run_cumulative_cost_usd=float(d.get("cumulative_cost_usd") or 0.0),
+            pr_lock_held=held,
+        ))
+    return rows
+
+
+@app.get(
+    "/v1/prs/{repo_owner}/{repo_name}/{pr_number}",
+    response_model=PrDetail,
+    dependencies=[Depends(require_admin_user)],
+)
+async def pr_detail(
+    repo_owner: str = Path(...),
+    repo_name: str = Path(...),
+    pr_number: int = Path(...),
+) -> PrDetail:
+    """PR detail view. Pulls the Run state from Cosmos plus the PR
+    metadata (title, body, html_url) live from the GH API."""
+    cosmos: Cosmos = app.state.cosmos
+    minter: GitHubAppTokenMinter | None = app.state.gh_minter
+    repo = f"{repo_owner}/{repo_name}"
+
+    lookup = await run_ops.find_run_by_pr(
+        cosmos, issue_repo=repo, pr_number=pr_number,
+    )
+    if lookup is None:
+        raise HTTPException(404, f"no run linked to {repo}#{pr_number}")
+    run, _ = lookup
+
+    pr_title: str | None = None
+    pr_body: str | None = None
+    pr_html_url: str | None = None
+    if minter is not None:
+        try:
+            from glimmung.github_app import get_issue as _get_issue
+            pr = await _get_issue(minter, repo=repo, issue_number=pr_number)
+            pr_title = str(pr.get("title", ""))
+            pr_body = str(pr.get("body") or "")
+            pr_html_url = str(pr.get("html_url", ""))
+        except Exception:
+            log.exception("pr_detail: failed to fetch PR metadata for %s#%d", repo, pr_number)
+
+    issue_title: str | None = None
+    if minter is not None:
+        try:
+            from glimmung.github_app import get_issue as _get_issue
+            issue = await _get_issue(minter, repo=repo, issue_number=run.issue_number)
+            issue_title = str(issue.get("title", ""))
+        except Exception:
+            pass
+
+    existing_lock = await lock_ops.read_lock(
+        cosmos, scope="pr", key=f"{repo}#{pr_number}",
+    )
+    held = (
+        existing_lock is not None
+        and existing_lock.state.value == "held"
+        and existing_lock.expires_at > datetime.now(UTC)
+    )
+
+    history = []
+    for a in run.attempts:
+        history.append({
+            "attempt_index": a.attempt_index,
+            "phase": a.phase.value,
+            "workflow_filename": a.workflow_filename,
+            "workflow_run_id": a.workflow_run_id,
+            "dispatched_at": a.dispatched_at.isoformat(),
+            "completed_at": a.completed_at.isoformat() if a.completed_at else None,
+            "verification_status": a.verification.status.value if a.verification else None,
+            "decision": a.decision,
+        })
+
+    return PrDetail(
+        project=run.project,
+        repo=repo,
+        pr_number=pr_number,
+        pr_branch=run.pr_branch,
+        issue_number=run.issue_number,
+        issue_title=issue_title,
+        pr_title=pr_title,
+        pr_body=pr_body,
+        pr_html_url=pr_html_url,
+        run_id=run.id,
+        run_state=run.state.value,
+        run_attempts=len(run.attempts),
+        run_cumulative_cost_usd=run.cumulative_cost_usd,
+        run_attempt_history=history,
+        pr_lock_held=held,
+    )
+
+
+@app.post(
+    "/v1/signals",
+    response_model=Signal,
+    dependencies=[Depends(require_admin_user)],
+)
+async def enqueue_signal_endpoint(req: SignalEnqueueRequest) -> Signal:
+    """Enqueue a Signal for the drain loop. Used by the UI reject
+    button (POST `{target_type: pr, target_repo, target_id, source:
+    glimmung_ui, payload: {kind: "reject", feedback: "..."}}`).
+
+    Future trigger sources (CLI, scheduled re-runs) hit this same
+    endpoint."""
+    return await signal_ops.enqueue_signal(
+        app.state.cosmos,
+        target_type=req.target_type,
+        target_repo=req.target_repo,
+        target_id=req.target_id,
+        source=req.source,
+        payload=req.payload,
     )
 
 

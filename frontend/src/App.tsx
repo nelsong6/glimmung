@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { AdminPanel } from "./AdminPanel";
 import { IssuesView } from "./IssuesView";
+import { PrsView } from "./PrsView";
 import { currentAccount, initAuth, signIn, signOut } from "./auth";
 import type { AccountInfo } from "@azure/msal-browser";
 
@@ -63,7 +64,7 @@ type Selection =
   | { kind: "project"; project: string }
   | { kind: "workflow"; project: string; workflow: string };
 
-type ViewMode = "capacity" | "issues";
+type ViewMode = "capacity" | "issues" | "prs";
 
 const ALL: Selection = { kind: "all" };
 
@@ -250,9 +251,17 @@ export function App() {
               type="button"
               className={`link ${viewMode === "issues" ? "selected" : ""}`}
               onClick={() => setViewMode("issues")}
-              style={{ marginRight: "1rem" }}
+              style={{ marginRight: "0.5rem" }}
             >
               issues
+            </button>
+            <button
+              type="button"
+              className={`link ${viewMode === "prs" ? "selected" : ""}`}
+              onClick={() => setViewMode("prs")}
+              style={{ marginRight: "1rem" }}
+            >
+              prs
             </button>
             {!authReady ? null : account ? (
               <>
@@ -296,6 +305,8 @@ export function App() {
 
         {viewMode === "issues" ? (
           <IssuesView signedIn={!!account} />
+        ) : viewMode === "prs" ? (
+          <PrsView signedIn={!!account} />
         ) : (
           <CapacityView
             snap={snap}

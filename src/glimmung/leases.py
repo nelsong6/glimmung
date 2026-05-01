@@ -269,6 +269,7 @@ def _camel_to_snake(d: dict[str, Any]) -> dict[str, Any]:
         "triggerLabel": "trigger_label",
         "defaultRequirements": "default_requirements",
         "retryWorkflowFilename": "retry_workflow_filename",
+        "triageWorkflowFilename": "triage_workflow_filename",
         "defaultBudget": "default_budget",
     }
     out: dict[str, Any] = {}

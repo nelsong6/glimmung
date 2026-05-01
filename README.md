@@ -68,6 +68,9 @@ Dockerfile            # multi-stage: node frontend build → python backend
 | GET    | `/v1/issues`                      | List open issues across all registered repos (live GH API). |
 | GET    | `/v1/issues/{owner}/{repo}/{n}`   | Issue detail (title, body, labels, last-run, lock state). |
 | POST   | `/v1/runs/dispatch`               | UI-initiated dispatch (`{repo, issue_number, workflow?}`). Same path as the label-webhook trigger; per-issue lock-serialized. |
+| GET    | `/v1/prs`                         | Agent-opened PRs across registered repos (linked Run + state). |
+| GET    | `/v1/prs/{owner}/{repo}/{n}`      | PR detail with attempt history + reject feedback surface. |
+| POST   | `/v1/signals`                     | Enqueue a Signal (e.g., `{target_type:"pr", target_repo, target_id, source:"glimmung_ui", payload:{kind:"reject", feedback:"…"}}`). UI reject button uses this. |
 
 Admin endpoints accept **either** auth path:
 
@@ -102,7 +105,7 @@ Lock TTL = `lease_default_ttl_seconds` (4h). Release happens at terminal Run tra
 
 ## Storage
 
-Cosmos DB NoSQL on the shared `infra-cosmos-serverless` account. Database `glimmung`, six containers (all pre-created by [`tofu/db.tf`](tofu/db.tf)):
+Cosmos DB NoSQL on the shared `infra-cosmos-serverless` account. Database `glimmung`, seven containers (all pre-created by [`tofu/db.tf`](tofu/db.tf)):
 
 - `projects` (partition key `/name`)
 - `workflows` (partition key `/project`)
@@ -110,6 +113,7 @@ Cosmos DB NoSQL on the shared `infra-cosmos-serverless` account. Database `glimm
 - `leases` (partition key `/project`)
 - `runs` (partition key `/project`) — verify-loop run state, see below
 - `locks` (partition key `/scope`) — generic mutual-exclusion primitive, see below
+- `signals` (partition key `/target_repo`) — signal bus for triage / re-entry / future automations, see below
 
 Runtime pod auth via the `infra-shared-identity` workload identity, which has `Cosmos DB Built-in Data Contributor` at the account scope (granted in [`infra-bootstrap/tofu/cosmos-serverless.tf`](https://github.com/nelsong6/infra-bootstrap/blob/main/tofu/cosmos-serverless.tf)). Container clients are obtained via `get_*_client` (no API call); reads/writes use the data-plane permissions. CREATE DATABASE / CREATE CONTAINER is control-plane and runs only via tofu under the app SP.
 
@@ -277,6 +281,39 @@ Deterministic: `f"{scope}::{urllib.parse.quote(key, safe='')}"`. Cosmos forbids 
 ### Test coverage
 
 29 unit tests in [`tests/test_locks.py`](tests/test_locks.py), all backed by the in-memory Cosmos fake at [`tests/cosmos_fake.py`](tests/cosmos_fake.py) so `_etag`/`IfNotModified` semantics + TTL behavior are exercised deterministically.
+
+## Signal bus + PR triage (#19)
+
+A `Signal` is a unit of work for the orchestrator. Webhooks (`pull_request_review`, future `issue_comment` / `pull_request_review_comment`) and the glimmung UI (reject button) enqueue Signals; a background drain loop (`_signal_drain_loop` in [`app.py`](src/glimmung/app.py)) processes them through the per-target lock primitive + triage decision engine.
+
+**Per-PR serialization** is built in: signals on a PR whose lock is held stay PENDING and re-evaluate next tick. Two consecutive reject submissions queue cleanly — the first holds the PR lock through its triage cycle, the second waits.
+
+**Triage decision engine** ([`src/glimmung/triage.py`](src/glimmung/triage.py)) is pure: `decide_triage(signal, run) → TriageDecision`. Outputs:
+
+- `DISPATCH_TRIAGE` — re-open the linked Run, append a TRIAGE PhaseAttempt, claim issue + PR locks, dispatch the consumer's `triage_workflow_filename` with `feedback` as input. The PR lock is held through the triage cycle (including any RETRY decisions within); the `workflow_run.completed` terminal handler releases on PASS / ABORT.
+- `IGNORE` — non-actionable signal (approved review, empty changes-requested body, etc.).
+- `ABORT_NO_RUN` / `ABORT_BUDGET_*` — posts an explanation comment to the PR; lock released immediately.
+
+Decision precedence: no-run → actionability → budget-cost → budget-attempts → DISPATCH_TRIAGE.
+
+**PR↔Run linking** is automatic: `pull_request.opened` / `pull_request.reopened` events whose body matches `Closes #N` / `Fixes #N` / `Resolves #N` link the Run for that issue to the new PR (`Run.pr_number`, `Run.pr_branch`).
+
+### Triage workflow contract
+
+When glimmung dispatches `triage_workflow_filename`, it sets:
+
+| Input | Description |
+|---|---|
+| `lease_id`                            | Fresh lease ID for the triage attempt. |
+| `host`                                | Host the triage was scheduled onto. |
+| `issue_number`                        | Originating issue number. |
+| `pr_number`                           | The PR receiving the feedback. |
+| `run_id`                              | Glimmung Run ULID. |
+| `attempt_index`                       | 0-based attempt index. |
+| `feedback`                            | Human-readable feedback text from the reject signal. |
+| `prior_verification_artifact_url`     | Empty for triage (the prior attempt PASSED to open the PR; no failure context to feed back). |
+
+The triage workflow runs impl + verify with feedback in context, force-pushes the result, and uploads `verification.json` (same contract as retry workflows — see verify-loop substrate).
 
 ## Phases
 
