@@ -109,7 +109,7 @@ class StateSnapshot(BaseModel):
     workflows: list[Workflow] = Field(default_factory=list)
 
 
-# ─── Verify-loop substrate (#18) ───────────────────────────────────
+# ─── Verify-loop substrate (#18) ───────────────────────────────────────
 #
 # A `Run` is the orchestrator's per-issue record. It is created when the
 # issue webhook fires and a workflow with `retry_workflow_filename` set is
@@ -255,7 +255,7 @@ Workflow.model_rebuild()
 WorkflowRegister.model_rebuild()
 
 
-# ─── Lock primitive (W1 substrate) ───────────────────────────────────
+# ─── Lock primitive (W1 substrate) ─────────────────────────────────────────
 #
 # A generic mutual-exclusion primitive. Used by #19's per-PR triage
 # serialization, by #20's per-issue dispatch serialization, by future
@@ -291,7 +291,7 @@ class Lock(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-# ─── Signal bus (#19) ────────────────────────────────────────────
+# ─── Signal bus (#19) ───────────────────────────────────────────────────────
 #
 # A `Signal` is a unit of work for the orchestrator's decision engine.
 # Webhooks (GH PR review, GH issue/PR comment), the glimmung UI (reject
@@ -356,7 +356,7 @@ class SignalEnqueueRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
-# ─── Glimmung-native issues (#28) ──────────────────────────────────
+# ─── Glimmung-native issues (#28) ─────────────────────────────────────────
 #
 # A glimmung Issue is a first-class control-plane object: title, body,
 # labels, lifecycle. Stored in the `issues` Cosmos container, partitioned
@@ -413,7 +413,7 @@ class Issue(BaseModel):
     closed_at: datetime | None = None
 
 
-# ─── Glimmung-native PRs (#41) ────────────────────────────────────────
+# ─── Glimmung-native PRs (#41) ─────────────────────────────────────────────
 #
 # Mirrors the Issue substrate (#28) shape. A PR is the canonical record of
 # a code-change conversation: title/body/state plus the reviews and comments
@@ -487,6 +487,13 @@ class PR(BaseModel):
     html_url: str = ""
     comments: list[PRComment] = Field(default_factory=list)
     reviews: list[PRReview] = Field(default_factory=list)
+    # Cross-substrate linkages (#50). Set by the agent's open-PR step and
+    # by the seed script's `Closes #N` parser; both are explicit IDs so
+    # downstream consumers don't have to re-derive from PR-body text.
+    # Optional because not every PR is agent-opened (manual humans-only
+    # PRs land here from the webhook mirror without a Run / Issue link).
+    linked_issue_id: str | None = None       # glimmung Issue.id (ULID)
+    linked_run_id: str | None = None         # glimmung Run.id (ULID)
     created_at: datetime
     updated_at: datetime
     # CLOSED-with-merge sets both; CLOSED-without-merge leaves them None.

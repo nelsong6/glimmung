@@ -80,13 +80,15 @@ async def create_pr(
     base_ref: str = "main",
     head_sha: str = "",
     html_url: str = "",
+    linked_issue_id: str | None = None,
+    linked_run_id: str | None = None,
 ) -> PR:
     """Mint a new PR in OPEN state. Returns the persisted PR.
 
     `repo` and `number` are GH coords (PRs are inherently a GH concept; see
-    the model banner). The webhook-mirror consumer PR threads them through
-    on `pull_request.opened`. Direct callers (none today, but glimmung-side
-    PR creation is on the long-term roadmap) supply them too."""
+    the model banner). `linked_issue_id` / `linked_run_id` are populated
+    by the agent's open-PR step (#50 slice 4) and by the seed script
+    (#50 slice 5)."""
     now = _now()
     pr = PR(
         id=str(ULID()),
@@ -100,6 +102,8 @@ async def create_pr(
         base_ref=base_ref,
         head_sha=head_sha,
         html_url=html_url,
+        linked_issue_id=linked_issue_id,
+        linked_run_id=linked_run_id,
         created_at=now,
         updated_at=now,
     )
@@ -136,6 +140,8 @@ async def update_pr(
     base_ref: str | None = None,
     head_sha: str | None = None,
     html_url: str | None = None,
+    linked_issue_id: str | None = None,
+    linked_run_id: str | None = None,
 ) -> tuple[PR, str]:
     """Patch fields on a PR. `None` means "don't change"; pass an empty
     string to actually clear a field. State transitions (close / merge /
@@ -155,6 +161,10 @@ async def update_pr(
             updates["head_sha"] = head_sha
         if html_url is not None:
             updates["html_url"] = html_url
+        if linked_issue_id is not None:
+            updates["linked_issue_id"] = linked_issue_id or None
+        if linked_run_id is not None:
+            updates["linked_run_id"] = linked_run_id or None
         return p.model_copy(update=updates)
 
     return await _retry_on_conflict(cosmos, pr, etag, apply)
