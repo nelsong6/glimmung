@@ -82,3 +82,25 @@ async def dispatch_workflow(
             json={"ref": ref, "inputs": inputs},
         )
         r.raise_for_status()
+
+
+async def post_issue_comment(
+    minter: GitHubAppTokenMinter,
+    *,
+    repo: str,
+    issue_number: int,
+    body: str,
+) -> None:
+    """POST /repos/{repo}/issues/{number}/comments"""
+    token = await minter.installation_token()
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.post(
+            f"https://api.github.com/repos/{repo}/issues/{issue_number}/comments",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            json={"body": body},
+        )
+        r.raise_for_status()

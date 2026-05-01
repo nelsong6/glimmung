@@ -27,6 +27,7 @@ class Cosmos:
         self.workflows: ContainerProxy | None = None
         self.hosts: ContainerProxy | None = None
         self.leases: ContainerProxy | None = None
+        self.runs: ContainerProxy | None = None
 
     async def start(self) -> None:
         # Database + containers are pre-created by tofu/ (per-app pattern,
@@ -42,7 +43,8 @@ class Cosmos:
         self.workflows = self._db.get_container_client("workflows")
         self.hosts = self._db.get_container_client("hosts")
         self.leases = self._db.get_container_client("leases")
-        log.info("cosmos clients ready: projects, workflows, hosts, leases")
+        self.runs = self._db.get_container_client("runs")
+        log.info("cosmos clients ready: projects, workflows, hosts, leases, runs")
 
     async def stop(self) -> None:
         if self._client is not None:

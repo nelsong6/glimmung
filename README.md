@@ -83,17 +83,18 @@ The handler:
 
 1. Verifies `X-Hub-Signature-256` against `GITHUB_WEBHOOK_SECRET`.
 2. **`issues`** → look up project by `repository.full_name`, find the workflow whose `trigger_label` matches (action=labeled with that label, or action=opened/reopened with the label already on the issue), atomic-acquire a host via optimistic CAS on `_etag`, fire `workflow_dispatch` with `{lease_id, host, issue_number, ...}`.
-3. **`workflow_run.completed`** → pull lease_id back out of `workflow_run.inputs`, look up project by repo, call `release()`. Belt-and-suspenders alongside any in-workflow release step. Idempotent.
+3. **`workflow_run.completed`** → pull lease_id back out of `workflow_run.inputs`, look up project by repo, call `release()`. If the originating workflow opted into the verify-loop substrate (see below), also fetch the verification artifact, run the decision engine, and either dispatch the retry workflow or abort with an issue comment. Belt-and-suspenders alongside any in-workflow release step. Idempotent.
 4. Other events → ignore.
 
 ## Storage
 
-Cosmos DB NoSQL on the shared `infra-cosmos-serverless` account. Database `glimmung`, four containers (all pre-created by [`tofu/db.tf`](tofu/db.tf)):
+Cosmos DB NoSQL on the shared `infra-cosmos-serverless` account. Database `glimmung`, five containers (all pre-created by [`tofu/db.tf`](tofu/db.tf)):
 
 - `projects` (partition key `/name`)
 - `workflows` (partition key `/project`)
 - `hosts` (partition key `/name`)
 - `leases` (partition key `/project`)
+- `runs` (partition key `/project`) — verify-loop run state, see below
 
 Runtime pod auth via the `infra-shared-identity` workload identity, which has `Cosmos DB Built-in Data Contributor` at the account scope (granted in [`infra-bootstrap/tofu/cosmos-serverless.tf`](https://github.com/nelsong6/infra-bootstrap/blob/main/tofu/cosmos-serverless.tf)). Container clients are obtained via `get_*_client` (no API call); reads/writes use the data-plane permissions. CREATE DATABASE / CREATE CONTAINER is control-plane and runs only via tofu under the app SP.
 
@@ -151,6 +152,88 @@ For the frontend:
 cd frontend && npm install && npm run dev
 # proxies /v1/* to localhost:8000
 ```
+
+## Verify-loop substrate (#18)
+
+Glimmung-as-orchestrator wedge: when a verify phase fails, glimmung re-dispatches an implementation phase with the prior verification artifact as additional context, repeating until verification passes, attempt count exceeds N, or cumulative cost exceeds $X. The substrate that lands here is reused by every other [meta #17](https://github.com/nelsong6/glimmung/issues/17) child.
+
+### Opting a workflow in
+
+Register the workflow with `retry_workflow_filename` set:
+
+```sh
+curl -X POST https://glimmung.romaine.life/v1/workflows \
+  -H "Authorization: Bearer $(az account get-access-token --resource <client-id> -o tsv --query accessToken)" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "project": "spirelens",
+    "name": "issue-agent",
+    "workflow_filename": "issue-agent.yml",
+    "retry_workflow_filename": "agent-retry.yml",
+    "trigger_label": "agent-run",
+    "default_budget": {"max_attempts": 3, "max_cost_usd": 25.0}
+  }'
+```
+
+Workflows without `retry_workflow_filename` keep the pre-#18 fire-and-forget behavior unchanged (no Run record, no decision engine, no retry path).
+
+### Per-issue budget overrides
+
+Apply an `agent-budget:NxM` label to the issue (`N` = max_attempts, `M` = max_cost_usd in USD). Examples:
+
+- `agent-budget:5x50` → 5 attempts, $50 ceiling
+- `agent-budget:1x10` → no retries, $10 ceiling
+
+The budget is **frozen at run-creation time** — relabeling mid-run does not move the goalposts. Resolution order: issue label → `Workflow.default_budget` → glimmung global default (3 / $25).
+
+### `verification.json` contract
+
+Every consumer workflow that opts into the verify-loop **must** upload a GHA artifact named `verification` containing `verification.json` at its root. The decision engine reads the typed verdict, never the workflow_run conclusion alone. Schema:
+
+```json
+{
+  "schema_version": 1,
+  "status": "pass" | "fail" | "error",
+  "reasons": ["short human-readable strings, one per failure"],
+  "evidence_refs": ["screenshots/01.png", "logs/verify.log"],
+  "cost_usd": 4.20,
+  "prompt_version": "v17",
+  "metadata": {}
+}
+```
+
+`status` semantics:
+
+- `pass` — verification reached a positive verdict; glimmung records `ADVANCE` and the consumer's PR-open step proceeds.
+- `fail` — verification reached a negative verdict; glimmung dispatches the retry workflow if budget allows, otherwise aborts.
+- `error` — verifier itself crashed before reaching a verdict. Treated as a substantive negative verdict (retry up to budget), distinct from a missing artifact.
+
+A missing or schema-invalid artifact is itself a decision input: the engine returns `ABORT_MALFORMED` and posts an issue comment explaining the contract violation. (Retrying the same producer would just reproduce the broken artifact.)
+
+### Retry workflow inputs
+
+When glimmung dispatches the retry workflow, it sets:
+
+| Input | Description |
+|---|---|
+| `lease_id`                            | Fresh lease ID for the retry attempt. |
+| `host`                                | Host the retry was scheduled onto. |
+| `issue_number`                        | Issue under which the run is tracked. |
+| `run_id`                              | Glimmung Run ULID (for log correlation). |
+| `attempt_index`                       | 0-based attempt index (initial=0, first retry=1, …). |
+| `prior_verification_artifact_url`     | GHA Actions API URL of the previous attempt's `verification` artifact. The retry workflow pulls it via its own `GITHUB_TOKEN`; redirect resolves to a short-lived presigned blob. |
+
+### Decision engine
+
+Pure function `decide(run) -> RunDecision` lives in [`src/glimmung/decision.py`](src/glimmung/decision.py). Side effects (artifact fetch, Cosmos updates, workflow dispatch, issue comment) live at the call site in `app.py`. Outputs:
+
+- `ADVANCE` — verification passed; consumer's PR step runs.
+- `RETRY` — dispatch retry workflow with `prior_verification_artifact_url`.
+- `ABORT_BUDGET_ATTEMPTS` — `len(attempts) >= max_attempts`.
+- `ABORT_BUDGET_COST` — `cumulative_cost_usd >= max_cost_usd` (checked first; harder cap).
+- `ABORT_MALFORMED` — verification artifact missing or schema-invalid.
+
+Decision logic and edge-case coverage live in [`tests/test_decision.py`](tests/test_decision.py).
 
 ## Phases
 
