@@ -13,14 +13,19 @@ from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
 from glimmung import leases as lease_ops
+from glimmung import runs as run_ops
 from glimmung.auth import require_admin_user
+from glimmung.budget import resolve_budget
 from glimmung.db import Cosmos, query_all
+from glimmung.decision import abort_explanation, decide
 from glimmung.github_app import (
     GitHubAppTokenMinter,
     dispatch_workflow,
+    post_issue_comment,
     verify_webhook_signature,
 )
 from glimmung.models import (
+    BudgetConfig,
     Host,
     Lease,
     LeaseRequest,
@@ -28,11 +33,14 @@ from glimmung.models import (
     LeaseState,
     Project,
     ProjectRegister,
+    Run,
+    RunDecision,
     StateSnapshot,
     Workflow,
     WorkflowRegister,
 )
 from glimmung.settings import Settings, get_settings
+from glimmung.verification import fetch_verification
 
 log = logging.getLogger(__name__)
 
@@ -135,17 +143,26 @@ async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host
 
 
 async def _handle_workflow_run(payload: dict[str, Any]) -> dict[str, Any]:
-    """Belt-and-suspenders release path: when a workflow run finishes for any
-    reason (success, failure, cancelled, runner died), GitHub fires
-    workflow_run.completed. We pull our lease_id back out of the dispatch
-    inputs (which we set ourselves at acquire time) and release. release()
-    is idempotent — if the workflow's own release step already fired, this
-    is a no-op."""
+    """workflow_run.completed handler. Two responsibilities:
+
+    1. **Lease release** (belt-and-suspenders). GitHub fires this event when
+       a workflow run finishes for *any* reason (success, failure, cancel,
+       runner died). We pull lease_id back out of the dispatch inputs and
+       release. `release()` is idempotent — if the workflow's own release
+       step already fired, this is a no-op.
+
+    2. **Verify-loop substrate** (#18). If the completed run belongs to a
+       tracked Run (workflow registered with `retry_workflow_filename`),
+       we fetch the verification artifact, record the attempt, run the
+       decision engine, and either dispatch the retry workflow or abort
+       with an issue comment. The lease release in (1) still happens —
+       the retry dispatch acquires its *own* lease.
+    """
     if payload.get("action") != "completed":
         return {"ignored": f"workflow_run.{payload.get('action')}"}
 
-    run = payload.get("workflow_run") or {}
-    inputs = run.get("inputs") or {}
+    run_data = payload.get("workflow_run") or {}
+    inputs = run_data.get("inputs") or {}
     lease_id = inputs.get("lease_id")
     if not lease_id:
         return {"ignored": "no lease_id in inputs"}
@@ -161,12 +178,187 @@ async def _handle_workflow_run(payload: dict[str, Any]) -> dict[str, Any]:
         return {"ignored": "no project for repo"}
     project = matching[0]["name"]
 
+    result: dict[str, Any] = {}
+
+    # (1) Lease release — always.
     try:
         released = await lease_ops.release(cosmos, lease_id, project)
-        return {"released": lease_id, "state": released.state.value}
+        result["released"] = lease_id
+        result["lease_state"] = released.state.value
     except Exception as e:
         log.exception("workflow_run release failed for %s", lease_id)
-        return {"error": str(e), "lease_id": lease_id}
+        result["error"] = str(e)
+        result["lease_id"] = lease_id
+
+    # (2) Verify-loop substrate — only if the completion lines up with an
+    # in-progress Run for this issue.
+    issue_number_raw = inputs.get("issue_number")
+    if issue_number_raw:
+        try:
+            issue_number = int(issue_number_raw)
+        except ValueError:
+            return result
+        run_lookup = await run_ops.get_active_run(
+            cosmos, project=project, issue_number=issue_number,
+        )
+        if run_lookup is not None:
+            run, etag = run_lookup
+            try:
+                run_outcome = await _process_run_completion(
+                    run=run, etag=etag, run_data=run_data, repo=repo,
+                )
+                result["run_id"] = run.id
+                result["decision"] = run_outcome
+            except Exception:
+                log.exception("verify-loop processing failed for run %s", run.id)
+                result["run_error"] = "see logs"
+
+    return result
+
+
+async def _process_run_completion(
+    *,
+    run: Run,
+    etag: str,
+    run_data: dict[str, Any],
+    repo: str,
+) -> str:
+    """Drive a Run from `workflow_run.completed` through one decision-engine
+    cycle. Returns the decision value."""
+    cosmos: Cosmos = app.state.cosmos
+    minter: GitHubAppTokenMinter | None = app.state.gh_minter
+    if minter is None:
+        log.warning("no GH minter; cannot fetch verification artifact for run %s", run.id)
+        return "skipped_no_minter"
+
+    workflow_run_id = int(run_data.get("id") or 0)
+    conclusion = str(run_data.get("conclusion") or "")
+
+    verification_result, archive_url = await fetch_verification(
+        minter, repo=repo, run_id=workflow_run_id,
+    )
+
+    run, etag = await run_ops.record_completion(
+        cosmos,
+        run=run,
+        etag=etag,
+        workflow_run_id=workflow_run_id,
+        conclusion=conclusion,
+        verification=verification_result,
+        artifact_url=archive_url,
+    )
+
+    decision = decide(run)
+    run, etag = await run_ops.record_decision(cosmos, run=run, etag=etag, decision=decision)
+
+    if decision == RunDecision.ADVANCE:
+        await run_ops.mark_passed(cosmos, run=run, etag=etag)
+        log.info("run %s passed verification on attempt %d", run.id, len(run.attempts))
+        return decision.value
+
+    if decision == RunDecision.RETRY:
+        await _dispatch_retry(run=run, etag=etag, repo=repo, archive_url=archive_url)
+        return decision.value
+
+    # Any abort decision.
+    reason = abort_explanation(run, decision)
+    await run_ops.mark_aborted(cosmos, run=run, etag=etag, reason=reason)
+    try:
+        await post_issue_comment(
+            minter, repo=repo, issue_number=run.issue_number, body=reason,
+        )
+    except Exception:
+        log.exception("failed to post abort comment on %s#%d", repo, run.issue_number)
+    return decision.value
+
+
+async def _dispatch_retry(
+    *,
+    run: Run,
+    etag: str,
+    repo: str,
+    archive_url: str | None,
+) -> None:
+    """Dispatch the retry workflow for a Run. Acquires a fresh lease, then
+    fires workflow_dispatch with `prior_verification_artifact_url` set
+    so the retry workflow can pull the previous attempt's verification
+    artifact for context."""
+    cosmos: Cosmos = app.state.cosmos
+    settings: Settings = app.state.settings
+    minter: GitHubAppTokenMinter = app.state.gh_minter
+
+    workflow_doc = await _read_workflow(cosmos, run.project, run.workflow)
+    if not workflow_doc:
+        log.warning("retry: workflow %s/%s vanished; cannot dispatch", run.project, run.workflow)
+        return
+    retry_filename = workflow_doc.get("retryWorkflowFilename") or workflow_doc.get("retry_workflow_filename")
+    if not retry_filename:
+        log.warning(
+            "retry: workflow %s/%s has no retry_workflow_filename; cannot dispatch",
+            run.project, run.workflow,
+        )
+        return
+
+    # Append the retry attempt *before* dispatching so a webhook redelivery
+    # of the previous completion can detect and skip the duplicate decision
+    # cycle (record_completion no-ops on already-completed attempts).
+    run, _ = await run_ops.append_retry_attempt(
+        cosmos, run=run, etag=etag, retry_workflow_filename=retry_filename,
+    )
+
+    # Acquire a fresh lease for the retry. Reuses the workflow's
+    # default_requirements.
+    metadata = {
+        "issue_number": str(run.issue_number),
+        "issue_repo": run.issue_repo,
+        "run_id": run.id,
+        "phase": "retry",
+        "attempt_index": str(len(run.attempts) - 1),
+    }
+    lease, host = await lease_ops.acquire(
+        cosmos,
+        settings,
+        project=run.project,
+        workflow=run.workflow,
+        requirements=workflow_doc.get("defaultRequirements", {}),
+        metadata=metadata,
+    )
+
+    if host is None:
+        # No capacity. The promote_loop will dispatch when a host frees up;
+        # but the retry workflow is a different filename than the initial,
+        # so promote_loop's _maybe_dispatch_workflow won't know to use the
+        # retry filename. For Sprint 1, log and accept — capacity rarely
+        # binds at this scale; full pending-retry handling is W1 followup.
+        log.warning(
+            "retry: no host available for run %s; lease %s pending. "
+            "Manual re-dispatch required (see #18 followup).",
+            run.id, lease.id,
+        )
+        return
+
+    inputs = {
+        "host": host.name,
+        "lease_id": lease.id,
+        "issue_number": str(run.issue_number),
+        "run_id": run.id,
+        "prior_verification_artifact_url": archive_url or "",
+        "attempt_index": str(len(run.attempts) - 1),
+    }
+    try:
+        await dispatch_workflow(
+            minter,
+            repo=repo,
+            workflow_filename=retry_filename,
+            ref=workflow_doc.get("workflowRef") or "main",
+            inputs=inputs,
+        )
+        log.info(
+            "dispatched retry %s on %s for run %s (attempt %d)",
+            retry_filename, host.name, run.id, len(run.attempts) - 1,
+        )
+    except Exception:
+        log.exception("retry workflow_dispatch failed for run %s", run.id)
 
 
 async def _read_project(cosmos: Cosmos, name: str) -> dict[str, Any] | None:
@@ -202,6 +394,8 @@ def _workflow_to_doc(w: WorkflowRegister) -> dict[str, Any]:
         "workflowRef": w.workflow_ref,
         "triggerLabel": w.trigger_label,
         "defaultRequirements": w.default_requirements,
+        "retryWorkflowFilename": w.retry_workflow_filename,
+        "defaultBudget": w.default_budget.model_dump() if w.default_budget else None,
         "createdAt": datetime.now(UTC).isoformat(),
     }
 
@@ -487,12 +681,61 @@ async def github_webhook(request: Request) -> dict[str, Any]:
             host,
         )
 
+    # Verify-loop substrate (#18): if the matched workflow opts in
+    # (retry_workflow_filename set), record a Run so the
+    # workflow_run.completed handler can drive the decision engine.
+    # Workflows without retry config keep the pre-#18 fire-and-forget
+    # behavior — no Run, no decision engine, no retry path.
+    run_id: str | None = None
+    retry_filename = matched_workflow.get("retryWorkflowFilename") or ""
+    issue_number_raw = issue.get("number")
+    if retry_filename and issue_number_raw is not None:
+        budget = resolve_budget(
+            label_names,
+            _budget_from_doc(matched_workflow.get("defaultBudget")),
+        )
+        existing_run = await run_ops.get_active_run(
+            cosmos, project=project_name, issue_number=int(issue_number_raw),
+        )
+        if existing_run is not None:
+            # Re-label or reopened-with-label — there's already an active
+            # run. Don't double-track. Log + leave the existing run alone;
+            # the user can abort it (close the issue) if they want a fresh
+            # run.
+            log.info(
+                "issues webhook: %s/%d already has active run %s; not creating another",
+                project_name, int(issue_number_raw), existing_run[0].id,
+            )
+            run_id = existing_run[0].id
+        else:
+            run = await run_ops.create_run(
+                cosmos,
+                project=project_name,
+                workflow=matched_workflow["name"],
+                issue_repo=repo,
+                issue_number=int(issue_number_raw),
+                budget=budget,
+                initial_workflow_filename=matched_workflow["workflowFilename"],
+            )
+            run_id = run.id
+
     return {
         "lease_id": lease.id,
         "state": lease.state.value,
         "host": host.name if host else None,
         "workflow": matched_workflow["name"],
+        "run_id": run_id,
     }
+
+
+def _budget_from_doc(doc: dict[str, Any] | None) -> BudgetConfig | None:
+    """Decode the camelCase Cosmos representation back into BudgetConfig."""
+    if not doc:
+        return None
+    return BudgetConfig(
+        max_attempts=int(doc.get("max_attempts", doc.get("maxAttempts", 3))),
+        max_cost_usd=float(doc.get("max_cost_usd", doc.get("maxCostUsd", 25.0))),
+    )
 
 
 # ─── Static frontend ──────────────────────────────────────────────────────────
