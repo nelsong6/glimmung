@@ -65,6 +65,9 @@ Dockerfile            # multi-stage: node frontend build → python backend
 | POST   | `/v1/workflows`                   | Register/upsert a workflow under a project. |
 | GET    | `/v1/workflows`                   | List workflows. |
 | POST   | `/v1/hosts`                       | Register/update a host. |
+| GET    | `/v1/issues`                      | List open issues across all registered repos (live GH API). |
+| GET    | `/v1/issues/{owner}/{repo}/{n}`   | Issue detail (title, body, labels, last-run, lock state). |
+| POST   | `/v1/runs/dispatch`               | UI-initiated dispatch (`{repo, issue_number, workflow?}`). Same path as the label-webhook trigger; per-issue lock-serialized. |
 
 Admin endpoints accept **either** auth path:
 
@@ -82,9 +85,20 @@ The two paths are routed by the unverified `iss` claim — Microsoft issuer vs. 
 The handler:
 
 1. Verifies `X-Hub-Signature-256` against `GITHUB_WEBHOOK_SECRET`.
-2. **`issues`** → look up project by `repository.full_name`, find the workflow whose `trigger_label` matches (action=labeled with that label, or action=opened/reopened with the label already on the issue), atomic-acquire a host via optimistic CAS on `_etag`, fire `workflow_dispatch` with `{lease_id, host, issue_number, ...}`.
-3. **`workflow_run.completed`** → pull lease_id back out of `workflow_run.inputs`, look up project by repo, call `release()`. If the originating workflow opted into the verify-loop substrate (see below), also fetch the verification artifact, run the decision engine, and either dispatch the retry workflow or abort with an issue comment. Belt-and-suspenders alongside any in-workflow release step. Idempotent.
+2. **`issues`** → match the workflow whose `trigger_label` fires for this event, then route through `dispatch_run` (see below). The label-trigger path is preserved for backward compatibility, but labels are no longer the dispatch primitive — UI dispatch is also a first-class trigger source.
+3. **`workflow_run.completed`** → pull lease_id back out of `workflow_run.inputs`, look up project by repo, call `release()`. If the originating workflow opted into the verify-loop substrate (see below), also fetch the verification artifact, run the decision engine, and either dispatch the retry workflow or abort with an issue comment. On terminal Run transitions (PASS / ABORT) or non-Run-tracked completions, also releases the per-issue lock claimed by `dispatch_run`. Belt-and-suspenders alongside any in-workflow release step. Idempotent.
 4. Other events → ignore.
+
+### Unified dispatch (`dispatch_run`)
+
+Both the GH webhook and the UI's `POST /v1/runs/dispatch` route through one function in [`src/glimmung/dispatch.py`](src/glimmung/dispatch.py). It:
+
+1. Resolves project (by `github_repo`) and workflow (explicit param, or the project's only registered one).
+2. Claims the `("issue", "<repo>#<number>")` lock — concurrent dispatches on the same issue serialize cleanly; the second sees `state="already_running"` without acquiring a lease or firing `workflow_dispatch`.
+3. Acquires a lease + fires `workflow_dispatch` (or returns `state="pending"` if no host capacity).
+4. Creates a `Run` record if the workflow opts into the verify-loop substrate (`retry_workflow_filename` set), with `trigger_source` recorded for W6 observability.
+
+Lock TTL = `lease_default_ttl_seconds` (4h). Release happens at terminal Run transition (PASS / ABORT) for verify-loop workflows, or at lease release for non-Run-tracked workflows. Lock + lease both expire via TTL/sweep if `workflow_run.completed` never fires.
 
 ## Storage
 

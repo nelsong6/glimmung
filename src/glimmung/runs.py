@@ -51,11 +51,22 @@ async def create_run(
     issue_number: int,
     budget: BudgetConfig,
     initial_workflow_filename: str,
+    issue_lock_holder_id: str | None = None,
+    trigger_source: dict[str, Any] | None = None,
 ) -> Run:
     """Create a Run record at initial dispatch time. Records the first
     PhaseAttempt as INITIAL with `dispatched_at = now`. The attempt
     is completed later via `record_completion` when the
-    workflow_run.completed webhook arrives."""
+    workflow_run.completed webhook arrives.
+
+    `issue_lock_holder_id` is the holder of the per-issue serialization
+    lock claimed by `dispatch_run`. The terminal-state handler in
+    `app._handle_workflow_run` reads it and releases the lock when the
+    Run reaches PASSED or ABORTED. Optional because pre-#20 dispatch
+    paths don't claim the lock.
+
+    `trigger_source` is a free-form record of why this run started — for
+    W6 observability and audit. Not consumed by the decision engine."""
     now = _now()
     run = Run(
         id=str(ULID()),
@@ -74,14 +85,17 @@ async def create_run(
             )
         ],
         cumulative_cost_usd=0.0,
+        issue_lock_holder_id=issue_lock_holder_id,
+        trigger_source=trigger_source,
         created_at=now,
         updated_at=now,
     )
     await cosmos.runs.create_item(run.model_dump(mode="json"))
     log.info(
-        "created run %s for %s/issues/%d (workflow=%s budget=%dx$%.2f)",
+        "created run %s for %s/issues/%d (workflow=%s budget=%dx$%.2f trigger=%s)",
         run.id, issue_repo, issue_number, workflow,
         budget.max_attempts, budget.max_cost_usd,
+        (trigger_source or {}).get("kind", "unspecified"),
     )
     return run
 
@@ -117,6 +131,28 @@ async def get_active_run(
         project_docs.sort(key=lambda d: d.get("updated_at", ""), reverse=True)
     doc = project_docs[0]
     return Run.model_validate(_strip_meta(doc)), doc["_etag"]
+
+
+async def get_latest_run(
+    cosmos: Cosmos,
+    *,
+    project: str,
+    issue_number: int,
+) -> Run | None:
+    """Most recent Run on an issue regardless of state. Used by the
+    Issues view to show last-run status alongside each open issue."""
+    docs = await query_all(
+        cosmos.runs,
+        "SELECT * FROM c WHERE c.project = @p AND c.issue_number = @n",
+        parameters=[
+            {"name": "@p", "value": project},
+            {"name": "@n", "value": issue_number},
+        ],
+    )
+    if not docs:
+        return None
+    docs.sort(key=lambda d: d.get("created_at", ""), reverse=True)
+    return Run.model_validate(_strip_meta(docs[0]))
 
 
 async def find_run_by_workflow_run(

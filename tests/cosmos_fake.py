@@ -180,34 +180,87 @@ def _evaluate_query(
     return rows
 
 
-def _evaluate_where(where: str, row: dict[str, Any], params: dict[str, Any]) -> bool:
-    # Split on top-level AND / OR. Parens not supported; we don't use them.
-    parts = re.split(r"\s+(AND|OR)\s+", where, flags=re.IGNORECASE)
-    # parts: [cond1, "AND"/"OR", cond2, ...]
-    if len(parts) == 1:
-        return _evaluate_cond(parts[0], row, params)
+def _split_top_level(expr: str, *ops: str) -> list[str]:
+    """Split `expr` on top-level boundary tokens (any of `ops`, case-insensitive),
+    respecting parentheses depth. Returns interleaved [piece, op, piece, op, ...]."""
+    pieces: list[str] = []
+    depth = 0
+    i = 0
+    last = 0
+    upper = expr.upper()
+    while i < len(expr):
+        c = expr[i]
+        if c == "(":
+            depth += 1
+            i += 1
+            continue
+        if c == ")":
+            depth -= 1
+            i += 1
+            continue
+        if depth == 0 and c.isspace():
+            for op in ops:
+                op_u = op.upper()
+                # boundary check: surrounded by whitespace / start / end
+                end = i + 1 + len(op_u)
+                if (upper[i + 1: end] == op_u
+                        and (end == len(expr) or expr[end].isspace())):
+                    pieces.append(expr[last:i].strip())
+                    pieces.append(op_u)
+                    i = end
+                    last = i
+                    break
+            else:
+                i += 1
+                continue
+            continue
+        i += 1
+    pieces.append(expr[last:].strip())
+    return pieces
 
-    result = _evaluate_cond(parts[0], row, params)
-    i = 1
-    while i < len(parts):
-        op = parts[i].upper()
-        rhs = _evaluate_cond(parts[i + 1], row, params)
-        if op == "AND":
-            result = result and rhs
-        elif op == "OR":
-            result = result or rhs
-        else:
-            raise NotImplementedError(f"unsupported boolean op: {op!r}")
-        i += 2
-    return result
+
+def _evaluate_where(where: str, row: dict[str, Any], params: dict[str, Any]) -> bool:
+    # AND binds tighter than OR; split on OR first, each disjunct splits on AND.
+    or_parts = _split_top_level(where, "OR")
+    if len(or_parts) > 1:
+        # _split_top_level returns [piece, "OR", piece, "OR", ...]
+        for i in range(0, len(or_parts), 2):
+            if _evaluate_where(or_parts[i], row, params):
+                return True
+        return False
+
+    and_parts = _split_top_level(where, "AND")
+    if len(and_parts) > 1:
+        for i in range(0, len(and_parts), 2):
+            if not _evaluate_where(and_parts[i], row, params):
+                return False
+        return True
+
+    return _evaluate_cond(where, row, params)
 
 
 def _evaluate_cond(cond: str, row: dict[str, Any], params: dict[str, Any]) -> bool:
     cond = cond.strip()
 
-    # Strip surrounding parens
+    # Strip surrounding parens (recursively, in case of nested redundant ones)
     while cond.startswith("(") and cond.endswith(")"):
+        # Check that the parens are matched (not just outer-incidental ones)
+        depth = 0
+        outer = True
+        for i, c in enumerate(cond):
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0 and i < len(cond) - 1:
+                    outer = False
+                    break
+        if not outer:
+            break
         cond = cond[1:-1].strip()
+        # If the result has top-level AND/OR, recurse into _evaluate_where
+        if _split_top_level(cond, "AND", "OR").__len__() > 1:
+            return _evaluate_where(cond, row, params)
 
     # IS_DEFINED(c.field)
     m = re.match(r"^IS_DEFINED\(c\.(\w+)\)$", cond, re.IGNORECASE)
