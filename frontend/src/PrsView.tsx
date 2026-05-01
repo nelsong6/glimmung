@@ -1,23 +1,31 @@
 /**
- * PRs view (#19) — agent-opened PRs across registered repos. Each row
- * links to the PR's detail view, where the reject-with-feedback action
- * lives.
+ * PRs view — open PRs across registered repos. Each row links to the
+ * PR's detail view, where the reject-with-feedback action lives.
  *
- * Sourced from `/v1/prs` (queries the runs container for any Run with
- * `pr_number` set). Refresh on mount + manual refresh button.
+ * Post-#50: sourced from `/v1/prs` which reads the glimmung `prs`
+ * container directly. Rows include both agent-opened PRs (carry a
+ * linked Run) and manual PRs (no run linkage). Refresh on mount +
+ * manual refresh button.
  */
 import { useEffect, useState } from "react";
 import { authedFetch } from "./auth";
 import { PrDetailView } from "./PrDetailView";
 
 type PrRow = {
+  id: string;
   project: string;
   repo: string;
   pr_number: number;
   pr_branch: string | null;
-  issue_number: number;
-  run_id: string;
-  run_state: string;
+  title: string;
+  state: string;
+  merged: boolean;
+  html_url: string | null;
+  linked_issue_id: string | null;
+  linked_run_id: string | null;
+  issue_number: number | null;
+  run_id: string | null;
+  run_state: string | null;
   run_attempts: number;
   run_cumulative_cost_usd: number;
   pr_lock_held: boolean;
@@ -88,7 +96,7 @@ export function PrsView({
   return (
     <>
       <h2>
-        Agent-opened PRs{visibleRows ? ` (${visibleRows.length})` : ""}
+        Open PRs{visibleRows ? ` (${visibleRows.length})` : ""}
         {projectFilter && (
           <span className="filter-hint"> — filtered to {projectFilter}</span>
         )}
@@ -108,8 +116,8 @@ export function PrsView({
       ) : visibleRows && visibleRows.length === 0 ? (
         <div className="empty">
           {projectFilter
-            ? `No agent-opened PRs for ${projectFilter}.`
-            : "No agent-opened PRs yet."}
+            ? `No open PRs for ${projectFilter}.`
+            : "No open PRs yet."}
         </div>
       ) : visibleRows ? (
         <table>
@@ -117,6 +125,7 @@ export function PrsView({
             <tr>
               <th>Project</th>
               <th>PR</th>
+              <th>Title</th>
               <th>Issue</th>
               <th>Run state</th>
               <th>Attempts</th>
@@ -127,7 +136,7 @@ export function PrsView({
           <tbody>
             {visibleRows.map((row) => (
               <tr
-                key={`${row.repo}#${row.pr_number}`}
+                key={row.id}
                 className={row.pr_lock_held ? "eligible" : ""}
                 onClick={() =>
                   setSelected({ repo: row.repo, pr_number: row.pr_number })
@@ -138,14 +147,25 @@ export function PrsView({
                 <td className="mono">
                   {row.repo}#{row.pr_number}
                 </td>
-                <td className="mono dim">#{row.issue_number}</td>
-                <td>
-                  <span className={`pill ${runStatePill(row.run_state)}`}>
-                    {row.run_state}
-                  </span>
+                <td>{row.title || <span className="dim">—</span>}</td>
+                <td className="mono dim">
+                  {row.issue_number !== null ? `#${row.issue_number}` : "—"}
                 </td>
-                <td className="mono dim">{row.run_attempts}</td>
-                <td className="mono dim">${row.run_cumulative_cost_usd.toFixed(2)}</td>
+                <td>
+                  {row.run_state ? (
+                    <span className={`pill ${runStatePill(row.run_state)}`}>
+                      {row.run_state}
+                    </span>
+                  ) : (
+                    <span className="dim">manual</span>
+                  )}
+                </td>
+                <td className="mono dim">{row.run_attempts || "—"}</td>
+                <td className="mono dim">
+                  {row.run_cumulative_cost_usd
+                    ? `$${row.run_cumulative_cost_usd.toFixed(2)}`
+                    : "—"}
+                </td>
                 <td>
                   {row.pr_lock_held ? (
                     <span className="pill busy">in flight</span>

@@ -1,29 +1,40 @@
 /**
- * PR detail view (#19) — reject-with-feedback action lives here.
+ * PR detail view — reject-with-feedback action lives here.
  *
- * Sourced from `/v1/prs/{owner}/{repo}/{number}`. Submit POSTs a
- * `glimmung_ui` reject signal; the drain loop processes it through the
- * triage decision engine and (if budget allows) dispatches the triage
- * workflow with the feedback as context.
+ * Post-#50: PR meta (title/body/state) sourced from the glimmung `prs`
+ * container; runtime fields (run_state, attempt history) come from the
+ * linked Run when one exists. Submit POSTs a `glimmung_ui` reject
+ * signal; the drain loop processes it through the triage decision
+ * engine and (if budget allows) dispatches the triage workflow with
+ * the feedback as context.
  */
 import { useEffect, useState } from "react";
 import { authedFetch } from "./auth";
 
 type PrDetail = {
+  id: string;
   project: string;
   repo: string;
   pr_number: number;
   pr_branch: string | null;
-  issue_number: number;
+  title: string;
+  body: string;
+  state: string;
+  merged: boolean;
+  base_ref: string;
+  head_sha: string;
+  html_url: string | null;
+  linked_issue_id: string | null;
+  linked_run_id: string | null;
+  issue_number: number | null;
   issue_title: string | null;
-  pr_title: string | null;
-  pr_body: string | null;
-  pr_html_url: string | null;
-  run_id: string;
-  run_state: string;
+  run_id: string | null;
+  run_state: string | null;
   run_attempts: number;
   run_cumulative_cost_usd: number;
   run_attempt_history: AttemptHistoryEntry[];
+  comments: unknown[];
+  reviews: unknown[];
   pr_lock_held: boolean;
 };
 
@@ -122,41 +133,74 @@ export function PrDetailView({
             <div className="row">
               <span className="key">title</span>
               <span className="val">
-                {detail.pr_html_url ? (
-                  <a href={detail.pr_html_url} target="_blank" rel="noreferrer">
-                    {detail.pr_title || `(no title)`}
+                {detail.html_url ? (
+                  <a href={detail.html_url} target="_blank" rel="noreferrer">
+                    {detail.title || `(no title)`}
                   </a>
                 ) : (
-                  detail.pr_title || "(no title)"
+                  detail.title || "(no title)"
                 )}
+              </span>
+            </div>
+            <div className="row">
+              <span className="key">state</span>
+              <span className="val mono">
+                {detail.merged ? "merged" : detail.state}
               </span>
             </div>
             <div className="row">
               <span className="key">issue</span>
               <span className="val mono">
-                #{detail.issue_number} {detail.issue_title ? `— ${detail.issue_title}` : ""}
+                {detail.issue_number !== null
+                  ? `#${detail.issue_number}${detail.issue_title ? ` — ${detail.issue_title}` : ""}`
+                  : "—"}
               </span>
             </div>
             <div className="row">
               <span className="key">branch</span>
-              <span className="val mono">{detail.pr_branch ?? "—"}</span>
+              <span className="val mono">
+                {detail.pr_branch ?? "—"}{detail.base_ref ? ` → ${detail.base_ref}` : ""}
+              </span>
             </div>
             <div className="row">
               <span className="key">run state</span>
               <span className="val">
-                <span className={`pill ${runStatePill(detail.run_state)}`}>{detail.run_state}</span>
+                {detail.run_state ? (
+                  <span className={`pill ${runStatePill(detail.run_state)}`}>{detail.run_state}</span>
+                ) : (
+                  <span className="dim">no agent run</span>
+                )}
                 {detail.pr_lock_held && (
                   <span className="pill busy" style={{ marginLeft: "0.5rem" }}>triage in flight</span>
                 )}
               </span>
             </div>
-            <div className="row">
-              <span className="key">attempts</span>
-              <span className="val mono">
-                {detail.run_attempts} • ${detail.run_cumulative_cost_usd.toFixed(2)} cumulative
-              </span>
-            </div>
+            {detail.run_state && (
+              <div className="row">
+                <span className="key">attempts</span>
+                <span className="val mono">
+                  {detail.run_attempts} • ${detail.run_cumulative_cost_usd.toFixed(2)} cumulative
+                </span>
+              </div>
+            )}
           </div>
+
+          {detail.body.trim() && (
+            <>
+              <h2>Body</h2>
+              <pre style={{
+                whiteSpace: "pre-wrap",
+                fontFamily: "inherit",
+                background: "#0a0a0c",
+                padding: "0.75rem 1rem",
+                border: "1px solid #2a2a2e",
+                borderRadius: "4px",
+                margin: 0,
+              }}>
+                {detail.body}
+              </pre>
+            </>
+          )}
 
           <h2>Attempt history</h2>
           {detail.run_attempt_history.length === 0 ? (

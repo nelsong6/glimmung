@@ -16,6 +16,7 @@ from sse_starlette.sse import EventSourceResponse
 from glimmung import issues as issue_ops
 from glimmung import leases as lease_ops
 from glimmung import locks as lock_ops
+from glimmung import prs as pr_ops
 from glimmung import runs as run_ops
 from glimmung import signals as signal_ops
 from glimmung.dispatch import DispatchResult, dispatch_run
@@ -32,6 +33,7 @@ from glimmung.github_app import (
 )
 from glimmung.locks import LockBusy
 from glimmung.models import (
+    PR,
     Host,
     Issue,
     IssueState,
@@ -39,6 +41,7 @@ from glimmung.models import (
     LeaseRequest,
     LeaseResponse,
     LeaseState,
+    PRState,
     Project,
     ProjectRegister,
     Run,
@@ -1227,7 +1230,7 @@ async def _mirror_github_issue(
     return outcome
 
 
-# ─── PR webhook handlers (#19) ────────────────────────────────────────────────
+# ─── PR webhook handlers (#19) ─────────────────────────────────────────────────
 
 
 _CLOSES_KEYWORDS_RE = None  # set on first call below
@@ -2010,7 +2013,7 @@ async def dispatch_run_endpoint(req: DispatchRequest) -> DispatchResult:
     )
 
 
-# ─── one-shot Issues backfill (#28-consumer-2) ──────────────────────────────────────
+# ─── one-shot Issues backfill (#28-consumer-2) ───────────────────────────────────────
 
 
 class BackfillIssuesResult(BaseModel):
@@ -2092,35 +2095,89 @@ async def _backfill_issues_impl(
 
 
 class PrRow(BaseModel):
-    """One row in the PR view: an agent-opened PR linked to a Run."""
+    """One row in the PR view. Sourced from the `prs` container (#50
+    slice 2 cutover). The optional Run join lights up the runtime
+    columns (state, attempts, cumulative cost) when a glimmung Run is
+    linked; manual PRs mirror in without a Run and surface the same
+    way the dashboard already shows non-agent activity."""
+    id: str                                # glimmung PR id (ULID)
     project: str
     repo: str
-    pr_number: int
+    pr_number: int                         # GH PR number (preserved on seed)
     pr_branch: str | None = None
-    issue_number: int
-    run_id: str
-    run_state: str       # "in_progress" | "passed" | "aborted"
-    run_attempts: int
-    run_cumulative_cost_usd: float
-    pr_lock_held: bool = False  # triage in flight
+    title: str = ""
+    state: str = "open"                    # PRState value: open | closed
+    merged: bool = False                   # CLOSED + merged_at != None
+    html_url: str | None = None
+    linked_issue_id: str | None = None
+    linked_run_id: str | None = None
+    issue_number: int | None = None        # legacy convenience for the dashboard
+    run_id: str | None = None
+    run_state: str | None = None
+    run_attempts: int = 0
+    run_cumulative_cost_usd: float = 0.0
+    pr_lock_held: bool = False             # triage in flight
 
 
 class PrDetail(BaseModel):
+    id: str
     project: str
     repo: str
     pr_number: int
     pr_branch: str | None = None
-    issue_number: int
+    title: str = ""
+    body: str = ""
+    state: str = "open"
+    merged: bool = False
+    base_ref: str = "main"
+    head_sha: str = ""
+    html_url: str | None = None
+    linked_issue_id: str | None = None
+    linked_run_id: str | None = None
+    issue_number: int | None = None
     issue_title: str | None = None
-    pr_title: str | None = None
-    pr_body: str | None = None
-    pr_html_url: str | None = None
-    run_id: str
-    run_state: str
-    run_attempts: int
-    run_cumulative_cost_usd: float
+    run_id: str | None = None
+    run_state: str | None = None
+    run_attempts: int = 0
+    run_cumulative_cost_usd: float = 0.0
     run_attempt_history: list[dict[str, Any]] = Field(default_factory=list)
+    comments: list[dict[str, Any]] = Field(default_factory=list)
+    reviews: list[dict[str, Any]] = Field(default_factory=list)
     pr_lock_held: bool = False
+
+
+class PrCreateRequest(BaseModel):
+    """POST /v1/prs body — agent open-PR step calls this immediately
+    after the GH PR has been opened (#50 slice 4)."""
+    project: str
+    repo: str
+    number: int
+    title: str
+    branch: str
+    body: str = ""
+    base_ref: str = "main"
+    head_sha: str = ""
+    html_url: str = ""
+    linked_issue_id: str | None = None
+    linked_run_id: str | None = None
+
+
+class PrUpdateRequest(BaseModel):
+    """PATCH /v1/prs/by-id/{project}/{pr_id} body. Same shape as the
+    update_pr substrate signature, plus an optional `state` transition
+    (`open` / `closed` / `merged`). Closed-vs-merged uses two distinct
+    state values because they hit two different substrate functions
+    (`close_pr` vs `merge_pr`)."""
+    title: str | None = None
+    body: str | None = None
+    branch: str | None = None
+    base_ref: str | None = None
+    head_sha: str | None = None
+    html_url: str | None = None
+    linked_issue_id: str | None = None
+    linked_run_id: str | None = None
+    state: str | None = None               # "open" | "closed" | "merged"
+    merged_by: str | None = None           # required when state="merged"
 
 
 @app.get(
@@ -2129,46 +2186,80 @@ class PrDetail(BaseModel):
     dependencies=[Depends(require_admin_user)],
 )
 async def list_prs() -> list[PrRow]:
-    """Agent-opened PRs across registered repos. Sourced from the
-    `runs` container — each Run with `pr_number` set has a row.
-    Multiple Runs on the same PR (rare) collapse to the most recent."""
-    cosmos: Cosmos = app.state.cosmos
-    docs = await query_all(
-        cosmos.runs,
-        "SELECT * FROM c WHERE IS_DEFINED(c.pr_number) AND c.pr_number != null",
-    )
-    rows: list[PrRow] = []
-    seen: set[tuple[str, int]] = set()
-    docs.sort(key=lambda d: d.get("created_at", ""), reverse=True)
-    for d in docs:
+    """All open PRs across registered projects. Sourced from the Cosmos
+    `prs` container (#50 slice 2 cutover). Bulk-loads `runs` once for
+    the linked-Run join + `locks` once for the lock state, mirroring the
+    /v1/issues read path's perf shape."""
+    return await _list_prs_from_cosmos(app.state.cosmos)
+
+
+async def _list_prs_from_cosmos(cosmos: Cosmos) -> list[PrRow]:
+    """Read-path for `/v1/prs`; lifted out so tests can drive it
+    directly without standing up a FastAPI client."""
+    prs = await pr_ops.list_open_prs(cosmos)
+    if not prs:
+        return []
+
+    run_docs = await query_all(cosmos.runs, "SELECT * FROM c")
+    runs_by_id: dict[str, dict[str, Any]] = {d["id"]: d for d in run_docs}
+    runs_by_repo_pr: dict[tuple[str, int], dict[str, Any]] = {}
+    for d in run_docs:
         repo = d.get("issue_repo") or ""
         pr_num = d.get("pr_number")
-        if not repo or pr_num is None:
-            continue
-        if (repo, pr_num) in seen:
-            continue
-        seen.add((repo, pr_num))
+        if repo and pr_num is not None:
+            key = (repo, int(pr_num))
+            cur = runs_by_repo_pr.get(key)
+            if cur is None or d.get("created_at", "") > cur.get("created_at", ""):
+                runs_by_repo_pr[key] = d
 
-        existing_lock = await lock_ops.read_lock(
-            cosmos, scope="pr", key=f"{repo}#{pr_num}",
+    lock_docs = await query_all(
+        cosmos.locks,
+        "SELECT * FROM c WHERE c.scope = @s",
+        parameters=[{"name": "@s", "value": "pr"}],
+    )
+    locks_by_key = {doc["key"]: doc for doc in lock_docs}
+
+    now = datetime.now(UTC)
+    rows: list[PrRow] = []
+    for pr in prs:
+        run_doc = None
+        if pr.linked_run_id:
+            run_doc = runs_by_id.get(pr.linked_run_id)
+        if run_doc is None:
+            run_doc = runs_by_repo_pr.get((pr.repo, pr.number))
+
+        lock_doc = locks_by_key.get(f"{pr.repo}#{pr.number}")
+        pr_lock_held = False
+        if lock_doc is not None and lock_doc.get("state") == "held":
+            expires_at = datetime.fromisoformat(lock_doc["expires_at"])
+            pr_lock_held = expires_at > now
+
+        row = PrRow(
+            id=pr.id,
+            project=pr.project,
+            repo=pr.repo,
+            pr_number=pr.number,
+            pr_branch=pr.branch or None,
+            title=pr.title,
+            state=pr.state.value,
+            merged=pr.merged_at is not None,
+            html_url=pr.html_url or None,
+            linked_issue_id=pr.linked_issue_id,
+            linked_run_id=pr.linked_run_id or (run_doc["id"] if run_doc else None),
+            pr_lock_held=pr_lock_held,
         )
-        held = (
-            existing_lock is not None
-            and existing_lock.state.value == "held"
-            and existing_lock.expires_at > datetime.now(UTC)
-        )
-        rows.append(PrRow(
-            project=d.get("project") or "",
-            repo=repo,
-            pr_number=int(pr_num),
-            pr_branch=d.get("pr_branch"),
-            issue_number=int(d.get("issue_number") or 0),
-            run_id=d.get("id") or "",
-            run_state=d.get("state") or "",
-            run_attempts=len(d.get("attempts") or []),
-            run_cumulative_cost_usd=float(d.get("cumulative_cost_usd") or 0.0),
-            pr_lock_held=held,
-        ))
+        if run_doc is not None:
+            row.run_id = run_doc["id"]
+            row.run_state = run_doc.get("state")
+            row.run_attempts = len(run_doc.get("attempts") or [])
+            row.run_cumulative_cost_usd = float(run_doc.get("cumulative_cost_usd") or 0.0)
+            issue_number = run_doc.get("issue_number")
+            if issue_number is not None and issue_number != 0:
+                row.issue_number = int(issue_number)
+
+        rows.append(row)
+
+    rows.sort(key=lambda r: (r.project, -r.pr_number))
     return rows
 
 
@@ -2182,80 +2273,237 @@ async def pr_detail(
     repo_name: str = Path(...),
     pr_number: int = Path(...),
 ) -> PrDetail:
-    """PR detail view. Pulls the Run state from Cosmos plus the PR
-    metadata (title, body, html_url) live from the GH API."""
-    cosmos: Cosmos = app.state.cosmos
-    minter: GitHubAppTokenMinter | None = app.state.gh_minter
+    """PR detail view. Reads the PR document from Cosmos `prs` (#50
+    slice 2). Stitches in the linked Run state if a Run id is on the
+    PR; otherwise looks up the most recent Run by `(repo, pr_number)`
+    so legacy agent-opened PRs (pre-#50, no `linked_run_id`) still
+    show their Run history."""
     repo = f"{repo_owner}/{repo_name}"
-
-    lookup = await run_ops.find_run_by_pr(
-        cosmos, issue_repo=repo, pr_number=pr_number,
+    cosmos: Cosmos = app.state.cosmos
+    found = await pr_ops.find_pr_by_repo_number(
+        cosmos, repo=repo, number=pr_number,
     )
-    if lookup is None:
-        raise HTTPException(404, f"no run linked to {repo}#{pr_number}")
-    run, _ = lookup
+    if found is None:
+        raise HTTPException(404, f"no glimmung PR {repo}#{pr_number}")
+    pr, _ = found
+    return await _build_pr_detail(cosmos, pr=pr)
 
-    pr_title: str | None = None
-    pr_body: str | None = None
-    pr_html_url: str | None = None
-    if minter is not None:
+
+async def _build_pr_detail(cosmos: Cosmos, *, pr: PR) -> PrDetail:
+    """Render a PR + its linked Run state into the `PrDetail` view.
+    Shared by both the URL-keyed and id-keyed detail endpoints."""
+    detail = PrDetail(
+        id=pr.id,
+        project=pr.project,
+        repo=pr.repo,
+        pr_number=pr.number,
+        pr_branch=pr.branch or None,
+        title=pr.title,
+        body=pr.body,
+        state=pr.state.value,
+        merged=pr.merged_at is not None,
+        base_ref=pr.base_ref,
+        head_sha=pr.head_sha,
+        html_url=pr.html_url or None,
+        linked_issue_id=pr.linked_issue_id,
+        linked_run_id=pr.linked_run_id,
+        comments=[c.model_dump(mode="json") for c in pr.comments],
+        reviews=[r.model_dump(mode="json") for r in pr.reviews],
+    )
+
+    run = None
+    if pr.linked_run_id:
         try:
-            from glimmung.github_app import get_issue as _get_issue
-            pr = await _get_issue(minter, repo=repo, issue_number=pr_number)
-            pr_title = str(pr.get("title", ""))
-            pr_body = str(pr.get("body") or "")
-            pr_html_url = str(pr.get("html_url", ""))
+            doc = await cosmos.runs.read_item(
+                item=pr.linked_run_id, partition_key=pr.project,
+            )
+            run = Run.model_validate({k: v for k, v in doc.items() if not k.startswith("_")})
         except Exception:
-            log.exception("pr_detail: failed to fetch PR metadata for %s#%d", repo, pr_number)
+            log.warning(
+                "pr_detail: linked_run_id=%s on PR %s/%d not readable; falling back",
+                pr.linked_run_id, pr.repo, pr.number,
+            )
+    if run is None:
+        lookup = await run_ops.find_run_by_pr(
+            cosmos, issue_repo=pr.repo, pr_number=pr.number,
+        )
+        if lookup is not None:
+            run = lookup[0]
 
-    issue_title: str | None = None
-    if minter is not None:
+    if run is not None:
+        detail.run_id = run.id
+        detail.run_state = run.state.value
+        detail.run_attempts = len(run.attempts)
+        detail.run_cumulative_cost_usd = run.cumulative_cost_usd
+        if run.issue_number:
+            detail.issue_number = run.issue_number
+        for a in run.attempts:
+            detail.run_attempt_history.append({
+                "attempt_index": a.attempt_index,
+                "phase": a.phase.value,
+                "workflow_filename": a.workflow_filename,
+                "workflow_run_id": a.workflow_run_id,
+                "dispatched_at": a.dispatched_at.isoformat(),
+                "completed_at": a.completed_at.isoformat() if a.completed_at else None,
+                "verification_status": a.verification.status.value if a.verification else None,
+                "decision": a.decision,
+            })
+
+    if pr.linked_issue_id:
         try:
-            from glimmung.github_app import get_issue as _get_issue
-            issue = await _get_issue(minter, repo=repo, issue_number=run.issue_number)
-            issue_title = str(issue.get("title", ""))
+            doc = await cosmos.issues.read_item(
+                item=pr.linked_issue_id, partition_key=pr.project,
+            )
+            detail.issue_title = str(doc.get("title") or "")
         except Exception:
             pass
 
     existing_lock = await lock_ops.read_lock(
-        cosmos, scope="pr", key=f"{repo}#{pr_number}",
+        cosmos, scope="pr", key=f"{pr.repo}#{pr.number}",
     )
-    held = (
+    detail.pr_lock_held = (
         existing_lock is not None
         and existing_lock.state.value == "held"
         and existing_lock.expires_at > datetime.now(UTC)
     )
+    return detail
 
-    history = []
-    for a in run.attempts:
-        history.append({
-            "attempt_index": a.attempt_index,
-            "phase": a.phase.value,
-            "workflow_filename": a.workflow_filename,
-            "workflow_run_id": a.workflow_run_id,
-            "dispatched_at": a.dispatched_at.isoformat(),
-            "completed_at": a.completed_at.isoformat() if a.completed_at else None,
-            "verification_status": a.verification.status.value if a.verification else None,
-            "decision": a.decision,
-        })
 
-    return PrDetail(
-        project=run.project,
-        repo=repo,
-        pr_number=pr_number,
-        pr_branch=run.pr_branch,
-        issue_number=run.issue_number,
-        issue_title=issue_title,
-        pr_title=pr_title,
-        pr_body=pr_body,
-        pr_html_url=pr_html_url,
-        run_id=run.id,
-        run_state=run.state.value,
-        run_attempts=len(run.attempts),
-        run_cumulative_cost_usd=run.cumulative_cost_usd,
-        run_attempt_history=history,
-        pr_lock_held=held,
+@app.get(
+    "/v1/prs/by-id/{project}/{pr_id}",
+    response_model=PrDetail,
+    dependencies=[Depends(require_admin_user)],
+)
+async def pr_detail_by_id(
+    project: str = Path(...),
+    pr_id: str = Path(...),
+) -> PrDetail:
+    """Detail view keyed by glimmung PR id. Mirrors the issue-by-id
+    pattern: useful when the caller already has the canonical id and
+    avoids the (repo, number) cross-partition lookup."""
+    cosmos: Cosmos = app.state.cosmos
+    found = await pr_ops.read_pr(cosmos, project=project, pr_id=pr_id)
+    if found is None:
+        raise HTTPException(404, f"no glimmung PR {project}/{pr_id}")
+    pr, _ = found
+    return await _build_pr_detail(cosmos, pr=pr)
+
+
+@app.post(
+    "/v1/prs",
+    response_model=PrDetail,
+    dependencies=[Depends(require_admin_user)],
+)
+async def create_pr_endpoint(req: PrCreateRequest) -> PrDetail:
+    """Register a glimmung PR. The agent's open-PR step (#50 slice 4)
+    is the primary caller: it opens a thin GH PR (one-line link to the
+    glimmung PR entity) and immediately registers the rich entity here.
+    Idempotent on `(repo, number)` — re-registration of an existing
+    PR returns the existing entity rather than minting a duplicate."""
+    cosmos: Cosmos = app.state.cosmos
+    project_doc = await _read_project(cosmos, req.project)
+    if not project_doc:
+        raise HTTPException(400, f"project {req.project!r} not registered")
+    if not req.title.strip():
+        raise HTTPException(400, "title required")
+    if not req.branch.strip():
+        raise HTTPException(400, "branch required")
+
+    # Idempotent ensure semantics.
+    pr, _etag, created = await pr_ops.ensure_pr_for_github(
+        cosmos,
+        project=req.project,
+        repo=req.repo,
+        number=req.number,
+        title=req.title,
+        branch=req.branch,
+        body=req.body,
+        base_ref=req.base_ref,
+        head_sha=req.head_sha,
+        html_url=req.html_url,
     )
+    if not created and (
+        req.linked_issue_id is not None or req.linked_run_id is not None
+    ):
+        # ensure_pr_for_github only honors create-time fields. Patch the
+        # linkages on after the fact so callers don't have to round-trip
+        # through PATCH for the common "found existing PR, attach
+        # linkage" case.
+        found = await pr_ops.read_pr(cosmos, project=req.project, pr_id=pr.id)
+        assert found is not None
+        pr, etag = found
+        pr, _ = await pr_ops.update_pr(
+            cosmos, pr=pr, etag=etag,
+            linked_issue_id=req.linked_issue_id,
+            linked_run_id=req.linked_run_id,
+        )
+    elif created and (req.linked_issue_id or req.linked_run_id):
+        found = await pr_ops.read_pr(cosmos, project=req.project, pr_id=pr.id)
+        assert found is not None
+        pr, etag = found
+        pr, _ = await pr_ops.update_pr(
+            cosmos, pr=pr, etag=etag,
+            linked_issue_id=req.linked_issue_id,
+            linked_run_id=req.linked_run_id,
+        )
+    return await _build_pr_detail(cosmos, pr=pr)
+
+
+@app.patch(
+    "/v1/prs/by-id/{project}/{pr_id}",
+    response_model=PrDetail,
+    dependencies=[Depends(require_admin_user)],
+)
+async def patch_pr_endpoint(
+    req: PrUpdateRequest,
+    project: str = Path(...),
+    pr_id: str = Path(...),
+) -> PrDetail:
+    """Patch PR fields + state transitions. State transitions go through
+    `close_pr` / `merge_pr` / `reopen_pr` so the timestamp invariants
+    (closed-vs-merged, merged_by) stay consistent at the call site."""
+    cosmos: Cosmos = app.state.cosmos
+    found = await pr_ops.read_pr(cosmos, project=project, pr_id=pr_id)
+    if found is None:
+        raise HTTPException(404, f"no glimmung PR {project}/{pr_id}")
+    pr, etag = found
+
+    if any(
+        f is not None for f in (
+            req.title, req.body, req.branch, req.base_ref,
+            req.head_sha, req.html_url, req.linked_issue_id, req.linked_run_id,
+        )
+    ):
+        pr, etag = await pr_ops.update_pr(
+            cosmos, pr=pr, etag=etag,
+            title=req.title,
+            body=req.body,
+            branch=req.branch,
+            base_ref=req.base_ref,
+            head_sha=req.head_sha,
+            html_url=req.html_url,
+            linked_issue_id=req.linked_issue_id,
+            linked_run_id=req.linked_run_id,
+        )
+
+    if req.state is not None:
+        target = req.state.lower()
+        if target == "closed" and pr.state == PRState.OPEN:
+            pr, etag = await pr_ops.close_pr(cosmos, pr=pr, etag=etag)
+        elif target == "merged":
+            if not req.merged_by:
+                raise HTTPException(400, "state='merged' requires merged_by")
+            pr, etag = await pr_ops.merge_pr(
+                cosmos, pr=pr, etag=etag, merged_by=req.merged_by,
+            )
+        elif target == "open" and pr.state == PRState.CLOSED:
+            if pr.merged_at is not None:
+                raise HTTPException(409, "merged PR cannot be reopened")
+            pr, etag = await pr_ops.reopen_pr(cosmos, pr=pr, etag=etag)
+        elif target not in ("open", "closed", "merged"):
+            raise HTTPException(400, f"state must be 'open' | 'closed' | 'merged', not {req.state!r}")
+
+    return await _build_pr_detail(cosmos, pr=pr)
 
 
 @app.post(
