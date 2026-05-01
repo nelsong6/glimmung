@@ -1,4 +1,4 @@
-# Cosmos DB NoSQL Database. Containers: projects, hosts, workflows, leases, runs, locks, signals, issues.
+# Cosmos DB NoSQL Database. Containers: projects, hosts, workflows, leases, runs, locks, signals, issues, prs.
 # Created here at the control plane; the runtime pod (workload identity) only
 # needs data-plane perms which are already granted on infra-shared-identity at
 # the account scope (infra-bootstrap/tofu/cosmos-serverless.tf line 45).
@@ -145,6 +145,29 @@ resource "azurerm_cosmosdb_sql_container" "signals" {
 # open issues for a project stays single-partition.
 resource "azurerm_cosmosdb_sql_container" "issues" {
   name                = "issues"
+  resource_group_name = local.infra.resource_group_name
+  account_name        = data.azurerm_cosmosdb_account.infra.name
+  database_name       = azurerm_cosmosdb_sql_database.glimmung.name
+  partition_key_paths = ["/project"]
+
+  indexing_policy {
+    indexing_mode = "consistent"
+    included_path {
+      path = "/*"
+    }
+  }
+}
+
+# Glimmung-native PRs (#41). Mirrors the Issue substrate (#28): glimmung
+# is the source of truth for PR conversation (title/body/state plus reviews
+# and comments), GitHub is one syndication target. Lets the read path
+# (`/v1/prs/detail`) render entirely from Cosmos with no live-GH stitch,
+# and gives the iteration-graph viewer (#43) PR-side conversation nodes
+# without per-request GH calls. Same partition strategy as `issues` /
+# `runs` (`/project`) — listing open PRs for a project stays single-
+# partition.
+resource "azurerm_cosmosdb_sql_container" "prs" {
+  name                = "prs"
   resource_group_name = local.infra.resource_group_name
   account_name        = data.azurerm_cosmosdb_account.infra.name
   database_name       = azurerm_cosmosdb_sql_database.glimmung.name
