@@ -304,9 +304,15 @@ export function App() {
         )}
 
         {viewMode === "issues" ? (
-          <IssuesView signedIn={!!account} />
+          <IssuesView
+            signedIn={!!account}
+            projectFilter={selected.kind === "all" ? null : selected.project}
+          />
         ) : viewMode === "prs" ? (
-          <PrsView signedIn={!!account} />
+          <PrsView
+            signedIn={!!account}
+            projectFilter={selected.kind === "all" ? null : selected.project}
+          />
         ) : (
           <CapacityView
             snap={snap}

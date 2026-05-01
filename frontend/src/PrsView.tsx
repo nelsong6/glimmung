@@ -25,7 +25,13 @@ type PrRow = {
 
 type Selected = { repo: string; pr_number: number } | null;
 
-export function PrsView({ signedIn }: { signedIn: boolean }) {
+export function PrsView({
+  signedIn,
+  projectFilter,
+}: {
+  signedIn: boolean;
+  projectFilter: string | null;
+}) {
   const [rows, setRows] = useState<PrRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -73,10 +79,19 @@ export function PrsView({ signedIn }: { signedIn: boolean }) {
     );
   }
 
+  const visibleRows = rows
+    ? projectFilter
+      ? rows.filter((r) => r.project === projectFilter)
+      : rows
+    : null;
+
   return (
     <>
       <h2>
-        Agent-opened PRs{rows ? ` (${rows.length})` : ""}
+        Agent-opened PRs{visibleRows ? ` (${visibleRows.length})` : ""}
+        {projectFilter && (
+          <span className="filter-hint"> — filtered to {projectFilter}</span>
+        )}
         <button
           type="button"
           className="link"
@@ -88,11 +103,15 @@ export function PrsView({ signedIn }: { signedIn: boolean }) {
         </button>
       </h2>
       {error && <div className="empty error">{error}</div>}
-      {rows === null && !error ? (
+      {visibleRows === null && !error ? (
         <div className="empty">{loading ? "Loading…" : ""}</div>
-      ) : rows && rows.length === 0 ? (
-        <div className="empty">No agent-opened PRs yet.</div>
-      ) : rows ? (
+      ) : visibleRows && visibleRows.length === 0 ? (
+        <div className="empty">
+          {projectFilter
+            ? `No agent-opened PRs for ${projectFilter}.`
+            : "No agent-opened PRs yet."}
+        </div>
+      ) : visibleRows ? (
         <table>
           <thead>
             <tr>
@@ -106,7 +125,7 @@ export function PrsView({ signedIn }: { signedIn: boolean }) {
             </tr>
           </thead>
           <tbody>
-            {rows.map((row) => (
+            {visibleRows.map((row) => (
               <tr
                 key={`${row.repo}#${row.pr_number}`}
                 className={row.pr_lock_held ? "eligible" : ""}

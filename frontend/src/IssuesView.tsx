@@ -40,7 +40,13 @@ type DispatchStatus =
   | { kind: "result"; key: string; result: DispatchResult }
   | { kind: "error"; key: string; message: string };
 
-export function IssuesView({ signedIn }: { signedIn: boolean }) {
+export function IssuesView({
+  signedIn,
+  projectFilter,
+}: {
+  signedIn: boolean;
+  projectFilter: string | null;
+}) {
   const [rows, setRows] = useState<IssueRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -97,10 +103,19 @@ export function IssuesView({ signedIn }: { signedIn: boolean }) {
     return <div className="empty">Sign in to view issues.</div>;
   }
 
+  const visibleRows = rows
+    ? projectFilter
+      ? rows.filter((r) => r.project === projectFilter)
+      : rows
+    : null;
+
   return (
     <>
       <h2>
-        Open issues{rows ? ` (${rows.length})` : ""}
+        Open issues{visibleRows ? ` (${visibleRows.length})` : ""}
+        {projectFilter && (
+          <span className="filter-hint"> — filtered to {projectFilter}</span>
+        )}
         <button
           type="button"
           className="link"
@@ -112,11 +127,15 @@ export function IssuesView({ signedIn }: { signedIn: boolean }) {
         </button>
       </h2>
       {error && <div className="empty error">{error}</div>}
-      {rows === null && !error ? (
+      {visibleRows === null && !error ? (
         <div className="empty">{loading ? "Loading…" : ""}</div>
-      ) : rows && rows.length === 0 ? (
-        <div className="empty">No open issues across registered repos.</div>
-      ) : rows ? (
+      ) : visibleRows && visibleRows.length === 0 ? (
+        <div className="empty">
+          {projectFilter
+            ? `No open issues for ${projectFilter}.`
+            : "No open issues across registered repos."}
+        </div>
+      ) : visibleRows ? (
         <table>
           <thead>
             <tr>
@@ -129,7 +148,7 @@ export function IssuesView({ signedIn }: { signedIn: boolean }) {
             </tr>
           </thead>
           <tbody>
-            {rows.map((row) => {
+            {visibleRows.map((row) => {
               const key = rowKey(row);
               const status = dispatchStatus.kind !== "idle" && dispatchStatus.key === key
                 ? dispatchStatus
