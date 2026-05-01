@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { AdminPanel } from "./AdminPanel";
+import { IssuesView } from "./IssuesView";
 import { currentAccount, initAuth, signIn, signOut } from "./auth";
 import type { AccountInfo } from "@azure/msal-browser";
 
@@ -62,6 +63,8 @@ type Selection =
   | { kind: "project"; project: string }
   | { kind: "workflow"; project: string; workflow: string };
 
+type ViewMode = "capacity" | "issues";
+
 const ALL: Selection = { kind: "all" };
 
 export function App() {
@@ -72,6 +75,7 @@ export function App() {
   const [account, setAccount] = useState<AccountInfo | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [showAdmin, setShowAdmin] = useState(false);
+  const [viewMode, setViewMode] = useState<ViewMode>("capacity");
 
   useEffect(() => {
     initAuth()
@@ -234,6 +238,22 @@ export function App() {
             “The Glimmung scanned the assembled list of beings he had summoned. From a thousand worlds they had come, each with a craft to contribute.”
           </div>
           <div className="auth">
+            <button
+              type="button"
+              className={`link ${viewMode === "capacity" ? "selected" : ""}`}
+              onClick={() => setViewMode("capacity")}
+              style={{ marginRight: "0.5rem" }}
+            >
+              capacity
+            </button>
+            <button
+              type="button"
+              className={`link ${viewMode === "issues" ? "selected" : ""}`}
+              onClick={() => setViewMode("issues")}
+              style={{ marginRight: "1rem" }}
+            >
+              issues
+            </button>
             {!authReady ? null : account ? (
               <>
                 <span className="user">{account.username}</span>
@@ -274,7 +294,49 @@ export function App() {
           <AdminPanel projects={snap?.projects ?? []} onSuccess={() => setShowAdmin(false)} />
         )}
 
-        <h2>Hosts</h2>
+        {viewMode === "issues" ? (
+          <IssuesView signedIn={!!account} />
+        ) : (
+          <CapacityView
+            snap={snap}
+            filteredPending={filteredPending}
+            filteredActive={filteredActive}
+            selected={selected}
+            selectedWorkflow={selectedWorkflow}
+            selectedProject={selectedProject}
+            eligibilityReqs={eligibilityReqs}
+            matchesRequirements={matchesRequirements}
+          />
+        )}
+      </main>
+    </div>
+  );
+}
+
+type CapacityViewProps = {
+  snap: Snapshot | null;
+  filteredPending: Lease[];
+  filteredActive: Lease[];
+  selected: Selection;
+  selectedWorkflow: Workflow | null;
+  selectedProject: Project | null;
+  eligibilityReqs: Record<string, unknown> | null;
+  matchesRequirements: (host: Host, reqs: Record<string, unknown>) => boolean;
+};
+
+function CapacityView({
+  snap,
+  filteredPending,
+  filteredActive,
+  selected,
+  selectedWorkflow,
+  selectedProject,
+  eligibilityReqs,
+  matchesRequirements,
+}: CapacityViewProps) {
+  return (
+    <>
+      <h2>Hosts</h2>
         {snap === null ? (
           <div className="empty">Connecting…</div>
         ) : snap.hosts.length === 0 ? (
@@ -430,8 +492,7 @@ export function App() {
             </div>
           </>
         )}
-      </main>
-    </div>
+    </>
   );
 }
 

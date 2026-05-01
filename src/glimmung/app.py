@@ -10,23 +10,25 @@ from typing import Any
 from fastapi import Depends, FastAPI, HTTPException, Path, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from glimmung import leases as lease_ops
 from glimmung import locks as lock_ops
 from glimmung import runs as run_ops
+from glimmung.dispatch import DispatchResult, dispatch_run
 from glimmung.auth import require_admin_user
-from glimmung.budget import resolve_budget
 from glimmung.db import Cosmos, query_all
 from glimmung.decision import abort_explanation, decide
 from glimmung.github_app import (
     GitHubAppTokenMinter,
     dispatch_workflow,
+    get_issue,
+    list_open_issues,
     post_issue_comment,
     verify_webhook_signature,
 )
 from glimmung.models import (
-    BudgetConfig,
     Host,
     Lease,
     LeaseRequest,
@@ -199,10 +201,12 @@ async def _handle_workflow_run(payload: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {}
 
     # (1) Lease release — always.
+    issue_lock_holder_id: str | None = None
     try:
         released = await lease_ops.release(cosmos, lease_id, project)
         result["released"] = lease_id
         result["lease_state"] = released.state.value
+        issue_lock_holder_id = (released.metadata or {}).get("issue_lock_holder_id")
     except Exception as e:
         log.exception("workflow_run release failed for %s", lease_id)
         result["error"] = str(e)
@@ -210,16 +214,22 @@ async def _handle_workflow_run(payload: dict[str, Any]) -> dict[str, Any]:
 
     # (2) Verify-loop substrate — only if the completion lines up with an
     # in-progress Run for this issue.
+    run_reached_terminal = False
+    is_run_tracked = False
     issue_number_raw = inputs.get("issue_number")
+    issue_number: int | None = None
     if issue_number_raw:
         try:
             issue_number = int(issue_number_raw)
         except ValueError:
-            return result
+            issue_number = None
+
+    if issue_number is not None:
         run_lookup = await run_ops.get_active_run(
             cosmos, project=project, issue_number=issue_number,
         )
         if run_lookup is not None:
+            is_run_tracked = True
             run, etag = run_lookup
             try:
                 run_outcome = await _process_run_completion(
@@ -227,9 +237,42 @@ async def _handle_workflow_run(payload: dict[str, Any]) -> dict[str, Any]:
                 )
                 result["run_id"] = run.id
                 result["decision"] = run_outcome
+                # The run-tracked lock holder lives on the Run document
+                # (survives across retry attempts; lease metadata only
+                # carries the latest attempt's lease).
+                if run_outcome in (RunDecision.ADVANCE.value,
+                                   RunDecision.ABORT_BUDGET_ATTEMPTS.value,
+                                   RunDecision.ABORT_BUDGET_COST.value,
+                                   RunDecision.ABORT_MALFORMED.value):
+                    run_reached_terminal = True
+                    issue_lock_holder_id = run.issue_lock_holder_id or issue_lock_holder_id
             except Exception:
                 log.exception("verify-loop processing failed for run %s", run.id)
                 result["run_error"] = "see logs"
+
+    # (3) Issue-lock release — covers both terminations:
+    #   - Run-tracked workflow reached a terminal decision (PASS / ABORT_*).
+    #   - Non-Run-tracked workflow's lease released (no Run; treat as done).
+    # RETRY decisions intentionally do NOT release: the lock spans the whole
+    # verify-loop chain (initial + retries), not per-attempt.
+    should_release_lock = (
+        issue_lock_holder_id
+        and issue_number is not None
+        and (run_reached_terminal or not is_run_tracked)
+    )
+    if should_release_lock:
+        try:
+            released_lock = await lock_ops.release_lock(
+                cosmos, scope="issue",
+                key=f"{repo}#{issue_number}",
+                holder_id=issue_lock_holder_id,
+            )
+            result["issue_lock_released"] = released_lock
+        except Exception:
+            log.exception(
+                "issue lock release failed for %s#%s holder=%s",
+                repo, issue_number, issue_lock_holder_id,
+            )
 
     return result
 
@@ -638,10 +681,14 @@ async def github_webhook(request: Request) -> dict[str, Any]:
     repo = payload.get("repository", {}).get("full_name", "")
     label = (payload.get("label") or {}).get("name") if action == "labeled" else None
 
-    if not repo or not issue:
+    if not repo or not issue or issue.get("number") is None:
         return {"ignored": "missing fields"}
 
-    # Find project by github_repo. Cross-partition scan; tiny container.
+    # Match a workflow whose trigger_label fires on this event. The
+    # label-trigger path is preserved (#20: "the label-trigger path
+    # keeps working unchanged") even though labels are no longer the
+    # primary primitive — UI dispatch is the new first-class trigger
+    # source. Both paths route through `dispatch_run` below.
     cosmos: Cosmos = app.state.cosmos
     matching = await query_all(
         cosmos.projects,
@@ -650,17 +697,15 @@ async def github_webhook(request: Request) -> dict[str, Any]:
     )
     if not matching:
         return {"ignored": "no project for repo"}
-    project_doc = matching[0]
-    project_name = project_doc["name"]
+    project_name = matching[0]["name"]
 
-    # Resolve which workflow under this project this event triggers, if any.
-    label_names = {l["name"] for l in issue.get("labels", []) if isinstance(l, dict)}
+    label_names = [lab["name"] for lab in issue.get("labels", []) if isinstance(lab, dict)]
     workflows_for_project = await query_all(
         cosmos.workflows,
         "SELECT * FROM c WHERE c.project = @p",
         parameters=[{"name": "@p", "value": project_name}],
     )
-    matched_workflow: dict[str, Any] | None = None
+    matched_workflow_name: str | None = None
     for w in sorted(workflows_for_project, key=lambda d: d.get("name", "")):
         trigger = w.get("triggerLabel", "")
         if not trigger:
@@ -670,89 +715,207 @@ async def github_webhook(request: Request) -> dict[str, Any]:
             or (action in ("opened", "reopened") and trigger in label_names)
         )
         if fires:
-            matched_workflow = w
+            matched_workflow_name = w["name"]
             break
 
-    if matched_workflow is None:
+    if matched_workflow_name is None:
         return {"ignored": f"no workflow matched action={action} label={label}"}
 
-    metadata = {
-        "issue_number": str(issue.get("number", "")),
-        "issue_title": str(issue.get("title", ""))[:200],
-        "gh_event": event,
-        "gh_action": action or "",
-    }
-
-    lease, host = await lease_ops.acquire(
-        cosmos,
-        settings,
-        project=project_name,
-        workflow=matched_workflow["name"],
-        requirements=matched_workflow.get("defaultRequirements", {}),
-        metadata=metadata,
+    result = await dispatch_run(
+        app,
+        repo=repo,
+        issue_number=int(issue["number"]),
+        trigger_source={
+            "kind": "label_webhook",
+            "label": label,
+            "action": action or "",
+            "issue_title": str(issue.get("title", ""))[:200],
+        },
+        workflow_name=matched_workflow_name,
+        issue_labels=label_names,
+        extra_metadata={
+            "issue_title": str(issue.get("title", ""))[:200],
+            "gh_event": event,
+            "gh_action": action or "",
+        },
     )
+    return result.model_dump()
 
-    if host is not None:
-        await _maybe_dispatch_workflow(
-            app,
-            {**lease_ops._lease_to_doc(lease), "id": lease.id, "project": lease.project, "workflow": lease.workflow},
-            host,
-        )
 
-    # Verify-loop substrate (#18): if the matched workflow opts in
-    # (retry_workflow_filename set), record a Run so the
-    # workflow_run.completed handler can drive the decision engine.
-    # Workflows without retry config keep the pre-#18 fire-and-forget
-    # behavior — no Run, no decision engine, no retry path.
-    run_id: str | None = None
-    retry_filename = matched_workflow.get("retryWorkflowFilename") or ""
-    issue_number_raw = issue.get("number")
-    if retry_filename and issue_number_raw is not None:
-        budget = resolve_budget(
-            label_names,
-            _budget_from_doc(matched_workflow.get("defaultBudget")),
-        )
-        existing_run = await run_ops.get_active_run(
-            cosmos, project=project_name, issue_number=int(issue_number_raw),
-        )
-        if existing_run is not None:
-            # Re-label or reopened-with-label — there's already an active
-            # run. Don't double-track. Log + leave the existing run alone;
-            # the user can abort it (close the issue) if they want a fresh
-            # run.
-            log.info(
-                "issues webhook: %s/%d already has active run %s; not creating another",
-                project_name, int(issue_number_raw), existing_run[0].id,
+# ─── Issues view + UI-initiated dispatch (#20) ────────────────────────────────
+
+
+class IssueRow(BaseModel):
+    """One row in the Issues view: a GH issue surfaced for the user to
+    dispatch. Pulled live from the GH API per request — no caching;
+    single-user scale doesn't merit it."""
+    project: str
+    repo: str
+    number: int
+    title: str
+    labels: list[str] = Field(default_factory=list)
+    html_url: str
+    last_run_id: str | None = None
+    last_run_state: str | None = None  # "in_progress" | "passed" | "aborted" | None
+    last_run_abort_reason: str | None = None
+    issue_lock_held: bool = False  # convenience: lock currently held → in flight
+
+
+class IssueDetail(BaseModel):
+    project: str
+    repo: str
+    number: int
+    title: str
+    body: str = ""
+    labels: list[str] = Field(default_factory=list)
+    html_url: str
+    last_run_id: str | None = None
+    last_run_state: str | None = None
+    issue_lock_held: bool = False
+
+
+class DispatchRequest(BaseModel):
+    repo: str
+    issue_number: int
+    workflow: str | None = None  # optional; dispatch_run picks if omitted+unambiguous
+
+
+@app.get(
+    "/v1/issues",
+    response_model=list[IssueRow],
+    dependencies=[Depends(require_admin_user)],
+)
+async def list_issues() -> list[IssueRow]:
+    """All open issues across registered repos. Live GH API call per
+    request via the GH App installation token. Filters out PRs (the GH
+    REST issues endpoint returns them by default).
+
+    Labels are surfaced informationally only — they're a courtesy
+    syndication surface in the post-#20 model, not a dispatch
+    primitive. The dispatch button on each row is the trigger."""
+    cosmos: Cosmos = app.state.cosmos
+    minter: GitHubAppTokenMinter | None = app.state.gh_minter
+    if minter is None:
+        raise HTTPException(503, "github app credentials not configured")
+
+    project_docs = await query_all(cosmos.projects, "SELECT * FROM c")
+    rows: list[IssueRow] = []
+    for project_doc in project_docs:
+        repo = project_doc.get("githubRepo") or ""
+        if not repo:
+            continue
+        try:
+            issues = await list_open_issues(minter, repo=repo)
+        except Exception:
+            log.exception("list_open_issues failed for %s; skipping", repo)
+            continue
+        for issue in issues:
+            number = int(issue["number"])
+            labels = [lab["name"] for lab in issue.get("labels", []) if isinstance(lab, dict)]
+            row = IssueRow(
+                project=project_doc["name"],
+                repo=repo,
+                number=number,
+                title=str(issue.get("title", "")),
+                labels=labels,
+                html_url=str(issue.get("html_url", "")),
             )
-            run_id = existing_run[0].id
-        else:
-            run = await run_ops.create_run(
-                cosmos,
-                project=project_name,
-                workflow=matched_workflow["name"],
-                issue_repo=repo,
-                issue_number=int(issue_number_raw),
-                budget=budget,
-                initial_workflow_filename=matched_workflow["workflowFilename"],
+            latest_run = await run_ops.get_latest_run(
+                cosmos, project=project_doc["name"], issue_number=number,
             )
-            run_id = run.id
+            if latest_run is not None:
+                row.last_run_id = latest_run.id
+                row.last_run_state = latest_run.state.value
+                row.last_run_abort_reason = latest_run.abort_reason
+            existing_lock = await lock_ops.read_lock(
+                cosmos, scope="issue", key=f"{repo}#{number}",
+            )
+            row.issue_lock_held = (
+                existing_lock is not None
+                and existing_lock.state.value == "held"
+                and existing_lock.expires_at > datetime.now(UTC)
+            )
+            rows.append(row)
 
-    return {
-        "lease_id": lease.id,
-        "state": lease.state.value,
-        "host": host.name if host else None,
-        "workflow": matched_workflow["name"],
-        "run_id": run_id,
-    }
+    rows.sort(key=lambda r: (r.project, -r.number))
+    return rows
 
 
-def _budget_from_doc(doc: dict[str, Any] | None) -> BudgetConfig | None:
-    """Decode the camelCase Cosmos representation back into BudgetConfig."""
-    if not doc:
-        return None
-    return BudgetConfig(
-        max_attempts=int(doc.get("max_attempts", doc.get("maxAttempts", 3))),
-        max_cost_usd=float(doc.get("max_cost_usd", doc.get("maxCostUsd", 25.0))),
+@app.get(
+    "/v1/issues/{repo_owner}/{repo_name}/{issue_number}",
+    response_model=IssueDetail,
+    dependencies=[Depends(require_admin_user)],
+)
+async def issue_detail(
+    repo_owner: str = Path(...),
+    repo_name: str = Path(...),
+    issue_number: int = Path(...),
+) -> IssueDetail:
+    """Detail view: title + body + last-run summary + lock state. Live
+    GH API call. Three-segment path so the repo owner/name pair stays
+    URL-friendly without a query param."""
+    cosmos: Cosmos = app.state.cosmos
+    minter: GitHubAppTokenMinter | None = app.state.gh_minter
+    if minter is None:
+        raise HTTPException(503, "github app credentials not configured")
+
+    repo = f"{repo_owner}/{repo_name}"
+    matching = await query_all(
+        cosmos.projects,
+        "SELECT * FROM c WHERE c.githubRepo = @r",
+        parameters=[{"name": "@r", "value": repo}],
+    )
+    if not matching:
+        raise HTTPException(404, f"no project registered for {repo!r}")
+    project_name = matching[0]["name"]
+
+    try:
+        issue = await get_issue(minter, repo=repo, issue_number=issue_number)
+    except Exception:
+        log.exception("get_issue failed for %s#%d", repo, issue_number)
+        raise HTTPException(502, "github api error fetching issue")
+
+    detail = IssueDetail(
+        project=project_name,
+        repo=repo,
+        number=issue_number,
+        title=str(issue.get("title", "")),
+        body=str(issue.get("body") or ""),
+        labels=[lab["name"] for lab in issue.get("labels", []) if isinstance(lab, dict)],
+        html_url=str(issue.get("html_url", "")),
+    )
+    latest_run = await run_ops.get_latest_run(
+        cosmos, project=project_name, issue_number=issue_number,
+    )
+    if latest_run is not None:
+        detail.last_run_id = latest_run.id
+        detail.last_run_state = latest_run.state.value
+    existing_lock = await lock_ops.read_lock(
+        cosmos, scope="issue", key=f"{repo}#{issue_number}",
+    )
+    detail.issue_lock_held = (
+        existing_lock is not None
+        and existing_lock.state.value == "held"
+        and existing_lock.expires_at > datetime.now(UTC)
+    )
+    return detail
+
+
+@app.post(
+    "/v1/runs/dispatch",
+    response_model=DispatchResult,
+    dependencies=[Depends(require_admin_user)],
+)
+async def dispatch_run_endpoint(req: DispatchRequest) -> DispatchResult:
+    """UI-initiated dispatch. Same code path as the label-webhook handler:
+    both call `dispatch_run` from glimmung.dispatch. The trigger source
+    is recorded on the resulting Run for W6 observability."""
+    return await dispatch_run(
+        app,
+        repo=req.repo,
+        issue_number=req.issue_number,
+        trigger_source={"kind": "glimmung_ui"},
+        workflow_name=req.workflow,
     )
 
 
