@@ -84,6 +84,42 @@ async def dispatch_workflow(
         r.raise_for_status()
 
 
+async def cancel_workflow_run(
+    minter: GitHubAppTokenMinter,
+    *,
+    repo: str,
+    run_id: int,
+) -> bool:
+    """POST /repos/{repo}/actions/runs/{run_id}/cancel.
+
+    Returns True if GH accepted the cancel (202), False if the run was
+    already terminal on the GH side (404 from the cancel endpoint, which
+    GH returns once a run has finished naturally). Other HTTP errors
+    propagate — the caller should log + still release the lease, since
+    the lease release is independent of GH-side state.
+
+    GH returns 202 (accepted, async). The actual run-state flip to
+    `cancelled` lands later via the `workflow_run.completed` webhook;
+    that handler's lock-release path is idempotent, so the cancel
+    endpoint releasing the lease here doesn't conflict with the
+    eventual completion handler doing the same.
+    """
+    token = await minter.installation_token()
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.post(
+            f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/cancel",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+        if r.status_code == 404:
+            return False
+        r.raise_for_status()
+        return True
+
+
 async def post_issue_comment(
     minter: GitHubAppTokenMinter,
     *,
