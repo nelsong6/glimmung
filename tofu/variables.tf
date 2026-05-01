@@ -7,7 +7,11 @@ variable "hostname" {
 variable "allowed_emails" {
   description = "Email allowlist for admin endpoints. Comma-joined and stored in KV; the app splits + lowercases."
   type        = list(string)
-  default     = ["fullnelsongrip@gmail.com"]
+  default = [
+    "nelson-devops-project@outlook.com",
+    "Brenden.owens39@gmail.com",
+    "gantonski@gmail.com",
+  ]
 }
 
 variable "key_vault_name" {
