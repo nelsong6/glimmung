@@ -100,7 +100,7 @@ async def _register_host(app, name: str, capabilities: dict | None = None) -> No
     })
 
 
-# ─── happy paths ─────────────────────────────────────────────────────────────
+# ─── happy paths ───────────────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -192,7 +192,7 @@ async def test_dispatch_returns_pending_when_no_host(app):
     assert result.run_id is not None  # Run is still created on PENDING
 
 
-# ─── per-issue serialization ─────────────────────────────────────────────────
+# ─── per-issue serialization ────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -294,7 +294,7 @@ async def test_dispatch_on_different_issues_does_not_serialize(app):
     assert a.issue_lock_holder_id != b.issue_lock_holder_id
 
 
-# ─── resolution failures ─────────────────────────────────────────────────────
+# ─── resolution failures ──────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -371,7 +371,7 @@ async def test_dispatch_with_unknown_workflow_returns_no_workflow(app):
     assert result.state == "no_workflow"
 
 
-# ─── budget resolution from labels ───────────────────────────────────────────
+# ─── budget resolution from labels ────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -398,7 +398,7 @@ async def test_dispatch_honors_agent_budget_label_at_run_creation(app):
     assert runs[0]["budget"] == {"max_attempts": 5, "max_cost_usd": 50.0}
 
 
-# ─── glimmung-Issue plumbing (#28 consumer-PR-1) ─────────────────────────────
+# ─── glimmung-Issue plumbing (#28 consumer-PR-1) ──────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -603,3 +603,97 @@ async def test_dispatch_uses_workflow_default_budget_when_no_label(app):
         parameters=[{"name": "@id", "value": result.run_id}],
     )]
     assert runs[0]["budget"] == {"max_attempts": 7, "max_cost_usd": 100.0}
+
+
+# ─── glimmung-native dispatch (#50) ───────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_dispatch_by_issue_id_dispatches_native_issue(app):
+    """Issue created via POST /v1/issues — no GH coords. Dispatch via
+    issue_id resolves project from the Issue doc, locks on a glimmung/
+    namespaced key, and stamps issue_id on the Run."""
+    from glimmung import issues as issue_ops
+
+    await _register_project(app, "ambience", "nelsong6/ambience")
+    await _register_workflow(
+        app, project="ambience", name="issue-agent",
+        retry_workflow_filename="agent-retry.yml",
+    )
+    await _register_host(app, "runner-1")
+
+    issue = await issue_ops.create_issue(
+        app.state.cosmos, project="ambience",
+        title="native-only issue",
+    )
+
+    result = await dispatch_run(
+        app, issue_id=issue.id,
+        trigger_source={"kind": "glimmung_ui"},
+    )
+
+    assert result.state == "dispatched"
+    assert result.run_id is not None
+
+    # Lock keyed on glimmung/{id}, not repo#N.
+    lock_docs = [d async for d in app.state.cosmos.locks.query_items(
+        "SELECT * FROM c WHERE c.scope = @s",
+        parameters=[{"name": "@s", "value": "issue"}],
+    )]
+    assert any(d["key"] == f"glimmung/{issue.id}" for d in lock_docs)
+
+    runs = [d async for d in app.state.cosmos.runs.query_items(
+        "SELECT * FROM c WHERE c.id = @id",
+        parameters=[{"name": "@id", "value": result.run_id}],
+    )]
+    assert runs[0]["issue_id"] == issue.id
+    assert runs[0]["issue_repo"] == ""
+    assert runs[0]["issue_number"] == 0
+
+
+@pytest.mark.asyncio
+async def test_dispatch_by_issue_id_returns_no_project_when_id_unknown(app):
+    """Caller passes a stale or invalid issue id → no_project (the no-
+    Issue-here outcome reuses the same code path as no-project-for-repo,
+    so the failure mode is uniform across dispatch entry shapes)."""
+    await _register_project(app, "ambience", "nelsong6/ambience")
+    await _register_workflow(
+        app, project="ambience", name="issue-agent",
+        retry_workflow_filename="agent-retry.yml",
+    )
+
+    result = await dispatch_run(
+        app, issue_id="01JBOGUS0000000000000000",
+        trigger_source={"kind": "glimmung_ui"},
+    )
+    assert result.state == "no_project"
+
+
+@pytest.mark.asyncio
+async def test_native_dispatch_serializes_with_second_call(app):
+    """Two concurrent dispatches against the same native Issue → second
+    sees `already_running`. Same lock primitive as the GH path, just a
+    different key shape."""
+    from glimmung import issues as issue_ops
+
+    await _register_project(app, "ambience", "nelsong6/ambience")
+    await _register_workflow(
+        app, project="ambience", name="issue-agent",
+        retry_workflow_filename="agent-retry.yml",
+    )
+    await _register_host(app, "runner-1")
+
+    issue = await issue_ops.create_issue(
+        app.state.cosmos, project="ambience", title="t",
+    )
+
+    first = await dispatch_run(
+        app, issue_id=issue.id,
+        trigger_source={"kind": "glimmung_ui"},
+    )
+    second = await dispatch_run(
+        app, issue_id=issue.id,
+        trigger_source={"kind": "glimmung_ui"},
+    )
+    assert first.state == "dispatched"
+    assert second.state == "already_running"
