@@ -33,6 +33,8 @@ from glimmung.github_app import (
 from glimmung.locks import LockBusy
 from glimmung.models import (
     Host,
+    Issue,
+    IssueState,
     Lease,
     LeaseRequest,
     LeaseResponse,
@@ -780,7 +782,7 @@ async def public_config() -> dict[str, str]:
     }
 
 
-# ─── Lease lifecycle (capability-based via lease_id) ──────────────────────────
+# ─── Lease lifecycle (capability-based via lease_id) ─────────────────────────────
 
 
 @app.post("/v1/lease", response_model=LeaseResponse)
@@ -1044,7 +1046,7 @@ async def events(request: Request):
     return EventSourceResponse(gen())
 
 
-# ─── Admin: projects + hosts ─────────────────────────────────────────────────
+# ─── Admin: projects + hosts ──────────────────────────────────────────────────
 
 
 @app.post("/v1/projects", response_model=Project, dependencies=[Depends(require_admin_user)])
@@ -1117,7 +1119,7 @@ async def register_host(host: dict[str, Any]) -> Host:
         return Host.model_validate(lease_ops._camel_to_snake(new_doc))
 
 
-# ─── GitHub webhook ───────────────────────────────────────────────────────────
+# ─── GitHub webhook ───────────────────────────────────────────────────────
 
 
 @app.post("/v1/webhook/github")
@@ -1140,90 +1142,12 @@ async def github_webhook(request: Request) -> dict[str, Any]:
         return await _handle_pull_request(payload)
     if event == "pull_request_review":
         return await _handle_pull_request_review(payload)
-    if event != "issues":
-        return {"ignored": event}
-    action = payload.get("action")
-    issue = payload.get("issue", {})
-    repo = payload.get("repository", {}).get("full_name", "")
-    label = (payload.get("label") or {}).get("name") if action == "labeled" else None
-
-    if not repo or not issue or issue.get("number") is None:
-        return {"ignored": "missing fields"}
-
-    # Match a workflow whose trigger_label fires on this event. The
-    # label-trigger path is preserved (#20: "the label-trigger path
-    # keeps working unchanged") even though labels are no longer the
-    # primary primitive — UI dispatch is the new first-class trigger
-    # source. Both paths route through `dispatch_run` below.
-    cosmos: Cosmos = app.state.cosmos
-    matching = await query_all(
-        cosmos.projects,
-        "SELECT * FROM c WHERE c.githubRepo = @r",
-        parameters=[{"name": "@r", "value": repo}],
-    )
-    if not matching:
-        return {"ignored": "no project for repo"}
-    project_name = matching[0]["name"]
-
-    label_names = [lab["name"] for lab in issue.get("labels", []) if isinstance(lab, dict)]
-
-    # Mirror the GH-side issue state into the glimmung `issues` container
-    # (#28 consumer-PR-3). Runs unconditionally before dispatch matching
-    # so even non-trigger actions (a label change that doesn't match any
-    # workflow, an edit, a close) keep Cosmos in sync. The eventual PR
-    # 2 cutover (`/v1/issues` reads from Cosmos) depends on this being
-    # the canonical sync path. Idempotent with the dispatch-path mint:
-    # both call `ensure_issue_for_github`, whichever wins seeds the
-    # Issue and the other reuses.
-    mirror_outcome = await _mirror_github_issue(
-        cosmos,
-        project=project_name,
-        repo=repo,
-        action=action or "",
-        issue_payload=issue,
-    )
-    workflows_for_project = await query_all(
-        cosmos.workflows,
-        "SELECT * FROM c WHERE c.project = @p",
-        parameters=[{"name": "@p", "value": project_name}],
-    )
-    matched_workflow_name: str | None = None
-    for w in sorted(workflows_for_project, key=lambda d: d.get("name", "")):
-        trigger = w.get("triggerLabel", "")
-        if not trigger:
-            continue
-        fires = (
-            (action == "labeled" and label == trigger)
-            or (action in ("opened", "reopened") and trigger in label_names)
-        )
-        if fires:
-            matched_workflow_name = w["name"]
-            break
-
-    if matched_workflow_name is None:
-        return {"ignored": f"no workflow matched action={action} label={label}", "mirror": mirror_outcome}
-
-    result = await dispatch_run(
-        app,
-        repo=repo,
-        issue_number=int(issue["number"]),
-        trigger_source={
-            "kind": "label_webhook",
-            "label": label,
-            "action": action or "",
-            "issue_title": str(issue.get("title", ""))[:200],
-        },
-        workflow_name=matched_workflow_name,
-        issue_labels=label_names,
-        extra_metadata={
-            "issue_title": str(issue.get("title", ""))[:200],
-            "gh_event": event,
-            "gh_action": action or "",
-        },
-    )
-    out = result.model_dump()
-    out["mirror"] = mirror_outcome
-    return out
+    # `issues` events used to mirror into the `issues` Cosmos container
+    # and label-trigger workflow dispatch. Per #50, glimmung is the
+    # source of truth for issues — GH issues are post-seed irrelevant.
+    # The mirror helper survives for the one-shot backfill / seed paths;
+    # the webhook just ignores the event here.
+    return {"ignored": event}
 
 
 async def _mirror_github_issue(
@@ -1303,7 +1227,7 @@ async def _mirror_github_issue(
     return outcome
 
 
-# ─── PR webhook handlers (#19) ───────────────────────────────────────────────
+# ─── PR webhook handlers (#19) ────────────────────────────────────────────────
 
 
 _CLOSES_KEYWORDS_RE = None  # set on first call below
@@ -1433,19 +1357,23 @@ async def _handle_pull_request_review(payload: dict[str, Any]) -> dict[str, Any]
     return {"enqueued_signal": sig.id}
 
 
-# ─── Issues view + UI-initiated dispatch (#20) ────────────────────────────────
+# ─── Issues view + UI-initiated dispatch (#20) ───────────────────────────────────────
 
 
 class IssueRow(BaseModel):
-    """One row in the Issues view: a GH issue surfaced for the user to
-    dispatch. Pulled live from the GH API per request — no caching;
-    single-user scale doesn't merit it."""
+    """One row in the Issues view. After #50, issues live in glimmung's
+    `issues` container; rows can be either GH-anchored (carry `repo` +
+    `number` + `html_url` from `metadata.github_issue_*`) or glimmung-
+    native (those three are None). The dashboard discriminates on
+    `repo` to pick the dispatch payload shape."""
+    id: str
     project: str
-    repo: str
-    number: int
+    repo: str | None = None
+    number: int | None = None
     title: str
+    state: str = "open"
     labels: list[str] = Field(default_factory=list)
-    html_url: str
+    html_url: str | None = None
     last_run_id: str | None = None
     last_run_state: str | None = None  # "in_progress" | "passed" | "aborted" | None
     last_run_abort_reason: str | None = None
@@ -1453,16 +1381,36 @@ class IssueRow(BaseModel):
 
 
 class IssueDetail(BaseModel):
+    id: str
     project: str
-    repo: str
-    number: int
+    repo: str | None = None
+    number: int | None = None
     title: str
     body: str = ""
+    state: str = "open"
     labels: list[str] = Field(default_factory=list)
-    html_url: str
+    html_url: str | None = None
     last_run_id: str | None = None
     last_run_state: str | None = None
     issue_lock_held: bool = False
+
+
+class IssueCreateRequest(BaseModel):
+    """POST /v1/issues body — glimmung-native issue creation."""
+    project: str
+    title: str
+    body: str = ""
+    labels: list[str] = Field(default_factory=list)
+
+
+class IssueUpdateRequest(BaseModel):
+    """PATCH /v1/issues/by-id/{project}/{issue_id} body. All fields
+    optional — None means "don't change". `state` is "open" or "closed";
+    other transitions (e.g. label-only edits) leave it untouched."""
+    title: str | None = None
+    body: str | None = None
+    labels: list[str] | None = None
+    state: str | None = None
 
 
 class GraphNode(BaseModel):
@@ -1495,9 +1443,23 @@ class IssueGraph(BaseModel):
 
 
 class DispatchRequest(BaseModel):
-    repo: str
-    issue_number: int
-    workflow: str | None = None  # optional; dispatch_run picks if omitted+unambiguous
+    """One of two shapes:
+
+    - GH-anchored: `repo` + `issue_number`. The pre-#50 path; the issue
+      may exist in GH or be a glimmung-native one whose `metadata` was
+      backfilled with the GH coords.
+    - Native: `issue_id` (+ optional `project`; resolved from the Issue
+      doc if omitted). For glimmung-native issues with no GH coords —
+      created via `POST /v1/issues`.
+
+    `workflow` is optional in both shapes; dispatch_run picks the
+    project's only workflow if omitted and unambiguous.
+    """
+    repo: str | None = None
+    issue_number: int | None = None
+    issue_id: str | None = None
+    project: str | None = None
+    workflow: str | None = None
 
 
 @app.get(
@@ -1567,36 +1529,47 @@ async def _list_issues_from_cosmos(cosmos: Cosmos) -> list[IssueRow]:
         url = issue.metadata.github_issue_url
         repo = issue.metadata.github_issue_repo
         number = issue.metadata.github_issue_number
-        if url is None or repo is None or number is None:
-            continue
         row = IssueRow(
+            id=issue.id,
             project=issue.project,
             repo=repo,
             number=number,
             title=issue.title,
+            state=issue.state.value,
             labels=list(issue.labels),
             html_url=url,
         )
         # Pre-#33 Runs predate `Run.issue_id`; the (project, number)
         # fallback covers them so the Issues view keeps showing last-
         # run state. Cleanup-PR drops the fallback once those Runs are
-        # migrated.
-        run_doc = (
-            runs_by_issue_id.get(issue.id)
-            or runs_by_project_number.get((issue.project, number))
-        )
+        # migrated. Native issues have no number — `issue_id` is the
+        # only joining key.
+        run_doc = runs_by_issue_id.get(issue.id)
+        if run_doc is None and number is not None:
+            run_doc = runs_by_project_number.get((issue.project, number))
         if run_doc is not None:
             row.last_run_id = run_doc["id"]
             row.last_run_state = run_doc["state"]
             row.last_run_abort_reason = run_doc.get("abort_reason")
-        lock_doc = locks_by_key.get(f"{repo}#{number}")
+        lock_key = (
+            f"{repo}#{number}" if (repo and number is not None)
+            else f"glimmung/{issue.id}"
+        )
+        lock_doc = locks_by_key.get(lock_key)
         if lock_doc is not None and lock_doc.get("state") == "held":
             expires_at = datetime.fromisoformat(lock_doc["expires_at"])
             if expires_at > now:
                 row.issue_lock_held = True
         rows.append(row)
 
-    rows.sort(key=lambda r: (r.project, -r.number))
+    # Sort: project asc, then GH issues by descending number, then native
+    # issues last (alphabetic by ulid suffix is fine — recency-ish).
+    rows.sort(key=lambda r: (
+        r.project,
+        0 if r.number is not None else 1,
+        -(r.number or 0),
+        r.id,
+    ))
     return rows
 
 
@@ -1630,25 +1603,41 @@ async def _load_issue_detail(
     if found is None:
         raise HTTPException(404, f"no glimmung issue mirrors {url}")
     issue, _ = found
+    return await _build_issue_detail(cosmos, issue=issue)
+
+
+async def _build_issue_detail(cosmos: Cosmos, *, issue: Issue) -> IssueDetail:
+    """Render an `Issue` into the `IssueDetail` API view + stitch in the
+    last-run summary and issue-lock state. Shared by both the URL-keyed
+    (`/v1/issues/{owner}/{repo}/{n}`) and id-keyed (`/v1/issues/by-id/
+    {project}/{id}`) detail endpoints."""
+    repo = issue.metadata.github_issue_repo
+    number = issue.metadata.github_issue_number
     detail = IssueDetail(
+        id=issue.id,
         project=issue.project,
         repo=repo,
-        number=issue_number,
+        number=number,
         title=issue.title,
         body=issue.body,
+        state=issue.state.value,
         labels=list(issue.labels),
-        html_url=url,
+        html_url=issue.metadata.github_issue_url,
     )
     latest_run = await run_ops.find_run_by_issue_id(cosmos, issue_id=issue.id)
-    if latest_run is None:
+    if latest_run is None and number is not None:
         latest_run = await run_ops.get_latest_run(
-            cosmos, project=issue.project, issue_number=issue_number,
+            cosmos, project=issue.project, issue_number=number,
         )
     if latest_run is not None:
         detail.last_run_id = latest_run.id
         detail.last_run_state = latest_run.state.value
+    lock_key = (
+        f"{repo}#{number}" if (repo and number is not None)
+        else f"glimmung/{issue.id}"
+    )
     existing_lock = await lock_ops.read_lock(
-        cosmos, scope="issue", key=f"{repo}#{issue_number}",
+        cosmos, scope="issue", key=lock_key,
     )
     detail.issue_lock_held = (
         existing_lock is not None
@@ -1656,6 +1645,90 @@ async def _load_issue_detail(
         and existing_lock.expires_at > datetime.now(UTC)
     )
     return detail
+
+
+@app.get(
+    "/v1/issues/by-id/{project}/{issue_id}",
+    response_model=IssueDetail,
+    dependencies=[Depends(require_admin_user)],
+)
+async def issue_detail_by_id(
+    project: str = Path(...),
+    issue_id: str = Path(...),
+) -> IssueDetail:
+    """Detail view keyed by glimmung issue id. Used for glimmung-native
+    issues (which have no GH coords to slot into the URL-keyed path)
+    and as the canonical handle for any caller that already has an id."""
+    cosmos: Cosmos = app.state.cosmos
+    found = await issue_ops.read_issue(cosmos, project=project, issue_id=issue_id)
+    if found is None:
+        raise HTTPException(404, f"no glimmung issue {project}/{issue_id}")
+    issue, _ = found
+    return await _build_issue_detail(cosmos, issue=issue)
+
+
+@app.post(
+    "/v1/issues",
+    response_model=IssueDetail,
+    dependencies=[Depends(require_admin_user)],
+)
+async def create_issue_endpoint(req: IssueCreateRequest) -> IssueDetail:
+    """Mint a glimmung-native Issue. The dashboard issue-create form
+    (#50) is the primary caller; CLI / scheduled paths can hit it too.
+
+    No GH counterpart is created — glimmung is the source of truth.
+    Source is `MANUAL`; the resulting Issue has no `metadata.github_*`
+    fields set, so the URL-keyed detail endpoint can't find it. Use
+    `/v1/issues/by-id/{project}/{id}` instead."""
+    cosmos: Cosmos = app.state.cosmos
+    project_doc = await _read_project(cosmos, req.project)
+    if not project_doc:
+        raise HTTPException(400, f"project {req.project!r} not registered")
+    if not req.title.strip():
+        raise HTTPException(400, "title required")
+    issue = await issue_ops.create_issue(
+        cosmos,
+        project=req.project,
+        title=req.title,
+        body=req.body,
+        labels=req.labels,
+    )
+    return await _build_issue_detail(cosmos, issue=issue)
+
+
+@app.patch(
+    "/v1/issues/by-id/{project}/{issue_id}",
+    response_model=IssueDetail,
+    dependencies=[Depends(require_admin_user)],
+)
+async def patch_issue_endpoint(
+    req: IssueUpdateRequest,
+    project: str = Path(...),
+    issue_id: str = Path(...),
+) -> IssueDetail:
+    """Patch title / body / labels / state. State transitions go through
+    `close_issue` / `reopen_issue` so `closed_at` is stamped consistently."""
+    cosmos: Cosmos = app.state.cosmos
+    found = await issue_ops.read_issue(cosmos, project=project, issue_id=issue_id)
+    if found is None:
+        raise HTTPException(404, f"no glimmung issue {project}/{issue_id}")
+    issue, etag = found
+    if req.title is not None or req.body is not None or req.labels is not None:
+        issue, etag = await issue_ops.update_issue(
+            cosmos, issue=issue, etag=etag,
+            title=req.title,
+            body=req.body,
+            labels=req.labels,
+        )
+    if req.state is not None:
+        target = req.state.lower()
+        if target == "closed" and issue.state == IssueState.OPEN:
+            issue, etag = await issue_ops.close_issue(cosmos, issue=issue, etag=etag)
+        elif target == "open" and issue.state == IssueState.CLOSED:
+            issue, etag = await issue_ops.reopen_issue(cosmos, issue=issue, etag=etag)
+        elif target not in ("open", "closed"):
+            raise HTTPException(400, f"state must be 'open' or 'closed', not {req.state!r}")
+    return await _build_issue_detail(cosmos, issue=issue)
 
 
 @app.get(
@@ -1910,9 +1983,24 @@ async def _build_issue_graph(
     dependencies=[Depends(require_admin_user)],
 )
 async def dispatch_run_endpoint(req: DispatchRequest) -> DispatchResult:
-    """UI-initiated dispatch. Same code path as the label-webhook handler:
-    both call `dispatch_run` from glimmung.dispatch. The trigger source
-    is recorded on the resulting Run for W6 observability."""
+    """UI-initiated dispatch. Same code path as the legacy label-webhook
+    handler used: both call `dispatch_run` from glimmung.dispatch. The
+    trigger source is recorded on the resulting Run for W6 observability.
+
+    Two payload shapes are accepted (#50): GH-anchored
+    `{repo, issue_number}` or glimmung-native `{issue_id, project?}`.
+    Native dispatch path looks up the existing Issue by id and skips the
+    `ensure_issue_for_github` mint."""
+    if req.issue_id is not None:
+        return await dispatch_run(
+            app,
+            issue_id=req.issue_id,
+            project=req.project,
+            trigger_source={"kind": "glimmung_ui"},
+            workflow_name=req.workflow,
+        )
+    if req.repo is None or req.issue_number is None:
+        raise HTTPException(400, "dispatch payload requires either {issue_id} or {repo, issue_number}")
     return await dispatch_run(
         app,
         repo=req.repo,
@@ -1922,7 +2010,7 @@ async def dispatch_run_endpoint(req: DispatchRequest) -> DispatchResult:
     )
 
 
-# ─── one-shot Issues backfill (#28-consumer-2) ───────────────────────────────
+# ─── one-shot Issues backfill (#28-consumer-2) ──────────────────────────────────────
 
 
 class BackfillIssuesResult(BaseModel):
@@ -2000,7 +2088,7 @@ async def _backfill_issues_impl(
     )
 
 
-# ─── PR view + reject signal (#19) ────────────────────────────────────────────
+# ─── PR view + reject signal (#19) ───────────────────────────────────────────────
 
 
 class PrRow(BaseModel):
@@ -2192,7 +2280,7 @@ async def enqueue_signal_endpoint(req: SignalEnqueueRequest) -> Signal:
     )
 
 
-# ─── Static frontend ──────────────────────────────────────────────────────────
+# ─── Static frontend ─────────────────────────────────────────────────────────
 # Mounted last so the API routes win. Frontend is built into /app/static by
 # the multi-stage Dockerfile; locally it lives at <repo>/frontend/dist.
 
