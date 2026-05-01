@@ -1296,6 +1296,35 @@ class IssueDetail(BaseModel):
     issue_lock_held: bool = False
 
 
+class GraphNode(BaseModel):
+    """One node in the per-issue lineage graph (#42).
+
+    `kind` discriminates rendering: an `issue` renders as a header card,
+    a `run` as a column header, an `attempt` as a phase pill inside the
+    column, a `pr` as the column footer, a `signal` as a sidebar event
+    that may have a `re_dispatched` edge into a downstream Run.
+    `metadata` carries kind-specific fields the renderer can show on
+    expand (verification verdict, decision, signal payload, etc)."""
+    id: str
+    kind: str  # "issue" | "run" | "attempt" | "pr" | "signal"
+    label: str
+    state: str | None = None
+    timestamp: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class GraphEdge(BaseModel):
+    source: str
+    target: str
+    kind: str  # "spawned" | "attempted" | "retried" | "opened" | "feedback" | "re_dispatched"
+
+
+class IssueGraph(BaseModel):
+    issue_id: str
+    nodes: list[GraphNode] = Field(default_factory=list)
+    edges: list[GraphEdge] = Field(default_factory=list)
+
+
 class DispatchRequest(BaseModel):
     repo: str
     issue_number: int
@@ -1458,6 +1487,252 @@ async def _load_issue_detail(
         and existing_lock.expires_at > datetime.now(UTC)
     )
     return detail
+
+
+@app.get(
+    "/v1/issues/{repo_owner}/{repo_name}/{issue_number}/graph",
+    response_model=IssueGraph,
+    dependencies=[Depends(require_admin_user)],
+)
+async def issue_graph(
+    repo_owner: str = Path(...),
+    repo_name: str = Path(...),
+    issue_number: int = Path(...),
+) -> IssueGraph:
+    """Lineage graph for one Issue (#42): every Run dispatched against
+    it, every PhaseAttempt inside each Run, the PR(s) opened, and the
+    Signals that fed back. Bulk-loaded — one cross-partition runs query
+    plus a legacy fallback plus one signals query, no per-row N+1."""
+    repo = f"{repo_owner}/{repo_name}"
+    return await _build_issue_graph(
+        app.state.cosmos, repo=repo, issue_number=issue_number,
+    )
+
+
+async def _build_issue_graph(
+    cosmos: Cosmos, *, repo: str, issue_number: int,
+) -> IssueGraph:
+    url = issue_ops.github_issue_url_for(repo, issue_number)
+    found = await issue_ops.find_issue_by_github_url(cosmos, github_issue_url=url)
+    if found is None:
+        raise HTTPException(404, f"no glimmung issue mirrors {url}")
+    issue, _ = found
+
+    # All Runs targeting this Issue. Cover both #33's canonical
+    # `issue_id` linkage and the legacy `(project, issue_number)` shape
+    # for pre-#33 Runs; dedupe by id.
+    by_issue_id = await query_all(
+        cosmos.runs,
+        "SELECT * FROM c WHERE c.issue_id = @i",
+        parameters=[{"name": "@i", "value": issue.id}],
+    )
+    by_project_number = await query_all(
+        cosmos.runs,
+        "SELECT * FROM c WHERE c.project = @p AND c.issue_number = @n",
+        parameters=[
+            {"name": "@p", "value": issue.project},
+            {"name": "@n", "value": issue_number},
+        ],
+    )
+    seen_run_ids: set[str] = set()
+    run_docs: list[dict[str, Any]] = []
+    for doc in (*by_issue_id, *by_project_number):
+        if doc["id"] not in seen_run_ids:
+            run_docs.append(doc)
+            seen_run_ids.add(doc["id"])
+    run_docs.sort(key=lambda d: d.get("created_at", ""))
+
+    pr_numbers = {
+        int(d["pr_number"]) for d in run_docs
+        if d.get("pr_number") is not None
+    }
+    run_ids = {d["id"] for d in run_docs}
+
+    # All signals on this repo; filter in-memory to those targeting the
+    # issue / one of its PRs / one of its Runs. Cross-partition but
+    # signals is small so this is cheap.
+    all_signals = await query_all(
+        cosmos.signals,
+        "SELECT * FROM c WHERE c.target_repo = @r",
+        parameters=[{"name": "@r", "value": repo}],
+    )
+    relevant_signals: list[dict[str, Any]] = []
+    for s in all_signals:
+        target_type = s.get("target_type")
+        target_id = s.get("target_id")
+        if target_type == "pr":
+            try:
+                if int(target_id) in pr_numbers:
+                    relevant_signals.append(s)
+            except (TypeError, ValueError):
+                pass
+        elif target_type == "run":
+            if target_id in run_ids:
+                relevant_signals.append(s)
+        elif target_type == "issue":
+            try:
+                if int(target_id) == issue_number:
+                    relevant_signals.append(s)
+            except (TypeError, ValueError):
+                pass
+    relevant_signals.sort(key=lambda s: s.get("created_at", ""))
+
+    nodes: list[GraphNode] = []
+    edges: list[GraphEdge] = []
+
+    issue_node_id = f"issue:{issue.id}"
+    nodes.append(GraphNode(
+        id=issue_node_id,
+        kind="issue",
+        label=f"#{issue_number} {issue.title}",
+        state=issue.state.value,
+        timestamp=issue.created_at.isoformat(),
+        metadata={
+            "github_issue_url": issue.metadata.github_issue_url,
+            "labels": list(issue.labels),
+        },
+    ))
+
+    pr_node_by_number: dict[int, str] = {}
+    for d in run_docs:
+        prn = d.get("pr_number")
+        if prn is None:
+            continue
+        prn_int = int(prn)
+        if prn_int not in pr_node_by_number:
+            pr_id = f"pr:{repo}#{prn_int}"
+            pr_node_by_number[prn_int] = pr_id
+            nodes.append(GraphNode(
+                id=pr_id,
+                kind="pr",
+                label=f"PR #{prn_int}",
+                state=None,  # rich PR state lands in #41
+                timestamp=None,
+                metadata={
+                    "branch": d.get("pr_branch"),
+                    "html_url": f"https://github.com/{repo}/pull/{prn_int}",
+                },
+            ))
+
+    for d in run_docs:
+        run_id = d["id"]
+        run_node_id = f"run:{run_id}"
+        nodes.append(GraphNode(
+            id=run_node_id,
+            kind="run",
+            label=f"Run {run_id[:8]}",
+            state=d.get("state"),
+            timestamp=d.get("created_at"),
+            metadata={
+                "workflow": d.get("workflow"),
+                "trigger_source": d.get("trigger_source"),
+                "abort_reason": d.get("abort_reason"),
+                "cumulative_cost_usd": d.get("cumulative_cost_usd"),
+                "issue_lock_holder_id": d.get("issue_lock_holder_id"),
+                "pr_number": d.get("pr_number"),
+                "pr_branch": d.get("pr_branch"),
+            },
+        ))
+        edges.append(GraphEdge(
+            source=issue_node_id, target=run_node_id, kind="spawned",
+        ))
+
+        prev_attempt_node: str | None = None
+        for a in d.get("attempts") or []:
+            ai = a.get("attempt_index")
+            attempt_node_id = f"attempt:{run_id}:{ai}"
+            verification = a.get("verification") or {}
+            nodes.append(GraphNode(
+                id=attempt_node_id,
+                kind="attempt",
+                label=f"{a.get('phase', 'attempt')} #{ai}",
+                state=verification.get("status") or (
+                    "completed" if a.get("completed_at") else "pending"
+                ),
+                timestamp=a.get("dispatched_at"),
+                metadata={
+                    "phase": a.get("phase"),
+                    "workflow_filename": a.get("workflow_filename"),
+                    "workflow_run_id": a.get("workflow_run_id"),
+                    "verification": verification or None,
+                    "decision": a.get("decision"),
+                    "completed_at": a.get("completed_at"),
+                    "conclusion": a.get("conclusion"),
+                },
+            ))
+            edges.append(GraphEdge(
+                source=prev_attempt_node or run_node_id,
+                target=attempt_node_id,
+                kind="retried" if prev_attempt_node else "attempted",
+            ))
+            prev_attempt_node = attempt_node_id
+
+        prn = d.get("pr_number")
+        if prn is not None:
+            edges.append(GraphEdge(
+                source=run_node_id,
+                target=pr_node_by_number[int(prn)],
+                kind="opened",
+            ))
+
+    for s in relevant_signals:
+        sig_node_id = f"signal:{s['id']}"
+        target_type = s.get("target_type")
+        target_id = s.get("target_id")
+        payload = s.get("payload") or {}
+        nodes.append(GraphNode(
+            id=sig_node_id,
+            kind="signal",
+            label=str(payload.get("kind") or s.get("source") or "signal"),
+            state=s.get("state"),
+            timestamp=s.get("created_at"),
+            metadata={
+                "source": s.get("source"),
+                "target_type": target_type,
+                "target_id": target_id,
+                "decision": s.get("decision"),
+                "payload": payload,
+                "failure_reason": s.get("failure_reason"),
+            },
+        ))
+        if target_type == "pr":
+            try:
+                pn = int(target_id)
+                if pn in pr_node_by_number:
+                    edges.append(GraphEdge(
+                        source=pr_node_by_number[pn],
+                        target=sig_node_id,
+                        kind="feedback",
+                    ))
+            except (TypeError, ValueError):
+                pass
+        elif target_type == "issue":
+            edges.append(GraphEdge(
+                source=issue_node_id, target=sig_node_id, kind="feedback",
+            ))
+        elif target_type == "run":
+            if target_id in run_ids:
+                edges.append(GraphEdge(
+                    source=f"run:{target_id}",
+                    target=sig_node_id,
+                    kind="feedback",
+                ))
+        # Heuristic re_dispatched edge: if this signal preceded a
+        # Run's creation, link it to the next Run on this issue. False
+        # positives are tolerable — the renderer can color the edge as
+        # "implied" rather than "explicit"; richer mapping (via the
+        # Run's `trigger_source.signal_id`) waits on a future PR.
+        sig_ts = s.get("created_at", "")
+        for d in run_docs:
+            if d.get("created_at", "") > sig_ts:
+                edges.append(GraphEdge(
+                    source=sig_node_id,
+                    target=f"run:{d['id']}",
+                    kind="re_dispatched",
+                ))
+                break
+
+    return IssueGraph(issue_id=issue.id, nodes=nodes, edges=edges)
 
 
 @app.post(
