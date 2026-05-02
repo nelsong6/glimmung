@@ -33,3 +33,12 @@ Every feature glimmung adds is one or more of:
 Glimmung is the platform a small SDLC operates on top of, across multiple projects. The lease primitive was the wedge that got us in the door; the reason to stay is everything purpose-curated around it — a single canonical surface for issues, PRs, runs, attempts, evidence, costs, and signals across every project that opts in.
 
 At its best: humans set direction, agents execute in lanes, and the system gracefully handles everything around the work — queue, retry, escalate, abort, surface.
+
+## Frontend / design
+
+Anything that touches the dashboard UI (`frontend/src/`) — new views, new components, copy changes, color tweaks — should follow the design system at `design-system/`.
+
+- **Read `design-system/SKILL.md` first.** It's the checklist: voice (lowercase, terse, technical), pills only from `{free, busy, drain, info}`, two-step inline cancel for destructive actions, KPI strip when a table has > 3 row states, no emoji, no icons-in-buttons, etc.
+- **Tokens are at `design-system/colors_and_type.css`.** `frontend/src/index.css` imports it; do not redefine `--color-*`, `--bg-*`, `--fg-*`, `--state-*`, or `--font-*` in the live frontend. The check at `scripts/check-design-tokens.sh` (run in CI) fails if you do.
+- **Reference visuals live at `design-system/preview/*.html`.** Open them in a browser to see what each component / pill / state should look like before re-implementing.
+- **`design-system/ui_kits/dashboard/`** is a runnable React UI kit (UMD + Babel-standalone, no build step) with fixture data — useful as a sandbox for trying a layout change before touching the live frontend.

@@ -1,73 +1,7 @@
-@import url("https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap");
-
-:root {
-  /* Raw color tokens — neutral ramp */
-  --color-black:           #050507;
-  --color-ink-950:         #0a0a0c;
-  --color-ink-900:         #0e0e10;
-  --color-ink-850:         #15151a;
-  --color-ink-800:         #1a1a1f;
-  --color-ink-700:         #2a2a2e;
-  --color-ink-600:         #3a3a3e;
-  --color-ink-500:         #444;
-  --color-ink-400:         #555;
-  --color-ink-350:         #666;
-  --color-ink-300:         #888;
-  --color-ink-250:         #999;
-  --color-ink-200:         #b8b8b8;
-  --color-ink-100:         #d4d4d4;
-  --color-white:           #e8e8e8;
-  --color-running-border:  #5a3a14;
-  --color-green-bg:        #14532d;
-  --color-green-fg:        #4ade80;
-  --color-green-bg-hover:  #166534;
-  --color-amber-bg:        #422006;
-  --color-amber-fg:        #fb923c;
-  --color-red-bg:          #3f1c1c;
-  --color-red-fg:          #f87171;
-  --color-blue-bg:         #1e3a5f;
-  --color-blue-fg:         #60a5fa;
-
-  /* Semantic surface tokens */
-  --bg:               var(--color-ink-900);
-  --bg-deep:          var(--color-ink-950);
-  --bg-deepest:       var(--color-black);
-  --surface:          var(--color-ink-850);
-  --surface-hover:    var(--color-ink-800);
-  --border:           var(--color-ink-700);
-  --border-strong:    var(--color-ink-600);
-  --border-running:   var(--color-running-border);
-  --border-focus:     var(--color-green-fg);
-  --fg:               var(--color-ink-100);
-  --fg-secondary:     var(--color-ink-200);
-  --fg-muted:         var(--color-ink-250);
-  --fg-dim:           var(--color-ink-300);
-  --fg-dimmer:        var(--color-ink-350);
-  --fg-dimmest:       var(--color-ink-400);
-  --fg-faintest:      var(--color-ink-500);
-  --fg-inverse:       var(--color-white);
-
-  /* State / status tokens */
-  --state-success-bg: var(--color-green-bg);
-  --state-success-fg: var(--color-green-fg);
-  --state-busy-bg:    var(--color-amber-bg);
-  --state-busy-fg:    var(--color-amber-fg);
-  --state-danger-bg:  var(--color-red-bg);
-  --state-danger-fg:  var(--color-red-fg);
-  --state-info-bg:    var(--color-blue-bg);
-  --state-info-fg:    var(--color-blue-fg);
-  --accent-primary:   var(--color-green-fg);
-  --accent-workflow:  var(--color-blue-fg);
-
-  /* Type tokens — Geist Sans + Geist Mono via Google Fonts */
-  --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-
-  font-family: var(--font-sans);
-  font-size: 14px;
-  color: var(--fg);
-  background: var(--bg);
-}
+/* Tokens, type, and base element styles live in the design system.
+   Edit colors / type / base resets there, not here. The check at
+   scripts/check-design-tokens.sh fails CI if this file redefines tokens. */
+@import url("../../design-system/colors_and_type.css");
 
 * { box-sizing: border-box; }
 body { margin: 0; }
