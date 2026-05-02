@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from azure.core import MatchConditions
-from azure.cosmos.exceptions import CosmosAccessConditionFailedError
+from azure.cosmos.exceptions import CosmosAccessConditionFailedError, CosmosResourceNotFoundError
 from ulid import ULID
 
 from glimmung.db import Cosmos, query_all
@@ -100,6 +100,22 @@ async def create_run(
         (trigger_source or {}).get("kind", "unspecified"),
     )
     return run
+
+
+async def read_run(
+    cosmos: Cosmos,
+    *,
+    project: str,
+    run_id: str,
+) -> tuple[Run, str] | None:
+    """Point-read a Run by `(project, run_id)`. Returns `(run, etag)` or
+    `None` if missing. The etag lets the caller chain into a write op
+    without re-reading."""
+    try:
+        doc = await cosmos.runs.read_item(item=run_id, partition_key=project)
+    except CosmosResourceNotFoundError:
+        return None
+    return Run.model_validate(_strip_meta(doc)), doc["_etag"]
 
 
 async def get_active_run(
@@ -282,6 +298,41 @@ async def find_run_by_workflow_run(
             if attempt.get("workflow_run_id") == workflow_run_id:
                 return Run.model_validate(_strip_meta(d)), d["_etag"]
     return None
+
+
+async def record_started(
+    cosmos: Cosmos,
+    *,
+    run: Run,
+    etag: str,
+    workflow_run_id: int,
+) -> tuple[Run, str]:
+    """Stamp the GH Actions `workflow_run.id` onto the latest attempt.
+
+    Called by the workflow's first-step curl callback to glimmung
+    (`POST /v1/runs/{project}/{run_id}/started`). This is what
+    establishes the workflow_run_id ↔ glimmung run_id mapping
+    deterministically — GitHub's `POST .../dispatches` returns 204
+    with no body, and the workflow_run webhook payload doesn't echo
+    workflow_dispatch inputs, so the workflow has to tell us itself.
+
+    Idempotent: a redelivery on the same attempt is a no-op (the
+    first stamped id wins; subsequent calls leave it unchanged).
+    """
+    def apply(r: Run) -> Run:
+        if not r.attempts:
+            raise RuntimeError(f"run {r.id} has no attempts to start")
+        last = r.attempts[-1]
+        if last.workflow_run_id is not None and last.workflow_run_id != workflow_run_id:
+            log.warning(
+                "run %s attempt %d already has workflow_run_id=%s; "
+                "ignoring duplicate started callback with %s",
+                r.id, last.attempt_index, last.workflow_run_id, workflow_run_id,
+            )
+            return r
+        last.workflow_run_id = workflow_run_id
+        return r.model_copy(update={"updated_at": _now()})
+    return await _retry_on_conflict(cosmos, run, etag, apply)
 
 
 async def record_completion(

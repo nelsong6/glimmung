@@ -55,6 +55,7 @@ from glimmung.models import (
     SignalTargetType,
     StateSnapshot,
     TriageDecision,
+    VerificationResult,
     Workflow,
     WorkflowRegister,
 )
@@ -438,175 +439,82 @@ async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host
         return False
 
 
-async def _handle_workflow_run(payload: dict[str, Any]) -> dict[str, Any]:
-    """workflow_run.completed handler. Two responsibilities:
-
-    1. **Lease release** (belt-and-suspenders). GitHub fires this event when
-       a workflow run finishes for *any* reason (success, failure, cancel,
-       runner died). We pull lease_id back out of the dispatch inputs and
-       release. `release()` is idempotent — if the workflow's own release
-       step already fired, this is a no-op.
-
-    2. **Verify-loop substrate** (#18). If the completed run belongs to a
-       tracked Run (workflow registered with `retry_workflow_filename`),
-       we fetch the verification artifact, record the attempt, run the
-       decision engine, and either dispatch the retry workflow or abort
-       with an issue comment. The lease release in (1) still happens —
-       the retry dispatch acquires its *own* lease.
+async def _release_locks_on_terminal(
+    *,
+    run: Run,
+    repo: str,
+    result: dict[str, Any],
+) -> None:
+    """Issue + PR lock release for a Run that reached a terminal decision
+    (ADVANCE / ABORT_*). RETRY intentionally skips this — the lock spans
+    the whole verify-loop chain, not per-attempt. Idempotent on the lock
+    side via holder_id; safe to call twice if the workflow somehow ends
+    up double-completing.
     """
-    if payload.get("action") != "completed":
-        return {"ignored": f"workflow_run.{payload.get('action')}"}
-
-    run_data = payload.get("workflow_run") or {}
-    inputs = run_data.get("inputs") or {}
-    lease_id = inputs.get("lease_id")
-    if not lease_id:
-        return {"ignored": "no lease_id in inputs"}
-
-    repo = (payload.get("repository") or {}).get("full_name", "")
     cosmos: Cosmos = app.state.cosmos
-    matching = await query_all(
-        cosmos.projects,
-        "SELECT * FROM c WHERE c.githubRepo = @r",
-        parameters=[{"name": "@r", "value": repo}],
-    )
-    if not matching:
-        return {"ignored": "no project for repo"}
-    project = matching[0]["name"]
 
-    result: dict[str, Any] = {}
-
-    # (1) Lease release — always.
-    issue_lock_holder_id: str | None = None
-    try:
-        released = await lease_ops.release(cosmos, lease_id, project)
-        result["released"] = lease_id
-        result["lease_state"] = released.state.value
-        issue_lock_holder_id = (released.metadata or {}).get("issue_lock_holder_id")
-    except Exception as e:
-        log.exception("workflow_run release failed for %s", lease_id)
-        result["error"] = str(e)
-        result["lease_id"] = lease_id
-
-    # (2) Verify-loop substrate — only if the completion lines up with an
-    # in-progress Run for this issue.
-    run_reached_terminal = False
-    is_run_tracked = False
-    issue_number_raw = inputs.get("issue_number")
-    issue_number: int | None = None
-    if issue_number_raw:
-        try:
-            issue_number = int(issue_number_raw)
-        except ValueError:
-            issue_number = None
-
-    if issue_number is not None:
-        run_lookup = await run_ops.get_active_run(
-            cosmos, project=project, issue_number=issue_number,
-        )
-        if run_lookup is not None:
-            is_run_tracked = True
-            run, etag = run_lookup
-            try:
-                run_outcome = await _process_run_completion(
-                    run=run, etag=etag, run_data=run_data, repo=repo,
-                )
-                result["run_id"] = run.id
-                result["decision"] = run_outcome
-                # The run-tracked lock holder lives on the Run document
-                # (survives across retry attempts; lease metadata only
-                # carries the latest attempt's lease).
-                if run_outcome in (RunDecision.ADVANCE.value,
-                                   RunDecision.ABORT_BUDGET_ATTEMPTS.value,
-                                   RunDecision.ABORT_BUDGET_COST.value,
-                                   RunDecision.ABORT_MALFORMED.value):
-                    run_reached_terminal = True
-                    issue_lock_holder_id = run.issue_lock_holder_id or issue_lock_holder_id
-            except Exception:
-                log.exception("verify-loop processing failed for run %s", run.id)
-                result["run_error"] = "see logs"
-
-    # (3) Issue-lock release — covers both terminations:
-    #   - Run-tracked workflow reached a terminal decision (PASS / ABORT_*).
-    #   - Non-Run-tracked workflow's lease released (no Run; treat as done).
-    # RETRY decisions intentionally do NOT release: the lock spans the whole
-    # verify-loop chain (initial + retries), not per-attempt.
-    should_release_lock = (
-        issue_lock_holder_id
-        and issue_number is not None
-        and (run_reached_terminal or not is_run_tracked)
-    )
-    if should_release_lock:
+    # Issue lock — keyed off the Run's stored holder_id so retries don't
+    # release the lock the initial dispatch claimed.
+    if run.issue_lock_holder_id and run.issue_number:
         try:
             released_lock = await lock_ops.release_lock(
                 cosmos, scope="issue",
-                key=f"{repo}#{issue_number}",
-                holder_id=issue_lock_holder_id,
+                key=f"{repo}#{run.issue_number}",
+                holder_id=run.issue_lock_holder_id,
             )
             result["issue_lock_released"] = released_lock
         except Exception:
             log.exception(
                 "issue lock release failed for %s#%s holder=%s",
-                repo, issue_number, issue_lock_holder_id,
+                repo, run.issue_number, run.issue_lock_holder_id,
             )
 
-    # (4) PR-lock release — only fires when a triage cycle reached a
-    # terminal Run state. The Run document carries pr_number +
-    # pr_lock_holder_id (set by _dispatch_triage when re-opening for
-    # triage). Release uses run.pr_lock_holder_id; idempotent.
-    if run_reached_terminal and is_run_tracked and run_lookup is not None:
-        run_for_locks, _ = run_lookup  # the original run, not the post-decision one
-        # Re-read the run to get the *latest* pr_lock_holder_id (in
-        # case the Run was re-opened for triage between when we read
-        # it above and now). Cheap point-read.
+    # PR lock — only set on triage cycles. Re-read the run for the
+    # freshest pr_lock_holder_id in case a triage re-open landed
+    # between record_completion and here.
+    try:
+        doc = await cosmos.runs.read_item(item=run.id, partition_key=run.project)
+        pr_lock_holder = doc.get("pr_lock_holder_id")
+        pr_number = doc.get("pr_number")
+    except Exception:
+        pr_lock_holder = run.pr_lock_holder_id
+        pr_number = run.pr_number
+
+    if pr_lock_holder and pr_number:
         try:
-            doc = await cosmos.runs.read_item(
-                item=run_for_locks.id, partition_key=run_for_locks.project,
+            released_pr_lock = await lock_ops.release_lock(
+                cosmos, scope="pr",
+                key=f"{repo}#{pr_number}",
+                holder_id=pr_lock_holder,
             )
-            pr_lock_holder = doc.get("pr_lock_holder_id")
-            pr_number = doc.get("pr_number")
+            result["pr_lock_released"] = released_pr_lock
         except Exception:
-            pr_lock_holder = run_for_locks.pr_lock_holder_id
-            pr_number = run_for_locks.pr_number
-
-        if pr_lock_holder and pr_number:
-            try:
-                released_pr_lock = await lock_ops.release_lock(
-                    cosmos, scope="pr",
-                    key=f"{repo}#{pr_number}",
-                    holder_id=pr_lock_holder,
-                )
-                result["pr_lock_released"] = released_pr_lock
-            except Exception:
-                log.exception(
-                    "pr lock release failed for %s#%s holder=%s",
-                    repo, pr_number, pr_lock_holder,
-                )
-
-    return result
+            log.exception(
+                "pr lock release failed for %s#%s holder=%s",
+                repo, pr_number, pr_lock_holder,
+            )
 
 
 async def _process_run_completion(
     *,
     run: Run,
     etag: str,
-    run_data: dict[str, Any],
+    workflow_run_id: int,
+    conclusion: str,
+    verification_result: VerificationResult | None,
     repo: str,
 ) -> str:
-    """Drive a Run from `workflow_run.completed` through one decision-engine
-    cycle. Returns the decision value."""
+    """Drive a Run through one decision-engine cycle. Returns the
+    decision value.
+
+    Inputs come from the workflow's curl-completed callback (verification
+    is the parsed `verification.json` content posted directly in the
+    body). The retry dispatch path resolves the prior-attempt artifact
+    URL lazily via `fetch_verification` only when RETRY actually fires —
+    keeps the hot path synchronous-and-cheap and confines GH API calls
+    to the one decision branch that needs them.
+    """
     cosmos: Cosmos = app.state.cosmos
-    minter: GitHubAppTokenMinter | None = app.state.gh_minter
-    if minter is None:
-        log.warning("no GH minter; cannot fetch verification artifact for run %s", run.id)
-        return "skipped_no_minter"
-
-    workflow_run_id = int(run_data.get("id") or 0)
-    conclusion = str(run_data.get("conclusion") or "")
-
-    verification_result, archive_url = await fetch_verification(
-        minter, repo=repo, run_id=workflow_run_id,
-    )
 
     run, etag = await run_ops.record_completion(
         cosmos,
@@ -615,7 +523,7 @@ async def _process_run_completion(
         workflow_run_id=workflow_run_id,
         conclusion=conclusion,
         verification=verification_result,
-        artifact_url=archive_url,
+        artifact_url=None,
     )
 
     workflow_doc = await _read_workflow(cosmos, run.project, run.workflow)
@@ -663,7 +571,7 @@ async def _process_run_completion(
     if decision == RunDecision.RETRY:
         await _dispatch_retry(
             run=run, etag=etag, repo=repo,
-            workflow_model=workflow_model, archive_url=archive_url,
+            workflow_model=workflow_model,
         )
         return decision.value
 
@@ -685,7 +593,6 @@ async def _dispatch_retry(
     etag: str,
     repo: str,
     workflow_model: Workflow,
-    archive_url: str | None,
 ) -> None:
     """Dispatch a recycle (formerly RETRY) for a Run. Reads the failing
     phase's `recycle_policy.lands_at` to pick the destination phase, finds
@@ -756,12 +663,30 @@ async def _dispatch_retry(
         )
         return
 
+    # Resolve the prior attempt's artifact URL lazily — only the retry
+    # path needs it (so the next agent can prepend prior-failure reasons
+    # to its prompt). Best-effort: if the lookup fails, the retry still
+    # fires without prior context rather than blocking on GH API state.
+    prior_artifact_url = ""
+    prior_attempt = run.attempts[-2] if len(run.attempts) >= 2 else None
+    if prior_attempt is not None and prior_attempt.workflow_run_id:
+        try:
+            _, archive_url = await fetch_verification(
+                minter, repo=repo, run_id=prior_attempt.workflow_run_id,
+            )
+            prior_artifact_url = archive_url or ""
+        except Exception:
+            log.exception(
+                "retry: failed to resolve prior artifact url for run %s attempt %d",
+                run.id, prior_attempt.attempt_index,
+            )
+
     inputs = {
         "host": host.name,
         "lease_id": lease.id,
         "issue_number": str(run.issue_number),
         "run_id": run.id,
-        "prior_verification_artifact_url": archive_url or "",
+        "prior_verification_artifact_url": prior_artifact_url,
         "attempt_index": str(len(run.attempts) - 1),
     }
     try:
@@ -1492,6 +1417,138 @@ async def abort_run(
     )
 
 
+# ─── Run lifecycle callbacks (workflow → glimmung) ────────────────────────────
+#
+# The dispatched workflow reports its own lifecycle to glimmung via these
+# endpoints rather than relying on GitHub's `workflow_run` webhook —
+# `workflow_dispatch` returns 204 with no run id, and the `workflow_run`
+# event payload doesn't echo dispatch inputs, so there's no GH-provided
+# correlation field to map an inbound webhook to a glimmung Run. The
+# workflow already curls glimmung at start (lease verify) and end (lease
+# release), so adding two callbacks for run-state is essentially free.
+#
+# Auth is capability-only: `run_id` is an unguessable ULID, same pattern
+# as `/v1/lease/{lease_id}/release`.
+
+
+class RunStartedRequest(BaseModel):
+    """`POST /v1/runs/{project}/{run_id}/started` body. The workflow's
+    first step posts its `${{ github.run_id }}` here so subsequent
+    dashboard / cancel paths can deep-link the GH workflow run."""
+    workflow_run_id: int
+
+
+class RunCompletedRequest(BaseModel):
+    """`POST /v1/runs/{project}/{run_id}/completed` body.
+
+    `verification` is the parsed `verification.json` content the
+    workflow's verify phase produced (still uploaded as a GHA artifact
+    for human auditability; this body is the decision-engine input).
+    Missing / unparseable verification → decision engine returns
+    ABORT_MALFORMED, same as the legacy webhook path.
+    """
+    workflow_run_id: int
+    conclusion: str   # GH-style: "success" | "failure" | "cancelled"
+    verification: dict[str, Any] | None = None
+
+
+class RunCallbackResult(BaseModel):
+    run_id: str
+    decision: str | None = None
+    issue_lock_released: bool | None = None
+    pr_lock_released: bool | None = None
+
+
+@app.post(
+    "/v1/runs/{project}/{run_id}/started",
+    response_model=RunCallbackResult,
+)
+async def run_started(
+    req: RunStartedRequest,
+    project: str = Path(...),
+    run_id: str = Path(...),
+) -> RunCallbackResult:
+    """Workflow-side callback: the dispatched workflow has started, here
+    is its `${{ github.run_id }}`. Stamps `workflow_run_id` on the latest
+    PhaseAttempt of the Run. Idempotent on redelivery."""
+    cosmos: Cosmos = app.state.cosmos
+    found = await run_ops.read_run(cosmos, project=project, run_id=run_id)
+    if found is None:
+        raise HTTPException(404, f"no run {project}/{run_id}")
+    run, etag = found
+    await run_ops.record_started(
+        cosmos, run=run, etag=etag, workflow_run_id=req.workflow_run_id,
+    )
+    return RunCallbackResult(run_id=run.id)
+
+
+@app.post(
+    "/v1/runs/{project}/{run_id}/completed",
+    response_model=RunCallbackResult,
+)
+async def run_completed(
+    req: RunCompletedRequest,
+    project: str = Path(...),
+    run_id: str = Path(...),
+) -> RunCallbackResult:
+    """Workflow-side callback: the dispatched workflow finished with the
+    given conclusion + verification.json content. Records the attempt,
+    runs the decision engine, and on terminal decisions releases the
+    issue lock (and PR lock for triage cycles).
+
+    Lease release is NOT done here — the workflow's `release-lease` job
+    handles that via `/v1/lease/{lease_id}/release` directly so capacity
+    frees independent of run-state outcome.
+    """
+    cosmos: Cosmos = app.state.cosmos
+    found = await run_ops.read_run(cosmos, project=project, run_id=run_id)
+    if found is None:
+        raise HTTPException(404, f"no run {project}/{run_id}")
+    run, etag = found
+
+    verification_result: VerificationResult | None = None
+    if req.verification is not None:
+        try:
+            verification_result = VerificationResult.model_validate(req.verification)
+        except Exception:
+            log.warning(
+                "run %s/%s: posted verification didn't validate; "
+                "decision engine will treat as malformed",
+                project, run_id,
+            )
+
+    decision_value = await _process_run_completion(
+        run=run,
+        etag=etag,
+        workflow_run_id=req.workflow_run_id,
+        conclusion=req.conclusion,
+        verification_result=verification_result,
+        repo=run.issue_repo,
+    )
+
+    result_dict: dict[str, Any] = {}
+    terminal = decision_value in (
+        RunDecision.ADVANCE.value,
+        RunDecision.ABORT_BUDGET_ATTEMPTS.value,
+        RunDecision.ABORT_BUDGET_COST.value,
+        RunDecision.ABORT_MALFORMED.value,
+    )
+    if terminal:
+        # Re-read to get the post-decision Run state for lock release.
+        post = await run_ops.read_run(cosmos, project=project, run_id=run_id)
+        post_run = post[0] if post is not None else run
+        await _release_locks_on_terminal(
+            run=post_run, repo=run.issue_repo, result=result_dict,
+        )
+
+    return RunCallbackResult(
+        run_id=run.id,
+        decision=decision_value,
+        issue_lock_released=result_dict.get("issue_lock_released"),
+        pr_lock_released=result_dict.get("pr_lock_released"),
+    )
+
+
 async def _compute_snapshot(cosmos: Cosmos) -> StateSnapshot:
     host_docs = await query_all(cosmos.hosts, "SELECT * FROM c")
     project_docs = await query_all(cosmos.projects, "SELECT * FROM c")
@@ -1670,8 +1727,14 @@ async def github_webhook(request: Request) -> dict[str, Any]:
     event = request.headers.get("X-GitHub-Event", "")
     payload = json.loads(body)
 
-    if event == "workflow_run":
-        return await _handle_workflow_run(payload)
+    # `workflow_run` events are intentionally ignored. The workflow
+    # itself reports lifecycle to glimmung via curl callbacks
+    # (`POST /v1/runs/{project}/{run_id}/started` and `/completed`) —
+    # GitHub doesn't echo workflow_dispatch inputs on workflow_run
+    # webhook payloads, so there's no way to map an inbound webhook to
+    # a glimmung Run without help from the workflow side. The workflow
+    # already curls glimmung at start (lease verify) and end (lease
+    # release), so adding the run-state callbacks is essentially free.
     if event == "pull_request":
         return await _handle_pull_request(payload)
     if event == "pull_request_review":
