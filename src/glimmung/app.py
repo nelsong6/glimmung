@@ -349,26 +349,34 @@ _DISPATCH_INPUT_KEYS = frozenset({
 })
 
 
-async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host: Host) -> None:
-    """Fire workflow_dispatch for the lease's (project, workflow). Both must
-    exist in Cosmos and the project must have a github_repo set."""
+async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host: Host) -> bool:
+    """Fire workflow_dispatch for the lease's (project, workflow). Returns
+    True on a successful dispatch OR a no-op (no GH minter, project not
+    registered, workflow doc missing); False only when the dispatch was
+    attempted and `dispatch_workflow` raised. The True-on-no-op shape
+    keeps the existing test surface (gh_minter=None as a global mute)
+    working without back-out side effects, while still letting
+    `dispatch_run` distinguish "GH actually said no" from "we never even
+    tried" — the former is the orphan-producing case that should roll
+    back the lease + lock instead of leaving a Run stranded
+    IN_PROGRESS."""
     minter: GitHubAppTokenMinter | None = app.state.gh_minter
     if minter is None:
-        return
+        return True
 
     cosmos: Cosmos = app.state.cosmos
     project_doc = await _read_project(cosmos, lease_doc["project"])
     if not project_doc or not project_doc.get("githubRepo"):
-        return
+        return True
 
     workflow_name = lease_doc.get("workflow")
     if not workflow_name:
         log.warning("lease %s has no workflow; skipping dispatch", lease_doc["id"])
-        return
+        return True
 
     workflow_doc = await _read_workflow(cosmos, lease_doc["project"], workflow_name)
     if not workflow_doc or not workflow_doc.get("workflowFilename"):
-        return
+        return True
 
     metadata = lease_doc.get("metadata") or {}
     inputs = {
@@ -392,8 +400,10 @@ async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host
             workflow_doc["workflowFilename"], host.name, lease_doc["id"],
             lease_doc["project"], workflow_name,
         )
+        return True
     except Exception:
         log.exception("workflow_dispatch failed for lease %s", lease_doc["id"])
+        return False
 
 
 async def _handle_workflow_run(payload: dict[str, Any]) -> dict[str, Any]:
