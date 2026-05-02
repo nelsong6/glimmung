@@ -1584,6 +1584,42 @@ async def list_workflows() -> list[Workflow]:
     return [_doc_to_workflow(d) for d in docs]
 
 
+class WorkflowUpdateRequest(BaseModel):
+    """PATCH /v1/workflows/{project}/{name} body. All fields optional —
+    None means "don't change". Only carries the rollout-knob fields a
+    live workflow row needs to flip without re-registering (`pr.enabled`,
+    `budget.total`); structural fields (phases, recycle policy) still go
+    through register_workflow's full upsert."""
+    pr_enabled: bool | None = None
+    budget_total: float | None = None
+
+
+@app.patch(
+    "/v1/workflows/{project}/{name}",
+    response_model=Workflow,
+    dependencies=[Depends(require_admin_user)],
+)
+async def patch_workflow_endpoint(
+    req: WorkflowUpdateRequest,
+    project: str = Path(...),
+    name: str = Path(...),
+) -> Workflow:
+    cosmos: Cosmos = app.state.cosmos
+    doc = await _read_workflow(cosmos, project, name)
+    if doc is None:
+        raise HTTPException(404, f"no workflow {project}/{name}")
+    if req.pr_enabled is not None:
+        pr = doc.get("pr") or {}
+        pr["enabled"] = bool(req.pr_enabled)
+        doc["pr"] = pr
+    if req.budget_total is not None:
+        budget = doc.get("budget") or {}
+        budget["total"] = float(req.budget_total)
+        doc["budget"] = budget
+    await cosmos.workflows.replace_item(item=name, body=doc)
+    return _doc_to_workflow(doc)
+
+
 @app.post("/v1/hosts", response_model=Host, dependencies=[Depends(require_admin_user)])
 async def register_host(host: dict[str, Any]) -> Host:
     name = host.get("name")
