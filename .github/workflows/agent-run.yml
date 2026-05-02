@@ -53,6 +53,30 @@ on:
         description: Originating GitHub action (informational)
         required: false
         type: string
+      # ── Verify-loop / phases-v1 inputs (glimmung#69) ──
+      # Glimmung dictates the branch via run_id; the others are reserved
+      # for future verify-loop / recycle dispatches (currently unused on
+      # this workflow since pr.enabled=False and verify=False).
+      run_id:
+        description: Glimmung Run ULID (used for branch=glimmung/<run_id>)
+        required: false
+        type: string
+      attempt_index:
+        description: 0-based attempt index. 0 = initial; >0 = recycle.
+        required: false
+        type: string
+      prior_verification_artifact_url:
+        description: Reserved for verify-loop recycle (unused on this workflow).
+        required: false
+        type: string
+      feedback:
+        description: Reserved for PR-feedback recycle (unused on this workflow).
+        required: false
+        type: string
+      pr_number:
+        description: Existing PR number on a recycle dispatch.
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -252,6 +276,8 @@ jobs:
             --overwrite-existing
 
       - name: Compute run-scoped variables
+        env:
+          GLIMMUNG_RUN_ID: ${{ inputs.run_id }}
         run: |
           set -euo pipefail
           short_sha=$(git rev-parse --short=7 HEAD)
@@ -261,6 +287,10 @@ jobs:
           # per-run namespace so the reflector's `glimmung-issue-.*`
           # match pattern auto-replicates the claude-oauth-ca ConfigMap
           # without polluting the prod glimmung namespace.
+          if [ -z "${GLIMMUNG_RUN_ID}" ]; then
+            echo "::error::missing inputs.run_id (required under glimmung#69)"
+            exit 1
+          fi
           {
             echo "RELEASE_NAME=${slug}"
             echo "PROD_NAMESPACE=glimmung"
@@ -268,7 +298,7 @@ jobs:
             echo "VALIDATION_HOST=${slug}.glimmung.dev.romaine.life"
             echo "VALIDATION_URL=https://${slug}.glimmung.dev.romaine.life"
             echo "JOB_NAME=agent-${slug}"
-            echo "BRANCH_NAME=agent/issue-${ISSUE_NUMBER}-${GITHUB_RUN_ID}"
+            echo "BRANCH_NAME=glimmung/${GLIMMUNG_RUN_ID}"
             echo "IMAGE_TAG=${slug}"
             echo "ISSUE_URL=https://github.com/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}"
           } >> "$GITHUB_ENV"
@@ -494,83 +524,25 @@ jobs:
             echo "EOF_MD"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Open pull request and label release
-        if: success()
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          SCREENSHOTS_MD: ${{ steps.upload.outputs.markdown }}
-          HAVE_NOTES: ${{ steps.evidence.outputs.have_notes }}
-          DEEP_VALIDATION_URL: ${{ steps.evidence.outputs.deep_validation_url }}
-          GLIMMUNG_ISSUE_ID: ${{ inputs.issue_id }}
+      - name: Label per-issue release + agent namespace by branch
+        # glimmung#69: glimmung opens the PR after this workflow completes
+        # (when pr.enabled=true on the workflow registration). The agent
+        # itself doesn't run gh pr create anymore. We label by branch slug
+        # so agent-pr-cleanup.yml can find and reap the release+namespace
+        # without knowing the PR number at workflow-run time. The closing
+        # PR's head.ref is `glimmung/<run_id>`; slugify the same way
+        # (`/` → `-`) and cleanup matches.
+        if: success() && inputs.pr_number == ''
         run: |
           set -euo pipefail
-          if [ -n "${DEEP_VALIDATION_URL}" ]; then
-            link_url="${DEEP_VALIDATION_URL}"
-          else
-            link_url="${VALIDATION_URL}"
-          fi
-          # Post-#50: the GH PR body is a thin shell linking back to
-          # glimmung. Rich content (validation env, screenshots, notes,
-          # cost) is embedded in an HTML-comment marker that the
-          # `_handle_pull_request` webhook parses and writes onto the
-          # glimmung PR document. The dashboard renders the rich body;
-          # the GH PR stays intentionally minimal.
-          notes_payload=""
-          if [ "${HAVE_NOTES}" = "true" ]; then
-            notes_payload=$(cat /tmp/evidence/notes.md)
-          fi
-          glimmung_pr_url=""
-          if [ -n "${GLIMMUNG_ISSUE_ID}" ]; then
-            glimmung_pr_url="${GLIMMUNG_BASE}/prs?issue=${GLIMMUNG_ISSUE_ID}"
-          fi
-          body_file=$(mktemp)
-          {
-            echo "Closes #${ISSUE_NUMBER}."
-            echo ""
-            if [ -n "${glimmung_pr_url}" ]; then
-              echo "Glimmung PR: ${glimmung_pr_url}"
-              echo ""
-            fi
-            echo "Validation env (until PR closes): <a href=\"${link_url}\" target=\"_blank\" rel=\"noopener noreferrer\">${link_url}</a>"
-            echo ""
-            echo "<!-- glimmung-meta"
-            echo "project=${GLIMMUNG_PROJECT}"
-            echo "issue_number=${ISSUE_NUMBER}"
-            if [ -n "${GLIMMUNG_ISSUE_ID}" ]; then
-              echo "issue_id=${GLIMMUNG_ISSUE_ID}"
-            fi
-            echo "validation_env=${link_url}"
-            echo "lease_id=${{ inputs.lease_id }}"
-            echo "host=${{ inputs.host }}"
-            if [ -n "${notes_payload}" ]; then
-              echo "notes_md_b64=$(printf '%s' "${notes_payload}" | base64 -w0)"
-            fi
-            if [ -n "${SCREENSHOTS_MD:-}" ]; then
-              echo "screenshots_md_b64=$(printf '%s' "${SCREENSHOTS_MD}" | base64 -w0)"
-            fi
-            echo "-->"
-          } > "${body_file}"
-          pr_url=$(gh pr create \
-            --base main \
-            --head "${BRANCH_NAME}" \
-            --title "agent: ${ISSUE_TITLE} (#${ISSUE_NUMBER})" \
-            --body-file "${body_file}")
-          echo "${pr_url}"
-          pr_number=$(printf '%s' "${pr_url}" | grep -oE 'pull/[0-9]+' | tr -dc '0-9')
-          echo "PR_NUMBER=${pr_number}" >> "$GITHUB_ENV"
-          if [ -z "${pr_number}" ]; then
-            echo "::warning::could not parse PR number from ${pr_url}; cleanup will need to find this release by hand"
-            exit 0
-          fi
-          # Label both the per-issue helm release (in glimmung namespace)
-          # AND the agent namespace, so cleanup can find both by label.
-          python -m glimmung_agent.cli label-release-pr \
+          slug="${BRANCH_NAME//\//-}"
+          python -m glimmung_agent.cli label-release-branch \
             --release "${RELEASE_NAME}" \
             --namespace "${PROD_NAMESPACE}" \
-            --pr-number "${pr_number}" \
-            || echo "::warning::failed to label release ${RELEASE_NAME} with glimmung.io/pr=${pr_number}"
-          kubectl label namespace "${AGENT_NAMESPACE}" "glimmung.io/pr=${pr_number}" --overwrite \
-            || echo "::warning::failed to label namespace ${AGENT_NAMESPACE} with glimmung.io/pr=${pr_number}"
+            --branch-slug "${slug}" \
+            || echo "::warning::failed to label release ${RELEASE_NAME} with glimmung.io/branch=${slug}"
+          kubectl label namespace "${AGENT_NAMESPACE}" "glimmung.io/branch=${slug}" --overwrite \
+            || echo "::warning::failed to label namespace ${AGENT_NAMESPACE} with glimmung.io/branch=${slug}"
 
       - name: Summarize agent run
         if: always()
