@@ -180,12 +180,43 @@ async def dispatch_run(
             detail=f"issue lock held by {busy.lock.held_by} until {busy.lock.expires_at.isoformat()}",
         )
 
-    # 4. Lease + workflow_dispatch.
+    # 4. Run record (#69): create BEFORE dispatch so run_id can flow into
+    # workflow_dispatch inputs. Glimmung dictates the head ref via run_id
+    # (`glimmung/<run_id>`) and the agent's workflow needs that value at
+    # branch-resolution time. Pre-#69 the Run was created post-dispatch
+    # (fine because branches were agent-named); post-#69 the order matters.
+    run_id: str | None = None
+    phases = workflow_doc.get("phases") or []
+    if phases:
+        initial_phase = phases[0]
+        budget = resolve_budget(
+            issue_labels or [],
+            _budget_from_doc(workflow_doc.get("budget")),
+        )
+        run = await run_ops.create_run(
+            cosmos,
+            project=project_name,
+            workflow=workflow_actual_name,
+            issue_id=issue.id,
+            issue_repo=repo or "",
+            issue_number=issue_number or 0,
+            budget=budget,
+            initial_phase_name=initial_phase["name"],
+            initial_workflow_filename=initial_phase["workflowFilename"],
+            issue_lock_holder_id=holder_id,
+            trigger_source=trigger_source,
+        )
+        run_id = run.id
+
+    # 5. Lease + workflow_dispatch.
     metadata: dict[str, Any] = {
         "issue_id": issue.id,
         "issue_lock_holder_id": holder_id,
         **(extra_metadata or {}),
     }
+    if run_id is not None:
+        metadata["run_id"] = run_id
+        metadata["attempt_index"] = "0"
     if repo and issue_number is not None:
         metadata["issue_number"] = str(issue_number)
         metadata["issue_repo"] = repo
@@ -215,11 +246,8 @@ async def dispatch_run(
         if not dispatched:
             # GH refused the dispatch (typically a 422 on undeclared
             # inputs — see _DISPATCH_INPUT_KEYS in app.py). Roll back the
-            # lease + lock so the issue isn't held for the lock TTL on a
-            # phantom run. The Run record is intentionally never created
-            # here: the orphan shape (`state=in_progress` + null
-            # workflow_run_id) was the symptom that motivated #20's
-            # backout path.
+            # lease + lock + Run so the issue isn't held for the lock TTL
+            # on a phantom run.
             try:
                 await lease_ops.release(cosmos, lease.id, project_name)
             except Exception:
@@ -236,39 +264,28 @@ async def dispatch_run(
                     "dispatch_run: lock release failed during backout for %s",
                     lock_key,
                 )
+            if run_id is not None:
+                try:
+                    # Mark the run aborted to avoid an orphan IN_PROGRESS row
+                    # (the symptom #20 was supposed to prevent).
+                    doc = await cosmos.runs.read_item(item=run_id, partition_key=project_name)
+                    from glimmung.models import Run
+                    run_obj = Run.model_validate({k: v for k, v in doc.items() if not k.startswith("_")})
+                    await run_ops.mark_aborted(
+                        cosmos, run=run_obj, etag=doc["_etag"],
+                        reason="dispatch_failed: GitHub workflow_dispatch raised before run started",
+                    )
+                except Exception:
+                    log.exception(
+                        "dispatch_run: failed to mark run %s aborted during backout", run_id,
+                    )
             return DispatchResult(
                 state="dispatch_failed",
                 lease_id=lease.id,
+                run_id=run_id,
                 workflow=workflow_actual_name,
-                detail="GitHub workflow_dispatch raised; lease + lock released, no Run created",
+                detail="GitHub workflow_dispatch raised; lease + lock + run rolled back",
             )
-
-    # 5. Run record. Under #69 every registered workflow has at least one
-    # phase (the v1 schema enforces ≥1 at registration time), so a Run is
-    # always created — the old retry_workflow_filename gate that distinguished
-    # "verify-loop-aware" from "fire-and-forget" workflows is gone.
-    run_id: str | None = None
-    phases = workflow_doc.get("phases") or []
-    if phases:
-        initial_phase = phases[0]
-        budget = resolve_budget(
-            issue_labels or [],
-            _budget_from_doc(workflow_doc.get("budget")),
-        )
-        run = await run_ops.create_run(
-            cosmos,
-            project=project_name,
-            workflow=workflow_actual_name,
-            issue_id=issue.id,
-            issue_repo=repo or "",
-            issue_number=issue_number or 0,
-            budget=budget,
-            initial_phase_name=initial_phase["name"],
-            initial_workflow_filename=initial_phase["workflowFilename"],
-            issue_lock_holder_id=holder_id,
-            trigger_source=trigger_source,
-        )
-        run_id = run.id
 
     return DispatchResult(
         state="dispatched" if host is not None else "pending",

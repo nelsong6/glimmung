@@ -120,13 +120,15 @@ async def _register_issue(app, *, project: str, repo: str, number: int) -> str:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_failure_rolls_back_lease_lock_and_skips_run(
+async def test_dispatch_failure_rolls_back_lease_lock_and_aborts_run(
     app, monkeypatch,
 ):
     """Simulates the orphan-producing path: GH `workflow_dispatch` raises
-    (422 on undeclared input is the realistic case). Verify the lease is
-    RELEASED, the issue lock is RELEASED, no Run record is created, and
-    DispatchResult.state == 'dispatch_failed'."""
+    (422 on undeclared input is the realistic case). Under #69 the Run is
+    pre-created (so run_id can flow into workflow_dispatch inputs); on
+    dispatch failure the Run is marked ABORTED rather than skipped — the
+    orphan-state symptom #20 was preventing is still avoided because the
+    Run doesn't sit in IN_PROGRESS forever."""
     await _register_project(app, "ambience", "nelsong6/ambience")
     await _register_workflow(
         app, project="ambience", name="agent-run",
@@ -148,7 +150,7 @@ async def test_dispatch_failure_rolls_back_lease_lock_and_skips_run(
 
     assert result.state == "dispatch_failed"
     assert result.lease_id is not None  # lease was claimed before backout
-    assert result.run_id is None        # Run was never created
+    assert result.run_id is not None    # Run was pre-created
 
     # Lease released.
     lease_doc = await app.state.cosmos.leases.read_item(
@@ -162,12 +164,15 @@ async def test_dispatch_failure_rolls_back_lease_lock_and_skips_run(
     )
     assert lock_doc["state"] == "released"
 
-    # No Run document persisted.
+    # Run document exists but is ABORTED — not orphaned IN_PROGRESS.
     runs = [d async for d in app.state.cosmos.runs.query_items(
         "SELECT * FROM c WHERE c.issue_number = @n",
         parameters=[{"name": "@n", "value": 124}],
     )]
-    assert runs == []
+    assert len(runs) == 1
+    assert runs[0]["id"] == result.run_id
+    assert runs[0]["state"] == "aborted"
+    assert "dispatch_failed" in (runs[0].get("abort_reason") or "")
 
 
 @pytest.mark.asyncio
@@ -204,14 +209,22 @@ async def test_dispatch_failure_idempotent_under_retry(app, monkeypatch):
     )
     assert second.state == "dispatched"
     assert second.run_id is not None
+    assert second.run_id != first.run_id  # fresh run, not the aborted one
 
-    # The Run created on the second dispatch is the only Run.
-    runs = [d async for d in app.state.cosmos.runs.query_items(
-        "SELECT * FROM c WHERE c.issue_number = @n",
-        parameters=[{"name": "@n", "value": 124}],
-    )]
-    assert len(runs) == 1
-    assert runs[0]["state"] == RunState.IN_PROGRESS.value
+    # Two Runs persist: the aborted one from the first dispatch and the
+    # in-progress one from the retry.
+    runs = sorted(
+        [d async for d in app.state.cosmos.runs.query_items(
+            "SELECT * FROM c WHERE c.issue_number = @n",
+            parameters=[{"name": "@n", "value": 124}],
+        )],
+        key=lambda d: d["created_at"],
+    )
+    assert len(runs) == 2
+    assert runs[0]["state"] == "aborted"
+    assert runs[0]["id"] == first.run_id
+    assert runs[1]["state"] == RunState.IN_PROGRESS.value
+    assert runs[1]["id"] == second.run_id
 
 
 @pytest.mark.asyncio
