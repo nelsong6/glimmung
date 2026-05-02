@@ -1,10 +1,237 @@
-/* Tokens, type, and base element styles live in the design system.
-   Edit colors / type / base resets there, not here. The check at
-   scripts/check-design-tokens.sh fails CI if this file redefines tokens. */
-@import url("../../design-system/colors_and_type.css");
+@import url("https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap");
+
+:root {
+  /* Raw color tokens — neutral ramp */
+  --color-black:           #050507;
+  --color-ink-950:         #0a0a0c;
+  --color-ink-900:         #0e0e10;
+  --color-ink-850:         #15151a;
+  --color-ink-800:         #1a1a1f;
+  --color-ink-700:         #2a2a2e;
+  --color-ink-600:         #3a3a3e;
+  --color-ink-500:         #444;
+  --color-ink-400:         #555;
+  --color-ink-350:         #666;
+  --color-ink-300:         #888;
+  --color-ink-250:         #999;
+  --color-ink-200:         #b8b8b8;
+  --color-ink-100:         #d4d4d4;
+  --color-white:           #e8e8e8;
+  --color-running-border:  #5a3a14;
+  --color-green-bg:        #14532d;
+  --color-green-fg:        #4ade80;
+  --color-green-bg-hover:  #166534;
+  --color-amber-bg:        #3a2a04;
+  --color-amber-fg:        #facc15;
+  --color-red-bg:          #3f1c1c;
+  --color-red-fg:          #f87171;
+  --color-blue-bg:         #1e3a5f;
+  --color-blue-fg:         #60a5fa;
+
+  /* Semantic surface tokens */
+  --bg:               var(--color-ink-900);
+  --bg-deep:          var(--color-ink-950);
+  --bg-deepest:       var(--color-black);
+  --surface:          var(--color-ink-850);
+  --surface-hover:    var(--color-ink-800);
+  --border:           var(--color-ink-700);
+  --border-strong:    var(--color-ink-600);
+  --border-running:   var(--color-running-border);
+  --border-focus:     var(--color-green-fg);
+  --fg:               var(--color-ink-100);
+  --fg-secondary:     var(--color-ink-200);
+  --fg-muted:         var(--color-ink-250);
+  --fg-dim:           var(--color-ink-300);
+  --fg-dimmer:        var(--color-ink-350);
+  --fg-dimmest:       var(--color-ink-400);
+  --fg-faintest:      var(--color-ink-500);
+  --fg-inverse:       var(--color-white);
+
+  /* State / status tokens */
+  --state-success-bg: var(--color-green-bg);
+  --state-success-fg: var(--color-green-fg);
+  --state-busy-bg:    var(--color-amber-bg);
+  --state-busy-fg:    var(--color-amber-fg);
+  --state-danger-bg:  var(--color-red-bg);
+  --state-danger-fg:  var(--color-red-fg);
+  --state-info-bg:    var(--color-blue-bg);
+  --state-info-fg:    var(--color-blue-fg);
+  --accent-primary:   var(--color-green-fg);
+  --accent-workflow:  var(--color-blue-fg);
+
+  /* Type tokens — Geist Sans + Geist Mono via Google Fonts */
+  --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  font-family: var(--font-sans);
+  font-size: 14px;
+  color: var(--fg);
+  background: var(--bg);
+}
 
 * { box-sizing: border-box; }
 body { margin: 0; }
+
+button { text-decoration: none; }
+button:hover, button:focus, button:focus-visible { text-decoration: none; }
+
+/* Chamfer scale — used by .gb buttons, .pill, .plate utility, count chips. */
+:root {
+  --chamfer-sm: 8px;
+  --chamfer-md: 10px;
+  --chamfer-lg: 14px;
+}
+
+/* ─────────── Plate utility ────────────────────────────
+   The chamfered top-left corner + drawn outline (since clip-path eats
+   real borders). Apply to "active machinery": admin panel, KPI strip,
+   project-info card. Caller sets --plate-edge / --plate-rail / --plate-c. */
+.plate {
+  position: relative;
+  background: var(--plate-bg, var(--surface));
+  border: none;
+  isolation: isolate;
+  clip-path: polygon(var(--plate-c, 10px) 0, 100% 0, 100% 100%, 0 100%, 0 var(--plate-c, 10px));
+}
+.plate::before {
+  content: ""; position: absolute; inset: 0;
+  background:
+    linear-gradient(to right, var(--plate-rail, transparent) 0 2px, transparent 2px),
+    linear-gradient(to top,    var(--plate-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(to bottom, var(--plate-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(to left,   var(--plate-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(135deg,
+      transparent 0 calc(var(--plate-c, 10px) * 1.414 - 1px),
+      var(--plate-edge, var(--border)) calc(var(--plate-c, 10px) * 1.414 - 1px) calc(var(--plate-c, 10px) * 1.414),
+      transparent calc(var(--plate-c, 10px) * 1.414));
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+  pointer-events: none; z-index: 0;
+}
+.plate > * { position: relative; z-index: 1; }
+
+/* ─────────── Buttons — "console plate" (.gb) ─────────────
+   Asymmetric chamfered top-left, hairline edge drawn via ::before
+   (clip-path eats borders), 2px state-color rail on the leading edge,
+   mono lowercase label, optional sigil glyph. */
+.gb {
+  position: relative;
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 30px; padding: 0 14px 0 13px;
+  background: var(--surface);
+  color: var(--fg);
+  border: none;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 400;
+  letter-spacing: 0.06em;
+  text-transform: lowercase;
+  cursor: pointer;
+  user-select: none;
+  clip-path: polygon(8px 0, 100% 0, 100% 100%, 0 100%, 0 8px);
+  isolation: isolate;
+}
+.gb::before {
+  content: ""; position: absolute; inset: 0;
+  background:
+    linear-gradient(to right, var(--gb-rail, transparent) 0 2px, transparent 2px),
+    linear-gradient(to top,    var(--gb-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(to bottom, var(--gb-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(to left,   var(--gb-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(135deg, transparent 0 calc(11.31px - 1px), var(--gb-edge, var(--border)) calc(11.31px - 1px) 11.31px, transparent 11.31px);
+  background-repeat: no-repeat; background-size: 100% 100%;
+  pointer-events: none; z-index: 1;
+}
+.gb .sigil { font-family: var(--font-mono); color: var(--gb-sigil, var(--fg-dimmer)); font-size: 0.85rem; line-height: 1; }
+.gb .label { line-height: 1; }
+.gb:hover { background: var(--gb-hover, var(--surface-hover)); }
+.gb:focus-visible { outline: none; }
+.gb:focus-visible::before { --gb-edge: var(--state-success-fg); }
+.gb:disabled { opacity: 0.35; cursor: not-allowed; }
+
+.gb.primary {
+  --gb-rail: var(--state-success-fg);
+  --gb-edge: color-mix(in srgb, var(--state-success-fg) 32%, var(--border));
+  --gb-sigil: var(--state-success-fg);
+  color: var(--fg-inverse);
+}
+.gb.primary:hover { --gb-edge: color-mix(in srgb, var(--state-success-fg) 55%, var(--border)); --gb-hover: #131a14; }
+
+.gb.danger {
+  --gb-rail: var(--state-danger-fg);
+  --gb-edge: color-mix(in srgb, var(--state-danger-fg) 32%, var(--border));
+  --gb-sigil: var(--state-danger-fg);
+  color: var(--fg-inverse);
+}
+.gb.danger:hover { --gb-edge: color-mix(in srgb, var(--state-danger-fg) 55%, var(--border)); --gb-hover: #1a1212; }
+
+.gb.quiet { background: transparent; color: var(--fg-muted); }
+.gb.quiet:hover { background: var(--surface); color: var(--fg-inverse); }
+
+.gb.active {
+  --gb-rail: var(--state-success-fg);
+  --gb-edge: color-mix(in srgb, var(--state-success-fg) 32%, var(--border));
+  background: color-mix(in srgb, var(--state-success-bg) 55%, transparent);
+  color: var(--state-success-fg);
+}
+
+.gb.sm { height: 24px; padding: 0 10px 0 9px; font-size: 0.72rem; clip-path: polygon(6px 0, 100% 0, 100% 100%, 0 100%, 0 6px); }
+.gb.sm::before { background:
+    linear-gradient(to right, var(--gb-rail, transparent) 0 2px, transparent 2px),
+    linear-gradient(to top,    var(--gb-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(to bottom, var(--gb-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(to left,   var(--gb-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(135deg, transparent 0 calc(8.49px - 1px), var(--gb-edge, var(--border)) calc(8.49px - 1px) 8.49px, transparent 8.49px);
+  background-repeat: no-repeat; }
+
+/* Ghost — strips the plate geometry; just typography. Used for inline
+   actions (dispatch / cancel / back-link / cancel-confirm pair). */
+.gb.ghost,
+.link {
+  position: static;
+  display: inline;
+  height: auto;
+  padding: 0;
+  clip-path: none;
+  background: transparent;
+  border: none;
+  color: var(--state-success-fg);
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  letter-spacing: 0;
+  text-transform: none;
+  cursor: pointer;
+  user-select: auto;
+}
+.gb.ghost::before, .link::before { display: none; }
+.gb.ghost:hover, .link:hover {
+  background: transparent;
+  color: #86efac;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+}
+.gb.ghost:focus-visible, .link:focus-visible {
+  outline: none;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.gb.ghost.danger-text, .link.danger-text {
+  color: var(--state-danger-fg);
+}
+.gb.ghost.danger-text:hover, .link.danger-text:hover {
+  color: #fca5a5;
+}
+.gb.ghost:disabled, .link:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  text-decoration: none;
+}
+
+/* Two-step confirm group. */
+.confirm { display: inline-flex; align-items: center; gap: 8px; }
+.confirm .sep { color: var(--fg-faintest); font-family: var(--font-mono); font-size: 0.85rem; }
 
 h1, h2 { font-weight: 600; margin: 0 0 12px 0; }
 h1 { font-size: 1.6rem; letter-spacing: -0.01em; }
@@ -58,17 +285,40 @@ h2 { font-size: 1.05rem; color: #999; text-transform: uppercase; letter-spacing:
 .project-row .name {
   font-weight: 500;
 }
-.project-row .count {
-  font-size: 0.75rem;
-  color: #555;
+/* Sidebar count chip — chamfered console-tag geometry. No rail when
+   neutral; selected variant gets the success rail (project) or info rail
+   (workflow) to match the sidebar selection vocabulary. */
+.project-row .count, .workflow-row .count {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 7px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--fg-dimmer);
+  background: var(--surface-hover);
   font-variant-numeric: tabular-nums;
-  background: #1a1a1f;
-  padding: 2px 8px;
-  border-radius: 999px;
+  clip-path: polygon(5px 0, 100% 0, 100% 100%, 0 100%, 0 5px);
+  isolation: isolate;
+}
+.project-row .count::before, .workflow-row .count::before {
+  content: ""; position: absolute; inset: 0;
+  background:
+    linear-gradient(to right,  var(--count-rail, transparent) 0 2px, transparent 2px),
+    linear-gradient(to top,    var(--count-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(to bottom, var(--count-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(to left,   var(--count-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(135deg, transparent 0 calc(7.07px - 1px), var(--count-edge, var(--border)) calc(7.07px - 1px) 7.07px, transparent 7.07px);
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+  pointer-events: none;
 }
 .project-row.selected .count {
-  background: #14532d;
-  color: #4ade80;
+  --count-rail: var(--state-success-fg);
+  --count-edge: color-mix(in srgb, var(--state-success-fg) 32%, var(--border));
+  background: color-mix(in srgb, var(--state-success-bg) 55%, transparent);
+  color: var(--state-success-fg);
 }
 .workflow-row {
   display: flex;
@@ -98,17 +348,11 @@ h2 { font-size: 1.05rem; color: #999; text-transform: uppercase; letter-spacing:
   font-weight: 400;
   font-family: var(--font-mono);
 }
-.workflow-row .count {
-  font-size: 0.7rem;
-  color: #555;
-  font-variant-numeric: tabular-nums;
-  background: #1a1a1f;
-  padding: 1px 6px;
-  border-radius: 999px;
-}
 .workflow-row.selected .count {
-  background: #1e3a5f;
-  color: #60a5fa;
+  --count-rail: var(--state-info-fg);
+  --count-edge: color-mix(in srgb, var(--state-info-fg) 32%, var(--border));
+  background: color-mix(in srgb, var(--state-info-bg) 55%, transparent);
+  color: var(--state-info-fg);
 }
 .workflow-empty {
   padding: 4px 20px 8px 36px;
@@ -163,16 +407,70 @@ tr.eligible td.mono:first-child {
   color: #d4d4d4;
 }
 
+/* Pill — "console tag". Same chamfered top-left geometry as .gb buttons,
+   smaller. 2px state-color rail on the leading edge, hairline tinted edge,
+   faint state-tinted body, mono lowercase label. white-space: nowrap so
+   long content can't deform the geometry into an oval. */
 .pill {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 0.75rem;
-  font-weight: 500;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 8px 0 9px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
+  line-height: 1;
+  white-space: nowrap;
+  clip-path: polygon(6px 0, 100% 0, 100% 100%, 0 100%, 0 6px);
+  isolation: isolate;
+  --pill-rail: var(--border-strong);
+  --pill-edge: var(--border);
+  --pill-bg:   transparent;
+  --pill-fg:   var(--fg-dim);
+  background: var(--pill-bg);
+  color: var(--pill-fg);
 }
-.pill.free   { background: #14532d; color: #4ade80; }
-.pill.busy   { background: #422006; color: #fb923c; }
-.pill.drain  { background: #3f1c1c; color: #f87171; }
+.pill::before {
+  content: "";
+  position: absolute; inset: 0;
+  background:
+    linear-gradient(to right,  var(--pill-rail) 0 2px, transparent 2px),
+    linear-gradient(to top,    var(--pill-edge) 0 1px, transparent 1px),
+    linear-gradient(to bottom, var(--pill-edge) 0 1px, transparent 1px),
+    linear-gradient(to left,   var(--pill-edge) 0 1px, transparent 1px),
+    linear-gradient(135deg, transparent 0 calc(8.49px - 1px), var(--pill-edge) calc(8.49px - 1px) 8.49px, transparent 8.49px);
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+  pointer-events: none;
+  z-index: 1;
+}
+.pill.free  {
+  --pill-rail: var(--state-success-fg);
+  --pill-edge: color-mix(in srgb, var(--state-success-fg) 32%, var(--border));
+  --pill-bg:   color-mix(in srgb, var(--state-success-bg) 55%, transparent);
+  --pill-fg:   var(--state-success-fg);
+}
+.pill.busy  {
+  --pill-rail: var(--state-busy-fg);
+  --pill-edge: color-mix(in srgb, var(--state-busy-fg) 32%, var(--border));
+  --pill-bg:   color-mix(in srgb, var(--state-busy-bg) 55%, transparent);
+  --pill-fg:   var(--state-busy-fg);
+}
+.pill.drain {
+  --pill-rail: var(--state-danger-fg);
+  --pill-edge: color-mix(in srgb, var(--state-danger-fg) 32%, var(--border));
+  --pill-bg:   color-mix(in srgb, var(--state-danger-bg) 55%, transparent);
+  --pill-fg:   var(--state-danger-fg);
+}
+.pill.info  {
+  --pill-rail: var(--state-info-fg);
+  --pill-edge: color-mix(in srgb, var(--state-info-fg) 32%, var(--border));
+  --pill-bg:   color-mix(in srgb, var(--state-info-bg) 55%, transparent);
+  --pill-fg:   var(--state-info-fg);
+}
 
 .empty {
   padding: 16px;
@@ -184,17 +482,62 @@ tr.eligible td.mono:first-child {
   margin-bottom: 8px;
 }
 
+/* Connection chip — same console-tag geometry as .pill. */
 .connection {
-  display: inline-block;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
   margin-left: 12px;
-  font-size: 0.75rem;
-  font-weight: 500;
-  padding: 2px 8px;
-  border-radius: 999px;
+  height: 18px;
+  padding: 0 8px 0 9px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
+  line-height: 1;
+  white-space: nowrap;
+  clip-path: polygon(6px 0, 100% 0, 100% 100%, 0 100%, 0 6px);
+  isolation: isolate;
+  --pill-rail: var(--border-strong);
+  --pill-edge: var(--border);
+  --pill-bg:   transparent;
+  --pill-fg:   var(--fg-dim);
+  background: var(--pill-bg);
+  color: var(--pill-fg);
 }
-.connection.live { background: #14532d; color: #4ade80; }
-.connection.stale { background: #422006; color: #fb923c; }
-.connection.dead { background: #3f1c1c; color: #f87171; }
+.connection::before {
+  content: "";
+  position: absolute; inset: 0;
+  background:
+    linear-gradient(to right,  var(--pill-rail) 0 2px, transparent 2px),
+    linear-gradient(to top,    var(--pill-edge) 0 1px, transparent 1px),
+    linear-gradient(to bottom, var(--pill-edge) 0 1px, transparent 1px),
+    linear-gradient(to left,   var(--pill-edge) 0 1px, transparent 1px),
+    linear-gradient(135deg, transparent 0 calc(8.49px - 1px), var(--pill-edge) calc(8.49px - 1px) 8.49px, transparent 8.49px);
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+  pointer-events: none;
+  z-index: 1;
+}
+.connection.live  {
+  --pill-rail: var(--state-success-fg);
+  --pill-edge: color-mix(in srgb, var(--state-success-fg) 32%, var(--border));
+  --pill-bg:   color-mix(in srgb, var(--state-success-bg) 55%, transparent);
+  --pill-fg:   var(--state-success-fg);
+}
+.connection.stale {
+  --pill-rail: var(--state-busy-fg);
+  --pill-edge: color-mix(in srgb, var(--state-busy-fg) 32%, var(--border));
+  --pill-bg:   color-mix(in srgb, var(--state-busy-bg) 55%, transparent);
+  --pill-fg:   var(--state-busy-fg);
+}
+.connection.dead  {
+  --pill-rail: var(--state-danger-fg);
+  --pill-edge: color-mix(in srgb, var(--state-danger-fg) 32%, var(--border));
+  --pill-bg:   color-mix(in srgb, var(--state-danger-bg) 55%, transparent);
+  --pill-fg:   var(--state-danger-fg);
+}
 
 header {
   display: flex;
@@ -228,88 +571,72 @@ header {
   max-width: 60ch;
 }
 
-.user-chip {
-  display: inline-flex;
-  align-items: stretch;
-  height: 28px;
-  background: var(--bg-deep);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  font-size: 0.8rem;
-  overflow: hidden;
-}
-.user-chip .chip-divider {
-  width: 1px;
-  background: var(--border);
-  flex-shrink: 0;
-}
-.user-chip .chip-btn {
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 0.8rem;
-  color: var(--fg-muted);
-  padding: 0 12px;
-  display: inline-flex;
-  align-items: center;
-}
-.user-chip .chip-btn:hover {
-  background: var(--surface);
-  color: var(--fg);
-}
-.user-chip .chip-btn.active {
-  background: var(--state-success-bg);
-  color: var(--state-success-fg);
-}
-.user-chip .chip-btn.quiet {
-  color: var(--fg-dimmer);
-}
-.user-chip .chip-btn.quiet:hover {
-  color: var(--state-danger-fg);
-  background: var(--surface);
-}
-.user-chip .user-id {
+/* User cluster — three console plates side-by-side: admin button (.gb),
+   user-id chamfered plate, sign-out button (.gb.quiet). Replaces the old
+   999px capsule to match the rest of the system's chamfered geometry. */
+.user-cluster {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 0 12px;
+}
+.user-id {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 12px 0 11px;
+  background: var(--bg-deep);
   color: var(--fg);
   font-family: var(--font-mono);
   font-size: 0.78rem;
+  clip-path: polygon(8px 0, 100% 0, 100% 100%, 0 100%, 0 8px);
+  isolation: isolate;
 }
-.user-chip .user-dot {
+.user-id::before {
+  content: ""; position: absolute; inset: 0;
+  background:
+    linear-gradient(to right,  var(--state-success-fg) 0 2px, transparent 2px),
+    linear-gradient(to top,    var(--border) 0 1px, transparent 1px),
+    linear-gradient(to bottom, var(--border) 0 1px, transparent 1px),
+    linear-gradient(to left,   var(--border) 0 1px, transparent 1px),
+    linear-gradient(135deg, transparent 0 calc(11.31px - 1px), var(--border) calc(11.31px - 1px) 11.31px, transparent 11.31px);
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+  pointer-events: none;
+  z-index: 1;
+}
+.user-id > * { position: relative; z-index: 2; }
+.user-id .user-dot {
   display: inline-block;
   width: 6px;
   height: 6px;
   border-radius: 999px;
   background: var(--state-success-fg);
 }
-.chip-btn.solo {
-  display: inline-flex;
-  align-items: center;
-  height: 28px;
-  background: var(--state-success-bg);
-  color: var(--state-success-fg);
-  border: none;
-  border-radius: 999px;
-  padding: 0 16px;
-  font-family: inherit;
-  font-size: 0.85rem;
-  font-weight: 500;
-  cursor: pointer;
-}
-.chip-btn.solo:hover {
-  background: var(--color-green-bg-hover);
-}
 
 .admin-panel {
-  border: 1px solid #2a2a2e;
-  border-radius: 4px;
-  background: #15151a;
+  position: relative;
+  background: var(--surface);
+  border: none;
   margin-bottom: 24px;
-  overflow: hidden;
+  isolation: isolate;
+  clip-path: polygon(10px 0, 100% 0, 100% 100%, 0 100%, 0 10px);
 }
+.admin-panel::before {
+  content: ""; position: absolute; inset: 0;
+  background:
+    linear-gradient(to top,    var(--border) 0 1px, transparent 1px),
+    linear-gradient(to bottom, var(--border) 0 1px, transparent 1px),
+    linear-gradient(to left,   var(--border) 0 1px, transparent 1px),
+    linear-gradient(to right,  var(--border) 0 1px, transparent 1px),
+    linear-gradient(135deg, transparent 0 calc(14.14px - 1px), var(--border) calc(14.14px - 1px) 14.14px, transparent 14.14px);
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+  pointer-events: none;
+  z-index: 0;
+}
+.admin-panel > * { position: relative; z-index: 1; }
 .admin-tabs {
   display: flex;
   border-bottom: 1px solid #2a2a2e;
@@ -366,9 +693,12 @@ header {
   font-family: var(--font-mono);
   font-size: 0.85rem;
 }
-.admin-form input:focus {
+.admin-form input:focus,
+.admin-form select:focus {
   outline: none;
-  border-color: #4ade80;
+  border-color: var(--border);
+  border-left: 2px solid var(--state-success-fg);
+  padding-left: 9px;
 }
 .admin-form label.checkbox {
   align-items: center;
@@ -437,15 +767,31 @@ h2 .inline-action,
 }
 
 .project-info {
+  position: relative;
   display: grid;
   grid-template-columns: max-content 1fr;
   gap: 8px 20px;
   padding: 16px;
-  border: 1px solid #2a2a2e;
-  border-radius: 4px;
-  background: #15151a;
+  background: var(--surface);
+  border: none;
   font-size: 0.9rem;
+  isolation: isolate;
+  clip-path: polygon(10px 0, 100% 0, 100% 100%, 0 100%, 0 10px);
 }
+.project-info::before {
+  content: ""; position: absolute; inset: 0;
+  background:
+    linear-gradient(to top,    var(--border) 0 1px, transparent 1px),
+    linear-gradient(to bottom, var(--border) 0 1px, transparent 1px),
+    linear-gradient(to left,   var(--border) 0 1px, transparent 1px),
+    linear-gradient(to right,  var(--border) 0 1px, transparent 1px),
+    linear-gradient(135deg, transparent 0 calc(14.14px - 1px), var(--border) calc(14.14px - 1px) 14.14px, transparent 14.14px);
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+  pointer-events: none;
+  z-index: 0;
+}
+.project-info > * { position: relative; z-index: 1; }
 .project-info .row {
   display: contents;
 }
@@ -460,9 +806,11 @@ h2 .inline-action,
   color: #d4d4d4;
 }
 
+/* Tabs — bottom-rail accent matches the leading-rail vocabulary on
+   buttons & pills. Mono lowercase labels keep the console-plate language. */
 .tabs {
   display: flex;
-  gap: 4px;
+  gap: 2px;
   border-bottom: 1px solid #2a2a2e;
   margin: 16px 0 0;
 }
@@ -470,15 +818,18 @@ h2 .inline-action,
   background: transparent;
   border: none;
   border-bottom: 2px solid transparent;
-  color: #999;
-  padding: 10px 18px;
+  color: #888;
+  padding: 9px 16px 7px;
   cursor: pointer;
-  font-family: inherit;
-  font-size: 0.9rem;
-  font-weight: 500;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 400;
+  letter-spacing: 0.06em;
+  text-transform: lowercase;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  margin-bottom: -1px;
 }
 .tabs .tab:hover {
   background: #1a1a1f;
@@ -499,7 +850,7 @@ h2 .inline-action,
   width: 7px;
   height: 7px;
   border-radius: 999px;
-  background: #fb923c;
+  background: var(--state-busy-fg);
   animation: pulse 1.6s ease-in-out infinite;
 }
 .tab-panel {
@@ -507,15 +858,31 @@ h2 .inline-action,
 }
 
 .kpi-strip {
+  position: relative;
   display: flex;
   gap: 24px;
   padding: 12px 16px;
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 4px;
+  border: none;
   margin-bottom: 12px;
   font-size: 0.85rem;
+  isolation: isolate;
+  clip-path: polygon(14px 0, 100% 0, 100% 100%, 0 100%, 0 14px);
 }
+.kpi-strip::before {
+  content: ""; position: absolute; inset: 0;
+  background:
+    linear-gradient(to right,  var(--state-success-fg) 0 2px, transparent 2px),
+    linear-gradient(to top,    var(--border) 0 1px, transparent 1px),
+    linear-gradient(to bottom, var(--border) 0 1px, transparent 1px),
+    linear-gradient(to left,   var(--border) 0 1px, transparent 1px),
+    linear-gradient(135deg, transparent 0 calc(19.8px - 1px), var(--border) calc(19.8px - 1px) 19.8px, transparent 19.8px);
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+  pointer-events: none;
+  z-index: 0;
+}
+.kpi-strip > * { position: relative; z-index: 1; }
 .kpi {
   display: flex;
   flex-direction: column;
@@ -573,7 +940,7 @@ h2 .inline-action,
   width: 8px;
   height: 8px;
   border-radius: 999px;
-  background: #fb923c;
+  background: var(--state-busy-fg);
   margin-left: 8px;
   vertical-align: middle;
   animation: pulse 1.6s ease-in-out infinite;
