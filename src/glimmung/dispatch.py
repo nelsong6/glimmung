@@ -43,7 +43,7 @@ from glimmung import runs as run_ops
 from glimmung.budget import resolve_budget
 from glimmung.db import Cosmos, query_all
 from glimmung.locks import LockBusy
-from glimmung.models import BudgetConfig, IssueSource
+from glimmung.models import BudgetConfig
 
 log = logging.getLogger(__name__)
 
@@ -73,10 +73,10 @@ class DispatchResult(BaseModel):
 async def dispatch_run(
     app: FastAPI,
     *,
-    repo: str | None = None,
-    issue_number: int | None = None,
     issue_id: str | None = None,
     project: str | None = None,
+    repo: str | None = None,
+    issue_number: int | None = None,
     trigger_source: dict[str, Any],
     workflow_name: str | None = None,
     issue_labels: list[str] | None = None,
@@ -84,20 +84,18 @@ async def dispatch_run(
 ) -> DispatchResult:
     """Start an agent run on a glimmung Issue.
 
-    Two ways to identify the target:
-    - GH-anchored: pass `repo` + `issue_number`. The Issue is minted /
-      reused via `ensure_issue_for_github` (source = GITHUB_WEBHOOK_IMPORT).
-      This is the legacy path and the one any GH-driven trigger source
-      still uses.
-    - Glimmung-native (#50): pass `issue_id` (+ optional `project`,
-      resolved from the doc when omitted). The Issue must exist; no
-      mint happens here. Used by UI dispatch on issues created via
-      `POST /v1/issues`.
+    The target Issue must already exist in glimmung — dispatch never
+    mints from GH coords. Two ways to identify the target:
+    - `issue_id` (canonical, what the UI sends): cross-partition point
+      read; `project` may be passed to make it a single-partition read.
+    - `(repo, issue_number)` (legacy lookup shape): looks up by
+      `metadata.github_issue_url`. Returns `no_project` if no glimmung
+      Issue links to that URL.
 
     `trigger_source` is recorded on the Run for observability. Required
-    fields by convention: `kind` (one of `label_webhook`, `glimmung_ui`,
-    `scheduled`, `cli`, `signal_drain`), plus kind-specific extras
-    (`label`, `actor`, etc.). The decision engine doesn't read it.
+    fields by convention: `kind` (one of `glimmung_ui`, `scheduled`,
+    `cli`, `signal_drain`), plus kind-specific extras (`actor`, etc.).
+    The decision engine doesn't read it.
 
     `workflow_name`: if provided, that exact workflow is dispatched.
     If not provided, glimmung picks the project's only registered
@@ -111,13 +109,9 @@ async def dispatch_run(
     cosmos: Cosmos = app.state.cosmos
     settings = app.state.settings
 
-    # 1. Resolve the target Issue + project. Two entry shapes converge
-    # to (issue, project_name) before workflow resolution.
+    # 1. Resolve the target Issue + project.
     issue = None
     if issue_id is not None:
-        # Native path: caller already has a glimmung issue id. Project
-        # may be passed for a single-partition point read; if omitted,
-        # we cross-partition find it by id.
         if project is None:
             issue = await _find_issue_anywhere(cosmos, issue_id=issue_id)
         else:
@@ -127,17 +121,22 @@ async def dispatch_run(
             issue = found[0] if found else None
         if issue is None:
             return DispatchResult(state="no_project", detail=f"no glimmung issue {issue_id!r}")
-        project_name = issue.project
-        repo = issue.metadata.github_issue_repo
-        issue_number = issue.metadata.github_issue_number
     else:
         if repo is None or issue_number is None:
             raise ValueError("dispatch_run requires either issue_id or (repo + issue_number)")
-        # GH-anchored path: project from repo lookup.
-        project_doc = await _resolve_project(cosmos, repo)
-        if project_doc is None:
-            return DispatchResult(state="no_project", detail=f"no project for repo {repo!r}")
-        project_name = project_doc["name"]
+        url = issue_ops.github_issue_url_for(repo, issue_number)
+        found = await issue_ops.find_issue_by_github_url(
+            cosmos, github_issue_url=url,
+        )
+        if found is None:
+            return DispatchResult(
+                state="no_project",
+                detail=f"no glimmung issue for {repo}#{issue_number}",
+            )
+        issue, _ = found
+    project_name = issue.project
+    repo = issue.metadata.github_issue_repo
+    issue_number = issue.metadata.github_issue_number
 
     # 2. Resolve workflow.
     workflow_doc, picker_detail = await _resolve_workflow(cosmos, project_name, workflow_name)
@@ -145,29 +144,9 @@ async def dispatch_run(
         return DispatchResult(state="no_workflow", detail=picker_detail)
     workflow_actual_name: str = workflow_doc["name"]
 
-    # 2b. Ensure a glimmung Issue exists for this (repo, issue_number).
-    # Skipped when the caller passed an explicit issue_id — that issue
-    # already exists. Sequenced after project + workflow resolution so
-    # failed dispatches (no_project / no_workflow) are no-ops on the
-    # issues container — we only mint when we're committed to dispatching.
-    if issue is None:
-        assert repo is not None and issue_number is not None  # narrowed above
-        issue, _issue_etag, issue_created = await issue_ops.ensure_issue_for_github(
-            cosmos,
-            project=project_name,
-            repo=repo,
-            issue_number=issue_number,
-            source=IssueSource.GITHUB_WEBHOOK_IMPORT,
-        )
-        if issue_created:
-            log.info(
-                "dispatch_run: minted glimmung issue %s for %s#%d",
-                issue.id, repo, issue_number,
-            )
-
-    # 3. Claim the per-issue lock. Native issues with no GH coords lock
-    # on their glimmung id; GH-anchored issues use the repo#N key so
-    # webhook-driven dispatches keep colliding with UI-driven ones.
+    # 3. Claim the per-issue lock. GH-anchored issues lock on the
+    # repo#N key (so webhook-driven dispatches collide with UI-driven
+    # ones); native issues with no GH coords lock on their glimmung id.
     holder_id = str(ULID())
     lock_key = (
         f"{repo}#{issue_number}" if (repo and issue_number is not None)

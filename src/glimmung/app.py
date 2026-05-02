@@ -27,7 +27,6 @@ from glimmung.github_app import (
     GitHubAppTokenMinter,
     cancel_workflow_run,
     dispatch_workflow,
-    list_open_issues as gh_list_open_issues,
     post_issue_comment,
     verify_webhook_signature,
 )
@@ -1222,89 +1221,9 @@ async def github_webhook(request: Request) -> dict[str, Any]:
         return await _handle_pull_request(payload)
     if event == "pull_request_review":
         return await _handle_pull_request_review(payload)
-    # `issues` events used to mirror into the `issues` Cosmos container
-    # and label-trigger workflow dispatch. Per #50, glimmung is the
-    # source of truth for issues — GH issues are post-seed irrelevant.
-    # The mirror helper survives for the one-shot backfill / seed paths;
-    # the webhook just ignores the event here.
+    # `issues` events are ignored entirely — glimmung owns the issue
+    # substrate; nothing about GH issue activity drives glimmung state.
     return {"ignored": event}
-
-
-async def _mirror_github_issue(
-    cosmos: Cosmos,
-    *,
-    project: str,
-    repo: str,
-    action: str,
-    issue_payload: dict[str, Any],
-) -> dict[str, Any]:
-    """Sync a GH issue's state into the glimmung `issues` container.
-
-    Called for every `issues` webhook event. Actions that change the
-    open/closed state (`closed`, `reopened`) drive the Issue state
-    machine; `edited` / `labeled` / `unlabeled` patch fields; `opened`
-    is treated as ensure-and-stamp-fields (the dispatch path may have
-    minted a placeholder Issue earlier, so even on a fresh `opened` we
-    still update title/body/labels in case they differ from the
-    minted defaults).
-
-    Other actions (`deleted`, `transferred`, `pinned`, `assigned`, …)
-    are no-ops for now — the substrate's read path doesn't surface
-    them, and tracking them would just bloat update churn.
-    """
-    issue_number = issue_payload.get("number")
-    if issue_number is None:
-        return {"ignored": "no issue number"}
-
-    title = issue_payload.get("title") or ""
-    body = issue_payload.get("body") or ""
-    labels = [
-        lab["name"] for lab in (issue_payload.get("labels") or [])
-        if isinstance(lab, dict) and "name" in lab
-    ]
-    gh_state = issue_payload.get("state") or "open"
-
-    # Ensure the Issue exists. ensure_issue_for_github populates the
-    # denormalized GH coords; on a real `opened` event we want the
-    # Issue's title/body/labels to match GH, not the placeholder
-    # `repo#N` title that `ensure_issue_for_github` synthesizes when
-    # the dispatch-path mints first. So we always patch after the
-    # ensure, except for actions where there's nothing to patch.
-    issue, etag, created = await issue_ops.ensure_issue_for_github(
-        cosmos,
-        project=project,
-        repo=repo,
-        issue_number=int(issue_number),
-        title=title,
-        body=body,
-        labels=labels,
-    )
-    outcome: dict[str, Any] = {
-        "issue_id": issue.id,
-        "created": created,
-    }
-
-    if action in ("opened", "edited", "labeled", "unlabeled", "reopened"):
-        # Patch the user-editable fields. ensure_issue_for_github only
-        # honors title/body/labels on create; for an existing Issue we
-        # need an explicit update to keep Cosmos in sync with GH edits.
-        if not created:
-            issue, etag = await issue_ops.update_issue(
-                cosmos, issue=issue, etag=etag,
-                title=title or None,
-                body=body if body else None,
-                labels=labels,
-            )
-            outcome["patched"] = True
-
-    if action == "reopened" and gh_state == "open":
-        issue, etag = await issue_ops.reopen_issue(cosmos, issue=issue, etag=etag)
-        outcome["reopened"] = True
-    elif action == "closed" or gh_state == "closed":
-        issue, etag = await issue_ops.close_issue(cosmos, issue=issue, etag=etag)
-        outcome["closed"] = True
-
-    return outcome
 
 
 # ─── PR webhook handlers (#50 slice 3 rewrite) ──────────────────────────────────
@@ -1654,21 +1573,11 @@ class IssueGraph(BaseModel):
 
 
 class DispatchRequest(BaseModel):
-    """One of two shapes:
-
-    - GH-anchored: `repo` + `issue_number`. The pre-#50 path; the issue
-      may exist in GH or be a glimmung-native one whose `metadata` was
-      backfilled with the GH coords.
-    - Native: `issue_id` (+ optional `project`; resolved from the Issue
-      doc if omitted). For glimmung-native issues with no GH coords —
-      created via `POST /v1/issues`.
-
-    `workflow` is optional in both shapes; dispatch_run picks the
-    project's only workflow if omitted and unambiguous.
-    """
-    repo: str | None = None
-    issue_number: int | None = None
-    issue_id: str | None = None
+    """`issue_id` is the canonical handle. `project` is optional — the
+    server cross-partition resolves it from the Issue doc when omitted.
+    `workflow` is optional; dispatch_run picks the project's only
+    workflow if there's exactly one."""
+    issue_id: str
     project: str | None = None
     workflow: str | None = None
 
@@ -1679,16 +1588,15 @@ class DispatchRequest(BaseModel):
     dependencies=[Depends(require_admin_user)],
 )
 async def list_issues() -> list[IssueRow]:
-    """All open glimmung Issues with a GH-syndication link, across
-    registered projects. Sourced from the Cosmos `issues` container
-    (#28-consumer-2 cutover) — populated by the GH-issue webhook
-    mirror (#34) and the dispatch-path mint (#33). Glimmung-native
-    Issues without a `metadata.github_issue_url` are excluded until
-    there's UI for them.
+    """All open glimmung Issues, across registered projects. Sourced
+    from the Cosmos `issues` container — glimmung is the source of
+    truth; nothing about GH issue activity flows back. Issues are
+    seeded once via the seed script (or minted via `POST /v1/issues`)
+    and lifecycle from there is glimmung-internal.
 
     Labels are surfaced informationally only — they're a courtesy
-    syndication surface in the post-#20 model, not a dispatch
-    primitive. The dispatch button on each row is the trigger."""
+    syndication surface, not a dispatch primitive. The dispatch button
+    on each row is the trigger."""
     return await _list_issues_from_cosmos(app.state.cosmos)
 
 
@@ -1797,9 +1705,9 @@ async def issue_detail(
     """Detail view: title + body + last-run summary + lock state.
     Sourced from the Cosmos `issues` container (#28-consumer-2). Three-
     segment path so the repo owner/name pair stays URL-friendly without
-    a query param. 404 if no glimmung Issue mirrors the GH issue —
-    rare post-#34 except for pre-existing untouched issues, which
-    `/v1/admin/backfill-issues` lands."""
+    a query param. 404 if no glimmung Issue exists for the GH coords —
+    glimmung doesn't auto-mint from GH, so any GH issue without a prior
+    glimmung-side existence is invisible here."""
     repo = f"{repo_owner}/{repo_name}"
     return await _load_issue_detail(
         app.state.cosmos, repo=repo, issue_number=issue_number,
@@ -2194,109 +2102,16 @@ async def _build_issue_graph(
     dependencies=[Depends(require_admin_user)],
 )
 async def dispatch_run_endpoint(req: DispatchRequest) -> DispatchResult:
-    """UI-initiated dispatch. Same code path as the legacy label-webhook
-    handler used: both call `dispatch_run` from glimmung.dispatch. The
-    trigger source is recorded on the resulting Run for W6 observability.
-
-    Two payload shapes are accepted (#50): GH-anchored
-    `{repo, issue_number}` or glimmung-native `{issue_id, project?}`.
-    Native dispatch path looks up the existing Issue by id and skips the
-    `ensure_issue_for_github` mint."""
-    if req.issue_id is not None:
-        return await dispatch_run(
-            app,
-            issue_id=req.issue_id,
-            project=req.project,
-            trigger_source={"kind": "glimmung_ui"},
-            workflow_name=req.workflow,
-        )
-    if req.repo is None or req.issue_number is None:
-        raise HTTPException(400, "dispatch payload requires either {issue_id} or {repo, issue_number}")
+    """UI-initiated dispatch. The trigger source is recorded on the
+    resulting Run for W6 observability."""
     return await dispatch_run(
         app,
-        repo=req.repo,
-        issue_number=req.issue_number,
+        issue_id=req.issue_id,
+        project=req.project,
         trigger_source={"kind": "glimmung_ui"},
         workflow_name=req.workflow,
     )
 
-
-# ─── one-shot Issues backfill (#28-consumer-2) ───────────────────────────────────────
-
-
-class BackfillIssuesResult(BaseModel):
-    repos_processed: int
-    issues_created: int
-    issues_patched: int
-    issues_unchanged: int
-    skipped_repos: list[dict[str, str]] = Field(default_factory=list)
-
-
-@app.post(
-    "/v1/admin/backfill-issues",
-    response_model=BackfillIssuesResult,
-    dependencies=[Depends(require_admin_user)],
-)
-async def backfill_issues() -> BackfillIssuesResult:
-    """Walk every registered repo's open GH issues and mirror them
-    into the Cosmos `issues` container. Idempotent — `_mirror_github_
-    issue` ensures-or-patches; safe to re-run. The post-#34 webhook
-    mirror keeps ongoing GH activity in sync, but pre-existing issues
-    that haven't seen any webhook event since the substrate landed
-    won't surface in the Issues view until this runs once."""
-    minter: GitHubAppTokenMinter | None = app.state.gh_minter
-    if minter is None:
-        raise HTTPException(503, "github app credentials not configured")
-    return await _backfill_issues_impl(
-        app.state.cosmos, list_open=gh_list_open_issues, minter=minter,
-    )
-
-
-async def _backfill_issues_impl(
-    cosmos: Cosmos,
-    *,
-    list_open: Any,
-    minter: Any,
-) -> BackfillIssuesResult:
-    """Backfill driver. `list_open` is a callable matching
-    `github_app.list_open_issues`; tests pass a stub so we don't reach
-    out to the real GH API."""
-    project_docs = await query_all(cosmos.projects, "SELECT * FROM c")
-    created = patched = unchanged = 0
-    repos = 0
-    skipped: list[dict[str, str]] = []
-    for project_doc in project_docs:
-        repo = project_doc.get("githubRepo") or ""
-        if not repo:
-            continue
-        try:
-            gh_issues = await list_open(minter, repo=repo)
-        except Exception as exc:
-            log.exception("backfill: list_open_issues failed for %s", repo)
-            skipped.append({"repo": repo, "error": str(exc)})
-            continue
-        repos += 1
-        for gh_issue in gh_issues:
-            outcome = await _mirror_github_issue(
-                cosmos,
-                project=project_doc["name"],
-                repo=repo,
-                action="opened",
-                issue_payload=gh_issue,
-            )
-            if outcome.get("created"):
-                created += 1
-            elif outcome.get("patched"):
-                patched += 1
-            else:
-                unchanged += 1
-    return BackfillIssuesResult(
-        repos_processed=repos,
-        issues_created=created,
-        issues_patched=patched,
-        issues_unchanged=unchanged,
-        skipped_repos=skipped,
-    )
 
 
 # ─── PR view + reject signal (#19) ───────────────────────────────────────────────
