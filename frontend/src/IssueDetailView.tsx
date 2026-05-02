@@ -532,7 +532,12 @@ function AttemptCard({ attempt, repo }: { attempt: GraphNode; repo: string | nul
   const workflowFilename = stringOrNull(meta.workflow_filename);
   const verification = isRecord(meta.verification) ? meta.verification : null;
   const verificationStatus = verification ? stringOrNull(verification.status) : null;
+  // Cost prefers the phase-reported top-level cost_usd (#69 — non-verify
+  // LLM phases set this directly without a verification.json) and falls
+  // back to verification.cost_usd for verify phases that emit the artifact.
+  const attemptCost = numberOrNull(meta.cost_usd);
   const verificationCost = verification ? numberOrNull(verification.cost_usd) : null;
+  const displayedCost = attemptCost ?? verificationCost;
   const verificationReasons = verification && Array.isArray(verification.reasons)
     ? verification.reasons.filter((r): r is string => typeof r === "string")
     : [];
@@ -601,10 +606,10 @@ function AttemptCard({ attempt, repo }: { attempt: GraphNode; repo: string | nul
             )}
           </div>
         )}
-        {verificationCost !== null && (
+        {displayedCost !== null && (
           <div>
             <span className="key">cost</span>{" "}
-            <span className="mono">${verificationCost.toFixed(4)}</span>
+            <span className="mono">${displayedCost.toFixed(4)}</span>
           </div>
         )}
         {decision && (
