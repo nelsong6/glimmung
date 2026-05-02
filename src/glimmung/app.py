@@ -1482,6 +1482,41 @@ async def run_started(
     return RunCallbackResult(run_id=run.id)
 
 
+class RunAbortedRequest(BaseModel):
+    """`POST /v1/runs/{project}/{run_id}/aborted` body. Lets the dispatched
+    workflow flip its own Run to ABORTED with a typed reason — used by
+    contract-violation checks (e.g. #86's `frontend_contract_violation`)
+    that need to fail the phase *before* it reaches the verify step.
+
+    Capability-only auth: `run_id` is an unguessable ULID, same pattern
+    as `started` / `completed`. The workflow already has the run id in
+    its inputs, so no new credential plumbing.
+    """
+    reason: str
+
+
+@app.post(
+    "/v1/runs/{project}/{run_id}/aborted",
+    response_model=AbortRunResult,
+)
+async def run_aborted(
+    req: RunAbortedRequest,
+    project: str = Path(...),
+    run_id: str = Path(...),
+) -> AbortRunResult:
+    """Workflow-side typed abort. Body identical to `_abort_run` —
+    cancels the GH workflow_run if one is recorded, marks the Run
+    ABORTED with the given reason, releases any locks the Run held.
+    Idempotent: a second call returns `already_terminal`."""
+    return await _abort_run(
+        app.state.cosmos,
+        getattr(app.state, "gh_minter", None),
+        run_id=run_id,
+        project=project,
+        reason=req.reason,
+    )
+
+
 @app.post(
     "/v1/runs/{project}/{run_id}/completed",
     response_model=RunCallbackResult,

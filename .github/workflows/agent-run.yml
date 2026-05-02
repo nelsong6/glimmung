@@ -322,6 +322,44 @@ jobs:
           set -euo pipefail
           python -m glimmung_agent.cli wait-public-preview --url "${VALIDATION_URL}"
 
+      - name: Verify /_styleguide contract
+        # Hard contract: every frontend project must expose /_styleguide
+        # on its live env so reviewers (and the screenshot pass) have a
+        # single page that catalogs every component. See
+        # docs/styleguide-contract.md. A 404 here aborts the run with a
+        # typed reason so the dashboard surfaces it cleanly instead of
+        # the failure cascading into a confused "agent ran but the PR is
+        # missing screenshots" review.
+        env:
+          GLIMMUNG_RUN_ID: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          url="${VALIDATION_URL}/_styleguide"
+          status=$(curl -sS -o /dev/null -w '%{http_code}' "${url}" || echo "000")
+          if [ "${status}" = "200" ]; then
+            echo "styleguide route OK: ${url}"
+            exit 0
+          fi
+
+          reason="frontend_contract_violation: /_styleguide route not exposed on ${VALIDATION_URL} (HTTP ${status})"
+          echo "::error::${reason}"
+          echo "::error::See docs/styleguide-contract.md for the contract and a minimal starter."
+
+          # Best-effort: post the typed abort to glimmung so the run
+          # record lands in ABORTED with this reason and any locks the
+          # run held are released. Capability-only auth (run_id ULID),
+          # same as started / completed.
+          if [ -n "${GLIMMUNG_RUN_ID}" ]; then
+            payload=$(jq -nc --arg r "${reason}" '{reason: $r}')
+            curl -sS -X POST \
+              -H "Content-Type: application/json" \
+              -d "${payload}" \
+              "${GLIMMUNG_BASE}/v1/runs/${GLIMMUNG_PROJECT}/${GLIMMUNG_RUN_ID}/aborted" \
+              || echo "::warning::failed to post typed abort to glimmung; lease-release will still fire"
+          fi
+
+          exit 1
+
       - name: Create per-run agent namespace
         run: |
           set -euo pipefail
