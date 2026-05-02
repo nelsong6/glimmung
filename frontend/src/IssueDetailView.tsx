@@ -17,7 +17,7 @@
  * URL params so deep-link reloads land directly here.
  */
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { authedFetch } from "./auth";
 
 type IssueDetail = {
@@ -62,6 +62,18 @@ type IssueGraph = {
 
 type Tab = "description" | "in_progress" | "lineage";
 
+const TAB_SLUGS: Record<Tab, string> = {
+  description: "description",
+  in_progress: "in-progress",
+  lineage: "lineage",
+};
+
+const SLUG_TO_TAB: Record<string, Tab> = {
+  description: "description",
+  "in-progress": "in_progress",
+  lineage: "lineage",
+};
+
 const COL_WIDTH = 200;
 const ROW_HEIGHT = 56;
 const SIGNAL_OFFSET_X = 220;
@@ -85,6 +97,7 @@ type IssueDetailRouteParams = {
 
 export function IssueDetailView() {
   const navigate = useNavigate();
+  const location = useLocation();
   const params = useParams<IssueDetailRouteParams>();
 
   // Two route shapes land here. GH-anchored has 3 segments after /issues
@@ -103,11 +116,21 @@ export function IssueDetailView() {
         issue_id: params.issueId ?? "",
       };
 
+  const baseUrl =
+    target.kind === "gh"
+      ? `/issues/${target.repo}/${target.issue_number}`
+      : `/issues/${encodeURIComponent(target.project)}/${encodeURIComponent(target.issue_id)}`;
+
+  // Tab is URL-driven so each tab is deep-linkable. Bare `/issues/...`
+  // (no tab segment) falls back to description.
+  const lastSeg = location.pathname.split("/").filter(Boolean).pop() ?? "";
+  const tab: Tab = SLUG_TO_TAB[lastSeg] ?? "description";
+  const setTab = (t: Tab) => navigate(`${baseUrl}/${TAB_SLUGS[t]}`);
+
   const [detail, setDetail] = useState<IssueDetail | null>(null);
   const [graph, setGraph] = useState<IssueGraph | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<GraphNode | null>(null);
-  const [tab, setTab] = useState<Tab>("description");
   const [editing, setEditing] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
 
