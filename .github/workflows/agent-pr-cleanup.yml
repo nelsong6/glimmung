@@ -11,8 +11,13 @@ run-name: "Cleanup #${{ github.event.pull_request.number }} (${{ github.event.pu
 # (`glimmung-issue-<N>-<run>-<sha>`) is separate and gets deleted
 # alongside.
 #
-# Only fires for PRs whose head ref starts with `agent/issue-` — manual
+# Only fires for PRs whose head ref starts with `glimmung/` — manual
 # PRs don't have an agent env and the job is a no-op anyway.
+#
+# Glimmung dictates head refs as `glimmung/<run_id>` under #69, and the
+# agent labels its release+namespace with `glimmung.io/branch=<slug>`
+# (slug = head.ref with `/` → `-`) since the PR number isn't known
+# at workflow-run time anymore.
 
 on:
   pull_request:
@@ -25,10 +30,11 @@ permissions:
 jobs:
   cleanup:
     name: Reap agent validation env
-    if: startsWith(github.event.pull_request.head.ref, 'agent/issue-')
+    if: startsWith(github.event.pull_request.head.ref, 'glimmung/')
     runs-on: ubuntu-latest
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}
+      HEAD_REF: ${{ github.event.pull_request.head.ref }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -99,14 +105,15 @@ jobs:
       - name: Reap helm releases + agent namespaces + ACR tags
         run: |
           set -euo pipefail
-          # Helm releases: find Deployments labeled `glimmung.io/pr=<N>`
+          slug="${HEAD_REF//\//-}"
+          # Helm releases: find Deployments labeled `glimmung.io/branch=<slug>`
           # in the prod `glimmung` namespace; their `app.kubernetes.io/instance`
           # label is the helm release name.
           mapfile -t releases < <(kubectl -n glimmung get deployment \
-            -l "glimmung.io/pr=${PR_NUMBER}" \
+            -l "glimmung.io/branch=${slug}" \
             -o jsonpath='{range .items[*]}{.metadata.labels.app\.kubernetes\.io/instance}{"\n"}{end}')
           if [ "${#releases[@]}" -eq 0 ] || [ -z "${releases[0]:-}" ]; then
-            echo "no helm releases labeled glimmung.io/pr=${PR_NUMBER}; nothing to reap on the chart side"
+            echo "no helm releases labeled glimmung.io/branch=${slug}; nothing to reap on the chart side"
           else
             for release in "${releases[@]}"; do
               [ -z "$release" ] && continue
@@ -122,10 +129,10 @@ jobs:
 
           # Agent namespaces: separately labeled with the same key.
           mapfile -t namespaces < <(kubectl get ns \
-            -l "glimmung.io/pr=${PR_NUMBER}" \
+            -l "glimmung.io/branch=${slug}" \
             -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
           if [ "${#namespaces[@]}" -eq 0 ] || [ -z "${namespaces[0]:-}" ]; then
-            echo "no agent namespaces labeled glimmung.io/pr=${PR_NUMBER}; nothing to reap there"
+            echo "no agent namespaces labeled glimmung.io/branch=${slug}; nothing to reap there"
             exit 0
           fi
           for ns in "${namespaces[@]}"; do
