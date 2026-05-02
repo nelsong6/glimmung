@@ -1,16 +1,23 @@
 /**
- * Issue detail view (#42) — issue meta + tabbed content (description /
- * in progress / lineage).
+ * Issue detail view (#42, #81) — issue meta + tabbed content.
  *
- * The persistent header carries identity + last-run state. Below it,
- * tabs split the content:
- *   - description: title link, body, edit form
- *   - in progress: active-run focus with attempt cards; polls while
- *     a run is in flight, falls back to last-completed-run summary
- *     (or "no runs yet") otherwise
- *   - lineage: full graph from `/v1/issues/{repo}/{n}/graph` rendered
- *     as SVG, one column per Run, attempts stacked, PR at the footer,
- *     Signals attached as side-events
+ * Tabs (#81): issue / the run / runs.
+ *   - issue: title link, body, edit form (was "description")
+ *   - the run: workflow's DAG painted with active run state. Phases
+ *     as nodes, PR primitive as the trailing node. Cool-toned
+ *     definition view when no run is in flight; nodes color in by
+ *     state when one is. Click a node to drill into the latest
+ *     attempt that exercised it.
+ *   - runs: list/timeline of every run on this issue. Click a row
+ *     to load that run in the run tab. Replaces the old SVG lineage.
+ *
+ * Conceptual move per #81: "list of steps that ran" → "graph that
+ * runs". Today the DAG is `[phase] → [pr]` (single-phase v1, per
+ * #69) — boring but honest, and the layout extends cleanly when
+ * multi-phase orchestration lands.
+ *
+ * Backwards-compat: old slugs (description / in-progress / lineage)
+ * still resolve so deep links from before #81 don't 404.
  *
  * Routed via `/issues/<owner>/<repo>/<n>` (GH-anchored) or
  * `/issues/<project>/<issueId>` (native). Target is derived from the
@@ -48,16 +55,14 @@ type GraphNode = {
   metadata: Record<string, unknown>;
 };
 
-type GraphEdge = {
-  source: string;
-  target: string;
-  kind: "spawned" | "attempted" | "retried" | "opened" | "feedback" | "re_dispatched";
-};
-
 type IssueGraph = {
   issue_id: string;
   nodes: GraphNode[];
-  edges: GraphEdge[];
+  edges: Array<{
+    source: string;
+    target: string;
+    kind: "spawned" | "attempted" | "retried" | "opened" | "feedback" | "re_dispatched";
+  }>;
 };
 
 type DispatchState =
@@ -71,32 +76,26 @@ type AbortState =
   | { kind: "aborting" }
   | { kind: "error"; message: string };
 
-type Tab = "description" | "in_progress" | "lineage";
+type Tab = "issue" | "the_run" | "runs";
 
 const TAB_SLUGS: Record<Tab, string> = {
-  description: "description",
-  in_progress: "in-progress",
-  lineage: "lineage",
+  issue: "issue",
+  the_run: "the-run",
+  runs: "runs",
 };
 
+// Backwards-compat: old description / in-progress / lineage slugs still
+// resolve so links and bookmarks from before #81 keep working.
 const SLUG_TO_TAB: Record<string, Tab> = {
-  description: "description",
-  "in-progress": "in_progress",
-  lineage: "lineage",
+  issue: "issue",
+  description: "issue",
+  "the-run": "the_run",
+  "in-progress": "the_run",
+  runs: "runs",
+  lineage: "runs",
 };
 
-const COL_WIDTH = 200;
-const ROW_HEIGHT = 56;
-const SIGNAL_OFFSET_X = 220;
-const TOP_PADDING = 40;
-const LEFT_PADDING = 40;
 const POLL_INTERVAL_MS = 3000;
-
-type Layout = {
-  positions: Map<string, { x: number; y: number; w: number; h: number }>;
-  width: number;
-  height: number;
-};
 
 type IssueDetailRouteParams = {
   owner?: string;
@@ -133,19 +132,23 @@ export function IssueDetailView() {
       : `/issues/${encodeURIComponent(target.project)}/${encodeURIComponent(target.issue_id)}`;
 
   // Tab is URL-driven so each tab is deep-linkable. Bare `/issues/...`
-  // (no tab segment) falls back to description.
+  // (no tab segment) falls back to the issue tab.
   const lastSeg = location.pathname.split("/").filter(Boolean).pop() ?? "";
-  const tab: Tab = SLUG_TO_TAB[lastSeg] ?? "description";
+  const tab: Tab = SLUG_TO_TAB[lastSeg] ?? "issue";
   const setTab = (t: Tab) => navigate(`${baseUrl}/${TAB_SLUGS[t]}`);
 
   const [detail, setDetail] = useState<IssueDetail | null>(null);
   const [graph, setGraph] = useState<IssueGraph | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<GraphNode | null>(null);
   const [editing, setEditing] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
   const [dispatchState, setDispatchState] = useState<DispatchState>({ kind: "idle" });
   const [abortState, setAbortState] = useState<AbortState>({ kind: "idle" });
+  // Which Run the "the run" tab paints. null → fall back to active or
+  // most recent. The Runs tab sets this when a row is clicked, then
+  // jumps to the run tab. Not URL-encoded yet; deep-linking a specific
+  // run gets a follow-up.
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
 
   const detailUrl =
     target.kind === "gh"
@@ -192,9 +195,9 @@ export function IssueDetailView() {
     };
   }, [detailUrl, graphUrl, refreshTick]);
 
-  // While the in-progress tab is open and a run is actually in flight,
-  // poll the same endpoints so attempt cards fill in as conclusions /
-  // verification verdicts / decisions land server-side.
+  // While the run tab is open and a run is actually in flight, poll
+  // detail+graph so DAG nodes fill in as conclusions / verification /
+  // decisions land server-side.
   const isInFlight = !!(detail && (detail.issue_lock_held || detail.last_run_state === "in_progress"));
 
   const onRedispatch = async () => {
@@ -236,16 +239,11 @@ export function IssueDetailView() {
     }
   };
   useEffect(() => {
-    if (tab !== "in_progress") return;
+    if (tab !== "the_run") return;
     if (!isInFlight) return;
     const id = setInterval(() => setRefreshTick((t) => t + 1), POLL_INTERVAL_MS);
     return () => clearInterval(id);
   }, [tab, isInFlight]);
-
-  const layout = useMemo<Layout | null>(() => {
-    if (!graph) return null;
-    return computeLayout(graph);
-  }, [graph]);
 
   return (
     <>
@@ -263,20 +261,20 @@ export function IssueDetailView() {
           <IssueHeader detail={detail} />
 
           <div className="tabs" role="tablist">
-            <TabButton current={tab} value="description" onSelect={setTab}>
-              description
+            <TabButton current={tab} value="issue" onSelect={setTab}>
+              issue
             </TabButton>
-            <TabButton current={tab} value="in_progress" onSelect={setTab}>
-              in progress
+            <TabButton current={tab} value="the_run" onSelect={setTab}>
+              the run
               {isInFlight && <span className="tab-dot" aria-label="active" />}
             </TabButton>
-            <TabButton current={tab} value="lineage" onSelect={setTab}>
-              lineage
+            <TabButton current={tab} value="runs" onSelect={setTab}>
+              runs
             </TabButton>
           </div>
 
           <div className="tab-panel">
-            {tab === "description" && (
+            {tab === "issue" && (
               <DescriptionTab
                 detail={detail}
                 editing={editing}
@@ -288,8 +286,8 @@ export function IssueDetailView() {
                 }}
               />
             )}
-            {tab === "in_progress" && (
-              <InProgressTab
+            {tab === "the_run" && (
+              <TheRunTab
                 graph={graph}
                 graphAvailable={!!graphUrl}
                 repo={repoForLinks}
@@ -300,15 +298,18 @@ export function IssueDetailView() {
                 onArmAbort={() => setAbortState({ kind: "armed" })}
                 onCancelAbort={() => setAbortState({ kind: "idle" })}
                 onConfirmAbort={(runId) => void onAbort(runId)}
+                selectedRunId={selectedRunId}
+                onSelectRun={setSelectedRunId}
               />
             )}
-            {tab === "lineage" && (
-              <LineageTab
+            {tab === "runs" && (
+              <RunsTab
                 graph={graph}
                 graphAvailable={!!graphUrl}
-                layout={layout}
-                selected={selected}
-                onSelect={setSelected}
+                onPickRun={(runId) => {
+                  setSelectedRunId(runId);
+                  setTab("the_run");
+                }}
               />
             )}
           </div>
@@ -437,7 +438,7 @@ function DescriptionTab({
   );
 }
 
-function InProgressTab({
+function TheRunTab({
   graph,
   graphAvailable,
   repo,
@@ -448,6 +449,8 @@ function InProgressTab({
   onArmAbort,
   onCancelAbort,
   onConfirmAbort,
+  selectedRunId,
+  onSelectRun,
 }: {
   graph: IssueGraph | null;
   graphAvailable: boolean;
@@ -459,7 +462,30 @@ function InProgressTab({
   onArmAbort: () => void;
   onCancelAbort: () => void;
   onConfirmAbort: (runId: string) => void;
+  selectedRunId: string | null;
+  onSelectRun: (runId: string | null) => void;
 }) {
+  // Pick the run we're painting. Caller-selected wins; fall back to
+  // active, then most recent. `null` only when there are no runs at
+  // all on this issue.
+  const focused = useMemo(() => {
+    if (!graph) return null;
+    if (selectedRunId) {
+      const node = graph.nodes.find(
+        (n) => n.kind === "run" && runIdFromNode(n) === selectedRunId,
+      );
+      if (node) return node;
+    }
+    return findActiveRun(graph) ?? findLastCompletedRun(graph);
+  }, [graph, selectedRunId]);
+
+  // Drill-in panel: which DAG node the user clicked. Reset when the
+  // focused run changes so we don't carry a stale selection.
+  const [drillNodeId, setDrillNodeId] = useState<string | null>(null);
+  useEffect(() => {
+    setDrillNodeId(null);
+  }, [focused?.id]);
+
   if (!graphAvailable) {
     return (
       <div className="empty">
@@ -471,37 +497,32 @@ function InProgressTab({
     return <div className="empty">Loading run state…</div>;
   }
 
-  const activeRun = findActiveRun(graph);
-  const lastCompleted = findLastCompletedRun(graph);
-
   const dispatching = dispatchState.kind === "dispatching";
   const dispatchDisabled = inFlight || dispatching;
   // Abort button shows only when an actual run record exists in flight.
   // Lock-only state (issue_lock_held but no run yet) doesn't have a run
   // id to target; that case stays as "Run lock held — waiting…".
+  // Always targets the currently in-flight run, even when a different
+  // historical run is selected for viewing in the run tab.
+  const activeRun = findActiveRun(graph);
   const abortableRunId = activeRun ? runIdFromNode(activeRun) : null;
   const aborting = abortState.kind === "aborting";
   const armed = abortState.kind === "armed";
   const actions = (
-    <div className="run-actions">
+    <div
+      className="run-actions"
+      style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}
+    >
       <button
         type="button"
         className="link"
         onClick={onRedispatch}
         disabled={dispatchDisabled}
       >
-        {dispatching
-          ? "dispatching…"
-          : inFlight
-          ? "in flight"
-          : "re-dispatch"}
+        {dispatching ? "dispatching…" : inFlight ? "in flight" : "re-dispatch"}
       </button>
       {dispatchState.kind === "error" && (
-        <span
-          className="pill drain"
-          style={{ marginLeft: "0.5rem" }}
-          title={dispatchState.message}
-        >
+        <span className="pill drain" title={dispatchState.message}>
           error
         </span>
       )}
@@ -547,49 +568,304 @@ function InProgressTab({
           abort error
         </span>
       )}
+      {selectedRunId && focused && (
+        <span className="dim mono">
+          showing run {selectedRunId.slice(0, 8)}…{" "}
+          <button type="button" className="link" onClick={() => onSelectRun(null)}>
+            (clear)
+          </button>
+        </span>
+      )}
     </div>
   );
 
-  if (activeRun) {
+  if (!focused) {
+    if (inFlight) {
+      return (
+        <>
+          {actions}
+          <DefinitionDag />
+          <div className="empty">
+            Run lock held — waiting for the run record to land.
+          </div>
+        </>
+      );
+    }
     return (
       <>
         {actions}
-        <RunPanel run={activeRun} graph={graph} repo={repo} live />
+        <DefinitionDag />
+        <div className="empty">No runs yet — re-dispatch above to start one.</div>
       </>
     );
   }
-  if (inFlight) {
-    return (
-      <>
-        {actions}
-        <div className="empty">
-          Run lock held — waiting for the run record to land.
-        </div>
-      </>
-    );
-  }
-  if (lastCompleted) {
-    return (
-      <>
-        {actions}
-        <div className="run-status-banner">
-          No run in flight. Showing the last completed run.
-        </div>
-        <RunPanel run={lastCompleted} graph={graph} repo={repo} live={false} />
-      </>
-    );
-  }
+
+  const isActive = focused.state === "in_progress";
+
   return (
     <>
       {actions}
-      <div className="empty">
-        No runs yet — re-dispatch above to start one.
-      </div>
+      {!isActive && !selectedRunId && (
+        <div className="run-status-banner">
+          No run in flight. Showing the last completed run.
+        </div>
+      )}
+      <PipelineDag
+        run={focused}
+        graph={graph}
+        selectedNodeId={drillNodeId}
+        onSelectNode={setDrillNodeId}
+      />
+      <DrillIn
+        nodeId={drillNodeId}
+        run={focused}
+        graph={graph}
+        repo={repo}
+        onClose={() => setDrillNodeId(null)}
+      />
+      {drillNodeId === null && (
+        <RunMetaSummary run={focused} graph={graph} repo={repo} live={isActive} />
+      )}
     </>
   );
 }
 
-function RunPanel({
+// Cool-toned definition view of the workflow's DAG when no run has
+// landed yet. v1 phases-v1 ships single-phase, so this is `[phase] →
+// [pr]`. Rendering richer phase metadata would need a /v1/workflows
+// fetch — out of scope for the initial DAG view; this is the floor.
+function DefinitionDag() {
+  return (
+    <div className="dag dag-definition" aria-label="workflow definition">
+      <div className="dag-node dag-node-definition">
+        <div className="dag-node-label">phase</div>
+        <div className="dag-node-state dim mono">not run</div>
+      </div>
+      <div className="dag-edge" aria-hidden="true">→</div>
+      <div className="dag-node dag-node-definition">
+        <div className="dag-node-label">pr</div>
+        <div className="dag-node-state dim mono">pending</div>
+      </div>
+    </div>
+  );
+}
+
+// Pipeline DAG painted with the focused run's state. Builds the node
+// list from the run's attempts (one node per distinct phase touched,
+// in order) plus a trailing PR node colored by pr linkage. Click a
+// node to drill in.
+function PipelineDag({
+  run,
+  graph,
+  selectedNodeId,
+  onSelectNode,
+}: {
+  run: GraphNode;
+  graph: IssueGraph;
+  selectedNodeId: string | null;
+  onSelectNode: (id: string | null) => void;
+}) {
+  const phases = useMemo(() => phaseNodesForRun(graph, run), [graph, run]);
+  const meta = run.metadata;
+  const prNumber = numberOrNull(meta.pr_number);
+  const prBranch = stringOrNull(meta.pr_branch);
+  return (
+    <div className="dag" aria-label="pipeline">
+      {phases.map((p) => (
+        <DagPhaseNode
+          key={p.phaseName}
+          phase={p}
+          selected={selectedNodeId === `phase:${p.phaseName}`}
+          onSelect={() =>
+            onSelectNode(selectedNodeId === `phase:${p.phaseName}` ? null : `phase:${p.phaseName}`)
+          }
+        />
+      ))}
+      <div className="dag-edge" aria-hidden="true">→</div>
+      <button
+        type="button"
+        className={`dag-node dag-node-pr${prNumber ? " opened" : " pending"}${selectedNodeId === "pr" ? " selected" : ""}`}
+        onClick={() => onSelectNode(selectedNodeId === "pr" ? null : "pr")}
+        aria-pressed={selectedNodeId === "pr"}
+      >
+        <div className="dag-node-label">pr</div>
+        <div className="dag-node-state mono">
+          {prNumber ? `#${prNumber}` : prBranch ? prBranch : "pending"}
+        </div>
+      </button>
+    </div>
+  );
+}
+
+type PhaseRollup = {
+  phaseName: string;
+  attempts: GraphNode[];
+  latest: GraphNode;
+  status: { cls: string; text: string };
+};
+
+function phaseNodesForRun(graph: IssueGraph, run: GraphNode): PhaseRollup[] {
+  const attempts = attemptsForRun(graph, run.id);
+  const byPhase = new Map<string, GraphNode[]>();
+  for (const a of attempts) {
+    const phase = stringOrNull(a.metadata.phase) ?? "phase";
+    const arr = byPhase.get(phase) ?? [];
+    arr.push(a);
+    byPhase.set(phase, arr);
+  }
+  const out: PhaseRollup[] = [];
+  for (const [phaseName, arr] of byPhase) {
+    const latest = arr[arr.length - 1];
+    out.push({ phaseName, attempts: arr, latest, status: phaseStatus(latest) });
+  }
+  if (out.length === 0) {
+    // Run exists but no attempts dispatched yet (rare — pre-record_started
+    // window). Still render a placeholder so the DAG isn't empty.
+    out.push({
+      phaseName: stringOrNull(run.metadata.workflow) ?? "phase",
+      attempts: [],
+      latest: run,
+      status: { cls: "info", text: "pending" },
+    });
+  }
+  return out;
+}
+
+function phaseStatus(attempt: GraphNode): { cls: string; text: string } {
+  const meta = attempt.metadata;
+  const completed = stringOrNull(meta.completed_at);
+  const conclusion = stringOrNull(meta.conclusion);
+  const verification = isRecord(meta.verification) ? meta.verification : null;
+  const verStatus = verification ? stringOrNull(verification.status) : null;
+  const workflowRunId = meta.workflow_run_id != null ? String(meta.workflow_run_id) : null;
+  if (!completed) {
+    return workflowRunId
+      ? { cls: "busy", text: "running" }
+      : { cls: "info", text: "dispatching" };
+  }
+  if (verStatus === "pass" || conclusion === "success") return { cls: "free", text: "pass" };
+  if (verStatus === "fail") return { cls: "drain", text: "fail" };
+  if (verStatus === "error") return { cls: "drain", text: "error" };
+  if (conclusion === "cancelled") return { cls: "drain", text: "cancelled" };
+  if (conclusion) return { cls: "drain", text: conclusion };
+  return { cls: "", text: "completed" };
+}
+
+function DagPhaseNode({
+  phase,
+  selected,
+  onSelect,
+}: {
+  phase: PhaseRollup;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`dag-node dag-node-phase${selected ? " selected" : ""}`}
+      onClick={onSelect}
+      aria-pressed={selected}
+    >
+      <div className="dag-node-label">{phase.phaseName}</div>
+      <div className="dag-node-state">
+        <span className={`pill ${phase.status.cls}`}>{phase.status.text}</span>
+      </div>
+      {phase.attempts.length > 1 && (
+        <div className="dag-node-meta dim mono">×{phase.attempts.length}</div>
+      )}
+    </button>
+  );
+}
+
+function DrillIn({
+  nodeId,
+  run,
+  graph,
+  repo,
+  onClose,
+}: {
+  nodeId: string | null;
+  run: GraphNode;
+  graph: IssueGraph;
+  repo: string | null;
+  onClose: () => void;
+}) {
+  if (nodeId === null) return null;
+  const meta = run.metadata;
+  if (nodeId === "pr") {
+    const prNumber = numberOrNull(meta.pr_number);
+    const prBranch = stringOrNull(meta.pr_branch);
+    return (
+      <div className="run-panel">
+        <div className="run-panel-header">
+          <div>
+            <strong>pr</strong>
+            <span className={`pill ${prNumber ? "free" : ""}`} style={{ marginLeft: "0.5rem" }}>
+              {prNumber ? "opened" : "pending"}
+            </span>
+          </div>
+          <button type="button" className="link" onClick={onClose}>
+            close
+          </button>
+        </div>
+        <div className="run-panel-meta">
+          {prNumber !== null && repo ? (
+            <div>
+              <span className="key">PR</span>{" "}
+              <a className="mono" href={`https://github.com/${repo}/pull/${prNumber}`} target="_blank" rel="noreferrer">
+                #{prNumber}
+              </a>
+            </div>
+          ) : (
+            <div className="dim mono">No PR opened yet for this run.</div>
+          )}
+          {prBranch && (
+            <div>
+              <span className="key">branch</span> <span className="mono">{prBranch}</span>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+  if (nodeId.startsWith("phase:")) {
+    const phaseName = nodeId.slice("phase:".length);
+    const phases = phaseNodesForRun(graph, run);
+    const rollup = phases.find((p) => p.phaseName === phaseName);
+    if (!rollup) return null;
+    return (
+      <div className="run-panel">
+        <div className="run-panel-header">
+          <div>
+            <strong>{rollup.phaseName}</strong>
+            <span className={`pill ${rollup.status.cls}`} style={{ marginLeft: "0.5rem" }}>
+              {rollup.status.text}
+            </span>
+            <span className="dim mono" style={{ marginLeft: "0.5rem" }}>
+              {rollup.attempts.length} attempt{rollup.attempts.length === 1 ? "" : "s"}
+            </span>
+          </div>
+          <button type="button" className="link" onClick={onClose}>
+            close
+          </button>
+        </div>
+        {rollup.attempts.length === 0 ? (
+          <div className="empty dim">No attempts dispatched yet.</div>
+        ) : (
+          <div className="attempt-list">
+            {rollup.attempts.map((a) => (
+              <AttemptCard key={a.id} attempt={a} repo={repo} />
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+  return null;
+}
+
+function RunMetaSummary({
   run,
   graph,
   repo,
@@ -600,82 +876,46 @@ function RunPanel({
   repo: string | null;
   live: boolean;
 }) {
+  // Lightweight tail summary so the user has context without having to
+  // drill in. When a node is selected, this gets replaced by the
+  // drill-in panel.
   const attempts = attemptsForRun(graph, run.id);
   const meta = run.metadata;
   const cumulativeCost = numberOrNull(meta.cumulative_cost_usd);
   const workflow = stringOrNull(meta.workflow);
-  const triggerSource = stringOrNull(meta.trigger_source);
   const abortReason = stringOrNull(meta.abort_reason);
   const prNumber = numberOrNull(meta.pr_number);
-  const prBranch = stringOrNull(meta.pr_branch);
-  const stateLabel = run.state ?? "unknown";
-
   return (
-    <div className="run-panel">
-      <div className="run-panel-header">
-        <div>
-          <span className={`pill ${runStatePill(stateLabel)}`}>{stateLabel}</span>
-          <span className="mono dim" style={{ marginLeft: "0.5rem" }}>
-            {run.label}
-          </span>
-          {live && <span className="live-dot" aria-label="live" />}
-        </div>
-        {run.timestamp && (
-          <span className="dim mono">started {formatTime(run.timestamp)}</span>
-        )}
+    <div className="run-panel-meta" style={{ marginTop: "0.5rem" }}>
+      <div>
+        <span className="key">state</span>{" "}
+        <span className={`pill ${runStatePill(run.state ?? "")}`}>{run.state ?? "—"}</span>
+        {live && <span className="live-dot" aria-label="live" style={{ marginLeft: "0.5rem" }} />}
       </div>
-      <div className="run-panel-meta">
-        {workflow && (
-          <div>
-            <span className="key">workflow</span>{" "}
-            <span className="mono">{workflow}</span>
-          </div>
-        )}
-        {triggerSource && (
-          <div>
-            <span className="key">trigger</span>{" "}
-            <span className="mono">{triggerSource}</span>
-          </div>
-        )}
+      {workflow && (
         <div>
-          <span className="key">attempts</span>{" "}
-          <span className="mono">{attempts.length}</span>
+          <span className="key">workflow</span> <span className="mono">{workflow}</span>
         </div>
-        {cumulativeCost !== null && (
-          <div>
-            <span className="key">cost</span>{" "}
-            <span className="mono">${cumulativeCost.toFixed(4)}</span>
-          </div>
-        )}
-        {prNumber !== null && repo && (
-          <div>
-            <span className="key">PR</span>{" "}
-            <a
-              className="mono"
-              href={`https://github.com/${repo}/pull/${prNumber}`}
-              target="_blank"
-              rel="noreferrer"
-            >
-              #{prNumber}
-            </a>
-            {prBranch && <span className="dim mono"> ({prBranch})</span>}
-          </div>
-        )}
-        {abortReason && (
-          <div>
-            <span className="key">abort</span>{" "}
-            <span className="mono">{abortReason}</span>
-          </div>
-        )}
+      )}
+      <div>
+        <span className="key">attempts</span> <span className="mono">{attempts.length}</span>
       </div>
-
-      {attempts.length === 0 ? (
-        <div className="empty dim">No attempts dispatched yet.</div>
-      ) : (
-        <div className="attempt-list">
-          {attempts.map((a) => (
-            <AttemptCard key={a.id} attempt={a} repo={repo} />
-          ))}
+      {cumulativeCost !== null && (
+        <div>
+          <span className="key">cost</span> <span className="mono">${cumulativeCost.toFixed(4)}</span>
+        </div>
+      )}
+      {prNumber !== null && repo && (
+        <div>
+          <span className="key">PR</span>{" "}
+          <a className="mono" href={`https://github.com/${repo}/pull/${prNumber}`} target="_blank" rel="noreferrer">
+            #{prNumber}
+          </a>
+        </div>
+      )}
+      {abortReason && (
+        <div>
+          <span className="key">abort</span> <span className="mono">{abortReason}</span>
         </div>
       )}
     </div>
@@ -688,6 +928,77 @@ function RunPanel({
 // normal conditions. 30s gives the runner some slack but flags real
 // dispatch failures (the orphan-webhook bug surfaced as exactly this).
 const STUCK_DISPATCHING_MS = 30_000;
+
+function RunsTab({
+  graph,
+  graphAvailable,
+  onPickRun,
+}: {
+  graph: IssueGraph | null;
+  graphAvailable: boolean;
+  onPickRun: (runId: string) => void;
+}) {
+  if (!graphAvailable) {
+    return (
+      <div className="empty">
+        Run history isn't available for native issues yet.
+      </div>
+    );
+  }
+  if (!graph) {
+    return <div className="empty">Loading run history…</div>;
+  }
+  const runs = graph.nodes
+    .filter((n) => n.kind === "run")
+    .slice()
+    .sort((a, b) => (b.timestamp ?? "").localeCompare(a.timestamp ?? ""));
+  if (runs.length === 0) {
+    return <div className="empty">No runs yet on this issue.</div>;
+  }
+  return (
+    <table>
+      <thead>
+        <tr>
+          <th>Run</th>
+          <th>State</th>
+          <th>Started</th>
+          <th>Attempts</th>
+          <th>Cost</th>
+          <th>PR</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {runs.map((r) => {
+          const id = runIdFromNode(r);
+          const meta = r.metadata;
+          const attemptCount = graph.nodes.filter(
+            (n) => n.kind === "attempt" && n.id.startsWith(`attempt:${id}:`),
+          ).length;
+          const cost = numberOrNull(meta.cumulative_cost_usd);
+          const prNumber = numberOrNull(meta.pr_number);
+          return (
+            <tr key={r.id}>
+              <td className="mono">{id.slice(0, 8)}…</td>
+              <td>
+                <span className={`pill ${runStatePill(r.state ?? "")}`}>{r.state ?? "—"}</span>
+              </td>
+              <td className="mono dim">{r.timestamp ? formatTime(r.timestamp) : "—"}</td>
+              <td className="mono">{attemptCount}</td>
+              <td className="mono">{cost !== null ? `$${cost.toFixed(4)}` : "—"}</td>
+              <td className="mono dim">{prNumber !== null ? `#${prNumber}` : "—"}</td>
+              <td>
+                <button type="button" className="link" onClick={() => onPickRun(id)}>
+                  open
+                </button>
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
 
 function AttemptCard({ attempt, repo }: { attempt: GraphNode; repo: string | null }) {
   const meta = attempt.metadata;
@@ -853,48 +1164,8 @@ function AttemptCard({ attempt, repo }: { attempt: GraphNode; repo: string | nul
   );
 }
 
-function LineageTab({
-  graph,
-  graphAvailable,
-  layout,
-  selected,
-  onSelect,
-}: {
-  graph: IssueGraph | null;
-  graphAvailable: boolean;
-  layout: Layout | null;
-  selected: GraphNode | null;
-  onSelect: (n: GraphNode | null) => void;
-}) {
-  if (!graphAvailable) {
-    return (
-      <div className="empty">
-        Lineage isn't available for native issues yet.
-      </div>
-    );
-  }
-  if (!graph || !layout) {
-    return <div className="empty">Loading graph…</div>;
-  }
-  if (graph.nodes.length === 1) {
-    return <div className="empty">No runs yet — dispatch from the Issues page.</div>;
-  }
-  return (
-    <>
-      <GraphCanvas graph={graph} layout={layout} selected={selected} onSelect={onSelect} />
-      {selected && <NodeDetailPanel node={selected} onClose={() => onSelect(null)} />}
-    </>
-  );
-}
-
 function findActiveRun(graph: IssueGraph): GraphNode | null {
   return graph.nodes.find((n) => n.kind === "run" && n.state === "in_progress") ?? null;
-}
-
-function runIdFromNode(n: GraphNode): string {
-  // Run nodes are keyed `run:<run_id>` in the graph endpoint; the abort
-  // endpoint takes the bare ULID.
-  return n.id.startsWith("run:") ? n.id.slice(4) : n.id;
 }
 
 function findLastCompletedRun(graph: IssueGraph): GraphNode | null {
@@ -915,6 +1186,12 @@ function attemptsForRun(graph: IssueGraph, runNodeId: string): GraphNode[] {
       const bi = parseInt(b.id.split(":").pop() ?? "0", 10);
       return ai - bi;
     });
+}
+
+// Run nodes are keyed `run:<run_id>` in the graph endpoint; the abort
+// endpoint and selection state both take the bare ULID.
+function runIdFromNode(n: GraphNode): string {
+  return n.id.startsWith("run:") ? n.id.slice(4) : n.id;
 }
 
 function isRecord(x: unknown): x is Record<string, unknown> {
@@ -1043,332 +1320,9 @@ function IssueEditForm({
   );
 }
 
-function GraphCanvas({
-  graph,
-  layout,
-  selected,
-  onSelect,
-}: {
-  graph: IssueGraph;
-  layout: Layout;
-  selected: GraphNode | null;
-  onSelect: (n: GraphNode | null) => void;
-}) {
-  return (
-    <svg
-      width={layout.width}
-      height={layout.height}
-      style={{
-        background: "#0a0a0c",
-        border: "1px solid #2a2a2e",
-        borderRadius: "4px",
-        display: "block",
-      }}
-    >
-      <defs>
-        <marker
-          id="arrow"
-          viewBox="0 0 10 10"
-          refX="10"
-          refY="5"
-          markerWidth="6"
-          markerHeight="6"
-          orient="auto-start-reverse"
-        >
-          <path d="M 0 0 L 10 5 L 0 10 z" fill="#555" />
-        </marker>
-        <marker
-          id="arrow-feedback"
-          viewBox="0 0 10 10"
-          refX="10"
-          refY="5"
-          markerWidth="6"
-          markerHeight="6"
-          orient="auto-start-reverse"
-        >
-          <path d="M 0 0 L 10 5 L 0 10 z" fill="#fb923c" />
-        </marker>
-      </defs>
-
-      {graph.edges.map((e, i) => (
-        <EdgeLine key={i} edge={e} layout={layout} />
-      ))}
-
-      {graph.nodes.map((n) => (
-        <NodeBox
-          key={n.id}
-          node={n}
-          layout={layout}
-          isSelected={selected?.id === n.id}
-          onClick={() => onSelect(n)}
-        />
-      ))}
-    </svg>
-  );
-}
-
-function EdgeLine({ edge, layout }: { edge: GraphEdge; layout: Layout }) {
-  const a = layout.positions.get(edge.source);
-  const b = layout.positions.get(edge.target);
-  if (!a || !b) return null;
-
-  const isFeedback = edge.kind === "feedback" || edge.kind === "re_dispatched";
-  const stroke = isFeedback ? "#fb923c" : "#555";
-  const dash = edge.kind === "re_dispatched" ? "4,4" : undefined;
-  const marker = isFeedback ? "url(#arrow-feedback)" : "url(#arrow)";
-
-  const x1 = a.x + a.w / 2;
-  const y1 = a.y + a.h;
-  const x2 = b.x + b.w / 2;
-  const y2 = b.y;
-
-  const sameColumn = Math.abs(x1 - x2) < 1;
-  if (sameColumn) {
-    return (
-      <line
-        x1={x1} y1={y1} x2={x2} y2={y2}
-        stroke={stroke}
-        strokeWidth={1.5}
-        strokeDasharray={dash}
-        markerEnd={marker}
-      />
-    );
-  }
-  const mx = (x1 + x2) / 2;
-  const my = Math.max(y1, y2) + 12;
-  const d = `M ${x1} ${y1} Q ${mx} ${my} ${x2} ${y2}`;
-  return (
-    <path
-      d={d}
-      fill="none"
-      stroke={stroke}
-      strokeWidth={1.5}
-      strokeDasharray={dash}
-      markerEnd={marker}
-    />
-  );
-}
-
-function NodeBox({
-  node,
-  layout,
-  isSelected,
-  onClick,
-}: {
-  node: GraphNode;
-  layout: Layout;
-  isSelected: boolean;
-  onClick: () => void;
-}) {
-  const pos = layout.positions.get(node.id);
-  if (!pos) return null;
-
-  const fill = nodeFill(node);
-  const stroke = isSelected ? "#60a5fa" : "#2a2a2e";
-
-  return (
-    <g style={{ cursor: "pointer" }} onClick={onClick}>
-      <rect
-        x={pos.x}
-        y={pos.y}
-        width={pos.w}
-        height={pos.h}
-        rx={4}
-        fill={fill.bg}
-        stroke={stroke}
-        strokeWidth={isSelected ? 2 : 1}
-      />
-      <text
-        x={pos.x + 10}
-        y={pos.y + 18}
-        fill={fill.fg}
-        fontSize="11"
-        fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
-      >
-        {truncate(node.label, Math.floor((pos.w - 20) / 6.5))}
-      </text>
-      {node.state && (
-        <text
-          x={pos.x + 10}
-          y={pos.y + 36}
-          fill={fill.dim}
-          fontSize="10"
-          fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
-        >
-          {node.state}
-        </text>
-      )}
-    </g>
-  );
-}
-
-function NodeDetailPanel({ node, onClose }: { node: GraphNode; onClose: () => void }) {
-  return (
-    <div
-      style={{
-        marginTop: "1rem",
-        padding: "0.75rem 1rem",
-        border: "1px solid #2a2a2e",
-        borderRadius: "4px",
-        background: "#0a0a0c",
-      }}
-    >
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <strong>
-          {node.kind} — {node.label}
-        </strong>
-        <button type="button" className="link" onClick={onClose}>
-          close
-        </button>
-      </div>
-      {node.state && <div className="dim mono" style={{ marginTop: 4 }}>state: {node.state}</div>}
-      {node.timestamp && <div className="dim mono" style={{ marginTop: 2 }}>at: {node.timestamp}</div>}
-      <pre
-        className="mono"
-        style={{
-          marginTop: "0.5rem",
-          fontSize: "0.8rem",
-          background: "#050507",
-          padding: "0.5rem",
-          borderRadius: "3px",
-          overflowX: "auto",
-        }}
-      >
-        {JSON.stringify(node.metadata, null, 2)}
-      </pre>
-    </div>
-  );
-}
-
-function computeLayout(graph: IssueGraph): Layout {
-  const positions = new Map<string, { x: number; y: number; w: number; h: number }>();
-
-  const issueNode = graph.nodes.find((n) => n.kind === "issue");
-  if (issueNode) {
-    positions.set(issueNode.id, {
-      x: LEFT_PADDING,
-      y: TOP_PADDING,
-      w: COL_WIDTH * 2,
-      h: 44,
-    });
-  }
-
-  const runs = graph.nodes
-    .filter((n) => n.kind === "run")
-    .sort((a, b) => (a.timestamp ?? "").localeCompare(b.timestamp ?? ""));
-
-  const runIdToCol = new Map<string, number>();
-  runs.forEach((r, i) => runIdToCol.set(r.id, i));
-
-  const attemptByRun = new Map<string, GraphNode[]>();
-  for (const n of graph.nodes) {
-    if (n.kind !== "attempt") continue;
-    const parts = n.id.split(":");
-    const runId = `run:${parts[1]}`;
-    const arr = attemptByRun.get(runId) ?? [];
-    arr.push(n);
-    attemptByRun.set(runId, arr);
-  }
-  for (const arr of attemptByRun.values()) {
-    arr.sort((a, b) => {
-      const ai = parseInt(a.id.split(":").pop() ?? "0", 10);
-      const bi = parseInt(b.id.split(":").pop() ?? "0", 10);
-      return ai - bi;
-    });
-  }
-
-  const prByRun = new Map<string, GraphNode>();
-  for (const e of graph.edges) {
-    if (e.kind !== "opened") continue;
-    const target = graph.nodes.find((n) => n.id === e.target);
-    if (target?.kind === "pr") prByRun.set(e.source, target);
-  }
-
-  const columnTopY = TOP_PADDING + 44 + 40;
-  let maxColumnBottomY = columnTopY;
-  for (const run of runs) {
-    const col = runIdToCol.get(run.id) ?? 0;
-    const colX = LEFT_PADDING + col * (COL_WIDTH + 24);
-    let y = columnTopY;
-
-    positions.set(run.id, {
-      x: colX,
-      y,
-      w: COL_WIDTH,
-      h: 44,
-    });
-    y += 44 + 12;
-
-    for (const a of attemptByRun.get(run.id) ?? []) {
-      positions.set(a.id, { x: colX, y, w: COL_WIDTH, h: 44 });
-      y += 44 + 8;
-    }
-
-    const pr = prByRun.get(run.id);
-    if (pr && !positions.has(pr.id)) {
-      positions.set(pr.id, { x: colX, y, w: COL_WIDTH, h: 44 });
-      y += 44 + 8;
-    }
-
-    maxColumnBottomY = Math.max(maxColumnBottomY, y);
-  }
-
-  for (const n of graph.nodes) {
-    if (n.kind !== "signal") continue;
-    const fbEdge = graph.edges.find((e) => e.kind === "feedback" && e.target === n.id);
-    let baseX = LEFT_PADDING;
-    let baseY = maxColumnBottomY;
-    if (fbEdge) {
-      const sourcePos = positions.get(fbEdge.source);
-      if (sourcePos) {
-        baseX = sourcePos.x;
-        baseY = sourcePos.y;
-      }
-    }
-    positions.set(n.id, {
-      x: baseX + SIGNAL_OFFSET_X,
-      y: baseY,
-      w: COL_WIDTH - 40,
-      h: ROW_HEIGHT - 12,
-    });
-  }
-
-  let width = LEFT_PADDING * 2 + Math.max(1, runs.length) * (COL_WIDTH + 24) + 80;
-  let height = maxColumnBottomY + TOP_PADDING;
-  for (const p of positions.values()) {
-    width = Math.max(width, p.x + p.w + LEFT_PADDING);
-    height = Math.max(height, p.y + p.h + TOP_PADDING);
-  }
-
-  return { positions, width, height };
-}
-
-function nodeFill(n: GraphNode): { bg: string; fg: string; dim: string } {
-  if (n.kind === "issue") return { bg: "#1a2030", fg: "#e8e8e8", dim: "#888" };
-  if (n.kind === "pr") return { bg: "#1a1f1a", fg: "#a8d8a8", dim: "#6a8a6a" };
-  if (n.kind === "signal") return { bg: "#2a1d10", fg: "#fb923c", dim: "#a87040" };
-
-  const state = (n.state ?? "").toLowerCase();
-  if (state === "passed" || state === "pass") {
-    return { bg: "#14321e", fg: "#4ade80", dim: "#7aae8a" };
-  }
-  if (state === "in_progress") {
-    return { bg: "#3a2a10", fg: "#fb923c", dim: "#a8754a" };
-  }
-  if (state === "aborted" || state === "fail" || state === "error") {
-    return { bg: "#321414", fg: "#f87171", dim: "#a85050" };
-  }
-  return { bg: "#15151a", fg: "#c0c0c0", dim: "#666" };
-}
-
 function runStatePill(state: string): string {
   if (state === "passed") return "free";
   if (state === "in_progress") return "busy";
   if (state === "aborted") return "drain";
   return "";
-}
-
-function truncate(s: string, max: number): string {
-  if (s.length <= max) return s;
-  return s.slice(0, Math.max(1, max - 1)) + "…";
 }

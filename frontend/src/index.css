@@ -745,6 +745,71 @@ h2 .inline-action,
   color: #888;
   margin-bottom: 8px;
 }
+
+/* Pipeline DAG (#81). Horizontal flow of phase nodes followed by a
+   trailing PR node. v1 phases-v1 ships single-phase, so this is
+   `[phase] → [pr]` — boring but honest. Layout extends cleanly when
+   multi-phase orchestration lands. */
+.dag {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+.dag-node {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 140px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg);
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.dag-node:hover {
+  background: var(--surface-hover);
+}
+.dag-node.selected {
+  border-color: var(--state-success-fg);
+  outline: none;
+}
+/* Cool-toned definition-only nodes (no run yet). Muted edge so the
+   reader can tell at a glance that this is the workflow's *shape*,
+   not state. */
+.dag-node-definition {
+  opacity: 0.7;
+  cursor: default;
+}
+.dag-node-label {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  text-transform: lowercase;
+  color: var(--fg);
+}
+.dag-node-state {
+  font-size: 0.8rem;
+}
+.dag-node-meta {
+  font-size: 0.72rem;
+}
+/* PR node colors by linkage state — opened pulls the success accent
+   to mark the trailing-node milestone; pending stays neutral. */
+.dag-node-pr.opened {
+  border-color: color-mix(in srgb, var(--state-success-fg) 40%, var(--border));
+}
+.dag-edge {
+  color: var(--fg-dimmer);
+  font-family: var(--font-mono);
+  font-size: 1.1rem;
+  user-select: none;
+}
 .run-actions {
   display: flex;
   align-items: center;
