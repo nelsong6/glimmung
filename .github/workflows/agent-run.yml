@@ -490,6 +490,63 @@ jobs:
           set -euo pipefail
           python -m glimmung_agent.cli wait-public-preview --url "${VALIDATION_URL}"
 
+      - name: Capture screenshot pass
+        # #87: Playwright over the rebuilt validation env, one PNG per
+        # page in frontend/screenshot-pages.json. Outputs land where
+        # the existing upload-to-blob step expects them
+        # (/tmp/evidence/screenshots) so the PR composer (#88) can
+        # surface them inline. Per-page failure aborts the run with a
+        # typed reason `screenshot_capture_failed: <path>` so the
+        # dashboard shows what broke without spelunking through CI logs.
+        if: success()
+        env:
+          BASE_URL: ${{ env.VALIDATION_URL }}
+          PAGES_JSON: frontend/screenshot-pages.json
+          OUT_DIR: /tmp/evidence/screenshots
+          GLIMMUNG_RUN_ID: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "${PAGES_JSON}" ]; then
+            echo "::warning::no ${PAGES_JSON}; skipping screenshot pass"
+            exit 0
+          fi
+          mkdir -p "${OUT_DIR}"
+
+          # Playwright's published image carries a matching browser, so
+          # we don't pay an `npx install --with-deps` round-trip in the
+          # critical path. The image is large but `actions/cache` makes
+          # subsequent runs cheap.
+          npm init -y >/dev/null
+          npm install --no-save --silent playwright@1
+          npx --yes playwright install chromium
+
+          set +e
+          node scripts/screenshot-pages.mjs > /tmp/screenshot-stdout.log 2> /tmp/screenshot-stderr.log
+          rc=$?
+          set -e
+          cat /tmp/screenshot-stdout.log || true
+          cat /tmp/screenshot-stderr.log >&2 || true
+
+          if [ "${rc}" -ne 0 ]; then
+            # Pluck the first typed reason from stderr for the abort
+            # post; if the script exited for some other reason, fall
+            # back to a generic message that still names the contract.
+            reason=$(head -1 /tmp/screenshot-stderr.log | sed 's/;.*$//') || true
+            if [ -z "${reason}" ]; then
+              reason="screenshot_capture_failed: <unknown> (script exit ${rc})"
+            fi
+            echo "::error::${reason}"
+            if [ -n "${GLIMMUNG_RUN_ID}" ]; then
+              payload=$(jq -nc --arg r "${reason}" '{reason: $r}')
+              curl -sS -X POST \
+                -H "Content-Type: application/json" \
+                -d "${payload}" \
+                "${GLIMMUNG_BASE}/v1/runs/${GLIMMUNG_PROJECT}/${GLIMMUNG_RUN_ID}/aborted" \
+                || echo "::warning::failed to post typed abort to glimmung; lease-release will still fire"
+            fi
+            exit 1
+          fi
+
       - name: Refresh Azure OIDC login
         # azure/login@v2's OIDC JWT is valid for 5 minutes; agent +
         # rebuild + capture takes 10-15 min, so the cached JWT is stale

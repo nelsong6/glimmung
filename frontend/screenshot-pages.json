@@ -1,0 +1,6 @@
+[
+  { "path": "/", "label": "home" },
+  { "path": "/issues", "label": "issues-list" },
+  { "path": "/issues/nelsong6/glimmung/1", "label": "issue-detail" },
+  { "path": "/_styleguide", "label": "styleguide" }
+]
