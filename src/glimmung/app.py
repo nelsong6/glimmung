@@ -2749,3 +2749,7 @@ if _static.exists():
     @app.get("/")
     async def serve_index() -> FileResponse:
         return FileResponse(_static / "index.html")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str) -> FileResponse:
+        return FileResponse(_static / "index.html")
