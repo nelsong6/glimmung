@@ -596,6 +596,13 @@ function RunPanel({
   );
 }
 
+// Threshold past which a `dispatching` attempt is visually flagged as
+// stuck. Post-#79, the workflow's `started` callback fires from the
+// route job's first step, which lands within ~10–15s of dispatch under
+// normal conditions. 30s gives the runner some slack but flags real
+// dispatch failures (the orphan-webhook bug surfaced as exactly this).
+const STUCK_DISPATCHING_MS = 30_000;
+
 function AttemptCard({ attempt, repo }: { attempt: GraphNode; repo: string | null }) {
   const meta = attempt.metadata;
   const phase = stringOrNull(meta.phase) ?? "attempt";
@@ -617,16 +624,31 @@ function AttemptCard({ attempt, repo }: { attempt: GraphNode; repo: string | nul
     ? verification.reasons.filter((r): r is string => typeof r === "string")
     : [];
 
+  // Pre-webhook progression (#83):
+  //   no workflow_run_id, no completed_at  → dispatching
+  //   workflow_run_id, no completed_at     → running
+  //   completed_at                         → terminal (existing logic)
+  // Pre-#79 the wire had a separate `queued` state we got from
+  // workflow_run.requested. Post-#79 the started callback fires from
+  // the workflow's first step, so the "queued at GHA but not yet
+  // running" window is no longer separately observable — collapsed
+  // into `dispatching`. Stuck-in-dispatching past STUCK_DISPATCHING_MS
+  // is visually flagged so the orphan-dispatch shape is obvious.
   const running = !completedAt;
+  const dispatching = running && !workflowRunId;
+  const elapsedMs = dispatchedAt && running ? now() - parseTs(dispatchedAt) : null;
+  const stuckDispatching =
+    dispatching && elapsedMs !== null && elapsedMs > STUCK_DISPATCHING_MS;
   const elapsedLabel = dispatchedAt
     ? running
-      ? `${formatDuration(now() - parseTs(dispatchedAt))} elapsed`
+      ? `${formatDuration(elapsedMs ?? 0)} elapsed`
       : completedAt
         ? `ran ${formatDuration(parseTs(completedAt) - parseTs(dispatchedAt))}`
         : null
     : null;
 
   const statusPill = (() => {
+    if (dispatching) return { cls: "info", text: "dispatching" };
     if (running) return { cls: "busy", text: "running" };
     if (verificationStatus === "pass") return { cls: "free", text: "pass" };
     if (verificationStatus === "fail") return { cls: "drain", text: "fail" };
@@ -637,13 +659,31 @@ function AttemptCard({ attempt, repo }: { attempt: GraphNode; repo: string | nul
     return { cls: "", text: "completed" };
   })();
 
+  // Fallback link for the dispatching window: GHA's actions-by-workflow
+  // page filtered to our branch (glimmung/<run_id>) lets the user find
+  // their run when the started callback hasn't landed yet. Derives
+  // run_id from the attempt id (`attempt:<run_id>:<idx>`).
+  const runIdFromAttempt = attempt.id.startsWith("attempt:")
+    ? attempt.id.split(":")[1] ?? ""
+    : "";
+  const branchName = runIdFromAttempt ? `glimmung/${runIdFromAttempt}` : null;
+  const dispatchingFallback =
+    dispatching && repo && workflowFilename && branchName
+      ? `https://github.com/${repo}/actions/workflows/${workflowFilename}?query=${encodeURIComponent(`branch:${branchName}`)}`
+      : null;
+
   return (
-    <div className={`attempt-card${running ? " running" : ""}`}>
+    <div className={`attempt-card${running ? " running" : ""}${stuckDispatching ? " stuck" : ""}`}>
       <div className="attempt-card-head">
         <strong>{attempt.label}</strong>
         <span className={`pill ${statusPill.cls}`}>{statusPill.text}</span>
         <span className="dim mono">{phase}</span>
         {elapsedLabel && <span className="dim mono">{elapsedLabel}</span>}
+        {stuckDispatching && (
+          <span className="pill drain" title="No workflow_run_id received from GHA. Possible orphan dispatch.">
+            stuck
+          </span>
+        )}
       </div>
       <div className="attempt-card-body">
         {dispatchedAt && (
@@ -679,6 +719,26 @@ function AttemptCard({ attempt, repo }: { attempt: GraphNode; repo: string | nul
             ) : (
               <span className="mono">{workflowRunId}</span>
             )}
+          </div>
+        )}
+        {!workflowRunId && branchName && (
+          <div>
+            <span className="key">branch</span>{" "}
+            <span className="mono">{branchName}</span>
+          </div>
+        )}
+        {dispatchingFallback && (
+          <div>
+            <span className="key">find run</span>{" "}
+            <a
+              className="mono"
+              href={dispatchingFallback}
+              target="_blank"
+              rel="noreferrer"
+              title="GHA workflow runs filtered to this attempt's branch — useful when the started callback hasn't landed yet"
+            >
+              gh actions ↗
+            </a>
           </div>
         )}
         {displayedCost !== null && (

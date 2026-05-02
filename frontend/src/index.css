@@ -802,6 +802,13 @@ h2 .inline-action,
 .attempt-card.running {
   border-color: #5a3a14;
 }
+/* Stuck-in-dispatching (#83): no workflow_run_id received past the
+   STUCK_DISPATCHING_MS threshold. Borrows the danger rail so it pulls
+   the eye, but stays a tinted border (not a fill) so the card body
+   still reads cleanly while the user investigates. */
+.attempt-card.stuck {
+  border-color: var(--state-danger-fg);
+}
 .attempt-card-head {
   display: flex;
   align-items: center;
