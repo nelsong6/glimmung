@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { NavLink, Outlet, Route, Routes, useOutletContext } from "react-router-dom";
+import { Link, NavLink, Outlet, Route, Routes, useOutletContext } from "react-router-dom";
 import { AdminPanel } from "./AdminPanel";
 import { IssueDetailView } from "./IssueDetailView";
 import { IssuesView } from "./IssuesView";
@@ -326,7 +326,9 @@ function Layout() {
         <header>
           <div className="header-left">
             <div className="header-title">
-              <h1>glimmung</h1>
+              <h1>
+                <Link to="/" className="title-link">glimmung</Link>
+              </h1>
               <span className={`connection ${conn}`}>{conn}</span>
             </div>
             <div className="epigraph">

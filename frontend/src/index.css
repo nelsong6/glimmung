@@ -388,6 +388,13 @@ header {
   align-items: baseline;
   gap: 12px;
 }
+.title-link {
+  color: inherit;
+  text-decoration: none;
+}
+.title-link:hover {
+  text-decoration: underline;
+}
 .header-right {
   flex-shrink: 0;
   padding-top: 4px;
