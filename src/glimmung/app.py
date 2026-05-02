@@ -327,6 +327,28 @@ async def _promote_loop(app: FastAPI, settings: Settings) -> None:
         await asyncio.sleep(settings.sweep_interval_seconds)
 
 
+# Lease metadata is dual-purpose: glimmung-internal bookkeeping
+# (`issue_id`, `issue_lock_holder_id`, `issue_repo`, `phase`) plus
+# workflow-facing inputs the consumer workflow declares in
+# `on.workflow_dispatch.inputs`. GitHub's workflow_dispatch endpoint
+# rejects undeclared inputs with 422, so splatting metadata wholesale
+# into `inputs` ships internal-only fields straight to GH and silently
+# fails every dispatch — leaving Runs IN_PROGRESS with no
+# `workflow_run_id`, which is the orphan shape `_abort_run` exists to
+# clean up. Allowlist what we forward; everything else stays internal.
+_DISPATCH_INPUT_KEYS = frozenset({
+    "issue_number",
+    "issue_title",
+    "gh_event",
+    "gh_action",
+    "run_id",
+    "attempt_index",
+    "prior_verification_artifact_url",
+    "feedback",
+    "pr_number",
+})
+
+
 async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host: Host) -> None:
     """Fire workflow_dispatch for the lease's (project, workflow). Both must
     exist in Cosmos and the project must have a github_repo set."""
@@ -348,10 +370,14 @@ async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host
     if not workflow_doc or not workflow_doc.get("workflowFilename"):
         return
 
+    metadata = lease_doc.get("metadata") or {}
     inputs = {
         "host": host.name,
         "lease_id": lease_doc["id"],
-        **{k: str(v) for k, v in lease_doc.get("metadata", {}).items()},
+        **{
+            k: str(v) for k, v in metadata.items()
+            if k in _DISPATCH_INPUT_KEYS
+        },
     }
     try:
         await dispatch_workflow(
