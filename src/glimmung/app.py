@@ -1575,13 +1575,13 @@ async def register_workflow(w: WorkflowRegister) -> Workflow:
         await cosmos.workflows.replace_item(item=w.name, body=doc)
     except Exception:
         await cosmos.workflows.create_item(doc)
-    return Workflow.model_validate(lease_ops._camel_to_snake(doc))
+    return _doc_to_workflow(doc)
 
 
 @app.get("/v1/workflows", response_model=list[Workflow], dependencies=[Depends(require_admin_user)])
 async def list_workflows() -> list[Workflow]:
     docs = await query_all(app.state.cosmos.workflows, "SELECT * FROM c")
-    return [Workflow.model_validate(lease_ops._camel_to_snake(d)) for d in docs]
+    return [_doc_to_workflow(d) for d in docs]
 
 
 @app.post("/v1/hosts", response_model=Host, dependencies=[Depends(require_admin_user)])
