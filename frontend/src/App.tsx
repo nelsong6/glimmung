@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
+import { NavLink, Outlet, Route, Routes, useOutletContext } from "react-router-dom";
 import { AdminPanel } from "./AdminPanel";
+import { IssueDetailView } from "./IssueDetailView";
 import { IssuesView } from "./IssuesView";
+import { PrDetailView } from "./PrDetailView";
 import { PrsView } from "./PrsView";
 import { authedFetch, currentAccount, initAuth, signIn, signOut } from "./auth";
 import type { AccountInfo } from "@azure/msal-browser";
@@ -64,11 +67,39 @@ type Selection =
   | { kind: "project"; project: string }
   | { kind: "workflow"; project: string; workflow: string };
 
-type ViewMode = "capacity" | "issues" | "prs";
+type LayoutContext = {
+  snap: Snapshot | null;
+  signedIn: boolean;
+  selected: Selection;
+  filteredPending: Lease[];
+  filteredActive: Lease[];
+  selectedWorkflow: Workflow | null;
+  selectedProject: Project | null;
+  eligibilityReqs: Record<string, unknown> | null;
+  matchesRequirements: (host: Host, reqs: Record<string, unknown>) => boolean;
+};
 
 const ALL: Selection = { kind: "all" };
 
 export function App() {
+  // Routes-only — Layout owns the SSE/auth state and provides it via Outlet
+  // context so deep-link reloads (e.g. /issues/<owner>/<repo>/<n>) land
+  // straight on the right view without a viewMode flip.
+  return (
+    <Routes>
+      <Route path="/" element={<Layout />}>
+        <Route index element={<CapacityRoute />} />
+        <Route path="issues" element={<IssuesRoute />} />
+        <Route path="issues/:owner/:repo/:n" element={<IssueDetailView />} />
+        <Route path="issues/:project/:issueId" element={<IssueDetailView />} />
+        <Route path="prs" element={<PrsRoute />} />
+        <Route path="prs/:owner/:repo/:n" element={<PrDetailView />} />
+      </Route>
+    </Routes>
+  );
+}
+
+function Layout() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [conn, setConn] = useState<Connection>("dead");
   const [lastUpdate, setLastUpdate] = useState<number>(0);
@@ -76,7 +107,6 @@ export function App() {
   const [account, setAccount] = useState<AccountInfo | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [showAdmin, setShowAdmin] = useState(false);
-  const [viewMode, setViewMode] = useState<ViewMode>("capacity");
 
   useEffect(() => {
     initAuth()
@@ -159,6 +189,21 @@ export function App() {
 
   const eligibilityReqs = selectedWorkflow?.default_requirements ?? null;
 
+  const ctx: LayoutContext = {
+    snap,
+    signedIn: !!account,
+    selected,
+    filteredPending,
+    filteredActive,
+    selectedWorkflow,
+    selectedProject,
+    eligibilityReqs,
+    matchesRequirements,
+  };
+
+  const navLinkClass = ({ isActive }: { isActive: boolean }) =>
+    `link ${isActive ? "selected" : ""}`;
+
   return (
     <div className="layout">
       <aside className="sidebar">
@@ -239,30 +284,15 @@ export function App() {
             “The Glimmung scanned the assembled list of beings he had summoned. From a thousand worlds they had come, each with a craft to contribute.”
           </div>
           <div className="auth">
-            <button
-              type="button"
-              className={`link ${viewMode === "capacity" ? "selected" : ""}`}
-              onClick={() => setViewMode("capacity")}
-              style={{ marginRight: "0.5rem" }}
-            >
+            <NavLink to="/" end className={navLinkClass} style={{ marginRight: "0.5rem" }}>
               capacity
-            </button>
-            <button
-              type="button"
-              className={`link ${viewMode === "issues" ? "selected" : ""}`}
-              onClick={() => setViewMode("issues")}
-              style={{ marginRight: "0.5rem" }}
-            >
+            </NavLink>
+            <NavLink to="/issues" className={navLinkClass} style={{ marginRight: "0.5rem" }}>
               issues
-            </button>
-            <button
-              type="button"
-              className={`link ${viewMode === "prs" ? "selected" : ""}`}
-              onClick={() => setViewMode("prs")}
-              style={{ marginRight: "1rem" }}
-            >
+            </NavLink>
+            <NavLink to="/prs" className={navLinkClass} style={{ marginRight: "1rem" }}>
               prs
-            </button>
+            </NavLink>
             {!authReady ? null : account ? (
               <>
                 <span className="user">{account.username}</span>
@@ -303,36 +333,40 @@ export function App() {
           <AdminPanel projects={snap?.projects ?? []} onSuccess={() => setShowAdmin(false)} />
         )}
 
-        {viewMode === "issues" ? (
-          <IssuesView
-            signedIn={!!account}
-            projectFilter={selected.kind === "all" ? null : selected.project}
-          />
-        ) : viewMode === "prs" ? (
-          <PrsView
-            signedIn={!!account}
-            projectFilter={selected.kind === "all" ? null : selected.project}
-          />
-        ) : (
-          <CapacityView
-            snap={snap}
-            filteredPending={filteredPending}
-            filteredActive={filteredActive}
-            selected={selected}
-            selectedWorkflow={selectedWorkflow}
-            selectedProject={selectedProject}
-            eligibilityReqs={eligibilityReqs}
-            matchesRequirements={matchesRequirements}
-            signedIn={!!account}
-          />
-        )}
+        <Outlet context={ctx} />
       </main>
     </div>
   );
 }
 
+function CapacityRoute() {
+  const ctx = useOutletContext<LayoutContext>();
+  return <CapacityView {...ctx} />;
+}
+
+function IssuesRoute() {
+  const { signedIn, selected } = useOutletContext<LayoutContext>();
+  return (
+    <IssuesView
+      signedIn={signedIn}
+      projectFilter={selected.kind === "all" ? null : selected.project}
+    />
+  );
+}
+
+function PrsRoute() {
+  const { signedIn, selected } = useOutletContext<LayoutContext>();
+  return (
+    <PrsView
+      signedIn={signedIn}
+      projectFilter={selected.kind === "all" ? null : selected.project}
+    />
+  );
+}
+
 type CapacityViewProps = {
   snap: Snapshot | null;
+  signedIn: boolean;
   filteredPending: Lease[];
   filteredActive: Lease[];
   selected: Selection;
@@ -340,11 +374,11 @@ type CapacityViewProps = {
   selectedProject: Project | null;
   eligibilityReqs: Record<string, unknown> | null;
   matchesRequirements: (host: Host, reqs: Record<string, unknown>) => boolean;
-  signedIn: boolean;
 };
 
 function CapacityView({
   snap,
+  signedIn,
   filteredPending,
   filteredActive,
   selected,
@@ -352,7 +386,6 @@ function CapacityView({
   selectedProject,
   eligibilityReqs,
   matchesRequirements,
-  signedIn,
 }: CapacityViewProps) {
   // Two-click confirm pattern for the cancel button (#30): first click
   // arms the row (replaces the button with [Cancel?] [Keep]); second
