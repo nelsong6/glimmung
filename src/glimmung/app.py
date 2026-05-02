@@ -1506,12 +1506,17 @@ async def _compute_snapshot(cosmos: Cosmos) -> StateSnapshot:
         "SELECT * FROM c WHERE c.state = @s",
         parameters=[{"name": "@s", "value": LeaseState.ACTIVE.value}],
     )
+    # Workflows have nested phases with camelCase keys; the shallow
+    # `_camel_to_snake` doesn't recurse into them, so `model_validate`
+    # 500s on `phases.0.workflowFilename` not matching `workflow_filename`.
+    # `_doc_to_workflow` walks the nested shape correctly. Same fix as
+    # the list_workflows / register_workflow hot-fix in 4babd13.
     return StateSnapshot(
         hosts=[Host.model_validate(lease_ops._camel_to_snake(h)) for h in host_docs],
         pending_leases=[Lease.model_validate(lease_ops._camel_to_snake(p)) for p in pending_docs],
         active_leases=[Lease.model_validate(lease_ops._camel_to_snake(a)) for a in active_docs],
         projects=[Project.model_validate(lease_ops._camel_to_snake(d)) for d in project_docs],
-        workflows=[Workflow.model_validate(lease_ops._camel_to_snake(d)) for d in workflow_docs],
+        workflows=[w for d in workflow_docs if (w := _doc_to_workflow(d)) is not None],
     )
 
 
