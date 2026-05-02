@@ -463,6 +463,67 @@ async def test_dispatch_resumed_run_returns_workflow_missing(cosmos, app_state):
 
 
 @pytest.mark.asyncio
+async def test_dispatch_resumed_run_releases_lock_when_dispatch_aborts(cosmos, app_state):
+    """If the entrypoint dispatch aborts mid-flight (e.g. input
+    substitution fails because the prior run's captured outputs don't
+    line up with the workflow's declared refs), the issue lock must
+    be released — the live terminal handler that normally releases
+    locks doesn't fire because no workflow_run exists."""
+    from glimmung import locks as lock_ops
+    await _seed_workflow_two_phase(cosmos)
+    await _seed_host(cosmos)
+
+    # Prior run with a captured env-prep that's *missing* the
+    # validation_url output. Substitution will KeyError on
+    # `${{ phases.env-prep.outputs.validation_url }}`.
+    now = datetime.now(UTC)
+    prior = Run(
+        id="01KQTEST_PRIOR_BADOUTPUT",
+        project="ambience",
+        workflow="agent-run",
+        issue_id="01HZRSMTEST_BAD",
+        issue_repo="nelsong6/ambience",
+        issue_number=300,
+        state=RunState.ABORTED,
+        budget=BudgetConfig(total=25.0),
+        attempts=[
+            PhaseAttempt(
+                attempt_index=0, phase="env-prep",
+                workflow_filename="env-prep.yml",
+                dispatched_at=now, completed_at=now, conclusion="success",
+                # Wrong shape on purpose — declared outputs include
+                # validation_url + namespace, captured set is missing both.
+                phase_outputs={"unrelated_key": "x"},
+            ),
+        ],
+        created_at=now, updated_at=now,
+    )
+    await cosmos.runs.create_item(prior.model_dump(mode="json"))
+
+    with patch("glimmung.app.app", app_state):
+        result = await dispatch_resumed_run(
+            app_state,
+            project=prior.project,
+            prior_run_id=prior.id,
+            entrypoint_phase="agent-execute",
+            trigger_source={"kind": "test"},
+        )
+
+    assert result.state == "dispatch_failed"
+    assert result.new_run_id is not None  # the new run was created before the abort
+
+    # Lock must have been released; subsequent claim with a different
+    # holder must succeed.
+    await lock_ops.claim_lock(
+        cosmos, scope="issue",
+        key=f"{prior.issue_repo}#{prior.issue_number}",
+        holder_id="01POST_DISPATCH_FAIL_OK",
+        ttl_seconds=60,
+        metadata={},
+    )
+
+
+@pytest.mark.asyncio
 async def test_resume_endpoint_404_on_prior_missing(cosmos, app_state):
     await _seed_workflow_two_phase(cosmos)
     req = RunResumeRequest(entrypoint_phase="agent-execute")

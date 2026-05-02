@@ -502,9 +502,20 @@ async def dispatch_resumed_run(
     post_run, _ = post
 
     # If _dispatch_next_phase aborted (substitution failed, etc.), the
-    # state will be ABORTED. Surface that as `dispatch_failed` so the
-    # caller knows lock + lease are in their backed-out state.
+    # state will be ABORTED. Release the issue lock — the live
+    # workflow_run.completed terminal handler that normally releases
+    # the lock won't fire because no workflow_run exists. Mirrors the
+    # rollback shape `dispatch_run` uses on its dispatch_failed path.
     if post_run.state == RunState.ABORTED:
+        try:
+            await lock_ops.release_lock(
+                cosmos, scope="issue", key=lock_key, holder_id=holder_id,
+            )
+        except Exception:
+            log.exception(
+                "dispatch_resumed_run: lock release failed during dispatch-abort backout for %s",
+                lock_key,
+            )
         return ResumeResult(
             state="dispatch_failed",
             new_run_id=new_run.id,
