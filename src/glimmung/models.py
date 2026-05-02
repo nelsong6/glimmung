@@ -381,6 +381,14 @@ class PhaseAttempt(BaseModel):
     # multi-phase runtime (PR 3 of #101) substitutes these into the next
     # phase's `workflow_dispatch.inputs` per its declared `inputs` refs.
     phase_outputs: dict[str, str] | None = None
+    # Resume primitive (#111) — set when this attempt is a skip-mark
+    # synthesized during run resumption, not a real dispatch. The phase
+    # didn't actually execute; `phase_outputs` were carried forward from
+    # the named prior Run's same-named phase attempt. `workflow_run_id`
+    # stays None and `conclusion` is "success" so downstream multi-phase
+    # substitution (`_collect_phase_outputs`) sees a completed-looking
+    # attempt and feeds the prior outputs into the next phase's dispatch.
+    skipped_from_run_id: str | None = None
 
 
 class RunState(str, Enum):
@@ -464,6 +472,18 @@ class Run(BaseModel):
     # the PR body — failures are surfaced in the markdown itself by
     # the workflow, so we don't need a separate failure list here.
     screenshots_markdown: str | None = None
+    # Resume primitive (#111) — set when this Run was created via
+    # `dispatch_resumed_run`. Points at the prior Run whose captured
+    # phase outputs got carried forward into this Run's skipped
+    # attempts. Visualization uses this to render the Run-lineage tree
+    # (parent-child across resume-spawned Runs); the decision engine
+    # ignores it.
+    cloned_from_run_id: str | None = None
+    # Resume primitive (#111) — the phase this Run started executing
+    # at, set when the Run is a resumed clone. None for fresh dispatches
+    # (which always start at phases[0]). The visualization layer uses
+    # this to highlight which entrypoint arrow lit up on this Run.
+    entrypoint_phase: str | None = None
     created_at: datetime
     updated_at: datetime
 

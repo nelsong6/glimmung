@@ -297,6 +297,260 @@ async def dispatch_run(
     )
 
 
+class ResumeResult(BaseModel):
+    """The outcome of `dispatch_resumed_run`. Same shape philosophy as
+    `DispatchResult`: `state` is the operational verdict, the rest is
+    surface for the caller to track / surface.
+
+    `state`:
+      - `dispatched`: skipped attempts persisted, lease claimed, entrypoint
+        workflow_dispatch fired.
+      - `pending`: skipped attempts persisted, lease in PENDING (no host);
+        the promote loop will fire workflow_dispatch when capacity frees.
+      - `already_running`: prior run's issue is already locked by another
+        run; resume rejected. Caller must abort the conflicting run first.
+      - `dispatch_failed`: lease + lock were claimed but workflow_dispatch
+        raised; lease + lock + new Run rolled back.
+      - `prior_in_progress`: refusing to resume from an IN_PROGRESS prior
+        run (would race the in-flight dispatch's lock + lease).
+      - `prior_missing` / `workflow_missing` / `phase_invalid` /
+        `outputs_missing`: pre-flight validation failures, no state
+        mutation occurred.
+    """
+    state: str
+    new_run_id: str | None = None
+    prior_run_id: str | None = None
+    lease_id: str | None = None
+    host: str | None = None
+    issue_lock_holder_id: str | None = None
+    detail: str | None = None
+
+
+async def dispatch_resumed_run(
+    app: FastAPI,
+    *,
+    project: str,
+    prior_run_id: str,
+    entrypoint_phase: str,
+    trigger_source: dict[str, Any],
+) -> ResumeResult:
+    """Spawn a new Run from a prior Run with phases preceding
+    `entrypoint_phase` skipped (carrying their `phase_outputs` forward),
+    and dispatch the entrypoint phase fresh. Sibling of `dispatch_run`,
+    same lock-then-Run-then-lease shape.
+
+    Refuses if the prior Run is still IN_PROGRESS — the operator should
+    abort it first; resuming from a live Run would race its in-flight
+    lock + lease.
+
+    Refuses if the issue is currently locked by another Run — caller
+    sees `state="already_running"` with the lock holder in `detail`,
+    same response shape `dispatch_run` returns on collision.
+
+    Pre-flight validation (workflow exists, entrypoint phase exists on
+    workflow, all skipped phases have captured outputs on the prior
+    Run) runs before any state mutation; failures return one of the
+    `prior_missing` / `workflow_missing` / `phase_invalid` /
+    `outputs_missing` states with no rollback needed.
+    """
+    cosmos: Cosmos = app.state.cosmos
+    settings = app.state.settings
+
+    # 1. Read prior run.
+    found = await run_ops.read_run(cosmos, project=project, run_id=prior_run_id)
+    if found is None:
+        return ResumeResult(
+            state="prior_missing",
+            prior_run_id=prior_run_id,
+            detail=f"no run {project}/{prior_run_id}",
+        )
+    prior_run, _ = found
+
+    from glimmung.models import RunState
+    if prior_run.state == RunState.IN_PROGRESS:
+        return ResumeResult(
+            state="prior_in_progress",
+            prior_run_id=prior_run_id,
+            detail=(
+                "refusing to resume from an in-progress run; abort the prior "
+                "run first (POST /v1/runs/{p}/{run_id}/abort) and retry"
+            ),
+        )
+
+    # 2. Read workflow registration.
+    workflow_doc = await _read_workflow(cosmos, project, prior_run.workflow)
+    if workflow_doc is None:
+        return ResumeResult(
+            state="workflow_missing",
+            prior_run_id=prior_run_id,
+            detail=(
+                f"workflow {project}/{prior_run.workflow!r} no longer registered; "
+                "re-register before resuming"
+            ),
+        )
+    # Inline import keeps dispatch.py free of the app.py runtime.
+    from glimmung.app import _doc_to_workflow, _dispatch_next_phase
+    workflow_model = _doc_to_workflow(workflow_doc)
+    if workflow_model is None:
+        return ResumeResult(
+            state="workflow_missing",
+            prior_run_id=prior_run_id,
+            detail="workflow doc didn't validate to Workflow model",
+        )
+
+    # 3. Validate entrypoint phase exists on workflow.
+    next_phase = next(
+        (p for p in workflow_model.phases if p.name == entrypoint_phase), None,
+    )
+    if next_phase is None:
+        return ResumeResult(
+            state="phase_invalid",
+            prior_run_id=prior_run_id,
+            detail=(
+                f"entrypoint_phase {entrypoint_phase!r} not on workflow "
+                f"{project}/{prior_run.workflow!r} "
+                f"(phases: {[p.name for p in workflow_model.phases]})"
+            ),
+        )
+
+    # 4. Claim a fresh issue lock. Resume always claims with a new
+    # holder_id — the prior run's lock was either released on its
+    # terminal transition or never claimed. If a different run holds
+    # the lock right now (a fresh dispatch came in), refuse.
+    holder_id = str(ULID())
+    lock_key = (
+        f"{prior_run.issue_repo}#{prior_run.issue_number}"
+        if (prior_run.issue_repo and prior_run.issue_number)
+        else f"glimmung/{prior_run.issue_id}"
+    )
+    try:
+        await lock_ops.claim_lock(
+            cosmos,
+            scope="issue",
+            key=lock_key,
+            holder_id=holder_id,
+            ttl_seconds=settings.lease_default_ttl_seconds,
+            metadata={
+                "trigger_source": trigger_source,
+                "workflow": prior_run.workflow,
+                "resumed_from": prior_run_id,
+            },
+        )
+    except LockBusy as busy:
+        return ResumeResult(
+            state="already_running",
+            prior_run_id=prior_run_id,
+            detail=(
+                f"issue lock held by {busy.lock.held_by} until "
+                f"{busy.lock.expires_at.isoformat()}; abort the conflicting "
+                "run before resuming"
+            ),
+        )
+
+    # 5. Create the resumed Run with skipped attempts. Pre-flight
+    # validation in `create_resumed_run` catches missing-phase-outputs;
+    # roll back the lock if it raises.
+    try:
+        new_run, etag = await run_ops.create_resumed_run(
+            cosmos,
+            prior_run=prior_run,
+            workflow=workflow_model,
+            entrypoint_phase=entrypoint_phase,
+            issue_lock_holder_id=holder_id,
+            trigger_source=trigger_source,
+        )
+    except ValueError as e:
+        try:
+            await lock_ops.release_lock(
+                cosmos, scope="issue", key=lock_key, holder_id=holder_id,
+            )
+        except Exception:
+            log.exception(
+                "dispatch_resumed_run: lock release failed during validation backout"
+            )
+        return ResumeResult(
+            state="outputs_missing",
+            prior_run_id=prior_run_id,
+            detail=str(e),
+        )
+
+    # 6. Dispatch the entrypoint phase. _dispatch_next_phase appends a
+    # fresh PhaseAttempt for `next_phase`, acquires a lease, and fires
+    # workflow_dispatch with prior phases' outputs substituted in.
+    # Errors inside _dispatch_next_phase log + mark the run aborted but
+    # don't raise — pattern matches the rest of the dispatch code.
+    await _dispatch_next_phase(
+        run=new_run,
+        etag=etag,
+        repo=prior_run.issue_repo,
+        workflow_model=workflow_model,
+        next_phase=next_phase,
+    )
+
+    # Re-read for the freshest state (post-dispatch the lease + new
+    # attempt are persisted; we want their ids in the response).
+    post = await run_ops.read_run(cosmos, project=project, run_id=new_run.id)
+    if post is None:
+        # Defensive — _dispatch_next_phase shouldn't be deleting the run.
+        return ResumeResult(
+            state="dispatch_failed",
+            new_run_id=new_run.id,
+            prior_run_id=prior_run_id,
+            issue_lock_holder_id=holder_id,
+            detail="resumed run vanished mid-dispatch",
+        )
+    post_run, _ = post
+
+    # If _dispatch_next_phase aborted (substitution failed, etc.), the
+    # state will be ABORTED. Surface that as `dispatch_failed` so the
+    # caller knows lock + lease are in their backed-out state.
+    if post_run.state == RunState.ABORTED:
+        return ResumeResult(
+            state="dispatch_failed",
+            new_run_id=new_run.id,
+            prior_run_id=prior_run_id,
+            issue_lock_holder_id=holder_id,
+            detail=post_run.abort_reason or "dispatch aborted; see glimmung logs",
+        )
+
+    # Find the lease the dispatch just claimed (latest attempt's
+    # workflow_run_id won't be set yet — the started callback fills it).
+    # The lease isn't recorded on the run; pull from leases container by
+    # metadata.run_id. Best-effort — surface the run_id either way.
+    lease_id: str | None = None
+    host_name: str | None = None
+    try:
+        lease_docs = await query_all(
+            cosmos.leases,
+            "SELECT * FROM c WHERE c.project = @p AND c.metadata.run_id = @r",
+            parameters=[
+                {"name": "@p", "value": project},
+                {"name": "@r", "value": new_run.id},
+            ],
+        )
+        if lease_docs:
+            # Most recently requested lease wins (the entrypoint dispatch
+            # is the one we just fired).
+            lease_docs.sort(key=lambda d: d.get("requestedAt", ""), reverse=True)
+            lease_id = lease_docs[0]["id"]
+            host_name = lease_docs[0].get("host")
+    except Exception:
+        log.exception(
+            "dispatch_resumed_run: lease lookup failed for run %s; result will "
+            "omit lease info (dispatch itself succeeded)",
+            new_run.id,
+        )
+
+    return ResumeResult(
+        state="dispatched" if host_name is not None else "pending",
+        new_run_id=new_run.id,
+        prior_run_id=prior_run_id,
+        lease_id=lease_id,
+        host=host_name,
+        issue_lock_holder_id=holder_id,
+    )
+
+
 async def _find_issue_anywhere(cosmos: Cosmos, *, issue_id: str):
     """Cross-partition lookup of an Issue by id. Used when the dispatch
     caller has the id but not the project. Returns the `Issue` or None."""

@@ -19,7 +19,7 @@ from glimmung import locks as lock_ops
 from glimmung import prs as pr_ops
 from glimmung import runs as run_ops
 from glimmung import signals as signal_ops
-from glimmung.dispatch import DispatchResult, dispatch_run
+from glimmung.dispatch import DispatchResult, ResumeResult, dispatch_resumed_run, dispatch_run
 from glimmung.auth import require_admin_user
 from glimmung.db import Cosmos, query_all
 from glimmung.decision import abort_explanation, decide
@@ -2017,6 +2017,83 @@ async def replay_run_decision(
         synthetic=req.synthetic_completion,
         workflow_source=workflow_source,
     )
+
+
+# ─── Resume primitive (#111) ───────────────────────────────────────────────
+#
+# Spawn a new Run from a prior (terminal) Run with phases preceding a
+# named entrypoint skipped — their captured outputs feed forward through
+# the multi-phase substitution path (`_collect_phase_outputs`) into the
+# entrypoint's dispatch inputs. The motivating case from the prior
+# session: agent-execute aborted because of a verify=true→false mismatch
+# in the registration; resume from agent-execute reuses env-prep's
+# captured validation_url + namespace and re-dispatches agent-execute
+# without re-running env-prep.
+
+
+class RunResumeRequest(BaseModel):
+    """`POST /v1/runs/{project}/{run_id}/resume` body.
+
+    `entrypoint_phase` is the phase the resumed Run will start
+    executing at. All phases declared earlier in the workflow's order
+    are auto-skipped; each gets a synthesized PhaseAttempt with
+    `phase_outputs` carried from the prior Run's same-named phase.
+
+    `trigger_source` is recorded on the new Run for observability;
+    callers should set `kind` (e.g. `"resume_via_admin_api"`,
+    `"resume_via_mcp"`) and any audit-relevant context.
+    """
+    entrypoint_phase: str
+    trigger_source: dict[str, Any] = Field(default_factory=dict)
+
+
+@app.post(
+    "/v1/runs/{project}/{run_id}/resume",
+    response_model=ResumeResult,
+    dependencies=[Depends(require_admin_user)],
+)
+async def resume_run(
+    req: RunResumeRequest,
+    project: str = Path(...),
+    run_id: str = Path(...),
+) -> ResumeResult:
+    """Resume from a prior Run by spawning a new Run that starts at
+    `entrypoint_phase` with all earlier phases pre-marked skipped.
+
+    Body of work delegated to `dispatch_resumed_run`. This handler's
+    job is HTTP shape: 422 on validation failures, 409 on lock
+    collisions (issue already locked by a different in-flight run),
+    plain 200 with `state` echoed for the operational outcomes
+    (`dispatched`, `pending`, `dispatch_failed`).
+
+    Admin-only auth posture, same as `register_workflow` /
+    `recompute_decision`-style admin mutations.
+    """
+    trigger_source = {**req.trigger_source}
+    trigger_source.setdefault("kind", "resume_via_admin_api")
+    trigger_source.setdefault("resumed_from_run_id", run_id)
+
+    result = await dispatch_resumed_run(
+        app,
+        project=project,
+        prior_run_id=run_id,
+        entrypoint_phase=req.entrypoint_phase,
+        trigger_source=trigger_source,
+    )
+
+    if result.state == "prior_missing":
+        raise HTTPException(404, result.detail)
+    if result.state == "workflow_missing":
+        raise HTTPException(404, result.detail)
+    if result.state == "phase_invalid":
+        raise HTTPException(422, result.detail)
+    if result.state == "outputs_missing":
+        raise HTTPException(422, result.detail)
+    if result.state == "prior_in_progress":
+        raise HTTPException(409, result.detail)
+    if result.state == "already_running":
+        raise HTTPException(409, result.detail)
+    return result
 
 
 async def _compute_snapshot(cosmos: Cosmos) -> StateSnapshot:
