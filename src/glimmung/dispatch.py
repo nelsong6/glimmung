@@ -60,6 +60,11 @@ class DispatchResult(BaseModel):
       - `no_project`: repo isn't registered with glimmung.
       - `no_workflow`: project has no matching workflow (caller passed
         none and the project has 0 or 2+ workflows).
+      - `dispatch_failed`: the lease was claimed and a host was assigned,
+        but `dispatch_workflow` raised (typically a 422 from GH on
+        undeclared workflow inputs). Lease + lock are released and no
+        Run record is created — caller can retry once the underlying
+        cause is fixed.
     """
     state: str
     lease_id: str | None = None
@@ -206,7 +211,37 @@ async def dispatch_run(
             "project": lease.project,
             "workflow": lease.workflow,
         }
-        await _maybe_dispatch_workflow(app, lease_doc, host)
+        dispatched = await _maybe_dispatch_workflow(app, lease_doc, host)
+        if not dispatched:
+            # GH refused the dispatch (typically a 422 on undeclared
+            # inputs — see _DISPATCH_INPUT_KEYS in app.py). Roll back the
+            # lease + lock so the issue isn't held for the lock TTL on a
+            # phantom run. The Run record is intentionally never created
+            # here: the orphan shape (`state=in_progress` + null
+            # workflow_run_id) was the symptom that motivated #20's
+            # backout path.
+            try:
+                await lease_ops.release(cosmos, lease.id, project_name)
+            except Exception:
+                log.exception(
+                    "dispatch_run: lease release failed during backout for %s",
+                    lease.id,
+                )
+            try:
+                await lock_ops.release_lock(
+                    cosmos, scope="issue", key=lock_key, holder_id=holder_id,
+                )
+            except Exception:
+                log.exception(
+                    "dispatch_run: lock release failed during backout for %s",
+                    lock_key,
+                )
+            return DispatchResult(
+                state="dispatch_failed",
+                lease_id=lease.id,
+                workflow=workflow_actual_name,
+                detail="GitHub workflow_dispatch raised; lease + lock released, no Run created",
+            )
 
     # 5. Run record (only if workflow opts into the verify-loop substrate).
     run_id: str | None = None
