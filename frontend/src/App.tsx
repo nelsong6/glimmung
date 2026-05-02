@@ -335,25 +335,24 @@ function Layout() {
           </div>
           <div className="header-right">
             {!authReady ? null : account ? (
-              <div className="user-chip">
+              <div className="user-cluster">
                 <button
                   type="button"
-                  className={`chip-btn ${showAdmin ? "active" : ""}`}
+                  className={`gb sm${showAdmin ? " active" : ""}`}
                   onClick={() => setShowAdmin((s) => !s)}
                   aria-label="admin"
                   title={showAdmin ? "hide admin" : "admin"}
                 >
-                  admin
+                  <span className="sigil">∷</span>
+                  <span className="label">admin</span>
                 </button>
-                <span className="chip-divider" />
                 <span className="user-id">
                   <span className="user-dot" />
                   <span className="user-handle">{account.username}</span>
                 </span>
-                <span className="chip-divider" />
                 <button
                   type="button"
-                  className="chip-btn quiet"
+                  className="gb sm quiet"
                   onClick={async () => {
                     await signOut();
                     setAccount(null);
@@ -362,13 +361,13 @@ function Layout() {
                   aria-label="sign out"
                   title="sign out"
                 >
-                  sign out
+                  <span className="label">sign out</span>
                 </button>
               </div>
             ) : (
               <button
                 type="button"
-                className="chip-btn solo"
+                className="gb primary"
                 onClick={async () => {
                   try {
                     setAccount(await signIn());
@@ -377,7 +376,8 @@ function Layout() {
                   }
                 }}
               >
-                sign in
+                <span className="sigil">›</span>
+                <span className="label">sign in</span>
               </button>
             )}
           </div>
@@ -605,24 +605,25 @@ function CapacityView({
                     <td>
                       {confirmId === l.id ? (
                         <>
-                          <button
-                            type="button"
-                            className="link"
-                            onClick={() => void fireCancel(l)}
-                            disabled={busyId === l.id}
-                            style={{ color: "var(--danger, #c44)" }}
-                          >
-                            {busyId === l.id ? "cancelling…" : "cancel?"}
-                          </button>
-                          {" / "}
-                          <button
-                            type="button"
-                            className="link"
-                            onClick={() => setConfirmId(null)}
-                            disabled={busyId === l.id}
-                          >
-                            keep
-                          </button>
+                          <span className="confirm">
+                            <button
+                              type="button"
+                              className="link danger-text"
+                              onClick={() => void fireCancel(l)}
+                              disabled={busyId === l.id}
+                            >
+                              {busyId === l.id ? "cancelling…" : "cancel?"}
+                            </button>
+                            <span className="sep">/</span>
+                            <button
+                              type="button"
+                              className="link"
+                              onClick={() => setConfirmId(null)}
+                              disabled={busyId === l.id}
+                            >
+                              keep
+                            </button>
+                          </span>
                         </>
                       ) : (
                         <button
@@ -641,7 +642,7 @@ function CapacityView({
           </table>
         )}
         {cancelError && (
-          <div className="empty" style={{ color: "var(--danger, #c44)" }}>
+          <div className="empty" style={{ color: "var(--state-danger-fg)" }}>
             {cancelError}
           </div>
         )}
