@@ -1,8 +1,8 @@
 """Workflow API surface tests.
 
-Covers the PATCH /v1/workflows/{project}/{name} endpoint introduced for
-live rollout-knob flips (pr.enabled, budget.total) without re-running
-register_workflow's full upsert. Mirrors the test_pr_endpoints style —
+Covers POST /v1/workflows (register, idempotent upsert) and
+PATCH /v1/workflows/{project}/{name} (live rollout-knob flips for
+pr.enabled and budget.total). Mirrors the test_pr_endpoints style —
 direct helper invocation against the in-memory cosmos fake.
 """
 
@@ -18,7 +18,9 @@ from glimmung.app import (
     WorkflowUpdateRequest,
     _read_workflow,
     patch_workflow_endpoint,
+    register_workflow,
 )
+from glimmung.models import PhaseSpec, WorkflowRegister
 
 from tests.cosmos_fake import FakeContainer
 
@@ -27,7 +29,18 @@ from tests.cosmos_fake import FakeContainer
 def cosmos():
     return SimpleNamespace(
         workflows=FakeContainer("workflows", "/project"),
+        projects=FakeContainer("projects", "/name"),
     )
+
+
+async def _seed_project(cosmos, name: str = "ambience") -> None:
+    await cosmos.projects.create_item({
+        "id": name,
+        "name": name,
+        "githubRepo": f"nelsong6/{name}",
+        "metadata": {},
+        "createdAt": datetime.now(UTC).isoformat(),
+    })
 
 
 async def _seed_workflow(
@@ -37,6 +50,7 @@ async def _seed_workflow(
     name: str = "agent-run",
     pr_enabled: bool = False,
     budget_total: float = 25.0,
+    created_at: str | None = None,
 ) -> None:
     await cosmos.workflows.create_item({
         "id": name,
@@ -60,12 +74,15 @@ async def _seed_workflow(
         "triggerLabel": "agent-run",
         "defaultRequirements": {},
         "metadata": {},
-        "createdAt": datetime.now(UTC).isoformat(),
+        "createdAt": created_at or datetime.now(UTC).isoformat(),
     })
 
 
 def _app_with(cosmos):
     return SimpleNamespace(state=SimpleNamespace(cosmos=cosmos))
+
+
+# ─── PATCH /v1/workflows/{project}/{name} ──────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -154,3 +171,128 @@ async def test_patch_workflow_partition_isolation(cosmos, monkeypatch):
     spirelens_doc = await _read_workflow(cosmos, "spirelens", "agent-run")
     assert ambience_doc["pr"]["enabled"] is True
     assert spirelens_doc["pr"]["enabled"] is False
+
+
+# ─── POST /v1/workflows (register / upsert) ────────────────────────────────
+
+
+def _single_phase_register(
+    project: str = "ambience",
+    name: str = "agent-run",
+) -> WorkflowRegister:
+    return WorkflowRegister(
+        project=project,
+        name=name,
+        phases=[
+            PhaseSpec(
+                name="agent",
+                workflow_filename="issue-agent.yml",
+                outputs=["validation_url"],
+            ),
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_register_workflow_creates_new(cosmos, monkeypatch):
+    """First-time registration: writes a new workflow doc and returns
+    the persisted shape."""
+    await _seed_project(cosmos, "ambience")
+    monkeypatch.setattr("glimmung.app.app", _app_with(cosmos))
+
+    result = await register_workflow(_single_phase_register())
+
+    assert result.project == "ambience"
+    assert result.name == "agent-run"
+    assert [p.name for p in result.phases] == ["agent"]
+    doc = await _read_workflow(cosmos, "ambience", "agent-run")
+    assert doc is not None
+    assert doc["phases"][0]["workflowFilename"] == "issue-agent.yml"
+
+
+@pytest.mark.asyncio
+async def test_register_workflow_idempotent_replace(cosmos, monkeypatch):
+    """Re-registering the same shape is a no-op replace, not a
+    duplicate. This is what consumer-migration scripts rely on."""
+    await _seed_project(cosmos, "ambience")
+    monkeypatch.setattr("glimmung.app.app", _app_with(cosmos))
+
+    await register_workflow(_single_phase_register())
+    # Second call must not raise on duplicate id.
+    await register_workflow(_single_phase_register())
+
+    doc = await _read_workflow(cosmos, "ambience", "agent-run")
+    assert doc is not None
+
+
+@pytest.mark.asyncio
+async def test_register_workflow_preserves_created_at_on_replace(cosmos, monkeypatch):
+    """Replacing an existing workflow keeps the original `createdAt`.
+    A fresh stamp would lose the audit trail of when the row first
+    appeared."""
+    original_created = "2026-01-01T00:00:00+00:00"
+    await _seed_project(cosmos, "ambience")
+    await _seed_workflow(
+        cosmos,
+        project="ambience",
+        name="agent-run",
+        created_at=original_created,
+    )
+    monkeypatch.setattr("glimmung.app.app", _app_with(cosmos))
+
+    await register_workflow(_single_phase_register())
+
+    doc = await _read_workflow(cosmos, "ambience", "agent-run")
+    assert doc["createdAt"] == original_created
+
+
+@pytest.mark.asyncio
+async def test_register_workflow_400_when_project_missing(cosmos, monkeypatch):
+    """Project must be registered first — register_workflow won't
+    auto-create one. Surfacing this as 400 (not 404) matches the
+    project_doc check in the endpoint."""
+    monkeypatch.setattr("glimmung.app.app", _app_with(cosmos))
+
+    with pytest.raises(HTTPException) as excinfo:
+        await register_workflow(_single_phase_register(project="does-not-exist"))
+    assert excinfo.value.status_code == 400
+    assert "does not exist" in excinfo.value.detail
+
+
+@pytest.mark.asyncio
+async def test_register_workflow_2phase_with_inputs_and_outputs(cosmos, monkeypatch):
+    """The motivating use case: re-register a workflow as 2-phase with
+    cross-phase ref expressions. Server-side validation must accept
+    well-formed refs; the actual ref-validator unit tests live in
+    test_phase_input_refs.py."""
+    await _seed_project(cosmos, "glimmung")
+    monkeypatch.setattr("glimmung.app.app", _app_with(cosmos))
+
+    reg = WorkflowRegister(
+        project="glimmung",
+        name="agent-run",
+        phases=[
+            PhaseSpec(
+                name="env-prep",
+                workflow_filename="env-prep.yml",
+                outputs=["validation_url", "image_tag"],
+            ),
+            PhaseSpec(
+                name="agent-execute",
+                workflow_filename="agent-execute.yml",
+                inputs={
+                    "validation_url": "${{ phases.env-prep.outputs.validation_url }}",
+                    "image_tag": "${{ phases.env-prep.outputs.image_tag }}",
+                },
+            ),
+        ],
+    )
+    result = await register_workflow(reg)
+
+    assert [p.name for p in result.phases] == ["env-prep", "agent-execute"]
+    doc = await _read_workflow(cosmos, "glimmung", "agent-run")
+    assert len(doc["phases"]) == 2
+    assert doc["phases"][1]["inputs"] == {
+        "validation_url": "${{ phases.env-prep.outputs.validation_url }}",
+        "image_tag": "${{ phases.env-prep.outputs.image_tag }}",
+    }
