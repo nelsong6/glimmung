@@ -7,10 +7,13 @@
  * Per #20: labels are *informational only* — surfaced as a row badge but
  * not used to gate dispatch. The dispatch button on each row is the
  * primitive trigger.
+ *
+ * Clicking an issue title navigates to the detail route — `/issues/<owner>/
+ * <repo>/<n>` for GH-anchored issues, `/issues/<project>/<id>` for native.
  */
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { authedFetch } from "./auth";
-import { IssueDetailView } from "./IssueDetailView";
 
 type IssueRow = {
   id: string;
@@ -43,11 +46,6 @@ type DispatchStatus =
   | { kind: "result"; key: string; result: DispatchResult }
   | { kind: "error"; key: string; message: string };
 
-type Selected =
-  | { kind: "gh"; repo: string; issue_number: number }
-  | { kind: "native"; project: string; issue_id: string }
-  | null;
-
 export function IssuesView({
   signedIn,
   projectFilter,
@@ -55,11 +53,11 @@ export function IssuesView({
   signedIn: boolean;
   projectFilter: string | null;
 }) {
+  const navigate = useNavigate();
   const [rows, setRows] = useState<IssueRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [dispatchStatus, setDispatchStatus] = useState<DispatchStatus>({ kind: "idle" });
-  const [selected, setSelected] = useState<Selected>(null);
 
   const refresh = async () => {
     if (!signedIn) {
@@ -113,20 +111,18 @@ export function IssuesView({
     }
   };
 
+  const openDetail = (row: IssueRow) => {
+    if (row.repo && row.number !== null) {
+      navigate(`/issues/${row.repo}/${row.number}`);
+    } else {
+      navigate(
+        `/issues/${encodeURIComponent(row.project)}/${encodeURIComponent(row.id)}`
+      );
+    }
+  };
+
   if (!signedIn) {
     return <div className="empty">Sign in to view issues.</div>;
-  }
-
-  if (selected) {
-    return (
-      <IssueDetailView
-        target={selected}
-        onBack={() => {
-          setSelected(null);
-          void refresh();
-        }}
-      />
-    );
   }
 
   const visibleRows = rows
@@ -193,11 +189,7 @@ export function IssuesView({
                     <button
                       type="button"
                       className="link"
-                      onClick={() => setSelected(
-                        row.repo && row.number !== null
-                          ? { kind: "gh", repo: row.repo, issue_number: row.number }
-                          : { kind: "native", project: row.project, issue_id: row.id }
-                      )}
+                      onClick={() => openDetail(row)}
                       style={{ textAlign: "left" }}
                     >
                       {row.title}
