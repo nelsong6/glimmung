@@ -316,34 +316,51 @@ function Layout() {
 
       <main className="content">
         <header>
-          <h1>glimmung</h1>
-          <span className={`connection ${conn}`}>{conn}</span>
-          <div className="quote">
-            “The Glimmung scanned the assembled list of beings he had summoned. From a thousand worlds they had come, each with a craft to contribute.”
+          <div className="header-left">
+            <div className="header-title">
+              <h1>glimmung</h1>
+              <span className={`connection ${conn}`}>{conn}</span>
+            </div>
+            <div className="epigraph">
+              “The Glimmung scanned the assembled list of beings he had summoned. From a thousand worlds they had come, each with a craft to contribute.”
+            </div>
           </div>
-          <div className="auth">
+          <div className="header-right">
             {!authReady ? null : account ? (
-              <>
-                <span className="user">{account.username}</span>
-                <button type="button" className="link" onClick={() => setShowAdmin((s) => !s)}>
-                  {showAdmin ? "hide admin" : "admin"}
-                </button>
+              <div className="user-chip">
                 <button
                   type="button"
-                  className="link"
+                  className={`chip-btn ${showAdmin ? "active" : ""}`}
+                  onClick={() => setShowAdmin((s) => !s)}
+                  aria-label="admin"
+                  title={showAdmin ? "hide admin" : "admin"}
+                >
+                  admin
+                </button>
+                <span className="chip-divider" />
+                <span className="user-id">
+                  <span className="user-dot" />
+                  <span className="user-handle">{account.username}</span>
+                </span>
+                <span className="chip-divider" />
+                <button
+                  type="button"
+                  className="chip-btn quiet"
                   onClick={async () => {
                     await signOut();
                     setAccount(null);
                     setShowAdmin(false);
                   }}
+                  aria-label="sign out"
+                  title="sign out"
                 >
                   sign out
                 </button>
-              </>
+              </div>
             ) : (
               <button
                 type="button"
-                className="link"
+                className="chip-btn solo"
                 onClick={async () => {
                   try {
                     setAccount(await signIn());

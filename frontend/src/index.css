@@ -264,46 +264,109 @@ tr.eligible td.mono:first-child {
 
 header {
   display: flex;
-  align-items: baseline;
-  gap: 12px;
+  align-items: flex-start;
+  gap: 24px;
   margin-bottom: 0;
   padding-bottom: 16px;
-  border-bottom: 1px solid #2a2a2e;
+  border-bottom: 1px solid var(--border);
 }
-header .quote {
-  margin-left: auto;
+.header-left {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.header-title {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+.header-right {
+  flex-shrink: 0;
+  padding-top: 4px;
+}
+.epigraph {
   font-style: italic;
-  color: #555;
-  max-width: 50%;
-  text-align: right;
-  font-size: 0.85rem;
+  color: var(--fg-dimmest);
+  font-size: 0.8rem;
   line-height: 1.4;
+  max-width: 60ch;
 }
 
-header .auth {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-left: 20px;
-  font-size: 0.85rem;
+.user-chip {
+  display: inline-flex;
+  align-items: stretch;
+  height: 28px;
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.8rem;
+  overflow: hidden;
 }
-header .auth .user {
-  color: #999;
-  font-family: var(--font-mono);
+.user-chip .chip-divider {
+  width: 1px;
+  background: var(--border);
+  flex-shrink: 0;
 }
-header .auth .link {
+.user-chip .chip-btn {
   background: transparent;
-  border: 1px solid #2a2a2e;
-  color: #d4d4d4;
-  padding: 4px 12px;
-  border-radius: 4px;
+  border: none;
   cursor: pointer;
   font-family: inherit;
-  font-size: inherit;
+  font-size: 0.8rem;
+  color: var(--fg-muted);
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
 }
-header .auth .link:hover {
-  background: #15151a;
-  border-color: #3a3a3e;
+.user-chip .chip-btn:hover {
+  background: var(--surface);
+  color: var(--fg);
+}
+.user-chip .chip-btn.active {
+  background: var(--state-success-bg);
+  color: var(--state-success-fg);
+}
+.user-chip .chip-btn.quiet {
+  color: var(--fg-dimmer);
+}
+.user-chip .chip-btn.quiet:hover {
+  color: var(--state-danger-fg);
+  background: var(--surface);
+}
+.user-chip .user-id {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+.user-chip .user-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--state-success-fg);
+}
+.chip-btn.solo {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  background: var(--state-success-bg);
+  color: var(--state-success-fg);
+  border: none;
+  border-radius: 999px;
+  padding: 0 16px;
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+.chip-btn.solo:hover {
+  background: var(--color-green-bg-hover);
 }
 
 .admin-panel {
@@ -417,6 +480,28 @@ header .auth .link:hover {
   margin-left: 8px;
 }
 
+h2 .inline-action,
+.inline-action {
+  font-size: 0.75rem;
+  color: var(--state-success-fg);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  margin-left: 12px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  padding: 0;
+}
+.inline-action:hover:not(:disabled) {
+  text-decoration: underline;
+}
+.inline-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .project-info {
   display: grid;
   grid-template-columns: max-content 1fr;
@@ -464,6 +549,12 @@ header .auth .link:hover {
 .tabs .tab:hover {
   background: #1a1a1f;
   color: #d4d4d4;
+}
+.tabs .tab,
+.tabs .tab:hover,
+.tabs .tab:focus,
+.tabs .tab:focus-visible {
+  text-decoration: none;
 }
 .tabs .tab.selected {
   color: #4ade80;

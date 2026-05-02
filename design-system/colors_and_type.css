@@ -1,0 +1,267 @@
+@import url("https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap");
+
+/**
+ * Glimmung Design System — Colors & Type
+ *
+ * Drop this file into any Glimmung-branded artifact. All values lifted
+ * directly from frontend/src/index.css in the glimmung repo.
+ *
+ *   <link rel="stylesheet" href="colors_and_type.css">
+ *
+ * The variables below are organized in four tiers:
+ *   1. Raw color tokens          (--color-*)
+ *   2. Semantic surface tokens   (--bg-*, --fg-*, --border-*)
+ *   3. State / status tokens     (--state-*-bg, --state-*-fg)
+ *   4. Type tokens               (--font-*, --text-*, --leading-*)
+ * Plus a set of base element styles for h1/h2/p/code/etc. that match
+ * the live dashboard exactly.
+ */
+
+:root {
+  /* ─────────────────────────────────────────────
+     1. Raw color tokens — neutral ramp
+     ───────────────────────────────────────────── */
+  --color-black:           #050507;  /* deepest — attempt-card body */
+  --color-ink-950:         #0a0a0c;  /* sidebar, run-panel */
+  --color-ink-900:         #0e0e10;  /* page background */
+  --color-ink-850:         #15151a;  /* surface (panels, hover row) */
+  --color-ink-800:         #1a1a1f;  /* surface hover */
+  --color-ink-700:         #2a2a2e;  /* default border */
+  --color-ink-600:         #3a3a3e;  /* raised border */
+  --color-ink-500:         #444;     /* foreground faintest */
+  --color-ink-400:         #555;     /* foreground dimmest (quote) */
+  --color-ink-350:         #666;     /* h2 muted, count text */
+  --color-ink-300:         #888;     /* eyebrow labels, table th */
+  --color-ink-250:         #999;     /* h2 default */
+  --color-ink-200:         #b8b8b8;  /* secondary text */
+  --color-ink-100:         #d4d4d4;  /* primary text */
+  --color-white:           #e8e8e8;  /* hover-active text */
+
+  /* Semantic accents — raw */
+  --color-running-border:  #5a3a14;  /* attempt-card.running border */
+
+  /* Green (success / live / pass) */
+  --color-green-bg:        #14532d;
+  --color-green-fg:        #4ade80;
+  --color-green-bg-hover:  #166534;
+
+  /* Amber (busy / stale / in-progress) */
+  --color-amber-bg:        #422006;
+  --color-amber-fg:        #fb923c;
+
+  /* Red (drain / dead / aborted / error) */
+  --color-red-bg:          #3f1c1c;
+  --color-red-fg:          #f87171;
+
+  /* Blue (workflow accent) */
+  --color-blue-bg:         #1e3a5f;
+  --color-blue-fg:         #60a5fa;
+
+  /* ─────────────────────────────────────────────
+     2. Semantic surface tokens
+     ───────────────────────────────────────────── */
+  --bg:                    var(--color-ink-900);
+  --bg-deep:               var(--color-ink-950);
+  --bg-deepest:            var(--color-black);
+  --surface:               var(--color-ink-850);
+  --surface-hover:         var(--color-ink-800);
+
+  --border:                var(--color-ink-700);
+  --border-strong:         var(--color-ink-600);
+  --border-running:        var(--color-running-border);
+  --border-focus:          var(--color-green-fg);
+
+  --fg:                    var(--color-ink-100);
+  --fg-secondary:          var(--color-ink-200);
+  --fg-muted:              var(--color-ink-250);
+  --fg-dim:                var(--color-ink-300);
+  --fg-dimmer:             var(--color-ink-350);
+  --fg-dimmest:            var(--color-ink-400);
+  --fg-faintest:           var(--color-ink-500);
+  --fg-inverse:            var(--color-white);
+
+  /* ─────────────────────────────────────────────
+     3. State / status tokens (paired bg + fg)
+     ───────────────────────────────────────────── */
+  --state-success-bg:      var(--color-green-bg);
+  --state-success-fg:      var(--color-green-fg);
+
+  --state-busy-bg:         var(--color-amber-bg);
+  --state-busy-fg:         var(--color-amber-fg);
+
+  --state-danger-bg:       var(--color-red-bg);
+  --state-danger-fg:       var(--color-red-fg);
+
+  --state-info-bg:         var(--color-blue-bg);
+  --state-info-fg:         var(--color-blue-fg);
+
+  /* Selection accents (used as 2px borders, not fills) */
+  --accent-primary:        var(--color-green-fg);  /* projects, primary tabs */
+  --accent-workflow:       var(--color-blue-fg);   /* workflow rows, secondary tabs */
+
+  /* ─────────────────────────────────────────────
+     4. Type tokens
+     ───────────────────────────────────────────── */
+  /* Geist Sans + Geist Mono — Vercel's developer-tooling family.
+     Loaded from Google Fonts via @import at the top of this file. */
+  --font-sans:             "Geist", ui-sans-serif, system-ui, -apple-system,
+                           "Segoe UI", Roboto, "Helvetica Neue", Arial,
+                           sans-serif;
+  --font-mono:             "Geist Mono", ui-monospace, SFMono-Regular, Menlo,
+                           monospace;
+
+  /* Base size is 14px — the live dashboard sets this on :root */
+  --text-base-px:          14px;
+  --text-xs:               0.7rem;    /* 9.8px @14px base */
+  --text-2xs:              0.75rem;   /* 10.5px — sidebar title, count pills, eyebrow */
+  --text-sm:               0.85rem;   /* 11.9px — table th, attempt body, auth links */
+  --text-md:               0.9rem;    /* 12.6px — body, project rows, form inputs */
+  --text-lg:               1.05rem;   /* 14.7px — h2 section heading */
+  --text-xl:               1.6rem;    /* 22.4px — h1 page title (the wordmark) */
+
+  --weight-regular:        400;
+  --weight-medium:         500;
+  --weight-semibold:       600;
+
+  --tracking-tight:        -0.01em;   /* h1 */
+  --tracking-eyebrow:      0.04em;    /* th, attempt-card key */
+  --tracking-h2:           0.05em;    /* h2 uppercase */
+  --tracking-sidebar:      0.1em;     /* sidebar-title uppercase */
+
+  --leading-tight:         1.2;
+  --leading-normal:        1.4;       /* quote */
+  --leading-relaxed:       1.5;
+
+  /* ─────────────────────────────────────────────
+     Spacing, radius, animation
+     ───────────────────────────────────────────── */
+  --radius-sm:             4px;       /* default for cards/inputs/buttons */
+  --radius-md:             6px;       /* run-panel only */
+  --radius-pill:           999px;     /* count pills, status pills, dots */
+
+  --pulse-duration:        1.6s;
+
+  /* Apply base */
+  font-family:             var(--font-sans);
+  font-size:               var(--text-base-px);
+  color:                   var(--fg);
+  background:              var(--bg);
+}
+
+/* ─────────────────────────────────────────────
+   Base elements (semantic CSS — match live UI)
+   ───────────────────────────────────────────── */
+* { box-sizing: border-box; }
+body { margin: 0; }
+
+h1, h2 {
+  font-weight: var(--weight-semibold);
+  margin: 0 0 12px 0;
+}
+
+h1 {
+  font-size: var(--text-xl);
+  letter-spacing: var(--tracking-tight);
+  /* Glimmung wordmark is always lowercase — don't text-transform here, just write it lowercase */
+}
+
+h2 {
+  font-size: var(--text-lg);
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-h2);
+  margin-top: 28px;
+}
+
+p {
+  margin: 0 0 12px 0;
+  line-height: var(--leading-relaxed);
+  color: var(--fg);
+}
+
+a {
+  color: var(--state-success-fg);
+  text-decoration: none;
+}
+a:hover { text-decoration: underline; }
+
+/* Buttons styled as tabs / chrome should never inherit link-style underlines. */
+button { text-decoration: none; }
+button:hover, button:focus, button:focus-visible { text-decoration: none; }
+
+code, pre, .mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+small, .text-dim {
+  color: var(--fg-dimmer);
+  font-size: var(--text-sm);
+}
+
+.eyebrow {
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  color: var(--fg-dim);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-eyebrow);
+}
+
+.sidebar-title {
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  color: var(--fg-dimmer);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-sidebar);
+}
+
+.quote {
+  font-style: italic;
+  color: var(--fg-dimmest);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+th {
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-weight: var(--weight-medium);
+  font-size: var(--text-sm);
+  color: var(--fg-dim);
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+}
+td {
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* Pill — base. Add modifier class .free / .busy / .drain for color. */
+.pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-medium);
+}
+.pill.free  { background: var(--state-success-bg); color: var(--state-success-fg); }
+.pill.busy  { background: var(--state-busy-bg);    color: var(--state-busy-fg); }
+.pill.drain { background: var(--state-danger-bg);  color: var(--state-danger-fg); }
+.pill.info  { background: var(--state-info-bg);    color: var(--state-info-fg); }
+
+/* The pulse animation — the only animation in the entire system. */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+.pulse {
+  animation: pulse var(--pulse-duration) ease-in-out infinite;
+}

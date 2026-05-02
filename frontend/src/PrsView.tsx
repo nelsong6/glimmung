@@ -89,10 +89,9 @@ export function PrsView({
         )}
         <button
           type="button"
-          className="link"
+          className="inline-action"
           onClick={() => void refresh()}
           disabled={loading}
-          style={{ marginLeft: "1rem" }}
         >
           {loading ? "refreshing…" : "refresh"}
         </button>
