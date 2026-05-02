@@ -1,0 +1,43 @@
+# Same pattern as mcp-github / mcp-azure: synthetic resource
+# (mcp.tank-operator.io/servers named "glimmung") gates the
+# SubjectAccessReview, ClusterRole + RoleBinding name allowed callers
+# explicitly.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kube-rbac-proxy
+  namespace: mcp-glimmung
+data:
+  config.yaml: |
+    authorization:
+      resourceAttributes:
+        apiGroup: mcp.tank-operator.io
+        resource: servers
+        name: glimmung
+        namespace: mcp-glimmung
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mcp-glimmung-invoker
+rules:
+  - apiGroups: ["mcp.tank-operator.io"]
+    resources: ["servers"]
+    resourceNames: ["glimmung"]
+    # GET (SSE) + POST (JSON-RPC) — kube-rbac-proxy auto-derives the
+    # verb from the HTTP method.
+    verbs: ["get", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mcp-glimmung-invoker
+  namespace: mcp-glimmung
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mcp-glimmung-invoker
+subjects:
+  - kind: ServiceAccount
+    name: claude-session
+    namespace: tank-operator-sessions
