@@ -161,6 +161,52 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         return client.patch(f"/v1/issues/by-id/{project}/{issue_id}", json=payload)
 
     @mcp.tool()
+    def replay_run_decision(
+        project: str,
+        run_id: str,
+        synthetic_completion: dict[str, Any],
+        override_workflow: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Pure-function replay of the decision engine against a Run, with
+        no Cosmos writes and no GHA dispatch. Returns the decision the
+        engine *would* make for `synthetic_completion`, plus a next-action
+        hint (which phase would advance, which recycle target would fire,
+        what abort comment would be posted).
+
+        Smoke-test substrate from glimmung#111: catches verify=true→false-
+        class registration bugs at zero cost. The classic case — registered
+        verify=true, /completed callback omits the verification field —
+        used to cost ~20 min of agent runtime per iteration to surface;
+        replay returns ABORT_MALFORMED in milliseconds.
+
+        `synthetic_completion` mirrors the live `/completed` callback body:
+        `{conclusion: "success"|"failure"|..., verification: dict|null,
+        phase_outputs: dict|null}`. Copy-paste a real completion and tweak
+        fields to ask "what if?".
+
+        `override_workflow` is optional. When set, the replay uses the
+        provided shape instead of the live registration — useful for
+        previewing a registration fix before applying it. Shape:
+        `{phases: [...PhaseSpec...], pr: {...}, budget: {...}}`. Cross-
+        phase input refs are validated; a typo in
+        `${{ phases.X.outputs.Y }}` 422s with the same error
+        register_workflow returns.
+
+        Returns: `{decision, applied_to_phase, applied_to_attempt_index,
+        abort_reason?, would_advance_to_phase?, would_open_pr,
+        would_retry_target_phase?, cumulative_cost_usd_after,
+        attempts_in_phase_after, workflow_source}`. `workflow_source` is
+        "registered" or "override" so the verdict's basis is unambiguous.
+        """
+        payload: dict[str, Any] = {"synthetic_completion": synthetic_completion}
+        if override_workflow is not None:
+            payload["override_workflow"] = override_workflow
+        return client.post(
+            f"/v1/runs/{project}/{run_id}/replay",
+            json=payload,
+        )
+
+    @mcp.tool()
     def abort_run(
         project: str,
         run_id: str,

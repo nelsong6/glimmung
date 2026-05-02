@@ -36,6 +36,7 @@ from glimmung.github_app import (
 from glimmung.locks import LockBusy
 from glimmung.models import (
     PR,
+    BudgetConfig,
     Host,
     Issue,
     IssueState,
@@ -43,7 +44,9 @@ from glimmung.models import (
     LeaseRequest,
     LeaseResponse,
     LeaseState,
+    PhaseSpec,
     PRState,
+    PrPrimitiveSpec,
     Project,
     ProjectRegister,
     Run,
@@ -59,7 +62,9 @@ from glimmung.models import (
     Workflow,
     WorkflowRegister,
     substitute_phase_inputs,
+    validate_phase_input_refs,
 )
+from glimmung.replay import ReplayResult, SyntheticCompletion, replay_decision
 from glimmung.triage import abort_explanation as triage_abort_explanation
 from glimmung.triage import decide_triage, feedback_text
 from glimmung.settings import Settings, get_settings
@@ -1884,6 +1889,133 @@ async def run_completed(
         decision=decision_value,
         issue_lock_released=result_dict.get("issue_lock_released"),
         pr_lock_released=result_dict.get("pr_lock_released"),
+    )
+
+
+# ─── Decision-engine replay (#111 smoke-test substrate) ────────────────────
+#
+# Pure-function preview of `decide()` against a Run. The caller posts a
+# synthetic `/completed` payload (and optionally an alternative workflow
+# shape); glimmung returns the decision the engine *would* make without
+# touching Cosmos or firing any GHA dispatch.
+#
+# Catches the verify=true→false-class registration bugs documented in
+# #111 at zero cost: a real agent dispatch was burning ~20 min of agent
+# runtime per iteration to surface a bug a static check could find.
+
+
+class WorkflowReplayOverride(BaseModel):
+    """Replay-only workflow shape — same fields decide() reads, minus
+    project/name (which are irrelevant for the verdict). Lets a caller
+    sketch a `what if my registration looked like this?` scenario
+    without re-registering the workflow first.
+
+    Cross-phase input ref validation runs on construction so a typo in
+    `${{ phases.X.outputs.Y }}` surfaces in the replay request rather
+    than silently producing a meaningless verdict.
+    """
+    phases: list[PhaseSpec]
+    pr: PrPrimitiveSpec = Field(default_factory=PrPrimitiveSpec)
+    budget: BudgetConfig = Field(default_factory=BudgetConfig)
+    trigger_label: str = "issue-agent"
+    default_requirements: dict[str, Any] = Field(default_factory=dict)
+
+
+class RunReplayRequest(BaseModel):
+    """`POST /v1/runs/{project}/{run_id}/replay` body.
+
+    `synthetic_completion` mirrors the live `/completed` callback body —
+    copy-paste a real one and tweak fields to ask `what if?`.
+
+    `override_workflow` is optional. When set, the replay runs against
+    the provided shape instead of the registered workflow; useful for
+    `if I changed my registration to verify=false, would this run have
+    advanced?`. When omitted, the live registration drives the verdict.
+    """
+    synthetic_completion: SyntheticCompletion
+    override_workflow: WorkflowReplayOverride | None = None
+
+
+@app.post(
+    "/v1/runs/{project}/{run_id}/replay",
+    response_model=ReplayResult,
+    dependencies=[Depends(require_admin_user)],
+)
+async def replay_run_decision(
+    req: RunReplayRequest,
+    project: str = Path(...),
+    run_id: str = Path(...),
+) -> ReplayResult:
+    """Pure-function replay of the decision engine against a Run.
+
+    Reads the Run + workflow registration, applies the synthetic
+    completion to the latest attempt in-memory, returns the verdict the
+    engine would produce — plus a next-action hint (which phase would
+    be dispatched, which recycle target would fire, what abort
+    explanation would be posted). Performs no Cosmos writes and fires
+    no GHA dispatches.
+
+    Admin-only: same auth posture as `register_workflow` + `abort_run`,
+    since the body can echo back workflow shapes that aren't otherwise
+    enumerable through the public API.
+    """
+    cosmos: Cosmos = app.state.cosmos
+    found = await run_ops.read_run(cosmos, project=project, run_id=run_id)
+    if found is None:
+        raise HTTPException(404, f"no run {project}/{run_id}")
+    run, _etag = found
+
+    if req.override_workflow is not None:
+        # Validate cross-phase input refs against the override's own
+        # phase order — same contract as register_workflow's
+        # `_validate_v1`. Surfacing this as a 422 keeps "registration
+        # would have been rejected" parity with the live admin API.
+        try:
+            validate_phase_input_refs(req.override_workflow.phases)
+        except ValueError as e:
+            raise HTTPException(422, f"override_workflow rejected: {e}")
+        workflow_model = Workflow(
+            id=run.workflow,
+            project=run.project,
+            name=run.workflow,
+            phases=req.override_workflow.phases,
+            pr=req.override_workflow.pr,
+            budget=req.override_workflow.budget,
+            trigger_label=req.override_workflow.trigger_label,
+            default_requirements=req.override_workflow.default_requirements,
+            metadata={},
+            created_at=datetime.now(UTC),
+        )
+        workflow_source = "override"
+    else:
+        workflow_doc = await _read_workflow(cosmos, run.project, run.workflow)
+        workflow_model = _doc_to_workflow(workflow_doc) if workflow_doc else None
+        if workflow_model is None:
+            raise HTTPException(
+                404,
+                f"no workflow registration {run.project}/{run.workflow!r} "
+                "(pass override_workflow if the live registration is missing)",
+            )
+        workflow_source = "registered"
+
+    # decide() asserts the latest attempt's phase exists on the workflow.
+    # Replay is a smoke test, so surface that mismatch as a 422 with a
+    # readable error instead of a 500.
+    phase_names = [p.name for p in workflow_model.phases]
+    if run.attempts and run.attempts[-1].phase not in phase_names:
+        raise HTTPException(
+            422,
+            f"run's latest attempt phase {run.attempts[-1].phase!r} not in "
+            f"workflow phases {phase_names}; cannot replay",
+        )
+    if not run.attempts:
+        raise HTTPException(422, f"run {run_id!r} has no attempts to replay against")
+
+    return replay_decision(
+        run=run,
+        workflow=workflow_model,
+        synthetic=req.synthetic_completion,
+        workflow_source=workflow_source,
     )
 
 
