@@ -148,6 +148,80 @@ async def _signal_drain_loop(app: FastAPI, settings: Settings) -> None:
         await asyncio.sleep(drain_interval)
 
 
+async def _resolve_signal_pr(
+    cosmos: Cosmos, signal: Signal,
+) -> tuple[str, int, "Run | None", str | None] | None:
+    """Resolve a PR-scoped signal's target into `(repo, pr_number, run,
+    run_etag)`. Handles both shapes (#50 slice 3 retargeting):
+
+    - Post-#50: `target_repo` is the project name and `target_id` is the
+      glimmung PR id (ULID-shaped). We point-read the PR doc to recover
+      `(repo, number)` + the linked Run.
+    - Pre-#50: `target_repo` is `<owner>/<repo>` and `target_id` is the
+      stringified GH PR number. Falls through to the legacy
+      find_run_by_pr lookup. Existing in-flight signals enqueued before
+      the rewrite drain cleanly via this branch.
+
+    Returns None if neither shape resolves to a usable PR target.
+    """
+    target_id = signal.target_id
+    # ULID is 26 chars Crockford base32; GH PR numbers are pure digits.
+    looks_like_id = len(target_id) == 26 and target_id.isalnum() and not target_id.isdigit()
+
+    if looks_like_id:
+        pr_lookup = await pr_ops.read_pr(
+            cosmos, project=signal.target_repo, pr_id=target_id,
+        )
+        if pr_lookup is None:
+            log.warning(
+                "triage: signal %s targets glimmung PR %s/%s which is missing",
+                signal.id, signal.target_repo, target_id,
+            )
+            return None
+        pr, _pr_etag = pr_lookup
+        run: Run | None = None
+        run_etag: str | None = None
+        if pr.linked_run_id:
+            try:
+                doc = await cosmos.runs.read_item(
+                    item=pr.linked_run_id, partition_key=pr.project,
+                )
+                from glimmung.runs import _strip_meta as _strip
+                run = Run.model_validate(_strip(doc))
+                run_etag = doc["_etag"]
+            except Exception:
+                log.warning(
+                    "triage: linked_run_id=%s on PR %s not readable",
+                    pr.linked_run_id, pr.id,
+                )
+        if run is None:
+            # Legacy PRs without explicit linkage (pre-#50 agent flow).
+            lookup = await run_ops.find_run_by_pr(
+                cosmos, issue_repo=pr.repo, pr_number=pr.number,
+            )
+            if lookup is not None:
+                run, run_etag = lookup
+        return pr.repo, pr.number, run, run_etag
+
+    # Legacy shape: target_id is the GH PR number, target_repo is the GH
+    # repo. Lookup the Run directly via find_run_by_pr.
+    try:
+        pr_number = int(target_id)
+    except ValueError:
+        log.warning(
+            "triage: signal %s target_id %r is neither a glimmung PR id nor a GH number",
+            signal.id, target_id,
+        )
+        return None
+    lookup = await run_ops.find_run_by_pr(
+        cosmos, issue_repo=signal.target_repo, pr_number=pr_number,
+    )
+    if lookup is not None:
+        run, run_etag = lookup
+        return signal.target_repo, pr_number, run, run_etag
+    return signal.target_repo, pr_number, None, None
+
+
 async def _triage_decide(app: FastAPI, signal: Signal) -> tuple[str, bool]:
     """Drain decide_fn for triage: look up the Run linked to the PR,
     invoke the pure decision engine, return (decision_value, hold_lock).
@@ -158,16 +232,10 @@ async def _triage_decide(app: FastAPI, signal: Signal) -> tuple[str, bool]:
 
     run: Run | None = None
     if signal.target_type == SignalTargetType.PR:
-        try:
-            pr_number = int(signal.target_id)
-        except ValueError:
-            log.warning("triage_decide: signal %s target_id %r is not an int",
-                        signal.id, signal.target_id)
+        resolved = await _resolve_signal_pr(cosmos, signal)
+        if resolved is None:
             return (TriageDecision.ABORT_NO_RUN.value, False)
-        lookup = await run_ops.find_run_by_pr(
-            cosmos, issue_repo=signal.target_repo, pr_number=pr_number,
-        )
-        run = lookup[0] if lookup else None
+        _repo, _pr_number, run, _run_etag = resolved
     # Issue/Run scoped signals don't yet have triage decision logic;
     # IGNORE them so they don't sit in PENDING forever.
     elif signal.target_type != SignalTargetType.PR:
@@ -197,16 +265,13 @@ async def _triage_apply(
     # Look up the run + post a comment / dispatch as appropriate.
     run: Run | None = None
     etag: str | None = None
+    pr_repo: str | None = None
+    pr_number: int | None = None
     if signal.target_type == SignalTargetType.PR:
-        try:
-            pr_number = int(signal.target_id)
-        except ValueError:
+        resolved = await _resolve_signal_pr(cosmos, signal)
+        if resolved is None:
             return
-        lookup = await run_ops.find_run_by_pr(
-            cosmos, issue_repo=signal.target_repo, pr_number=pr_number,
-        )
-        if lookup is not None:
-            run, etag = lookup
+        pr_repo, pr_number, run, etag = resolved
 
     if decision == TriageDecision.DISPATCH_TRIAGE.value:
         if run is None or etag is None:
@@ -231,16 +296,21 @@ async def _triage_apply(
         if minter is None:
             log.info("triage_apply: no GH minter; would have posted: %s", body[:80])
             return
+        if pr_repo is None or pr_number is None:
+            log.warning(
+                "triage_apply: cannot post abort comment, no resolved PR coords for signal %s",
+                signal.id,
+            )
+            return
         try:
-            pr_number = int(signal.target_id)
             await post_issue_comment(
-                minter, repo=signal.target_repo,
+                minter, repo=pr_repo,
                 issue_number=pr_number, body=body,
             )
         except Exception:
             log.exception(
                 "triage_apply: failed to post abort comment on %s#%s",
-                signal.target_repo, signal.target_id,
+                pr_repo, pr_number,
             )
 
 
@@ -637,19 +707,26 @@ async def _dispatch_triage(
     # Claim the issue lock with the signal as holder. If the issue
     # lock is currently held (rare: original Run is still in-flight,
     # or a prior triage is still in flight on the same issue), bail
-    # — drain will retry next tick.
+    # — drain will retry next tick. Lock-key shape mirrors dispatch_run:
+    # `repo#number` for GH-anchored issues, `glimmung/{issue_id}` for
+    # native issues without GH coords.
+    issue_lock_key = (
+        f"{run.issue_repo}#{run.issue_number}"
+        if (run.issue_repo and run.issue_number)
+        else f"glimmung/{run.issue_id}"
+    )
     try:
         await lock_ops.claim_lock(
             cosmos, scope="issue",
-            key=f"{run.issue_repo}#{run.issue_number}",
+            key=issue_lock_key,
             holder_id=holder_id,
             ttl_seconds=settings.lease_default_ttl_seconds,
             metadata={"triage_signal_id": signal.id, "phase": "triage"},
         )
     except LockBusy as busy:
         log.warning(
-            "triage: issue lock %s#%d is held by %s; deferring signal %s",
-            run.issue_repo, run.issue_number, busy.lock.held_by, signal.id,
+            "triage: issue lock %s is held by %s; deferring signal %s",
+            issue_lock_key, busy.lock.held_by, signal.id,
         )
         return
 
@@ -1230,42 +1307,37 @@ async def _mirror_github_issue(
     return outcome
 
 
-# ─── PR webhook handlers (#19) ─────────────────────────────────────────────────
-
-
-_CLOSES_KEYWORDS_RE = None  # set on first call below
-def _parse_issue_refs(body: str) -> list[int]:
-    """Extract issue numbers from PR body 'Closes #N' / 'Fixes #N' /
-    'Resolves #N' patterns (case-insensitive). Conservative — only
-    same-repo references; cross-repo `owner/repo#N` is ignored
-    because we only auto-link within the project."""
-    import re
-    global _CLOSES_KEYWORDS_RE
-    if _CLOSES_KEYWORDS_RE is None:
-        _CLOSES_KEYWORDS_RE = re.compile(
-            r"\b(?:closes|fixes|resolves)\s+#(\d+)\b",
-            re.IGNORECASE,
-        )
-    return [int(m.group(1)) for m in _CLOSES_KEYWORDS_RE.finditer(body)]
+# ─── PR webhook handlers (#50 slice 3 rewrite) ──────────────────────────────────
 
 
 async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
-    """`pull_request.opened` and `pull_request.reopened` — auto-link
-    the new PR to a Run by parsing the PR body for `Closes #N`."""
-    if payload.get("action") not in ("opened", "reopened"):
-        return {"ignored": f"pull_request.{payload.get('action')}"}
+    """Mirror `pull_request.*` events into the glimmung `prs` container.
 
-    pr = payload.get("pull_request") or {}
+    Pre-#50 this parsed `Closes #N` from the PR body to link a Run to a
+    GH PR number. Post-#50 the PR is the canonical entity in glimmung's
+    own `prs` container and the run/issue linkage is set explicitly by
+    the agent's `POST /v1/prs` step (#50 slice 4) — the webhook's job
+    is just to keep glimmung's PR document in sync with GH's lifecycle
+    (state transitions, head sha refreshes, title/body edits).
+
+    Actions handled:
+      - opened / reopened: ensure the glimmung PR exists + reopen if it
+        was previously CLOSED (skipped if it was merged — GH wouldn't
+        fire reopened for those but the guard is cheap).
+      - synchronize / edited: refresh head_sha + title/body so the
+        dashboard shows the latest commit.
+      - closed: close_pr or merge_pr depending on `pr.merged`.
+      - other: ignored.
+    """
+    action = payload.get("action") or ""
+    if action not in ("opened", "reopened", "closed", "synchronize", "edited"):
+        return {"ignored": f"pull_request.{action}"}
+
+    pr_payload = payload.get("pull_request") or {}
     repo = (payload.get("repository") or {}).get("full_name", "")
-    pr_number = pr.get("number")
+    pr_number = pr_payload.get("number")
     if not repo or not pr_number:
         return {"ignored": "missing fields"}
-
-    pr_branch = ((pr.get("head") or {}).get("ref") or "")
-    body = pr.get("body") or ""
-    issue_refs = _parse_issue_refs(body)
-    if not issue_refs:
-        return {"ignored": "pr body has no issue ref"}
 
     cosmos: Cosmos = app.state.cosmos
     matching = await query_all(
@@ -1277,78 +1349,112 @@ async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
         return {"ignored": "no project for repo"}
     project = matching[0]["name"]
 
-    linked: list[str] = []
-    for issue_number in issue_refs:
-        # `Closes #N` only carries the GH issue number. Resolve it
-        # through the glimmung Issue first (#28-consumer-PR-1): match
-        # by stitched github_issue_url, then look up the Run by the
-        # canonical glimmung issue_id. Falls back to the legacy
-        # `(project, issue_number)` query when no Issue exists for
-        # this URL — covers Runs created before the dispatch shim
-        # started minting Issues. The cleanup PR removes that branch
-        # along with `Run.issue_number`.
-        issue_url = issue_ops.github_issue_url_for(repo, issue_number)
-        run = None
-        issue_lookup = await issue_ops.find_issue_by_github_url(
-            cosmos, github_issue_url=issue_url,
-        )
-        if issue_lookup is not None:
-            issue, _issue_etag = issue_lookup
-            run = await run_ops.find_run_by_issue_id(cosmos, issue_id=issue.id)
-        if run is None:
-            run = await run_ops.get_latest_run(
-                cosmos, project=project, issue_number=issue_number,
-            )
-        if run is None:
-            continue
-        # Re-read with etag for the link mutation.
-        try:
-            doc = await cosmos.runs.read_item(item=run.id, partition_key=run.project)
-        except Exception:
-            continue
-        from glimmung.runs import _strip_meta as _strip
-        run, etag = (Run.model_validate(_strip(doc)), doc["_etag"])
-        try:
-            await run_ops.link_pr_to_run(
-                cosmos, run=run, etag=etag,
-                pr_number=int(pr_number), pr_branch=pr_branch,
-            )
-            linked.append(run.id)
-            log.info(
-                "linked PR %s#%d to run %s (issue #%d, branch %s)",
-                repo, pr_number, run.id, issue_number, pr_branch,
-            )
-        except Exception:
-            log.exception(
-                "link_pr_to_run failed for run %s pr %s#%d",
-                run.id, repo, pr_number,
-            )
+    title = pr_payload.get("title") or f"{repo}#{pr_number}"
+    body = pr_payload.get("body") or ""
+    branch = ((pr_payload.get("head") or {}).get("ref") or "")
+    base_ref = ((pr_payload.get("base") or {}).get("ref") or "main")
+    head_sha = ((pr_payload.get("head") or {}).get("sha") or "")
+    html_url = pr_payload.get("html_url") or ""
+    pr_merged = bool(pr_payload.get("merged"))
+    merged_by_user = (pr_payload.get("merged_by") or {}).get("login") or ""
 
-    return {"linked_runs": linked, "issue_refs": issue_refs}
+    pr, etag, created = await pr_ops.ensure_pr_for_github(
+        cosmos,
+        project=project,
+        repo=repo,
+        number=int(pr_number),
+        title=title,
+        branch=branch,
+        body=body,
+        base_ref=base_ref,
+        head_sha=head_sha,
+        html_url=html_url,
+    )
+    outcome: dict[str, Any] = {
+        "pr_id": pr.id,
+        "created": created,
+        "action": action,
+    }
+
+    # ensure_pr_for_github only honors create-time fields. For an
+    # existing PR, patch the user-editable + GH-provided fields so
+    # Cosmos stays in sync with GH edits + commits.
+    if not created and action in ("opened", "reopened", "edited", "synchronize"):
+        pr, etag = await pr_ops.update_pr(
+            cosmos, pr=pr, etag=etag,
+            title=title or None,
+            body=body if body else None,
+            branch=branch or None,
+            base_ref=base_ref or None,
+            head_sha=head_sha or None,
+            html_url=html_url or None,
+        )
+        outcome["patched"] = True
+
+    if action == "reopened" and pr.state == PRState.CLOSED:
+        if pr.merged_at is not None:
+            log.warning(
+                "pull_request.reopened on already-merged PR %s#%d (glimmung id %s); ignoring",
+                repo, pr_number, pr.id,
+            )
+            outcome["reopen_ignored"] = "merged"
+        else:
+            pr, etag = await pr_ops.reopen_pr(cosmos, pr=pr, etag=etag)
+            outcome["reopened"] = True
+
+    if action == "closed":
+        if pr_merged:
+            pr, etag = await pr_ops.merge_pr(
+                cosmos, pr=pr, etag=etag,
+                merged_by=merged_by_user or "unknown",
+            )
+            outcome["merged"] = True
+        else:
+            pr, etag = await pr_ops.close_pr(cosmos, pr=pr, etag=etag)
+            outcome["closed"] = True
+
+    return outcome
 
 
 async def _handle_pull_request_review(payload: dict[str, Any]) -> dict[str, Any]:
     """`pull_request_review.submitted` — enqueue a GH_REVIEW signal so
     the drain loop can route it through the triage decision engine.
 
+    Post-#50 the signal targets the glimmung PR id (ULID), not the GH
+    PR number. The drain still accepts the legacy `(repo, pr_number)`
+    shape so any signals enqueued before the rewrite continue to drain
+    cleanly. If no glimmung PR exists for `(repo, pr_number)` (the
+    webhook handler above ensures one normally does), the GH coords
+    are used as a fallback so the signal isn't lost.
+
     Other actions (`edited`, `dismissed`) are ignored — only the
     initial submission is decisional."""
     if payload.get("action") != "submitted":
         return {"ignored": f"pull_request_review.{payload.get('action')}"}
 
-    pr = payload.get("pull_request") or {}
+    pr_payload = payload.get("pull_request") or {}
     review = payload.get("review") or {}
     repo = (payload.get("repository") or {}).get("full_name", "")
-    pr_number = pr.get("number")
+    pr_number = pr_payload.get("number")
     if not repo or not pr_number:
         return {"ignored": "missing fields"}
 
     cosmos: Cosmos = app.state.cosmos
+    target_repo = repo
+    target_id = str(pr_number)
+    found = await pr_ops.find_pr_by_repo_number(
+        cosmos, repo=repo, number=int(pr_number),
+    )
+    if found is not None:
+        pr, _ = found
+        target_repo = pr.project
+        target_id = pr.id
+
     sig = await signal_ops.enqueue_signal(
         cosmos,
         target_type=SignalTargetType.PR,
-        target_repo=repo,
-        target_id=str(pr_number),
+        target_repo=target_repo,
+        target_id=target_id,
         source=SignalSource.GH_REVIEW,
         payload={
             "state": review.get("state") or "",
