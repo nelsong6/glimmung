@@ -332,6 +332,17 @@ class Run(BaseModel):
     pr_number: int | None = None
     pr_branch: str | None = None
     pr_lock_holder_id: str | None = None     # set while a triage workflow is in flight
+    # Live preview env URL the workflow stood up (#88). Stamped by the
+    # `started` callback so the PR composer can surface the env + the
+    # /_styleguide URL alongside the diff. None for non-frontend
+    # workflows that don't expose a public env.
+    validation_url: str | None = None
+    # Markdown block of inline screenshot embeds rendered by the
+    # workflow's upload-to-blob step (#87 + #88). Stamped by the
+    # `completed` callback. The PR composer drops this verbatim into
+    # the PR body — failures are surfaced in the markdown itself by
+    # the workflow, so we don't need a separate failure list here.
+    screenshots_markdown: str | None = None
     created_at: datetime
     updated_at: datetime
 
