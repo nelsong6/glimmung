@@ -22,10 +22,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pr-number", default="")
 
     p = sub.add_parser("label-release-pr",
-        help="Add glimmung.io/pr=<N> labels to the issue release's resources after the PR opens.")
+        help="(legacy) Add glimmung.io/pr=<N> labels to the issue release's resources after the PR opens.")
     p.add_argument("--release", required=True)
     p.add_argument("--namespace", default=ops.PROD_NAMESPACE)
     p.add_argument("--pr-number", required=True)
+
+    p = sub.add_parser("label-release-branch",
+        help="Add glimmung.io/branch=<slug> labels to the issue release's resources at apply time (#69 path).")
+    p.add_argument("--release", required=True)
+    p.add_argument("--namespace", default=ops.PROD_NAMESPACE)
+    p.add_argument("--branch-slug", required=True)
 
     p = sub.add_parser("rebuild-validation-image",
         help="Build a fresh image from the agent's pushed branch and roll the issue release onto it.")
@@ -88,6 +94,12 @@ def main() -> int:
                 release=args.release,
                 namespace=args.namespace,
                 pr_number=args.pr_number,
+            ))
+        elif args.command == "label-release-branch":
+            dump(ops.label_release_branch(
+                release=args.release,
+                namespace=args.namespace,
+                branch_slug=args.branch_slug,
             ))
         elif args.command == "rebuild-validation-image":
             dump(ops.rebuild_validation_image(

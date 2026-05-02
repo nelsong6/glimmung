@@ -154,7 +154,11 @@ def deploy_preview(
 
 def label_release_pr(*, release: str, namespace: str, pr_number: str) -> dict:
     """Add `glimmung.io/pr=<N>` to the issue release's resources after the
-    PR opens. Cleanup workflow finds + uninstalls releases by this label."""
+    PR opens. Pre-#69 cleanup workflow path; kept for legacy callers.
+
+    Under #69 (glimmung-opens-PR), the agent doesn't know the PR number
+    at workflow-run time — use `label_release_branch` instead.
+    """
     for kind in ("deployment", "service", "httproute"):
         run_command(
             [
@@ -165,6 +169,22 @@ def label_release_pr(*, release: str, namespace: str, pr_number: str) -> dict:
             ]
         )
     return {"release": release, "namespace": namespace, "pr_number": pr_number}
+
+
+def label_release_branch(*, release: str, namespace: str, branch_slug: str) -> dict:
+    """Add `glimmung.io/branch=<slug>` to the issue release's resources at
+    apply time so cleanup can find the release by branch (the agent doesn't
+    have the PR number until glimmung opens the PR post-workflow)."""
+    for kind in ("deployment", "service", "httproute"):
+        run_command(
+            [
+                "kubectl", "-n", namespace, "label",
+                kind, release,
+                f"glimmung.io/branch={branch_slug}",
+                "--overwrite",
+            ]
+        )
+    return {"release": release, "namespace": namespace, "branch_slug": branch_slug}
 
 
 def destroy_preview(*, release: str, namespace: str) -> dict:
