@@ -14,15 +14,18 @@ function IssuesView({ data, projectFilter }) {
             {rows.map(r => (
               <tr key={r.id}>
                 <td>{r.project}</td>
-                <td><button className="link" style={{ textAlign: "left" }}>{r.title}</button></td>
+                <td><button className="gb ghost" style={{ textAlign: "left" }}>{r.title}</button></td>
                 <MonoCell dim>{r.labels.length ? r.labels.join(", ") : "—"}</MonoCell>
                 <td>
                   {r.last_run_state ? (
-                    <Pill kind={runPill(r.last_run_state)}>{r.last_run_state}{r.issue_lock_held ? " (in flight)" : ""}</Pill>
+                    <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                      <Pill kind={runPill(r.last_run_state)}>{r.last_run_state}</Pill>
+                      {r.issue_lock_held && <Pill kind="busy">in flight</Pill>}
+                    </span>
                   ) : <span style={{ color: "var(--fg-dimmer)" }}>—</span>}
                 </td>
                 <td>
-                  <button className="link" disabled={r.issue_lock_held}>
+                  <button className="gb ghost" disabled={r.issue_lock_held}>
                     {r.issue_lock_held ? "in flight" : "dispatch"}
                   </button>
                 </td>

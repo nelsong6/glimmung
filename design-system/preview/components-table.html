@@ -1,33 +1,78 @@
-<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="_card.css"></head><body>
-<div class="card" style="padding:0">
-<table style="width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums">
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="_card.css">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  .tbl-card { padding: 0; }
+  table.demo {
+    width: 100%;
+    border-collapse: collapse;
+    font-variant-numeric: tabular-nums;
+  }
+  table.demo th {
+    text-align: left;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    font-weight: 500;
+    font-size: var(--text-sm);
+    color: var(--fg-dim);
+    letter-spacing: var(--tracking-eyebrow);
+    text-transform: uppercase;
+  }
+  table.demo td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    font-family: var(--font-sans);
+    font-variant-numeric: tabular-nums;
+    font-size: var(--text-sm);
+    color: var(--fg-secondary);
+  }
+  table.demo td code {
+    font-family: var(--font-code);
+    font-size: 0.78rem;
+    color: var(--fg-secondary);
+  }
+  table.demo td.dim { color: var(--fg-dimmer); }
+  table.demo tr.eligible td:first-child {
+    border-left: 2px solid var(--state-success-fg);
+    color: var(--fg);
+  }
+  .meta {
+    padding: 8px 14px 12px;
+    font-family: var(--font-sans);
+    font-size: 11px;
+    color: var(--fg-dimmer);
+  }
+</style>
+</head><body>
+<div class="card tbl-card">
+<table class="demo">
   <thead><tr>
-    <th style="text-align:left;padding:8px 12px;border-bottom:1px solid #2a2a2e;font-weight:500;font-size:0.85rem;color:#888;letter-spacing:0.04em;text-transform:uppercase">Name</th>
-    <th style="text-align:left;padding:8px 12px;border-bottom:1px solid #2a2a2e;font-weight:500;font-size:0.85rem;color:#888;letter-spacing:0.04em;text-transform:uppercase">Capabilities</th>
-    <th style="text-align:left;padding:8px 12px;border-bottom:1px solid #2a2a2e;font-weight:500;font-size:0.85rem;color:#888;letter-spacing:0.04em;text-transform:uppercase">State</th>
-    <th style="text-align:left;padding:8px 12px;border-bottom:1px solid #2a2a2e;font-weight:500;font-size:0.85rem;color:#888;letter-spacing:0.04em;text-transform:uppercase">Last used</th>
+    <th>Name</th>
+    <th>Capabilities</th>
+    <th>State</th>
+    <th>Last used</th>
   </tr></thead>
   <tbody>
-    <tr style="background:transparent">
-      <td style="padding:8px 12px;border-bottom:1px solid #2a2a2e;font-family:ui-monospace,monospace;font-size:0.85rem;color:#b8b8b8">x11-gpu-01</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #2a2a2e;font-family:ui-monospace,monospace;font-size:0.85rem;color:#b8b8b8">{"runtime":"x11","gpu":true}</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #2a2a2e"><span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#14532d;color:#4ade80;font-size:0.75rem;font-weight:500">free</span></td>
-      <td style="padding:8px 12px;border-bottom:1px solid #2a2a2e;font-family:ui-monospace,monospace;font-size:0.85rem;color:#666">3m ago</td>
+    <tr>
+      <td>x11-gpu-01</td>
+      <td><code>{"runtime":"x11","gpu":true}</code></td>
+      <td><span class="pill free">free</span></td>
+      <td class="dim">3m ago</td>
     </tr>
     <tr class="eligible">
-      <td style="padding:8px 12px;border-bottom:1px solid #2a2a2e;font-family:ui-monospace,monospace;font-size:0.85rem;color:#d4d4d4;border-left:2px solid #4ade80">x11-gpu-02</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #2a2a2e;font-family:ui-monospace,monospace;font-size:0.85rem;color:#b8b8b8">{"runtime":"x11","gpu":true}</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #2a2a2e"><span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#422006;color:#fb923c;font-size:0.75rem;font-weight:500">busy</span></td>
-      <td style="padding:8px 12px;border-bottom:1px solid #2a2a2e;font-family:ui-monospace,monospace;font-size:0.85rem;color:#666">just now</td>
+      <td>x11-gpu-02</td>
+      <td><code>{"runtime":"x11","gpu":true}</code></td>
+      <td><span class="pill busy">busy</span></td>
+      <td class="dim">just now</td>
     </tr>
     <tr>
-      <td style="padding:8px 12px;border-bottom:1px solid #2a2a2e;font-family:ui-monospace,monospace;font-size:0.85rem;color:#b8b8b8">headless-04</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #2a2a2e;font-family:ui-monospace,monospace;font-size:0.85rem;color:#b8b8b8">{"runtime":"linux"}</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #2a2a2e"><span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#3f1c1c;color:#f87171;font-size:0.75rem;font-weight:500">drained</span></td>
-      <td style="padding:8px 12px;border-bottom:1px solid #2a2a2e;font-family:ui-monospace,monospace;font-size:0.85rem;color:#666">2d ago</td>
+      <td>headless-04</td>
+      <td><code>{"runtime":"linux"}</code></td>
+      <td><span class="pill drain">drained</span></td>
+      <td class="dim">2d ago</td>
     </tr>
   </tbody>
 </table>
-<div style="padding:8px 12px;font-family:ui-monospace,monospace;font-size:10px;color:#666">eligible row gets a 2px green left-stripe — the only row decoration in the system</div>
+<div class="meta">eligible row gets a 2px green left-rail — same rail vocabulary as buttons / pills / sidebar selection</div>
 </div>
 </body></html>

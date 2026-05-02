@@ -1,4 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap");
 
 /**
  * Glimmung Design System — Colors & Type
@@ -102,12 +102,17 @@
   /* ─────────────────────────────────────────────
      4. Type tokens
      ───────────────────────────────────────────── */
-  /* Geist Sans + Geist Mono — Vercel's developer-tooling family.
-     Loaded from Google Fonts via @import at the top of this file. */
-  --font-sans:             "Geist", ui-sans-serif, system-ui, -apple-system,
+  /* Single-family system — IBM Plex Sans.
+     A humanist sans that reads as professional product UI rather than
+     code-tooling. `--font-mono` is kept as an alias for legacy rules but
+     resolves to the sans stack — use `font-variant-numeric: tabular-nums`
+     where numeric alignment matters (tables, counts, KPIs).
+     Use `--font-code` (still real mono) only inside <code>/<pre>. */
+  --font-sans:             "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system,
                            "Segoe UI", Roboto, "Helvetica Neue", Arial,
                            sans-serif;
-  --font-mono:             "Geist Mono", ui-monospace, SFMono-Regular, Menlo,
+  --font-mono:             var(--font-sans);
+  --font-code:             ui-monospace, SFMono-Regular, Menlo, Consolas,
                            monospace;
 
   /* Base size is 14px — the live dashboard sets this on :root */
@@ -190,7 +195,7 @@ button { text-decoration: none; }
 button:hover, button:focus, button:focus-visible { text-decoration: none; }
 
 code, pre, .mono {
-  font-family: var(--font-mono);
+  font-family: var(--font-code);
   font-size: var(--text-sm);
   color: var(--fg-secondary);
 }
@@ -227,6 +232,7 @@ table {
   width: 100%;
   border-collapse: collapse;
   font-variant-numeric: tabular-nums;
+  font-family: var(--font-sans);
 }
 th {
   text-align: left;
@@ -244,18 +250,107 @@ td {
   border-bottom: 1px solid var(--border);
 }
 
-/* Pill — base. Add modifier class .free / .busy / .drain for color. */
+/* ─────────────────────────────────────────────
+   Pill — "console tag". Sibling to the .gb button:
+   asymmetric chamfered top-left, hairline edge in
+   the state color, 2px rail along the leading edge,
+   mono lowercase label, faint state-tinted body.
+   No border-radius — flat industrial geometry to
+   match buttons / tabs / table chrome.
+   Modifier classes: .free / .busy / .drain / .info
+   ───────────────────────────────────────────── */
 .pill {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: var(--radius-pill);
-  font-size: var(--text-2xs);
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 8px 0 9px;
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
   font-weight: var(--weight-medium);
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
+  line-height: 1;
+  white-space: nowrap;
+  /* asymmetric chamfered top-left — same signature as .gb but smaller */
+  clip-path: polygon(6px 0, 100% 0, 100% 100%, 0 100%, 0 6px);
+  isolation: isolate;
+  /* defaults — overridden by state modifiers */
+  --pill-rail: var(--border-strong);
+  --pill-edge: var(--border);
+  --pill-bg:   transparent;
+  --pill-fg:   var(--fg-dim);
+  background: var(--pill-bg);
+  color: var(--pill-fg);
 }
-.pill.free  { background: var(--state-success-bg); color: var(--state-success-fg); }
-.pill.busy  { background: var(--state-busy-bg);    color: var(--state-busy-fg); }
-.pill.drain { background: var(--state-danger-bg);  color: var(--state-danger-fg); }
-.pill.info  { background: var(--state-info-bg);    color: var(--state-info-fg); }
+.pill::before {
+  content: "";
+  position: absolute; inset: 0;
+  background:
+    linear-gradient(to right, var(--pill-rail) 0 2px, transparent 2px),
+    linear-gradient(to top,    var(--pill-edge) 0 1px, transparent 1px),
+    linear-gradient(to bottom, var(--pill-edge) 0 1px, transparent 1px),
+    linear-gradient(to left,   var(--pill-edge) 0 1px, transparent 1px),
+    linear-gradient(135deg, transparent 0 calc(8.49px - 1px), var(--pill-edge) calc(8.49px - 1px) 8.49px, transparent 8.49px);
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+  pointer-events: none;
+  z-index: 1;
+}
+.pill.free  {
+  --pill-rail: var(--state-success-fg);
+  --pill-edge: color-mix(in srgb, var(--state-success-fg) 32%, var(--border));
+  --pill-bg:   color-mix(in srgb, var(--state-success-bg) 55%, transparent);
+  --pill-fg:   var(--state-success-fg);
+}
+.pill.busy  {
+  --pill-rail: var(--state-busy-fg);
+  --pill-edge: color-mix(in srgb, var(--state-busy-fg) 32%, var(--border));
+  --pill-bg:   color-mix(in srgb, var(--state-busy-bg) 55%, transparent);
+  --pill-fg:   var(--state-busy-fg);
+}
+.pill.drain {
+  --pill-rail: var(--state-danger-fg);
+  --pill-edge: color-mix(in srgb, var(--state-danger-fg) 32%, var(--border));
+  --pill-bg:   color-mix(in srgb, var(--state-danger-bg) 55%, transparent);
+  --pill-fg:   var(--state-danger-fg);
+}
+.pill.info  {
+  --pill-rail: var(--state-info-fg);
+  --pill-edge: color-mix(in srgb, var(--state-info-fg) 32%, var(--border));
+  --pill-bg:   color-mix(in srgb, var(--state-info-bg) 55%, transparent);
+  --pill-fg:   var(--state-info-fg);
+}
+
+/* Count pill — neutral numeric chip. No rail, just a hairline
+   edge + chamfer. Tabular numerals, dim text. */
+.count-pill {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 7px;
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-dimmer);
+  background: var(--surface-hover);
+  clip-path: polygon(5px 0, 100% 0, 100% 100%, 0 100%, 0 5px);
+  isolation: isolate;
+}
+.count-pill::before {
+  content: "";
+  position: absolute; inset: 0;
+  background:
+    linear-gradient(to top,    var(--border) 0 1px, transparent 1px),
+    linear-gradient(to bottom, var(--border) 0 1px, transparent 1px),
+    linear-gradient(to left,   var(--border) 0 1px, transparent 1px),
+    linear-gradient(to right,  var(--border) 0 1px, transparent 1px),
+    linear-gradient(135deg, transparent 0 calc(7.07px - 1px), var(--border) calc(7.07px - 1px) 7.07px, transparent 7.07px);
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+  pointer-events: none;
+}
 
 /* The pulse animation — the only animation in the entire system. */
 @keyframes pulse {

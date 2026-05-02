@@ -1,16 +1,176 @@
-<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="_card.css"></head><body>
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="_card.css">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+/* ─────────────────────────────────────────────────────────────
+   Glimmung button system — "console plate"
+   ─────────────────────────────────────────────────────────────
+   Reference: industrial control-panel hardware, mainframe console
+   labels, freight runway placards. Asymmetric chamfered corner cut
+   (top-left), hairline accent rail along the leading edge, mono
+   lowercase label with optional sigil. No box-shadows, no
+   gradients — depth lives in border value, accent rail, and the
+   chamfer geometry.
+   ───────────────────────────────────────────────────────────── */
+
+.gb {
+  position: relative;
+  display: inline-flex; align-items: center; gap: 10px;
+  height: 34px; padding: 0 18px 0 16px;
+  background: var(--surface);
+  color: var(--fg);
+  border: none;
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
+  cursor: pointer;
+  user-select: none;
+  /* asymmetric chamfered top-left corner — the signature shape */
+  clip-path: polygon(10px 0, 100% 0, 100% 100%, 0 100%, 0 10px);
+  isolation: isolate;
+}
+
+/* drawn outline (replaces border because clip-path eats the border) */
+.gb::before {
+  content: ""; position: absolute; inset: 0;
+  background:
+    /* left rail (accent) */
+    linear-gradient(to right, var(--gb-rail, transparent) 0 2px, transparent 2px),
+    /* bottom hairline */
+    linear-gradient(to top, var(--gb-edge, var(--border)) 0 1px, transparent 1px),
+    /* top hairline */
+    linear-gradient(to bottom, var(--gb-edge, var(--border)) 0 1px, transparent 1px),
+    /* right hairline */
+    linear-gradient(to left, var(--gb-edge, var(--border)) 0 1px, transparent 1px),
+    /* chamfer hairline (top-left diagonal stroke) */
+    linear-gradient(135deg, transparent 0 calc(14.14px - 1px), var(--gb-edge, var(--border)) calc(14.14px - 1px) 14.14px, transparent 14.14px);
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+  pointer-events: none; z-index: 1;
+}
+
+.gb .sigil {
+  font-family: var(--font-sans);
+  color: var(--gb-sigil, var(--fg-dimmer));
+  font-size: 0.9rem;
+  line-height: 1;
+}
+.gb .label { line-height: 1; }
+
+.gb:hover { background: var(--gb-hover, var(--surface-hover)); }
+.gb:active { background: var(--gb-active, var(--bg-deep)); }
+.gb:focus-visible { outline: none; }
+.gb:focus-visible::before { --gb-edge: var(--state-success-fg); }
+.gb:disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* ─── Primary — affirmative action. Green rail on left, body still surface. ─── */
+.gb.primary {
+  --gb-rail: var(--state-success-fg);
+  --gb-edge: color-mix(in srgb, var(--state-success-fg) 32%, var(--border));
+  --gb-sigil: var(--state-success-fg);
+  color: var(--fg-inverse);
+}
+.gb.primary:hover { --gb-edge: color-mix(in srgb, var(--state-success-fg) 55%, var(--border)); --gb-hover: #131a14; }
+
+/* ─── Danger — red rail. ─── */
+.gb.danger {
+  --gb-rail: var(--state-danger-fg);
+  --gb-edge: color-mix(in srgb, var(--state-danger-fg) 32%, var(--border));
+  --gb-sigil: var(--state-danger-fg);
+  color: var(--fg-inverse);
+}
+.gb.danger:hover { --gb-edge: color-mix(in srgb, var(--state-danger-fg) 55%, var(--border)); --gb-hover: #1a1212; }
+
+/* ─── Quiet — no rail, transparent body. ─── */
+.gb.quiet { background: transparent; color: var(--fg-muted); }
+.gb.quiet:hover { background: var(--surface); color: var(--fg-inverse); }
+
+/* ─── Ghost link — strips the chamfer, just the typography. ─── */
+.gb.ghost {
+  clip-path: none; height: auto; padding: 0;
+  background: transparent;
+  color: var(--state-success-fg);
+}
+.gb.ghost::before { display: none; }
+.gb.ghost:hover { background: transparent; color: #86efac; text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
+.gb.ghost.danger-text { color: var(--state-danger-fg); }
+.gb.ghost.danger-text:hover { color: #fca5a5; }
+
+/* ─── Sizes ─── */
+.gb.sm { height: 26px; padding: 0 14px 0 12px; font-size: 0.72rem; clip-path: polygon(8px 0, 100% 0, 100% 100%, 0 100%, 0 8px); }
+.gb.sm::before { background:
+    linear-gradient(to right, var(--gb-rail, transparent) 0 2px, transparent 2px),
+    linear-gradient(to top, var(--gb-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(to bottom, var(--gb-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(to left, var(--gb-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(135deg, transparent 0 calc(11.31px - 1px), var(--gb-edge, var(--border)) calc(11.31px - 1px) 11.31px, transparent 11.31px); background-repeat: no-repeat; }
+
+.gb.lg { height: 42px; padding: 0 22px 0 20px; font-size: 0.85rem; clip-path: polygon(12px 0, 100% 0, 100% 100%, 0 100%, 0 12px); }
+.gb.lg::before { background:
+    linear-gradient(to right, var(--gb-rail, transparent) 0 2px, transparent 2px),
+    linear-gradient(to top, var(--gb-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(to bottom, var(--gb-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(to left, var(--gb-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(135deg, transparent 0 calc(16.97px - 1px), var(--gb-edge, var(--border)) calc(16.97px - 1px) 16.97px, transparent 16.97px); background-repeat: no-repeat; }
+
+/* ─── Two-step confirm group ─── */
+.confirm { display: inline-flex; align-items: center; gap: 10px; }
+.confirm .sep { color: var(--fg-faintest); font-family: var(--font-sans); font-size: 0.85rem; }
+
+/* ─── Loading dot ─── */
+.gb .ldot {
+  width: 5px; height: 5px; border-radius: 999px;
+  background: currentColor; opacity: 0.7;
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+.row { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin-bottom: 18px; }
+.row:last-child { margin-bottom: 0; }
+.meta { font-family: var(--font-sans); font-size: 10px; font-weight: 500; color: var(--fg-dimmer); width: 88px; flex-shrink: 0; text-transform: uppercase; letter-spacing: 0.08em; padding-top: 4px; }
+</style>
+</head><body>
 <div class="card">
-  <div class="lbl">Buttons & links</div>
-  <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center">
-    <button style="background:#14532d;color:#4ade80;border:none;padding:8px 16px;border-radius:4px;font-family:inherit;font-size:0.9rem;font-weight:500;cursor:pointer">submit</button>
-    <button style="background:#14532d;color:#4ade80;border:none;padding:8px 16px;border-radius:4px;font-family:inherit;font-size:0.9rem;font-weight:500;opacity:0.5">submit (disabled)</button>
-    <button style="background:transparent;border:1px solid #2a2a2e;color:#d4d4d4;padding:4px 12px;border-radius:4px;font-family:inherit;font-size:0.85rem">admin</button>
-    <button style="background:transparent;border:1px solid #3a3a3e;color:#d4d4d4;padding:4px 12px;border-radius:4px;font-family:inherit;font-size:0.85rem;background:#15151a">admin (hover)</button>
-    <a style="color:#4ade80;font-size:0.85rem">refresh</a>
-    <span style="color:#f87171;font-size:0.85rem">cancel?</span>
-    <span style="color:#666">/</span>
-    <span style="color:#d4d4d4;font-size:0.85rem">keep</span>
+  <div class="lbl">Buttons — console plate</div>
+
+  <div class="row">
+    <div class="meta">primary</div>
+    <button class="gb primary"><span class="sigil">›</span><span class="label">dispatch</span></button>
+    <button class="gb primary lg"><span class="sigil">▸</span><span class="label">register host</span></button>
+    <button class="gb primary"><span class="ldot"></span><span class="label">dispatching</span></button>
+    <button class="gb primary" disabled><span class="sigil">›</span><span class="label">dispatch</span></button>
   </div>
-  <div style="margin-top:12px;font-family:ui-monospace,monospace;font-size:10px;color:#666">primary submit (green) · ghost link (border) · inline link (green) · two-step danger confirm</div>
+
+  <div class="row">
+    <div class="meta">default</div>
+    <button class="gb"><span class="sigil">∷</span><span class="label">admin</span></button>
+    <button class="gb"><span class="label">refresh</span></button>
+    <button class="gb sm"><span class="label">view raw</span></button>
+  </div>
+
+  <div class="row">
+    <div class="meta">quiet</div>
+    <button class="gb quiet"><span class="label">filter</span></button>
+    <button class="gb quiet"><span class="label">copy id</span></button>
+    <button class="gb quiet sm"><span class="label">expand</span></button>
+  </div>
+
+  <div class="row">
+    <div class="meta">danger</div>
+    <button class="gb danger"><span class="sigil">⌫</span><span class="label">force release</span></button>
+    <span class="confirm">
+      <button class="gb ghost danger-text">cancel?</button>
+      <span class="sep">/</span>
+      <button class="gb ghost">keep</button>
+    </span>
+  </div>
+
+  <div class="row">
+    <div class="meta">ghost</div>
+    <button class="gb ghost">refresh</button>
+    <button class="gb ghost">view attempt</button>
+    <button class="gb ghost" disabled>in flight</button>
+  </div>
 </div>
 </body></html>

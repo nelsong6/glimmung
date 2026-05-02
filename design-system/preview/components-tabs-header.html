@@ -1,15 +1,77 @@
-<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="_card.css"></head><body>
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="_card.css">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  .hdr {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 12px;
+    margin-bottom: 14px;
+  }
+  .hdr h1 {
+    font-size: var(--text-xl);
+    font-weight: var(--weight-semibold);
+    letter-spacing: var(--tracking-tight);
+    color: var(--fg);
+    margin: 0;
+  }
+  .hdr .quote {
+    margin-left: auto;
+    max-width: 50%;
+    text-align: right;
+  }
+
+  /* Tabs — mono lowercase labels, bottom-rail accent on selected
+     (same rail vocabulary as buttons / pills / sidebar / table). */
+  .tabs {
+    display: flex;
+    gap: 2px;
+    border-bottom: 1px solid var(--border);
+  }
+  .tabs .tab {
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--fg-dim);
+    padding: 9px 16px 7px;
+    cursor: pointer;
+    font-family: var(--font-sans);
+    font-size: 0.78rem;
+    font-weight: 400;
+    letter-spacing: 0.06em;
+    text-transform: lowercase;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: -1px;
+  }
+  .tabs .tab:hover { background: var(--surface); color: var(--fg); }
+  .tabs .tab.selected {
+    color: var(--state-success-fg);
+    border-bottom-color: var(--state-success-fg);
+  }
+  .tab-dot {
+    display: inline-block;
+    width: 7px; height: 7px;
+    border-radius: 999px;
+    background: var(--state-busy-fg);
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+</style>
+</head><body>
 <div class="card">
-  <div class="lbl">Tabs · connection · header strip</div>
-  <div style="display:flex;align-items:baseline;gap:12px;border-bottom:1px solid #2a2a2e;padding-bottom:12px;margin-bottom:14px">
-    <h1 style="font-size:1.6rem;font-weight:600;letter-spacing:-0.01em;color:#d4d4d4;margin:0">glimmung</h1>
-    <span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#14532d;color:#4ade80;font-size:0.75rem;font-weight:500">live</span>
-    <div style="margin-left:auto;font-style:italic;color:#555;font-size:0.85rem">"From a thousand worlds they had come, each with a craft to contribute."</div>
+  <div class="lbl">Header · connection · tabs</div>
+  <div class="hdr">
+    <h1>glimmung</h1>
+    <span class="connection live">live</span>
+    <div class="quote">"From a thousand worlds they had come, each with a craft to contribute."</div>
   </div>
-  <div style="display:flex;gap:4px;border-bottom:1px solid #2a2a2e">
-    <button style="background:transparent;border:none;border-bottom:2px solid #4ade80;color:#4ade80;padding:10px 18px;font-family:inherit;font-size:0.9rem;font-weight:500">capacity</button>
-    <button style="background:transparent;border:none;border-bottom:2px solid transparent;color:#999;padding:10px 18px;font-family:inherit;font-size:0.9rem;font-weight:500;display:inline-flex;align-items:center;gap:6px">issues <span style="display:inline-block;width:7px;height:7px;border-radius:999px;background:#fb923c;animation:pulse-anim 1.6s ease-in-out infinite"></span></button>
-    <button style="background:transparent;border:none;border-bottom:2px solid transparent;color:#999;padding:10px 18px;font-family:inherit;font-size:0.9rem;font-weight:500">prs</button>
+  <div class="tabs">
+    <button class="tab selected">capacity</button>
+    <button class="tab">issues <span class="tab-dot"></span></button>
+    <button class="tab">prs</button>
   </div>
 </div>
 </body></html>

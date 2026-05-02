@@ -14,7 +14,7 @@ function CapacityView({ snap, signedIn, selected, selectedWorkflow, selectedProj
   return (
     <>
       <h2>Hosts</h2>
-      <div className="kpi-strip">
+      <div className="plate kpi-strip">
         <div className="kpi"><span className="k">hosts</span><span className="v">{snap.hosts.length}</span></div>
         <div className="kpi"><span className="k">free</span><span className="v green">{free}</span></div>
         <div className="kpi"><span className="k">busy</span><span className="v amber">{busy}</span></div>
@@ -82,13 +82,13 @@ function CapacityView({ snap, signedIn, selected, selectedWorkflow, selectedProj
                 {signedIn && (
                   <td>
                     {confirmId === l.id ? (
-                      <>
-                        <button className="link danger" onClick={() => setConfirmId(null)}>cancel?</button>
-                        <span style={{ color: "var(--fg-dimmer)" }}> / </span>
-                        <button className="link" onClick={() => setConfirmId(null)}>keep</button>
-                      </>
+                      <span className="confirm">
+                        <button className="gb ghost danger-text" onClick={() => setConfirmId(null)}>cancel?</button>
+                        <span className="sep">/</span>
+                        <button className="gb ghost" onClick={() => setConfirmId(null)}>keep</button>
+                      </span>
                     ) : (
-                      <button className="link" onClick={() => setConfirmId(l.id)}>cancel</button>
+                      <button className="gb ghost" onClick={() => setConfirmId(l.id)}>cancel</button>
                     )}
                   </td>
                 )}
@@ -101,7 +101,7 @@ function CapacityView({ snap, signedIn, selected, selectedWorkflow, selectedProj
       {selectedWorkflow && (
         <>
           <h2>Workflow info</h2>
-          <div className="project-info">
+          <div className="plate project-info">
             <span className="key">project</span><span className="val mono">{selectedWorkflow.project}</span>
             <span className="key">workflow</span><span className="val mono">{selectedWorkflow.name}</span>
             <span className="key">file</span><span className="val mono">{selectedWorkflow.workflow_filename}@{selectedWorkflow.workflow_ref}</span>
@@ -113,7 +113,7 @@ function CapacityView({ snap, signedIn, selected, selectedWorkflow, selectedProj
       {selectedProject && !selectedWorkflow && (
         <>
           <h2>Project info</h2>
-          <div className="project-info">
+          <div className="plate project-info">
             <span className="key">name</span><span className="val mono">{selectedProject.name}</span>
             <span className="key">github</span><span className="val mono">{selectedProject.github_repo}</span>
           </div>

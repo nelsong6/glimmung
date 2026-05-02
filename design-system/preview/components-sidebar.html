@@ -1,23 +1,99 @@
-<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="_card.css"></head><body>
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="_card.css">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  .sb {
+    background: var(--bg-deep);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 14px 0;
+    width: 240px;
+  }
+  .sb .sidebar-title {
+    padding: 0 20px 10px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 6px;
+  }
+  .sb-row {
+    display: flex;
+    width: 100%;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 20px;
+    background: transparent;
+    border: none;
+    color: var(--fg-secondary);
+    font-family: var(--font-sans);
+    font-size: 0.9rem;
+    text-align: left;
+    border-left: 2px solid transparent;
+    cursor: pointer;
+  }
+  .sb-row.selected {
+    background: var(--surface);
+    color: var(--fg-inverse);
+    border-left-color: var(--state-success-fg);
+    font-weight: 500;
+  }
+  .sb-row.workflow {
+    padding: 6px 20px 6px 36px;
+    font-family: var(--font-sans);
+    font-size: 0.85rem;
+    color: var(--fg-dim);
+  }
+  .sb-row.workflow.selected {
+    background: var(--surface);
+    color: var(--fg);
+    border-left-color: var(--state-info-fg);
+    font-weight: 400;
+  }
+  .count-pill.info-tone {
+    background: color-mix(in srgb, var(--state-info-bg) 55%, transparent);
+    color: var(--state-info-fg);
+  }
+  .count-pill.info-tone::before {
+    background:
+      linear-gradient(to right,  var(--state-info-fg) 0 2px, transparent 2px),
+      linear-gradient(to top,    color-mix(in srgb, var(--state-info-fg) 32%, var(--border)) 0 1px, transparent 1px),
+      linear-gradient(to bottom, color-mix(in srgb, var(--state-info-fg) 32%, var(--border)) 0 1px, transparent 1px),
+      linear-gradient(to left,   color-mix(in srgb, var(--state-info-fg) 32%, var(--border)) 0 1px, transparent 1px),
+      linear-gradient(135deg, transparent 0 calc(7.07px - 1px), color-mix(in srgb, var(--state-info-fg) 32%, var(--border)) calc(7.07px - 1px) 7.07px, transparent 7.07px);
+    background-repeat: no-repeat; background-size: 100% 100%;
+  }
+  .count-pill.success-tone {
+    background: color-mix(in srgb, var(--state-success-bg) 55%, transparent);
+    color: var(--state-success-fg);
+  }
+  .count-pill.success-tone::before {
+    background:
+      linear-gradient(to right,  var(--state-success-fg) 0 2px, transparent 2px),
+      linear-gradient(to top,    color-mix(in srgb, var(--state-success-fg) 32%, var(--border)) 0 1px, transparent 1px),
+      linear-gradient(to bottom, color-mix(in srgb, var(--state-success-fg) 32%, var(--border)) 0 1px, transparent 1px),
+      linear-gradient(to left,   color-mix(in srgb, var(--state-success-fg) 32%, var(--border)) 0 1px, transparent 1px),
+      linear-gradient(135deg, transparent 0 calc(7.07px - 1px), color-mix(in srgb, var(--state-success-fg) 32%, var(--border)) calc(7.07px - 1px) 7.07px, transparent 7.07px);
+    background-repeat: no-repeat; background-size: 100% 100%;
+  }
+</style>
+</head><body>
 <div class="card">
   <div class="lbl">Sidebar — project / workflow nav</div>
-  <div style="background:#0a0a0c;border:1px solid #2a2a2e;border-radius:4px;padding:14px 0;width:240px">
-    <div style="font-size:0.75rem;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.1em;padding:0 20px 10px;border-bottom:1px solid #2a2a2e;margin-bottom:6px">PROJECTS</div>
-    <button style="display:flex;width:100%;justify-content:space-between;align-items:center;padding:8px 20px;background:transparent;border:none;color:#b8b8b8;font-family:inherit;font-size:0.9rem;text-align:left;border-left:2px solid transparent">
+  <div class="sb">
+    <div class="sidebar-title">PROJECTS</div>
+    <button class="sb-row">
       <span>All</span>
-      <span style="background:#1a1a1f;color:#555;padding:2px 8px;border-radius:999px;font-size:0.75rem;font-family:ui-monospace,monospace">7</span>
+      <span class="count-pill">7</span>
     </button>
-    <button style="display:flex;width:100%;justify-content:space-between;align-items:center;padding:8px 20px;background:#15151a;border:none;color:#e8e8e8;font-family:inherit;font-size:0.9rem;text-align:left;border-left:2px solid #4ade80;font-weight:500">
+    <button class="sb-row selected">
       <span>spirelens</span>
-      <span style="background:#14532d;color:#4ade80;padding:2px 8px;border-radius:999px;font-size:0.75rem;font-family:ui-monospace,monospace">3</span>
+      <span class="count-pill success-tone">3</span>
     </button>
-    <button style="display:flex;width:100%;justify-content:space-between;align-items:center;padding:6px 20px 6px 36px;background:#15151a;border:none;color:#d4d4d4;font-family:ui-monospace,monospace;font-size:0.85rem;text-align:left;border-left:2px solid #60a5fa">
+    <button class="sb-row workflow selected">
       <span>issue-agent</span>
-      <span style="background:#1e3a5f;color:#60a5fa;padding:1px 6px;border-radius:999px;font-size:0.7rem">2</span>
+      <span class="count-pill info-tone">2</span>
     </button>
-    <button style="display:flex;width:100%;justify-content:space-between;align-items:center;padding:8px 20px;background:transparent;border:none;color:#b8b8b8;font-family:inherit;font-size:0.9rem;text-align:left;border-left:2px solid transparent">
+    <button class="sb-row">
       <span>ambience</span>
-      <span style="background:#1a1a1f;color:#555;padding:2px 8px;border-radius:999px;font-size:0.75rem;font-family:ui-monospace,monospace">1</span>
+      <span class="count-pill">1</span>
     </button>
   </div>
 </div>

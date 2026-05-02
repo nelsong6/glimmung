@@ -26,6 +26,7 @@ A pixel-faithful + lightly-redesigned recreation of the Glimmung dashboard, with
 | KPI strip ("3 hosts · 1 free · 2 busy · 1 pending") above hosts table | Density boost — the same info was visible only by scanning rows. |
 | Tab active state uses both underline AND foreground (was foreground-only on hover) | Made non-hover selection more obvious. |
 | Two-step cancel kept as `cancel` → `cancel? / keep` | This pattern is good — preserved exactly. |
-| Sidebar count pill uses tabular-nums everywhere (not just rows) | Alignment fix. |
+| Sidebar count chips use the system `.count-pill` console-tag geometry | Aligns the kit with the design system — no `border-radius: 999px` on chips. |
+| Pills, buttons (`.gb`), and the user cluster all use the chamfer + leading-rail vocabulary | Single source of truth: `colors_and_type.css` for `.pill` / `.count-pill`, `plate.css` for panels, this file for `.gb` and the user cluster. |
 
 Nothing was removed.
