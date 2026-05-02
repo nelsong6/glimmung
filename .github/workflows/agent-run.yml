@@ -275,6 +275,32 @@ jobs:
             --name "$AZURE_AKS_CLUSTER_NAME" \
             --overwrite-existing
 
+      - name: Notify glimmung — run started
+        # Capability-auth callback: run_id is an unguessable ULID. Posts
+        # ${{ github.run_id }} so glimmung can map workflow_run_id →
+        # glimmung run, plus the validation URL (#88) so the PR
+        # composer has the live env + /_styleguide URLs without
+        # re-deriving them from CI inputs glimmung doesn't see. The URL
+        # isn't computed until the next step, so we recompute the slug
+        # inline here.
+        if: ${{ inputs.run_id != '' }}
+        env:
+          GLIMMUNG_RUN_ID: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          short_sha=$(git rev-parse --short=7 HEAD)
+          slug="issue-${ISSUE_NUMBER}-${GITHUB_RUN_ID}-${short_sha}"
+          validation_url="https://${slug}.glimmung.dev.romaine.life"
+          payload=$(jq -nc \
+            --argjson rid "${GITHUB_RUN_ID}" \
+            --arg vurl "${validation_url}" \
+            '{workflow_run_id: $rid, validation_url: $vurl}')
+          curl -sS -X POST \
+            -H "Content-Type: application/json" \
+            -d "${payload}" \
+            "${GLIMMUNG_BASE}/v1/runs/${GLIMMUNG_PROJECT}/${GLIMMUNG_RUN_ID}/started" \
+            || echo "::warning::failed to post started callback to glimmung; continuing"
+
       - name: Compute run-scoped variables
         env:
           GLIMMUNG_RUN_ID: ${{ inputs.run_id }}
@@ -618,6 +644,29 @@ jobs:
             fi
             echo "EOF_MD"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Notify glimmung — run completed
+        # Forwards the workflow's success conclusion + the
+        # screenshot-MD block from the upload step (#88) so glimmung's
+        # PR composer can drop the inline images into the body. Runs
+        # only on success — failure paths fire the typed-abort callback
+        # at their failure site (#86 / #87).
+        if: success() && inputs.run_id != ''
+        env:
+          GLIMMUNG_RUN_ID: ${{ inputs.run_id }}
+          SCREENSHOTS_MD: ${{ steps.upload.outputs.markdown }}
+        run: |
+          set -euo pipefail
+          payload=$(jq -nc \
+            --argjson rid "${GITHUB_RUN_ID}" \
+            --arg conclusion "success" \
+            --arg shots "${SCREENSHOTS_MD}" \
+            '{workflow_run_id: $rid, conclusion: $conclusion, screenshots_markdown: ($shots | select(length > 0))}')
+          curl -sS -X POST \
+            -H "Content-Type: application/json" \
+            -d "${payload}" \
+            "${GLIMMUNG_BASE}/v1/runs/${GLIMMUNG_PROJECT}/${GLIMMUNG_RUN_ID}/completed" \
+            || echo "::warning::failed to post completed callback to glimmung; continuing"
 
       - name: Label per-issue release + agent namespace by branch
         # glimmung#69: glimmung opens the PR after this workflow completes

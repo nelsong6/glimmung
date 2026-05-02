@@ -306,6 +306,7 @@ async def record_started(
     run: Run,
     etag: str,
     workflow_run_id: int,
+    validation_url: str | None = None,
 ) -> tuple[Run, str]:
     """Stamp the GH Actions `workflow_run.id` onto the latest attempt.
 
@@ -315,6 +316,10 @@ async def record_started(
     deterministically — GitHub's `POST .../dispatches` returns 204
     with no body, and the workflow_run webhook payload doesn't echo
     workflow_dispatch inputs, so the workflow has to tell us itself.
+
+    Optional `validation_url` is the live preview env URL the
+    workflow stood up (#88). Stamped on the Run so the PR composer
+    has it without re-deriving from CI inputs glimmung doesn't see.
 
     Idempotent: a redelivery on the same attempt is a no-op (the
     first stamped id wins; subsequent calls leave it unchanged).
@@ -331,7 +336,12 @@ async def record_started(
             )
             return r
         last.workflow_run_id = workflow_run_id
-        return r.model_copy(update={"updated_at": _now()})
+        updates: dict[str, Any] = {"updated_at": _now()}
+        # Only stamp validation_url on first arrival; redelivery shouldn't
+        # blow away a prior value with a stale one.
+        if validation_url is not None and r.validation_url is None:
+            updates["validation_url"] = validation_url
+        return r.model_copy(update=updates)
     return await _retry_on_conflict(cosmos, run, etag, apply)
 
 
@@ -344,16 +354,27 @@ async def record_completion(
     conclusion: str,
     verification: VerificationResult | None,
     artifact_url: str | None,
+    screenshots_markdown: str | None = None,
 ) -> tuple[Run, str]:
     """Record the workflow_run.completed payload on the latest attempt
     of a run. Updates cumulative_cost_usd from the verification
     artifact's cost (or 0 if missing). Optimistic-concurrency
     protected; on _etag mismatch, re-reads and retries up to
     _MAX_CONFLICT_RETRIES. Returns the updated (run, etag) so the
-    caller can chain into the next lifecycle op without re-reading."""
+    caller can chain into the next lifecycle op without re-reading.
+
+    `screenshots_markdown` (#88) is the rendered markdown block from
+    the workflow's upload-to-blob step. Stamped on the Run so the PR
+    composer can drop it verbatim into the body without rebuilding
+    image URLs from scratch. None means no screenshot pass ran (e.g.
+    backend-only workflow).
+    """
     return await _retry_on_conflict(
         cosmos, run, etag,
-        lambda r: _apply_completion(r, workflow_run_id, conclusion, verification, artifact_url),
+        lambda r: _apply_completion(
+            r, workflow_run_id, conclusion, verification, artifact_url,
+            screenshots_markdown,
+        ),
     )
 
 
@@ -363,6 +384,7 @@ def _apply_completion(
     conclusion: str,
     verification: VerificationResult | None,
     artifact_url: str | None,
+    screenshots_markdown: str | None,
 ) -> Run:
     if not run.attempts:
         raise RuntimeError(f"run {run.id} has no attempts to complete")
@@ -386,10 +408,16 @@ def _apply_completion(
     cost = verification.cost_usd if verification else 0.0
     if last.cost_usd is None:
         last.cost_usd = cost
-    return run.model_copy(update={
+    updates: dict[str, Any] = {
         "cumulative_cost_usd": run.cumulative_cost_usd + cost,
         "updated_at": _now(),
-    })
+    }
+    # First-arrival wins on screenshots_markdown — same idempotency
+    # shape as validation_url in record_started. Re-deliveries
+    # shouldn't blow away the captured block.
+    if screenshots_markdown is not None and run.screenshots_markdown is None:
+        updates["screenshots_markdown"] = screenshots_markdown
+    return run.model_copy(update=updates)
 
 
 async def record_decision(

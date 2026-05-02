@@ -503,6 +503,7 @@ async def _process_run_completion(
     conclusion: str,
     verification_result: VerificationResult | None,
     repo: str,
+    screenshots_markdown: str | None = None,
 ) -> str:
     """Drive a Run through one decision-engine cycle. Returns the
     decision value.
@@ -513,6 +514,9 @@ async def _process_run_completion(
     URL lazily via `fetch_verification` only when RETRY actually fires —
     keeps the hot path synchronous-and-cheap and confines GH API calls
     to the one decision branch that needs them.
+
+    `screenshots_markdown` is forwarded to `record_completion` so the
+    Run carries the rendered MD block into `_compose_pr_body`.
     """
     cosmos: Cosmos = app.state.cosmos
 
@@ -524,6 +528,7 @@ async def _process_run_completion(
         conclusion=conclusion,
         verification=verification_result,
         artifact_url=None,
+        screenshots_markdown=screenshots_markdown,
     )
 
     workflow_doc = await _read_workflow(cosmos, run.project, run.workflow)
@@ -884,11 +889,18 @@ async def _open_pr_primitive(*, run: Run, workflow: Workflow) -> None:
 async def _compose_pr_body(
     cosmos: Cosmos, *, run: Run, workflow: Workflow,
 ) -> tuple[str, str]:
-    """Compose PR title + body from the issue + run state. Title is the
-    issue title; body links the issue (`Closes #N`) and surfaces a short
-    run summary so reviewers see attempt history + cost without leaving
-    the PR view. Composition is intentionally minimal in v1 — richer
-    evidence rendering is a follow-up."""
+    """Compose PR title + body from the issue + run state.
+
+    Title is the issue title; body links the issue (`Closes #N`),
+    surfaces the live preview env + /_styleguide URLs (#88), inlines
+    the screenshot markdown the workflow uploaded (#87 → #88), and
+    closes with a short run summary so reviewers see attempts + cost
+    without leaving the PR view.
+
+    `validation_url` and `screenshots_markdown` are populated by the
+    `started` and `completed` callbacks respectively. Either may be
+    None for backend-only workflows; sections drop out cleanly when
+    they are."""
     issue_title = ""
     issue_body_link = ""
     if run.issue_id:
@@ -905,11 +917,34 @@ async def _compose_pr_body(
         f"cost=${(a.cost_usd or 0.0):.4f} decision={a.decision or '—'}"
         for a in run.attempts
     )
-    body_parts = [
+    body_parts: list[str] = [
         issue_body_link,
         "",
         "Glimmung-opened PR. Composed from run state — see the dashboard "
         f"for full lineage (run id `{run.id}`).",
+    ]
+
+    # Live preview surface (#88). Reviewers get the actual running app
+    # plus the styleguide route — that's the contract documented in
+    # docs/styleguide-contract.md, and the PR is the moment they need
+    # both URLs in one place.
+    if run.validation_url:
+        env_url = run.validation_url.rstrip("/")
+        body_parts += [
+            "",
+            "## Preview",
+            f"- live env: {env_url}",
+            f"- styleguide: {env_url}/_styleguide",
+        ]
+
+    # Screenshot block from the workflow's upload step (#87 → #88).
+    # Already markdown — drop in verbatim. The workflow handles the
+    # "_Screenshot upload failed_" case in the same block, so we don't
+    # need to repeat that fallback here.
+    if run.screenshots_markdown:
+        body_parts += ["", run.screenshots_markdown.strip()]
+
+    body_parts += [
         "",
         "## Run summary",
         f"- workflow: `{workflow.name}`",
@@ -1434,8 +1469,15 @@ async def abort_run(
 class RunStartedRequest(BaseModel):
     """`POST /v1/runs/{project}/{run_id}/started` body. The workflow's
     first step posts its `${{ github.run_id }}` here so subsequent
-    dashboard / cancel paths can deep-link the GH workflow run."""
+    dashboard / cancel paths can deep-link the GH workflow run.
+
+    `validation_url` (optional, #88) is the live preview env URL the
+    workflow stood up. Stamped on the Run so the PR composer can
+    surface env + /_styleguide URLs in the PR body. None for backend-
+    only workflows that don't expose a public env.
+    """
     workflow_run_id: int
+    validation_url: str | None = None
 
 
 class RunCompletedRequest(BaseModel):
@@ -1446,10 +1488,17 @@ class RunCompletedRequest(BaseModel):
     for human auditability; this body is the decision-engine input).
     Missing / unparseable verification → decision engine returns
     ABORT_MALFORMED, same as the legacy webhook path.
+
+    `screenshots_markdown` (optional, #88) is the rendered MD block
+    from the workflow's upload-to-blob step (#87 captures, blob URLs).
+    Stamped on the Run; the PR composer drops it verbatim into the
+    body. None for backend workflows or runs where screenshots failed
+    upstream (those abort before reaching this callback).
     """
     workflow_run_id: int
     conclusion: str   # GH-style: "success" | "failure" | "cancelled"
     verification: dict[str, Any] | None = None
+    screenshots_markdown: str | None = None
 
 
 class RunCallbackResult(BaseModel):
@@ -1477,7 +1526,9 @@ async def run_started(
         raise HTTPException(404, f"no run {project}/{run_id}")
     run, etag = found
     await run_ops.record_started(
-        cosmos, run=run, etag=etag, workflow_run_id=req.workflow_run_id,
+        cosmos, run=run, etag=etag,
+        workflow_run_id=req.workflow_run_id,
+        validation_url=req.validation_url,
     )
     return RunCallbackResult(run_id=run.id)
 
@@ -1559,6 +1610,7 @@ async def run_completed(
         conclusion=req.conclusion,
         verification_result=verification_result,
         repo=run.issue_repo,
+        screenshots_markdown=req.screenshots_markdown,
     )
 
     result_dict: dict[str, Any] = {}
