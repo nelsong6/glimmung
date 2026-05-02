@@ -1,0 +1,4 @@
+apiVersion: v2
+name: mcp-glimmung
+version: 0.1.0
+description: Custom Glimmung MCP Server (HTTP). Outgoing auth = pod SA token presented to glimmung; incoming auth via kube-rbac-proxy K8s SA TokenReview.

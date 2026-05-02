@@ -1,0 +1,21 @@
+[project]
+name = "mcp-glimmung"
+version = "0.1.0"
+description = "Custom Glimmung MCP server — kube-rbac-proxy fronts auth, pod SA token presented to glimmung."
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.18.0",
+    "httpx>=0.27.0",
+    "starlette>=0.40.0",
+    "uvicorn>=0.30.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_glimmung"]
+
+[project.scripts]
+mcp-glimmung-http = "mcp_glimmung.http:main"

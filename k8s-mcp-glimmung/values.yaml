@@ -1,0 +1,43 @@
+# ============================================================================
+# mcp-glimmung values
+# ============================================================================
+# Glimmung lives at glimmung.glimmung.svc inside the cluster. The MCP server
+# reads its own pod's projected SA token and presents it as a bearer to
+# glimmung; glimmung validates via TokenReview and accepts the SA per its
+# K8S_SA_ALLOWLIST. No KV-mounted creds — the SA token is the only secret
+# in play.
+
+image:
+  repository: romainecr.azurecr.io/mcp-glimmung
+  # SHA-pinned. mcp-glimmung-build.yml rewrites this tag on every push to
+  # main via a `[skip ci]` follow-up commit. Quoted so all-digit short-SHAs
+  # don't get parsed as floats — see reference_yaml_tag_quoting.md.
+  tag: "f789fd5"
+  pullPolicy: IfNotPresent
+
+# Loopback-only port the Python uvicorn server listens on.
+upstreamPort: 8080
+
+proxy:
+  image:
+    repository: quay.io/brancz/kube-rbac-proxy
+    tag: v0.18.2
+    pullPolicy: IfNotPresent
+  port: 8443
+
+# Upstream glimmung URL. Defaults to the in-cluster Service.
+glimmungBaseUrl: http://glimmung.glimmung.svc
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 256Mi
+
+proxyResources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 64Mi
