@@ -207,6 +207,56 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         )
 
     @mcp.tool()
+    def resume_run(
+        project: str,
+        run_id: str,
+        entrypoint_phase: str,
+        trigger_source: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Spawn a new Run from a terminal prior Run, picking up at
+        `entrypoint_phase`. All phases declared earlier in the workflow
+        order are auto-skipped — each gets a synthesized PhaseAttempt
+        with `phase_outputs` carried forward from the prior Run's same-
+        named phase, and the multi-phase substitution path feeds those
+        outputs into the entrypoint phase's `workflow_dispatch.inputs`.
+
+        The motivating case from glimmung#111: an `agent-execute`
+        attempt aborted on a `verify=true→false` registration mismatch.
+        After fixing the registration, `resume_run(... entrypoint_phase=
+        "agent-execute")` re-uses `env-prep`'s captured outputs and
+        dispatches a fresh `agent-execute` attempt without re-running
+        env-prep — saves ~20 minutes of agent runtime per iteration.
+
+        Refuses with state=`prior_in_progress` if the prior Run is
+        still IN_PROGRESS (would race the in-flight dispatch's lock).
+        Refuses with state=`already_running` if the issue's lock is
+        currently held by a different Run (caller must abort the
+        conflicting run first).
+
+        `trigger_source` is recorded on the new Run for observability;
+        the server adds `kind: resume_via_mcp` and `resumed_from_run_id`
+        if not provided.
+
+        Returns: `{state, new_run_id, prior_run_id, lease_id?, host?,
+        issue_lock_holder_id, detail?}`. State values include
+        `dispatched`, `pending`, `dispatch_failed`, `prior_in_progress`,
+        `already_running`, `phase_invalid`, `outputs_missing`,
+        `prior_missing`, `workflow_missing`. The HTTP layer maps the
+        validation states to 4xx; happy paths return state in the body.
+        """
+        ts: dict[str, Any] = {"kind": "resume_via_mcp", "resumed_from_run_id": run_id}
+        if trigger_source:
+            ts.update(trigger_source)
+        payload: dict[str, Any] = {
+            "entrypoint_phase": entrypoint_phase,
+            "trigger_source": ts,
+        }
+        return client.post(
+            f"/v1/runs/{project}/{run_id}/resume",
+            json=payload,
+        )
+
+    @mcp.tool()
     def abort_run(
         project: str,
         run_id: str,

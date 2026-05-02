@@ -29,6 +29,7 @@ from glimmung.models import (
     RunDecision,
     RunState,
     VerificationResult,
+    Workflow,
 )
 
 log = logging.getLogger(__name__)
@@ -471,6 +472,126 @@ async def append_attempt(
         ))
         return r.model_copy(update={"updated_at": _now()})
     return await _retry_on_conflict(cosmos, run, etag, apply)
+
+
+async def create_resumed_run(
+    cosmos: Cosmos,
+    *,
+    prior_run: Run,
+    workflow: Workflow,
+    entrypoint_phase: str,
+    issue_lock_holder_id: str | None = None,
+    trigger_source: dict[str, Any] | None = None,
+) -> tuple[Run, str]:
+    """Spawn a new Run that picks up from `prior_run` at `entrypoint_phase`.
+
+    Phases declared *before* `entrypoint_phase` in the workflow's order
+    are skipped: each gets a synthesized PhaseAttempt with
+    `skipped_from_run_id=prior_run.id` and `phase_outputs` carried
+    forward from the prior Run's last successful attempt of that phase.
+    Those skipped attempts look completed enough to the multi-phase
+    runtime that `_collect_phase_outputs` picks them up and substitutes
+    them into the entrypoint phase's `workflow_dispatch.inputs`.
+
+    The entrypoint phase itself is NOT appended here — the caller's
+    dispatch path (e.g. `_dispatch_next_phase`) appends a fresh
+    PhaseAttempt for it at workflow_dispatch time, mirroring the
+    existing forward-dispatch shape from #101.
+
+    cumulative_cost_usd resets to 0 — resume is a new accounting
+    boundary. Issue/budget/repo/issue_id are inherited from `prior_run`.
+
+    Raises:
+      ValueError if `entrypoint_phase` isn't declared on `workflow`, or
+        if a phase that needs to be skipped has no captured outputs on
+        `prior_run` (the multi-phase runtime would 500 on missing-ref
+        substitution; surface it now instead).
+    """
+    phase_names = [p.name for p in workflow.phases]
+    if entrypoint_phase not in phase_names:
+        raise ValueError(
+            f"entrypoint_phase {entrypoint_phase!r} not declared on workflow "
+            f"{workflow.project}/{workflow.name!r} (phases: {phase_names})"
+        )
+
+    entrypoint_index = phase_names.index(entrypoint_phase)
+    skipped_phase_names = phase_names[:entrypoint_index]
+
+    # Last-attempt-wins per phase, mirrors `_collect_phase_outputs`
+    # (only the most recent attempt of each phase contributes outputs;
+    # the recycle case keeps the failing attempts before the passing
+    # one and we want the passing one's outputs).
+    prior_attempts_by_phase: dict[str, PhaseAttempt] = {}
+    for a in prior_run.attempts:
+        if a.phase in skipped_phase_names:
+            prior_attempts_by_phase[a.phase] = a
+
+    now = _now()
+    skipped_attempts: list[PhaseAttempt] = []
+    for idx, phase_name in enumerate(skipped_phase_names):
+        prior_a = prior_attempts_by_phase.get(phase_name)
+        if prior_a is None:
+            raise ValueError(
+                f"resume: phase {phase_name!r} (skipped before entrypoint "
+                f"{entrypoint_phase!r}) has no attempts on prior run "
+                f"{prior_run.id} — cannot carry outputs forward"
+            )
+        # Find the workflow filename + outputs the prior attempt declared.
+        phase_spec = next((p for p in workflow.phases if p.name == phase_name), None)
+        if phase_spec is None:
+            # Won't happen — we already validated entrypoint and built
+            # skipped_phase_names from workflow.phases — but defensively
+            # surface it as a ValueError instead of an AttributeError.
+            raise ValueError(
+                f"resume: phase {phase_name!r} disappeared between "
+                "validation and skipped-attempt synthesis"
+            )
+        skipped_attempts.append(PhaseAttempt(
+            attempt_index=idx,
+            phase=phase_name,
+            workflow_filename=phase_spec.workflow_filename,
+            workflow_run_id=None,
+            dispatched_at=now,
+            completed_at=now,
+            conclusion="success",
+            verification=None,
+            cost_usd=0.0,
+            artifact_url=None,
+            decision=None,
+            phase_outputs=dict(prior_a.phase_outputs or {}),
+            skipped_from_run_id=prior_run.id,
+        ))
+
+    new_run = Run(
+        id=str(ULID()),
+        project=prior_run.project,
+        workflow=prior_run.workflow,
+        issue_id=prior_run.issue_id,
+        issue_repo=prior_run.issue_repo,
+        issue_number=prior_run.issue_number,
+        state=RunState.IN_PROGRESS,
+        budget=BudgetConfig(total=prior_run.budget.total),
+        attempts=skipped_attempts,
+        cumulative_cost_usd=0.0,
+        issue_lock_holder_id=issue_lock_holder_id,
+        trigger_source=trigger_source,
+        # Inherit validation_url so the dashboard shows the live env
+        # immediately on the resumed Run; the entrypoint dispatch's
+        # /started callback won't blow it away (first-arrival-wins).
+        validation_url=prior_run.validation_url,
+        cloned_from_run_id=prior_run.id,
+        entrypoint_phase=entrypoint_phase,
+        created_at=now,
+        updated_at=now,
+    )
+    response = await cosmos.runs.create_item(new_run.model_dump(mode="json"))
+    log.info(
+        "created resumed run %s from prior=%s entrypoint=%s skipped=%s "
+        "(workflow=%s issue=%s/%d)",
+        new_run.id, prior_run.id, entrypoint_phase, skipped_phase_names,
+        new_run.workflow, new_run.issue_repo, new_run.issue_number,
+    )
+    return new_run, response["_etag"]
 
 
 async def mark_passed(cosmos: Cosmos, *, run: Run, etag: str) -> tuple[Run, str]:
