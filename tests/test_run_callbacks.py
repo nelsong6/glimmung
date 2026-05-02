@@ -492,6 +492,222 @@ async def test_completed_400_when_outputs_omitted_against_declared_phase(
     assert "missing" in exc.value.detail
 
 
+# ─── /completed: multi-phase forward dispatch (#101) ──────────────────────
+
+
+async def _register_2phase_workflow(cosmos, project: str, name: str = "agent-run") -> None:
+    """Two non-verify phases plumbed via inputs/outputs. env-prep emits
+    validation_url + image_tag; agent-execute consumes both via
+    `${{ phases.env-prep.outputs.X }}`. Mirrors the pilot (#102) shape."""
+    await cosmos.workflows.create_item({
+        "id": name,
+        "name": name,
+        "project": project,
+        "phases": [
+            {
+                "name": "env-prep",
+                "kind": "gha_dispatch",
+                "workflowFilename": "env-prep.yml",
+                "workflowRef": "main",
+                "requirements": None,
+                "verify": False,
+                "recyclePolicy": None,
+                "inputs": {},
+                "outputs": ["validation_url", "image_tag"],
+            },
+            {
+                "name": "agent-execute",
+                "kind": "gha_dispatch",
+                "workflowFilename": "agent-execute.yml",
+                "workflowRef": "main",
+                "requirements": None,
+                "verify": False,
+                "recyclePolicy": None,
+                "inputs": {
+                    "validation_url": "${{ phases.env-prep.outputs.validation_url }}",
+                    "image_tag": "${{ phases.env-prep.outputs.image_tag }}",
+                },
+                "outputs": [],
+            },
+        ],
+        "pr": {"enabled": False, "recyclePolicy": None},
+        "budget": {"total": 25.0},
+        "triggerLabel": "agent-run",
+        "defaultRequirements": {},
+        "metadata": {},
+        "createdAt": datetime.now(UTC).isoformat(),
+    })
+
+
+async def _seed_run_for_phase(
+    cosmos,
+    *,
+    run_id: str,
+    project: str,
+    issue_repo: str,
+    issue_number: int,
+    phase: str,
+    workflow_filename: str,
+    workflow: str = "agent-run",
+) -> Run:
+    """Variant of `_seed_run` that lets the phase + workflow_filename
+    be set so multi-phase tests can seed a run mid-flight on phase 1."""
+    run = Run(
+        id=run_id,
+        project=project,
+        workflow=workflow,
+        issue_id="01HZZZTESTISSUE",
+        issue_repo=issue_repo,
+        issue_number=issue_number,
+        state=RunState.IN_PROGRESS,
+        budget=BudgetConfig(total=25.0),
+        attempts=[PhaseAttempt(
+            attempt_index=0,
+            phase=phase,
+            workflow_filename=workflow_filename,
+            dispatched_at=datetime.now(UTC),
+        )],
+        cumulative_cost_usd=0.0,
+        issue_lock_holder_id="01HOLDER",
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    await cosmos.runs.create_item(run.model_dump(mode="json"))
+    return run
+
+
+@pytest.fixture
+def app_state_with_settings(cosmos):
+    """Variant of `app_state` that wires settings and gh_minter=None.
+    Forward-dispatch tests need lease_ops.acquire to read TTL config;
+    the no-minter path is what the test fixture relies on to stop short
+    of an actual workflow_dispatch."""
+    state = SimpleNamespace(
+        cosmos=cosmos,
+        settings=SimpleNamespace(
+            lease_default_ttl_seconds=14400,
+            sweep_interval_seconds=60,
+        ),
+        gh_minter=None,
+    )
+    return SimpleNamespace(state=state)
+
+
+@pytest.mark.asyncio
+async def test_completed_dispatches_next_phase_on_advance(cosmos, app_state_with_settings):
+    """Phase 1 (env-prep) completes successfully with declared outputs.
+    Glimmung's /completed handler dispatches phase 2 (agent-execute)
+    instead of going terminal: a new PhaseAttempt is appended for the
+    next phase, the run stays IN_PROGRESS, and the new lease's metadata
+    carries the substituted phase inputs for the dispatch."""
+    from glimmung.db import query_all
+    await _register_project(cosmos, "ambience", "nelsong6/ambience")
+    await _register_2phase_workflow(cosmos, "ambience")
+    run = await _seed_run_for_phase(
+        cosmos, run_id="01KQTEST_RUN_FW1", project="ambience",
+        issue_repo="nelsong6/ambience", issue_number=200,
+        phase="env-prep", workflow_filename="env-prep.yml",
+    )
+
+    body = RunCompletedRequest(
+        workflow_run_id=999,
+        conclusion="success",
+        outputs={
+            "validation_url": "https://issue-200-999-abc.glimmung.dev.romaine.life",
+            "image_tag": "issue-200-999-abc",
+        },
+    )
+    with patch("glimmung.app.app", app_state_with_settings):
+        result = await run_completed(body, project="ambience", run_id=run.id)
+    # Non-terminal — run continues into phase 2.
+    assert result.decision == "advance_phase"
+
+    found = await run_ops.read_run(cosmos, project="ambience", run_id=run.id)
+    final, _ = found  # type: ignore[misc]
+    assert final.state == RunState.IN_PROGRESS
+    assert len(final.attempts) == 2
+    # Phase 1's outputs persisted on the prior attempt.
+    assert final.attempts[0].phase_outputs == {
+        "validation_url": "https://issue-200-999-abc.glimmung.dev.romaine.life",
+        "image_tag": "issue-200-999-abc",
+    }
+    # Phase 2's attempt is queued (not yet completed).
+    assert final.attempts[1].phase == "agent-execute"
+    assert final.attempts[1].workflow_filename == "agent-execute.yml"
+    assert final.attempts[1].completed_at is None
+
+    # New lease for phase 2 with the substituted inputs in metadata.
+    leases = await query_all(
+        cosmos.leases,
+        "SELECT * FROM c WHERE c.project = @p",
+        parameters=[{"name": "@p", "value": "ambience"}],
+    )
+    phase2_leases = [
+        l for l in leases
+        if (l.get("metadata") or {}).get("phase_name") == "agent-execute"
+    ]
+    assert len(phase2_leases) == 1
+    md = phase2_leases[0]["metadata"]
+    assert md["phase_inputs"] == {
+        "validation_url": "https://issue-200-999-abc.glimmung.dev.romaine.life",
+        "image_tag": "issue-200-999-abc",
+    }
+    assert md["run_id"] == run.id
+
+
+@pytest.mark.asyncio
+async def test_completed_marks_passed_after_last_phase(cosmos, app_state_with_settings):
+    """After agent-execute (phase 2, the terminal phase) completes
+    successfully, the run goes terminal — same flow as today's
+    single-phase ADVANCE."""
+    await _register_project(cosmos, "ambience", "nelsong6/ambience")
+    await _register_2phase_workflow(cosmos, "ambience")
+    # Seed a run that's already past phase 1; phase 2 is in flight.
+    run_doc = Run(
+        id="01KQTEST_RUN_FW2",
+        project="ambience",
+        workflow="agent-run",
+        issue_id="01HZZZTESTISSUE",
+        issue_repo="nelsong6/ambience",
+        issue_number=201,
+        state=RunState.IN_PROGRESS,
+        budget=BudgetConfig(total=25.0),
+        attempts=[
+            PhaseAttempt(
+                attempt_index=0, phase="env-prep",
+                workflow_filename="env-prep.yml",
+                dispatched_at=datetime.now(UTC),
+                completed_at=datetime.now(UTC),
+                conclusion="success",
+                phase_outputs={"validation_url": "https://x", "image_tag": "t"},
+            ),
+            PhaseAttempt(
+                attempt_index=1, phase="agent-execute",
+                workflow_filename="agent-execute.yml",
+                dispatched_at=datetime.now(UTC),
+            ),
+        ],
+        cumulative_cost_usd=0.0,
+        issue_lock_holder_id="01HOLDER",
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    await cosmos.runs.create_item(run_doc.model_dump(mode="json"))
+
+    body = RunCompletedRequest(
+        workflow_run_id=1000,
+        conclusion="success",
+    )
+    with patch("glimmung.app.app", app_state_with_settings):
+        result = await run_completed(body, project="ambience", run_id=run_doc.id)
+    assert result.decision == "advance"
+
+    found = await run_ops.read_run(cosmos, project="ambience", run_id=run_doc.id)
+    final, _ = found  # type: ignore[misc]
+    assert final.state == RunState.PASSED
+    assert len(final.attempts) == 2  # No new attempt — last phase is terminal.
+
+
 @pytest.mark.asyncio
 async def test_completed_legacy_phase_with_no_outputs_still_works(
     cosmos, app_state,

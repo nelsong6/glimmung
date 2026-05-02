@@ -63,6 +63,45 @@ def parse_phase_input_ref(ref: str) -> tuple[str, str] | None:
     return m.group("phase"), m.group("key")
 
 
+def substitute_phase_inputs(
+    phase: "PhaseSpec",
+    prior_outputs: dict[str, dict[str, str]],
+) -> dict[str, str]:
+    """Resolve a phase's `inputs` against captured outputs of prior phases.
+    `prior_outputs` is keyed by phase name, value is the phase's
+    `phase_outputs` dict (validated at /completed callback time).
+
+    Returns a flat dict of `input_name -> value` ready to splat into a
+    workflow_dispatch payload. Refs are assumed to have been validated
+    at registration time (see `validate_phase_input_refs`); reaching
+    this function with an unresolvable ref means runtime state has
+    drifted from the registered schema, which is a bug — raise instead
+    of silently substituting empty strings.
+    """
+    resolved: dict[str, str] = {}
+    for input_name, ref in phase.inputs.items():
+        parsed = parse_phase_input_ref(ref)
+        if parsed is None:
+            raise ValueError(
+                f"phase {phase.name!r} input {input_name!r} ref {ref!r} is "
+                "malformed (registration validation should have caught this)"
+            )
+        ref_phase, ref_key = parsed
+        if ref_phase not in prior_outputs:
+            raise KeyError(
+                f"phase {phase.name!r} input {input_name!r} refs phase "
+                f"{ref_phase!r} which has no captured outputs on this run"
+            )
+        if ref_key not in prior_outputs[ref_phase]:
+            raise KeyError(
+                f"phase {phase.name!r} input {input_name!r} refs "
+                f"{ref_phase}.outputs.{ref_key!r}; phase posted outputs "
+                f"{sorted(prior_outputs[ref_phase])}"
+            )
+        resolved[input_name] = prior_outputs[ref_phase][ref_key]
+    return resolved
+
+
 def validate_phase_input_refs(phases: list["PhaseSpec"]) -> None:
     """Validate every phase's `inputs` map against earlier phases' declared
     `outputs`. Raises ValueError on the first problem.
@@ -230,14 +269,6 @@ class WorkflowRegister(BaseModel):
                     f"PR primitive recycle_policy.on contains unknown triggers: {bad}; "
                     f"valid: {sorted(PR_PRIMITIVE_TRIGGERS)}"
                 )
-        # v1 runtime gate (relaxed when the multi-phase runtime lands;
-        # tracked in glimmung#101). Comes last so 2-phase fixtures still
-        # exercise the per-phase + ref validators above.
-        if len(self.phases) != 1:
-            raise ValueError(
-                f"v1 supports exactly one phase per workflow; got {len(self.phases)}. "
-                "Multi-phase orchestration is a follow-up (see glimmung#101)."
-            )
         return self
 
 
