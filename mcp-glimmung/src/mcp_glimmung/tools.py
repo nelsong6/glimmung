@@ -180,6 +180,33 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         )
 
     @mcp.tool()
+    def dispatch_run(
+        issue_id: str,
+        project: str | None = None,
+        workflow: str | None = None,
+    ) -> dict[str, Any]:
+        """Manually dispatch an agent run for a glimmung Issue. Same path
+        the dashboard's re-dispatch button takes: claims a host that
+        matches the workflow's requirements, creates a Run, and fires
+        the workflow_dispatch (or the first phase of a multi-phase
+        workflow). Useful for re-driving a run after a fix lands when
+        the original webhook trigger has already been consumed.
+
+        `issue_id` is the glimmung ULID (find via `get_issue` →
+        `id`). `project` is optional — the server resolves it from
+        the Issue doc when omitted. `workflow` is optional and only
+        needed if the project has more than one workflow registered.
+
+        Returns the dispatch result: created Run id, claimed lease id,
+        host, and the GHA workflow_dispatch outcome."""
+        payload: dict[str, Any] = {"issue_id": issue_id}
+        if project is not None:
+            payload["project"] = project
+        if workflow is not None:
+            payload["workflow"] = workflow
+        return client.post("/v1/runs/dispatch", json=payload)
+
+    @mcp.tool()
     def patch_pr(
         project: str,
         pr_id: str,
