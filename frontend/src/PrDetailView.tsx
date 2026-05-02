@@ -86,16 +86,19 @@ export function PrDetailView({
   }, [repo, prNumber]);
 
   const submit = async () => {
-    if (!feedback.trim()) return;
+    if (!feedback.trim() || !detail) return;
     setReject({ kind: "submitting" });
     try {
+      // Post-#50 signal shape: target_repo is the project name, target_id
+      // is the glimmung PR id (ULID). The drain accepts both shapes for
+      // backwards-compat with in-flight pre-#50 signals.
       const r = await authedFetch("/v1/signals", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           target_type: "pr",
-          target_repo: repo,
-          target_id: String(prNumber),
+          target_repo: detail.project,
+          target_id: detail.id,
           source: "glimmung_ui",
           payload: { kind: "reject", feedback: feedback.trim() },
         }),
