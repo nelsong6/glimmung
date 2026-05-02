@@ -92,8 +92,16 @@ export function App() {
       <Route path="/" element={<Layout />}>
         <Route index element={<CapacityRoute />} />
         <Route path="issues" element={<IssuesRoute />} />
-        <Route path="issues/:owner/:repo/:n" element={<IssueDetailView />} />
-        <Route path="issues/:project/:issueId" element={<IssueDetailView />} />
+        <Route path="issues/:owner/:repo/:n" element={<IssueDetailView />}>
+          <Route path="description" element={null} />
+          <Route path="in-progress" element={null} />
+          <Route path="lineage" element={null} />
+        </Route>
+        <Route path="issues/:project/:issueId" element={<IssueDetailView />}>
+          <Route path="description" element={null} />
+          <Route path="in-progress" element={null} />
+          <Route path="lineage" element={null} />
+        </Route>
         <Route path="prs" element={<PrsRoute />} />
         <Route path="prs/:owner/:repo/:n" element={<PrDetailView />} />
       </Route>
