@@ -62,6 +62,8 @@ type Snapshot = {
 
 type Connection = "live" | "stale" | "dead";
 
+type Inflight = { issues: boolean; prs: boolean };
+
 type Selection =
   | { kind: "all" }
   | { kind: "project"; project: string }
@@ -107,6 +109,7 @@ function Layout() {
   const [account, setAccount] = useState<AccountInfo | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [showAdmin, setShowAdmin] = useState(false);
+  const [inflight, setInflight] = useState<Inflight>({ issues: false, prs: false });
 
   useEffect(() => {
     initAuth()
@@ -148,6 +151,41 @@ function Layout() {
       if (staleTimer !== null) window.clearInterval(staleTimer);
     };
   }, [lastUpdate]);
+
+  // Poll /v1/issues + /v1/prs to drive the pulsing dot on the issues/prs
+  // tabs when something has a lock held. Cheap reads; 20s feels live
+  // enough without hammering the API. Skipped while signed out — both
+  // endpoints require auth.
+  useEffect(() => {
+    if (!account) {
+      setInflight({ issues: false, prs: false });
+      return;
+    }
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const [iRes, pRes] = await Promise.all([
+          authedFetch("/v1/issues"),
+          authedFetch("/v1/prs"),
+        ]);
+        const issues = iRes.ok ? ((await iRes.json()) as Array<{ issue_lock_held?: boolean }>) : [];
+        const prs = pRes.ok ? ((await pRes.json()) as Array<{ pr_lock_held?: boolean }>) : [];
+        if (cancelled) return;
+        setInflight({
+          issues: Array.isArray(issues) && issues.some((x) => x.issue_lock_held),
+          prs: Array.isArray(prs) && prs.some((x) => x.pr_lock_held),
+        });
+      } catch {
+        // keep last value on transient failures
+      }
+    };
+    void check();
+    const t = window.setInterval(() => void check(), 20000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(t);
+    };
+  }, [account]);
 
   const matchesSelection = (l: Lease): boolean => {
     if (selected.kind === "all") return true;
@@ -201,8 +239,8 @@ function Layout() {
     matchesRequirements,
   };
 
-  const navLinkClass = ({ isActive }: { isActive: boolean }) =>
-    `link ${isActive ? "selected" : ""}`;
+  const tabLinkClass = ({ isActive }: { isActive: boolean }) =>
+    `tab ${isActive ? "selected" : ""}`;
 
   return (
     <div className="layout">
@@ -284,15 +322,6 @@ function Layout() {
             “The Glimmung scanned the assembled list of beings he had summoned. From a thousand worlds they had come, each with a craft to contribute.”
           </div>
           <div className="auth">
-            <NavLink to="/" end className={navLinkClass} style={{ marginRight: "0.5rem" }}>
-              capacity
-            </NavLink>
-            <NavLink to="/issues" className={navLinkClass} style={{ marginRight: "0.5rem" }}>
-              issues
-            </NavLink>
-            <NavLink to="/prs" className={navLinkClass} style={{ marginRight: "1rem" }}>
-              prs
-            </NavLink>
             {!authReady ? null : account ? (
               <>
                 <span className="user">{account.username}</span>
@@ -328,6 +357,20 @@ function Layout() {
             )}
           </div>
         </header>
+
+        <div className="tabs">
+          <NavLink to="/" end className={tabLinkClass}>
+            capacity
+          </NavLink>
+          <NavLink to="/issues" className={tabLinkClass}>
+            issues
+            {inflight.issues && <span className="tab-dot" />}
+          </NavLink>
+          <NavLink to="/prs" className={tabLinkClass}>
+            prs
+            {inflight.prs && <span className="tab-dot" />}
+          </NavLink>
+        </div>
 
         {account && showAdmin && (
           <AdminPanel projects={snap?.projects ?? []} onSuccess={() => setShowAdmin(false)} />
@@ -413,8 +456,22 @@ function CapacityView({
     }
   };
 
+  const free = snap?.hosts.filter((h) => !h.drained && !h.current_lease_id).length ?? 0;
+  const busy = snap?.hosts.filter((h) => !h.drained && h.current_lease_id).length ?? 0;
+  const drained = snap?.hosts.filter((h) => h.drained).length ?? 0;
+
   return (
     <>
+      {snap !== null && (
+        <div className="kpi-strip">
+          <div className="kpi"><span className="k">hosts</span><span className="v">{snap.hosts.length}</span></div>
+          <div className="kpi"><span className="k">free</span><span className="v green">{free}</span></div>
+          <div className="kpi"><span className="k">busy</span><span className="v amber">{busy}</span></div>
+          <div className="kpi"><span className="k">drained</span><span className="v red">{drained}</span></div>
+          <div className="kpi"><span className="k">pending</span><span className="v">{snap.pending_leases.length}</span></div>
+          <div className="kpi"><span className="k">active</span><span className="v">{snap.active_leases.length}</span></div>
+        </div>
+      )}
       <h2>Hosts</h2>
         {snap === null ? (
           <div className="empty">Connecting…</div>
