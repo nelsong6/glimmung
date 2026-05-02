@@ -161,7 +161,6 @@ export function IssuesView({
           <thead>
             <tr>
               <th>Project</th>
-              <th>Issue</th>
               <th>Title</th>
               <th>Labels</th>
               <th>Last run</th>
@@ -177,13 +176,6 @@ export function IssuesView({
               return (
                 <tr key={key}>
                   <td>{row.project}</td>
-                  <td className="mono">
-                    {row.html_url && row.number !== null ? (
-                      <a href={row.html_url} target="_blank" rel="noreferrer">#{row.number}</a>
-                    ) : (
-                      <span className="dim" title="glimmung-native, no GitHub counterpart">native</span>
-                    )}
-                  </td>
                   <td>
                     <button
                       type="button"
