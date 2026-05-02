@@ -3057,24 +3057,52 @@ async def _build_issue_graph(
                 "issue_lock_holder_id": d.get("issue_lock_holder_id"),
                 "pr_number": d.get("pr_number"),
                 "pr_branch": d.get("pr_branch"),
+                # Resume primitive (#111) — surface the lineage pointers
+                # so the dashboard can render the Run-lineage tree
+                # (parent-child across resume-spawned Runs) and the
+                # entrypoint-arrow highlight on resumed Runs.
+                "cloned_from_run_id": d.get("cloned_from_run_id"),
+                "entrypoint_phase": d.get("entrypoint_phase"),
             },
         ))
         edges.append(GraphEdge(
             source=issue_node_id, target=run_node_id, kind="spawned",
         ))
 
+        # Run-lineage edge: a resumed Run draws back to its prior
+        # (cloned-from) Run. Only added if the prior is also in this
+        # graph — cross-issue resume isn't a thing today, but the guard
+        # keeps the edge set referentially closed so a renderer doesn't
+        # have to handle dangling sources.
+        cloned_from = d.get("cloned_from_run_id")
+        if cloned_from and cloned_from in run_ids:
+            edges.append(GraphEdge(
+                source=f"run:{cloned_from}",
+                target=run_node_id,
+                kind="resumed_from",
+            ))
+
         prev_attempt_node: str | None = None
         for a in d.get("attempts") or []:
             ai = a.get("attempt_index")
             attempt_node_id = f"attempt:{run_id}:{ai}"
             verification = a.get("verification") or {}
+            skipped_from = a.get("skipped_from_run_id")
+            # Synthesized skip-marks (#111) take priority over the
+            # generic completed/pending state so the dashboard can
+            # grey them out regardless of how the synthesis stamped
+            # `completed_at`.
+            attempt_state = (
+                "skipped" if skipped_from
+                else verification.get("status") or (
+                    "completed" if a.get("completed_at") else "pending"
+                )
+            )
             nodes.append(GraphNode(
                 id=attempt_node_id,
                 kind="attempt",
                 label=f"{a.get('phase', 'attempt')} #{ai}",
-                state=verification.get("status") or (
-                    "completed" if a.get("completed_at") else "pending"
-                ),
+                state=attempt_state,
                 timestamp=a.get("dispatched_at"),
                 metadata={
                     "phase": a.get("phase"),
@@ -3085,6 +3113,10 @@ async def _build_issue_graph(
                     "decision": a.get("decision"),
                     "completed_at": a.get("completed_at"),
                     "conclusion": a.get("conclusion"),
+                    # Resume primitive (#111) — set on synthesized
+                    # skip-marks so the dashboard can render "satisfied
+                    # by Run X" tooltips and grey out skipped attempts.
+                    "skipped_from_run_id": skipped_from,
                 },
             ))
             edges.append(GraphEdge(
