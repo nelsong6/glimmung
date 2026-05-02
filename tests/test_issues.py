@@ -15,7 +15,6 @@ import pytest
 from glimmung.issues import (
     close_issue,
     create_issue,
-    ensure_issue_for_github,
     find_issue_by_github_url,
     github_issue_url_for,
     list_open_issues,
@@ -35,7 +34,7 @@ def cosmos():
     )
 
 
-# ─── create / read ───────────────────────────────────────────────
+# ─── create / read ──────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -86,7 +85,7 @@ async def test_read_issue_returns_none_for_missing(cosmos):
     assert await read_issue(cosmos, project="ambience", issue_id="01HZZZNOPE") is None
 
 
-# ─── update ──────────────────────────────────────────────────────
+# ─── update ─────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -183,7 +182,7 @@ async def test_reopen_issue_clears_closed_at(cosmos):
     assert reopened.closed_at is None
 
 
-# ─── list_open ────────────────────────────────────────────────
+# ─── list_open ───────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -309,52 +308,3 @@ def test_github_issue_url_for_renders_canonical_form():
         github_issue_url_for("nelsong6/ambience", 42)
         == "https://github.com/nelsong6/ambience/issues/42"
     )
-
-
-# ─── ensure_issue_for_github ────────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_ensure_issue_for_github_creates_when_missing(cosmos):
-    issue, etag, created = await ensure_issue_for_github(
-        cosmos, project="ambience",
-        repo="nelsong6/ambience", issue_number=42,
-    )
-    assert created is True
-    assert etag
-    assert issue.metadata.github_issue_url == "https://github.com/nelsong6/ambience/issues/42"
-    assert issue.metadata.github_issue_repo == "nelsong6/ambience"
-    assert issue.metadata.github_issue_number == 42
-    # Default source for the dispatch path is GITHUB_WEBHOOK_IMPORT
-    # (the helper's default; dispatch_run overrides to MANUAL).
-    assert issue.metadata.source == IssueSource.GITHUB_WEBHOOK_IMPORT
-
-
-@pytest.mark.asyncio
-async def test_ensure_issue_for_github_returns_existing(cosmos):
-    """Second call on the same (repo, issue_number) returns the existing
-    Issue with `created=False` — keeps the dispatch path idempotent
-    across re-dispatches and webhook redeliveries."""
-    first, _, created_first = await ensure_issue_for_github(
-        cosmos, project="ambience",
-        repo="nelsong6/ambience", issue_number=42,
-    )
-    assert created_first is True
-
-    second, etag, created_second = await ensure_issue_for_github(
-        cosmos, project="ambience",
-        repo="nelsong6/ambience", issue_number=42,
-    )
-    assert created_second is False
-    assert second.id == first.id
-    assert etag
-
-
-@pytest.mark.asyncio
-async def test_ensure_issue_for_github_threads_source_override(cosmos):
-    issue, _, _ = await ensure_issue_for_github(
-        cosmos, project="ambience",
-        repo="nelsong6/ambience", issue_number=42,
-        source=IssueSource.SCHEDULED,
-    )
-    assert issue.metadata.source == IssueSource.SCHEDULED

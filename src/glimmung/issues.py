@@ -225,54 +225,6 @@ def github_issue_url_for(repo: str, issue_number: int) -> str:
     return f"https://github.com/{repo}/issues/{issue_number}"
 
 
-async def ensure_issue_for_github(
-    cosmos: Cosmos,
-    *,
-    project: str,
-    repo: str,
-    issue_number: int,
-    title: str = "",
-    body: str = "",
-    labels: list[str] | None = None,
-    source: IssueSource = IssueSource.GITHUB_WEBHOOK_IMPORT,
-) -> tuple[Issue, str, bool]:
-    """Find or mint a glimmung Issue mirroring a GH issue. Returns
-    `(issue, etag, created)`; `created=True` if this call minted the
-    Issue, `False` if it already existed.
-
-    The dispatch shim uses this to ensure every (repo, issue_number)
-    has a glimmung Issue before `dispatch_run` keys off `issue_id`.
-    The eventual GH-webhook mirror consumer-PR uses the same helper
-    on `issues.opened` events so direct GH-issue creation also lands
-    a glimmung Issue. Title/body/labels passed here only apply on
-    create; existing Issues are left alone (mirror-PR does the
-    update path)."""
-    url = github_issue_url_for(repo, issue_number)
-    existing = await find_issue_by_github_url(cosmos, github_issue_url=url)
-    if existing is not None:
-        issue, etag = existing
-        return issue, etag, False
-
-    issue = await create_issue(
-        cosmos,
-        project=project,
-        title=title or f"{repo}#{issue_number}",
-        body=body,
-        labels=labels,
-        source=source,
-        github_issue_url=url,
-        github_issue_repo=repo,
-        github_issue_number=issue_number,
-    )
-    # `create_issue` doesn't return an etag (point-write); read it back
-    # so callers can chain into update_issue / close_issue without an
-    # extra round-trip if they want.
-    refreshed = await read_issue(cosmos, project=project, issue_id=issue.id)
-    if refreshed is None:
-        raise RuntimeError(f"ensure_issue_for_github: just-created issue {issue.id} not readable")
-    return refreshed[0], refreshed[1], True
-
-
 async def find_issue_by_github_url(
     cosmos: Cosmos,
     *,
