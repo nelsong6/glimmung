@@ -46,8 +46,12 @@ class Settings(BaseSettings):
     #     Claude runs; needed for in-conversation registration of new
     #     projects/workflows/hosts (the original CLI flow requires Entra
     #     login on a workstation, which session pods don't have).
+    #   - mcp-glimmung/mcp-glimmung: the mcp-glimmung MCP server (sibling
+    #     to mcp-k8s/mcp-github/etc. in tank-operator's monorepo). Calls
+    #     us as itself; the session-pod identity stops at its kube-rbac-
+    #     proxy gate, so the MCP server's own SA is what reaches us.
     # Empty disables the path; Entra remains the only admin auth.
-    k8s_sa_allowlist: str = "tank-operator/tank-operator,tank-operator-sessions/claude-session"
+    k8s_sa_allowlist: str = "tank-operator/tank-operator,tank-operator-sessions/claude-session,mcp-glimmung/mcp-glimmung"
     k8s_api_host: str = "https://kubernetes.default.svc"
     # Standard projected paths inside the pod; overridable for tests.
     k8s_sa_token_path: str = "/var/run/secrets/kubernetes.io/serviceaccount/token"
