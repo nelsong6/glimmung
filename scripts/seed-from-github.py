@@ -1,15 +1,9 @@
-"""One-shot seed of glimmung's `issues` + `prs` containers from GitHub.
+"""One-shot seed of glimmung's `prs` container from GitHub.
 
-Per #50: glimmung becomes the system of record for issues + PRs. The
-runtime path stops calling the GitHub API for them; this script does
-the one-time import per project so the dashboards have content from day
-one.
-
-Run once per registered project, manually, after the slice 1-4 cutover
-lands. Idempotent — re-running ensures the same set of GH issues/PRs
-exist as glimmung docs without duplicating. The post-#50 webhook keeps
-ongoing GH activity in sync, so this script's only job is the historical
-backfill.
+Glimmung is the system of record for issues — they are not seeded
+from GH. PRs still pull from GH because the dashboards want the
+historical view. The post-#50 webhook keeps ongoing PR activity in
+sync, so this script's only job is the historical backfill.
 
 Usage::
 
@@ -25,14 +19,12 @@ Or in-cluster (where the workload identity is already wired):
         python -m scripts.seed_from_github --project glimmung
 
 Steps per project:
-    1. Pull every open + closed issue from the project's `github_repo`
-       and ensure_issue_for_github each one. Numbers preserved on
-       (repo, number).
-    2. Pull every open + recently-merged PR. ensure_pr_for_github each
+    1. Pull every open + recently-merged PR. ensure_pr_for_github each
        one (with the live GH-side title / body / branch / etc.).
-    3. Best-effort populate `linked_issue_id` by parsing `Closes #N` /
-       `Fixes #N` in seeded PR bodies + matching to the seeded Issues.
-    4. Best-effort populate `linked_run_id` from existing `runs` records
+    2. Best-effort populate `linked_issue_id` by parsing `Closes #N` /
+       `Fixes #N` in seeded PR bodies + matching to existing glimmung
+       Issues by their `metadata.github_issue_url`.
+    3. Best-effort populate `linked_run_id` from existing `runs` records
        where `runs.pr_number` matches.
 """
 
@@ -54,7 +46,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from glimmung import issues as issue_ops  # noqa: E402
 from glimmung import prs as pr_ops  # noqa: E402
 from glimmung import runs as run_ops  # noqa: E402
-from glimmung.app import _mirror_github_issue  # noqa: E402
 from glimmung.db import Cosmos, query_all  # noqa: E402
 from glimmung.github_app import GitHubAppTokenMinter  # noqa: E402
 from glimmung.settings import get_settings  # noqa: E402
@@ -64,39 +55,6 @@ log = logging.getLogger("glimmung.seed")
 _CLOSES_KEYWORDS_RE = re.compile(
     r"\b(?:closes|fixes|resolves)\s+#(\d+)\b", re.IGNORECASE,
 )
-
-
-async def list_all_issues(
-    minter: GitHubAppTokenMinter, *, repo: str, per_page: int = 100,
-) -> list[dict[str, Any]]:
-    """GET /repos/{repo}/issues?state=all, paginated. Filters out PRs
-    (GH returns them as issues with a `pull_request` field set)."""
-    token = await minter.installation_token()
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    out: list[dict[str, Any]] = []
-    page = 1
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        while True:
-            r = await client.get(
-                f"https://api.github.com/repos/{repo}/issues",
-                headers=headers,
-                params={"state": "all", "per_page": per_page, "page": page},
-            )
-            r.raise_for_status()
-            items = r.json() or []
-            if not items:
-                break
-            for item in items:
-                if "pull_request" not in item:
-                    out.append(item)
-            if len(items) < per_page:
-                break
-            page += 1
-    return out
 
 
 async def list_all_prs(
@@ -130,39 +88,6 @@ async def list_all_prs(
                 break
             page += 1
     return out
-
-
-async def seed_issues(
-    cosmos: Cosmos,
-    minter: GitHubAppTokenMinter,
-    *,
-    project: str,
-    repo: str,
-) -> dict[str, int]:
-    """Pull every open + closed issue from `repo` and ensure each lands
-    in the glimmung `issues` container with its GH coords. Closes
-    closed-on-GH ones to match state. Returns a per-action counter."""
-    log.info("seeding issues from %s", repo)
-    gh_issues = await list_all_issues(minter, repo=repo)
-    log.info("  found %d issues on GH", len(gh_issues))
-
-    counts = {"created": 0, "patched": 0, "closed": 0, "unchanged": 0}
-    for gh_issue in gh_issues:
-        gh_state = gh_issue.get("state") or "open"
-        action = "closed" if gh_state == "closed" else "opened"
-        outcome = await _mirror_github_issue(
-            cosmos, project=project, repo=repo,
-            action=action, issue_payload=gh_issue,
-        )
-        if outcome.get("created"):
-            counts["created"] += 1
-        elif outcome.get("closed"):
-            counts["closed"] += 1
-        elif outcome.get("patched"):
-            counts["patched"] += 1
-        else:
-            counts["unchanged"] += 1
-    return counts
 
 
 async def seed_prs(
@@ -315,17 +240,13 @@ async def link_prs(
 async def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "One-shot seed of glimmung's issues + prs containers from "
-            "the registered project's GitHub repo. Idempotent."
+            "One-shot seed of glimmung's prs container from the "
+            "registered project's GitHub repo. Idempotent."
         ),
     )
     parser.add_argument(
         "--project", required=True,
         help="Glimmung project name (must be registered in `projects`).",
-    )
-    parser.add_argument(
-        "--skip-issues", action="store_true",
-        help="Skip the issues import phase. Useful for re-running only PR import.",
     )
     parser.add_argument(
         "--skip-prs", action="store_true",
@@ -376,11 +297,6 @@ async def main() -> int:
             return 3
         log.info("seeding project=%s repo=%s", args.project, repo)
 
-        if not args.skip_issues:
-            issue_counts = await seed_issues(
-                cosmos, minter, project=args.project, repo=repo,
-            )
-            log.info("issues: %s", issue_counts)
         if not args.skip_prs:
             pr_counts = await seed_prs(
                 cosmos, minter, project=args.project, repo=repo,

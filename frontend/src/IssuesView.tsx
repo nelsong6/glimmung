@@ -89,16 +89,11 @@ export function IssuesView({
   const dispatch = async (row: IssueRow) => {
     const key = rowKey(row);
     setDispatchStatus({ kind: "dispatching", key });
-    // Native issues have no repo/number — dispatch by glimmung id;
-    // GH-anchored ones use the legacy (repo, issue_number) shape.
-    const payload = row.repo && row.number !== null
-      ? { repo: row.repo, issue_number: row.number }
-      : { issue_id: row.id, project: row.project };
     try {
       const r = await authedFetch("/v1/runs/dispatch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ issue_id: row.id, project: row.project }),
       });
       if (!r.ok) {
         const text = await r.text();
