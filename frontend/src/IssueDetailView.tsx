@@ -1,12 +1,16 @@
 /**
- * Issue detail view (#42) — issue meta + per-issue lineage graph.
+ * Issue detail view (#42) — issue meta + tabbed content (description /
+ * in progress / lineage).
  *
- * The graph is the answer to "what did the agent actually do on this
- * issue, where did it stall, what feedback drove which retry." Sourced
- * from `/v1/issues/{repo}/{n}/graph`; rendered as SVG with one column
- * per Run (left-to-right by created_at), PhaseAttempts stacked vertically
- * inside each Run column, PR at the column footer, and Signals attached
- * as side-events to their targets.
+ * The persistent header carries identity + last-run state. Below it,
+ * tabs split the content:
+ *   - description: title link, body, edit form
+ *   - in progress: active-run focus with attempt cards; polls while
+ *     a run is in flight, falls back to last-completed-run summary
+ *     (or "no runs yet") otherwise
+ *   - lineage: full graph from `/v1/issues/{repo}/{n}/graph` rendered
+ *     as SVG, one column per Run, attempts stacked, PR at the footer,
+ *     Signals attached as side-events
  *
  * Routed via `/issues/<owner>/<repo>/<n>` (GH-anchored) or
  * `/issues/<project>/<issueId>` (native). Target is derived from the
@@ -56,11 +60,14 @@ type IssueGraph = {
   edges: GraphEdge[];
 };
 
+type Tab = "description" | "in_progress" | "lineage";
+
 const COL_WIDTH = 200;
 const ROW_HEIGHT = 56;
-const SIGNAL_OFFSET_X = 220;  // signals render to the right of their target's column
+const SIGNAL_OFFSET_X = 220;
 const TOP_PADDING = 40;
 const LEFT_PADDING = 40;
+const POLL_INTERVAL_MS = 3000;
 
 type Layout = {
   positions: Map<string, { x: number; y: number; w: number; h: number }>;
@@ -100,11 +107,10 @@ export function IssueDetailView() {
   const [graph, setGraph] = useState<IssueGraph | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<GraphNode | null>(null);
+  const [tab, setTab] = useState<Tab>("description");
   const [editing, setEditing] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
 
-  // GH-anchored issues have a graph endpoint keyed off (repo, number);
-  // native issues don't yet, so the lineage view is suppressed for them.
   const detailUrl =
     target.kind === "gh"
       ? `/v1/issues/${target.repo}/${target.issue_number}`
@@ -117,6 +123,7 @@ export function IssueDetailView() {
     target.kind === "gh"
       ? `${target.repo}#${target.issue_number}`
       : `${target.project} (native)`;
+  const repoForLinks = target.kind === "gh" ? target.repo : null;
 
   const onBack = () => navigate("/issues");
 
@@ -149,6 +156,17 @@ export function IssueDetailView() {
     };
   }, [detailUrl, graphUrl, refreshTick]);
 
+  // While the in-progress tab is open and a run is actually in flight,
+  // poll the same endpoints so attempt cards fill in as conclusions /
+  // verification verdicts / decisions land server-side.
+  const isInFlight = !!(detail && (detail.issue_lock_held || detail.last_run_state === "in_progress"));
+  useEffect(() => {
+    if (tab !== "in_progress") return;
+    if (!isInFlight) return;
+    const id = setInterval(() => setRefreshTick((t) => t + 1), POLL_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [tab, isInFlight]);
+
   const layout = useMemo<Layout | null>(() => {
     if (!graph) return null;
     return computeLayout(graph);
@@ -161,125 +179,526 @@ export function IssueDetailView() {
           ← back
         </button>
         {heading}
-        {detail && (
-          <button
-            type="button"
-            className="link"
-            onClick={() => setEditing((e) => !e)}
-            style={{ marginLeft: "1rem", fontSize: "0.85rem" }}
-          >
-            {editing ? "cancel edit" : "edit"}
-          </button>
-        )}
       </h2>
       {error && <div className="empty error">{error}</div>}
       {detail === null && !error ? (
         <div className="empty">Loading…</div>
       ) : detail ? (
         <>
-          {editing ? (
-            <IssueEditForm
-              detail={detail}
-              onCancel={() => setEditing(false)}
-              onSaved={() => {
-                setEditing(false);
-                setRefreshTick((t) => t + 1);
-              }}
-            />
-          ) : (
-            <>
-              <div className="project-info">
-                <div className="row">
-                  <span className="key">title</span>
-                  <span className="val">
-                    {detail.html_url ? (
-                      <a href={detail.html_url} target="_blank" rel="noreferrer">
-                        {detail.title}
-                      </a>
-                    ) : (
-                      detail.title
-                    )}
-                  </span>
-                </div>
-                <div className="row">
-                  <span className="key">project</span>
-                  <span className="val mono">{detail.project}</span>
-                </div>
-                <div className="row">
-                  <span className="key">state</span>
-                  <span className="val mono">{detail.state}</span>
-                </div>
-                <div className="row">
-                  <span className="key">labels</span>
-                  <span className="val mono dim">
-                    {detail.labels.length === 0 ? "—" : detail.labels.join(", ")}
-                  </span>
-                </div>
-                <div className="row">
-                  <span className="key">last run</span>
-                  <span className="val">
-                    {detail.last_run_state ? (
-                      <span className={`pill ${runStatePill(detail.last_run_state)}`}>
-                        {detail.last_run_state}
-                      </span>
-                    ) : (
-                      "—"
-                    )}
-                    {detail.issue_lock_held && (
-                      <span className="pill busy" style={{ marginLeft: "0.5rem" }}>
-                        in flight
-                      </span>
-                    )}
-                  </span>
-                </div>
-              </div>
+          <IssueHeader detail={detail} />
 
-              {detail.body.trim() && (
-                <>
-                  <h2>Body</h2>
-                  <pre style={{
-                    whiteSpace: "pre-wrap",
-                    fontFamily: "inherit",
-                    background: "#0a0a0c",
-                    padding: "0.75rem 1rem",
-                    border: "1px solid #2a2a2e",
-                    borderRadius: "4px",
-                    margin: 0,
-                  }}>
-                    {detail.body}
-                  </pre>
-                </>
-              )}
-            </>
-          )}
+          <div className="tabs" role="tablist">
+            <TabButton current={tab} value="description" onSelect={setTab}>
+              description
+            </TabButton>
+            <TabButton current={tab} value="in_progress" onSelect={setTab}>
+              in progress
+              {isInFlight && <span className="tab-dot" aria-label="active" />}
+            </TabButton>
+            <TabButton current={tab} value="lineage" onSelect={setTab}>
+              lineage
+            </TabButton>
+          </div>
 
-          {graphUrl && (
-            <>
-              <h2>Lineage graph</h2>
-              {graph && layout ? (
-                graph.nodes.length === 1 ? (
-                  <div className="empty">No runs yet — dispatch from the Issues page.</div>
-                ) : (
-                  <GraphCanvas
-                    graph={graph}
-                    layout={layout}
-                    selected={selected}
-                    onSelect={setSelected}
-                  />
-                )
-              ) : (
-                <div className="empty">Loading graph…</div>
-              )}
-
-              {selected && (
-                <NodeDetailPanel node={selected} onClose={() => setSelected(null)} />
-              )}
-            </>
-          )}
+          <div className="tab-panel">
+            {tab === "description" && (
+              <DescriptionTab
+                detail={detail}
+                editing={editing}
+                onEdit={() => setEditing(true)}
+                onCancelEdit={() => setEditing(false)}
+                onSaved={() => {
+                  setEditing(false);
+                  setRefreshTick((t) => t + 1);
+                }}
+              />
+            )}
+            {tab === "in_progress" && (
+              <InProgressTab
+                detail={detail}
+                graph={graph}
+                graphAvailable={!!graphUrl}
+                repo={repoForLinks}
+              />
+            )}
+            {tab === "lineage" && (
+              <LineageTab
+                graph={graph}
+                graphAvailable={!!graphUrl}
+                layout={layout}
+                selected={selected}
+                onSelect={setSelected}
+              />
+            )}
+          </div>
         </>
       ) : null}
     </>
   );
+}
+
+function IssueHeader({ detail }: { detail: IssueDetail }) {
+  return (
+    <div className="project-info">
+      <div className="row">
+        <span className="key">title</span>
+        <span className="val">
+          {detail.html_url ? (
+            <a href={detail.html_url} target="_blank" rel="noreferrer">
+              {detail.title}
+            </a>
+          ) : (
+            detail.title
+          )}
+        </span>
+      </div>
+      <div className="row">
+        <span className="key">project</span>
+        <span className="val mono">{detail.project}</span>
+      </div>
+      <div className="row">
+        <span className="key">state</span>
+        <span className="val mono">{detail.state}</span>
+      </div>
+      <div className="row">
+        <span className="key">labels</span>
+        <span className="val mono dim">
+          {detail.labels.length === 0 ? "—" : detail.labels.join(", ")}
+        </span>
+      </div>
+      <div className="row">
+        <span className="key">last run</span>
+        <span className="val">
+          {detail.last_run_state ? (
+            <span className={`pill ${runStatePill(detail.last_run_state)}`}>
+              {detail.last_run_state}
+            </span>
+          ) : (
+            "—"
+          )}
+          {detail.issue_lock_held && (
+            <span className="pill busy" style={{ marginLeft: "0.5rem" }}>
+              in flight
+            </span>
+          )}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function TabButton({
+  current,
+  value,
+  onSelect,
+  children,
+}: {
+  current: Tab;
+  value: Tab;
+  onSelect: (t: Tab) => void;
+  children: React.ReactNode;
+}) {
+  const selected = current === value;
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={selected}
+      className={`tab${selected ? " selected" : ""}`}
+      onClick={() => onSelect(value)}
+    >
+      {children}
+    </button>
+  );
+}
+
+function DescriptionTab({
+  detail,
+  editing,
+  onEdit,
+  onCancelEdit,
+  onSaved,
+}: {
+  detail: IssueDetail;
+  editing: boolean;
+  onEdit: () => void;
+  onCancelEdit: () => void;
+  onSaved: () => void;
+}) {
+  if (editing) {
+    return <IssueEditForm detail={detail} onCancel={onCancelEdit} onSaved={onSaved} />;
+  }
+  return (
+    <>
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "0.5rem" }}>
+        <button type="button" className="link" onClick={onEdit}>
+          edit
+        </button>
+      </div>
+      {detail.body.trim() ? (
+        <pre
+          style={{
+            whiteSpace: "pre-wrap",
+            fontFamily: "inherit",
+            background: "#0a0a0c",
+            padding: "0.75rem 1rem",
+            border: "1px solid #2a2a2e",
+            borderRadius: "4px",
+            margin: 0,
+          }}
+        >
+          {detail.body}
+        </pre>
+      ) : (
+        <div className="empty dim">(no description)</div>
+      )}
+    </>
+  );
+}
+
+function InProgressTab({
+  detail,
+  graph,
+  graphAvailable,
+  repo,
+}: {
+  detail: IssueDetail;
+  graph: IssueGraph | null;
+  graphAvailable: boolean;
+  repo: string | null;
+}) {
+  if (!graphAvailable) {
+    return (
+      <div className="empty">
+        Run details aren't available for native issues yet.
+      </div>
+    );
+  }
+  if (!graph) {
+    return <div className="empty">Loading run state…</div>;
+  }
+
+  const activeRun = findActiveRun(graph);
+  const lastCompleted = findLastCompletedRun(graph);
+  const inFlight = !!(detail.issue_lock_held || detail.last_run_state === "in_progress");
+
+  if (activeRun) {
+    return <RunPanel run={activeRun} graph={graph} repo={repo} live />;
+  }
+  if (inFlight) {
+    return (
+      <div className="empty">
+        Run lock held — waiting for the run record to land.
+      </div>
+    );
+  }
+  if (lastCompleted) {
+    return (
+      <>
+        <div className="run-status-banner">
+          No run in flight. Showing the last completed run.
+        </div>
+        <RunPanel run={lastCompleted} graph={graph} repo={repo} live={false} />
+      </>
+    );
+  }
+  return <div className="empty">No runs yet — dispatch from the Issues page.</div>;
+}
+
+function RunPanel({
+  run,
+  graph,
+  repo,
+  live,
+}: {
+  run: GraphNode;
+  graph: IssueGraph;
+  repo: string | null;
+  live: boolean;
+}) {
+  const attempts = attemptsForRun(graph, run.id);
+  const meta = run.metadata;
+  const cumulativeCost = numberOrNull(meta.cumulative_cost_usd);
+  const workflow = stringOrNull(meta.workflow);
+  const triggerSource = stringOrNull(meta.trigger_source);
+  const abortReason = stringOrNull(meta.abort_reason);
+  const prNumber = numberOrNull(meta.pr_number);
+  const prBranch = stringOrNull(meta.pr_branch);
+  const stateLabel = run.state ?? "unknown";
+
+  return (
+    <div className="run-panel">
+      <div className="run-panel-header">
+        <div>
+          <span className={`pill ${runStatePill(stateLabel)}`}>{stateLabel}</span>
+          <span className="mono dim" style={{ marginLeft: "0.5rem" }}>
+            {run.label}
+          </span>
+          {live && <span className="live-dot" aria-label="live" />}
+        </div>
+        {run.timestamp && (
+          <span className="dim mono">started {formatTime(run.timestamp)}</span>
+        )}
+      </div>
+      <div className="run-panel-meta">
+        {workflow && (
+          <div>
+            <span className="key">workflow</span>{" "}
+            <span className="mono">{workflow}</span>
+          </div>
+        )}
+        {triggerSource && (
+          <div>
+            <span className="key">trigger</span>{" "}
+            <span className="mono">{triggerSource}</span>
+          </div>
+        )}
+        <div>
+          <span className="key">attempts</span>{" "}
+          <span className="mono">{attempts.length}</span>
+        </div>
+        {cumulativeCost !== null && (
+          <div>
+            <span className="key">cost</span>{" "}
+            <span className="mono">${cumulativeCost.toFixed(4)}</span>
+          </div>
+        )}
+        {prNumber !== null && repo && (
+          <div>
+            <span className="key">PR</span>{" "}
+            <a
+              className="mono"
+              href={`https://github.com/${repo}/pull/${prNumber}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              #{prNumber}
+            </a>
+            {prBranch && <span className="dim mono"> ({prBranch})</span>}
+          </div>
+        )}
+        {abortReason && (
+          <div>
+            <span className="key">abort</span>{" "}
+            <span className="mono">{abortReason}</span>
+          </div>
+        )}
+      </div>
+
+      {attempts.length === 0 ? (
+        <div className="empty dim">No attempts dispatched yet.</div>
+      ) : (
+        <div className="attempt-list">
+          {attempts.map((a) => (
+            <AttemptCard key={a.id} attempt={a} repo={repo} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AttemptCard({ attempt, repo }: { attempt: GraphNode; repo: string | null }) {
+  const meta = attempt.metadata;
+  const phase = stringOrNull(meta.phase) ?? "attempt";
+  const dispatchedAt = attempt.timestamp;
+  const completedAt = stringOrNull(meta.completed_at);
+  const conclusion = stringOrNull(meta.conclusion);
+  const decision = stringOrNull(meta.decision);
+  const workflowRunId = meta.workflow_run_id != null ? String(meta.workflow_run_id) : null;
+  const workflowFilename = stringOrNull(meta.workflow_filename);
+  const verification = isRecord(meta.verification) ? meta.verification : null;
+  const verificationStatus = verification ? stringOrNull(verification.status) : null;
+  const verificationCost = verification ? numberOrNull(verification.cost_usd) : null;
+  const verificationReasons = verification && Array.isArray(verification.reasons)
+    ? verification.reasons.filter((r): r is string => typeof r === "string")
+    : [];
+
+  const running = !completedAt;
+  const elapsedLabel = dispatchedAt
+    ? running
+      ? `${formatDuration(now() - parseTs(dispatchedAt))} elapsed`
+      : completedAt
+        ? `ran ${formatDuration(parseTs(completedAt) - parseTs(dispatchedAt))}`
+        : null
+    : null;
+
+  const statusPill = (() => {
+    if (running) return { cls: "busy", text: "running" };
+    if (verificationStatus === "pass") return { cls: "free", text: "pass" };
+    if (verificationStatus === "fail") return { cls: "drain", text: "fail" };
+    if (verificationStatus === "error") return { cls: "drain", text: "error" };
+    if (conclusion === "success") return { cls: "free", text: "success" };
+    if (conclusion === "cancelled") return { cls: "drain", text: "cancelled" };
+    if (conclusion) return { cls: "drain", text: conclusion };
+    return { cls: "", text: "completed" };
+  })();
+
+  return (
+    <div className={`attempt-card${running ? " running" : ""}`}>
+      <div className="attempt-card-head">
+        <strong>{attempt.label}</strong>
+        <span className={`pill ${statusPill.cls}`}>{statusPill.text}</span>
+        <span className="dim mono">{phase}</span>
+        {elapsedLabel && <span className="dim mono">{elapsedLabel}</span>}
+      </div>
+      <div className="attempt-card-body">
+        {dispatchedAt && (
+          <div>
+            <span className="key">dispatched</span>{" "}
+            <span className="mono">{formatTime(dispatchedAt)}</span>
+          </div>
+        )}
+        {completedAt && (
+          <div>
+            <span className="key">completed</span>{" "}
+            <span className="mono">{formatTime(completedAt)}</span>
+          </div>
+        )}
+        {workflowFilename && (
+          <div>
+            <span className="key">workflow</span>{" "}
+            <span className="mono">{workflowFilename}</span>
+          </div>
+        )}
+        {workflowRunId && (
+          <div>
+            <span className="key">gh run</span>{" "}
+            {repo ? (
+              <a
+                className="mono"
+                href={`https://github.com/${repo}/actions/runs/${workflowRunId}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {workflowRunId}
+              </a>
+            ) : (
+              <span className="mono">{workflowRunId}</span>
+            )}
+          </div>
+        )}
+        {verificationCost !== null && (
+          <div>
+            <span className="key">cost</span>{" "}
+            <span className="mono">${verificationCost.toFixed(4)}</span>
+          </div>
+        )}
+        {decision && (
+          <div>
+            <span className="key">decision</span>{" "}
+            <span className="mono">{decision}</span>
+          </div>
+        )}
+      </div>
+      {verificationReasons.length > 0 && (
+        <ul className="attempt-card-reasons">
+          {verificationReasons.map((r, i) => (
+            <li key={i} className="mono dim">
+              {r}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function LineageTab({
+  graph,
+  graphAvailable,
+  layout,
+  selected,
+  onSelect,
+}: {
+  graph: IssueGraph | null;
+  graphAvailable: boolean;
+  layout: Layout | null;
+  selected: GraphNode | null;
+  onSelect: (n: GraphNode | null) => void;
+}) {
+  if (!graphAvailable) {
+    return (
+      <div className="empty">
+        Lineage isn't available for native issues yet.
+      </div>
+    );
+  }
+  if (!graph || !layout) {
+    return <div className="empty">Loading graph…</div>;
+  }
+  if (graph.nodes.length === 1) {
+    return <div className="empty">No runs yet — dispatch from the Issues page.</div>;
+  }
+  return (
+    <>
+      <GraphCanvas graph={graph} layout={layout} selected={selected} onSelect={onSelect} />
+      {selected && <NodeDetailPanel node={selected} onClose={() => onSelect(null)} />}
+    </>
+  );
+}
+
+function findActiveRun(graph: IssueGraph): GraphNode | null {
+  return graph.nodes.find((n) => n.kind === "run" && n.state === "in_progress") ?? null;
+}
+
+function findLastCompletedRun(graph: IssueGraph): GraphNode | null {
+  const completed = graph.nodes
+    .filter((n) => n.kind === "run" && n.state !== "in_progress")
+    .sort((a, b) => (b.timestamp ?? "").localeCompare(a.timestamp ?? ""));
+  return completed[0] ?? null;
+}
+
+function attemptsForRun(graph: IssueGraph, runNodeId: string): GraphNode[] {
+  // run node id is `run:<run_id>`; attempt ids are `attempt:<run_id>:<index>`.
+  const runId = runNodeId.startsWith("run:") ? runNodeId.slice(4) : runNodeId;
+  const prefix = `attempt:${runId}:`;
+  return graph.nodes
+    .filter((n) => n.kind === "attempt" && n.id.startsWith(prefix))
+    .sort((a, b) => {
+      const ai = parseInt(a.id.split(":").pop() ?? "0", 10);
+      const bi = parseInt(b.id.split(":").pop() ?? "0", 10);
+      return ai - bi;
+    });
+}
+
+function isRecord(x: unknown): x is Record<string, unknown> {
+  return typeof x === "object" && x !== null && !Array.isArray(x);
+}
+
+function numberOrNull(x: unknown): number | null {
+  return typeof x === "number" && Number.isFinite(x) ? x : null;
+}
+
+function stringOrNull(x: unknown): string | null {
+  return typeof x === "string" && x.length > 0 ? x : null;
+}
+
+function parseTs(s: string): number {
+  const n = Date.parse(s);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function now(): number {
+  return Date.now();
+}
+
+function formatTime(s: string): string {
+  const n = parseTs(s);
+  if (!n) return s;
+  return new Date(n).toLocaleString();
+}
+
+function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  const remSec = sec % 60;
+  if (min < 60) return `${min}m ${remSec}s`;
+  const hr = Math.floor(min / 60);
+  const remMin = min % 60;
+  return `${hr}h ${remMin}m`;
 }
 
 function IssueEditForm({
@@ -443,14 +862,11 @@ function EdgeLine({ edge, layout }: { edge: GraphEdge; layout: Layout }) {
   const dash = edge.kind === "re_dispatched" ? "4,4" : undefined;
   const marker = isFeedback ? "url(#arrow-feedback)" : "url(#arrow)";
 
-  // Anchor at edge mid-points.
   const x1 = a.x + a.w / 2;
   const y1 = a.y + a.h;
   const x2 = b.x + b.w / 2;
   const y2 = b.y;
 
-  // Curved path for cross-column edges (re_dispatched, feedback to a
-  // different column); straight for same-column.
   const sameColumn = Math.abs(x1 - x2) < 1;
   if (sameColumn) {
     return (
@@ -463,7 +879,6 @@ function EdgeLine({ edge, layout }: { edge: GraphEdge; layout: Layout }) {
       />
     );
   }
-  // Quadratic curve through a midpoint between the two anchor points.
   const mx = (x1 + x2) / 2;
   const my = Math.max(y1, y2) + 12;
   const d = `M ${x1} ${y1} Q ${mx} ${my} ${x2} ${y2}`;
@@ -573,7 +988,6 @@ function NodeDetailPanel({ node, onClose }: { node: GraphNode; onClose: () => vo
 function computeLayout(graph: IssueGraph): Layout {
   const positions = new Map<string, { x: number; y: number; w: number; h: number }>();
 
-  // Issue (root) at top.
   const issueNode = graph.nodes.find((n) => n.kind === "issue");
   if (issueNode) {
     positions.set(issueNode.id, {
@@ -584,19 +998,16 @@ function computeLayout(graph: IssueGraph): Layout {
     });
   }
 
-  // Order Runs by timestamp; assign each a column.
   const runs = graph.nodes
     .filter((n) => n.kind === "run")
     .sort((a, b) => (a.timestamp ?? "").localeCompare(b.timestamp ?? ""));
 
-  // Map run id → column index. Also map attempt nodes to their run.
   const runIdToCol = new Map<string, number>();
   runs.forEach((r, i) => runIdToCol.set(r.id, i));
 
   const attemptByRun = new Map<string, GraphNode[]>();
   for (const n of graph.nodes) {
     if (n.kind !== "attempt") continue;
-    // attempt id format: "attempt:<run_id>:<index>"
     const parts = n.id.split(":");
     const runId = `run:${parts[1]}`;
     const arr = attemptByRun.get(runId) ?? [];
@@ -612,14 +1023,12 @@ function computeLayout(graph: IssueGraph): Layout {
   }
 
   const prByRun = new Map<string, GraphNode>();
-  // Map run → its PR via the "opened" edge.
   for (const e of graph.edges) {
     if (e.kind !== "opened") continue;
     const target = graph.nodes.find((n) => n.id === e.target);
     if (target?.kind === "pr") prByRun.set(e.source, target);
   }
 
-  // Lay out columns.
   const columnTopY = TOP_PADDING + 44 + 40;
   let maxColumnBottomY = columnTopY;
   for (const run of runs) {
@@ -649,10 +1058,8 @@ function computeLayout(graph: IssueGraph): Layout {
     maxColumnBottomY = Math.max(maxColumnBottomY, y);
   }
 
-  // Signals: right of their target's column at the target's row.
   for (const n of graph.nodes) {
     if (n.kind !== "signal") continue;
-    // Find an incoming "feedback" edge to position by source.
     const fbEdge = graph.edges.find((e) => e.kind === "feedback" && e.target === n.id);
     let baseX = LEFT_PADDING;
     let baseY = maxColumnBottomY;
@@ -671,10 +1078,8 @@ function computeLayout(graph: IssueGraph): Layout {
     });
   }
 
-  // Compute canvas size.
   let width = LEFT_PADDING * 2 + Math.max(1, runs.length) * (COL_WIDTH + 24) + 80;
   let height = maxColumnBottomY + TOP_PADDING;
-  // Expand for any signal positions that overflow.
   for (const p of positions.values()) {
     width = Math.max(width, p.x + p.w + LEFT_PADDING);
     height = Math.max(height, p.y + p.h + TOP_PADDING);
@@ -684,7 +1089,6 @@ function computeLayout(graph: IssueGraph): Layout {
 }
 
 function nodeFill(n: GraphNode): { bg: string; fg: string; dim: string } {
-  // Status-driven coloring; defaults by kind.
   if (n.kind === "issue") return { bg: "#1a2030", fg: "#e8e8e8", dim: "#888" };
   if (n.kind === "pr") return { bg: "#1a1f1a", fg: "#a8d8a8", dim: "#6a8a6a" };
   if (n.kind === "signal") return { bg: "#2a1d10", fg: "#fb923c", dim: "#a87040" };
