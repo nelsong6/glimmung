@@ -73,6 +73,48 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         return client.get("/v1/workflows")
 
     @mcp.tool()
+    def register_workflow(
+        project: str,
+        name: str,
+        phases: list[dict[str, Any]],
+        pr: dict[str, Any] | None = None,
+        budget: dict[str, Any] | None = None,
+        trigger_label: str = "issue-agent",
+        default_requirements: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Upsert a Workflow (create or replace). Use this for the
+        structural fields `patch_workflow` won't touch: phase shape,
+        declared inputs/outputs, recycle policy, trigger label, default
+        requirements. Idempotent — re-registering the same shape is a
+        no-op replace, so consumer-migration scripts can run repeatedly
+        without piling up state. The server preserves `createdAt` on
+        replace and validates cross-phase input refs at registration
+        time, so a typo in `${{ phases.NAME.outputs.KEY }}` surfaces
+        before it can corrupt a run.
+
+        `phases` is a list of PhaseSpec dicts; each must declare `name`
+        and `workflow_filename`. Optional fields: `kind` (default
+        "gha_dispatch"), `workflow_ref`, `inputs`, `outputs`,
+        `requirements`, `verify`, `recycle_policy`. `pr` is a
+        PrPrimitiveSpec dict (`enabled`, `recycle_policy`); omit for the
+        default disabled primitive. `budget` is `{"total": float}`
+        (default 25.0). Pair with `patch_workflow` for live rollout-knob
+        flips that don't need a full re-register."""
+        payload: dict[str, Any] = {
+            "project": project,
+            "name": name,
+            "phases": phases,
+            "trigger_label": trigger_label,
+        }
+        if pr is not None:
+            payload["pr"] = pr
+        if budget is not None:
+            payload["budget"] = budget
+        if default_requirements is not None:
+            payload["default_requirements"] = default_requirements
+        return client.post("/v1/workflows", json=payload)
+
+    @mcp.tool()
     def patch_workflow(
         project: str,
         name: str,
