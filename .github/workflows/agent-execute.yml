@@ -1,25 +1,18 @@
-name: Agent Run
+name: Agent Run — agent-execute
 
-run-name: "#${{ inputs.issue_number }} ${{ inputs.issue_title }} (${{ inputs.host }})"
+run-name: "#${{ inputs.issue_number }} agent-execute ${{ inputs.issue_title }} (${{ inputs.host }})"
 
-# Glimmung itself dispatches this workflow. https://glimmung.romaine.life/v1/webhook/github
-# receives the GitHub `issues` event, atomically claims a host, fires
-# this workflow_dispatch with lease_id + host + issue_number. Heavy
-# lifting (Claude run + screenshot/notes capture) happens inside an
-# in-cluster k8s Job that talks to tank-operator's claude-api-proxy
-# for subscription-token auth — the GHA runner only orchestrates and
-# copies evidence out.
+# Phase 2 of the multi-phase agent-run pipeline (glimmung#102).
+# Runs the Claude agent against the validation env that env-prep
+# already stood up (validation_url + release_name + prod_namespace +
+# image_tag come in as workflow_dispatch inputs, threaded through by
+# glimmung's runtime substitution path — glimmung#101).
 #
-# Layout differs from ambience: per-issue helm releases install into
-# the prod `glimmung` namespace (release-name-distinguished) so they
-# share the prod SA + glimmung-identity workload identity, which is
-# the only way to run live-data Cosmos calls without flexible-FIC
-# subject matching (Microsoft's grammar parser doesn't accept
-# `claims['sub'].matches(...)`). The agent Job lives in a separate
-# `glimmung-issue-<N>-<run>-<sha>` namespace because the reflector
-# in tank-operator-sessions auto-replicates the claude-oauth-ca
-# ConfigMap to namespaces matching that pattern; the prod glimmung
-# namespace doesn't need the CA.
+# After the agent Job completes, this phase rebuilds the validation
+# env from the agent's branch, runs the screenshot pass, uploads, and
+# fires the final completed callback. No outputs declared in the
+# PhaseSpec — this is the terminal user phase; glimmung opens the PR
+# (or hands off to the consumer's pr step depending on pr.enabled).
 
 on:
   workflow_dispatch:
@@ -41,8 +34,7 @@ on:
         required: false
         type: string
       issue_id:
-        description: Glimmung Issue id (ULID, optional). Threaded into the
-          thin GH PR body marker so the webhook can attach linkages.
+        description: Glimmung Issue id (ULID, optional).
         required: false
         type: string
       gh_event:
@@ -53,16 +45,12 @@ on:
         description: Originating GitHub action (informational)
         required: false
         type: string
-      # ── Verify-loop / phases-v1 inputs (glimmung#69) ──
-      # Glimmung dictates the branch via run_id; the others are reserved
-      # for future verify-loop / recycle dispatches (currently unused on
-      # this workflow since pr.enabled=False and verify=False).
       run_id:
         description: Glimmung Run ULID (used for branch=glimmung/<run_id>)
-        required: false
+        required: true
         type: string
       attempt_index:
-        description: 0-based attempt index. 0 = initial; >0 = recycle.
+        description: 0-based attempt index for this phase.
         required: false
         type: string
       prior_verification_artifact_url:
@@ -76,6 +64,24 @@ on:
       pr_number:
         description: Existing PR number on a recycle dispatch.
         required: false
+        type: string
+      # ── Inputs threaded from env-prep's outputs (glimmung#101) ──
+      validation_url:
+        description: Live preview env URL stood up by env-prep.
+        required: true
+        type: string
+      release_name:
+        description: Helm release name env-prep used. Reused for rebuild.
+        required: true
+        type: string
+      prod_namespace:
+        description: Namespace the release lives in (always `glimmung`).
+        required: true
+        type: string
+      image_tag:
+        description: Initial image tag env-prep built. Used as the prefix
+          for the rebuild tag.
+        required: true
         type: string
 
 permissions:
@@ -115,63 +121,18 @@ jobs:
           fi
           echo "lease verified: ${LEASE_ID} active on ${HOST}"
 
-      - name: Azure Login (OIDC)
-        uses: azure/login@v2
-        with:
-          client-id: ${{ vars.ARM_CLIENT_ID }}
-          tenant-id: ${{ vars.ARM_TENANT_ID }}
-          subscription-id: ${{ vars.ARM_SUBSCRIPTION_ID }}
-
-      - name: Fetch GitHub App credentials from Key Vault
-        env:
-          KV_NAME: ${{ vars.KEY_VAULT_NAME }}
-        run: |
-          set -euo pipefail
-          app_id=$(az keyvault secret show --vault-name "$KV_NAME" --name "github-app-id" --query value -o tsv)
-          pem=$(az keyvault secret show --vault-name "$KV_NAME" --name "github-app-private-key" --query value -o tsv)
-          echo "::add-mask::${app_id}"
-          while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            echo "::add-mask::${line}"
-          done <<< "$pem"
-          echo "GH_APP_ID=${app_id}" >> "$GITHUB_ENV"
-          {
-            echo "GH_APP_PRIVATE_KEY<<KEY_EOF"
-            echo "$pem"
-            echo "KEY_EOF"
-          } >> "$GITHUB_ENV"
-
-      - name: Mint GitHub App installation token
-        id: app-token
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ env.GH_APP_ID }}
-          private-key: ${{ env.GH_APP_PRIVATE_KEY }}
-
-      - name: Comment with run link
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          ISSUE_NUMBER: ${{ inputs.issue_number }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          HOST: ${{ inputs.host }}
-        run: |
-          set -euo pipefail
-          if [ -z "${ISSUE_NUMBER}" ]; then
-            echo "no issue_number; skipping run-start comment"
-            exit 0
-          fi
-          body="agent run started: ${RUN_URL} (host \`${HOST}\`)"
-          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments" \
-            -f "body=${body}" >/dev/null \
-            || echo "::warning::failed to post run-start comment on #${ISSUE_NUMBER}; continuing"
-
-  agent:
-    name: Run agent + open PR
+  agent-execute:
+    name: Run agent + screenshots + upload
     needs: route
     runs-on: ubuntu-latest
     env:
       ISSUE_NUMBER: ${{ inputs.issue_number }}
       ISSUE_TITLE: ${{ inputs.issue_title }}
+      VALIDATION_URL: ${{ inputs.validation_url }}
+      RELEASE_NAME: ${{ inputs.release_name }}
+      PROD_NAMESPACE: ${{ inputs.prod_namespace }}
+      IMAGE_TAG: ${{ inputs.image_tag }}
+      BRANCH_NAME: glimmung/${{ inputs.run_id }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -234,12 +195,9 @@ jobs:
           private-key: ${{ env.GH_APP_PRIVATE_KEY }}
 
       - name: Read infra-bootstrap tofu outputs
-        # Pulls AKS + screenshot-storage values from the infra-bootstrap
-        # state at runtime instead of GitHub Actions vars. The CI SP has
-        # `Storage Blob Data Reader` on `nelsontofu/tfstate` (granted in
-        # infra-bootstrap/tofu/agent-screenshots.tf::glimmung_ci_tfstate_reader)
-        # so it can `tofu init` against that state read-only and read
-        # outputs without standing up a separate tofu config locally.
+        # env-prep doesn't emit storage account info because nothing in
+        # phase 1 needed it. agent-execute pulls the screenshot
+        # storage values fresh from tofu state.
         env:
           ARM_USE_OIDC: "true"
           ARM_CLIENT_ID: ${{ vars.ARM_CLIENT_ID }}
@@ -275,26 +233,16 @@ jobs:
             --name "$AZURE_AKS_CLUSTER_NAME" \
             --overwrite-existing
 
-      - name: Notify glimmung — run started
-        # Capability-auth callback: run_id is an unguessable ULID. Posts
-        # ${{ github.run_id }} so glimmung can map workflow_run_id →
-        # glimmung run, plus the validation URL (#88) so the PR
-        # composer has the live env + /_styleguide URLs without
-        # re-deriving them from CI inputs glimmung doesn't see. The URL
-        # isn't computed until the next step, so we recompute the slug
-        # inline here.
-        if: ${{ inputs.run_id != '' }}
+      - name: Notify glimmung — agent-execute started
+        # Stamps THIS phase's GHA workflow_run_id on the agent-execute
+        # PhaseAttempt. validation_url is already on the Run from
+        # env-prep's started callback (first-arrival-wins idempotency
+        # in record_started, so re-stamping here would be a no-op).
         env:
           GLIMMUNG_RUN_ID: ${{ inputs.run_id }}
         run: |
           set -euo pipefail
-          short_sha=$(git rev-parse --short=7 HEAD)
-          slug="issue-${ISSUE_NUMBER}-${GITHUB_RUN_ID}-${short_sha}"
-          validation_url="https://${slug}.glimmung.dev.romaine.life"
-          payload=$(jq -nc \
-            --argjson rid "${GITHUB_RUN_ID}" \
-            --arg vurl "${validation_url}" \
-            '{workflow_run_id: $rid, validation_url: $vurl}')
+          payload=$(jq -nc --argjson rid "${GITHUB_RUN_ID}" '{workflow_run_id: $rid}')
           curl -sS -X POST \
             -H "Content-Type: application/json" \
             -d "${payload}" \
@@ -306,92 +254,18 @@ jobs:
           GLIMMUNG_RUN_ID: ${{ inputs.run_id }}
         run: |
           set -euo pipefail
-          short_sha=$(git rev-parse --short=7 HEAD)
-          slug="issue-${ISSUE_NUMBER}-${GITHUB_RUN_ID}-${short_sha}"
-          # Per-issue helm release lives in the prod `glimmung` namespace,
-          # release-name-distinguished. Agent Job lives in a separate
-          # per-run namespace so the reflector's `glimmung-issue-.*`
-          # match pattern auto-replicates the claude-oauth-ca ConfigMap
-          # without polluting the prod glimmung namespace.
-          if [ -z "${GLIMMUNG_RUN_ID}" ]; then
-            echo "::error::missing inputs.run_id (required under glimmung#69)"
-            exit 1
-          fi
+          # AGENT_NAMESPACE follows the same `glimmung-issue-.*` pattern
+          # the reflector matches on so the claude-oauth-ca ConfigMap
+          # auto-replicates. Slug is reused from env-prep's IMAGE_TAG.
           {
-            echo "RELEASE_NAME=${slug}"
-            echo "PROD_NAMESPACE=glimmung"
-            echo "AGENT_NAMESPACE=glimmung-${slug}"
-            echo "VALIDATION_HOST=${slug}.glimmung.dev.romaine.life"
-            echo "VALIDATION_URL=https://${slug}.glimmung.dev.romaine.life"
-            echo "JOB_NAME=agent-${slug}"
-            echo "BRANCH_NAME=glimmung/${GLIMMUNG_RUN_ID}"
-            echo "IMAGE_TAG=${slug}"
+            echo "AGENT_NAMESPACE=glimmung-${IMAGE_TAG}"
+            echo "JOB_NAME=agent-${IMAGE_TAG}"
             echo "ISSUE_URL=https://github.com/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}"
           } >> "$GITHUB_ENV"
-
-      - name: Build preview image
-        run: |
-          set -euo pipefail
-          python -m glimmung_agent.cli build-preview-image --image-tag "${IMAGE_TAG}" > /tmp/preview-image.json
-
-      - name: Deploy issue release into glimmung namespace
-        run: |
-          set -euo pipefail
-          python -m glimmung_agent.cli deploy-validation-preview \
-            --release "${RELEASE_NAME}" \
-            --namespace "${PROD_NAMESPACE}" \
-            --image-tag "${IMAGE_TAG}" \
-            --public-host "${VALIDATION_HOST}"
-
-      - name: Wait for validation env to be ready
-        run: |
-          set -euo pipefail
-          python -m glimmung_agent.cli wait-public-preview --url "${VALIDATION_URL}"
-
-      - name: Verify /_styleguide contract
-        # Hard contract: every frontend project must expose /_styleguide
-        # on its live env so reviewers (and the screenshot pass) have a
-        # single page that catalogs every component. See
-        # docs/styleguide-contract.md. A 404 here aborts the run with a
-        # typed reason so the dashboard surfaces it cleanly instead of
-        # the failure cascading into a confused "agent ran but the PR is
-        # missing screenshots" review.
-        env:
-          GLIMMUNG_RUN_ID: ${{ inputs.run_id }}
-        run: |
-          set -euo pipefail
-          url="${VALIDATION_URL}/_styleguide"
-          status=$(curl -sS -o /dev/null -w '%{http_code}' "${url}" || echo "000")
-          if [ "${status}" = "200" ]; then
-            echo "styleguide route OK: ${url}"
-            exit 0
-          fi
-
-          reason="frontend_contract_violation: /_styleguide route not exposed on ${VALIDATION_URL} (HTTP ${status})"
-          echo "::error::${reason}"
-          echo "::error::See docs/styleguide-contract.md for the contract and a minimal starter."
-
-          # Best-effort: post the typed abort to glimmung so the run
-          # record lands in ABORTED with this reason and any locks the
-          # run held are released. Capability-only auth (run_id ULID),
-          # same as started / completed.
-          if [ -n "${GLIMMUNG_RUN_ID}" ]; then
-            payload=$(jq -nc --arg r "${reason}" '{reason: $r}')
-            curl -sS -X POST \
-              -H "Content-Type: application/json" \
-              -d "${payload}" \
-              "${GLIMMUNG_BASE}/v1/runs/${GLIMMUNG_PROJECT}/${GLIMMUNG_RUN_ID}/aborted" \
-              || echo "::warning::failed to post typed abort to glimmung; lease-release will still fire"
-          fi
-
-          exit 1
 
       - name: Create per-run agent namespace
         run: |
           set -euo pipefail
-          # Reflector in tank-operator-sessions matches `glimmung-issue-.*`
-          # and auto-replicates the claude-oauth-ca ConfigMap into this
-          # namespace shortly after creation.
           kubectl create namespace "${AGENT_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Resolve claude-api-proxy ClusterIP
@@ -517,13 +391,6 @@ jobs:
           python -m glimmung_agent.cli wait-public-preview --url "${VALIDATION_URL}"
 
       - name: Capture screenshot pass
-        # #87: Playwright over the rebuilt validation env, one PNG per
-        # page in frontend/screenshot-pages.json. Outputs land where
-        # the existing upload-to-blob step expects them
-        # (/tmp/evidence/screenshots) so the PR composer (#88) can
-        # surface them inline. Per-page failure aborts the run with a
-        # typed reason `screenshot_capture_failed: <path>` so the
-        # dashboard shows what broke without spelunking through CI logs.
         if: success()
         env:
           BASE_URL: ${{ env.VALIDATION_URL }}
@@ -538,10 +405,6 @@ jobs:
           fi
           mkdir -p "${OUT_DIR}"
 
-          # Playwright's published image carries a matching browser, so
-          # we don't pay an `npx install --with-deps` round-trip in the
-          # critical path. The image is large but `actions/cache` makes
-          # subsequent runs cheap.
           npm init -y >/dev/null
           npm install --no-save --silent playwright@1
           npx --yes playwright install chromium
@@ -554,9 +417,6 @@ jobs:
           cat /tmp/screenshot-stderr.log >&2 || true
 
           if [ "${rc}" -ne 0 ]; then
-            # Pluck the first typed reason from stderr for the abort
-            # post; if the script exited for some other reason, fall
-            # back to a generic message that still names the contract.
             reason=$(head -1 /tmp/screenshot-stderr.log | sed 's/;.*$//') || true
             if [ -z "${reason}" ]; then
               reason="screenshot_capture_failed: <unknown> (script exit ${rc})"
@@ -574,10 +434,6 @@ jobs:
           fi
 
       - name: Refresh Azure OIDC login
-        # azure/login@v2's OIDC JWT is valid for 5 minutes; agent +
-        # rebuild + capture takes 10-15 min, so the cached JWT is stale
-        # by upload time and `az storage` hits AADSTS700024. Re-login
-        # mints a fresh one.
         if: success() && steps.evidence.outputs.have_screenshots == 'true'
         uses: azure/login@v2
         with:
@@ -646,12 +502,10 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Notify glimmung — run completed
-        # Forwards the workflow's success conclusion + the
-        # screenshot-MD block from the upload step (#88) so glimmung's
-        # PR composer can drop the inline images into the body. Runs
-        # only on success — failure paths fire the typed-abort callback
-        # at their failure site (#86 / #87).
-        if: success() && inputs.run_id != ''
+        # Terminal phase: no `outputs` declared on the PhaseSpec, so
+        # the payload omits `outputs`. Glimmung's _validate_phase_outputs
+        # accepts (declared empty + posted absent).
+        if: success()
         env:
           GLIMMUNG_RUN_ID: ${{ inputs.run_id }}
           SCREENSHOTS_MD: ${{ steps.upload.outputs.markdown }}
@@ -669,13 +523,6 @@ jobs:
             || echo "::warning::failed to post completed callback to glimmung; continuing"
 
       - name: Label per-issue release + agent namespace by branch
-        # glimmung#69: glimmung opens the PR after this workflow completes
-        # (when pr.enabled=true on the workflow registration). The agent
-        # itself doesn't run gh pr create anymore. We label by branch slug
-        # so agent-pr-cleanup.yml can find and reap the release+namespace
-        # without knowing the PR number at workflow-run time. The closing
-        # PR's head.ref is `glimmung/<run_id>`; slugify the same way
-        # (`/` → `-`) and cleanup matches.
         if: success() && inputs.pr_number == ''
         run: |
           set -euo pipefail
@@ -763,9 +610,9 @@ jobs:
           fi
 
       - name: Tear down validation env on failure
-        # Successful runs leave the env up for human review;
-        # agent-pr-cleanup.yml reaps it on PR close. Failed runs
-        # would otherwise orphan a helm release + agent namespace + ACR tags.
+        # env-prep's tear-down only handles env-prep's own failures.
+        # Failures here also need to reap the still-running env so
+        # we don't orphan a helm release + agent namespace + ACR tags.
         if: failure() || cancelled()
         run: |
           set -euo pipefail
@@ -782,7 +629,7 @@ jobs:
 
   release-lease:
     name: Release glimmung lease
-    needs: [route, agent]
+    needs: [route, agent-execute]
     if: always()
     runs-on: ubuntu-latest
     steps:
