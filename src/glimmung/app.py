@@ -45,6 +45,7 @@ from glimmung.models import (
     ProjectRegister,
     Run,
     RunDecision,
+    RunState,
     Signal,
     SignalEnqueueRequest,
     SignalSource,
@@ -1075,6 +1076,146 @@ async def cancel_lease(lease_id: str = Path(...), project: str = "") -> CancelLe
         getattr(app.state, "gh_minter", None),
         lease_id,
         project,
+    )
+
+
+class AbortRunResult(BaseModel):
+    """Outcome of POST /v1/runs/{project}/{run_id}/abort.
+
+    Sibling of `CancelLeaseResult` — same kind of cleanup, started from a
+    Run id rather than a lease id. Use this when the Run is orphaned (no
+    lease / no workflow_run): `_cancel_lease` needs a lease to start from
+    and 404s otherwise.
+
+    `state`:
+      - `aborted`: Run was IN_PROGRESS, flipped to ABORTED with the given
+        reason. If the latest attempt has a workflow_run_id, a GH cancel
+        was POSTed (best-effort; `gh_run_cancelled` records the outcome,
+        `None` if no GH dispatch was attempted on this Run).
+      - `already_terminal`: Run was already PASSED or ABORTED. No-op.
+    """
+    state: str
+    run_id: str
+    gh_run_cancelled: bool | None = None
+    issue_lock_released: bool | None = None
+    pr_lock_released: bool | None = None
+
+
+async def _abort_run(
+    cosmos: Cosmos,
+    minter: GitHubAppTokenMinter | None,
+    *,
+    run_id: str,
+    project: str,
+    reason: str,
+) -> AbortRunResult:
+    """Operator-initiated abort of a Run, keyed by run id.
+
+    Mirrors `_cancel_lease` but starts from a Run rather than a Lease —
+    needed when the dispatch failed mid-flight and left a Run IN_PROGRESS
+    with no lease + no workflow_run_id (nothing for `_cancel_lease` to
+    grip onto). All sub-steps are idempotent: running this twice on the
+    same Run returns `already_terminal` the second time.
+    """
+    # 1. Read the Run.
+    try:
+        run_doc = await cosmos.runs.read_item(item=run_id, partition_key=project)
+    except Exception:
+        raise HTTPException(404, f"run {run_id} not found in project {project!r}")
+
+    if run_doc["state"] in (RunState.PASSED.value, RunState.ABORTED.value):
+        return AbortRunResult(state="already_terminal", run_id=run_id)
+
+    run = Run.model_validate(run_ops._strip_meta(run_doc))
+    etag = run_doc["_etag"]
+
+    # 2. GH cancel — only if the Run was dispatched (workflow_run_id set).
+    # Orphans typically don't have one (that's why they're orphans), so
+    # this is None in the common case.
+    gh_cancelled: bool | None = None
+    if run.attempts and minter is not None:
+        latest = run.attempts[-1]
+        gh_run_id = latest.workflow_run_id
+        if gh_run_id is not None:
+            try:
+                gh_cancelled = await cancel_workflow_run(
+                    minter, repo=run.issue_repo, run_id=gh_run_id,
+                )
+            except Exception:
+                log.exception(
+                    "abort_run: GH cancel failed for run %s (workflow_run_id=%d); "
+                    "proceeding with abort",
+                    run.id, gh_run_id,
+                )
+                gh_cancelled = False
+
+    # 3. Mark the Run aborted.
+    try:
+        await run_ops.mark_aborted(cosmos, run=run, etag=etag, reason=reason)
+    except Exception:
+        log.exception("abort_run: mark_aborted failed for run %s", run.id)
+        raise HTTPException(500, f"mark_aborted failed for {run.id}")
+
+    # 4. Release the issue lock + PR lock if the Run was holding them.
+    # Idempotent — release_lock returns False if we don't hold it.
+    issue_lock_released: bool | None = None
+    if run.issue_lock_holder_id and run.issue_repo and run.issue_number is not None:
+        try:
+            issue_lock_released = bool(await lock_ops.release_lock(
+                cosmos, scope="issue",
+                key=f"{run.issue_repo}#{run.issue_number}",
+                holder_id=run.issue_lock_holder_id,
+            ))
+        except Exception:
+            log.exception(
+                "abort_run: issue lock release failed for %s#%s holder=%s",
+                run.issue_repo, run.issue_number, run.issue_lock_holder_id,
+            )
+
+    pr_lock_released: bool | None = None
+    if run.pr_lock_holder_id and run.pr_number and run.issue_repo:
+        try:
+            pr_lock_released = bool(await lock_ops.release_lock(
+                cosmos, scope="pr",
+                key=f"{run.issue_repo}#{run.pr_number}",
+                holder_id=run.pr_lock_holder_id,
+            ))
+        except Exception:
+            log.exception(
+                "abort_run: pr lock release failed for %s#%s holder=%s",
+                run.issue_repo, run.pr_number, run.pr_lock_holder_id,
+            )
+
+    return AbortRunResult(
+        state="aborted",
+        run_id=run.id,
+        gh_run_cancelled=gh_cancelled,
+        issue_lock_released=issue_lock_released,
+        pr_lock_released=pr_lock_released,
+    )
+
+
+@app.post(
+    "/v1/runs/{project}/{run_id}/abort",
+    response_model=AbortRunResult,
+    dependencies=[Depends(require_admin_user)],
+)
+async def abort_run(
+    project: str = Path(...),
+    run_id: str = Path(...),
+    reason: str = "aborted_via_admin_api",
+) -> AbortRunResult:
+    """Admin-only endpoint that flips a Run to ABORTED and releases any
+    locks it was holding. Distinct from `cancel_lease`: that one starts
+    from a lease and 404s if the lease is gone, leaving orphaned Runs
+    (dispatch failed mid-flight) unrecoverable. See `_abort_run` for the
+    body of the operation."""
+    return await _abort_run(
+        app.state.cosmos,
+        getattr(app.state, "gh_minter", None),
+        run_id=run_id,
+        project=project,
+        reason=reason,
     )
 
 
