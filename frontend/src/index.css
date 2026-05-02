@@ -1,114 +1,10 @@
-@import url("https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap");
-
-:root {
-  /* Raw color tokens — neutral ramp */
-  --color-black:           #050507;
-  --color-ink-950:         #0a0a0c;
-  --color-ink-900:         #0e0e10;
-  --color-ink-850:         #15151a;
-  --color-ink-800:         #1a1a1f;
-  --color-ink-700:         #2a2a2e;
-  --color-ink-600:         #3a3a3e;
-  --color-ink-500:         #444;
-  --color-ink-400:         #555;
-  --color-ink-350:         #666;
-  --color-ink-300:         #888;
-  --color-ink-250:         #999;
-  --color-ink-200:         #b8b8b8;
-  --color-ink-100:         #d4d4d4;
-  --color-white:           #e8e8e8;
-  --color-running-border:  #5a3a14;
-  --color-green-bg:        #14532d;
-  --color-green-fg:        #4ade80;
-  --color-green-bg-hover:  #166534;
-  --color-amber-bg:        #3a2a04;
-  --color-amber-fg:        #facc15;
-  --color-red-bg:          #3f1c1c;
-  --color-red-fg:          #f87171;
-  --color-blue-bg:         #1e3a5f;
-  --color-blue-fg:         #60a5fa;
-
-  /* Semantic surface tokens */
-  --bg:               var(--color-ink-900);
-  --bg-deep:          var(--color-ink-950);
-  --bg-deepest:       var(--color-black);
-  --surface:          var(--color-ink-850);
-  --surface-hover:    var(--color-ink-800);
-  --border:           var(--color-ink-700);
-  --border-strong:    var(--color-ink-600);
-  --border-running:   var(--color-running-border);
-  --border-focus:     var(--color-green-fg);
-  --fg:               var(--color-ink-100);
-  --fg-secondary:     var(--color-ink-200);
-  --fg-muted:         var(--color-ink-250);
-  --fg-dim:           var(--color-ink-300);
-  --fg-dimmer:        var(--color-ink-350);
-  --fg-dimmest:       var(--color-ink-400);
-  --fg-faintest:      var(--color-ink-500);
-  --fg-inverse:       var(--color-white);
-
-  /* State / status tokens */
-  --state-success-bg: var(--color-green-bg);
-  --state-success-fg: var(--color-green-fg);
-  --state-busy-bg:    var(--color-amber-bg);
-  --state-busy-fg:    var(--color-amber-fg);
-  --state-danger-bg:  var(--color-red-bg);
-  --state-danger-fg:  var(--color-red-fg);
-  --state-info-bg:    var(--color-blue-bg);
-  --state-info-fg:    var(--color-blue-fg);
-  --accent-primary:   var(--color-green-fg);
-  --accent-workflow:  var(--color-blue-fg);
-
-  /* Type tokens — Geist Sans + Geist Mono via Google Fonts */
-  --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-
-  font-family: var(--font-sans);
-  font-size: 14px;
-  color: var(--fg);
-  background: var(--bg);
-}
-
-* { box-sizing: border-box; }
-body { margin: 0; }
-
-button { text-decoration: none; }
-button:hover, button:focus, button:focus-visible { text-decoration: none; }
-
-/* Chamfer scale — used by .gb buttons, .pill, .plate utility, count chips. */
-:root {
-  --chamfer-sm: 8px;
-  --chamfer-md: 10px;
-  --chamfer-lg: 14px;
-}
-
-/* ─────────── Plate utility ────────────────────────────
-   The chamfered top-left corner + drawn outline (since clip-path eats
-   real borders). Apply to "active machinery": admin panel, KPI strip,
-   project-info card. Caller sets --plate-edge / --plate-rail / --plate-c. */
-.plate {
-  position: relative;
-  background: var(--plate-bg, var(--surface));
-  border: none;
-  isolation: isolate;
-  clip-path: polygon(var(--plate-c, 10px) 0, 100% 0, 100% 100%, 0 100%, 0 var(--plate-c, 10px));
-}
-.plate::before {
-  content: ""; position: absolute; inset: 0;
-  background:
-    linear-gradient(to right, var(--plate-rail, transparent) 0 2px, transparent 2px),
-    linear-gradient(to top,    var(--plate-edge, var(--border)) 0 1px, transparent 1px),
-    linear-gradient(to bottom, var(--plate-edge, var(--border)) 0 1px, transparent 1px),
-    linear-gradient(to left,   var(--plate-edge, var(--border)) 0 1px, transparent 1px),
-    linear-gradient(135deg,
-      transparent 0 calc(var(--plate-c, 10px) * 1.414 - 1px),
-      var(--plate-edge, var(--border)) calc(var(--plate-c, 10px) * 1.414 - 1px) calc(var(--plate-c, 10px) * 1.414),
-      transparent calc(var(--plate-c, 10px) * 1.414));
-  background-repeat: no-repeat;
-  background-size: 100% 100%;
-  pointer-events: none; z-index: 0;
-}
-.plate > * { position: relative; z-index: 1; }
+/* Design-system tokens, base resets, .pill / .count-pill, and the .plate
+   utility live in design-system/. Vite's fs.allow opens up the parent
+   directory so these resolve at build time.
+   The CI check at scripts/check-design-tokens.sh fails if this file
+   redefines anything from those token namespaces — keep it that way. */
+@import url("../../design-system/colors_and_type.css");
+@import url("../../design-system/plate.css");
 
 /* ─────────── Buttons — "console plate" (.gb) ─────────────
    Asymmetric chamfered top-left, hairline edge drawn via ::before
@@ -232,10 +128,6 @@ button:hover, button:focus, button:focus-visible { text-decoration: none; }
 /* Two-step confirm group. */
 .confirm { display: inline-flex; align-items: center; gap: 8px; }
 .confirm .sep { color: var(--fg-faintest); font-family: var(--font-mono); font-size: 0.85rem; }
-
-h1, h2 { font-weight: 600; margin: 0 0 12px 0; }
-h1 { font-size: 1.6rem; letter-spacing: -0.01em; }
-h2 { font-size: 1.05rem; color: #999; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 28px; }
 
 .layout {
   display: flex;
@@ -407,70 +299,7 @@ tr.eligible td.mono:first-child {
   color: #d4d4d4;
 }
 
-/* Pill — "console tag". Same chamfered top-left geometry as .gb buttons,
-   smaller. 2px state-color rail on the leading edge, hairline tinted edge,
-   faint state-tinted body, mono lowercase label. white-space: nowrap so
-   long content can't deform the geometry into an oval. */
-.pill {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  height: 18px;
-  padding: 0 8px 0 9px;
-  font-family: var(--font-mono);
-  font-size: 0.7rem;
-  font-weight: 400;
-  letter-spacing: 0.04em;
-  text-transform: lowercase;
-  line-height: 1;
-  white-space: nowrap;
-  clip-path: polygon(6px 0, 100% 0, 100% 100%, 0 100%, 0 6px);
-  isolation: isolate;
-  --pill-rail: var(--border-strong);
-  --pill-edge: var(--border);
-  --pill-bg:   transparent;
-  --pill-fg:   var(--fg-dim);
-  background: var(--pill-bg);
-  color: var(--pill-fg);
-}
-.pill::before {
-  content: "";
-  position: absolute; inset: 0;
-  background:
-    linear-gradient(to right,  var(--pill-rail) 0 2px, transparent 2px),
-    linear-gradient(to top,    var(--pill-edge) 0 1px, transparent 1px),
-    linear-gradient(to bottom, var(--pill-edge) 0 1px, transparent 1px),
-    linear-gradient(to left,   var(--pill-edge) 0 1px, transparent 1px),
-    linear-gradient(135deg, transparent 0 calc(8.49px - 1px), var(--pill-edge) calc(8.49px - 1px) 8.49px, transparent 8.49px);
-  background-repeat: no-repeat;
-  background-size: 100% 100%;
-  pointer-events: none;
-  z-index: 1;
-}
-.pill.free  {
-  --pill-rail: var(--state-success-fg);
-  --pill-edge: color-mix(in srgb, var(--state-success-fg) 32%, var(--border));
-  --pill-bg:   color-mix(in srgb, var(--state-success-bg) 55%, transparent);
-  --pill-fg:   var(--state-success-fg);
-}
-.pill.busy  {
-  --pill-rail: var(--state-busy-fg);
-  --pill-edge: color-mix(in srgb, var(--state-busy-fg) 32%, var(--border));
-  --pill-bg:   color-mix(in srgb, var(--state-busy-bg) 55%, transparent);
-  --pill-fg:   var(--state-busy-fg);
-}
-.pill.drain {
-  --pill-rail: var(--state-danger-fg);
-  --pill-edge: color-mix(in srgb, var(--state-danger-fg) 32%, var(--border));
-  --pill-bg:   color-mix(in srgb, var(--state-danger-bg) 55%, transparent);
-  --pill-fg:   var(--state-danger-fg);
-}
-.pill.info  {
-  --pill-rail: var(--state-info-fg);
-  --pill-edge: color-mix(in srgb, var(--state-info-fg) 32%, var(--border));
-  --pill-bg:   color-mix(in srgb, var(--state-info-bg) 55%, transparent);
-  --pill-fg:   var(--state-info-fg);
-}
+/* .pill (free / busy / drain / info) lives in design-system/colors_and_type.css. */
 
 .empty {
   padding: 16px;
@@ -945,10 +774,7 @@ h2 .inline-action,
   vertical-align: middle;
   animation: pulse 1.6s ease-in-out infinite;
 }
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50%      { opacity: 0.35; }
-}
+/* @keyframes pulse lives in design-system/colors_and_type.css. */
 
 .attempt-list {
   display: flex;
