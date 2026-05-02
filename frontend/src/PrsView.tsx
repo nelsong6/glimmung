@@ -6,10 +6,12 @@
  * container directly. Rows include both agent-opened PRs (carry a
  * linked Run) and manual PRs (no run linkage). Refresh on mount +
  * manual refresh button.
+ *
+ * Row click navigates to `/prs/<owner>/<repo>/<n>`.
  */
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { authedFetch } from "./auth";
-import { PrDetailView } from "./PrDetailView";
 
 type PrRow = {
   id: string;
@@ -31,8 +33,6 @@ type PrRow = {
   pr_lock_held: boolean;
 };
 
-type Selected = { repo: string; pr_number: number } | null;
-
 export function PrsView({
   signedIn,
   projectFilter,
@@ -40,10 +40,10 @@ export function PrsView({
   signedIn: boolean;
   projectFilter: string | null;
 }) {
+  const navigate = useNavigate();
   const [rows, setRows] = useState<PrRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [selected, setSelected] = useState<Selected>(null);
 
   const refresh = async () => {
     if (!signedIn) {
@@ -72,19 +72,6 @@ export function PrsView({
 
   if (!signedIn) {
     return <div className="empty">Sign in to view PRs.</div>;
-  }
-
-  if (selected) {
-    return (
-      <PrDetailView
-        repo={selected.repo}
-        prNumber={selected.pr_number}
-        onBack={() => {
-          setSelected(null);
-          void refresh();
-        }}
-      />
-    );
   }
 
   const visibleRows = rows
@@ -138,9 +125,7 @@ export function PrsView({
               <tr
                 key={row.id}
                 className={row.pr_lock_held ? "eligible" : ""}
-                onClick={() =>
-                  setSelected({ repo: row.repo, pr_number: row.pr_number })
-                }
+                onClick={() => navigate(`/prs/${row.repo}/${row.pr_number}`)}
                 style={{ cursor: "pointer" }}
               >
                 <td>{row.project}</td>
