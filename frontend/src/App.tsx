@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, NavLink, Outlet, Route, Routes, useOutletContext } from "react-router-dom";
+import { NavLink, Outlet, Route, Routes, useOutletContext } from "react-router-dom";
 import { AdminPanel } from "./AdminPanel";
 import { IssueDetailView } from "./IssueDetailView";
 import { IssuesView } from "./IssuesView";
 import { PrDetailView } from "./PrDetailView";
 import { PrsView } from "./PrsView";
+import { StyleguideView } from "./StyleguideView";
 import { authedFetch, currentAccount, initAuth, signIn, signOut } from "./auth";
 import type { AccountInfo } from "@azure/msal-browser";
 
@@ -89,6 +90,10 @@ export function App() {
   // straight on the right view without a viewMode flip.
   return (
     <Routes>
+      {/* Platform route: visual catalog of components, served outside
+          Layout so the validation-step curl check (#86) doesn't need
+          auth or SSE. Contract: docs/styleguide-contract.md. */}
+      <Route path="/_styleguide" element={<StyleguideView />} />
       <Route path="/" element={<Layout />}>
         <Route index element={<CapacityRoute />} />
         <Route path="issues" element={<IssuesRoute />} />
@@ -326,9 +331,7 @@ function Layout() {
         <header>
           <div className="header-left">
             <div className="header-title">
-              <h1>
-                <Link to="/" className="title-link">glimmung</Link>
-              </h1>
+              <h1>glimmung</h1>
               <span className={`connection ${conn}`}>{conn}</span>
             </div>
             <div className="epigraph">
