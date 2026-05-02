@@ -1,10 +1,12 @@
-"""Budget config parsing for the verify-loop substrate (#18).
+"""Budget config parsing for the verify-loop substrate (#18, #69).
 
 Resolution order, first match wins:
 
-  1. Issue label `agent-budget:NxM`   (N = max_attempts, M = max_cost_usd)
-  2. Workflow.default_budget          (per-repo default registered via /v1/workflows)
-  3. BudgetConfig() defaults          (3 attempts, $25)
+  1. Issue label `agent-budget:M` or legacy `agent-budget:NxM`
+     (M = total cost cap in USD; N is ignored under the #69 schema —
+     per-phase attempt counts now live on the phase's recycle_policy).
+  2. Workflow.budget                  (per-repo default registered via /v1/workflows)
+  3. BudgetConfig() defaults          ($25 cumulative)
 
 The label format is intentionally one-token: GitHub label names get
 echoed in dozens of places (issue UI, search, mobile, gh CLI), and a
@@ -25,26 +27,24 @@ LABEL_PREFIX = "agent-budget:"
 
 
 def parse_budget_label(label: str) -> BudgetConfig | None:
-    """Parse a single label. Returns None if the label doesn't apply
-    *or* if it's malformed (logged as a warning so the user finds out
-    why their override didn't take effect)."""
+    """Parse a single label. Returns None if the label doesn't apply or
+    is malformed (logged as a warning so the user finds out why their
+    override didn't take effect). Accepts both `agent-budget:M` (#69
+    shape) and the legacy `agent-budget:NxM` (N silently dropped — the
+    per-attempt count moved off the run-level budget)."""
     if not label.startswith(LABEL_PREFIX):
         return None
     spec = label[len(LABEL_PREFIX):]
-    if "x" not in spec:
-        log.warning("budget label %r missing 'x' separator; ignoring", label)
-        return None
-    n_raw, m_raw = spec.split("x", 1)
+    raw = spec.split("x", 1)[1] if "x" in spec else spec
     try:
-        n = int(n_raw)
-        m = float(m_raw)
+        m = float(raw)
     except ValueError:
-        log.warning("budget label %r has non-numeric N or M; ignoring", label)
+        log.warning("budget label %r has non-numeric cost cap; ignoring", label)
         return None
-    if n <= 0 or m <= 0:
-        log.warning("budget label %r has non-positive value; ignoring", label)
+    if m <= 0:
+        log.warning("budget label %r has non-positive cost cap; ignoring", label)
         return None
-    return BudgetConfig(max_attempts=n, max_cost_usd=m)
+    return BudgetConfig(total=m)
 
 
 def resolve_budget(

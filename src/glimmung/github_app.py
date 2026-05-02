@@ -142,3 +142,81 @@ async def post_issue_comment(
         r.raise_for_status()
 
 
+class PRCreateNoDiff(Exception):
+    """Raised when `gh pr create` rejects because head and base have no
+    diff. Glimmung treats this as a terminal failure of the PR primitive
+    (per the v1 design — handled in #69 follow-up to make recoverable)."""
+
+
+class PRCreateAlreadyExists(Exception):
+    """Raised when a PR already exists for the head branch. Carries the
+    existing PR number so the caller can record-and-continue without
+    opening a duplicate. Future-proofs the rewind/recycle case."""
+
+    def __init__(self, pr_number: int, html_url: str) -> None:
+        super().__init__(f"PR already exists: #{pr_number}")
+        self.pr_number = pr_number
+        self.html_url = html_url
+
+
+async def open_pull_request(
+    minter: GitHubAppTokenMinter,
+    *,
+    repo: str,
+    head: str,
+    base: str,
+    title: str,
+    body: str,
+) -> tuple[int, str]:
+    """POST /repos/{repo}/pulls. Returns (pr_number, html_url).
+
+    Maps GH's documented error shapes onto typed exceptions so the caller
+    can branch policy on them:
+      - 422 with "No commits between"  → PRCreateNoDiff
+      - 422 with "A pull request already exists" → PRCreateAlreadyExists
+        (carries the existing PR number, looked up via list-PRs by head).
+      - anything else                  → httpx.HTTPStatusError
+    """
+    token = await minter.installation_token()
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.post(
+            f"https://api.github.com/repos/{repo}/pulls",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            json={"title": title, "body": body, "head": head, "base": base},
+        )
+        if r.status_code == 422:
+            payload = r.json()
+            errors = payload.get("errors") or []
+            messages = " ".join(str(e.get("message", "")) for e in errors)
+            if "No commits between" in messages or "no commits between" in messages.lower():
+                raise PRCreateNoDiff(messages or payload.get("message", ""))
+            if "already exists" in messages.lower() or "already exists" in payload.get("message", "").lower():
+                # Look up the existing PR by head ref to surface the number.
+                # GH expects head=`<owner>:<branch>` for cross-fork lookups, but
+                # for same-repo opens just the branch works.
+                owner = repo.split("/")[0]
+                head_qualifier = f"{owner}:{head}"
+                lookup = await client.get(
+                    f"https://api.github.com/repos/{repo}/pulls",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/vnd.github+json",
+                        "X-GitHub-Api-Version": "2022-11-28",
+                    },
+                    params={"head": head_qualifier, "state": "all"},
+                )
+                lookup.raise_for_status()
+                existing = lookup.json() or []
+                if existing:
+                    pr = existing[0]
+                    raise PRCreateAlreadyExists(pr["number"], pr["html_url"])
+                raise PRCreateAlreadyExists(0, "")
+        r.raise_for_status()
+        data = r.json()
+        return int(data["number"]), str(data.get("html_url", ""))
+
+

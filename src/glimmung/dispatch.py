@@ -243,13 +243,17 @@ async def dispatch_run(
                 detail="GitHub workflow_dispatch raised; lease + lock released, no Run created",
             )
 
-    # 5. Run record (only if workflow opts into the verify-loop substrate).
+    # 5. Run record. Under #69 every registered workflow has at least one
+    # phase (the v1 schema enforces ≥1 at registration time), so a Run is
+    # always created — the old retry_workflow_filename gate that distinguished
+    # "verify-loop-aware" from "fire-and-forget" workflows is gone.
     run_id: str | None = None
-    retry_filename = workflow_doc.get("retryWorkflowFilename") or ""
-    if retry_filename:
+    phases = workflow_doc.get("phases") or []
+    if phases:
+        initial_phase = phases[0]
         budget = resolve_budget(
             issue_labels or [],
-            _budget_from_doc(workflow_doc.get("defaultBudget")),
+            _budget_from_doc(workflow_doc.get("budget")),
         )
         run = await run_ops.create_run(
             cosmos,
@@ -259,7 +263,8 @@ async def dispatch_run(
             issue_repo=repo or "",
             issue_number=issue_number or 0,
             budget=budget,
-            initial_workflow_filename=workflow_doc["workflowFilename"],
+            initial_phase_name=initial_phase["name"],
+            initial_workflow_filename=initial_phase["workflowFilename"],
             issue_lock_holder_id=holder_id,
             trigger_source=trigger_source,
         )

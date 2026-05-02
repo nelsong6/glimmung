@@ -25,8 +25,11 @@ from glimmung.db import Cosmos, query_all
 from glimmung.decision import abort_explanation, decide
 from glimmung.github_app import (
     GitHubAppTokenMinter,
+    PRCreateAlreadyExists,
+    PRCreateNoDiff,
     cancel_workflow_run,
     dispatch_workflow,
+    open_pull_request,
     post_issue_comment,
     verify_webhook_signature,
 )
@@ -241,7 +244,14 @@ async def _triage_decide(app: FastAPI, signal: Signal) -> tuple[str, bool]:
     elif signal.target_type != SignalTargetType.PR:
         return (TriageDecision.IGNORE.value, False)
 
-    decision = decide_triage(signal=signal, run=run)
+    if run is None:
+        return (TriageDecision.ABORT_NO_RUN.value, False)
+    workflow_doc = await _read_workflow(cosmos, run.project, run.workflow)
+    workflow_model = _doc_to_workflow(workflow_doc) if workflow_doc else None
+    if workflow_model is None:
+        return (TriageDecision.ABORT_NO_RUN.value, False)
+
+    decision = decide_triage(signal=signal, run=run, workflow=workflow_model)
     hold_lock = decision == TriageDecision.DISPATCH_TRIAGE
     return (decision.value, hold_lock)
 
@@ -291,7 +301,11 @@ async def _triage_apply(
             decision_enum = TriageDecision(decision)
         except ValueError:
             return
-        body = triage_abort_explanation(decision_enum, run, signal)
+        workflow_doc = (
+            await _read_workflow(cosmos, run.project, run.workflow) if run else None
+        )
+        workflow_model = _doc_to_workflow(workflow_doc) if workflow_doc else None
+        body = triage_abort_explanation(decision_enum, run, signal, workflow_model)
         minter: GitHubAppTokenMinter | None = app.state.gh_minter
         if minter is None:
             log.info("triage_apply: no GH minter; would have posted: %s", body[:80])
@@ -375,10 +389,28 @@ async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host
         return True
 
     workflow_doc = await _read_workflow(cosmos, lease_doc["project"], workflow_name)
-    if not workflow_doc or not workflow_doc.get("workflowFilename"):
+    if not workflow_doc:
         return True
-
+    # #69 schema: read the initial phase off `phases[0]`. The pre-#69
+    # workflowFilename top-level field is gone; lease metadata can override
+    # the phase pick (see metadata.phase_name, future multi-phase use).
+    phases = workflow_doc.get("phases") or []
     metadata = lease_doc.get("metadata") or {}
+    target_phase_name = metadata.get("phase_name")
+    target_phase = None
+    if target_phase_name:
+        target_phase = next((p for p in phases if p["name"] == target_phase_name), None)
+    if target_phase is None and phases:
+        target_phase = phases[0]
+    if target_phase is None:
+        log.warning(
+            "workflow %s/%s has no phases; skipping dispatch",
+            lease_doc["project"], workflow_name,
+        )
+        return True
+    workflow_filename = target_phase["workflowFilename"]
+    workflow_ref = target_phase.get("workflowRef") or "main"
+
     inputs = {
         "host": host.name,
         "lease_id": lease_doc["id"],
@@ -391,14 +423,14 @@ async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host
         await dispatch_workflow(
             minter,
             repo=project_doc["githubRepo"],
-            workflow_filename=workflow_doc["workflowFilename"],
-            ref=workflow_doc.get("workflowRef") or "main",
+            workflow_filename=workflow_filename,
+            ref=workflow_ref,
             inputs=inputs,
         )
         log.info(
-            "dispatched %s on %s for lease %s (project=%s workflow=%s)",
-            workflow_doc["workflowFilename"], host.name, lease_doc["id"],
-            lease_doc["project"], workflow_name,
+            "dispatched %s on %s for lease %s (project=%s workflow=%s phase=%s)",
+            workflow_filename, host.name, lease_doc["id"],
+            lease_doc["project"], workflow_name, target_phase["name"],
         )
         return True
     except Exception:
@@ -586,20 +618,57 @@ async def _process_run_completion(
         artifact_url=archive_url,
     )
 
-    decision = decide(run)
+    workflow_doc = await _read_workflow(cosmos, run.project, run.workflow)
+    workflow_model = _doc_to_workflow(workflow_doc) if workflow_doc else None
+    if workflow_model is None:
+        log.warning(
+            "run %s: workflow %s/%s vanished mid-flight; aborting",
+            run.id, run.project, run.workflow,
+        )
+        await run_ops.mark_aborted(
+            cosmos, run=run, etag=etag,
+            reason="workflow registration disappeared mid-run",
+        )
+        return "abort_no_workflow"
+
+    decision = decide(run, workflow_model)
     run, etag = await run_ops.record_decision(cosmos, run=run, etag=etag, decision=decision)
 
     if decision == RunDecision.ADVANCE:
+        # PR primitive: when the workflow opts in (`pr.enabled=True`),
+        # glimmung calls `gh pr create` itself rather than relying on the
+        # consumer's YAML. Default-off during the rollout per #69 — flip
+        # per-workflow as each consumer migrates.
+        if workflow_model.pr.enabled:
+            try:
+                await _open_pr_primitive(run=run, workflow=workflow_model)
+            except PRCreateNoDiff as e:
+                log.warning("pr-primitive: no diff for run %s; aborting (%s)", run.id, e)
+                await run_ops.mark_aborted(
+                    cosmos, run=run, etag=etag,
+                    reason=f"PR primitive: no diff between glimmung/{run.id} and base",
+                )
+                return "abort_no_diff"
+            except Exception:
+                log.exception("pr-primitive: gh pr create failed for run %s", run.id)
+                await run_ops.mark_aborted(
+                    cosmos, run=run, etag=etag,
+                    reason="PR primitive: gh pr create failed (see glimmung logs)",
+                )
+                return "abort_pr_create_failed"
         await run_ops.mark_passed(cosmos, run=run, etag=etag)
         log.info("run %s passed verification on attempt %d", run.id, len(run.attempts))
         return decision.value
 
     if decision == RunDecision.RETRY:
-        await _dispatch_retry(run=run, etag=etag, repo=repo, archive_url=archive_url)
+        await _dispatch_retry(
+            run=run, etag=etag, repo=repo,
+            workflow_model=workflow_model, archive_url=archive_url,
+        )
         return decision.value
 
     # Any abort decision.
-    reason = abort_explanation(run, decision)
+    reason = abort_explanation(run, workflow_model, decision)
     await run_ops.mark_aborted(cosmos, run=run, etag=etag, reason=reason)
     try:
         await post_issue_comment(
@@ -615,42 +684,59 @@ async def _dispatch_retry(
     run: Run,
     etag: str,
     repo: str,
+    workflow_model: Workflow,
     archive_url: str | None,
 ) -> None:
-    """Dispatch the retry workflow for a Run. Acquires a fresh lease, then
-    fires workflow_dispatch with `prior_verification_artifact_url` set
-    so the retry workflow can pull the previous attempt's verification
-    artifact for context."""
+    """Dispatch a recycle (formerly RETRY) for a Run. Reads the failing
+    phase's `recycle_policy.lands_at` to pick the destination phase, finds
+    that phase's spec, acquires a fresh lease, then fires workflow_dispatch
+    with `prior_verification_artifact_url` set so the next attempt can pull
+    context from the previous attempt. v1 always lands at "self" (same
+    phase), but the lookup is general for the future multi-phase case."""
     cosmos: Cosmos = app.state.cosmos
     settings: Settings = app.state.settings
     minter: GitHubAppTokenMinter = app.state.gh_minter
 
-    workflow_doc = await _read_workflow(cosmos, run.project, run.workflow)
-    if not workflow_doc:
-        log.warning("retry: workflow %s/%s vanished; cannot dispatch", run.project, run.workflow)
+    if not run.attempts:
+        log.warning("retry: run %s has no attempts; cannot dispatch", run.id)
         return
-    retry_filename = workflow_doc.get("retryWorkflowFilename") or workflow_doc.get("retry_workflow_filename")
-    if not retry_filename:
+    failing_phase_name = run.attempts[-1].phase
+    failing_phase = next(
+        (p for p in workflow_model.phases if p.name == failing_phase_name), None,
+    )
+    if failing_phase is None or failing_phase.recycle_policy is None:
         log.warning(
-            "retry: workflow %s/%s has no retry_workflow_filename; cannot dispatch",
-            run.project, run.workflow,
+            "retry: phase %r on run %s has no recycle_policy; cannot dispatch",
+            failing_phase_name, run.id,
+        )
+        return
+    target_name = failing_phase.recycle_policy.lands_at
+    if target_name == "self":
+        target_name = failing_phase_name
+    target_phase = next(
+        (p for p in workflow_model.phases if p.name == target_name), None,
+    )
+    if target_phase is None:
+        log.warning(
+            "retry: lands_at %r doesn't match any phase on workflow %s/%s",
+            target_name, run.project, run.workflow,
         )
         return
 
-    # Append the retry attempt *before* dispatching so a webhook redelivery
-    # of the previous completion can detect and skip the duplicate decision
-    # cycle (record_completion no-ops on already-completed attempts).
-    run, _ = await run_ops.append_retry_attempt(
-        cosmos, run=run, etag=etag, retry_workflow_filename=retry_filename,
+    # Append the next attempt *before* dispatching so a webhook redelivery
+    # of the previous completion can detect and skip duplicate decision cycles.
+    run, _ = await run_ops.append_attempt(
+        cosmos, run=run, etag=etag,
+        phase_name=target_phase.name,
+        workflow_filename=target_phase.workflow_filename,
     )
 
-    # Acquire a fresh lease for the retry. Reuses the workflow's
-    # default_requirements.
+    requirements = target_phase.requirements or workflow_model.default_requirements
     metadata = {
         "issue_number": str(run.issue_number),
         "issue_repo": run.issue_repo,
         "run_id": run.id,
-        "phase": "retry",
+        "phase_name": target_phase.name,
         "attempt_index": str(len(run.attempts) - 1),
     }
     lease, host = await lease_ops.acquire(
@@ -658,16 +744,11 @@ async def _dispatch_retry(
         settings,
         project=run.project,
         workflow=run.workflow,
-        requirements=workflow_doc.get("defaultRequirements", {}),
+        requirements=requirements,
         metadata=metadata,
     )
 
     if host is None:
-        # No capacity. The promote_loop will dispatch when a host frees up;
-        # but the retry workflow is a different filename than the initial,
-        # so promote_loop's _maybe_dispatch_workflow won't know to use the
-        # retry filename. For Sprint 1, log and accept — capacity rarely
-        # binds at this scale; full pending-retry handling is W1 followup.
         log.warning(
             "retry: no host available for run %s; lease %s pending. "
             "Manual re-dispatch required (see #18 followup).",
@@ -687,16 +768,17 @@ async def _dispatch_retry(
         await dispatch_workflow(
             minter,
             repo=repo,
-            workflow_filename=retry_filename,
-            ref=workflow_doc.get("workflowRef") or "main",
+            workflow_filename=target_phase.workflow_filename,
+            ref=target_phase.workflow_ref,
             inputs=inputs,
         )
         log.info(
-            "dispatched retry %s on %s for run %s (attempt %d)",
-            retry_filename, host.name, run.id, len(run.attempts) - 1,
+            "dispatched recycle %s on %s for run %s phase=%s (attempt %d)",
+            target_phase.workflow_filename, host.name, run.id,
+            target_phase.name, len(run.attempts) - 1,
         )
     except Exception:
-        log.exception("retry workflow_dispatch failed for run %s", run.id)
+        log.exception("recycle workflow_dispatch failed for run %s", run.id)
 
 
 async def _dispatch_triage(
@@ -707,45 +789,45 @@ async def _dispatch_triage(
     etag: str,
     holder_id: str,
 ) -> None:
-    """Re-open a Run for triage and fire the consumer's triage workflow.
+    """Re-open a Run via the PR primitive's recycle path and fire the
+    workflow for the `lands_at` phase.
 
-    Triage state machine: PASSED → IN_PROGRESS, with a new TRIAGE
-    PhaseAttempt appended. Both the issue lock and the PR lock are
-    held with `holder_id` (the signal_id, set on the Run for terminal
-    handler release). The triage workflow runs impl + verify with
-    `feedback_text` as additional context; on terminal Run transition
-    (PASS / ABORT_*) the workflow_run.completed handler releases both
-    locks. RETRY decisions within a triage cycle dispatch the regular
-    retry workflow and keep both locks held."""
+    Under #69, "triage" is no longer a separate `triage_workflow_filename`
+    — it's the PR primitive's `recycle_policy` firing. Read the workflow's
+    `pr.recycle_policy.lands_at`, find that PhaseSpec, and dispatch its
+    `workflow_filename`. State machine is unchanged: PASSED → IN_PROGRESS,
+    new PhaseAttempt appended at lands_at, both issue + PR locks held
+    with `holder_id` for terminal release."""
     cosmos: Cosmos = app.state.cosmos
     settings: Settings = app.state.settings
     minter: GitHubAppTokenMinter | None = app.state.gh_minter
 
     workflow_doc = await _read_workflow(cosmos, run.project, run.workflow)
-    if not workflow_doc:
+    workflow_model = _doc_to_workflow(workflow_doc) if workflow_doc else None
+    if workflow_model is None:
         log.warning(
-            "triage: workflow %s/%s vanished; cannot dispatch",
-            run.project, run.workflow,
-        )
-        return
-    triage_filename = (
-        workflow_doc.get("triageWorkflowFilename")
-        or workflow_doc.get("triage_workflow_filename")
-        or ""
-    )
-    if not triage_filename:
-        log.warning(
-            "triage: workflow %s/%s has no triage_workflow_filename; cannot dispatch",
+            "pr-recycle: workflow %s/%s vanished; cannot dispatch",
             run.project, run.workflow,
         )
         return
 
-    # Claim the issue lock with the signal as holder. If the issue
-    # lock is currently held (rare: original Run is still in-flight,
-    # or a prior triage is still in flight on the same issue), bail
-    # — drain will retry next tick. Lock-key shape mirrors dispatch_run:
-    # `repo#number` for GH-anchored issues, `glimmung/{issue_id}` for
-    # native issues without GH coords.
+    pr_rp = workflow_model.pr.recycle_policy
+    if pr_rp is None:
+        log.warning(
+            "pr-recycle: workflow %s/%s has no pr.recycle_policy; cannot dispatch",
+            run.project, run.workflow,
+        )
+        return
+    target_phase = next(
+        (p for p in workflow_model.phases if p.name == pr_rp.lands_at), None,
+    )
+    if target_phase is None:
+        log.warning(
+            "pr-recycle: lands_at %r not found on workflow %s/%s",
+            pr_rp.lands_at, run.project, run.workflow,
+        )
+        return
+
     issue_lock_key = (
         f"{run.issue_repo}#{run.issue_number}"
         if (run.issue_repo and run.issue_number)
@@ -757,50 +839,49 @@ async def _dispatch_triage(
             key=issue_lock_key,
             holder_id=holder_id,
             ttl_seconds=settings.lease_default_ttl_seconds,
-            metadata={"triage_signal_id": signal.id, "phase": "triage"},
+            metadata={"triage_signal_id": signal.id, "phase_name": target_phase.name},
         )
     except LockBusy as busy:
         log.warning(
-            "triage: issue lock %s is held by %s; deferring signal %s",
+            "pr-recycle: issue lock %s is held by %s; deferring signal %s",
             issue_lock_key, busy.lock.held_by, signal.id,
         )
         return
 
-    # Re-open the Run + append the TRIAGE attempt before dispatching,
-    # so a webhook redelivery of the previous completion can detect
-    # and skip duplicate decision cycles.
-    run, etag = await run_ops.reopen_for_triage(
+    run, etag = await run_ops.reopen_for_recycle(
         cosmos, run=run, etag=etag,
-        triage_workflow_filename=triage_filename,
+        phase_name=target_phase.name,
+        workflow_filename=target_phase.workflow_filename,
         pr_lock_holder_id=holder_id,
         issue_lock_holder_id=holder_id,
     )
 
+    requirements = target_phase.requirements or workflow_model.default_requirements
     metadata = {
         "issue_number": str(run.issue_number),
         "issue_repo": run.issue_repo,
         "run_id": run.id,
-        "phase": "triage",
+        "phase_name": target_phase.name,
         "attempt_index": str(len(run.attempts) - 1),
         "issue_lock_holder_id": holder_id,
     }
     lease, host = await lease_ops.acquire(
         cosmos, settings,
         project=run.project, workflow=run.workflow,
-        requirements=workflow_doc.get("defaultRequirements", {}),
+        requirements=requirements,
         metadata=metadata,
     )
 
     if host is None:
         log.warning(
-            "triage: no host available for run %s; lease %s pending. "
+            "pr-recycle: no host available for run %s; lease %s pending. "
             "Manual re-dispatch may be required.",
             run.id, lease.id,
         )
         return
 
     if minter is None:
-        log.warning("triage: no GH minter; cannot dispatch workflow for run %s", run.id)
+        log.warning("pr-recycle: no GH minter; cannot dispatch for run %s", run.id)
         return
 
     feedback = feedback_text(signal)
@@ -818,19 +899,103 @@ async def _dispatch_triage(
         await dispatch_workflow(
             minter,
             repo=run.issue_repo,
-            workflow_filename=triage_filename,
-            ref=workflow_doc.get("workflowRef") or "main",
+            workflow_filename=target_phase.workflow_filename,
+            ref=target_phase.workflow_ref,
             inputs=inputs,
         )
         log.info(
-            "dispatched triage %s on %s for run %s (attempt %d, signal %s)",
-            triage_filename, host.name, run.id, len(run.attempts) - 1, signal.id,
+            "dispatched pr-recycle %s on %s for run %s phase=%s (attempt %d, signal %s)",
+            target_phase.workflow_filename, host.name, run.id,
+            target_phase.name, len(run.attempts) - 1, signal.id,
         )
     except Exception:
         log.exception(
-            "triage workflow_dispatch failed for run %s signal %s",
+            "pr-recycle workflow_dispatch failed for run %s signal %s",
             run.id, signal.id,
         )
+
+
+async def _open_pr_primitive(*, run: Run, workflow: Workflow) -> None:
+    """Open the PR for a run that just ADVANCEd. Branch is glimmung-
+    dictated (`glimmung/<run_id>`); title comes from the linked issue,
+    body summarizes the run state. On success, stamps `pr_number` and
+    `pr_branch` on the Run via `link_pr_to_run`. On `PRCreateNoDiff`, the
+    caller turns this into a run-level abort (per #69 v1 — no-diff is a
+    terminal error). On `PRCreateAlreadyExists`, the existing PR's number
+    is recorded and the run continues — supports rewind/recycle paths
+    that re-enter after a PR is already open."""
+    cosmos: Cosmos = app.state.cosmos
+    minter: GitHubAppTokenMinter | None = app.state.gh_minter
+    if minter is None:
+        raise RuntimeError("pr-primitive: no GH minter configured")
+
+    head = f"glimmung/{run.id}"
+    base = "main"  # v1: hardcoded; future PhaseSpec.pr.base extends this
+    title, body = await _compose_pr_body(cosmos, run=run, workflow=workflow)
+
+    try:
+        pr_number, html_url = await open_pull_request(
+            minter, repo=run.issue_repo, head=head, base=base, title=title, body=body,
+        )
+    except PRCreateAlreadyExists as already:
+        log.info(
+            "pr-primitive: PR already exists for %s head=%s; recording #%d",
+            run.issue_repo, head, already.pr_number,
+        )
+        pr_number = already.pr_number
+    # Stamp on the run.
+    lookup = await run_ops.find_run_by_workflow_run(
+        cosmos, project=run.project,
+        workflow_run_id=run.attempts[-1].workflow_run_id or 0,
+    )
+    if lookup is not None:
+        run, etag = lookup
+        await run_ops.link_pr_to_run(
+            cosmos, run=run, etag=etag,
+            pr_number=pr_number, pr_branch=head,
+        )
+
+
+async def _compose_pr_body(
+    cosmos: Cosmos, *, run: Run, workflow: Workflow,
+) -> tuple[str, str]:
+    """Compose PR title + body from the issue + run state. Title is the
+    issue title; body links the issue (`Closes #N`) and surfaces a short
+    run summary so reviewers see attempt history + cost without leaving
+    the PR view. Composition is intentionally minimal in v1 — richer
+    evidence rendering is a follow-up."""
+    issue_title = ""
+    issue_body_link = ""
+    if run.issue_id:
+        try:
+            doc = await cosmos.issues.read_item(item=run.issue_id, partition_key=run.project)
+            issue_title = str(doc.get("title") or "")
+        except Exception:
+            pass
+    if run.issue_repo and run.issue_number:
+        issue_body_link = f"Closes {run.issue_repo}#{run.issue_number}"
+    title = issue_title or f"Run {run.id[:8]}"
+    attempts_summary = "\n".join(
+        f"- attempt {a.attempt_index} phase={a.phase} "
+        f"cost=${(a.cost_usd or 0.0):.4f} decision={a.decision or '—'}"
+        for a in run.attempts
+    )
+    body_parts = [
+        issue_body_link,
+        "",
+        "Glimmung-opened PR. Composed from run state — see the dashboard "
+        f"for full lineage (run id `{run.id}`).",
+        "",
+        "## Run summary",
+        f"- workflow: `{workflow.name}`",
+        f"- attempts: {len(run.attempts)}",
+        f"- cumulative cost: ${run.cumulative_cost_usd:.4f}",
+        "",
+        "## Attempts",
+        attempts_summary or "_no attempts recorded_",
+    ]
+    body = "\n".join(body_parts).strip()
+    return title, body
 
 
 async def _read_project(cosmos: Cosmos, name: str) -> dict[str, Any] | None:
@@ -857,20 +1022,92 @@ def _project_to_doc(p: ProjectRegister) -> dict[str, Any]:
     }
 
 
+def _recycle_policy_to_doc(rp: Any) -> dict[str, Any] | None:
+    if rp is None:
+        return None
+    return {"maxAttempts": rp.max_attempts, "on": list(rp.on), "landsAt": rp.lands_at}
+
+
+def _phase_to_doc(p: Any) -> dict[str, Any]:
+    return {
+        "name": p.name,
+        "kind": p.kind,
+        "workflowFilename": p.workflow_filename,
+        "workflowRef": p.workflow_ref,
+        "requirements": p.requirements,
+        "verify": p.verify,
+        "recyclePolicy": _recycle_policy_to_doc(p.recycle_policy),
+    }
+
+
 def _workflow_to_doc(w: WorkflowRegister) -> dict[str, Any]:
     return {
         "id": w.name,
         "project": w.project,
         "name": w.name,
-        "workflowFilename": w.workflow_filename,
-        "workflowRef": w.workflow_ref,
+        "phases": [_phase_to_doc(p) for p in w.phases],
+        "pr": {
+            "enabled": w.pr.enabled,
+            "recyclePolicy": _recycle_policy_to_doc(w.pr.recycle_policy),
+        },
+        "budget": w.budget.model_dump(),
         "triggerLabel": w.trigger_label,
         "defaultRequirements": w.default_requirements,
-        "retryWorkflowFilename": w.retry_workflow_filename,
-        "triageWorkflowFilename": w.triage_workflow_filename,
-        "defaultBudget": w.default_budget.model_dump() if w.default_budget else None,
+        "metadata": {},
         "createdAt": datetime.now(UTC).isoformat(),
     }
+
+
+def _recycle_policy_from_doc(d: dict[str, Any] | None):
+    """Inverse of `_recycle_policy_to_doc`. Tolerates None and unknown
+    fields so legacy / forward-compatible reads don't 500."""
+    from glimmung.models import RecyclePolicy
+    if not d:
+        return None
+    return RecyclePolicy(
+        max_attempts=int(d.get("maxAttempts", 3)),
+        on=list(d.get("on") or []),
+        lands_at=str(d.get("landsAt", "self")),
+    )
+
+
+def _phase_from_doc(d: dict[str, Any]):
+    from glimmung.models import PhaseSpec
+    return PhaseSpec(
+        name=d["name"],
+        kind=d.get("kind", "gha_dispatch"),
+        workflow_filename=d["workflowFilename"],
+        workflow_ref=d.get("workflowRef") or "main",
+        requirements=d.get("requirements"),
+        verify=bool(d.get("verify", False)),
+        recycle_policy=_recycle_policy_from_doc(d.get("recyclePolicy")),
+    )
+
+
+def _doc_to_workflow(doc: dict[str, Any] | None):
+    """Cosmos camelCase → Pydantic Workflow. Returns None if `doc` is None
+    so callers can null-check the workflow on disappearance mid-flight."""
+    if doc is None:
+        return None
+    from glimmung.models import BudgetConfig, PrPrimitiveSpec
+    phases_raw = doc.get("phases") or []
+    pr_raw = doc.get("pr") or {}
+    budget_raw = doc.get("budget") or {}
+    return Workflow(
+        id=doc.get("id") or doc["name"],
+        project=doc["project"],
+        name=doc["name"],
+        phases=[_phase_from_doc(p) for p in phases_raw],
+        pr=PrPrimitiveSpec(
+            enabled=bool(pr_raw.get("enabled", False)),
+            recycle_policy=_recycle_policy_from_doc(pr_raw.get("recyclePolicy")),
+        ),
+        budget=BudgetConfig(total=float(budget_raw.get("total", 25.0))),
+        trigger_label=doc.get("triggerLabel", "issue-agent"),
+        default_requirements=doc.get("defaultRequirements") or {},
+        metadata=doc.get("metadata") or {},
+        created_at=datetime.now(UTC),  # not authoritative; used only for the model
+    )
 
 
 app = FastAPI(title="glimmung", version="0.1.0", lifespan=lifespan)
@@ -2193,6 +2430,7 @@ async def _build_issue_graph(
                     "workflow_filename": a.get("workflow_filename"),
                     "workflow_run_id": a.get("workflow_run_id"),
                     "verification": verification or None,
+                    "cost_usd": a.get("cost_usd"),
                     "decision": a.get("decision"),
                     "completed_at": a.get("completed_at"),
                     "conclusion": a.get("conclusion"),
@@ -2540,12 +2778,13 @@ async def _build_pr_detail(cosmos: Cosmos, *, pr: PR) -> PrDetail:
         for a in run.attempts:
             detail.run_attempt_history.append({
                 "attempt_index": a.attempt_index,
-                "phase": a.phase.value,
+                "phase": a.phase,
                 "workflow_filename": a.workflow_filename,
                 "workflow_run_id": a.workflow_run_id,
                 "dispatched_at": a.dispatched_at.isoformat(),
                 "completed_at": a.completed_at.isoformat() if a.completed_at else None,
                 "verification_status": a.verification.status.value if a.verification else None,
+                "cost_usd": a.cost_usd,
                 "decision": a.decision,
             })
 

@@ -20,7 +20,6 @@ from glimmung.models import (
     BudgetConfig,
     PhaseAttempt,
     Run,
-    RunPhase,
     RunState,
 )
 
@@ -56,7 +55,7 @@ async def _put_run(
     attempts: list[dict[str, Any]] = []
     if workflow_run_id is not None:
         attempts.append(PhaseAttempt(
-            attempt_index=0, phase=RunPhase.INITIAL,
+            attempt_index=0, phase="agent",
             workflow_filename="agent-run.yml",
             workflow_run_id=workflow_run_id,
             dispatched_at=now,
@@ -64,7 +63,7 @@ async def _put_run(
     else:
         # Orphan-shape: dispatch never recorded a workflow_run_id.
         attempts.append(PhaseAttempt(
-            attempt_index=0, phase=RunPhase.INITIAL,
+            attempt_index=0, phase="agent",
             workflow_filename="agent-run.yml",
             workflow_run_id=None,
             dispatched_at=now,

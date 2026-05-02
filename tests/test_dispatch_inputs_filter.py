@@ -57,12 +57,20 @@ async def _seed(app_state, *, project: str, repo: str, workflow_name: str,
     })
     await app_state.state.cosmos.workflows.create_item({
         "id": workflow_name, "name": workflow_name, "project": project,
-        "workflowFilename": workflow_filename,
-        "workflowRef": "main",
+        "phases": [{
+            "name": "agent",
+            "kind": "gha_dispatch",
+            "workflowFilename": workflow_filename,
+            "workflowRef": "main",
+            "requirements": None,
+            "verify": True,
+            "recyclePolicy": {"maxAttempts": 3, "on": ["verify_fail"], "landsAt": "self"},
+        }],
+        "pr": {"enabled": False, "recyclePolicy": None},
+        "budget": {"total": 25.0},
         "triggerLabel": "agent:run",
         "defaultRequirements": {},
-        "retryWorkflowFilename": "agent-run.yml",
-        "defaultBudget": None,
+        "metadata": {},
         "createdAt": datetime.now(UTC).isoformat(),
     })
 

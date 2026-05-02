@@ -68,14 +68,28 @@ async def _register_project(app, name: str, repo: str) -> None:
 
 async def _register_workflow(app, *, project: str, name: str,
                               retry_workflow_filename: str = "") -> None:
+    """retry_workflow_filename kwarg preserved for legacy test signatures —
+    truthy = phase opts into verify+recycle, falsy = phase is non-verify."""
+    has_recycle = bool(retry_workflow_filename)
     await app.state.cosmos.workflows.create_item({
         "id": name, "name": name, "project": project,
-        "workflowFilename": "agent-run.yml",
-        "workflowRef": "main",
+        "phases": [{
+            "name": "agent",
+            "kind": "gha_dispatch",
+            "workflowFilename": "agent-run.yml",
+            "workflowRef": "main",
+            "requirements": None,
+            "verify": has_recycle,
+            "recyclePolicy": (
+                {"maxAttempts": 3, "on": ["verify_fail"], "landsAt": "self"}
+                if has_recycle else None
+            ),
+        }],
+        "pr": {"enabled": False, "recyclePolicy": None},
+        "budget": {"total": 25.0},
         "triggerLabel": "agent:run",
         "defaultRequirements": {},
-        "retryWorkflowFilename": retry_workflow_filename,
-        "defaultBudget": None,
+        "metadata": {},
         "createdAt": datetime.now(UTC).isoformat(),
     })
 

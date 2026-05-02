@@ -21,7 +21,6 @@ from glimmung.models import (
     LeaseState,
     PhaseAttempt,
     Run,
-    RunPhase,
     RunState,
 )
 
@@ -97,7 +96,7 @@ async def _put_run(
     attempts: list[dict[str, Any]] = []
     if workflow_run_id is not None:
         attempts.append(PhaseAttempt(
-            attempt_index=0, phase=RunPhase.INITIAL,
+            attempt_index=0, phase="agent",
             workflow_filename="issue-agent.yml",
             workflow_run_id=workflow_run_id,
             dispatched_at=now,

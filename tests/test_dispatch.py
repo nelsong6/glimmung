@@ -74,19 +74,38 @@ async def _register_workflow(
     name: str,
     workflow_filename: str = "issue-agent.yml",
     trigger_label: str = "agent-run",
-    retry_workflow_filename: str = "",
+    retry_workflow_filename: str = "",  # legacy kwarg, see note below
     requirements: dict | None = None,
 ) -> None:
+    """Test helper that writes the #69 schema directly to Cosmos. The
+    `retry_workflow_filename` kwarg is preserved as a legacy hint: when
+    truthy, the registered phase opts into verify + a basic recycle policy;
+    when empty, the phase is non-verify (no recycle). Test bodies don't
+    need to know the new shape — they just keep saying "this workflow opts
+    into the verify loop" and we translate."""
+    has_recycle = bool(retry_workflow_filename)
+    phase = {
+        "name": "agent",
+        "kind": "gha_dispatch",
+        "workflowFilename": workflow_filename,
+        "workflowRef": "main",
+        "requirements": None,
+        "verify": has_recycle,
+        "recyclePolicy": (
+            {"maxAttempts": 3, "on": ["verify_fail"], "landsAt": "self"}
+            if has_recycle else None
+        ),
+    }
     await app.state.cosmos.workflows.create_item({
         "id": name,
         "name": name,
         "project": project,
-        "workflowFilename": workflow_filename,
-        "workflowRef": "main",
+        "phases": [phase],
+        "pr": {"enabled": False, "recyclePolicy": None},
+        "budget": {"total": 25.0},
         "triggerLabel": trigger_label,
         "defaultRequirements": requirements or {},
-        "retryWorkflowFilename": retry_workflow_filename,
-        "defaultBudget": None,
+        "metadata": {},
         "createdAt": datetime.now(UTC).isoformat(),
     })
 
@@ -174,10 +193,13 @@ async def test_dispatch_creates_lock_lease_and_run_when_workflow_opts_in(app):
 
 
 @pytest.mark.asyncio
-async def test_dispatch_skips_run_creation_for_non_verify_loop_workflow(app):
-    """Workflow with no retry_workflow_filename: lease is acquired, but
-    no Run is created. The lock is still claimed (so two webhook
-    deliveries on the same issue don't double-dispatch)."""
+async def test_dispatch_creates_run_even_for_non_verify_phase(app):
+    """Under #69, every workflow has at least one phase, so every dispatch
+    creates a Run — even when the phase doesn't opt into the verify loop.
+    Replaces the pre-#69 'no retry_workflow_filename = no Run' behavior:
+    the gating moved off the trio and onto the per-phase verify flag, and
+    Runs exist regardless so glimmung tracks every dispatch in the lineage
+    graph."""
     await _register_project(app, "ambience", "nelsong6/ambience")
     await _register_workflow(app, project="ambience", name="issue-agent")
     await _register_host(app, "runner-1")
@@ -189,7 +211,7 @@ async def test_dispatch_skips_run_creation_for_non_verify_loop_workflow(app):
     )
 
     assert result.state == "dispatched"
-    assert result.run_id is None
+    assert result.run_id is not None
     assert result.lease_id is not None
     assert result.issue_lock_holder_id is not None
 
@@ -436,7 +458,7 @@ async def test_dispatch_honors_agent_budget_label_at_run_creation(app):
         parameters=[{"name": "@id", "value": result.run_id}],
     )]
     assert len(runs) == 1
-    assert runs[0]["budget"] == {"max_attempts": 5, "max_cost_usd": 50.0}
+    assert runs[0]["budget"] == {"total": 50.0}
 
 
 # ─── glimmung-Issue plumbing ──────────────────────────────
@@ -559,12 +581,20 @@ async def test_dispatch_uses_workflow_default_budget_when_no_label(app):
         "id": "issue-agent",
         "name": "issue-agent",
         "project": "ambience",
-        "workflowFilename": "issue-agent.yml",
-        "workflowRef": "main",
+        "phases": [{
+            "name": "agent",
+            "kind": "gha_dispatch",
+            "workflowFilename": "issue-agent.yml",
+            "workflowRef": "main",
+            "requirements": None,
+            "verify": True,
+            "recyclePolicy": {"maxAttempts": 3, "on": ["verify_fail"], "landsAt": "self"},
+        }],
+        "pr": {"enabled": False, "recyclePolicy": None},
+        "budget": {"total": 100.0},
         "triggerLabel": "agent-run",
         "defaultRequirements": {},
-        "retryWorkflowFilename": "agent-retry.yml",
-        "defaultBudget": {"max_attempts": 7, "max_cost_usd": 100.0},
+        "metadata": {},
         "createdAt": datetime.now(UTC).isoformat(),
     })
     await _register_host(app, "runner-1")
@@ -579,7 +609,7 @@ async def test_dispatch_uses_workflow_default_budget_when_no_label(app):
         "SELECT * FROM c WHERE c.id = @id",
         parameters=[{"name": "@id", "value": result.run_id}],
     )]
-    assert runs[0]["budget"] == {"max_attempts": 7, "max_cost_usd": 100.0}
+    assert runs[0]["budget"] == {"total": 100.0}
 
 
 # ─── glimmung-native dispatch (#50) ───────────────────────────────────────────

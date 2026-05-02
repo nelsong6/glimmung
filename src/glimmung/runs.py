@@ -27,7 +27,6 @@ from glimmung.models import (
     PhaseAttempt,
     Run,
     RunDecision,
-    RunPhase,
     RunState,
     VerificationResult,
 )
@@ -50,21 +49,22 @@ async def create_run(
     issue_repo: str,
     issue_number: int,
     budget: BudgetConfig,
+    initial_phase_name: str,
     initial_workflow_filename: str,
     issue_id: str = "",
     issue_lock_holder_id: str | None = None,
     trigger_source: dict[str, Any] | None = None,
 ) -> Run:
     """Create a Run record at initial dispatch time. Records the first
-    PhaseAttempt as INITIAL with `dispatched_at = now`. The attempt
-    is completed later via `record_completion` when the
+    PhaseAttempt with the caller-supplied phase name (matching a
+    PhaseSpec.name in the workflow) and `dispatched_at = now`. The
+    attempt is completed later via `record_completion` when the
     workflow_run.completed webhook arrives.
 
     `issue_lock_holder_id` is the holder of the per-issue serialization
     lock claimed by `dispatch_run`. The terminal-state handler in
     `app._handle_workflow_run` reads it and releases the lock when the
-    Run reaches PASSED or ABORTED. Optional because pre-#20 dispatch
-    paths don't claim the lock.
+    Run reaches PASSED or ABORTED.
 
     `trigger_source` is a free-form record of why this run started — for
     W6 observability and audit. Not consumed by the decision engine."""
@@ -81,7 +81,7 @@ async def create_run(
         attempts=[
             PhaseAttempt(
                 attempt_index=0,
-                phase=RunPhase.INITIAL,
+                phase=initial_phase_name,
                 workflow_filename=initial_workflow_filename,
                 dispatched_at=now,
             )
@@ -94,9 +94,9 @@ async def create_run(
     )
     await cosmos.runs.create_item(run.model_dump(mode="json"))
     log.info(
-        "created run %s for %s/issues/%d (workflow=%s budget=%dx$%.2f trigger=%s)",
+        "created run %s for %s/issues/%d (workflow=%s phase=%s budget=$%.2f trigger=%s)",
         run.id, issue_repo, issue_number, workflow,
-        budget.max_attempts, budget.max_cost_usd,
+        initial_phase_name, budget.total,
         (trigger_source or {}).get("kind", "unspecified"),
     )
     return run
@@ -228,24 +228,28 @@ async def link_pr_to_run(
     return await _retry_on_conflict(cosmos, run, etag, apply)
 
 
-async def reopen_for_triage(
+async def reopen_for_recycle(
     cosmos: Cosmos,
     *,
     run: Run,
     etag: str,
-    triage_workflow_filename: str,
+    phase_name: str,
+    workflow_filename: str,
     pr_lock_holder_id: str,
     issue_lock_holder_id: str,
 ) -> tuple[Run, str]:
-    """Re-open a PASSED Run for triage: state PASSED → IN_PROGRESS,
-    append a new TRIAGE PhaseAttempt, stamp both lock holders so the
-    workflow_run.completed terminal handler can release both locks."""
+    """Re-open a PASSED Run via the PR primitive's recycle path: state
+    PASSED → IN_PROGRESS, append a new PhaseAttempt at `phase_name` (the
+    `lands_at` target), stamp both lock holders so the workflow_run.
+    completed terminal handler can release both locks. Replaces the
+    pre-#69 `reopen_for_triage`; the trigger is still PR feedback but
+    the destination phase is now recycle-policy-driven."""
     def apply(r: Run) -> Run:
         next_idx = (r.attempts[-1].attempt_index + 1) if r.attempts else 0
         r.attempts.append(PhaseAttempt(
             attempt_index=next_idx,
-            phase=RunPhase.TRIAGE,
-            workflow_filename=triage_workflow_filename,
+            phase=phase_name,
+            workflow_filename=workflow_filename,
             dispatched_at=_now(),
         ))
         return r.model_copy(update={
@@ -324,7 +328,13 @@ def _apply_completion(
     last.conclusion = conclusion
     last.verification = verification
     last.artifact_url = artifact_url
+    # Phase-reported cost: prefer an explicit cost_usd on the attempt
+    # (set by future native LLM phases that don't emit verification.json),
+    # fall back to verification.cost_usd. Surface it on the attempt so the
+    # rollup is auditable per attempt without re-parsing verification.
     cost = verification.cost_usd if verification else 0.0
+    if last.cost_usd is None:
+        last.cost_usd = cost
     return run.model_copy(update={
         "cumulative_cost_usd": run.cumulative_cost_usd + cost,
         "updated_at": _now(),
@@ -349,24 +359,26 @@ async def record_decision(
     return await _retry_on_conflict(cosmos, run, etag, apply)
 
 
-async def append_retry_attempt(
+async def append_attempt(
     cosmos: Cosmos,
     *,
     run: Run,
     etag: str,
-    retry_workflow_filename: str,
+    phase_name: str,
+    workflow_filename: str,
 ) -> tuple[Run, str]:
-    """Append a new PhaseAttempt to the run for a freshly-dispatched
-    retry workflow. Caller must call this *before* firing the
-    workflow_dispatch so the run state reflects intent — and so a
-    duplicate dispatch can be detected if the webhook redelivery races
-    the dispatch call."""
+    """Append a new PhaseAttempt to an in-progress run for a freshly-
+    dispatched workflow. `phase_name` is the recycle policy's `lands_at`
+    target (or 'self' resolved to the current phase's name). Caller must
+    call this *before* firing the workflow_dispatch so run state reflects
+    intent and duplicate dispatches can be detected on webhook redelivery
+    races."""
     def apply(r: Run) -> Run:
         next_idx = (r.attempts[-1].attempt_index + 1) if r.attempts else 0
         r.attempts.append(PhaseAttempt(
             attempt_index=next_idx,
-            phase=RunPhase.RETRY,
-            workflow_filename=retry_workflow_filename,
+            phase=phase_name,
+            workflow_filename=workflow_filename,
             dispatched_at=_now(),
         ))
         return r.model_copy(update={"updated_at": _now()})
