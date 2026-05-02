@@ -355,6 +355,7 @@ async def record_completion(
     verification: VerificationResult | None,
     artifact_url: str | None,
     screenshots_markdown: str | None = None,
+    phase_outputs: dict[str, str] | None = None,
 ) -> tuple[Run, str]:
     """Record the workflow_run.completed payload on the latest attempt
     of a run. Updates cumulative_cost_usd from the verification
@@ -368,12 +369,17 @@ async def record_completion(
     composer can drop it verbatim into the body without rebuilding
     image URLs from scratch. None means no screenshot pass ran (e.g.
     backend-only workflow).
+
+    `phase_outputs` (#101) is the phase's emitted output values,
+    already validated against the phase's declared output names by
+    the caller. Persisted on the latest attempt for the multi-phase
+    runtime to substitute into the next phase's dispatch inputs.
     """
     return await _retry_on_conflict(
         cosmos, run, etag,
         lambda r: _apply_completion(
             r, workflow_run_id, conclusion, verification, artifact_url,
-            screenshots_markdown,
+            screenshots_markdown, phase_outputs,
         ),
     )
 
@@ -385,6 +391,7 @@ def _apply_completion(
     verification: VerificationResult | None,
     artifact_url: str | None,
     screenshots_markdown: str | None,
+    phase_outputs: dict[str, str] | None,
 ) -> Run:
     if not run.attempts:
         raise RuntimeError(f"run {run.id} has no attempts to complete")
@@ -401,6 +408,8 @@ def _apply_completion(
     last.conclusion = conclusion
     last.verification = verification
     last.artifact_url = artifact_url
+    if phase_outputs is not None:
+        last.phase_outputs = phase_outputs
     # Phase-reported cost: prefer an explicit cost_usd on the attempt
     # (set by future native LLM phases that don't emit verification.json),
     # fall back to verification.cost_usd. Surface it on the attempt so the
