@@ -7,27 +7,34 @@ type GlimmungConfig = {
 
 let _msal: PublicClientApplication | null = null;
 let _config: GlimmungConfig | null = null;
+// Memoize the in-flight initAuth promise so concurrent callers (e.g. the
+// Layout effect + a routed view's first authedFetch on a deep-link reload)
+// share the same MSAL instance instead of racing.
+let _initPromise: Promise<void> | null = null;
 
 const SCOPES = ["openid", "profile", "email"];
 
-export async function initAuth(): Promise<void> {
-  if (_msal) return;
-  const cfgRes = await fetch("/v1/config");
-  if (!cfgRes.ok) throw new Error(`config fetch failed: ${cfgRes.status}`);
-  _config = await cfgRes.json();
-  if (!_config!.entra_client_id) {
-    throw new Error("backend has no entra_client_id configured");
-  }
-  const msalConfig: Configuration = {
-    auth: {
-      clientId: _config!.entra_client_id,
-      authority: _config!.authority,
-      redirectUri: window.location.origin + "/",
-    },
-    cache: { cacheLocation: "sessionStorage" },
-  };
-  _msal = new PublicClientApplication(msalConfig);
-  await _msal.initialize();
+export function initAuth(): Promise<void> {
+  if (_initPromise) return _initPromise;
+  _initPromise = (async () => {
+    const cfgRes = await fetch("/v1/config");
+    if (!cfgRes.ok) throw new Error(`config fetch failed: ${cfgRes.status}`);
+    _config = await cfgRes.json();
+    if (!_config!.entra_client_id) {
+      throw new Error("backend has no entra_client_id configured");
+    }
+    const msalConfig: Configuration = {
+      auth: {
+        clientId: _config!.entra_client_id,
+        authority: _config!.authority,
+        redirectUri: window.location.origin + "/",
+      },
+      cache: { cacheLocation: "sessionStorage" },
+    };
+    _msal = new PublicClientApplication(msalConfig);
+    await _msal.initialize();
+  })();
+  return _initPromise;
 }
 
 export function currentAccount(): AccountInfo | null {
@@ -61,6 +68,9 @@ export async function getIdToken(): Promise<string> {
 }
 
 export async function authedFetch(input: RequestInfo, init: RequestInit = {}): Promise<Response> {
+  // Auto-init so deep-link reloads work regardless of whether the Layout
+  // effect or the routed view's first call wins the mount race.
+  await initAuth();
   const token = await getIdToken();
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${token}`);
