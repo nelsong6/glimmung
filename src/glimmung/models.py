@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from enum import Enum
 from typing import Any
@@ -40,6 +41,70 @@ VERIFY_PHASE_TRIGGERS: frozenset[str] = frozenset({"verify_fail", "verify_malfor
 PR_PRIMITIVE_TRIGGERS: frozenset[str] = frozenset({"pr_review_changes_requested"})
 
 
+# Cross-phase input ref expression: `${{ phases.<phase_name>.outputs.<key> }}`.
+# Whitespace is permissive inside the `${{ }}` to match GHA-style ergonomics.
+# Phase names and output keys are restricted to a conservative identifier
+# alphabet (alnum, underscore, hyphen) so the reference syntax stays
+# unambiguous and we don't have to think about quoting.
+_PHASE_REF_RE = re.compile(
+    r"^\s*\$\{\{\s*phases\.(?P<phase>[A-Za-z0-9_-]+)\.outputs\.(?P<key>[A-Za-z0-9_-]+)\s*\}\}\s*$"
+)
+
+
+def parse_phase_input_ref(ref: str) -> tuple[str, str] | None:
+    """Parse a `${{ phases.<name>.outputs.<key> }}` expression.
+
+    Returns `(phase_name, output_key)` or None if the string isn't a
+    well-formed phase ref. Free function so tests and the runtime
+    substitution path share one parser."""
+    m = _PHASE_REF_RE.match(ref)
+    if m is None:
+        return None
+    return m.group("phase"), m.group("key")
+
+
+def validate_phase_input_refs(phases: list["PhaseSpec"]) -> None:
+    """Validate every phase's `inputs` map against earlier phases' declared
+    `outputs`. Raises ValueError on the first problem.
+
+    Rules:
+    - Each input value must be a syntactically valid `${{ phases.NAME.outputs.KEY }}`.
+    - The referenced phase must appear *strictly earlier* in the order
+      (no self-refs, no forward refs).
+    - The referenced output `KEY` must be declared in that earlier phase's
+      `outputs` list."""
+    declared_outputs: dict[str, frozenset[str]] = {}
+    for phase in phases:
+        for input_name, ref in phase.inputs.items():
+            parsed = parse_phase_input_ref(ref)
+            if parsed is None:
+                raise ValueError(
+                    f"phase {phase.name!r} input {input_name!r}={ref!r} is not a "
+                    "valid phase ref (expected `${{ phases.NAME.outputs.KEY }}`)"
+                )
+            ref_phase, ref_key = parsed
+            if ref_phase == phase.name:
+                raise ValueError(
+                    f"phase {phase.name!r} input {input_name!r} refs itself; "
+                    "self-refs are not allowed"
+                )
+            if ref_phase not in declared_outputs:
+                # Either the referenced phase doesn't exist, or it's later
+                # in the order. Both are forward refs from this phase's POV.
+                raise ValueError(
+                    f"phase {phase.name!r} input {input_name!r} refs phase "
+                    f"{ref_phase!r} which doesn't appear earlier in the workflow"
+                )
+            if ref_key not in declared_outputs[ref_phase]:
+                raise ValueError(
+                    f"phase {phase.name!r} input {input_name!r} refs "
+                    f"{ref_phase!r}.outputs.{ref_key!r} but {ref_phase!r} "
+                    f"doesn't declare that output (declared: "
+                    f"{sorted(declared_outputs[ref_phase])})"
+                )
+        declared_outputs[phase.name] = frozenset(phase.outputs)
+
+
 class RecyclePolicy(BaseModel):
     """Where re-dispatch lands when a recycle trigger fires, and how many
     times. `lands_at = "self"` is same-phase retry (today's RETRY); a phase
@@ -59,11 +124,21 @@ class PhaseSpec(BaseModel):
     Verify is opt-in: when true, the phase emits `verification.json` and the
     decision engine routes through `recycle_policy`. When false, any
     non-`success` GHA conclusion ends the run (GHA-job semantics) and
-    `recycle_policy` is invalid."""
+    `recycle_policy` is invalid.
+
+    `inputs` and `outputs` plumb data between phases (multi-phase runtime,
+    glimmung#101). `outputs` is the list of named values this phase emits
+    via the `completed` callback's `outputs` payload — string-only in v1.
+    `inputs` maps an input name (becomes a `workflow_dispatch.inputs` key)
+    to a ref expression of the form `${{ phases.<phase_name>.outputs.<key> }}`
+    pointing at an earlier phase's declared output. Cross-phase ref
+    validation runs at registration time."""
     name: str
     kind: str = "gha_dispatch"
     workflow_filename: str
     workflow_ref: str = "main"
+    inputs: dict[str, str] = Field(default_factory=dict)
+    outputs: list[str] = Field(default_factory=list)
     requirements: dict[str, Any] | None = None
     verify: bool = False
     recycle_policy: RecyclePolicy | None = None
@@ -108,13 +183,13 @@ class WorkflowRegister(BaseModel):
 
     @model_validator(mode="after")
     def _validate_v1(self) -> "WorkflowRegister":
-        # v1: exactly one phase. Schema accommodates more; runtime doesn't.
-        # See glimmung#69 for the multi-phase follow-up.
-        if len(self.phases) != 1:
-            raise ValueError(
-                f"v1 supports exactly one phase per workflow; got {len(self.phases)}. "
-                "Multi-phase orchestration is a follow-up (see glimmung#69)."
-            )
+        # Ordering matters: per-phase validation (kind, recycle), name
+        # uniqueness, and ref validation all run BEFORE the single-phase
+        # enforcement so 2-phase fixtures exercise those validators in
+        # tests. The single-phase check stays last as a v1 runtime gate
+        # (relaxed when the multi-phase runtime lands; see glimmung#101).
+        if not self.phases:
+            raise ValueError("workflow must declare at least one phase")
         names = [p.name for p in self.phases]
         if len(set(names)) != len(names):
             raise ValueError(f"phase names must be unique within a workflow; got {names}")
@@ -140,6 +215,7 @@ class WorkflowRegister(BaseModel):
                         f"phase {p.name!r} recycle_policy.on contains unknown triggers: {bad}; "
                         f"valid: {sorted(VERIFY_PHASE_TRIGGERS)}"
                     )
+        validate_phase_input_refs(self.phases)
         if self.pr.recycle_policy is not None:
             la = self.pr.recycle_policy.lands_at
             if la == "self":
@@ -154,6 +230,14 @@ class WorkflowRegister(BaseModel):
                     f"PR primitive recycle_policy.on contains unknown triggers: {bad}; "
                     f"valid: {sorted(PR_PRIMITIVE_TRIGGERS)}"
                 )
+        # v1 runtime gate (relaxed when the multi-phase runtime lands;
+        # tracked in glimmung#101). Comes last so 2-phase fixtures still
+        # exercise the per-phase + ref validators above.
+        if len(self.phases) != 1:
+            raise ValueError(
+                f"v1 supports exactly one phase per workflow; got {len(self.phases)}. "
+                "Multi-phase orchestration is a follow-up (see glimmung#101)."
+            )
         return self
 
 
