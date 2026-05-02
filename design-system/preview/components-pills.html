@@ -1,22 +1,49 @@
-<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="_card.css"></head><body>
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="_card.css">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  .row { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; margin-bottom: 14px; }
+  .row:last-child { margin-bottom: 0; }
+  .meta { font-family: var(--font-sans); font-size: 10px; color: var(--fg-dimmer); width: 88px; flex-shrink: 0; text-transform: uppercase; letter-spacing: 0.08em; }
+  .note { font-family: var(--font-sans); font-size: 10px; color: var(--fg-dim); }
+  .dot {
+    display: inline-block; width: 7px; height: 7px;
+    border-radius: 999px; background: var(--state-busy-fg);
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+</style>
+</head><body>
 <div class="card">
-  <div class="lbl">Pills — status badges</div>
-  <div style="display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center">
-    <span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#14532d;color:#4ade80;font-size:0.75rem;font-weight:500">free</span>
-    <span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#422006;color:#fb923c;font-size:0.75rem;font-weight:500">busy</span>
-    <span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#3f1c1c;color:#f87171;font-size:0.75rem;font-weight:500">drained</span>
-    <span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#14532d;color:#4ade80;font-size:0.75rem;font-weight:500">live</span>
-    <span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#422006;color:#fb923c;font-size:0.75rem;font-weight:500">stale</span>
-    <span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#3f1c1c;color:#f87171;font-size:0.75rem;font-weight:500">dead</span>
-    <span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#14532d;color:#4ade80;font-size:0.75rem;font-weight:500">passed</span>
-    <span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#422006;color:#fb923c;font-size:0.75rem;font-weight:500">in_progress</span>
-    <span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#3f1c1c;color:#f87171;font-size:0.75rem;font-weight:500">aborted</span>
-    <span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#1e3a5f;color:#60a5fa;font-size:0.75rem;font-weight:500">issue-agent</span>
+  <div class="lbl">Pills — console tag</div>
+
+  <div class="row">
+    <div class="meta">host</div>
+    <span class="pill free">free</span>
+    <span class="pill busy">busy</span>
+    <span class="pill drain">drained</span>
   </div>
-  <div style="margin-top:14px;display:flex;gap:18px;align-items:center">
-    <div style="display:flex;gap:6px;align-items:center"><span style="display:inline-block;width:8px;height:8px;border-radius:999px;background:#fb923c;animation:pulse-anim 1.6s ease-in-out infinite"></span><span style="font-family:ui-monospace,monospace;font-size:10px;color:#888">live-dot · pulse 1.6s</span></div>
-    <span style="display:inline-block;padding:1px 6px;border-radius:999px;background:#1a1a1f;color:#666;font-size:0.7rem;font-family:ui-monospace,monospace">12</span>
-    <span style="font-family:ui-monospace,monospace;font-size:10px;color:#888">count pill (ink-800 / dim text)</span>
+
+  <div class="row">
+    <div class="meta">stream</div>
+    <span class="pill free">live</span>
+    <span class="pill busy">stale</span>
+    <span class="pill drain">dead</span>
+  </div>
+
+  <div class="row">
+    <div class="meta">run state</div>
+    <span class="pill free">passed</span>
+    <span class="pill busy">in_progress</span>
+    <span class="pill drain">aborted</span>
+    <span class="pill info">issue-agent</span>
+  </div>
+
+  <div class="row">
+    <div class="meta">atoms</div>
+    <span class="dot"></span>
+    <span class="note">live-dot · pulse 1.6s (stays round — it's a dot)</span>
+    <span class="count-pill">12</span>
+    <span class="note">count-pill · neutral, no rail</span>
   </div>
 </div>
 </body></html>

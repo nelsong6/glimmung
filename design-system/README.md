@@ -130,18 +130,23 @@ There is **no brand purple, teal, or pink**. There is **no gradient anywhere** i
 
 ### Type
 
-Glimmung uses **Geist Sans + Geist Mono** — Vercel's developer-tooling family. Designed for dense dashboards: tight metrics at small sizes, tabular numerals on by default, and a slashed-zero / disambiguated `1lI` mono. Loaded from Google Fonts via `@import` at the top of `colors_and_type.css`; system stacks are fallbacks.
+Glimmung uses **IBM Plex Sans** as a single typeface across the entire UI. A humanist sans that reads as professional product UI rather than developer tooling, with tabular numerals on by default for tables / counts / KPIs and a slashed zero. Loaded from Google Fonts via `@import` at the top of `colors_and_type.css`; system stacks are fallbacks.
 
 ```css
-/* Body / UI — set on :root */
-font-family: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+/* Body / UI — set on :root, used everywhere */
+font-family: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
              Roboto, "Helvetica Neue", Arial, sans-serif;
 
-/* Mono — for IDs, capability JSON, workflow names, key fields */
-font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+/* Numeric alignment for tables, counts, KPIs */
+font-variant-numeric: tabular-nums;
+
+/* Mono — reserved for <code> / <pre> only (literal data, code blocks).
+   The `--font-mono` token is kept as an alias of `--font-sans` so legacy
+   rules continue to render in sans without rewriting them. */
+font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 ```
 
-Substitution disclosure: the live product still uses system stacks. Geist is the design-system upgrade — switch back by editing the two `--font-*` tokens.
+Substitution disclosure: the live product still uses system stacks plus Geist Mono. The design-system direction is single-family IBM Plex Sans — swap by editing `--font-sans` (and re-pointing `--font-mono` at a real mono stack) in `colors_and_type.css`.
 
 Base size is **14px** (`font-size: 14px` on `:root`). The scale is compressed:
 
@@ -178,10 +183,10 @@ Sidebar width is fixed at **220px**. Content has **min-width: 0** so tables can 
 
 ### Borders
 
-- **All borders are 1px solid `#2a2a2e`** unless noted. There is no border thickness scale; everything is 1px.
-- **Border-radius is small.** 4px on cards, inputs, buttons, panels. 6px on the run-panel. **999px (full pill)** on count badges, connection pills, status pills, the live-dot, the tab-dot.
-- **Selected state uses a 2px left or bottom border accent** (sidebar row selected: 2px solid `#4ade80` on left; tab selected: 2px solid `#4ade80` on bottom). The selected border is the ONLY way the system communicates active selection in the chrome.
-- Eligible-row indicator: `tr.eligible td:first-child { border-left: 2px solid #4ade80; }` — a 2px green stripe that joins to the row.
+- **All borders are 1px solid `#2a2a2e`** unless noted. There is no border thickness scale; everything is 1px (with one accent variant: 2px rails for selection).
+- **Border-radius is small.** 4px on cards, inputs, panels. 6px on the run-panel. **No `border-radius: 999px` on pills, buttons, or chips** — those use the **console-plate / console-tag** geometry instead: an asymmetric chamfered top-left corner drawn via `clip-path: polygon(N 0, 100% 0, 100% 100%, 0 100%, 0 N)`, with hairline edges and accent rails painted by a `::before` overlay (since `clip-path` eats `border`). 999px is reserved for actual **dots** — the live-dot and tab-dot.
+- **Selected state uses a 2px accent rail.** Sidebar row selected: 2px solid `#4ade80` on the **left**. Tab selected: 2px solid `#4ade80` on the **bottom**. Pill / button: 2px solid state-color on the **leading edge** (left). This is one selection vocabulary, applied to four surfaces.
+- Eligible-row indicator: `tr.eligible td:first-child { border-left: 2px solid #4ade80; }` — same 2px rail vocabulary, joined to the row.
 
 ### Shadows, blur, transparency
 
@@ -207,7 +212,7 @@ Sidebar width is fixed at **220px**. Content has **min-width: 0** so tables can 
 
 ### Imagery / illustration
 
-- **None.** Glimmung has no photography, no illustrations, no iconography in the live product. The only graphical element on the entire dashboard is the **2px green left-stripe** on selected/eligible rows and the **pulsing orange dot**. This is a deliberate aesthetic — a CRT-terminal feel by way of restraint.
+- **None.** Glimmung has no photography, no illustrations, no iconography in the live product. The only graphical elements on the entire dashboard are the **2px accent rails** (selection, eligibility, leading edges of pills/buttons), the **chamfered top-left corner** that runs through pills/buttons/count chips/connection chip, and the **pulsing orange dot**. This is a deliberate aesthetic — a CRT-terminal / industrial-control-panel feel by way of restraint.
 - This design system adds Lucide line icons (line weight 1.5px, `currentColor`) for use in extensions / new screens. See ICONOGRAPHY.
 
 ### Animation
@@ -295,7 +300,7 @@ The live Glimmung product uses **no icons at all** — Lucide is a substitute / 
 
 ## Caveats
 
-- **Geist is a substitution.** The live product uses system stacks; this design system standardizes on Geist Sans + Geist Mono via Google Fonts. If you'd rather stay on system fonts, edit the two `--font-*` tokens in `colors_and_type.css` and remove the `@import`.
+- **IBM Plex Sans, single family.** The design system uses IBM Plex Sans for everything, with `font-variant-numeric: tabular-nums` carrying numeric alignment in tables/counts/KPIs and real mono reserved for `<code>` / `<pre>`. The live product still uses system stacks plus Geist Mono. To revert to two families, edit `--font-sans` and re-point `--font-mono` at a real mono stack in `colors_and_type.css`. If you'd rather stay on system fonts, edit the two `--font-*` tokens in `colors_and_type.css` and remove the `@import`.
 - **No real logo asset.** The wordmark SVG in `assets/` is a clean re-rendering of the lowercase `glimmung` h1 from the dashboard, not an officially-blessed mark.
 - **Lucide is a substitution.** The live product ships zero icons; we picked Lucide as the extension set. Flag if a different choice is preferred.
 - **No slide template was provided**, so no `slides/` folder. The visual foundations would translate well to a dark-deck system if needed — ask if you want one generated.

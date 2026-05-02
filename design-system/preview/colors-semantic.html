@@ -1,25 +1,355 @@
-<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="_card.css"></head><body>
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="_card.css">
+<style>
+  .card { width: 760px; padding: 20px 24px; }
+
+  .lbl-sub {
+    font-family: var(--font-sans);
+    font-size: 10px;
+    color: var(--fg-dimmer);
+    margin-left: 8px;
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 400;
+  }
+
+  /* ──────────────────────────────────────────
+     Faux app frame: header + KPI strip + table
+     ────────────────────────────────────────── */
+  .frame {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg);
+    overflow: hidden;
+  }
+
+  /* Header row — wordmark, connection chip, epigraph, auth */
+  .frame-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-deep);
+  }
+  .wordmark {
+    font-size: 1.2rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--fg);
+  }
+  .epigraph {
+    font-style: italic;
+    color: var(--fg-dimmest);
+    font-size: 11px;
+    line-height: 1.4;
+    margin-left: auto;
+    max-width: 280px;
+    text-align: right;
+  }
+
+  /* Connection chip — uses the same console-tag geometry */
+  .conn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 18px;
+    padding: 0 8px 0 9px;
+    font-family: var(--font-sans);
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    text-transform: lowercase;
+    line-height: 1;
+    clip-path: polygon(6px 0, 100% 0, 100% 100%, 0 100%, 0 6px);
+    position: relative;
+    isolation: isolate;
+  }
+  .conn::before {
+    content: "";
+    position: absolute; inset: 0;
+    background:
+      linear-gradient(to right, var(--rail) 0 2px, transparent 2px),
+      linear-gradient(to top,    var(--edge) 0 1px, transparent 1px),
+      linear-gradient(to bottom, var(--edge) 0 1px, transparent 1px),
+      linear-gradient(to left,   var(--edge) 0 1px, transparent 1px),
+      linear-gradient(135deg, transparent 0 calc(8.49px - 1px), var(--edge) calc(8.49px - 1px) 8.49px, transparent 8.49px);
+    background-repeat: no-repeat;
+    pointer-events: none;
+  }
+  .conn .dot { width: 6px; height: 6px; border-radius: 999px; }
+  .conn.live { background: color-mix(in srgb, #14532d 55%, transparent); color: #4ade80; --rail: #4ade80; --edge: #4ade8055; }
+  .conn.live .dot { background: #4ade80; }
+
+  /* KPI strip */
+  .kpi-strip {
+    display: flex;
+    gap: 0;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    font-family: var(--font-sans);
+    font-size: 11px;
+  }
+  .kpi {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding-right: 18px;
+  }
+  .kpi + .kpi { padding-left: 18px; border-left: 1px solid var(--border); }
+  .kpi .k {
+    color: var(--fg-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 9.5px;
+  }
+  .kpi .v { color: var(--fg); font-variant-numeric: tabular-nums; }
+  .kpi .v.green  { color: #4ade80; }
+  .kpi .v.yellow { color: #facc15; }
+  .kpi .v.red    { color: #f87171; }
+  .kpi .v.blue   { color: #60a5fa; }
+
+  /* Table */
+  .frame table {
+    width: 100%;
+    border-collapse: collapse;
+    font-variant-numeric: tabular-nums;
+  }
+  .frame th {
+    text-align: left;
+    padding: 8px 16px;
+    font-weight: 500;
+    font-size: 10px;
+    color: var(--fg-dim);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-deep);
+  }
+  .frame td {
+    padding: 9px 16px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--fg);
+    vertical-align: middle;
+  }
+  .frame tr:last-child td { border-bottom: none; }
+  .frame tr.eligible td:first-child { border-left: 2px solid #4ade80; padding-left: 14px; }
+  .frame .mono { font-family: var(--font-sans); font-size: 11.5px; color: var(--fg-secondary); }
+  .frame .mono.dim { color: var(--fg-dimmer); }
+
+  /* Pill — same as live */
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    height: 18px;
+    padding: 0 8px 0 9px;
+    font-family: var(--font-sans);
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    text-transform: lowercase;
+    line-height: 1;
+    clip-path: polygon(6px 0, 100% 0, 100% 100%, 0 100%, 0 6px);
+    position: relative;
+    isolation: isolate;
+  }
+  .pill::before {
+    content: "";
+    position: absolute; inset: 0;
+    background:
+      linear-gradient(to right, var(--rail) 0 2px, transparent 2px),
+      linear-gradient(to top,    var(--edge) 0 1px, transparent 1px),
+      linear-gradient(to bottom, var(--edge) 0 1px, transparent 1px),
+      linear-gradient(to left,   var(--edge) 0 1px, transparent 1px),
+      linear-gradient(135deg, transparent 0 calc(8.49px - 1px), var(--edge) calc(8.49px - 1px) 8.49px, transparent 8.49px);
+    background-repeat: no-repeat;
+    pointer-events: none;
+  }
+  .pill.free   { background: color-mix(in srgb, #14532d 55%, transparent); color: #4ade80; --rail: #4ade80; --edge: #4ade8055; }
+  .pill.busy   { background: color-mix(in srgb, #3a2a04 70%, transparent); color: #facc15; --rail: #facc15; --edge: #facc1555; }
+  .pill.drain  { background: color-mix(in srgb, #3f1c1c 55%, transparent); color: #f87171; --rail: #f87171; --edge: #f8717155; }
+  .pill.info   { background: color-mix(in srgb, #1e3a5f 55%, transparent); color: #60a5fa; --rail: #60a5fa; --edge: #60a5fa55; }
+
+  /* Token reference row beneath the frame */
+  .tokens {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    margin-top: 16px;
+    font-family: var(--font-sans);
+    font-size: 10px;
+  }
+  .tok {
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 8px 10px;
+    line-height: 1.6;
+  }
+  .tok .role {
+    font-size: 9.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--fg-dim);
+    margin-bottom: 4px;
+  }
+  .tok .swatch-row {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 6px;
+  }
+  .tok .sq {
+    width: 14px; height: 14px;
+    border-radius: 2px;
+    border: 1px solid var(--border);
+  }
+  .tok .hex { color: var(--fg-secondary); }
+  .tok .hex.label { color: var(--fg-dimmer); margin-right: 4px; }
+</style>
+</head>
+<body>
 <div class="card">
-  <div class="lbl">Semantic — status colors (paired bg + fg)</div>
-  <div class="row">
-    <div class="swatch" style="background:#14532d;color:#4ade80">
-      <div><div class="name">success / free / live</div><div class="hex">bg #14532d · fg #4ade80</div></div>
-      <div><span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#14532d;color:#4ade80;font-size:10px;font-weight:500">free</span></div>
+
+  <div class="lbl">
+    Semantic states · in context
+    <span class="lbl-sub">capacity view · 4 hosts · 1 pending lease</span>
+  </div>
+
+  <div class="frame">
+
+    <!-- Header -->
+    <div class="frame-header">
+      <span class="wordmark">glimmung</span>
+      <span class="conn live"><span class="dot"></span>live</span>
+      <span class="epigraph">"From a thousand worlds they had come, each with a craft to contribute."</span>
     </div>
-    <div class="swatch" style="background:#422006;color:#fb923c">
-      <div><div class="name">busy / stale</div><div class="hex">bg #422006 · fg #fb923c</div></div>
-      <div><span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#422006;color:#fb923c;font-size:10px;font-weight:500">busy</span></div>
+
+    <!-- KPI strip -->
+    <div class="kpi-strip">
+      <div class="kpi"><span class="k">hosts</span><span class="v">4</span></div>
+      <div class="kpi"><span class="k">free</span><span class="v green">1</span></div>
+      <div class="kpi"><span class="k">busy</span><span class="v yellow">2</span></div>
+      <div class="kpi"><span class="k">drained</span><span class="v red">1</span></div>
+      <div class="kpi"><span class="k">pending</span><span class="v">1</span></div>
+      <div class="kpi"><span class="k">active</span><span class="v">2</span></div>
+    </div>
+
+    <!-- Hosts table -->
+    <table>
+      <thead>
+        <tr>
+          <th>name</th>
+          <th>capabilities</th>
+          <th>state</th>
+          <th>lease</th>
+          <th>last heartbeat</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="eligible">
+          <td class="mono">x11-gpu-01</td>
+          <td class="mono dim">{"runtime":"x11","gpu":true,"ram_gb":32}</td>
+          <td><span class="pill free">free</span></td>
+          <td class="mono dim">—</td>
+          <td class="mono dim">3s ago</td>
+        </tr>
+        <tr>
+          <td class="mono">x11-gpu-02</td>
+          <td class="mono dim">{"runtime":"x11","gpu":true,"ram_gb":32}</td>
+          <td><span class="pill busy">busy</span></td>
+          <td class="mono dim">01HKQX2A…</td>
+          <td class="mono dim">just now</td>
+        </tr>
+        <tr>
+          <td class="mono">linux-04</td>
+          <td class="mono dim">{"runtime":"linux","ram_gb":16}</td>
+          <td><span class="pill busy">busy</span></td>
+          <td class="mono dim">01HKQX2B…</td>
+          <td class="mono dim">8s ago</td>
+        </tr>
+        <tr>
+          <td class="mono">linux-05</td>
+          <td class="mono dim">{"runtime":"linux","ram_gb":16}</td>
+          <td><span class="pill drain">drained</span></td>
+          <td class="mono dim">—</td>
+          <td class="mono dim">2d ago</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <!-- Active leases — uses info pill on workflow tag -->
+    <table>
+      <thead>
+        <tr>
+          <th>active lease</th>
+          <th>project</th>
+          <th>workflow</th>
+          <th>host</th>
+          <th>started</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="mono dim">01HKQX2A…</td>
+          <td>spirelens</td>
+          <td><span class="pill info">issue-agent</span></td>
+          <td class="mono">x11-gpu-02</td>
+          <td class="mono dim">5m ago</td>
+        </tr>
+        <tr>
+          <td class="mono dim">01HKQX2B…</td>
+          <td>ambience</td>
+          <td><span class="pill info">issue-agent</span></td>
+          <td class="mono">linux-04</td>
+          <td class="mono dim">10m ago</td>
+        </tr>
+      </tbody>
+    </table>
+
+  </div>
+
+  <!-- Token reference -->
+  <div class="tokens">
+    <div class="tok">
+      <div class="role">success</div>
+      <div class="swatch-row">
+        <div class="sq" style="background:#14532d"></div>
+        <div class="sq" style="background:#4ade80"></div>
+      </div>
+      <div><span class="hex label">bg</span><span class="hex">#14532d</span></div>
+      <div><span class="hex label">fg</span><span class="hex">#4ade80</span></div>
+    </div>
+    <div class="tok">
+      <div class="role">busy</div>
+      <div class="swatch-row">
+        <div class="sq" style="background:#3a2a04"></div>
+        <div class="sq" style="background:#facc15"></div>
+      </div>
+      <div><span class="hex label">bg</span><span class="hex">#3a2a04</span></div>
+      <div><span class="hex label">fg</span><span class="hex">#facc15</span></div>
+    </div>
+    <div class="tok">
+      <div class="role">danger</div>
+      <div class="swatch-row">
+        <div class="sq" style="background:#3f1c1c"></div>
+        <div class="sq" style="background:#f87171"></div>
+      </div>
+      <div><span class="hex label">bg</span><span class="hex">#3f1c1c</span></div>
+      <div><span class="hex label">fg</span><span class="hex">#f87171</span></div>
+    </div>
+    <div class="tok">
+      <div class="role">info</div>
+      <div class="swatch-row">
+        <div class="sq" style="background:#1e3a5f"></div>
+        <div class="sq" style="background:#60a5fa"></div>
+      </div>
+      <div><span class="hex label">bg</span><span class="hex">#1e3a5f</span></div>
+      <div><span class="hex label">fg</span><span class="hex">#60a5fa</span></div>
     </div>
   </div>
-  <div class="row" style="margin-top:12px">
-    <div class="swatch" style="background:#3f1c1c;color:#f87171">
-      <div><div class="name">drain / dead / abort</div><div class="hex">bg #3f1c1c · fg #f87171</div></div>
-      <div><span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#3f1c1c;color:#f87171;font-size:10px;font-weight:500">drained</span></div>
-    </div>
-    <div class="swatch" style="background:#1e3a5f;color:#60a5fa">
-      <div><div class="name">workflow accent</div><div class="hex">bg #1e3a5f · fg #60a5fa</div></div>
-      <div><span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#1e3a5f;color:#60a5fa;font-size:10px;font-weight:500">issue-agent</span></div>
-    </div>
-  </div>
+
 </div>
-</body></html>
+</body>
+</html>

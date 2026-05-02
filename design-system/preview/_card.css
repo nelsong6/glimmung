@@ -39,7 +39,7 @@ html, body {
   text-transform: uppercase;
 }
 .swatch .hex {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 11px;
   opacity: 0.85;
 }
@@ -51,5 +51,5 @@ html, body {
   font-weight: 600;
   margin-bottom: 8px;
 }
-.mono { font-family: var(--font-mono); }
+.mono { font-family: var(--font-sans); }
 @keyframes pulse-anim { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }

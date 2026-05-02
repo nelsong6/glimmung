@@ -1,5 +1,9 @@
-/* Glimmung dashboard UI kit styles — extends colors_and_type.css */
+/* Glimmung dashboard UI kit styles — extends colors_and_type.css + plate.css.
+   This file ONLY defines layout + console-plate components specific to the
+   dashboard surface. The .pill / .count-pill / type / color tokens come from
+   colors_and_type.css. The .plate primitive comes from plate.css. */
 @import url("../../colors_and_type.css");
+@import url("../../plate.css");
 
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--font-sans); }
@@ -28,21 +32,49 @@ body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--fo
 }
 .project-row { padding: 8px 20px; color: var(--fg-secondary); font-size: 0.9rem; }
 .workflow-row { padding: 6px 20px 6px 36px; color: var(--fg-dim); font-size: 0.85rem; }
-.workflow-row .name { font-family: var(--font-mono); }
+.workflow-row .name { font-family: var(--font-sans); }
 
 .project-row:hover, .workflow-row:hover { background: var(--surface); color: var(--fg-inverse); }
 .project-row.selected { background: var(--surface); color: var(--fg-inverse); border-left-color: var(--accent-primary); }
 .workflow-row.selected { background: var(--surface); color: var(--fg); border-left-color: var(--accent-workflow); }
 
-.count {
-  font-size: 0.75rem; color: var(--fg-dimmest);
+/* Sidebar count chip — same console-tag geometry as .count-pill, with
+   selection-state variants (success rail on selected projects, info rail
+   on selected workflows). Drawn inline so we don't need an extra class. */
+.project-row .count, .workflow-row .count {
+  position: relative;
+  display: inline-flex; align-items: center;
+  height: 16px; padding: 0 7px;
+  font-family: var(--font-sans);
+  font-size: 0.7rem;
   font-variant-numeric: tabular-nums;
-  background: var(--surface-hover); padding: 2px 8px;
-  border-radius: var(--radius-pill); font-family: var(--font-mono);
+  color: var(--fg-dimmer);
+  background: var(--surface-hover);
+  clip-path: polygon(5px 0, 100% 0, 100% 100%, 0 100%, 0 5px);
+  isolation: isolate;
 }
-.project-row.selected .count { background: var(--state-success-bg); color: var(--state-success-fg); }
-.workflow-row .count { font-size: 0.7rem; padding: 1px 6px; }
-.workflow-row.selected .count { background: var(--state-info-bg); color: var(--state-info-fg); }
+.project-row .count::before, .workflow-row .count::before {
+  content: ""; position: absolute; inset: 0;
+  background:
+    linear-gradient(to right, var(--rail, transparent) 0 2px, transparent 2px),
+    linear-gradient(to top,    var(--edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(to bottom, var(--edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(to left,   var(--edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(135deg, transparent 0 calc(7.07px - 1px), var(--edge, var(--border)) calc(7.07px - 1px) 7.07px, transparent 7.07px);
+  background-repeat: no-repeat; pointer-events: none;
+}
+.project-row.selected .count {
+  --rail: var(--state-success-fg);
+  --edge: color-mix(in srgb, var(--state-success-fg) 32%, var(--border));
+  background: color-mix(in srgb, var(--state-success-bg) 55%, transparent);
+  color: var(--state-success-fg);
+}
+.workflow-row.selected .count {
+  --rail: var(--state-info-fg);
+  --edge: color-mix(in srgb, var(--state-info-fg) 32%, var(--border));
+  background: color-mix(in srgb, var(--state-info-bg) 55%, transparent);
+  color: var(--state-info-fg);
+}
 .workflow-empty { padding: 4px 20px 8px 36px; color: var(--fg-faintest); font-size: 0.75rem; font-style: italic; }
 
 /* ─────────── Content ─────────── */
@@ -54,65 +86,50 @@ body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--fo
   margin-bottom: 0;
 }
 .header-left { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
-.header-title { display: flex; align-items: baseline; gap: 12px; }
+.header-title { display: flex; align-items: center; gap: 12px; }
 .header-right { flex-shrink: 0; padding-top: 4px; }
 
 h1.wordmark {
   margin: 0; font-size: 1.6rem; font-weight: 600;
   letter-spacing: -0.01em; color: var(--fg);
 }
-.connection {
-  display: inline-block; padding: 2px 8px; border-radius: 999px;
-  font-size: 0.75rem; font-weight: 500;
-}
-.connection.live  { background: var(--state-success-bg); color: var(--state-success-fg); }
-.connection.stale { background: var(--state-busy-bg); color: var(--state-busy-fg); }
-.connection.dead  { background: var(--state-danger-bg); color: var(--state-danger-fg); }
-
 .epigraph {
   font-style: italic; color: var(--fg-dimmest);
   font-size: 0.8rem; line-height: 1.4; max-width: 60ch;
 }
 
-/* ─────────── User chip (top-right cluster) ─────────── */
-.user-chip {
-  display: inline-flex; align-items: stretch; height: 28px;
-  background: var(--bg-deep);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  font-size: 0.8rem;
-  overflow: hidden;
-}
-.user-chip .chip-divider {
-  width: 1px; background: var(--border); flex-shrink: 0;
-}
-.user-chip .chip-btn {
-  background: transparent; border: none; cursor: pointer;
-  font-family: inherit; font-size: 0.8rem; color: var(--fg-muted);
-  padding: 0 12px; display: inline-flex; align-items: center;
-}
-.user-chip .chip-btn:hover { background: var(--surface); color: var(--fg); }
-.user-chip .chip-btn.active { background: var(--state-success-bg); color: var(--state-success-fg); }
-.user-chip .chip-btn.quiet { color: var(--fg-dimmer); }
-.user-chip .chip-btn.quiet:hover { color: var(--state-danger-fg); background: var(--surface); }
+/* The header connection chip is just a .pill — pulled from colors_and_type.css.
+   We mark it up as <span class="pill free">live</span> in JSX. */
 
-.user-chip .user-id {
+/* ─────────── User cluster (top-right) — console plates, not capsules ─────────── */
+.user-cluster {
   display: inline-flex; align-items: center; gap: 8px;
-  padding: 0 12px; color: var(--fg);
-  font-family: var(--font-mono); font-size: 0.78rem;
 }
-.user-chip .user-dot {
+.user-id {
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 28px; padding: 0 12px 0 11px;
+  background: var(--bg-deep);
+  color: var(--fg);
+  font-family: var(--font-sans); font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  position: relative;
+  clip-path: polygon(8px 0, 100% 0, 100% 100%, 0 100%, 0 8px);
+  isolation: isolate;
+}
+.user-id::before {
+  content: ""; position: absolute; inset: 0;
+  background:
+    linear-gradient(to right, var(--state-success-fg) 0 2px, transparent 2px),
+    linear-gradient(to top,    var(--border) 0 1px, transparent 1px),
+    linear-gradient(to bottom, var(--border) 0 1px, transparent 1px),
+    linear-gradient(to left,   var(--border) 0 1px, transparent 1px),
+    linear-gradient(135deg, transparent 0 calc(11.31px - 1px), var(--border) calc(11.31px - 1px) 11.31px, transparent 11.31px);
+  background-repeat: no-repeat; pointer-events: none;
+}
+.user-id .user-dot {
   display: inline-block; width: 6px; height: 6px; border-radius: 999px;
   background: var(--state-success-fg);
 }
-
-.chip-btn.solo {
-  display: inline-flex; align-items: center; height: 28px;
-  background: var(--state-success-bg); color: var(--state-success-fg);
-  border: none; border-radius: 999px; padding: 0 16px;
-  font-family: inherit; font-size: 0.85rem; font-weight: 500; cursor: pointer;
-}
-.chip-btn.solo:hover { background: #166534; }
 
 /* ─────────── Tabs ─────────── */
 .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin: 16px 0 0; }
@@ -150,15 +167,16 @@ h2 .inline-action {
 }
 h2 .inline-action:hover { text-decoration: underline; }
 
-/* ─────────── KPI strip ─────────── */
+/* ─────────── KPI strip — console readout ─────────── */
 .kpi-strip {
+  --plate-c: var(--chamfer-lg);
+  --plate-rail: var(--state-success-fg);
   display: flex; gap: 24px; padding: 12px 16px;
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: 4px; margin-bottom: 12px; font-size: 0.85rem;
+  margin-bottom: 12px; font-size: 0.85rem;
 }
 .kpi { display: flex; flex-direction: column; gap: 2px; }
 .kpi .k { color: var(--fg-dim); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; }
-.kpi .v { color: var(--fg); font-family: var(--font-mono); font-size: 1rem; font-variant-numeric: tabular-nums; }
+.kpi .v { color: var(--fg); font-family: var(--font-sans); font-size: 1.05rem; font-weight: 600; font-variant-numeric: tabular-nums; }
 .kpi .v.green { color: var(--state-success-fg); }
 .kpi .v.amber { color: var(--state-busy-fg); }
 .kpi .v.red   { color: var(--state-danger-fg); }
@@ -170,19 +188,15 @@ table {
 }
 th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); }
 th { font-weight: 500; font-size: 0.85rem; color: var(--fg-dim); letter-spacing: 0.04em; text-transform: uppercase; }
-td.mono { font-family: var(--font-mono); font-size: 0.85rem; color: var(--fg-secondary); }
+td.mono { font-family: var(--font-sans); font-size: 0.85rem; color: var(--fg-secondary); font-variant-numeric: tabular-nums; }
 td.dim { color: var(--fg-dimmer); }
 tr.eligible td:first-child { border-left: 2px solid var(--state-success-fg); }
 tr.eligible td.mono:first-child { color: var(--fg); }
 tr.clickable { cursor: pointer; }
 tr.clickable:hover td { background: var(--surface); }
 
-/* ─────────── Pills ─────────── */
-.pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.75rem; font-weight: 500; }
-.pill.free  { background: var(--state-success-bg); color: var(--state-success-fg); }
-.pill.busy  { background: var(--state-busy-bg);    color: var(--state-busy-fg); }
-.pill.drain { background: var(--state-danger-bg);  color: var(--state-danger-fg); }
-.pill.info  { background: var(--state-info-bg);    color: var(--state-info-fg); }
+/* NOTE: .pill / .count-pill come from colors_and_type.css with full
+   console-tag geometry (chamfer + leading rail). Don't redefine them here. */
 
 /* ─────────── Empty ─────────── */
 .empty {
@@ -191,26 +205,88 @@ tr.clickable:hover td { background: var(--surface); }
   margin-bottom: 8px;
 }
 
-/* ─────────── Buttons / links ─────────── */
-.btn {
-  background: var(--state-success-bg); color: var(--state-success-fg);
-  border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;
-  font-family: inherit; font-size: 0.9rem; font-weight: 500;
+/* ─────────── Buttons — console plate (.gb) ─────────── */
+.gb {
+  position: relative;
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 30px; padding: 0 14px 0 13px;
+  background: var(--surface);
+  color: var(--fg);
+  border: none;
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
+  cursor: pointer;
+  user-select: none;
+  clip-path: polygon(8px 0, 100% 0, 100% 100%, 0 100%, 0 8px);
+  isolation: isolate;
 }
-.btn:hover:not(:disabled) { background: #166534; }
-.btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn.ghost {
-  background: transparent; border: 1px solid var(--border);
-  color: var(--fg); padding: 4px 12px; font-size: 0.85rem;
+.gb::before {
+  content: ""; position: absolute; inset: 0;
+  background:
+    linear-gradient(to right, var(--gb-rail, transparent) 0 2px, transparent 2px),
+    linear-gradient(to top,    var(--gb-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(to bottom, var(--gb-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(to left,   var(--gb-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(135deg, transparent 0 calc(11.31px - 1px), var(--gb-edge, var(--border)) calc(11.31px - 1px) 11.31px, transparent 11.31px);
+  background-repeat: no-repeat; background-size: 100% 100%;
+  pointer-events: none; z-index: 1;
 }
-.btn.ghost:hover { background: var(--surface); border-color: var(--border-strong); }
-.link {
-  background: transparent; border: none; color: var(--state-success-fg);
-  font-family: inherit; font-size: inherit; cursor: pointer; padding: 0;
+.gb .sigil { font-family: var(--font-sans); color: var(--gb-sigil, var(--fg-dimmer)); font-size: 0.9rem; line-height: 1; }
+.gb .label { line-height: 1; }
+.gb:hover { background: var(--gb-hover, var(--surface-hover)); }
+.gb:focus-visible { outline: none; }
+.gb:focus-visible::before { --gb-edge: var(--state-success-fg); }
+.gb:disabled { opacity: 0.35; cursor: not-allowed; }
+
+.gb.primary {
+  --gb-rail: var(--state-success-fg);
+  --gb-edge: color-mix(in srgb, var(--state-success-fg) 32%, var(--border));
+  --gb-sigil: var(--state-success-fg);
+  color: var(--fg-inverse);
 }
-.link:hover { text-decoration: underline; }
-.link.danger { color: var(--state-danger-fg); }
-.link:disabled { opacity: 0.5; cursor: not-allowed; text-decoration: none; }
+.gb.primary:hover { --gb-edge: color-mix(in srgb, var(--state-success-fg) 55%, var(--border)); --gb-hover: #131a14; }
+
+.gb.danger {
+  --gb-rail: var(--state-danger-fg);
+  --gb-edge: color-mix(in srgb, var(--state-danger-fg) 32%, var(--border));
+  --gb-sigil: var(--state-danger-fg);
+  color: var(--fg-inverse);
+}
+.gb.danger:hover { --gb-edge: color-mix(in srgb, var(--state-danger-fg) 55%, var(--border)); --gb-hover: #1a1212; }
+
+.gb.quiet { background: transparent; color: var(--fg-muted); }
+.gb.quiet:hover { background: var(--surface); color: var(--fg-inverse); }
+
+.gb.sm { height: 24px; padding: 0 10px 0 9px; font-size: 0.72rem; clip-path: polygon(6px 0, 100% 0, 100% 100%, 0 100%, 0 6px); }
+.gb.sm::before { background:
+    linear-gradient(to right, var(--gb-rail, transparent) 0 2px, transparent 2px),
+    linear-gradient(to top,    var(--gb-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(to bottom, var(--gb-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(to left,   var(--gb-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(135deg, transparent 0 calc(8.49px - 1px), var(--gb-edge, var(--border)) calc(8.49px - 1px) 8.49px, transparent 8.49px);
+  background-repeat: no-repeat; }
+
+/* Ghost — plain text link, no plate geometry. Used for inline table actions
+   ("dispatch", "cancel", and the cancel-confirm pair). */
+.gb.ghost {
+  clip-path: none; height: auto; padding: 0;
+  background: transparent;
+  color: var(--state-success-fg);
+  letter-spacing: 0;
+  text-transform: none;
+}
+.gb.ghost::before { display: none; }
+.gb.ghost:hover { background: transparent; color: #86efac; text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
+.gb.ghost.danger-text { color: var(--state-danger-fg); }
+.gb.ghost.danger-text:hover { color: #fca5a5; }
+.gb.ghost:disabled { opacity: 0.5; cursor: not-allowed; text-decoration: none; }
+
+/* Two-step confirm group */
+.confirm { display: inline-flex; align-items: center; gap: 8px; }
+.confirm .sep { color: var(--fg-faintest); font-family: var(--font-sans); font-size: 0.85rem; }
 
 /* ─────────── Inputs ─────────── */
 .field { display: flex; align-items: center; gap: 12px; font-size: 0.9rem; }
@@ -220,14 +296,18 @@ tr.clickable:hover td { background: var(--surface); }
   color: var(--fg); padding: 6px 10px; border-radius: 4px;
   font-family: inherit; font-size: 0.9rem;
 }
-.field input.mono { font-family: var(--font-mono); font-size: 0.85rem; }
-.field input:focus, .field select:focus { outline: none; border-color: var(--state-success-fg); }
+.field input.mono { font-family: var(--font-sans); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+.field input[type="text"]:focus,
+.field input:not([type="checkbox"]):focus,
+.field select:focus {
+  outline: none;
+  border-color: var(--border);
+  border-left: 2px solid var(--state-success-fg);
+  padding-left: 9px;
+}
 
 /* ─────────── Admin panel ─────────── */
-.admin-panel {
-  border: 1px solid var(--border); border-radius: 4px;
-  background: var(--surface); margin: 20px 0; overflow: hidden;
-}
+.admin-panel { --plate-c: var(--chamfer-md); margin: 20px 0; }
 .admin-tabs { display: flex; border-bottom: 1px solid var(--border); }
 .admin-tabs .tab { flex: 1; border-bottom: 2px solid transparent; }
 .admin-tabs .tab.selected { color: var(--state-success-fg); border-bottom-color: var(--state-success-fg); }
@@ -235,20 +315,18 @@ tr.clickable:hover td { background: var(--surface); }
 
 /* ─────────── Project info ─────────── */
 .project-info {
+  --plate-c: var(--chamfer-md);
   display: grid; grid-template-columns: max-content 1fr;
-  gap: 8px 20px; padding: 16px;
-  border: 1px solid var(--border); border-radius: 4px;
-  background: var(--surface); font-size: 0.9rem;
+  gap: 8px 20px; padding: 16px; font-size: 0.9rem;
 }
 .project-info .key {
   color: var(--fg-dim); font-size: 0.75rem;
   text-transform: uppercase; letter-spacing: 0.04em;
 }
-.project-info .val.mono { font-family: var(--font-mono); color: var(--fg); }
+.project-info .val.mono { font-family: var(--font-sans); color: var(--fg); font-variant-numeric: tabular-nums; }
 
 .live-dot {
   display: inline-block; width: 8px; height: 8px; border-radius: 999px;
   background: var(--state-busy-fg); margin-left: 8px; vertical-align: middle;
   animation: pulse 1.6s ease-in-out infinite;
 }
-@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }

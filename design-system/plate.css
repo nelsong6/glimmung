@@ -1,0 +1,37 @@
+/* Glimmung console-plate primitives.
+   The chamfered top-left corner + leading-edge accent rail are the
+   structural signature of the system. Apply to "active machinery":
+   buttons, focused inputs, panels conveying live state, KPI strips.
+   ─────────────────────────────────────────────────────────────── */
+
+/* Chamfer sizes (top-left only) */
+:root {
+  --chamfer-sm: 8px;   /* small buttons, inputs */
+  --chamfer-md: 10px;  /* buttons, panels */
+  --chamfer-lg: 14px;  /* large panels, KPI strips */
+}
+
+/* A panel/input/button that wants the chamfer + drawn outline.
+   Caller sets --plate-edge (default --border) and optional --plate-rail. */
+.plate {
+  position: relative;
+  background: var(--plate-bg, var(--surface));
+  border: none;
+  isolation: isolate;
+  clip-path: polygon(var(--plate-c, 10px) 0, 100% 0, 100% 100%, 0 100%, 0 var(--plate-c, 10px));
+}
+.plate::before {
+  content: ""; position: absolute; inset: 0;
+  background:
+    linear-gradient(to right, var(--plate-rail, transparent) 0 2px, transparent 2px),
+    linear-gradient(to top,    var(--plate-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(to bottom, var(--plate-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(to left,   var(--plate-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(135deg,
+      transparent 0 calc(var(--plate-c, 10px) * 1.414 - 1px),
+      var(--plate-edge, var(--border)) calc(var(--plate-c, 10px) * 1.414 - 1px) calc(var(--plate-c, 10px) * 1.414),
+      transparent calc(var(--plate-c, 10px) * 1.414));
+  background-repeat: no-repeat;
+  pointer-events: none; z-index: 0;
+}
+.plate > * { position: relative; z-index: 1; }

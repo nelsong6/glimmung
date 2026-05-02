@@ -4,7 +4,7 @@ const { useState: useStateAP } = React;
 function AdminPanel({ projects, onClose }) {
   const [tab, setTab] = useStateAP("project");
   return (
-    <div className="admin-panel">
+    <div className="plate admin-panel">
       <div className="admin-tabs tabs" style={{ margin: 0 }}>
         {["project", "workflow", "host"].map(t => (
           <button key={t} className={`tab ${tab === t ? "selected" : ""}`} onClick={() => setTab(t)}>register {t}</button>

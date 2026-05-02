@@ -1,21 +1,35 @@
 /* global React */
 const { useState } = React;
 
+/* Console-tag pill — geometry comes from colors_and_type.css .pill */
 function Pill({ kind = "free", children }) {
   return <span className={`pill ${kind}`}>{children}</span>;
 }
 
+/* Neutral count chip — geometry comes from colors_and_type.css .count-pill */
 function CountPill({ children }) {
-  return <span className="count">{children}</span>;
+  return <span className="count-pill">{children}</span>;
 }
 
 function LiveDot() { return <span className="live-dot" />; }
 
 function Empty({ children }) { return <div className="empty">{children}</div>; }
 
-function Button({ kind = "primary", children, ...rest }) {
-  const cls = kind === "ghost" ? "btn ghost" : kind === "link" ? "link" : kind === "danger" ? "link danger" : "btn";
-  return <button className={cls} {...rest}>{children}</button>;
+/* Button — console plate (.gb). Kinds:
+   primary  — green leading rail, affirmative action
+   default  — neutral plate
+   danger   — red leading rail
+   quiet    — transparent plate, used for inline actions in chrome
+   ghost    — strips the plate; plain text link (for table-cell actions)
+*/
+function Button({ kind = "primary", sigil, children, ...rest }) {
+  const cls = ["gb", kind].filter(Boolean).join(" ");
+  return (
+    <button className={cls} {...rest}>
+      {sigil ? <span className="sigil">{sigil}</span> : null}
+      <span className="label">{children}</span>
+    </button>
+  );
 }
 
 function EyebrowKey({ children }) {

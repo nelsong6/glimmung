@@ -1,26 +1,174 @@
-<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="_card.css"></head><body>
-<div class="card">
-  <div class="lbl">Surfaces — neutral ramp</div>
-  <div class="row">
-    <div class="swatch" style="background:#050507;color:#d4d4d4">
-      <div><div class="name">bg-deepest</div><div class="hex">#050507</div></div>
-      <div style="font-size:10px;opacity:.6">attempt-card body</div>
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="_card.css">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  .intro {
+    font-size: 11.5px; color: var(--fg-muted); line-height: 1.5;
+    max-width: 60ch; margin-bottom: 18px;
+  }
+  .intro code { font-family: var(--font-sans); color: var(--fg); font-size: 10.5px; }
+
+  /* No borders. The whole point is that VALUE alone separates the layers. */
+  .stage {
+    display: grid;
+    grid-template-columns: 1fr 110px;
+    gap: 16px; margin-bottom: 22px;
+  }
+  .nest { padding: 0; }
+
+  /* Nested bands — generous padding so each color reads as a slab,
+     never a hairline border. No outlines. Labels live on a left rail
+     so they don't cut into the value. */
+  .band {
+    padding: 22px 22px 22px 110px;
+    position: relative;
+    font-family: var(--font-sans); font-size: 10.5px;
+  }
+  .band > .lab {
+    position: absolute; left: 16px; top: 50%; transform: translateY(-50%);
+    font-family: var(--font-sans); font-size: 10px;
+    letter-spacing: 0.04em; color: var(--fg-muted);
+    line-height: 1.45; white-space: nowrap;
+  }
+  .band > .lab .hx { display: block; color: var(--fg-dimmer); font-size: 9.5px; margin-top: 2px; }
+  .b1 { background: #1a1a1f; }
+  .b2 { background: #15151a; }
+  .b3 { background: #0e0e10; }
+  .b4 { background: #0a0a0c; }
+  .b5 { background: #050507; padding-bottom: 28px; }
+  .b5 .att-head { color: var(--fg-secondary); font-size: 11px; }
+  .b5 .att-head .dot {
+    display: inline-block; width: 6px; height: 6px; border-radius: 999px;
+    background: var(--state-busy-fg); margin-right: 8px; vertical-align: middle;
+    animation: pulse-anim 1.6s ease-in-out infinite;
+  }
+  .b5 .att-meta { color: var(--fg-dimmer); font-size: 10px; margin-top: 6px; }
+
+  /* Side gradient strip — same range as one continuous slope, no breaks.
+     Wider this time so the slope is visible. */
+  .gradient {
+    position: relative;
+    background: linear-gradient(to bottom, #050507 0%, #0a0a0c 25%, #0e0e10 50%, #15151a 75%, #1a1a1f 100%);
+  }
+  .tick {
+    position: absolute; left: 0; right: 0; height: 1px;
+    background: color-mix(in srgb, var(--fg-faintest) 70%, transparent);
+  }
+  .tick .v {
+    position: absolute; right: 6px; top: -7px;
+    font-family: var(--font-sans); font-size: 9px;
+    color: var(--fg-dimmer);
+    background: color-mix(in srgb, #000 75%, transparent);
+    padding: 1px 4px;
+  }
+
+  /* Side-by-side flat compare — five edge-to-edge slabs with NO borders
+     between them, so the value steps are the only separator. This is
+     where the differences actually pop. */
+  .flat {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    height: 96px;
+  }
+  .slab {
+    display: flex; flex-direction: column; justify-content: flex-end;
+    padding: 12px;
+    font-family: var(--font-sans); font-size: 10px;
+  }
+  .slab .nm { color: var(--fg); font-size: 10.5px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; font-family: var(--font-sans); }
+  .slab .hx { color: var(--fg-muted); margin-top: 2px; }
+  .f1 { background: #050507; }
+  .f2 { background: #0a0a0c; }
+  .f3 { background: #0e0e10; }
+  .f4 { background: #15151a; }
+  .f5 { background: #1a1a1f; }
+
+  .role-row {
+    display: grid; grid-template-columns: repeat(5, 1fr);
+    margin-top: 0;
+  }
+  .role {
+    padding: 10px 12px;
+    font-size: 10px; color: var(--fg-dimmer); line-height: 1.4;
+    background: var(--bg);
+    border-right: 1px solid var(--border);
+  }
+  .role:last-child { border-right: none; }
+
+  .delta-bar { display: grid; grid-template-columns: repeat(4, 1fr); }
+  .delta {
+    padding: 8px 12px;
+    font-family: var(--font-sans); font-size: 10px;
+    color: var(--fg-dimmer); text-align: center;
+    background: var(--bg-deep);
+    border-right: 1px solid var(--border);
+  }
+  .delta:last-child { border-right: none; }
+  .delta b { color: var(--state-success-fg); font-weight: 400; }
+
+  .section-lbl {
+    font-size: 10px; font-weight: 600; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--fg-dim);
+    margin: 18px 0 8px;
+  }
+</style>
+</head><body>
+<div class="card" style="width:760px">
+  <div class="lbl">Surfaces — depth by adjacency</div>
+  <div class="intro">
+    The five surface tokens are a <span style="color:var(--fg)">depth scale</span>, not a palette. The eye reads the steps only when surfaces sit <span style="color:var(--fg)">edge-to-edge with no borders between them</span>. The flat strip below is the truest read; the nest shows the same colors in their structural role.
+  </div>
+
+  <div class="section-lbl">Edge-to-edge — no borders, no gaps</div>
+  <div class="flat">
+    <div class="slab f1"><div class="nm">bg-deepest</div><div class="hx">#050507</div></div>
+    <div class="slab f2"><div class="nm">bg-deep</div><div class="hx">#0a0a0c</div></div>
+    <div class="slab f3"><div class="nm">bg</div><div class="hx">#0e0e10</div></div>
+    <div class="slab f4"><div class="nm">surface</div><div class="hx">#15151a</div></div>
+    <div class="slab f5"><div class="nm">surface-hover</div><div class="hx">#1a1a1f</div></div>
+  </div>
+  <div class="delta-bar">
+    <div class="delta">Δ <b>+5</b></div>
+    <div class="delta">Δ <b>+4</b></div>
+    <div class="delta">Δ <b>+7</b></div>
+    <div class="delta">Δ <b>+5</b></div>
+  </div>
+  <div class="role-row">
+    <div class="role">attempt-card body</div>
+    <div class="role">sidebar · run-panel</div>
+    <div class="role">page canvas</div>
+    <div class="role">panels · selected row</div>
+    <div class="role">tab hover · count-pill</div>
+  </div>
+
+  <div class="section-lbl">In role — nested, no borders, label on left rail</div>
+  <div class="stage">
+    <div class="nest">
+      <div class="band b1">
+        <span class="lab">surface-hover<span class="hx">#1a1a1f</span></span>
+        <div class="band b2">
+          <span class="lab">surface<span class="hx">#15151a</span></span>
+          <div class="band b3">
+            <span class="lab">bg<span class="hx">#0e0e10</span></span>
+            <div class="band b4">
+              <span class="lab">bg-deep<span class="hx">#0a0a0c</span></span>
+              <div class="band b5">
+                <span class="lab">bg-deepest<span class="hx">#050507</span></span>
+                <div class="att-head"><span class="dot"></span>attempt 02 · in_progress</div>
+                <div class="att-meta">4m elapsed · host x11-gpu-03</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
-    <div class="swatch" style="background:#0a0a0c;color:#d4d4d4">
-      <div><div class="name">bg-deep</div><div class="hex">#0a0a0c</div></div>
-      <div style="font-size:10px;opacity:.6">sidebar, run-panel</div>
-    </div>
-    <div class="swatch" style="background:#0e0e10;color:#d4d4d4">
-      <div><div class="name">bg</div><div class="hex">#0e0e10</div></div>
-      <div style="font-size:10px;opacity:.6">page</div>
-    </div>
-    <div class="swatch" style="background:#15151a;color:#d4d4d4">
-      <div><div class="name">surface</div><div class="hex">#15151a</div></div>
-      <div style="font-size:10px;opacity:.6">panels, hover</div>
-    </div>
-    <div class="swatch" style="background:#1a1a1f;color:#d4d4d4">
-      <div><div class="name">surface-hover</div><div class="hex">#1a1a1f</div></div>
-      <div style="font-size:10px;opacity:.6">tab hover</div>
+
+    <div class="gradient">
+      <div class="tick" style="bottom: 0%"><span class="v">#1a1a1f</span></div>
+      <div class="tick" style="bottom: 25%"><span class="v">#15151a</span></div>
+      <div class="tick" style="bottom: 50%"><span class="v">#0e0e10</span></div>
+      <div class="tick" style="bottom: 75%"><span class="v">#0a0a0c</span></div>
+      <div class="tick" style="bottom: 100%"><span class="v">#050507</span></div>
     </div>
   </div>
 </div>

@@ -69,28 +69,30 @@ function Dashboard() {
           </div>
           <div className="header-right">
             {signedIn ? (
-              <div className="user-chip">
+              <div className="user-cluster">
                 <button
-                  className={`chip-btn ${showAdmin ? "active" : ""}`}
+                  className={`gb sm ${showAdmin ? "primary" : "quiet"}`}
                   onClick={() => setShowAdmin(s => !s)}
-                  title={showAdmin ? "hide admin" : "admin"}
                   aria-label="admin"
-                >admin</button>
-                <span className="chip-divider" />
+                >
+                  <span className="sigil">∷</span><span className="label">admin</span>
+                </button>
                 <span className="user-id">
                   <span className="user-dot" />
                   <span className="user-handle">nelson</span>
                 </span>
-                <span className="chip-divider" />
                 <button
-                  className="chip-btn quiet"
+                  className="gb sm quiet"
                   onClick={() => { setSignedIn(false); setShowAdmin(false); }}
-                  title="sign out"
                   aria-label="sign out"
-                >sign out</button>
+                >
+                  <span className="label">sign out</span>
+                </button>
               </div>
             ) : (
-              <button className="chip-btn solo" onClick={() => setSignedIn(true)}>sign in</button>
+              <button className="gb sm primary" onClick={() => setSignedIn(true)}>
+                <span className="sigil">›</span><span className="label">sign in</span>
+              </button>
             )}
           </div>
         </header>

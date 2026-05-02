@@ -1,27 +1,256 @@
-<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="_card.css"></head><body>
-<div class="card">
-  <div class="lbl">Borders & lines</div>
-  <div class="row">
-    <div class="swatch" style="background:#0e0e10;border:1px solid #2a2a2e">
-      <div><div class="name" style="color:#d4d4d4">border</div><div class="hex" style="color:#888">#2a2a2e</div></div>
-      <div style="font-size:10px;color:#666">default 1px</div>
-    </div>
-    <div class="swatch" style="background:#0e0e10;border:1px solid #3a3a3e">
-      <div><div class="name" style="color:#d4d4d4">border-strong</div><div class="hex" style="color:#888">#3a3a3e</div></div>
-      <div style="font-size:10px;color:#666">hover state</div>
-    </div>
-    <div class="swatch" style="background:#0e0e10;border:1px solid #5a3a14">
-      <div><div class="name" style="color:#d4d4d4">border-running</div><div class="hex" style="color:#888">#5a3a14</div></div>
-      <div style="font-size:10px;color:#666">attempt running</div>
-    </div>
-    <div class="swatch" style="background:#0e0e10;border:1px dashed #2a2a2e">
-      <div><div class="name" style="color:#d4d4d4">border-dashed</div><div class="hex" style="color:#888">#2a2a2e</div></div>
-      <div style="font-size:10px;color:#666">empty states</div>
+<!doctype html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="_card.css">
+<link rel="stylesheet" href="../colors_and_type.css">
+<link rel="stylesheet" href="../plate.css">
+<style>
+  .intro {
+    font-size: 11.5px; color: var(--fg-muted); line-height: 1.5;
+    max-width: 60ch; margin-bottom: 18px;
+  }
+  .intro code { font-family: var(--font-sans); color: var(--fg); font-size: 10.5px; }
+
+  /* The anatomy block — a single oversized .gb button with callouts pointing
+     at each border component, so the four "border" tokens read as parts of
+     one signature instead of unrelated chips. */
+  .anatomy {
+    position: relative;
+    background: var(--bg-deep);
+    border: 1px solid var(--border);
+    padding: 56px 40px 64px;
+    margin-bottom: 24px;
+  }
+  .anatomy-stage {
+    position: relative;
+    width: 280px;
+    margin: 0 auto;
+  }
+
+  /* The hero button — same .gb geometry, scaled up so the parts are visible. */
+  .hero {
+    position: relative;
+    display: flex; align-items: center; gap: 14px;
+    height: 64px; padding: 0 28px 0 24px;
+    background: var(--surface);
+    color: var(--fg-inverse);
+    font-family: var(--font-sans);
+    font-size: 16px; letter-spacing: 0.06em; text-transform: lowercase;
+    clip-path: polygon(20px 0, 100% 0, 100% 100%, 0 100%, 0 20px);
+    isolation: isolate;
+  }
+  .hero::before {
+    content: ""; position: absolute; inset: 0;
+    background:
+      linear-gradient(to right, var(--state-success-fg) 0 3px, transparent 3px),
+      linear-gradient(to top,    var(--border) 0 1px, transparent 1px),
+      linear-gradient(to bottom, var(--border) 0 1px, transparent 1px),
+      linear-gradient(to left,   var(--border) 0 1px, transparent 1px),
+      linear-gradient(135deg, transparent 0 calc(28.28px - 1px), var(--border) calc(28.28px - 1px) 28.28px, transparent 28.28px);
+    background-repeat: no-repeat;
+    pointer-events: none;
+  }
+  .hero .sigil { color: var(--state-success-fg); font-size: 18px; }
+
+  /* Callout lines + labels */
+  .callout {
+    position: absolute;
+    font-family: var(--font-sans);
+    font-size: 10px; letter-spacing: 0.04em;
+    color: var(--fg-dim);
+    line-height: 1.4;
+    white-space: nowrap;
+  }
+  .callout .tag { color: var(--fg); }
+  .callout .hex { color: var(--fg-dimmer); }
+  .callout::before {
+    content: ""; position: absolute;
+    background: var(--fg-faintest);
+  }
+
+  /* Top — chamfer cut (135deg hairline) */
+  .c-chamfer { top: -34px; left: -50px; }
+  .c-chamfer::before { width: 50px; height: 1px; left: 56px; top: 50%; }
+  .c-chamfer::after {
+    content: ""; position: absolute;
+    width: 1px; height: 26px; left: 105px; top: 50%;
+    background: var(--fg-faintest);
+  }
+
+  /* Top — top hairline */
+  .c-top { top: -34px; right: 10px; text-align: right; }
+  .c-top::before { width: 1px; height: 26px; right: 30px; top: 100%; background: var(--fg-faintest); }
+
+  /* Left — leading rail */
+  .c-rail { top: 50%; left: -150px; transform: translateY(-50%); }
+  .c-rail::before { width: 130px; height: 1px; left: 100%; top: 50%; }
+
+  /* Bottom — bottom hairline */
+  .c-bottom { bottom: -34px; left: 60px; }
+  .c-bottom::before { width: 1px; height: 22px; left: 18px; bottom: 100%; background: var(--fg-faintest); }
+
+  /* Right — right hairline */
+  .c-right { top: 50%; right: -150px; transform: translateY(-50%); }
+  .c-right::before { width: 130px; height: 1px; right: 100%; top: 50%; }
+
+  /* Below the diagram: a token table that ties each part to its variable. */
+  .tokens { display: grid; grid-template-columns: 1fr 1fr; gap: 0; border: 1px solid var(--border); }
+  .trow {
+    display: grid; grid-template-columns: 22px 1fr 110px;
+    gap: 12px; align-items: center;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+  }
+  .trow:nth-child(2n) { border-right: none; }
+  .trow:nth-last-child(-n+2) { border-bottom: none; }
+  .swatch-mini {
+    width: 22px; height: 22px;
+    background: var(--bg-deep);
+    border: 1px solid var(--border);
+    position: relative;
+  }
+  .sw-default { border-color: #2a2a2e; }
+  .sw-strong  { border-color: #3a3a3e; }
+  .sw-running { border-color: #5a3a14; }
+  .sw-dashed  { border: 1px dashed #2a2a2e; }
+  .sw-rail-g  { border: none; background: linear-gradient(to right, #4ade80 0 2px, var(--bg-deep) 2px); }
+  .sw-rail-b  { border: none; background: linear-gradient(to right, #60a5fa 0 2px, var(--bg-deep) 2px); }
+  .sw-rail-r  { border: none; background: linear-gradient(to right, #f87171 0 2px, var(--bg-deep) 2px); }
+  .sw-cham    {
+    border: none; background: var(--bg-deep);
+    clip-path: polygon(7px 0, 100% 0, 100% 100%, 0 100%, 0 7px);
+    position: relative;
+  }
+  .sw-cham::before {
+    content: ""; position: absolute; inset: 0;
+    background:
+      linear-gradient(to top,    #2a2a2e 0 1px, transparent 1px),
+      linear-gradient(to bottom, #2a2a2e 0 1px, transparent 1px),
+      linear-gradient(to left,   #2a2a2e 0 1px, transparent 1px),
+      linear-gradient(to right,  #2a2a2e 0 1px, transparent 1px),
+      linear-gradient(135deg, transparent 0 9.9px, #2a2a2e 9.9px 10.9px, transparent 10.9px);
+    background-repeat: no-repeat;
+  }
+  .tinfo .tname {
+    font-size: 11px; font-weight: 600; letter-spacing: 0.03em;
+    text-transform: uppercase; color: var(--fg);
+    font-family: var(--font-sans);
+  }
+  .tinfo .trole {
+    font-size: 10.5px; color: var(--fg-dimmer); margin-top: 2px;
+    line-height: 1.4;
+  }
+  .tinfo .tvar { font-family: var(--font-sans); font-size: 10px; color: var(--fg-dim); }
+  .thex { font-family: var(--font-sans); font-size: 10px; color: var(--fg-dimmer); text-align: right; }
+
+  .section-lbl {
+    font-size: 10px; font-weight: 600; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--fg-dim);
+    margin: 0 0 8px;
+  }
+</style>
+</head><body>
+<div class="card" style="width:760px">
+  <div class="lbl">Borders — one signature, four parts</div>
+  <div class="intro">
+    Glimmung has <span style="color:var(--fg)">one</span> border vocabulary. Every active surface — buttons (<code>.gb</code>), pills (<code>.pill</code>), panels (<code>.plate</code>) — is built from the same four parts: a <span style="color:var(--fg)">chamfered top-left</span>, a <span style="color:var(--state-success-fg)">2px leading rail</span> in a state color, a <span style="color:var(--fg)">1px hairline</span> tracing the rest of the edge, and (where it applies) a <span style="color:var(--state-busy-fg)">tinted variant</span> of the hairline to signal a running state.
+  </div>
+
+  <div class="anatomy">
+    <div class="anatomy-stage">
+      <button class="hero" disabled>
+        <span class="sigil">›</span><span>dispatch</span>
+      </button>
+
+      <div class="callout c-chamfer">
+        <div class="tag">chamfer · 14.14px ⌐</div>
+        <div class="hex">clip-path + 135° hairline</div>
+      </div>
+      <div class="callout c-top">
+        <div class="tag">hairline · 1px</div>
+        <div class="hex">#2a2a2e · --border</div>
+      </div>
+      <div class="callout c-rail">
+        <div class="tag" style="color:var(--state-success-fg)">leading rail · 2px ◀</div>
+        <div class="hex">--state-success-fg</div>
+        <div class="hex">(swap for danger / info)</div>
+      </div>
+      <div class="callout c-bottom">
+        <div class="tag">hairline · 1px</div>
+        <div class="hex">drawn via ::before</div>
+      </div>
+      <div class="callout c-right">
+        <div class="tag">hairline · 1px ▶</div>
+        <div class="hex">clip-path eats real borders</div>
+      </div>
     </div>
   </div>
-  <div style="margin-top:14px;display:flex;gap:14px;align-items:center">
-    <div style="background:#15151a;padding:10px 16px;border-left:2px solid #4ade80;color:#e8e8e8;font-size:12px">selected — green stripe</div>
-    <div style="background:#15151a;padding:10px 16px;border-left:2px solid #60a5fa;color:#d4d4d4;font-size:12px">workflow — blue stripe</div>
+
+  <div class="section-lbl">Tokens that build the signature</div>
+  <div class="tokens">
+    <div class="trow">
+      <div class="swatch-mini sw-default"></div>
+      <div class="tinfo">
+        <div class="tname">border</div>
+        <div class="trole">the hairline itself · panels, table rows, inputs</div>
+      </div>
+      <div class="thex">#2a2a2e<br><span class="tvar">--border</span></div>
+    </div>
+    <div class="trow">
+      <div class="swatch-mini sw-strong"></div>
+      <div class="tinfo">
+        <div class="tname">border-strong</div>
+        <div class="trole">hairline on hover · one value step up</div>
+      </div>
+      <div class="thex">#3a3a3e<br><span class="tvar">--border-strong</span></div>
+    </div>
+    <div class="trow">
+      <div class="swatch-mini sw-cham"></div>
+      <div class="tinfo">
+        <div class="tname">chamfer hairline</div>
+        <div class="trole">same color as <code class="tvar">--border</code>, traced over the 135° cut by the ::before gradient</div>
+      </div>
+      <div class="thex">drawn<br><span class="tvar">::before</span></div>
+    </div>
+    <div class="trow">
+      <div class="swatch-mini sw-dashed"></div>
+      <div class="tinfo">
+        <div class="tname">border (dashed)</div>
+        <div class="trole">the only dashed border · empty states</div>
+      </div>
+      <div class="thex">#2a2a2e<br><span class="tvar">1px dashed</span></div>
+    </div>
+    <div class="trow">
+      <div class="swatch-mini sw-rail-g"></div>
+      <div class="tinfo">
+        <div class="tname">leading rail · success</div>
+        <div class="trole">selection · primary action · live</div>
+      </div>
+      <div class="thex">#4ade80<br><span class="tvar">--accent-primary</span></div>
+    </div>
+    <div class="trow">
+      <div class="swatch-mini sw-rail-b"></div>
+      <div class="tinfo">
+        <div class="tname">leading rail · info</div>
+        <div class="trole">workflow selection · informational</div>
+      </div>
+      <div class="thex">#60a5fa<br><span class="tvar">--accent-workflow</span></div>
+    </div>
+    <div class="trow">
+      <div class="swatch-mini sw-rail-r"></div>
+      <div class="tinfo">
+        <div class="tname">leading rail · danger</div>
+        <div class="trole">destructive confirm · drained host</div>
+      </div>
+      <div class="thex">#f87171<br><span class="tvar">--state-danger-fg</span></div>
+    </div>
+    <div class="trow">
+      <div class="swatch-mini sw-running"></div>
+      <div class="tinfo">
+        <div class="tname">border-running</div>
+        <div class="trole">hairline tinted amber on a live attempt-card · the only state-colored hairline</div>
+      </div>
+      <div class="thex">#5a3a14<br><span class="tvar">--border-running</span></div>
+    </div>
   </div>
 </div>
 </body></html>
