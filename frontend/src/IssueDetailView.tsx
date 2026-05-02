@@ -7,8 +7,13 @@
  * per Run (left-to-right by created_at), PhaseAttempts stacked vertically
  * inside each Run column, PR at the column footer, and Signals attached
  * as side-events to their targets.
+ *
+ * Routed via `/issues/<owner>/<repo>/<n>` (GH-anchored) or
+ * `/issues/<project>/<issueId>` (native). Target is derived from the
+ * URL params so deep-link reloads land directly here.
  */
 import { useEffect, useMemo, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
 import { authedFetch } from "./auth";
 
 type IssueDetail = {
@@ -63,13 +68,34 @@ type Layout = {
   height: number;
 };
 
-export function IssueDetailView({
-  target,
-  onBack,
-}: {
-  target: IssueDetailTarget;
-  onBack: () => void;
-}) {
+type IssueDetailRouteParams = {
+  owner?: string;
+  repo?: string;
+  n?: string;
+  project?: string;
+  issueId?: string;
+};
+
+export function IssueDetailView() {
+  const navigate = useNavigate();
+  const params = useParams<IssueDetailRouteParams>();
+
+  // Two route shapes land here. GH-anchored has 3 segments after /issues
+  // (`:owner/:repo/:n`); native has 2 (`:project/:issueId`). React-router
+  // only fills params for the matched route, so `params.n` being set
+  // disambiguates.
+  const target: IssueDetailTarget = params.n
+    ? {
+        kind: "gh",
+        repo: `${params.owner ?? ""}/${params.repo ?? ""}`,
+        issue_number: parseInt(params.n, 10),
+      }
+    : {
+        kind: "native",
+        project: params.project ?? "",
+        issue_id: params.issueId ?? "",
+      };
+
   const [detail, setDetail] = useState<IssueDetail | null>(null);
   const [graph, setGraph] = useState<IssueGraph | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -91,6 +117,8 @@ export function IssueDetailView({
     target.kind === "gh"
       ? `${target.repo}#${target.issue_number}`
       : `${target.project} (native)`;
+
+  const onBack = () => navigate("/issues");
 
   useEffect(() => {
     let cancelled = false;

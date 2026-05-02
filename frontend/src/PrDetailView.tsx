@@ -7,8 +7,12 @@
  * signal; the drain loop processes it through the triage decision
  * engine and (if budget allows) dispatches the triage workflow with
  * the feedback as context.
+ *
+ * Routed via `/prs/<owner>/<repo>/<n>`. Repo + PR number are derived
+ * from URL params so deep-link reloads land directly here.
  */
 import { useEffect, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
 import { authedFetch } from "./auth";
 
 type PrDetail = {
@@ -55,19 +59,24 @@ type RejectStatus =
   | { kind: "submitted"; signalId: string }
   | { kind: "error"; message: string };
 
-export function PrDetailView({
-  repo,
-  prNumber,
-  onBack,
-}: {
-  repo: string;
-  prNumber: number;
-  onBack: () => void;
-}) {
+type PrDetailRouteParams = {
+  owner?: string;
+  repo?: string;
+  n?: string;
+};
+
+export function PrDetailView() {
+  const navigate = useNavigate();
+  const params = useParams<PrDetailRouteParams>();
+  const repo = `${params.owner ?? ""}/${params.repo ?? ""}`;
+  const prNumber = parseInt(params.n ?? "0", 10);
+
   const [detail, setDetail] = useState<PrDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState("");
   const [reject, setReject] = useState<RejectStatus>({ kind: "idle" });
+
+  const onBack = () => navigate("/prs");
 
   const refresh = async () => {
     setError(null);
