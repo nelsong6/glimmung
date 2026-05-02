@@ -1,0 +1,346 @@
+name: Agent Run — env-prep
+
+run-name: "#${{ inputs.issue_number }} env-prep ${{ inputs.issue_title }} (${{ inputs.host }})"
+
+# Phase 1 of the multi-phase agent-run pipeline (glimmung#102).
+# Builds + deploys the per-issue validation env and verifies the
+# /_styleguide contract. Emits validation_url + release_name +
+# prod_namespace + image_tag as phase outputs; glimmung threads them
+# into agent-execute via workflow_dispatch.inputs (glimmung#101).
+#
+# Failures in this phase fast-fail the run before any Claude tokens
+# spend — that's the whole motivation for the split.
+
+on:
+  workflow_dispatch:
+    inputs:
+      lease_id:
+        description: Glimmung lease ID (ULID)
+        required: true
+        type: string
+      host:
+        description: Glimmung slot host (e.g. glimmung-slot-1)
+        required: true
+        type: string
+      issue_number:
+        description: Issue number to address
+        required: true
+        type: string
+      issue_title:
+        description: Issue title (informational)
+        required: false
+        type: string
+      issue_id:
+        description: Glimmung Issue id (ULID, optional).
+        required: false
+        type: string
+      gh_event:
+        description: Originating GitHub event (informational)
+        required: false
+        type: string
+      gh_action:
+        description: Originating GitHub action (informational)
+        required: false
+        type: string
+      run_id:
+        description: Glimmung Run ULID (used for branch=glimmung/<run_id>)
+        required: true
+        type: string
+      attempt_index:
+        description: 0-based attempt index for this phase.
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+  issues: write
+  pull-requests: write
+
+env:
+  GLIMMUNG_BASE: https://glimmung.romaine.life
+  GLIMMUNG_PROJECT: glimmung
+  PYTHONUNBUFFERED: "1"
+  PYTHONIOENCODING: "utf-8"
+
+jobs:
+  route:
+    name: Verify glimmung lease
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify glimmung lease
+        env:
+          LEASE_ID: ${{ inputs.lease_id }}
+          HOST: ${{ inputs.host }}
+        run: |
+          set -euo pipefail
+          resp=$(curl -fsS "${GLIMMUNG_BASE}/v1/lease/${LEASE_ID}?project=${GLIMMUNG_PROJECT}")
+          state=$(printf '%s' "$resp" | jq -r .state)
+          host=$(printf '%s' "$resp" | jq -r .host)
+          if [[ "$state" != "active" ]]; then
+            echo "::error::lease ${LEASE_ID} state=${state} (expected active)"
+            exit 1
+          fi
+          if [[ "$host" != "$HOST" ]]; then
+            echo "::error::lease ${LEASE_ID} host=${host} (expected ${HOST})"
+            exit 1
+          fi
+          echo "lease verified: ${LEASE_ID} active on ${HOST}"
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.ARM_CLIENT_ID }}
+          tenant-id: ${{ vars.ARM_TENANT_ID }}
+          subscription-id: ${{ vars.ARM_SUBSCRIPTION_ID }}
+
+      - name: Fetch GitHub App credentials from Key Vault
+        env:
+          KV_NAME: ${{ vars.KEY_VAULT_NAME }}
+        run: |
+          set -euo pipefail
+          app_id=$(az keyvault secret show --vault-name "$KV_NAME" --name "github-app-id" --query value -o tsv)
+          pem=$(az keyvault secret show --vault-name "$KV_NAME" --name "github-app-private-key" --query value -o tsv)
+          echo "::add-mask::${app_id}"
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            echo "::add-mask::${line}"
+          done <<< "$pem"
+          echo "GH_APP_ID=${app_id}" >> "$GITHUB_ENV"
+          {
+            echo "GH_APP_PRIVATE_KEY<<KEY_EOF"
+            echo "$pem"
+            echo "KEY_EOF"
+          } >> "$GITHUB_ENV"
+
+      - name: Mint GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ env.GH_APP_ID }}
+          private-key: ${{ env.GH_APP_PRIVATE_KEY }}
+
+      - name: Comment with run link
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          HOST: ${{ inputs.host }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ISSUE_NUMBER}" ]; then
+            echo "no issue_number; skipping run-start comment"
+            exit 0
+          fi
+          body="agent run started (env-prep): ${RUN_URL} (host \`${HOST}\`)"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments" \
+            -f "body=${body}" >/dev/null \
+            || echo "::warning::failed to post run-start comment on #${ISSUE_NUMBER}; continuing"
+
+  env-prep:
+    name: Build + deploy validation env, verify /_styleguide
+    needs: route
+    runs-on: ubuntu-latest
+    env:
+      ISSUE_NUMBER: ${{ inputs.issue_number }}
+      ISSUE_TITLE: ${{ inputs.issue_title }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: "1.9.0"
+
+      - name: Install glimmung-agent package
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install ./mcp
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.ARM_CLIENT_ID }}
+          tenant-id: ${{ vars.ARM_TENANT_ID }}
+          subscription-id: ${{ vars.ARM_SUBSCRIPTION_ID }}
+
+      - name: Read infra-bootstrap tofu outputs
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ vars.ARM_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ vars.ARM_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.ARM_SUBSCRIPTION_ID }}
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d)
+          cat > "${work}/main.tf" <<'EOF'
+          terraform { backend "azurerm" {} }
+          EOF
+          (
+            cd "${work}"
+            tofu init \
+              -backend-config="resource_group_name=infra" \
+              -backend-config="storage_account_name=nelsontofu" \
+              -backend-config="container_name=tfstate" \
+              -backend-config="key=infra-bootstrap.tfstate"
+            {
+              echo "AZURE_AKS_RESOURCE_GROUP=$(tofu output -raw resource_group_name)"
+              echo "AZURE_AKS_CLUSTER_NAME=$(tofu output -raw aks_cluster_name)"
+            } >> "$GITHUB_ENV"
+          )
+
+      - name: Set AKS context
+        run: |
+          set -euo pipefail
+          az aks get-credentials \
+            --resource-group "$AZURE_AKS_RESOURCE_GROUP" \
+            --name "$AZURE_AKS_CLUSTER_NAME" \
+            --overwrite-existing
+
+      - name: Compute run-scoped variables
+        env:
+          GLIMMUNG_RUN_ID: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          short_sha=$(git rev-parse --short=7 HEAD)
+          slug="issue-${ISSUE_NUMBER}-${GITHUB_RUN_ID}-${short_sha}"
+          {
+            echo "RELEASE_NAME=${slug}"
+            echo "PROD_NAMESPACE=glimmung"
+            echo "VALIDATION_HOST=${slug}.glimmung.dev.romaine.life"
+            echo "VALIDATION_URL=https://${slug}.glimmung.dev.romaine.life"
+            echo "IMAGE_TAG=${slug}"
+          } >> "$GITHUB_ENV"
+
+      - name: Notify glimmung — run started
+        env:
+          GLIMMUNG_RUN_ID: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(jq -nc \
+            --argjson rid "${GITHUB_RUN_ID}" \
+            --arg vurl "${VALIDATION_URL}" \
+            '{workflow_run_id: $rid, validation_url: $vurl}')
+          curl -sS -X POST \
+            -H "Content-Type: application/json" \
+            -d "${payload}" \
+            "${GLIMMUNG_BASE}/v1/runs/${GLIMMUNG_PROJECT}/${GLIMMUNG_RUN_ID}/started" \
+            || echo "::warning::failed to post started callback to glimmung; continuing"
+
+      - name: Build preview image
+        run: |
+          set -euo pipefail
+          python -m glimmung_agent.cli build-preview-image --image-tag "${IMAGE_TAG}" > /tmp/preview-image.json
+
+      - name: Deploy issue release into glimmung namespace
+        run: |
+          set -euo pipefail
+          python -m glimmung_agent.cli deploy-validation-preview \
+            --release "${RELEASE_NAME}" \
+            --namespace "${PROD_NAMESPACE}" \
+            --image-tag "${IMAGE_TAG}" \
+            --public-host "${VALIDATION_HOST}"
+
+      - name: Wait for validation env to be ready
+        run: |
+          set -euo pipefail
+          python -m glimmung_agent.cli wait-public-preview --url "${VALIDATION_URL}"
+
+      - name: Verify /_styleguide contract
+        # Hard contract: every frontend project must expose /_styleguide
+        # on its live env. A 404 here aborts the run with a typed reason
+        # so the dashboard surfaces it cleanly. See docs/styleguide-contract.md.
+        env:
+          GLIMMUNG_RUN_ID: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          url="${VALIDATION_URL}/_styleguide"
+          status=$(curl -sS -o /dev/null -w '%{http_code}' "${url}" || echo "000")
+          if [ "${status}" = "200" ]; then
+            echo "styleguide route OK: ${url}"
+            exit 0
+          fi
+
+          reason="frontend_contract_violation: /_styleguide route not exposed on ${VALIDATION_URL} (HTTP ${status})"
+          echo "::error::${reason}"
+          echo "::error::See docs/styleguide-contract.md for the contract and a minimal starter."
+
+          if [ -n "${GLIMMUNG_RUN_ID}" ]; then
+            payload=$(jq -nc --arg r "${reason}" '{reason: $r}')
+            curl -sS -X POST \
+              -H "Content-Type: application/json" \
+              -d "${payload}" \
+              "${GLIMMUNG_BASE}/v1/runs/${GLIMMUNG_PROJECT}/${GLIMMUNG_RUN_ID}/aborted" \
+              || echo "::warning::failed to post typed abort to glimmung; lease-release will still fire"
+          fi
+
+          exit 1
+
+      - name: Tear down validation env on failure
+        if: failure() || cancelled()
+        run: |
+          set -euo pipefail
+          python -m glimmung_agent.cli destroy-validation-preview \
+            --release "${RELEASE_NAME}" \
+            --namespace "${PROD_NAMESPACE}" || true
+          if [ -n "${IMAGE_TAG:-}" ]; then
+            az acr repository delete --name romainecr --image "glimmung:${IMAGE_TAG}" --yes || true
+          fi
+
+      - name: Notify glimmung — env-prep completed
+        # Phase output capture (#101): emit the four strings agent-execute
+        # consumes via its declared `inputs`. Keys MUST match the
+        # registered phase's `outputs` list exactly or glimmung 400s.
+        if: success()
+        env:
+          GLIMMUNG_RUN_ID: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(jq -nc \
+            --argjson rid "${GITHUB_RUN_ID}" \
+            --arg conclusion "success" \
+            --arg vurl "${VALIDATION_URL}" \
+            --arg rname "${RELEASE_NAME}" \
+            --arg pns "${PROD_NAMESPACE}" \
+            --arg itag "${IMAGE_TAG}" \
+            '{
+              workflow_run_id: $rid,
+              conclusion: $conclusion,
+              outputs: {
+                validation_url: $vurl,
+                release_name: $rname,
+                prod_namespace: $pns,
+                image_tag: $itag
+              }
+            }')
+          curl -sS -X POST \
+            -H "Content-Type: application/json" \
+            -d "${payload}" \
+            "${GLIMMUNG_BASE}/v1/runs/${GLIMMUNG_PROJECT}/${GLIMMUNG_RUN_ID}/completed" \
+            || echo "::warning::failed to post completed callback to glimmung; continuing"
+
+  release-lease:
+    name: Release glimmung lease
+    needs: [route, env-prep]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Release lease
+        run: |
+          set -euo pipefail
+          curl -fsS -X POST "${GLIMMUNG_BASE}/v1/lease/${{ inputs.lease_id }}/release?project=${GLIMMUNG_PROJECT}" >/dev/null
