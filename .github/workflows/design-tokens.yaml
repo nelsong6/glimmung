@@ -1,0 +1,26 @@
+name: design-tokens
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/src/index.css'
+      - 'design-system/colors_and_type.css'
+      - 'scripts/check-design-tokens.sh'
+      - '.github/workflows/design-tokens.yaml'
+  pull_request:
+    paths:
+      - 'frontend/src/index.css'
+      - 'design-system/colors_and_type.css'
+      - 'scripts/check-design-tokens.sh'
+      - '.github/workflows/design-tokens.yaml'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/check-design-tokens.sh
