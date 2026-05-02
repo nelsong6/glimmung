@@ -71,6 +71,34 @@ unauthenticated screenshot only shows the public surface — note that
 in `notes.md` if it matters, and consider pairing with a
 backend-level test instead.
 
+**Styleguide maintenance is mandatory.** The platform contract
+(`docs/styleguide-contract.md`) requires every frontend project to
+expose `/_styleguide` — a hand-rolled visual catalog of every
+component shipped, in every variant. The CI validation step curls the
+route and hard-fails the run with `frontend_contract_violation` if it
+404s, so a stale catalog will eventually break the build too.
+
+When you change a component in `frontend/src/` (new component, new
+variant, new state, copy or color change in an existing component):
+
+1. Make the component change.
+2. **In the same change, update the corresponding entry in
+   `frontend/src/StyleguideView.tsx`** so the catalog renders the new
+   shape. If the component is genuinely new, add a new `<Section>`;
+   if it gained a variant, render that variant alongside the existing
+   ones.
+3. Confirm `/_styleguide` still renders without errors against the
+   validation env before stopping.
+
+If your change adds a new top-level route that reviewers should see
+on the screenshot pass, also add an entry to
+`frontend/screenshot-pages.json` (`{ "path": "...", "label": "..." }`).
+The screenshot pass picks it up next run.
+
+Don't ship a component change without the styleguide change. There's
+no automated drift check yet — the contract is social, with the
+validation curl as the floor.
+
 ### New / changed API endpoint
 
 If the route is unauthenticated (e.g. `/v1/state`, `/v1/events`,
