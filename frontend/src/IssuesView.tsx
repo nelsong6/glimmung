@@ -156,6 +156,7 @@ export function IssuesView({
           <thead>
             <tr>
               <th>Project</th>
+              <th>#</th>
               <th>Title</th>
               <th>Labels</th>
               <th>Last run</th>
@@ -171,6 +172,9 @@ export function IssuesView({
               return (
                 <tr key={key}>
                   <td>{row.project}</td>
+                  <td className="mono dim">
+                    {row.number !== null ? row.number : "—"}
+                  </td>
                   <td>
                     <button
                       type="button"
