@@ -65,6 +65,12 @@ type DispatchState =
   | { kind: "dispatching" }
   | { kind: "error"; message: string };
 
+type AbortState =
+  | { kind: "idle" }
+  | { kind: "armed" }       // first click on `abort` — show `abort?` / `keep`
+  | { kind: "aborting" }
+  | { kind: "error"; message: string };
+
 type Tab = "description" | "in_progress" | "lineage";
 
 const TAB_SLUGS: Record<Tab, string> = {
@@ -139,6 +145,7 @@ export function IssueDetailView() {
   const [editing, setEditing] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
   const [dispatchState, setDispatchState] = useState<DispatchState>({ kind: "idle" });
+  const [abortState, setAbortState] = useState<AbortState>({ kind: "idle" });
 
   const detailUrl =
     target.kind === "gh"
@@ -209,6 +216,25 @@ export function IssueDetailView() {
       setDispatchState({ kind: "error", message: String(e) });
     }
   };
+
+  const onAbort = async (runId: string) => {
+    if (!detail) return;
+    setAbortState({ kind: "aborting" });
+    try {
+      const url = `/v1/runs/${encodeURIComponent(detail.project)}/${encodeURIComponent(runId)}/abort?reason=aborted_via_dashboard`;
+      const r = await authedFetch(url, { method: "POST" });
+      if (!r.ok) {
+        const text = await r.text();
+        throw new Error(`${url} -> ${r.status}: ${text}`);
+      }
+      setAbortState({ kind: "idle" });
+      // Refresh immediately so the in-flight pill flips to aborted and
+      // the abort button drops out before the next poll tick lands.
+      setRefreshTick((t) => t + 1);
+    } catch (e) {
+      setAbortState({ kind: "error", message: String(e) });
+    }
+  };
   useEffect(() => {
     if (tab !== "in_progress") return;
     if (!isInFlight) return;
@@ -270,6 +296,10 @@ export function IssueDetailView() {
                 inFlight={isInFlight}
                 dispatchState={dispatchState}
                 onRedispatch={() => void onRedispatch()}
+                abortState={abortState}
+                onArmAbort={() => setAbortState({ kind: "armed" })}
+                onCancelAbort={() => setAbortState({ kind: "idle" })}
+                onConfirmAbort={(runId) => void onAbort(runId)}
               />
             )}
             {tab === "lineage" && (
@@ -414,6 +444,10 @@ function InProgressTab({
   inFlight,
   dispatchState,
   onRedispatch,
+  abortState,
+  onArmAbort,
+  onCancelAbort,
+  onConfirmAbort,
 }: {
   graph: IssueGraph | null;
   graphAvailable: boolean;
@@ -421,6 +455,10 @@ function InProgressTab({
   inFlight: boolean;
   dispatchState: DispatchState;
   onRedispatch: () => void;
+  abortState: AbortState;
+  onArmAbort: () => void;
+  onCancelAbort: () => void;
+  onConfirmAbort: (runId: string) => void;
 }) {
   if (!graphAvailable) {
     return (
@@ -438,6 +476,12 @@ function InProgressTab({
 
   const dispatching = dispatchState.kind === "dispatching";
   const dispatchDisabled = inFlight || dispatching;
+  // Abort button shows only when an actual run record exists in flight.
+  // Lock-only state (issue_lock_held but no run yet) doesn't have a run
+  // id to target; that case stays as "Run lock held — waiting…".
+  const abortableRunId = activeRun ? runIdFromNode(activeRun) : null;
+  const aborting = abortState.kind === "aborting";
+  const armed = abortState.kind === "armed";
   const actions = (
     <div className="run-actions">
       <button
@@ -459,6 +503,48 @@ function InProgressTab({
           title={dispatchState.message}
         >
           error
+        </span>
+      )}
+      {abortableRunId && (
+        <span style={{ marginLeft: "1rem" }}>
+          {armed || aborting ? (
+            <span className="confirm">
+              <button
+                type="button"
+                className="link danger-text"
+                onClick={() => onConfirmAbort(abortableRunId)}
+                disabled={aborting}
+              >
+                {aborting ? "aborting…" : "abort?"}
+              </button>
+              <span className="sep">/</span>
+              <button
+                type="button"
+                className="link"
+                onClick={onCancelAbort}
+                disabled={aborting}
+              >
+                keep
+              </button>
+            </span>
+          ) : (
+            <button
+              type="button"
+              className="link danger-text"
+              onClick={onArmAbort}
+            >
+              abort
+            </button>
+          )}
+        </span>
+      )}
+      {abortState.kind === "error" && (
+        <span
+          className="pill drain"
+          style={{ marginLeft: "0.5rem" }}
+          title={abortState.message}
+        >
+          abort error
         </span>
       )}
     </div>
@@ -743,6 +829,12 @@ function LineageTab({
 
 function findActiveRun(graph: IssueGraph): GraphNode | null {
   return graph.nodes.find((n) => n.kind === "run" && n.state === "in_progress") ?? null;
+}
+
+function runIdFromNode(n: GraphNode): string {
+  // Run nodes are keyed `run:<run_id>` in the graph endpoint; the abort
+  // endpoint takes the bare ULID.
+  return n.id.startsWith("run:") ? n.id.slice(4) : n.id;
 }
 
 function findLastCompletedRun(graph: IssueGraph): GraphNode | null {
