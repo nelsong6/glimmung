@@ -58,6 +58,7 @@ from glimmung.models import (
     VerificationResult,
     Workflow,
     WorkflowRegister,
+    substitute_phase_inputs,
 )
 from glimmung.triage import abort_explanation as triage_abort_explanation
 from glimmung.triage import decide_triage, feedback_text
@@ -420,6 +421,13 @@ async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host
             if k in _DISPATCH_INPUT_KEYS
         },
     }
+    # Multi-phase forward dispatch (#101): the substituted phase inputs
+    # are stashed on lease metadata so the promote-loop path can pick
+    # them up too. Each consumer workflow declares these inputs in its
+    # YAML; if not, GH 422s, same orphan shape as the standard inputs.
+    phase_inputs = metadata.get("phase_inputs") or {}
+    if isinstance(phase_inputs, dict):
+        inputs.update({k: str(v) for k, v in phase_inputs.items()})
     try:
         await dispatch_workflow(
             minter,
@@ -610,6 +618,23 @@ async def _process_run_completion(
     run, etag = await run_ops.record_decision(cosmos, run=run, etag=etag, decision=decision)
 
     if decision == RunDecision.ADVANCE:
+        # Multi-phase routing (#101): if there's a next phase in the
+        # workflow's ordered list, dispatch it instead of going terminal.
+        # Run stays IN_PROGRESS, issue lock stays held, lease released
+        # by the just-completed workflow's release-lease job is fine —
+        # the next phase acquires its own lease.
+        next_phase = _next_phase_after(workflow_model, run.attempts[-1].phase)
+        if next_phase is not None:
+            await _dispatch_next_phase(
+                run=run, etag=etag, repo=repo,
+                workflow_model=workflow_model, next_phase=next_phase,
+            )
+            log.info(
+                "run %s advanced from phase %r to %r",
+                run.id, run.attempts[-1].phase, next_phase.name,
+            )
+            return "advance_phase"
+
         # PR primitive: when the workflow opts in (`pr.enabled=True`),
         # glimmung calls `gh pr create` itself rather than relying on the
         # consumer's YAML. Default-off during the rollout per #69 — flip
@@ -771,6 +796,148 @@ async def _dispatch_retry(
         )
     except Exception:
         log.exception("recycle workflow_dispatch failed for run %s", run.id)
+
+
+def _next_phase_after(workflow: Workflow, phase_name: str):
+    """Return the PhaseSpec immediately after `phase_name` in the
+    workflow's declared order, or None if `phase_name` is the last
+    phase (or doesn't appear). Pure lookup; multi-phase routing
+    depends on this being deterministic."""
+    for i, p in enumerate(workflow.phases):
+        if p.name == phase_name:
+            if i + 1 < len(workflow.phases):
+                return workflow.phases[i + 1]
+            return None
+    return None
+
+
+def _collect_phase_outputs(run: Run) -> dict[str, dict[str, str]]:
+    """Build the prior-outputs map for ref substitution. Walks attempts
+    in order so the latest attempt of each phase wins (matters when a
+    verify phase recycled — only the passing attempt's outputs should
+    flow downstream). Skips attempts without phase_outputs."""
+    by_phase: dict[str, dict[str, str]] = {}
+    for a in run.attempts:
+        if a.phase_outputs:
+            by_phase[a.phase] = dict(a.phase_outputs)
+    return by_phase
+
+
+async def _dispatch_next_phase(
+    *,
+    run: Run,
+    etag: str,
+    repo: str,
+    workflow_model: Workflow,
+    next_phase,
+) -> None:
+    """Forward dispatch (#101): fire `next_phase` for `run` after the
+    prior phase ADVANCEd. Substitutes inputs from prior phases'
+    captured outputs, acquires a fresh lease (capacity accounting is
+    per-runner-job, same shape as recycle dispatch), appends a new
+    PhaseAttempt, and fires workflow_dispatch.
+
+    Run stays IN_PROGRESS, issue lock stays held — lock release
+    fires only when the run goes terminal (last phase ADVANCEs to
+    PR / fails / aborts)."""
+    cosmos: Cosmos = app.state.cosmos
+    settings: Settings = app.state.settings
+    minter: GitHubAppTokenMinter | None = app.state.gh_minter
+
+    prior_outputs = _collect_phase_outputs(run)
+    try:
+        substituted = substitute_phase_inputs(next_phase, prior_outputs)
+    except (KeyError, ValueError):
+        log.exception(
+            "forward dispatch: input substitution failed for run %s phase %r; aborting",
+            run.id, next_phase.name,
+        )
+        await run_ops.mark_aborted(
+            cosmos, run=run, etag=etag,
+            reason=(
+                f"forward dispatch: input substitution failed for phase "
+                f"{next_phase.name!r} — see glimmung logs"
+            ),
+        )
+        return
+
+    # Append the next attempt before dispatching so a webhook redelivery
+    # of the previous completion doesn't re-trigger forward dispatch.
+    run, etag = await run_ops.append_attempt(
+        cosmos, run=run, etag=etag,
+        phase_name=next_phase.name,
+        workflow_filename=next_phase.workflow_filename,
+    )
+
+    requirements = next_phase.requirements or workflow_model.default_requirements
+    metadata = {
+        "issue_id": run.issue_id,
+        "issue_number": str(run.issue_number),
+        "issue_repo": run.issue_repo,
+        "issue_lock_holder_id": run.issue_lock_holder_id or "",
+        "run_id": run.id,
+        "phase_name": next_phase.name,
+        # Per-phase counter (0 == first dispatch of this phase). The
+        # PhaseAttempt.attempt_index field stays run-flat for accounting;
+        # this metadata field is the value the consumer workflow reads.
+        "attempt_index": "0",
+        # Substituted phase inputs land here so the promote-loop path
+        # (host comes free later) can splat them into the dispatch the
+        # same way the inline path does. Cosmos round-trips dict[str,
+        # str] cleanly.
+        "phase_inputs": dict(substituted),
+    }
+    lease, host = await lease_ops.acquire(
+        cosmos,
+        settings,
+        project=run.project,
+        workflow=run.workflow,
+        requirements=requirements,
+        metadata=metadata,
+    )
+
+    if host is None:
+        # No host capacity — lease is PENDING. The promote loop will
+        # fire workflow_dispatch when capacity frees, same as the
+        # initial-dispatch pending path.
+        log.info(
+            "forward dispatch: no host for run %s phase %r; lease %s pending",
+            run.id, next_phase.name, lease.id,
+        )
+        return
+
+    if minter is None:
+        # Test path: no GH token minter wired in. The lease + attempt
+        # are recorded; downstream tests assert on those without
+        # actually firing a workflow_dispatch.
+        log.info(
+            "forward dispatch (no minter): would dispatch %s on %s for run %s phase %r",
+            next_phase.workflow_filename, host.name, run.id, next_phase.name,
+        )
+        return
+
+    inputs = {
+        "host": host.name,
+        "lease_id": lease.id,
+        "issue_number": str(run.issue_number),
+        "run_id": run.id,
+        "attempt_index": "0",
+        **{k: str(v) for k, v in substituted.items()},
+    }
+    try:
+        await dispatch_workflow(
+            minter,
+            repo=repo,
+            workflow_filename=next_phase.workflow_filename,
+            ref=next_phase.workflow_ref,
+            inputs=inputs,
+        )
+        log.info(
+            "dispatched next phase %s on %s for run %s phase=%s",
+            next_phase.workflow_filename, host.name, run.id, next_phase.name,
+        )
+    except Exception:
+        log.exception("forward workflow_dispatch failed for run %s", run.id)
 
 
 async def _dispatch_triage(

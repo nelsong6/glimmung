@@ -20,6 +20,7 @@ from glimmung.models import (
     PhaseSpec,
     WorkflowRegister,
     parse_phase_input_ref,
+    substitute_phase_inputs,
     validate_phase_input_refs,
 )
 
@@ -195,20 +196,66 @@ def test_register_2phase_with_bad_ref_surfaces_ref_error_first():
         )
 
 
-def test_register_2phase_valid_refs_still_blocked_by_v1_gate():
-    """Until the multi-phase runtime lands (PR 3 of #101), 2-phase
-    workflows are rejected at registration even when refs validate.
-    This regression-locks the gate while the runtime is being built."""
-    with pytest.raises(ValueError, match="v1 supports exactly one phase"):
-        WorkflowRegister(
-            project="p",
-            name="w",
-            phases=[
-                PhaseSpec(name="a", workflow_filename="a.yml", outputs=["x"]),
-                PhaseSpec(
-                    name="b",
-                    workflow_filename="b.yml",
-                    inputs={"x": "${{ phases.a.outputs.x }}"},
-                ),
-            ],
-        )
+# ─── substitute_phase_inputs — runtime substitution path ─────────────────
+
+
+def test_substitute_resolves_against_prior_outputs():
+    next_phase = _phase(
+        "agent-execute",
+        inputs={
+            "validation_url": "${{ phases.env-prep.outputs.validation_url }}",
+            "image_tag": "${{ phases.env-prep.outputs.image_tag }}",
+        },
+    )
+    prior = {
+        "env-prep": {
+            "validation_url": "https://x.glimmung.dev",
+            "image_tag": "issue-123-abc",
+        },
+    }
+    assert substitute_phase_inputs(next_phase, prior) == {
+        "validation_url": "https://x.glimmung.dev",
+        "image_tag": "issue-123-abc",
+    }
+
+
+def test_substitute_empty_inputs_returns_empty():
+    next_phase = _phase("a")
+    assert substitute_phase_inputs(next_phase, {}) == {}
+
+
+def test_substitute_raises_on_missing_phase():
+    """Reaching this state means the upstream phase ran but had no
+    captured outputs (or registration validation slipped). Raise loudly
+    instead of silently substituting empty strings."""
+    next_phase = _phase("b", inputs={"x": "${{ phases.a.outputs.x }}"})
+    with pytest.raises(KeyError, match="no captured outputs"):
+        substitute_phase_inputs(next_phase, {})
+
+
+def test_substitute_raises_on_missing_key():
+    next_phase = _phase("b", inputs={"x": "${{ phases.a.outputs.x }}"})
+    with pytest.raises(KeyError, match="phase posted outputs"):
+        substitute_phase_inputs(next_phase, {"a": {"y": "v"}})
+
+
+# ─── WorkflowRegister wiring ──────────────────────────────────────────────
+
+
+def test_register_2phase_valid_refs_accepted():
+    """Multi-phase workflows with valid refs register cleanly. The v1
+    single-phase gate dropped when the runtime landed (PR 3 of #101);
+    earlier PRs in the series kept it on as a safety rail."""
+    reg = WorkflowRegister(
+        project="p",
+        name="w",
+        phases=[
+            PhaseSpec(name="a", workflow_filename="a.yml", outputs=["x"]),
+            PhaseSpec(
+                name="b",
+                workflow_filename="b.yml",
+                inputs={"x": "${{ phases.a.outputs.x }}"},
+            ),
+        ],
+    )
+    assert [p.name for p in reg.phases] == ["a", "b"]
