@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class LeaseState(str, Enum):
@@ -26,27 +26,66 @@ class ProjectRegister(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+# ─── Pipeline schema (#69 — multi-phase, v1 single-phase) ──────────────────
+#
+# A workflow is a pipeline: an ordered list of `PhaseSpec`s plus a glimmung-
+# owned terminal `PrPrimitiveSpec`. v1 enforces exactly one phase at
+# registration time; the schema is shaped for N>1 so multi-phase orchestration
+# is a runtime addition rather than a schema migration.
+
+# Recognized recycle triggers, kept as plain strings (not enums) so adding
+# new ones doesn't churn the registration API. Two namespaces, validated
+# per phase kind.
+VERIFY_PHASE_TRIGGERS: frozenset[str] = frozenset({"verify_fail", "verify_malformed"})
+PR_PRIMITIVE_TRIGGERS: frozenset[str] = frozenset({"pr_review_changes_requested"})
+
+
+class RecyclePolicy(BaseModel):
+    """Where re-dispatch lands when a recycle trigger fires, and how many
+    times. `lands_at = "self"` is same-phase retry (today's RETRY); a phase
+    name is rewind-and-replay-forward (future). On a verify phase, `on`
+    accepts {verify_fail, verify_malformed}; on the PR primitive,
+    {pr_review_changes_requested}."""
+    max_attempts: int = 3
+    on: list[str] = Field(default_factory=list)
+    lands_at: str = "self"
+
+
+class PhaseSpec(BaseModel):
+    """One step in a workflow's pipeline. v1 supports `kind="gha_dispatch"`
+    only — phases dispatch a GitHub Actions workflow. `kind="llm"` and other
+    native kinds are reserved.
+
+    Verify is opt-in: when true, the phase emits `verification.json` and the
+    decision engine routes through `recycle_policy`. When false, any
+    non-`success` GHA conclusion ends the run (GHA-job semantics) and
+    `recycle_policy` is invalid."""
+    name: str
+    kind: str = "gha_dispatch"
+    workflow_filename: str
+    workflow_ref: str = "main"
+    requirements: dict[str, Any] | None = None
+    verify: bool = False
+    recycle_policy: RecyclePolicy | None = None
+
+
+class PrPrimitiveSpec(BaseModel):
+    """The glimmung-owned terminal PR-creation step. Always present in the
+    run lineage (skipped state reserved for future). Carries its own
+    `recycle_policy` for PR-feedback re-entry — `lands_at` points back at a
+    user phase, replacing today's `triage_workflow_filename` flow."""
+    recycle_policy: RecyclePolicy | None = None
+
+
 class Workflow(BaseModel):
     id: str                     # workflow name (e.g. "issue-agent")
     project: str                # partition key
     name: str                   # = id; canonical handle is f"{project}.{name}"
-    workflow_filename: str
-    workflow_ref: str = "main"
+    phases: list[PhaseSpec] = Field(default_factory=list)
+    pr: PrPrimitiveSpec = Field(default_factory=PrPrimitiveSpec)
+    budget: "BudgetConfig" = Field(default_factory=lambda: BudgetConfig())
     trigger_label: str = "issue-agent"
     default_requirements: dict[str, Any] = Field(default_factory=dict)
-    # When set, glimmung treats this workflow as participating in the
-    # verify-loop substrate (#18): a Run is created on initial dispatch,
-    # workflow_run.completed parses the verification artifact, and the
-    # decision engine may dispatch this filename as a retry. When unset,
-    # glimmung's pre-#18 fire-and-forget behavior is preserved.
-    retry_workflow_filename: str = ""
-    # When set, glimmung dispatches this workflow when a PR-feedback
-    # signal (#19) drains and the triage decision engine returns
-    # DISPATCH_TRIAGE. The triage workflow re-enters impl + verify with
-    # the human's feedback as additional context. Same artifact contract
-    # as the retry workflow (uploads `verification.json`).
-    triage_workflow_filename: str = ""
-    default_budget: "BudgetConfig | None" = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
 
@@ -54,13 +93,61 @@ class Workflow(BaseModel):
 class WorkflowRegister(BaseModel):
     project: str                # must reference an existing Project
     name: str
-    workflow_filename: str
-    workflow_ref: str = "main"
+    phases: list[PhaseSpec]
+    pr: PrPrimitiveSpec = Field(default_factory=PrPrimitiveSpec)
+    budget: "BudgetConfig" = Field(default_factory=lambda: BudgetConfig())
     trigger_label: str = "issue-agent"
     default_requirements: dict[str, Any] = Field(default_factory=dict)
-    retry_workflow_filename: str = ""
-    triage_workflow_filename: str = ""
-    default_budget: "BudgetConfig | None" = None
+
+    @model_validator(mode="after")
+    def _validate_v1(self) -> "WorkflowRegister":
+        # v1: exactly one phase. Schema accommodates more; runtime doesn't.
+        # See glimmung#69 for the multi-phase follow-up.
+        if len(self.phases) != 1:
+            raise ValueError(
+                f"v1 supports exactly one phase per workflow; got {len(self.phases)}. "
+                "Multi-phase orchestration is a follow-up (see glimmung#69)."
+            )
+        names = [p.name for p in self.phases]
+        if len(set(names)) != len(names):
+            raise ValueError(f"phase names must be unique within a workflow; got {names}")
+        for p in self.phases:
+            if p.kind != "gha_dispatch":
+                raise ValueError(
+                    f"phase {p.name!r} kind={p.kind!r} not supported in v1 (only 'gha_dispatch')"
+                )
+            if p.recycle_policy is not None:
+                if not p.verify:
+                    raise ValueError(
+                        f"phase {p.name!r} has recycle_policy but verify=False; "
+                        "recycle is only valid on verify phases"
+                    )
+                if p.recycle_policy.lands_at != "self" and p.recycle_policy.lands_at not in names:
+                    raise ValueError(
+                        f"phase {p.name!r} recycle_policy.lands_at="
+                        f"{p.recycle_policy.lands_at!r} doesn't match any phase name"
+                    )
+                bad = [t for t in p.recycle_policy.on if t not in VERIFY_PHASE_TRIGGERS]
+                if bad:
+                    raise ValueError(
+                        f"phase {p.name!r} recycle_policy.on contains unknown triggers: {bad}; "
+                        f"valid: {sorted(VERIFY_PHASE_TRIGGERS)}"
+                    )
+        if self.pr.recycle_policy is not None:
+            la = self.pr.recycle_policy.lands_at
+            if la == "self":
+                raise ValueError("PR primitive recycle_policy.lands_at='self' is meaningless")
+            if la not in names:
+                raise ValueError(
+                    f"PR primitive recycle_policy.lands_at={la!r} doesn't match any phase name"
+                )
+            bad = [t for t in self.pr.recycle_policy.on if t not in PR_PRIMITIVE_TRIGGERS]
+            if bad:
+                raise ValueError(
+                    f"PR primitive recycle_policy.on contains unknown triggers: {bad}; "
+                    f"valid: {sorted(PR_PRIMITIVE_TRIGGERS)}"
+                )
+        return self
 
 
 class Host(BaseModel):
@@ -149,25 +236,21 @@ class VerificationResult(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class RunPhase(str, Enum):
-    """The phase a particular attempt represents. Long-term this widens
-    to a richer taxonomy (test_plan / impl / verify as separate phases);
-    #18 ships INITIAL + RETRY, #19 adds TRIAGE (re-entry into impl + verify
-    triggered by a PR-feedback signal)."""
-    INITIAL = "initial"
-    RETRY = "retry"
-    TRIAGE = "triage"
-
-
 class PhaseAttempt(BaseModel):
+    """One dispatch of a phase (or the PR primitive). `phase` is the phase
+    name from the workflow's `phases` list, or a glimmung-reserved name for
+    the PR primitive. `cost_usd` is decoupled from `verification` so non-
+    verify LLM phases can report cost too; verify phases can leave it null
+    and the rollup falls back to `verification.cost_usd`."""
     attempt_index: int                         # 0-based; 0 == initial dispatch
-    phase: RunPhase
+    phase: str                                 # phase name from PhaseSpec.name
     workflow_filename: str
     workflow_run_id: int | None = None         # GH Actions run id; populated on completion
     dispatched_at: datetime
     completed_at: datetime | None = None
     conclusion: str | None = None              # GH workflow_run.conclusion (success/failure/cancelled/...)
     verification: VerificationResult | None = None
+    cost_usd: float | None = None              # phase-reported; fallback to verification.cost_usd if null
     artifact_url: str | None = None            # prior_verification_artifact_url passed into the *next* attempt
     decision: str | None = None                # RunDecision applied after this attempt completed
 
@@ -179,11 +262,10 @@ class RunState(str, Enum):
 
 
 class BudgetConfig(BaseModel):
-    """Hard limits the decision engine enforces. Frozen at run-creation
-    time from (issue label → workflow default → glimmung default) so
-    relabeling mid-run can't move the goalposts."""
-    max_attempts: int = 3
-    max_cost_usd: float = 25.0
+    """Run-cumulative cost cap, frozen at run-creation time so relabeling
+    mid-run can't move the goalposts. Per-phase attempt counts live on the
+    phase's `recycle_policy.max_attempts` (formerly part of this config)."""
+    total: float = 25.0
 
 
 class RunDecision(str, Enum):
