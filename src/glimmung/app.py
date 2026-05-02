@@ -495,6 +495,63 @@ async def _release_locks_on_terminal(
             )
 
 
+async def _validate_phase_outputs(
+    cosmos: Cosmos,
+    *,
+    run: Run,
+    posted_outputs: dict[str, str] | None,
+) -> dict[str, str] | None:
+    """Validate `outputs` posted to `/v1/runs/.../completed` against the
+    registered phase's declared `PhaseSpec.outputs` (#101).
+
+    Strict equality of key sets — missing keys, extra keys, posting
+    outputs against a phase that declares none, or omitting outputs
+    against a phase that declares some all 400. Workflow contract
+    violations surface to the consumer instead of being recorded as
+    malformed completion state.
+
+    Returns the validated dict (or None when both posted and declared
+    are empty). Returning a value the caller can pass straight to
+    `record_completion` keeps callers from re-deriving "is there
+    anything to persist".
+
+    A workflow that vanished mid-run yields `phase_outputs=None`; the
+    `_process_run_completion` path then routes through abort_no_workflow
+    and records nothing — output capture is a workflow-defined contract,
+    so a missing workflow can't be evaluated either way.
+    """
+    declared: set[str] = set()
+    workflow_doc = await _read_workflow(cosmos, run.project, run.workflow)
+    workflow_model = _doc_to_workflow(workflow_doc) if workflow_doc else None
+    if workflow_model is not None and run.attempts:
+        latest_phase_name = run.attempts[-1].phase
+        for phase in workflow_model.phases:
+            if phase.name == latest_phase_name:
+                declared = set(phase.outputs)
+                break
+
+    posted = posted_outputs or {}
+    if set(posted.keys()) != declared:
+        missing = declared - set(posted.keys())
+        extra = set(posted.keys()) - declared
+        parts = []
+        if missing:
+            parts.append(f"missing: {sorted(missing)}")
+        if extra:
+            parts.append(f"unexpected: {sorted(extra)}")
+        raise HTTPException(
+            400,
+            f"phase_outputs contract violation for run {run.project}/{run.id} "
+            f"phase {run.attempts[-1].phase if run.attempts else '<none>'!r}: "
+            f"{'; '.join(parts)}. Declared outputs: {sorted(declared)}.",
+        )
+
+    # Empty dict means "phase declares no outputs and consumer posted
+    # nothing" — store None on the attempt rather than {} so the
+    # absence is unambiguous when the runtime substitutes inputs later.
+    return posted if posted else None
+
+
 async def _process_run_completion(
     *,
     run: Run,
@@ -504,6 +561,7 @@ async def _process_run_completion(
     verification_result: VerificationResult | None,
     repo: str,
     screenshots_markdown: str | None = None,
+    phase_outputs: dict[str, str] | None = None,
 ) -> str:
     """Drive a Run through one decision-engine cycle. Returns the
     decision value.
@@ -517,6 +575,9 @@ async def _process_run_completion(
 
     `screenshots_markdown` is forwarded to `record_completion` so the
     Run carries the rendered MD block into `_compose_pr_body`.
+
+    `phase_outputs` (#101) is the caller-validated `outputs` payload
+    from the completed callback, persisted on the latest attempt.
     """
     cosmos: Cosmos = app.state.cosmos
 
@@ -529,6 +590,7 @@ async def _process_run_completion(
         verification=verification_result,
         artifact_url=None,
         screenshots_markdown=screenshots_markdown,
+        phase_outputs=phase_outputs,
     )
 
     workflow_doc = await _read_workflow(cosmos, run.project, run.workflow)
@@ -997,6 +1059,8 @@ def _phase_to_doc(p: Any) -> dict[str, Any]:
         "requirements": p.requirements,
         "verify": p.verify,
         "recyclePolicy": _recycle_policy_to_doc(p.recycle_policy),
+        "inputs": dict(p.inputs),
+        "outputs": list(p.outputs),
     }
 
 
@@ -1041,6 +1105,8 @@ def _phase_from_doc(d: dict[str, Any]):
         requirements=d.get("requirements"),
         verify=bool(d.get("verify", False)),
         recycle_policy=_recycle_policy_from_doc(d.get("recyclePolicy")),
+        inputs=dict(d.get("inputs") or {}),
+        outputs=list(d.get("outputs") or []),
     )
 
 
@@ -1494,11 +1560,19 @@ class RunCompletedRequest(BaseModel):
     Stamped on the Run; the PR composer drops it verbatim into the
     body. None for backend workflows or runs where screenshots failed
     upstream (those abort before reaching this callback).
+
+    `outputs` (optional, #101) is the phase's emitted output values.
+    Keys MUST match exactly the set declared in the registered phase's
+    `PhaseSpec.outputs`. Missing keys, extra keys, or `outputs` posted
+    against a phase that declares none → 400. Persisted on the latest
+    PhaseAttempt for the multi-phase runtime to substitute into the
+    next phase's `workflow_dispatch.inputs` (PR 3 of #101).
     """
     workflow_run_id: int
     conclusion: str   # GH-style: "success" | "failure" | "cancelled"
     verification: dict[str, Any] | None = None
     screenshots_markdown: str | None = None
+    outputs: dict[str, str] | None = None
 
 
 class RunCallbackResult(BaseModel):
@@ -1592,6 +1666,15 @@ async def run_completed(
         raise HTTPException(404, f"no run {project}/{run_id}")
     run, etag = found
 
+    # Phase outputs (#101): validate posted keys against the registered
+    # phase's declared `outputs`. Mismatch is a workflow contract
+    # violation — 400 instead of recording a malformed completion. The
+    # workflow read sits before _process_run_completion so a bad payload
+    # never advances run state.
+    phase_outputs = await _validate_phase_outputs(
+        cosmos, run=run, posted_outputs=req.outputs,
+    )
+
     verification_result: VerificationResult | None = None
     if req.verification is not None:
         try:
@@ -1611,6 +1694,7 @@ async def run_completed(
         verification_result=verification_result,
         repo=run.issue_repo,
         screenshots_markdown=req.screenshots_markdown,
+        phase_outputs=phase_outputs,
     )
 
     result_dict: dict[str, Any] = {}

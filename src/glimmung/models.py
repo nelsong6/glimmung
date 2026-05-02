@@ -344,6 +344,12 @@ class PhaseAttempt(BaseModel):
     cost_usd: float | None = None              # phase-reported; fallback to verification.cost_usd if null
     artifact_url: str | None = None            # prior_verification_artifact_url passed into the *next* attempt
     decision: str | None = None                # RunDecision applied after this attempt completed
+    # Phase outputs (#101) — values this phase emitted via the `completed`
+    # callback's `outputs` payload. Keys match the phase's declared
+    # `PhaseSpec.outputs`; mismatches are rejected at callback time. The
+    # multi-phase runtime (PR 3 of #101) substitutes these into the next
+    # phase's `workflow_dispatch.inputs` per its declared `inputs` refs.
+    phase_outputs: dict[str, str] | None = None
 
 
 class RunState(str, Enum):
