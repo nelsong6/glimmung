@@ -25,8 +25,11 @@ from glimmung.db import Cosmos, query_all
 from glimmung.decision import abort_explanation, decide
 from glimmung.github_app import (
     GitHubAppTokenMinter,
+    PRCreateAlreadyExists,
+    PRCreateNoDiff,
     cancel_workflow_run,
     dispatch_workflow,
+    open_pull_request,
     post_issue_comment,
     verify_webhook_signature,
 )
@@ -632,6 +635,27 @@ async def _process_run_completion(
     run, etag = await run_ops.record_decision(cosmos, run=run, etag=etag, decision=decision)
 
     if decision == RunDecision.ADVANCE:
+        # PR primitive: when the workflow opts in (`pr.enabled=True`),
+        # glimmung calls `gh pr create` itself rather than relying on the
+        # consumer's YAML. Default-off during the rollout per #69 — flip
+        # per-workflow as each consumer migrates.
+        if workflow_model.pr.enabled:
+            try:
+                await _open_pr_primitive(run=run, workflow=workflow_model)
+            except PRCreateNoDiff as e:
+                log.warning("pr-primitive: no diff for run %s; aborting (%s)", run.id, e)
+                await run_ops.mark_aborted(
+                    cosmos, run=run, etag=etag,
+                    reason=f"PR primitive: no diff between glimmung/{run.id} and base",
+                )
+                return "abort_no_diff"
+            except Exception:
+                log.exception("pr-primitive: gh pr create failed for run %s", run.id)
+                await run_ops.mark_aborted(
+                    cosmos, run=run, etag=etag,
+                    reason="PR primitive: gh pr create failed (see glimmung logs)",
+                )
+                return "abort_pr_create_failed"
         await run_ops.mark_passed(cosmos, run=run, etag=etag)
         log.info("run %s passed verification on attempt %d", run.id, len(run.attempts))
         return decision.value
@@ -891,6 +915,89 @@ async def _dispatch_triage(
         )
 
 
+async def _open_pr_primitive(*, run: Run, workflow: Workflow) -> None:
+    """Open the PR for a run that just ADVANCEd. Branch is glimmung-
+    dictated (`glimmung/<run_id>`); title comes from the linked issue,
+    body summarizes the run state. On success, stamps `pr_number` and
+    `pr_branch` on the Run via `link_pr_to_run`. On `PRCreateNoDiff`, the
+    caller turns this into a run-level abort (per #69 v1 — no-diff is a
+    terminal error). On `PRCreateAlreadyExists`, the existing PR's number
+    is recorded and the run continues — supports rewind/recycle paths
+    that re-enter after a PR is already open."""
+    cosmos: Cosmos = app.state.cosmos
+    minter: GitHubAppTokenMinter | None = app.state.gh_minter
+    if minter is None:
+        raise RuntimeError("pr-primitive: no GH minter configured")
+
+    head = f"glimmung/{run.id}"
+    base = "main"  # v1: hardcoded; future PhaseSpec.pr.base extends this
+    title, body = await _compose_pr_body(cosmos, run=run, workflow=workflow)
+
+    try:
+        pr_number, html_url = await open_pull_request(
+            minter, repo=run.issue_repo, head=head, base=base, title=title, body=body,
+        )
+    except PRCreateAlreadyExists as already:
+        log.info(
+            "pr-primitive: PR already exists for %s head=%s; recording #%d",
+            run.issue_repo, head, already.pr_number,
+        )
+        pr_number = already.pr_number
+    # Stamp on the run.
+    lookup = await run_ops.find_run_by_workflow_run(
+        cosmos, project=run.project,
+        workflow_run_id=run.attempts[-1].workflow_run_id or 0,
+    )
+    if lookup is not None:
+        run, etag = lookup
+        await run_ops.link_pr_to_run(
+            cosmos, run=run, etag=etag,
+            pr_number=pr_number, pr_branch=head,
+        )
+
+
+async def _compose_pr_body(
+    cosmos: Cosmos, *, run: Run, workflow: Workflow,
+) -> tuple[str, str]:
+    """Compose PR title + body from the issue + run state. Title is the
+    issue title; body links the issue (`Closes #N`) and surfaces a short
+    run summary so reviewers see attempt history + cost without leaving
+    the PR view. Composition is intentionally minimal in v1 — richer
+    evidence rendering is a follow-up."""
+    issue_title = ""
+    issue_body_link = ""
+    if run.issue_id:
+        try:
+            doc = await cosmos.issues.read_item(item=run.issue_id, partition_key=run.project)
+            issue_title = str(doc.get("title") or "")
+        except Exception:
+            pass
+    if run.issue_repo and run.issue_number:
+        issue_body_link = f"Closes {run.issue_repo}#{run.issue_number}"
+    title = issue_title or f"Run {run.id[:8]}"
+    attempts_summary = "\n".join(
+        f"- attempt {a.attempt_index} phase={a.phase} "
+        f"cost=${(a.cost_usd or 0.0):.4f} decision={a.decision or '—'}"
+        for a in run.attempts
+    )
+    body_parts = [
+        issue_body_link,
+        "",
+        "Glimmung-opened PR. Composed from run state — see the dashboard "
+        f"for full lineage (run id `{run.id}`).",
+        "",
+        "## Run summary",
+        f"- workflow: `{workflow.name}`",
+        f"- attempts: {len(run.attempts)}",
+        f"- cumulative cost: ${run.cumulative_cost_usd:.4f}",
+        "",
+        "## Attempts",
+        attempts_summary or "_no attempts recorded_",
+    ]
+    body = "\n".join(body_parts).strip()
+    return title, body
+
+
 async def _read_project(cosmos: Cosmos, name: str) -> dict[str, Any] | None:
     try:
         return await cosmos.projects.read_item(item=name, partition_key=name)
@@ -939,7 +1046,10 @@ def _workflow_to_doc(w: WorkflowRegister) -> dict[str, Any]:
         "project": w.project,
         "name": w.name,
         "phases": [_phase_to_doc(p) for p in w.phases],
-        "pr": {"recyclePolicy": _recycle_policy_to_doc(w.pr.recycle_policy)},
+        "pr": {
+            "enabled": w.pr.enabled,
+            "recyclePolicy": _recycle_policy_to_doc(w.pr.recycle_policy),
+        },
         "budget": w.budget.model_dump(),
         "triggerLabel": w.trigger_label,
         "defaultRequirements": w.default_requirements,
@@ -988,7 +1098,10 @@ def _doc_to_workflow(doc: dict[str, Any] | None):
         project=doc["project"],
         name=doc["name"],
         phases=[_phase_from_doc(p) for p in phases_raw],
-        pr=PrPrimitiveSpec(recycle_policy=_recycle_policy_from_doc(pr_raw.get("recyclePolicy"))),
+        pr=PrPrimitiveSpec(
+            enabled=bool(pr_raw.get("enabled", False)),
+            recycle_policy=_recycle_policy_from_doc(pr_raw.get("recyclePolicy")),
+        ),
         budget=BudgetConfig(total=float(budget_raw.get("total", 25.0))),
         trigger_label=doc.get("triggerLabel", "issue-agent"),
         default_requirements=doc.get("defaultRequirements") or {},

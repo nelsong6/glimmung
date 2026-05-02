@@ -73,7 +73,14 @@ class PrPrimitiveSpec(BaseModel):
     """The glimmung-owned terminal PR-creation step. Always present in the
     run lineage (skipped state reserved for future). Carries its own
     `recycle_policy` for PR-feedback re-entry — `lands_at` points back at a
-    user phase, replacing today's `triage_workflow_filename` flow."""
+    user phase, replacing today's `triage_workflow_filename` flow.
+
+    `enabled` is a v1-rollout knob: when True, glimmung calls `gh pr create`
+    after the last user phase succeeds. When False (default), the consumer
+    workflow is still expected to open the PR itself. Each consumer flips
+    this to True as part of its YAML migration. Once all consumers are on
+    glimmung-opens-PR, the flag goes away."""
+    enabled: bool = False
     recycle_policy: RecyclePolicy | None = None
 
 
