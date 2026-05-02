@@ -738,6 +738,11 @@ h2 .inline-action,
   color: #888;
   margin-bottom: 8px;
 }
+.run-actions {
+  display: flex;
+  align-items: center;
+  margin-bottom: 12px;
+}
 .run-panel {
   border: 1px solid #2a2a2e;
   border-radius: 6px;
