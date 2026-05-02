@@ -98,11 +98,21 @@ export function App() {
         <Route index element={<CapacityRoute />} />
         <Route path="issues" element={<IssuesRoute />} />
         <Route path="issues/:owner/:repo/:n" element={<IssueDetailView />}>
+          {/* New tabs (#81): issue / the run / runs. */}
+          <Route path="issue" element={null} />
+          <Route path="the-run" element={null} />
+          <Route path="runs" element={null} />
+          {/* Backwards-compat: pre-#81 tab slugs. SLUG_TO_TAB in
+              IssueDetailView maps these to the new tabs so deep links
+              from before the rename keep working. */}
           <Route path="description" element={null} />
           <Route path="in-progress" element={null} />
           <Route path="lineage" element={null} />
         </Route>
         <Route path="issues/:project/:issueId" element={<IssueDetailView />}>
+          <Route path="issue" element={null} />
+          <Route path="the-run" element={null} />
+          <Route path="runs" element={null} />
           <Route path="description" element={null} />
           <Route path="in-progress" element={null} />
           <Route path="lineage" element={null} />
