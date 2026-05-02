@@ -60,6 +60,11 @@ type IssueGraph = {
   edges: GraphEdge[];
 };
 
+type DispatchState =
+  | { kind: "idle" }
+  | { kind: "dispatching" }
+  | { kind: "error"; message: string };
+
 type Tab = "description" | "in_progress" | "lineage";
 
 const TAB_SLUGS: Record<Tab, string> = {
@@ -133,6 +138,7 @@ export function IssueDetailView() {
   const [selected, setSelected] = useState<GraphNode | null>(null);
   const [editing, setEditing] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
+  const [dispatchState, setDispatchState] = useState<DispatchState>({ kind: "idle" });
 
   const detailUrl =
     target.kind === "gh"
@@ -183,6 +189,26 @@ export function IssueDetailView() {
   // poll the same endpoints so attempt cards fill in as conclusions /
   // verification verdicts / decisions land server-side.
   const isInFlight = !!(detail && (detail.issue_lock_held || detail.last_run_state === "in_progress"));
+
+  const onRedispatch = async () => {
+    if (!detail) return;
+    setDispatchState({ kind: "dispatching" });
+    try {
+      const r = await authedFetch("/v1/runs/dispatch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ issue_id: detail.id, project: detail.project }),
+      });
+      if (!r.ok) {
+        const text = await r.text();
+        throw new Error(`/v1/runs/dispatch -> ${r.status}: ${text}`);
+      }
+      setDispatchState({ kind: "idle" });
+      setRefreshTick((t) => t + 1);
+    } catch (e) {
+      setDispatchState({ kind: "error", message: String(e) });
+    }
+  };
   useEffect(() => {
     if (tab !== "in_progress") return;
     if (!isInFlight) return;
@@ -238,10 +264,12 @@ export function IssueDetailView() {
             )}
             {tab === "in_progress" && (
               <InProgressTab
-                detail={detail}
                 graph={graph}
                 graphAvailable={!!graphUrl}
                 repo={repoForLinks}
+                inFlight={isInFlight}
+                dispatchState={dispatchState}
+                onRedispatch={() => void onRedispatch()}
               />
             )}
             {tab === "lineage" && (
@@ -380,15 +408,19 @@ function DescriptionTab({
 }
 
 function InProgressTab({
-  detail,
   graph,
   graphAvailable,
   repo,
+  inFlight,
+  dispatchState,
+  onRedispatch,
 }: {
-  detail: IssueDetail;
   graph: IssueGraph | null;
   graphAvailable: boolean;
   repo: string | null;
+  inFlight: boolean;
+  dispatchState: DispatchState;
+  onRedispatch: () => void;
 }) {
   if (!graphAvailable) {
     return (
@@ -403,21 +435,57 @@ function InProgressTab({
 
   const activeRun = findActiveRun(graph);
   const lastCompleted = findLastCompletedRun(graph);
-  const inFlight = !!(detail.issue_lock_held || detail.last_run_state === "in_progress");
+
+  const dispatching = dispatchState.kind === "dispatching";
+  const dispatchDisabled = inFlight || dispatching;
+  const actions = (
+    <div className="run-actions">
+      <button
+        type="button"
+        className="link"
+        onClick={onRedispatch}
+        disabled={dispatchDisabled}
+      >
+        {dispatching
+          ? "dispatching…"
+          : inFlight
+          ? "in flight"
+          : "re-dispatch"}
+      </button>
+      {dispatchState.kind === "error" && (
+        <span
+          className="pill drain"
+          style={{ marginLeft: "0.5rem" }}
+          title={dispatchState.message}
+        >
+          error
+        </span>
+      )}
+    </div>
+  );
 
   if (activeRun) {
-    return <RunPanel run={activeRun} graph={graph} repo={repo} live />;
+    return (
+      <>
+        {actions}
+        <RunPanel run={activeRun} graph={graph} repo={repo} live />
+      </>
+    );
   }
   if (inFlight) {
     return (
-      <div className="empty">
-        Run lock held — waiting for the run record to land.
-      </div>
+      <>
+        {actions}
+        <div className="empty">
+          Run lock held — waiting for the run record to land.
+        </div>
+      </>
     );
   }
   if (lastCompleted) {
     return (
       <>
+        {actions}
         <div className="run-status-banner">
           No run in flight. Showing the last completed run.
         </div>
@@ -425,7 +493,14 @@ function InProgressTab({
       </>
     );
   }
-  return <div className="empty">No runs yet — dispatch from the Issues page.</div>;
+  return (
+    <>
+      {actions}
+      <div className="empty">
+        No runs yet — re-dispatch above to start one.
+      </div>
+    </>
+  );
 }
 
 function RunPanel({
