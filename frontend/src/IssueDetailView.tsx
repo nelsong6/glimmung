@@ -61,7 +61,17 @@ type IssueGraph = {
   edges: Array<{
     source: string;
     target: string;
-    kind: "spawned" | "attempted" | "retried" | "opened" | "feedback" | "re_dispatched";
+    kind:
+      | "spawned"
+      | "attempted"
+      | "retried"
+      | "opened"
+      | "feedback"
+      | "re_dispatched"
+      // Resume primitive (#111) — links a prior Run to a Run that
+      // resumed from it (cloned_from_run_id). Renders in the runs
+      // table + run-meta panel as "resumed from Run X".
+      | "resumed_from";
   }>;
 };
 
@@ -738,6 +748,14 @@ function phaseStatus(attempt: GraphNode): { cls: string; text: string } {
   const verification = isRecord(meta.verification) ? meta.verification : null;
   const verStatus = verification ? stringOrNull(verification.status) : null;
   const workflowRunId = meta.workflow_run_id != null ? String(meta.workflow_run_id) : null;
+  // Resume primitive (#111) — synthesized skip-marks render as "skipped"
+  // ahead of any other state since they're never dispatched. No pill
+  // (skipped isn't one of {free, busy, drain, info}); the caller renders
+  // it as dim text. Also propagates upward via the attempt node's
+  // `state === "skipped"` value emitted by `_build_issue_graph`.
+  if (attempt.state === "skipped" || stringOrNull(meta.skipped_from_run_id)) {
+    return { cls: "", text: "skipped" };
+  }
   if (!completed) {
     return workflowRunId
       ? { cls: "busy", text: "running" }
@@ -885,6 +903,11 @@ function RunMetaSummary({
   const workflow = stringOrNull(meta.workflow);
   const abortReason = stringOrNull(meta.abort_reason);
   const prNumber = numberOrNull(meta.pr_number);
+  // Resume primitive (#111) — set on the resumed Run so the user
+  // sees why earlier phases are pre-satisfied and which prior Run's
+  // outputs got carried forward.
+  const clonedFromRunId = stringOrNull(meta.cloned_from_run_id);
+  const entrypointPhase = stringOrNull(meta.entrypoint_phase);
   return (
     <div className="run-panel-meta" style={{ marginTop: "0.5rem" }}>
       <div>
@@ -895,6 +918,20 @@ function RunMetaSummary({
       {workflow && (
         <div>
           <span className="key">workflow</span> <span className="mono">{workflow}</span>
+        </div>
+      )}
+      {clonedFromRunId && (
+        <div>
+          <span className="key">resumed from</span>{" "}
+          <span className="mono" title={clonedFromRunId}>
+            {clonedFromRunId.slice(0, 8)}…
+          </span>
+          {entrypointPhase && (
+            <>
+              {" "}
+              <span className="dim mono">at {entrypointPhase}</span>
+            </>
+          )}
         </div>
       )}
       <div>
@@ -977,9 +1014,25 @@ function RunsTab({
           ).length;
           const cost = numberOrNull(meta.cumulative_cost_usd);
           const prNumber = numberOrNull(meta.pr_number);
+          // Resume primitive (#111) — flag rows that started as
+          // resumed clones so the lineage is visible at a glance
+          // without drilling in. Tooltip carries the prior run id.
+          const clonedFrom = stringOrNull(meta.cloned_from_run_id);
+          const entrypointPhase = stringOrNull(meta.entrypoint_phase);
           return (
             <tr key={r.id}>
-              <td className="mono">{id.slice(0, 8)}…</td>
+              <td className="mono">
+                {id.slice(0, 8)}…
+                {clonedFrom && (
+                  <span
+                    className="dim mono"
+                    style={{ marginLeft: "0.5rem" }}
+                    title={`resumed from ${clonedFrom}${entrypointPhase ? ` at ${entrypointPhase}` : ""}`}
+                  >
+                    ↩ {clonedFrom.slice(0, 8)}…
+                  </span>
+                )}
+              </td>
               <td>
                 <span className={`pill ${runStatePill(r.state ?? "")}`}>{r.state ?? "—"}</span>
               </td>
@@ -1011,6 +1064,11 @@ function AttemptCard({ attempt, repo }: { attempt: GraphNode; repo: string | nul
   const workflowFilename = stringOrNull(meta.workflow_filename);
   const verification = isRecord(meta.verification) ? meta.verification : null;
   const verificationStatus = verification ? stringOrNull(verification.status) : null;
+  // Resume primitive (#111) — set on synthesized skip-marks. The phase
+  // wasn't actually dispatched; outputs were carried from the named
+  // prior Run. Renders the card in a dim/dashed style so it reads as
+  // "this slot was satisfied, no work happened here."
+  const skippedFromRunId = stringOrNull(meta.skipped_from_run_id);
   // Cost prefers the phase-reported top-level cost_usd (#69 — non-verify
   // LLM phases set this directly without a verification.json) and falls
   // back to verification.cost_usd for verify phases that emit the artifact.
@@ -1045,6 +1103,7 @@ function AttemptCard({ attempt, repo }: { attempt: GraphNode; repo: string | nul
     : null;
 
   const statusPill = (() => {
+    if (skippedFromRunId) return { cls: "", text: "skipped" };
     if (dispatching) return { cls: "info", text: "dispatching" };
     if (running) return { cls: "busy", text: "running" };
     if (verificationStatus === "pass") return { cls: "free", text: "pass" };
@@ -1070,12 +1129,23 @@ function AttemptCard({ attempt, repo }: { attempt: GraphNode; repo: string | nul
       : null;
 
   return (
-    <div className={`attempt-card${running ? " running" : ""}${stuckDispatching ? " stuck" : ""}`}>
+    <div
+      className={`attempt-card${running ? " running" : ""}${stuckDispatching ? " stuck" : ""}${skippedFromRunId ? " skipped" : ""}`}
+    >
       <div className="attempt-card-head">
         <strong>{attempt.label}</strong>
-        <span className={`pill ${statusPill.cls}`}>{statusPill.text}</span>
+        {skippedFromRunId ? (
+          <span
+            className="dim mono"
+            title={`satisfied by run ${skippedFromRunId} — no dispatch happened on this run`}
+          >
+            skipped
+          </span>
+        ) : (
+          <span className={`pill ${statusPill.cls}`}>{statusPill.text}</span>
+        )}
         <span className="dim mono">{phase}</span>
-        {elapsedLabel && <span className="dim mono">{elapsedLabel}</span>}
+        {elapsedLabel && !skippedFromRunId && <span className="dim mono">{elapsedLabel}</span>}
         {stuckDispatching && (
           <span className="pill drain" title="No workflow_run_id received from GHA. Possible orphan dispatch.">
             stuck
@@ -1083,13 +1153,19 @@ function AttemptCard({ attempt, repo }: { attempt: GraphNode; repo: string | nul
         )}
       </div>
       <div className="attempt-card-body">
-        {dispatchedAt && (
+        {skippedFromRunId && (
+          <div>
+            <span className="key">satisfied by</span>{" "}
+            <span className="mono">{skippedFromRunId.slice(0, 8)}…</span>
+          </div>
+        )}
+        {dispatchedAt && !skippedFromRunId && (
           <div>
             <span className="key">dispatched</span>{" "}
             <span className="mono">{formatTime(dispatchedAt)}</span>
           </div>
         )}
-        {completedAt && (
+        {completedAt && !skippedFromRunId && (
           <div>
             <span className="key">completed</span>{" "}
             <span className="mono">{formatTime(completedAt)}</span>
