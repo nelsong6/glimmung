@@ -448,6 +448,7 @@ class NativeRunEventType(str, Enum):
     STEP_STARTED = "step_started"
     LOG = "log"
     STEP_COMPLETED = "step_completed"
+    STEP_SKIPPED = "step_skipped"
     STEP_FAILED = "step_failed"
 
 

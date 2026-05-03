@@ -14,7 +14,7 @@ from typing import Any
 from azure.cosmos.exceptions import CosmosResourceExistsError
 
 from glimmung.db import Cosmos, query_all
-from glimmung.models import NativeRunEventType, NativeStepState, Run
+from glimmung.models import NativeJobAttempt, NativeRunEventType, NativeStepState, Run
 from glimmung.runs import _retry_on_conflict
 
 
@@ -121,9 +121,17 @@ async def record_native_event(
             step.exit_code = exit_code
             step.message = message
             step.state = NativeStepState.SUCCEEDED
-            if all(s.state == NativeStepState.SUCCEEDED for s in job.steps):
-                job.state = NativeStepState.SUCCEEDED
-                job.completed_at = _now()
+            _refresh_job_state(job)
+        elif event == NativeRunEventType.STEP_SKIPPED:
+            if job.started_at is None:
+                job.started_at = _now()
+            if step.started_at is None:
+                step.started_at = _now()
+            step.completed_at = _now()
+            step.exit_code = exit_code
+            step.message = message
+            step.state = NativeStepState.SKIPPED
+            _refresh_job_state(job)
         elif event == NativeRunEventType.STEP_FAILED:
             if step.started_at is None:
                 step.started_at = _now()
@@ -137,6 +145,24 @@ async def record_native_event(
         return r.model_copy(update={"updated_at": _now()})
 
     return await _retry_on_conflict(cosmos, run, etag, apply)
+
+
+def _refresh_job_state(job: NativeJobAttempt) -> None:
+    states = [step.state for step in job.steps]
+    if any(state == NativeStepState.FAILED for state in states):
+        job.state = NativeStepState.FAILED
+        job.completed_at = _now()
+        return
+    if all(state == NativeStepState.SKIPPED for state in states):
+        job.state = NativeStepState.SKIPPED
+        job.completed_at = _now()
+        return
+    if all(state in TERMINAL_STEP_STATES for state in states):
+        job.state = NativeStepState.SUCCEEDED
+        job.completed_at = _now()
+        return
+    if any(state in TERMINAL_STEP_STATES for state in states):
+        job.state = NativeStepState.ACTIVE
 
 
 async def assert_native_completion_ready(cosmos: Cosmos, *, run: Run) -> None:
