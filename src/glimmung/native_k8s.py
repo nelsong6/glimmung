@@ -414,7 +414,7 @@ def _universal_env(
             },
         },
     ]
-    for key in ("issue_id", "issue_repo", "issue_number", "issue_title"):
+    for key in ("issue_id", "issue_repo", "issue_number", "issue_title", "issue_body"):
         if key in metadata:
             env.append({"name": f"GLIMMUNG_{_env_name(key)}", "value": str(metadata[key])})
     phase_inputs = metadata.get("phase_inputs") or {}
