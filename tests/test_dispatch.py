@@ -572,6 +572,34 @@ async def test_dispatch_records_warm_session_label_on_run(app):
     assert runs[0]["session_launch_intent"] == "warm"
 
 
+@pytest.mark.asyncio
+async def test_dispatch_uses_stored_issue_labels_when_no_override(app):
+    await _register_project(app, "ambience", "nelsong6/ambience")
+    await _register_workflow(
+        app, project="ambience", name="issue-agent",
+        retry_workflow_filename="agent-retry.yml",
+    )
+    await _register_host(app, "runner-1")
+    await _register_issue(
+        app, project="ambience", repo="nelsong6/ambience", issue_number=42,
+        labels=["bug", "agent-budget:5x50", "agent-session:warm"],
+    )
+
+    result = await dispatch_run(
+        app, repo="nelsong6/ambience", issue_number=42,
+        trigger_source={"kind": "glimmung_ui"},
+    )
+    assert result.state == "dispatched"
+
+    runs = [d async for d in app.state.cosmos.runs.query_items(
+        "SELECT * FROM c WHERE c.id = @id",
+        parameters=[{"name": "@id", "value": result.run_id}],
+    )]
+    assert len(runs) == 1
+    assert runs[0]["budget"] == {"total": 50.0}
+    assert runs[0]["session_launch_intent"] == "warm"
+
+
 # ─── glimmung-Issue plumbing ──────────────────────────────
 
 

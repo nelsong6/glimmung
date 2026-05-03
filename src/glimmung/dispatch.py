@@ -117,9 +117,9 @@ async def dispatch_run(
     workflow; if there are 0 or 2+, returns `no_workflow` and the
     caller has to disambiguate.
 
-    `issue_labels` are passed to budget resolution (`agent-budget:NxM`
-    label support). Labels remain a courtesy syndication surface from
-    glimmung, not the dispatch primitive.
+    `issue_labels` can override the stored Issue labels for webhook
+    callers that already have a fresh label set. UI/native callers omit
+    it and dispatch uses the labels persisted on the Issue.
     """
     cosmos: Cosmos = app.state.cosmos
     settings = app.state.settings
@@ -161,6 +161,7 @@ async def dispatch_run(
     if workflow_doc is None:
         return DispatchResult(state="no_workflow", detail=picker_detail)
     workflow_actual_name: str = workflow_doc["name"]
+    effective_issue_labels = issue_labels if issue_labels is not None else list(issue.labels)
 
     # 3. Claim the per-issue lock. GH-anchored issues lock on the
     # repo#N key (so webhook-driven dispatches collide with UI-driven
@@ -203,7 +204,7 @@ async def dispatch_run(
     if phases:
         initial_phase = phases[0]
         budget = resolve_budget(
-            issue_labels or [],
+            effective_issue_labels,
             _budget_from_doc(workflow_doc.get("budget")),
         )
         run = await run_ops.create_run(
@@ -218,7 +219,7 @@ async def dispatch_run(
             initial_workflow_filename=initial_phase["workflowFilename"],
             issue_lock_holder_id=holder_id,
             trigger_source=trigger_source,
-            session_launch_intent=session_launch_intent_from_labels(issue_labels),
+            session_launch_intent=session_launch_intent_from_labels(effective_issue_labels),
         )
         run_id = run.id
 
