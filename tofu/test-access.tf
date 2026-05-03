@@ -8,7 +8,7 @@
 # `readMetadata` denied — the failure that left #37 open after PR #120
 # landed the opt-in mechanics.
 #
-# Mirrors `glimmung_cosmos` in identity.tf: same role (Built-in Data
+# Mirrors `glimmung_dedicated_cosmos` in identity.tf: same role (Built-in Data
 # Contributor — tests create+replace items), same database scope (the
 # `test-...:` partition-key namespace lives inside the glimmung database
 # and never touches sibling apps' data on the same account).

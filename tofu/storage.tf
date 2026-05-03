@@ -32,12 +32,6 @@ resource "azurerm_storage_container" "artifacts" {
   container_access_type = "private"
 }
 
-resource "azurerm_role_assignment" "glimmung_artifacts_blob_contributor" {
-  scope                = azurerm_storage_container.artifacts.id
-  role_definition_name = "Storage Blob Data Contributor"
-  principal_id         = azurerm_user_assigned_identity.glimmung.principal_id
-}
-
 resource "azurerm_role_assignment" "glimmung_dedicated_artifacts_blob_contributor" {
   scope                = azurerm_storage_container.artifacts.id
   role_definition_name = "Storage Blob Data Contributor"
