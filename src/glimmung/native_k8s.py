@@ -24,6 +24,7 @@ class NativeLaunchError(RuntimeError):
 
 _DNS_LABEL_RE = re.compile(r"[^a-z0-9-]+")
 _ENV_NAME_RE = re.compile(r"[^A-Za-z0-9_]+")
+_K8S_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 
 
 class NativeKubernetesLauncher:
@@ -63,6 +64,13 @@ class NativeKubernetesLauncher:
             run=run,
             etag=etag,
             token_sha256=_sha256(token),
+        )
+        await self._ensure_run_namespace_access(
+            lease_doc=lease_doc,
+            workflow_doc=workflow_doc,
+            phase=phase,
+            run_id=run_id,
+            attempt_index=attempt_index,
         )
 
         manifest = _job_manifest(
@@ -136,6 +144,92 @@ class NativeKubernetesLauncher:
             )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
+                return
+            raise
+
+    async def _ensure_run_namespace_access(
+        self,
+        *,
+        lease_doc: dict[str, Any],
+        workflow_doc: dict[str, Any],
+        phase: PhaseSpec,
+        run_id: str,
+        attempt_index: int,
+    ) -> None:
+        metadata = lease_doc.get("metadata") or {}
+        validation_namespace = _validation_namespace(run_id, attempt_index)
+        access_namespaces = _access_namespaces(validation_namespace, metadata)
+        labels = {
+            **_managed_labels(),
+            "glimmung.romaine.life/project": _label_value(str(lease_doc["project"])),
+            "glimmung.romaine.life/workflow": _label_value(str(workflow_doc["name"])),
+            "glimmung.romaine.life/run-id": _label_value(run_id),
+            "glimmung.romaine.life/phase": _label_value(phase.name),
+            "glimmung.romaine.life/attempt-index": str(attempt_index),
+        }
+        for namespace in access_namespaces:
+            await self._ensure_namespace(namespace, labels=labels)
+            await self._ensure_runner_role_binding(
+                namespace,
+                run_id=run_id,
+                attempt_index=attempt_index,
+                labels=labels,
+            )
+
+    async def _ensure_namespace(self, namespace: str, *, labels: dict[str, str]) -> None:
+        body = {
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": {
+                "name": namespace,
+                "labels": labels,
+            },
+        }
+        try:
+            await self._request("POST", "/api/v1/namespaces", json=body)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 409:
+                return
+            raise
+
+    async def _ensure_runner_role_binding(
+        self,
+        namespace: str,
+        *,
+        run_id: str,
+        attempt_index: int,
+        labels: dict[str, str],
+    ) -> None:
+        name = _resource_name("glim-rbac", run_id, attempt_index)
+        body = {
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "RoleBinding",
+            "metadata": {
+                "name": name,
+                "namespace": namespace,
+                "labels": labels,
+            },
+            "roleRef": {
+                "apiGroup": "rbac.authorization.k8s.io",
+                "kind": "ClusterRole",
+                "name": self._settings.native_runner_namespace_role,
+            },
+            "subjects": [
+                {
+                    "kind": "ServiceAccount",
+                    "name": self._settings.native_runner_service_account,
+                    "namespace": self._settings.native_runner_namespace,
+                }
+            ],
+        }
+        try:
+            await self._request(
+                "POST",
+                f"/apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/rolebindings",
+                json=body,
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 409:
                 return
             raise
 
@@ -275,6 +369,9 @@ def _universal_env(
     base_url = settings.native_runner_callback_base_url.rstrip("/")
     project = str(lease_doc["project"])
     run_id = str(metadata.get("run_id") or "")
+    attempt_index = int(str(metadata.get("attempt_index") or "0"))
+    validation_namespace = _validation_namespace(run_id, attempt_index)
+    access_namespaces = _access_namespaces(validation_namespace, metadata)
     env: list[dict[str, Any]] = [
         {"name": "GLIMMUNG_BASE_URL", "value": base_url},
         {"name": "GLIMMUNG_PROJECT", "value": project},
@@ -282,7 +379,9 @@ def _universal_env(
         {"name": "GLIMMUNG_PHASE", "value": phase.name},
         {"name": "GLIMMUNG_RUN_ID", "value": run_id},
         {"name": "GLIMMUNG_LEASE_ID", "value": str(lease_doc["id"])},
-        {"name": "GLIMMUNG_ATTEMPT_INDEX", "value": str(metadata.get("attempt_index", "0"))},
+        {"name": "GLIMMUNG_ATTEMPT_INDEX", "value": str(attempt_index)},
+        {"name": "GLIMMUNG_VALIDATION_NAMESPACE", "value": validation_namespace},
+        {"name": "GLIMMUNG_K8S_NAMESPACES", "value": ",".join(access_namespaces)},
         {
             "name": "GLIMMUNG_EVENTS_URL",
             "value": f"{base_url}/v1/runs/{project}/{run_id}/native/events",
@@ -335,6 +434,27 @@ def _managed_labels() -> dict[str, str]:
 
 def _resource_name(prefix: str, run_id: str, attempt_index: int) -> str:
     return _dns_label(f"{prefix}-{run_id.lower()}-{attempt_index}")[:63].rstrip("-")
+
+
+def _validation_namespace(run_id: str, attempt_index: int) -> str:
+    return _resource_name("glim-run", run_id, attempt_index)
+
+
+def _access_namespaces(validation_namespace: str, metadata: dict[str, Any]) -> list[str]:
+    namespaces = [validation_namespace]
+    phase_inputs = metadata.get("phase_inputs") or {}
+    if isinstance(phase_inputs, dict):
+        for key, value in phase_inputs.items():
+            key_name = str(key)
+            if key_name == "namespace" or key_name.endswith("_namespace"):
+                namespace = str(value)
+                if _valid_namespace(namespace) and namespace not in namespaces:
+                    namespaces.append(namespace)
+    return namespaces
+
+
+def _valid_namespace(value: str) -> bool:
+    return bool(value and len(value) <= 63 and _K8S_NAME_RE.match(value))
 
 
 def _dns_label(value: str) -> str:

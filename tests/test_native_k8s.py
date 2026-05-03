@@ -3,8 +3,21 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-from glimmung.native_k8s import _job_manifest
-from glimmung.models import NativeJobSpec, NativeStepSpec, PhaseSpec
+import pytest
+
+from glimmung.native_k8s import NativeKubernetesLauncher, _job_manifest
+from glimmung.models import (
+    BudgetConfig,
+    NativeJobSpec,
+    NativeStepSpec,
+    PhaseAttempt,
+    PhaseSpec,
+    Run,
+    RunState,
+    native_job_attempts_from_specs,
+)
+
+from tests.cosmos_fake import FakeContainer
 
 
 def _settings():
@@ -13,6 +26,27 @@ def _settings():
         native_runner_service_account="glimmung-native-runner",
         native_runner_callback_base_url="http://glimmung.glimmung.svc.cluster.local:8000",
         native_runner_job_ttl_seconds=259200,
+        native_runner_namespace_role="admin",
+        k8s_sa_token_path="/var/run/token",
+        k8s_ca_cert_path="/var/run/ca.crt",
+        k8s_api_host="https://kubernetes.default.svc",
+    )
+
+
+class _RecordingLauncher(NativeKubernetesLauncher):
+    def __init__(self, settings):
+        super().__init__(settings)
+        self.calls = []
+
+    async def _request(self, method: str, path: str, *, json=None):
+        self.calls.append({"method": method, "path": path, "json": json})
+        return {}
+
+
+def _cosmos():
+    return SimpleNamespace(
+        runs=FakeContainer("runs", "/project"),
+        leases=FakeContainer("leases", "/project"),
     )
 
 
@@ -46,7 +80,11 @@ def test_job_manifest_maps_phase_jobs_to_sequential_pod_containers():
             "run_id": "01KRNATIVE0000000000000000",
             "attempt_index": "2",
             "issue_id": "01ISSUE",
-            "phase_inputs": {"target-ref": "main"},
+            "phase_inputs": {
+                "target-ref": "main",
+                "prod_namespace": "glimmung",
+                "validation_url": "https://preview.invalid",
+            },
         },
         "requestedAt": datetime.now(UTC).isoformat(),
     }
@@ -72,6 +110,12 @@ def test_job_manifest_maps_phase_jobs_to_sequential_pod_containers():
     assert env["GLIMMUNG_RUN_ID"]["value"] == "01KRNATIVE0000000000000000"
     assert env["GLIMMUNG_JOB_ID"]["value"] == "agent"
     assert env["GLIMMUNG_INPUT_TARGET_REF"]["value"] == "main"
+    assert env["GLIMMUNG_VALIDATION_NAMESPACE"]["value"] == (
+        "glim-run-01krnative0000000000000000-2"
+    )
+    assert env["GLIMMUNG_K8S_NAMESPACES"]["value"] == (
+        "glim-run-01krnative0000000000000000-2,glimmung"
+    )
     assert env["GLIMMUNG_GITHUB_TOKEN_URL"]["value"] == (
         "http://glimmung.glimmung.svc.cluster.local:8000"
         "/v1/runs/ambience/01KRNATIVE0000000000000000/native/github-token"
@@ -79,3 +123,106 @@ def test_job_manifest_maps_phase_jobs_to_sequential_pod_containers():
     assert env["GLIMMUNG_ATTEMPT_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == (
         "glim-01krnative-2-token"
     )
+
+
+@pytest.mark.asyncio
+async def test_launch_scaffolds_run_namespaces_and_rbac_before_job():
+    settings = _settings()
+    launcher = _RecordingLauncher(settings)
+    cosmos = _cosmos()
+    now = datetime.now(UTC)
+    phase = PhaseSpec(
+        name="agent",
+        kind="k8s_job",
+        jobs=[
+            NativeJobSpec(
+                id="agent",
+                image="runner:agent",
+                steps=[NativeStepSpec(slug="run-agent")],
+            )
+        ],
+    )
+    run = Run(
+        id="01KRNATIVE0000000000000000",
+        project="ambience",
+        workflow="native-agent",
+        issue_id="01ISSUE",
+        issue_repo="nelsong6/ambience",
+        issue_number=117,
+        state=RunState.IN_PROGRESS,
+        budget=BudgetConfig(total=25.0),
+        attempts=[
+            PhaseAttempt(
+                attempt_index=0,
+                phase="agent",
+                phase_kind="k8s_job",
+                workflow_filename="k8s_job:agent",
+                dispatched_at=now,
+                jobs=native_job_attempts_from_specs(phase.jobs),
+            )
+        ],
+        created_at=now,
+        updated_at=now,
+    )
+    await cosmos.runs.create_item(run.model_dump(mode="json"))
+    lease_doc = {
+        "id": "01LEASE",
+        "project": "ambience",
+        "workflow": "native-agent",
+        "state": "active",
+        "host": "native-k8s",
+        "requirements": {},
+        "metadata": {
+            "native_k8s": True,
+            "run_id": run.id,
+            "attempt_index": "0",
+            "phase_inputs": {
+                "prod_namespace": "glimmung",
+                "validation_url": "https://preview.invalid",
+            },
+        },
+        "requestedAt": now.isoformat(),
+        "assignedAt": now.isoformat(),
+        "releasedAt": None,
+        "ttlSeconds": 14400,
+    }
+    await cosmos.leases.create_item(lease_doc)
+
+    await launcher.launch(
+        cosmos,
+        lease_doc=lease_doc,
+        workflow_doc={"name": "native-agent"},
+        phase=phase,
+    )
+
+    paths = [call["path"] for call in launcher.calls]
+    job_index = paths.index("/apis/batch/v1/namespaces/glimmung-runs/jobs")
+    rolebinding_indexes = [
+        i for i, path in enumerate(paths)
+        if path.endswith("/rolebindings")
+    ]
+    assert rolebinding_indexes
+    assert max(rolebinding_indexes) < job_index
+    rolebinding_namespaces = {
+        path.split("/namespaces/", 1)[1].split("/", 1)[0]
+        for path in paths
+        if path.endswith("/rolebindings")
+    }
+    assert rolebinding_namespaces == {
+        "glim-run-01krnative0000000000000000-0",
+        "glimmung",
+    }
+    rolebinding = next(
+        call["json"] for call in launcher.calls
+        if call["path"].endswith("/glimmung/rolebindings")
+    )
+    assert rolebinding["roleRef"] == {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": "admin",
+    }
+    assert rolebinding["subjects"] == [{
+        "kind": "ServiceAccount",
+        "name": "glimmung-native-runner",
+        "namespace": "glimmung-runs",
+    }]
