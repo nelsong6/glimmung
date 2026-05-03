@@ -3863,6 +3863,18 @@ async def _list_prs_from_cosmos(cosmos: Cosmos) -> list[PrRow]:
         if run_doc is not None:
             row.run_id = run_doc["id"]
             row.run_state = run_doc.get("state")
+            row.validation_url = run_doc.get("validation_url")
+            row.session_launch_intent = str(
+                run_doc.get("session_launch_intent") or "cold",
+            )
+            if pr.linked_issue_id and run_doc.get("issue_id"):
+                row.session_launch_url = _tank_session_launch_url_from_fields(
+                    settings=getattr(app.state, "settings", get_settings()),
+                    run_id=str(run_doc["id"]),
+                    issue_id=str(run_doc["issue_id"]),
+                    pr_id=pr.id,
+                    validation_url=row.validation_url,
+                )
             row.run_attempts = len(run_doc.get("attempts") or [])
             row.run_cumulative_cost_usd = float(run_doc.get("cumulative_cost_usd") or 0.0)
             issue_number = run_doc.get("issue_number")
@@ -4015,13 +4027,30 @@ async def _build_pr_detail(cosmos: Cosmos, *, pr: PR) -> PrDetail:
 
 
 def _tank_session_launch_url(*, settings: Settings, run: Run, pr: PR) -> str:
+    return _tank_session_launch_url_from_fields(
+        settings=settings,
+        run_id=run.id,
+        issue_id=run.issue_id,
+        pr_id=pr.id,
+        validation_url=run.validation_url,
+    )
+
+
+def _tank_session_launch_url_from_fields(
+    *,
+    settings: Settings,
+    run_id: str,
+    issue_id: str,
+    pr_id: str,
+    validation_url: str | None,
+) -> str:
     params: dict[str, str] = {
-        "glimmung_run_id": run.id,
-        "glimmung_issue_id": run.issue_id,
-        "glimmung_pr_id": pr.id,
+        "glimmung_run_id": run_id,
+        "glimmung_issue_id": issue_id,
+        "glimmung_pr_id": pr_id,
     }
-    if run.validation_url:
-        params["validation_url"] = run.validation_url
+    if validation_url:
+        params["validation_url"] = validation_url
     return f"{settings.tank_operator_base_url.rstrip('/')}?{urlencode(params)}"
 
 
