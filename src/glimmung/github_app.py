@@ -32,13 +32,16 @@ class GitHubAppTokenMinter:
             self._token, self._expires_at = await self._fetch()
             return self._token
 
-    async def _fetch(self) -> tuple[str, float]:
+    def _jwt(self) -> str:
         now = int(time.time())
-        app_jwt = jwt.encode(
+        return jwt.encode(
             {"iat": now - 60, "exp": now + 540, "iss": self._app_id},
             self._private_key,
             algorithm="RS256",
         )
+
+    async def _fetch(self) -> tuple[str, float]:
+        app_jwt = self._jwt()
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.post(
                 f"https://api.github.com/app/installations/{self._installation_id}/access_tokens",
@@ -51,6 +54,42 @@ class GitHubAppTokenMinter:
             r.raise_for_status()
             body = r.json()
             return body["token"], time.time() + 3300
+
+    async def repository_token(
+        self,
+        *,
+        repo: str,
+        permissions: dict[str, str] | None = None,
+    ) -> tuple[str, str | None]:
+        """Mint a short-lived installation token narrowed to one repository.
+
+        Native runner Jobs use this instead of receiving the broad cached
+        installation token. GitHub scopes by repository name within the app
+        installation's account; the endpoint rejects names outside the
+        installation.
+        """
+        repo_name = repo.split("/", 1)[1] if "/" in repo else repo
+        app_jwt = self._jwt()
+        body: dict[str, Any] = {
+            "repositories": [repo_name],
+            "permissions": permissions or {
+                "contents": "write",
+                "metadata": "read",
+            },
+        }
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(
+                f"https://api.github.com/app/installations/{self._installation_id}/access_tokens",
+                headers={
+                    "Authorization": f"Bearer {app_jwt}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+                json=body,
+            )
+            r.raise_for_status()
+            payload = r.json()
+            return payload["token"], payload.get("expires_at")
 
 
 def verify_webhook_signature(secret: str, body: bytes, signature_header: str | None) -> bool:
@@ -240,4 +279,3 @@ async def update_pull_request_body(
             json={"body": body},
         )
         r.raise_for_status()
-

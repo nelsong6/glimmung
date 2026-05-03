@@ -121,6 +121,24 @@ class NativeKubernetesLauncher:
                 return
             raise
 
+    async def delete_attempt_secret(self, *, run_id: str, attempt_index: int) -> None:
+        """Delete the per-attempt callback token Secret.
+
+        Idempotent: a missing Secret means terminal cleanup already happened.
+        """
+        namespace = self._settings.native_runner_namespace
+        job_name = _resource_name("glim", run_id, attempt_index)
+        secret_name = f"{job_name}-token"
+        try:
+            await self._request(
+                "DELETE",
+                f"/api/v1/namespaces/{namespace}/secrets/{secret_name}",
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return
+            raise
+
     async def _request(
         self,
         method: str,
@@ -276,6 +294,10 @@ def _universal_env(
         {
             "name": "GLIMMUNG_FAILED_URL",
             "value": f"{base_url}/v1/runs/{project}/{run_id}/native/failed",
+        },
+        {
+            "name": "GLIMMUNG_GITHUB_TOKEN_URL",
+            "value": f"{base_url}/v1/runs/{project}/{run_id}/native/github-token",
         },
         {
             "name": "GLIMMUNG_ATTEMPT_TOKEN",

@@ -586,6 +586,28 @@ async def _release_native_attempt_lease(cosmos: Cosmos, run: Run) -> None:
             )
 
 
+async def _cleanup_native_attempt_secret(run: Run, attempt_index: int) -> None:
+    """Delete the per-attempt Secret backing a completed native Job."""
+    attempt = next((a for a in run.attempts if a.attempt_index == attempt_index), None)
+    if attempt is None or attempt.phase_kind != "k8s_job":
+        return
+    launcher = getattr(app.state, "native_k8s_launcher", None)
+    if launcher is None:
+        return
+    try:
+        await launcher.delete_attempt_secret(
+            run_id=run.id,
+            attempt_index=attempt.attempt_index,
+        )
+    except Exception:
+        log.exception(
+            "native terminal cleanup failed deleting attempt Secret for run %s "
+            "attempt %d",
+            run.id, attempt.attempt_index,
+        )
+        return
+
+
 async def _release_locks_on_terminal(
     *,
     run: Run,
@@ -2126,6 +2148,12 @@ class NativeRunFailedRequest(BaseModel):
     reason: str
 
 
+class NativeGitHubTokenResult(BaseModel):
+    repo: str
+    token: str
+    expires_at: str | None = None
+
+
 @app.post(
     "/v1/runs/{project}/{run_id}/started",
     response_model=RunCallbackResult,
@@ -2322,6 +2350,7 @@ async def native_run_completed(
         raise HTTPException(404, f"no run {project}/{run_id}")
     run, etag = found
     _require_native_attempt_token(request, run)
+    attempt_index = run.attempts[-1].attempt_index
     try:
         await native_event_ops.assert_native_completion_ready(cosmos, run=run)
     except native_event_ops.NativeEventError as e:
@@ -2354,6 +2383,7 @@ async def native_run_completed(
         phase_outputs=phase_outputs,
     )
 
+    await _cleanup_native_attempt_secret(run, attempt_index)
     result_dict: dict[str, Any] = {}
     terminal = decision_value in (
         RunDecision.ADVANCE.value,
@@ -2393,14 +2423,56 @@ async def native_run_failed(
         raise HTTPException(404, f"no run {project}/{run_id}")
     run, _etag = found
     _require_native_attempt_token(request, run)
+    attempt_index = run.attempts[-1].attempt_index
     await _release_native_attempt_lease(cosmos, run)
-    return await _abort_run(
+    result = await _abort_run(
         cosmos,
         getattr(app.state, "gh_minter", None),
         run_id=run_id,
         project=project,
         reason=req.reason,
     )
+    await _cleanup_native_attempt_secret(run, attempt_index)
+    return result
+
+
+@app.post(
+    "/v1/runs/{project}/{run_id}/native/github-token",
+    response_model=NativeGitHubTokenResult,
+)
+async def native_github_token(
+    request: Request,
+    project: str = Path(...),
+    run_id: str = Path(...),
+) -> NativeGitHubTokenResult:
+    """Mint a short-lived repo-scoped GitHub App token for a native Job."""
+    cosmos: Cosmos = app.state.cosmos
+    found = await run_ops.read_run(cosmos, project=project, run_id=run_id)
+    if found is None:
+        raise HTTPException(404, f"no run {project}/{run_id}")
+    run, _etag = found
+    _require_native_attempt_token(request, run)
+    if run.state != RunState.IN_PROGRESS:
+        raise HTTPException(409, f"run {run.id} is {run.state.value}")
+    if not run.attempts or run.attempts[-1].phase_kind != "k8s_job":
+        raise HTTPException(409, f"run {run.id} latest attempt is not native")
+
+    repo = run.issue_repo
+    if not repo:
+        project_doc = await _read_project(cosmos, project)
+        repo = str((project_doc or {}).get("githubRepo") or "")
+    if not repo:
+        raise HTTPException(409, f"run {run.id} has no target GitHub repo")
+
+    minter: GitHubAppTokenMinter | None = getattr(app.state, "gh_minter", None)
+    if minter is None:
+        raise HTTPException(503, "github app token minter is not configured")
+    try:
+        token, expires_at = await minter.repository_token(repo=repo)
+    except Exception:
+        log.exception("native github-token mint failed for run %s repo %s", run.id, repo)
+        raise HTTPException(502, "github token mint failed")
+    return NativeGitHubTokenResult(repo=repo, token=token, expires_at=expires_at)
 
 
 # ─── Decision-engine replay (#111 smoke-test substrate) ────────────────────
