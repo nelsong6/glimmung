@@ -47,6 +47,8 @@ from glimmung.models import BudgetConfig
 
 log = logging.getLogger(__name__)
 
+_RECENT_COMMENT_LIMIT = 5
+
 
 class DispatchResult(BaseModel):
     """The outcome of a dispatch_run call.
@@ -214,6 +216,9 @@ async def dispatch_run(
         "issue_lock_holder_id": holder_id,
         **(extra_metadata or {}),
     }
+    workflow_metadata = workflow_doc.get("metadata") or {}
+    if workflow_metadata.get("include_recent_comments"):
+        metadata["recent_comments"] = _format_recent_comments(issue.comments)
     if run_id is not None:
         metadata["run_id"] = run_id
         metadata["attempt_index"] = "0"
@@ -294,6 +299,14 @@ async def dispatch_run(
         host=host.name if host is not None else None,
         workflow=workflow_actual_name,
         issue_lock_holder_id=holder_id,
+    )
+
+
+def _format_recent_comments(comments: list[Any]) -> str:
+    recent = sorted(comments, key=lambda c: c.created_at)[-_RECENT_COMMENT_LIMIT:]
+    return "\n\n".join(
+        f"[{comment.created_at.isoformat()}] {comment.author}:\n{comment.body}"
+        for comment in recent
     )
 
 

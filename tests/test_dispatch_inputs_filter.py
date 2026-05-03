@@ -193,6 +193,7 @@ async def test_triage_metadata_passes_through_workflow_facing_keys(
             "attempt_index": "1",
             "pr_number": "42",
             "feedback": "please address X",
+            "recent_comments": "[2026-05-03T00:00:00+00:00] nelson:\ncontext",
             "prior_verification_artifact_url": "https://api.github.com/...",
             "issue_lock_holder_id": "01HOLDER",  # internal
         },
@@ -202,7 +203,7 @@ async def test_triage_metadata_passes_through_workflow_facing_keys(
     assert "issue_lock_holder_id" not in captured["inputs"]
     for forwarded in (
         "issue_number", "run_id", "attempt_index", "pr_number",
-        "feedback", "prior_verification_artifact_url",
+        "feedback", "recent_comments", "prior_verification_artifact_url",
     ):
         assert forwarded in captured["inputs"], f"{forwarded} should forward"
 
@@ -220,4 +221,5 @@ def test_allowlist_is_intentional_not_accidental():
         "prior_verification_artifact_url",
         "feedback",
         "pr_number",
+        "recent_comments",
     })
