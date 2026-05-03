@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     # its own origin so the user's tank auth cookie applies.
     tank_operator_base_url: str = "https://tank.romaine.life"
 
+    # Public dashboard origin. Used when syndicating thin pointers into
+    # external systems like GitHub while keeping rich PR context in Glimmung.
+    glimmung_base_url: str = "https://glimmung.romaine.life"
+
 
 @lru_cache
 def get_settings() -> Settings:

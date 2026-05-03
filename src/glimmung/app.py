@@ -33,6 +33,7 @@ from glimmung.github_app import (
     dispatch_workflow,
     open_pull_request,
     post_issue_comment,
+    update_pull_request_body,
     verify_webhook_signature,
 )
 from glimmung.locks import LockBusy
@@ -1089,8 +1090,9 @@ async def _dispatch_triage(
 async def _open_pr_primitive(*, run: Run, workflow: Workflow) -> None:
     """Open the PR for a run that just ADVANCEd. Branch is glimmung-
     dictated (`glimmung/<run_id>`); title comes from the linked issue,
-    body summarizes the run state. On success, stamps `pr_number` and
-    `pr_branch` on the Run via `link_pr_to_run`. On `PRCreateNoDiff`, the
+    body summarizes the run state in Glimmung; GitHub gets a thin pointer
+    back to the canonical Glimmung PR row. On success, stamps `pr_number`
+    and `pr_branch` on the Run via `link_pr_to_run`. On `PRCreateNoDiff`, the
     caller turns this into a run-level abort (per #69 v1 — no-diff is a
     terminal error). On `PRCreateAlreadyExists`, the existing PR's number
     is recorded and the run continues — supports rewind/recycle paths
@@ -1102,11 +1104,20 @@ async def _open_pr_primitive(*, run: Run, workflow: Workflow) -> None:
 
     head = f"glimmung/{run.id}"
     base = "main"  # v1: hardcoded; future PhaseSpec.pr.base extends this
-    title, body = await _compose_pr_body(cosmos, run=run, workflow=workflow)
+    title, rich_body = await _compose_pr_body(cosmos, run=run, workflow=workflow)
+    initial_github_body = _thin_github_pr_body(
+        run=run,
+        glimmung_url=None,
+    )
 
     try:
         pr_number, html_url = await open_pull_request(
-            minter, repo=run.issue_repo, head=head, base=base, title=title, body=body,
+            minter,
+            repo=run.issue_repo,
+            head=head,
+            base=base,
+            title=title,
+            body=initial_github_body,
         )
     except PRCreateAlreadyExists as already:
         log.info(
@@ -1114,6 +1125,51 @@ async def _open_pr_primitive(*, run: Run, workflow: Workflow) -> None:
             run.issue_repo, head, already.pr_number,
         )
         pr_number = already.pr_number
+        html_url = already.html_url
+
+    pr, etag, _created = await pr_ops.ensure_pr_for_github(
+        cosmos,
+        project=run.project,
+        repo=run.issue_repo,
+        number=pr_number,
+        title=title,
+        branch=head,
+        body=rich_body,
+        base_ref=base,
+        html_url=html_url,
+    )
+    pr, _ = await pr_ops.update_pr(
+        cosmos,
+        pr=pr,
+        etag=etag,
+        title=title,
+        branch=head,
+        body=rich_body,
+        base_ref=base,
+        html_url=html_url,
+        linked_issue_id=run.issue_id or "",
+        linked_run_id=run.id,
+    )
+
+    glimmung_url = _glimmung_pr_detail_url(
+        settings=app.state.settings if getattr(app.state, "settings", None) is not None else get_settings(),
+        repo=run.issue_repo,
+        number=pr_number,
+    )
+    try:
+        await update_pull_request_body(
+            minter,
+            repo=run.issue_repo,
+            number=pr_number,
+            body=_thin_github_pr_body(run=run, glimmung_url=glimmung_url),
+        )
+    except Exception:
+        log.exception(
+            "pr-primitive: failed to update thin GitHub body for %s#%d",
+            run.issue_repo,
+            pr_number,
+        )
+
     # Stamp on the run.
     lookup = await run_ops.find_run_by_workflow_run(
         cosmos, project=run.project,
@@ -1125,6 +1181,22 @@ async def _open_pr_primitive(*, run: Run, workflow: Workflow) -> None:
             cosmos, run=run, etag=etag,
             pr_number=pr_number, pr_branch=head,
         )
+
+
+def _glimmung_pr_detail_url(*, settings: Settings, repo: str, number: int) -> str:
+    base_url = getattr(settings, "glimmung_base_url", "https://glimmung.romaine.life")
+    return f"{base_url.rstrip('/')}/prs/{repo}/{number}"
+
+
+def _thin_github_pr_body(*, run: Run, glimmung_url: str | None) -> str:
+    parts: list[str] = []
+    if run.issue_repo and run.issue_number:
+        parts.append(f"Closes {run.issue_repo}#{run.issue_number}")
+    if glimmung_url:
+        parts += ["", f"Canonical context: {glimmung_url}"]
+    else:
+        parts += ["", "Canonical context is being prepared in Glimmung."]
+    return "\n".join(parts).strip()
 
 
 async def _compose_pr_body(
