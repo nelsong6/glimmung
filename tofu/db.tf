@@ -93,8 +93,9 @@ resource "azurerm_cosmosdb_sql_container" "runs" {
   }
 }
 
-# Ordered native-runner event/log stream. One doc per `(run_id, job_id, seq)`;
-# partitioned by project so hot log reads stay with the run graph.
+# Ordered native-runner event/log stream. One doc per
+# `(run_id, attempt_index, job_id, seq)`; partitioned by project so hot log
+# reads stay with the run graph.
 resource "azurerm_cosmosdb_sql_container" "run_events" {
   name                = "run_events"
   resource_group_name = local.infra.resource_group_name
