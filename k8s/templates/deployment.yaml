@@ -10,6 +10,8 @@ spec:
       app: glimmung
   template:
     metadata:
+      annotations:
+        glimmung.io/service-account-client-id: {{ .Values.serviceAccountClientId | quote }}
       labels:
         app: glimmung
         azure.workload.identity/use: "true"
