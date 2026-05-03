@@ -560,33 +560,38 @@ async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host
         return False
 
 
-async def _release_native_attempt_lease(cosmos: Cosmos, run: Run) -> None:
-    """Release the active native lease for the latest attempt, if present."""
-    if not run.attempts:
-        return
-    attempt = run.attempts[-1]
+async def _release_native_run_leases(cosmos: Cosmos, run: Run) -> int:
+    """Release active/pending native leases for a Run, if present.
+
+    Older native dispatches recorded incorrect attempt_index metadata on
+    forwarded phases. Terminal cleanup keys by run_id so those stale leases
+    cannot survive abort/completion and later block native capacity.
+    """
     docs = await query_all(
         cosmos.leases,
         (
-            "SELECT * FROM c WHERE c.project = @p AND c.state = @s "
-            "AND c.metadata.native_k8s = true AND c.metadata.run_id = @r "
-            "AND c.metadata.attempt_index = @a"
+            "SELECT * FROM c WHERE c.project = @p "
+            "AND (c.state = @active OR c.state = @pending) "
+            "AND c.metadata.native_k8s = true AND c.metadata.run_id = @r"
         ),
         parameters=[
             {"name": "@p", "value": run.project},
-            {"name": "@s", "value": LeaseState.ACTIVE.value},
+            {"name": "@active", "value": LeaseState.ACTIVE.value},
+            {"name": "@pending", "value": LeaseState.PENDING.value},
             {"name": "@r", "value": run.id},
-            {"name": "@a", "value": str(attempt.attempt_index)},
         ],
     )
+    released = 0
     for doc in docs:
         try:
             await lease_ops.release(cosmos, doc["id"], run.project)
+            released += 1
         except Exception:
             log.exception(
-                "failed to release native lease %s for run %s attempt %d",
-                doc.get("id"), run.id, attempt.attempt_index,
+                "failed to release native lease %s for run %s",
+                doc.get("id"), run.id,
             )
+    return released
 
 
 async def _cleanup_native_attempt_secret(run: Run, attempt_index: int) -> None:
@@ -2080,8 +2085,13 @@ async def _abort_run(
             log.exception("abort_run: mark_aborted failed for run %s", run.id)
             raise HTTPException(500, f"mark_aborted failed for {run.id}")
 
-    # 4. Release the issue lock + PR lock if the Run was holding them.
+    # 4. Release native leases plus issue/PR locks if the Run was holding them.
     # Idempotent — release_lock returns False if we don't hold it.
+    try:
+        await _release_native_run_leases(cosmos, run)
+    except Exception:
+        log.exception("abort_run: native lease release failed for run %s", run.id)
+
     issue_lock_released: bool | None = None
     issue_lock_key = _issue_lock_key(
         issue_repo=run.issue_repo,
@@ -2466,7 +2476,7 @@ async def native_run_completed(
     run, etag = await _archive_native_attempt_logs(
         cosmos, run=run, etag=etag, attempt_index=attempt_index,
     )
-    await _release_native_attempt_lease(cosmos, run)
+    await _release_native_run_leases(cosmos, run)
     decision_value = await _process_run_completion(
         run=run,
         etag=etag,
@@ -2522,7 +2532,7 @@ async def native_run_failed(
     run, _etag = await _archive_native_attempt_logs(
         cosmos, run=run, etag=_etag, attempt_index=attempt_index,
     )
-    await _release_native_attempt_lease(cosmos, run)
+    await _release_native_run_leases(cosmos, run)
     result = await _abort_run(
         cosmos,
         getattr(app.state, "gh_minter", None),
