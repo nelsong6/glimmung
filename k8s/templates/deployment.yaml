@@ -41,6 +41,8 @@ spec:
               value: {{ .Values.nativeRunner.globalConcurrency | quote }}
             - name: NATIVE_RUNNER_JOB_TTL_SECONDS
               value: {{ .Values.nativeRunner.jobTtlSeconds | quote }}
+            - name: NATIVE_RUNNER_NAMESPACE_ROLE
+              value: {{ .Values.nativeRunner.namespaceRole | quote }}
             - name: ARTIFACTS_STORAGE_ACCOUNT
               value: {{ .Values.artifacts.storageAccount | quote }}
             - name: ARTIFACTS_CONTAINER

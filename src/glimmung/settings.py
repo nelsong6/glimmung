@@ -90,6 +90,7 @@ class Settings(BaseSettings):
     native_runner_project_concurrency: int = 5
     native_runner_global_concurrency: int = 5
     native_runner_job_ttl_seconds: int = 259200
+    native_runner_namespace_role: str = "admin"
 
     # Private Blob container for native runner logs and future evidence.
     # Glimmung serves these back to users; callers should persist logical
