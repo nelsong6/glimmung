@@ -8,10 +8,9 @@ image:
 
 namespace: glimmung
 serviceAccount: infra-shared
-# Pinned by tofu/identity.tf's `glimmung_identity_client_id` output. Update
-# here whenever that identity is recreated (rare — it's stable resource
-# state). Bypassing the prior reuse of infra-shared-identity (overbroad
-# RBAC) — see tofu/identity.tf for the rationale.
+# Pinned by tofu/identity.tf's current `glimmung_identity_client_id` output.
+# After the staged dedicated-identity apply, update this to
+# `glimmung_dedicated_identity_client_id` in a chart-only cutover PR.
 serviceAccountClientId: "718fd28c-892a-43e9-89c3-9ee3f0f8d073"
 replicas: 1
 
@@ -22,9 +21,8 @@ nativeRunner:
   projectConcurrency: 5
   globalConcurrency: 5
   jobTtlSeconds: 259200
-  # Filled by tofu once the dedicated native runner identity is applied.
-  # Until then the ServiceAccount is created without workload identity
-  # annotation; the launcher code is still deployable and testable.
+  # Filled by tofu's `glimmung_native_runner_identity_client_id` output once
+  # the native runner identity is applied.
   serviceAccountClientId: ""
 
 # In-cluster admin auth via Kubernetes service-account tokens. When enabled,

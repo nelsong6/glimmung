@@ -21,8 +21,8 @@ Glimmung is a FastAPI dispatcher with a Vite + React dashboard:
   which is the per-issue agent-CI chart (Deployment + Service +
   HTTPRoute named after release). The validation env you'll evaluate
   against is a `k8s/issue/` install that picked up your tag.
-- `tofu/` — Cosmos database + containers, glimmung-identity (workload
-  identity), Entra app reg.
+- `tofu/` — Cosmos database + containers, Glimmung-owned managed
+  identities, native-runner artifact storage, Entra app reg.
 - `Dockerfile` — multi-stage: node frontend build → python backend.
 
 Re-read `README.md` and any `CLAUDE.md` files before making non-trivial
