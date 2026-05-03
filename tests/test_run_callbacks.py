@@ -872,6 +872,7 @@ async def test_completed_dispatches_next_phase_on_advance(cosmos, app_state_with
         "image_tag": "issue-200-999-abc",
     }
     assert md["run_id"] == run.id
+    assert md["attempt_index"] == "1"
 
 
 @pytest.mark.asyncio

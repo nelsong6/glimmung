@@ -1180,6 +1180,7 @@ async def _dispatch_next_phase(
         phase_kind=next_phase.kind,
         jobs=native_job_attempts_from_specs(next_phase.jobs),
     )
+    attempt_index = run.attempts[-1].attempt_index
 
     requirements = next_phase.requirements or workflow_model.default_requirements
     issue_metadata = await _run_issue_workflow_metadata(cosmos, run)
@@ -1188,10 +1189,7 @@ async def _dispatch_next_phase(
         "issue_lock_holder_id": run.issue_lock_holder_id or "",
         "run_id": run.id,
         "phase_name": next_phase.name,
-        # Per-phase counter (0 == first dispatch of this phase). The
-        # PhaseAttempt.attempt_index field stays run-flat for accounting;
-        # this metadata field is the value the consumer workflow reads.
-        "attempt_index": "0",
+        "attempt_index": str(attempt_index),
         # Substituted phase inputs land here so the promote-loop path
         # (host comes free later) can splat them into the dispatch the
         # same way the inline path does. Cosmos round-trips dict[str,
@@ -1245,7 +1243,7 @@ async def _dispatch_next_phase(
             if k in _DISPATCH_INPUT_KEYS
         },
         "run_id": run.id,
-        "attempt_index": "0",
+        "attempt_index": str(attempt_index),
         **{k: str(v) for k, v in substituted.items()},
     }
     try:

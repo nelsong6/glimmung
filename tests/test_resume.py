@@ -349,6 +349,22 @@ async def test_dispatch_resumed_run_happy_path(cosmos, app_state):
     assert new_run.attempts[1].skipped_from_run_id is None
     assert new_run.attempts[1].completed_at is None  # awaiting /completed callback
 
+    # The entrypoint lease must use the run-flat PhaseAttempt index, not
+    # a per-phase counter that collides with the skipped env-prep attempt.
+    from glimmung.db import query_all
+    lease_docs = await query_all(
+        cosmos.leases,
+        "SELECT * FROM c WHERE c.project = @p AND c.metadata.run_id = @r",
+        parameters=[
+            {"name": "@p", "value": prior.project},
+            {"name": "@r", "value": new_run.id},
+        ],
+    )
+    assert len(lease_docs) == 1
+    lease_md = lease_docs[0]["metadata"]
+    assert lease_md["phase_name"] == "agent-execute"
+    assert lease_md["attempt_index"] == "1"
+
     # Issue lock was claimed for the resumed run.
     lock_doc = await cosmos.locks.read_item(
         item="issue::nelsong6%2Fambience%23116", partition_key="issue",
