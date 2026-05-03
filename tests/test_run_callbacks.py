@@ -695,6 +695,69 @@ async def _register_2phase_workflow(cosmos, project: str, name: str = "agent-run
     })
 
 
+async def _register_2phase_native_retry_workflow(
+    cosmos,
+    project: str,
+    name: str = "agent-run",
+) -> None:
+    await cosmos.workflows.create_item({
+        "id": name,
+        "name": name,
+        "project": project,
+        "phases": [
+            {
+                "name": "env-prep",
+                "kind": "gha_dispatch",
+                "workflowFilename": "env-prep.yml",
+                "workflowRef": "main",
+                "requirements": None,
+                "verify": False,
+                "recyclePolicy": None,
+                "inputs": {},
+                "outputs": ["validation_url", "namespace", "image_tag"],
+            },
+            {
+                "name": "agent-execute",
+                "kind": "k8s_job",
+                "workflowFilename": "",
+                "workflowRef": "main",
+                "requirements": None,
+                "verify": True,
+                "recyclePolicy": {
+                    "maxAttempts": 3,
+                    "on": ["verify_fail"],
+                    "landsAt": "self",
+                },
+                "inputs": {
+                    "validation_url": "${{ phases.env-prep.outputs.validation_url }}",
+                    "namespace": "${{ phases.env-prep.outputs.namespace }}",
+                    "image_tag": "${{ phases.env-prep.outputs.image_tag }}",
+                },
+                "outputs": [],
+                "jobs": [{
+                    "id": "agent",
+                    "name": None,
+                    "image": "runner:latest",
+                    "command": [],
+                    "args": [],
+                    "env": {},
+                    "steps": [
+                        {"slug": "clone-repo", "title": None},
+                        {"slug": "run-agent", "title": None},
+                    ],
+                    "timeoutSeconds": None,
+                }],
+            },
+        ],
+        "pr": {"enabled": False, "recyclePolicy": None},
+        "budget": {"total": 25.0},
+        "triggerLabel": "agent-run",
+        "defaultRequirements": {},
+        "metadata": {},
+        "createdAt": datetime.now(UTC).isoformat(),
+    })
+
+
 async def _seed_run_for_phase(
     cosmos,
     *,
@@ -799,8 +862,8 @@ async def test_completed_dispatches_next_phase_on_advance(cosmos, app_state_with
         parameters=[{"name": "@p", "value": "ambience"}],
     )
     phase2_leases = [
-        l for l in leases
-        if (l.get("metadata") or {}).get("phase_name") == "agent-execute"
+        lease for lease in leases
+        if (lease.get("metadata") or {}).get("phase_name") == "agent-execute"
     ]
     assert len(phase2_leases) == 1
     md = phase2_leases[0]["metadata"]
@@ -809,6 +872,92 @@ async def test_completed_dispatches_next_phase_on_advance(cosmos, app_state_with
         "image_tag": "issue-200-999-abc",
     }
     assert md["run_id"] == run.id
+
+
+@pytest.mark.asyncio
+async def test_retry_dispatch_carries_phase_inputs_to_native_phase(
+    cosmos,
+    app_state_with_settings,
+):
+    from glimmung.db import query_all
+    await _register_project(cosmos, "ambience", "nelsong6/ambience")
+    await _register_2phase_native_retry_workflow(cosmos, "ambience")
+    now = datetime.now(UTC)
+    run = Run(
+        id="01KQTEST_RUN_RETRY_NATIVE",
+        project="ambience",
+        workflow="agent-run",
+        issue_id="01HZZZTESTISSUE",
+        issue_repo="nelsong6/ambience",
+        issue_number=202,
+        state=RunState.IN_PROGRESS,
+        budget=BudgetConfig(total=25.0),
+        attempts=[
+            PhaseAttempt(
+                attempt_index=0,
+                phase="env-prep",
+                workflow_filename="env-prep.yml",
+                dispatched_at=now,
+                completed_at=now,
+                conclusion="success",
+                phase_outputs={
+                    "validation_url": "https://preview.example",
+                    "namespace": "glim-run-01-test-0",
+                    "image_tag": "glim-run-01-test-0",
+                },
+            ),
+            PhaseAttempt(
+                attempt_index=1,
+                phase="agent-execute",
+                phase_kind="k8s_job",
+                workflow_filename="k8s_job:agent-execute",
+                dispatched_at=now,
+            ),
+        ],
+        cumulative_cost_usd=0.0,
+        issue_lock_holder_id="01HOLDER",
+        created_at=now,
+        updated_at=now,
+    )
+    await cosmos.runs.create_item(run.model_dump(mode="json"))
+
+    body = RunCompletedRequest(
+        workflow_run_id=123,
+        conclusion="success",
+        verification={
+            "schema_version": 1,
+            "status": VerificationStatus.FAIL.value,
+            "reasons": ["screenshot_capture_failed"],
+            "evidence_refs": [],
+            "cost_usd": 0.01,
+        },
+    )
+    with patch("glimmung.app.app", app_state_with_settings):
+        result = await run_completed(body, project="ambience", run_id=run.id)
+    assert result.decision == "retry"
+
+    found = await run_ops.read_run(cosmos, project="ambience", run_id=run.id)
+    final, _ = found  # type: ignore[misc]
+    assert final.state == RunState.IN_PROGRESS
+    assert len(final.attempts) == 3
+    assert final.attempts[-1].phase == "agent-execute"
+    assert final.attempts[-1].phase_kind == "k8s_job"
+
+    leases = await query_all(
+        cosmos.leases,
+        "SELECT * FROM c WHERE c.project = @p",
+        parameters=[{"name": "@p", "value": "ambience"}],
+    )
+    retry_leases = [
+        lease for lease in leases
+        if (lease.get("metadata") or {}).get("attempt_index") == "2"
+    ]
+    assert len(retry_leases) == 1
+    assert retry_leases[0]["metadata"]["phase_inputs"] == {
+        "validation_url": "https://preview.example",
+        "namespace": "glim-run-01-test-0",
+        "image_tag": "glim-run-01-test-0",
+    }
 
 
 @pytest.mark.asyncio

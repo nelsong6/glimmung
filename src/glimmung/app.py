@@ -965,6 +965,23 @@ async def _dispatch_retry(
         )
         return
 
+    prior_outputs = _collect_phase_outputs(run)
+    try:
+        substituted = substitute_phase_inputs(target_phase, prior_outputs)
+    except (KeyError, ValueError):
+        log.exception(
+            "retry: input substitution failed for run %s phase %r; aborting",
+            run.id, target_phase.name,
+        )
+        await run_ops.mark_aborted(
+            cosmos, run=run, etag=etag,
+            reason=(
+                f"retry: input substitution failed for phase "
+                f"{target_phase.name!r} — see glimmung logs"
+            ),
+        )
+        return
+
     # Append the next attempt *before* dispatching so a webhook redelivery
     # of the previous completion can detect and skip duplicate decision cycles.
     run, _ = await run_ops.append_attempt(
@@ -982,6 +999,7 @@ async def _dispatch_retry(
         "run_id": run.id,
         "phase_name": target_phase.name,
         "attempt_index": str(len(run.attempts) - 1),
+        "phase_inputs": dict(substituted),
     }
     lease, host = await _acquire_phase_lease(
         cosmos=cosmos,
@@ -1035,6 +1053,7 @@ async def _dispatch_retry(
             k: v for k, v in issue_metadata.items()
             if k in _DISPATCH_INPUT_KEYS
         },
+        **dict(substituted),
         "run_id": run.id,
         "prior_verification_artifact_url": prior_artifact_url,
         "attempt_index": str(len(run.attempts) - 1),
