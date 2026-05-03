@@ -91,6 +91,12 @@ class Settings(BaseSettings):
     native_runner_global_concurrency: int = 5
     native_runner_job_ttl_seconds: int = 259200
 
+    # Private Blob container for native runner logs and future evidence.
+    # Glimmung serves these back to users; callers should persist logical
+    # blob:// refs rather than raw storage URLs.
+    artifacts_storage_account: str = "romaineglimmungartifacts"
+    artifacts_container: str = "artifacts"
+
 
 @lru_cache
 def get_settings() -> Settings:

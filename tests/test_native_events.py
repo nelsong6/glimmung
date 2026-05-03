@@ -65,13 +65,32 @@ class _NativeLauncher:
         self.deleted.append((run_id, attempt_index))
 
 
-def _app_with(cosmos, *, gh_minter=None, native_k8s_launcher=None):
+class _ArtifactStore:
+    def __init__(self, *, fail: bool = False):
+        self.fail = fail
+        self.uploads = []
+
+    async def upload_json(self, *, blob_name: str, payload: dict):
+        if self.fail:
+            raise RuntimeError("archive unavailable")
+        self.uploads.append({"blob_name": blob_name, "payload": payload})
+        return f"blob://artifacts/{blob_name}"
+
+
+def _app_with(
+    cosmos,
+    *,
+    gh_minter=None,
+    native_k8s_launcher=None,
+    artifact_store=None,
+):
     return SimpleNamespace(
         state=SimpleNamespace(
             cosmos=cosmos,
             gh_minter=gh_minter,
             settings=None,
             native_k8s_launcher=native_k8s_launcher,
+            artifact_store=artifact_store or _ArtifactStore(),
         )
     )
 
@@ -265,9 +284,14 @@ async def test_native_completion_requires_no_sequence_gaps(cosmos, monkeypatch):
 async def test_native_completion_drives_decision_and_marks_run_passed(cosmos, monkeypatch):
     run = await _seed_native_run(cosmos)
     launcher = _NativeLauncher()
+    artifact_store = _ArtifactStore()
     monkeypatch.setattr(
         "glimmung.app.app",
-        _app_with(cosmos, native_k8s_launcher=launcher),
+        _app_with(
+            cosmos,
+            native_k8s_launcher=launcher,
+            artifact_store=artifact_store,
+        ),
     )
     await cosmos.leases.create_item({
         "id": "01LEASE",
@@ -335,18 +359,32 @@ async def test_native_completion_drives_decision_and_marks_run_passed(cosmos, mo
     assert doc["state"] == "passed"
     assert doc["attempts"][0]["workflow_run_id"] is None
     assert doc["attempts"][0]["verification"]["status"] == "pass"
+    assert doc["attempts"][0]["log_archive_url"] == (
+        f"blob://artifacts/runs/{run.project}/{run.id}/attempts/0/native-events.json"
+    )
     lease = await cosmos.leases.read_item(item="01LEASE", partition_key=run.project)
     assert lease["state"] == "released"
     assert launcher.deleted == [(run.id, 0)]
+    assert artifact_store.uploads[0]["blob_name"] == (
+        f"runs/{run.project}/{run.id}/attempts/0/native-events.json"
+    )
+    assert [event["seq"] for event in artifact_store.uploads[0]["payload"]["events"]] == [
+        1, 2, 3, 4,
+    ]
 
 
 @pytest.mark.asyncio
 async def test_native_failure_deletes_attempt_secret(cosmos, monkeypatch):
     run = await _seed_native_run(cosmos)
     launcher = _NativeLauncher()
+    artifact_store = _ArtifactStore()
     monkeypatch.setattr(
         "glimmung.app.app",
-        _app_with(cosmos, native_k8s_launcher=launcher),
+        _app_with(
+            cosmos,
+            native_k8s_launcher=launcher,
+            artifact_store=artifact_store,
+        ),
     )
 
     result = await native_run_failed(
@@ -358,6 +396,72 @@ async def test_native_failure_deletes_attempt_secret(cosmos, monkeypatch):
 
     assert result.state == "aborted"
     assert launcher.deleted == [(run.id, 0)]
+    doc = await cosmos.runs.read_item(item=run.id, partition_key=run.project)
+    assert doc["attempts"][0]["log_archive_url"] == (
+        f"blob://artifacts/runs/{run.project}/{run.id}/attempts/0/native-events.json"
+    )
+    assert artifact_store.uploads[0]["payload"]["events"] == []
+
+
+@pytest.mark.asyncio
+async def test_native_completion_fails_before_decision_when_archive_upload_fails(
+    cosmos, monkeypatch,
+):
+    run = await _seed_native_run(cosmos)
+    monkeypatch.setattr(
+        "glimmung.app.app",
+        _app_with(cosmos, artifact_store=_ArtifactStore(fail=True)),
+    )
+
+    seq = 1
+    for step in ("clone-repo", "run-agent"):
+        await native_run_event(
+            NativeRunEventRequest(
+                job_id="agent",
+                seq=seq,
+                event=NativeRunEventType.STEP_STARTED,
+                step_slug=step,
+            ),
+            request=_request(),
+            project=run.project,
+            run_id=run.id,
+        )
+        seq += 1
+        await native_run_event(
+            NativeRunEventRequest(
+                job_id="agent",
+                seq=seq,
+                event=NativeRunEventType.STEP_COMPLETED,
+                step_slug=step,
+                exit_code=0,
+            ),
+            request=_request(),
+            project=run.project,
+            run_id=run.id,
+        )
+        seq += 1
+
+    with pytest.raises(HTTPException) as excinfo:
+        await native_run_completed(
+            NativeRunCompletedRequest(
+                verification={
+                    "schema_version": 1,
+                    "status": VerificationStatus.PASS.value,
+                    "reasons": [],
+                    "evidence_refs": [],
+                    "cost_usd": 0.05,
+                },
+            ),
+            request=_request(),
+            project=run.project,
+            run_id=run.id,
+        )
+
+    assert excinfo.value.status_code == 502
+    doc = await cosmos.runs.read_item(item=run.id, partition_key=run.project)
+    assert doc["state"] == "in_progress"
+    assert doc["attempts"][0]["decision"] is None
+    assert doc["attempts"][0]["log_archive_url"] is None
 
 
 @pytest.mark.asyncio

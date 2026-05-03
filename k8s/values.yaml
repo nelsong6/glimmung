@@ -24,6 +24,10 @@ nativeRunner:
   # `glimmung_native_runner_identity_client_id` output.
   serviceAccountClientId: "a865aa27-e76e-4363-ab53-375712bd6db8"
 
+artifacts:
+  storageAccount: romaineglimmungartifacts
+  container: artifacts
+
 # In-cluster admin auth via Kubernetes service-account tokens. When enabled,
 # admin endpoints (/v1/projects, /v1/workflows, /v1/hosts) accept a bearer
 # token whose subject — resolved through TokenReview — matches an entry in

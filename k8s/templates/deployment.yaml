@@ -41,6 +41,10 @@ spec:
               value: {{ .Values.nativeRunner.globalConcurrency | quote }}
             - name: NATIVE_RUNNER_JOB_TTL_SECONDS
               value: {{ .Values.nativeRunner.jobTtlSeconds | quote }}
+            - name: ARTIFACTS_STORAGE_ACCOUNT
+              value: {{ .Values.artifacts.storageAccount | quote }}
+            - name: ARTIFACTS_CONTAINER
+              value: {{ .Values.artifacts.container | quote }}
           envFrom:
             - secretRef:
                 name: {{ .Values.externalSecret.secretName }}
