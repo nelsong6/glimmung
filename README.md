@@ -226,6 +226,9 @@ The attended-pickup launch flow ([#127](https://github.com/nelsong6/glimmung/iss
 is dogfooded against real Glimmung PR rows: a Glimmung agent run produces an
 actual PR in this repo, and that PR is the fixture used to exercise
 `session ready` / `launch session` end-to-end before #127 can close.
+A recorded exercise of this flow ran on 2026-05-03 from glimmung run
+`01KQPFHHE9V0KYVHWFG6R4Z3T1`, with the resulting Glimmung PR used as the
+launch-from fixture for tank-operator.
 
 ## Verify-loop substrate (#18)
 
