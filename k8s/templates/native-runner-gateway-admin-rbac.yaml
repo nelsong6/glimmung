@@ -1,0 +1,13 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: glimmung-native-gateway-admin
+  labels:
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+rules:
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources:
+      - httproutes
+      - grpcroutes
+      - referencegrants
+    verbs: ["create", "delete", "deletecollection", "get", "list", "patch", "update", "watch"]
