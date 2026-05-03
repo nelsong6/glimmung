@@ -14,7 +14,10 @@ from .glimmung_client import GlimmungClient
 def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
     @mcp.tool()
     def get_issue(repo_owner: str, repo_name: str, issue_number: int) -> dict[str, Any]:
-        """Detail view of a glimmung Issue keyed by GitHub repo coords.
+        """Get a Glimmung issue by GitHub repository owner/name and GitHub issue number.
+
+        Use to inspect a GitHub-backed Glimmung Issue before patching it,
+        dispatching a run, reviewing locks, or finding its Glimmung-native id.
         Returns title, body, state, labels, last_run_id, last_run_state,
         issue_lock_held, plus the glimmung `id` and `project` (use those
         for patch_issue if you intend to mutate)."""
@@ -22,47 +25,64 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
 
     @mcp.tool()
     def get_issue_by_id(project: str, issue_id: str) -> dict[str, Any]:
-        """Detail view of a glimmung Issue keyed by its glimmung id. Use
-        this for glimmung-native issues that have no GitHub counterpart."""
+        """Get a Glimmung issue by project and Glimmung issue id.
+
+        Use this for glimmung-native issues that have no GitHub counterpart."""
         return client.get(f"/v1/issues/by-id/{project}/{issue_id}")
 
     @mcp.tool()
     def get_issue_graph(repo_owner: str, repo_name: str, issue_number: int) -> dict[str, Any]:
-        """Lineage graph for one Issue: every Run dispatched against it,
+        """Get the Glimmung lineage graph for one issue, including runs, phases, reports, and signals.
+
+        Lineage graph for one Issue: every Run dispatched against it,
         every PhaseAttempt inside each Run, the Report(s) opened, and the
         Signals fed back."""
         return client.get(f"/v1/issues/{repo_owner}/{repo_name}/{issue_number}/graph")
 
     @mcp.tool()
     def list_issues() -> list[dict[str, Any]]:
-        """List all glimmung Issues across projects."""
+        """List all Glimmung issues across projects.
+
+        Use to discover issue ids, project names, GitHub-backed issues, and
+        glimmung-native issues before dispatching or patching.
+        """
         return client.get("/v1/issues")
 
     @mcp.tool()
     def get_report(repo_owner: str, repo_name: str, pr_number: int) -> dict[str, Any]:
-        """Detail view of a Glimmung Report keyed by GitHub PR coords."""
+        """Get a Glimmung report by GitHub repository owner/name and pull request (PR) number.
+
+        Use to inspect PR-backed report state, linked issue/run ids, branch,
+        merge state, and report metadata.
+        """
         return client.get(f"/v1/reports/{repo_owner}/{repo_name}/{pr_number}")
 
     @mcp.tool()
     def get_report_by_id(project: str, report_id: str) -> dict[str, Any]:
-        """Detail view of a Glimmung Report keyed by its canonical id."""
+        """Get a Glimmung report by project and canonical Glimmung report id."""
         return client.get(f"/v1/reports/by-id/{project}/{report_id}")
 
     @mcp.tool()
     def list_reports() -> list[dict[str, Any]]:
-        """List all Glimmung Reports across projects."""
+        """List all Glimmung reports across projects.
+
+        Use to find reports associated with GitHub pull requests, branches,
+        issues, or runs.
+        """
         return client.get("/v1/reports")
 
     @mcp.tool()
     def get_state() -> dict[str, Any]:
-        """Snapshot of hosts, leases, and recent runs. Same shape the
+        """Get Glimmung control-plane state: hosts, leases, locks, and recent runs.
+
+        Snapshot of hosts, leases, and recent runs. Same shape the
         /v1/events SSE feed pushes; this returns the latest snapshot
         point-in-time."""
         return client.get("/v1/state")
 
     @mcp.tool()
     def list_projects() -> list[dict[str, Any]]:
-        """List configured glimmung projects."""
+        """List configured Glimmung projects and their GitHub repository bindings."""
         return client.get("/v1/projects")
 
     @mcp.tool()
@@ -71,7 +91,9 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         github_repo: str,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Upsert a glimmung Project. Use this when standing up a new
+        """Create or update a Glimmung project mapped to a GitHub repository.
+
+        Upsert a glimmung Project. Use this when standing up a new
         repository in the control plane before registering workflows or
         native issues. `github_repo` is the canonical "owner/repo" slug;
         `metadata` is an optional free-form bag preserved on the Project."""
@@ -90,7 +112,9 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         capabilities: dict[str, Any] | None = None,
         drained: bool = False,
     ) -> dict[str, Any]:
-        """Upsert a runner Host. This is an admin/bootstrap tool: use it
+        """Create or update a Glimmung runner host and its dispatch capabilities.
+
+        Admin/bootstrap tool: use it
         to advertise a worker slot and its dispatch `capabilities`.
         `drained=True` keeps the host registered but ineligible for new
         leases."""
@@ -105,7 +129,11 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
 
     @mcp.tool()
     def list_workflows() -> list[dict[str, Any]]:
-        """List workflow definitions across projects."""
+        """List Glimmung workflow definitions across projects.
+
+        Use to discover workflow names, phase shapes, trigger labels, PR
+        settings, budgets, and requirements before patching or registering.
+        """
         return client.get("/v1/workflows")
 
     @mcp.tool()
@@ -118,7 +146,9 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         trigger_label: str = "issue-agent",
         default_requirements: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Upsert a Workflow (create or replace). Use this for the
+        """Create or replace a Glimmung workflow registration, including phases, PR policy, budget, and triggers.
+
+        Upsert a Workflow (create or replace). Use this for the
         structural fields `patch_workflow` won't touch: phase shape,
         declared inputs/outputs, recycle policy, trigger label, default
         requirements. Idempotent — re-registering the same shape is a
@@ -158,7 +188,9 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         pr_enabled: bool | None = None,
         budget_total: float | None = None,
     ) -> dict[str, Any]:
-        """Patch a Workflow's live rollout knobs (`pr.enabled`, `budget.total`).
+        """Patch Glimmung workflow rollout knobs such as PR creation and budget.
+
+        Patch a Workflow's live rollout knobs (`pr.enabled`, `budget.total`).
         All fields optional — None means "don't change". Structural fields
         (phases, recycle policy) are not patchable here; re-run
         register_workflow for those.
@@ -181,7 +213,9 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         labels: list[str] | None = None,
         state: str | None = None,
     ) -> dict[str, Any]:
-        """Patch an Issue. All fields optional — None means \"don't change\".
+        """Patch or update a Glimmung issue title, body, labels, or state.
+
+        All fields optional — None means \"don't change\".
         Pass an empty string to actually clear `body`, or an empty list to
         clear `labels`. `state` is \"open\" or \"closed\"; transitions route
         through close_issue / reopen_issue so closed_at is stamped
@@ -204,7 +238,9 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         body: str = "",
         labels: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Mint a glimmung-native Issue. No GitHub issue is created; the
+        """Create a Glimmung-native issue without creating a GitHub issue.
+
+        Mint a glimmung-native Issue. No GitHub issue is created; the
         returned `id` is the canonical handle for detail, comments, and
         dispatch APIs."""
         return client.post(
@@ -225,7 +261,10 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         source: str = "glimmung_ui",
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Enqueue a Signal for the drain loop. Common values:
+        """Enqueue a Glimmung signal for an issue, pull request (PR), or run.
+
+        Use to feed actionable feedback or trigger details into the drain loop.
+        Common values:
         `target_type` is `pr`, `issue`, or `run`; `target_repo` is the
         repository slug / partition key; `target_id` is a PR number,
         issue number, or run id. Put the actionable feedback or trigger
@@ -248,8 +287,12 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         synthetic_completion: dict[str, Any],
         override_workflow: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Pure-function replay of the decision engine against a Run, with
-        no Cosmos writes and no GHA dispatch. Returns the decision the
+        """Replay the Glimmung run decision engine without writes or dispatch.
+
+        Use to debug workflow verification, phase outputs, retry/recycle
+        decisions, PR opening decisions, and registration fixes. This is a
+        pure-function replay with no Cosmos writes and no GHA dispatch.
+        Returns the decision the
         engine *would* make for `synthetic_completion`, plus a next-action
         hint (which phase would advance, which recycle target would fire,
         what abort comment would be posted).
@@ -294,8 +337,11 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         entrypoint_phase: str,
         trigger_source: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Spawn a new Run from a terminal prior Run, picking up at
-        `entrypoint_phase`. All phases declared earlier in the workflow
+        """Resume a Glimmung run by spawning a new run from a terminal prior run at a chosen phase.
+
+        Use to re-drive failed or aborted multi-phase workflows without
+        re-running successful earlier phases. Picks up at `entrypoint_phase`.
+        All phases declared earlier in the workflow
         order are auto-skipped — each gets a synthesized PhaseAttempt
         with `phase_outputs` carried forward from the prior Run's same-
         named phase, and the multi-phase substitution path feeds those
@@ -343,9 +389,12 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         run_id: str,
         reason: str = "aborted_via_mcp",
     ) -> dict[str, Any]:
-        """Flip a Run from in_progress to aborted and release any locks
-        it was holding. Use when a Run is orphaned (no lease, no
-        workflow_run_id) and `cancel_lease` can't grip onto it.
+        """Abort a Glimmung run and release issue locks or run locks.
+
+        Use for orphaned, stuck, or intentionally cancelled runs. Flips a Run
+        from in_progress to aborted and releases any locks it was holding.
+        Use when a Run has no lease or workflow_run_id and `cancel_lease`
+        can't grip onto it.
 
         Idempotent — calling twice returns `state: already_terminal` the
         second time. If the Run has a workflow_run_id, a GH cancel is
@@ -362,12 +411,12 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         project: str | None = None,
         workflow: str | None = None,
     ) -> dict[str, Any]:
-        """Manually dispatch an agent run for a glimmung Issue. Same path
-        the dashboard's re-dispatch button takes: claims a host that
-        matches the workflow's requirements, creates a Run, and fires
-        the workflow_dispatch (or the first phase of a multi-phase
-        workflow). Useful for re-driving a run after a fix lands when
-        the original webhook trigger has already been consumed.
+        """Dispatch a Glimmung agent run for an issue and workflow.
+
+        Use to manually start or re-drive a run after a fix lands. Same path
+        the dashboard's re-dispatch button takes: claims a host that matches
+        the workflow's requirements, creates a Run, and fires the
+        workflow_dispatch event or the first phase of a multi-phase workflow.
 
         `issue_id` is the glimmung ULID (find via `get_issue` →
         `id`). `project` is optional — the server resolves it from
@@ -397,8 +446,10 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         linked_issue_id: str | None = None,
         linked_run_id: str | None = None,
     ) -> dict[str, Any]:
-        """Register a Glimmung Report after the GitHub PR exists. Idempotent
-        on `(repo, number)` and can attach `linked_issue_id` /
+        """Create or register a Glimmung report for an existing GitHub pull request (PR).
+
+        Use after creating a GitHub PR to link the PR back to Glimmung issue/run
+        state. Idempotent on `(repo, number)` and can attach `linked_issue_id` /
         `linked_run_id` during either create or re-registration."""
         payload: dict[str, Any] = {
             "project": project,
@@ -432,7 +483,12 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         state: str | None = None,
         merged_by: str | None = None,
     ) -> dict[str, Any]:
-        """Patch a Report. All fields optional; None means don't change."""
+        """Patch or update a Glimmung report linked to a GitHub pull request (PR).
+
+        Use to update report title, body, branch, base ref, head SHA, URL,
+        linked issue/run ids, state, or merged_by. All fields optional; None
+        means don't change.
+        """
         payload: dict[str, Any] = {}
         for k, v in {
             "title": title,
