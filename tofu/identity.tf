@@ -90,6 +90,15 @@ resource "azurerm_role_assignment" "native_runner_acr_push" {
   principal_id         = azurerm_user_assigned_identity.native_runner.principal_id
 }
 
+# Native app runners use `az acr build` for validation images because the
+# Kubernetes job does not have a Docker daemon. AcrPush covers direct image
+# push/pull, but ACR Tasks are management-plane operations on the registry.
+resource "azurerm_role_assignment" "native_runner_acr_build_contributor" {
+  scope                = data.azurerm_container_registry.romaine.id
+  role_definition_name = "Contributor"
+  principal_id         = azurerm_user_assigned_identity.native_runner.principal_id
+}
+
 output "glimmung_dedicated_identity_client_id" {
   value       = azurerm_user_assigned_identity.glimmung_dedicated.client_id
   description = "client_id of the Glimmung-owned glimmung-identity. Pin this into k8s/values.yaml."
