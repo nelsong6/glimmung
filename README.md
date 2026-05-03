@@ -225,7 +225,10 @@ stay unreachable.
 The attended-pickup launch flow ([#127](https://github.com/nelsong6/glimmung/issues/127))
 is dogfooded against real Glimmung PR rows: a Glimmung agent run produces an
 actual PR in this repo, and that PR is the fixture used to exercise
-`session ready` / `launch session` end-to-end before #127 can close.
+`session ready` / `launch session` end-to-end before #127 can close. This PR
+itself is one such fixture — opened by the agent run for glimmung-native
+issue `01KQPDK68XJ0GH0XEBXSDHF9PD`, with a live validation URL that
+tank-operator can launch a context session against.
 
 ## Verify-loop substrate (#18)
 
