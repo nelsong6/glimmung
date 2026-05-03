@@ -13,10 +13,12 @@ spec:
   hostnames:
     - {{ .Values.hostname }}
   parentRefs:
-    # Wildcard XListenerSet provisioned by the prod chart
-    # (k8s/templates/wildcard-listenerset.yaml). Lives in the same
-    # `glimmung` namespace where this chart installs, so no
-    # ReferenceGrant is needed.
+    # Gateway parentRef gives ExternalDNS a source for the per-issue A
+    # record; XListenerSet handles HTTPS on the wildcard listener.
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ .Values.gatewayName }}
+      namespace: {{ .Values.gatewayNamespace }}
     - group: gateway.networking.x-k8s.io
       kind: XListenerSet
       name: {{ .Values.attachListenerSet }}

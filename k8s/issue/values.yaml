@@ -32,6 +32,12 @@ cosmos:
 # the same `glimmung` namespace where this chart installs).
 attachListenerSet: glimmung-wildcard
 
+# ExternalDNS reads Gateway parentRefs from HTTPRoutes to create DNS
+# records. The XListenerSet serves HTTPS; this Gateway parentRef makes
+# the per-issue validation hostname resolvable.
+gatewayName: main
+gatewayNamespace: envoy-gateway-system
+
 # Surfaced for cleanup-by-label. The agent-run workflow sets
 # --set prNumber=<N> after the PR opens so the cleanup workflow
 # (agent-pr-cleanup.yml) can find releases by label and uninstall them.
