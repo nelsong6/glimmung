@@ -1,6 +1,6 @@
 name: Agent Run — agent-execute
 
-run-name: "#${{ inputs.issue_number }} agent-execute ${{ inputs.issue_title }} (${{ inputs.host }})"
+run-name: "issue ${{ inputs.issue_number || inputs.issue_id }} agent-execute ${{ inputs.issue_title }} (${{ inputs.host }})"
 
 # Phase 2 of the multi-phase agent-run pipeline (glimmung#102).
 # Runs the Claude agent against the validation env that env-prep
@@ -26,8 +26,8 @@ on:
         required: true
         type: string
       issue_number:
-        description: Issue number to address
-        required: true
+        description: Legacy GitHub issue number to address, when present.
+        required: false
         type: string
       issue_title:
         description: Issue title (informational)
@@ -127,6 +127,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       ISSUE_NUMBER: ${{ inputs.issue_number }}
+      GLIMMUNG_ISSUE_ID: ${{ inputs.issue_id }}
       ISSUE_TITLE: ${{ inputs.issue_title }}
       VALIDATION_URL: ${{ inputs.validation_url }}
       RELEASE_NAME: ${{ inputs.release_name }}
@@ -259,10 +260,15 @@ jobs:
           # AGENT_NAMESPACE follows the same `glimmung-issue-.*` pattern
           # the reflector matches on so the claude-oauth-ca ConfigMap
           # auto-replicates. Slug is reused from env-prep's IMAGE_TAG.
+          if [ -n "${ISSUE_NUMBER}" ] && [ "${ISSUE_NUMBER}" != "0" ]; then
+            issue_url="https://github.com/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}"
+          else
+            issue_url="${GLIMMUNG_BASE}/issues/${GLIMMUNG_PROJECT}/${GLIMMUNG_ISSUE_ID}"
+          fi
           {
             echo "AGENT_NAMESPACE=glimmung-${IMAGE_TAG}"
             echo "JOB_NAME=agent-${IMAGE_TAG}"
-            echo "ISSUE_URL=https://github.com/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}"
+            echo "ISSUE_URL=${issue_url}"
           } >> "$GITHUB_ENV"
 
       - name: Create per-run agent namespace
@@ -299,6 +305,7 @@ jobs:
             --namespace "${AGENT_NAMESPACE}" \
             --job-name "${JOB_NAME}" \
             --issue-number "${ISSUE_NUMBER}" \
+            --issue-id "${GLIMMUNG_ISSUE_ID}" \
             --issue-title "${ISSUE_TITLE}" \
             --issue-url "${ISSUE_URL}" \
             --validation-url "${VALIDATION_URL}" \
@@ -458,7 +465,9 @@ jobs:
           MAX_SCREENSHOTS: "20"
         run: |
           set -euo pipefail
-          prefix="issue-${ISSUE_NUMBER}/${GITHUB_RUN_ID}"
+          issue_ref="${ISSUE_NUMBER:-${GLIMMUNG_ISSUE_ID}}"
+          issue_ref="$(printf '%s' "${issue_ref}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-')"
+          prefix="issue-${issue_ref}/${GITHUB_RUN_ID}"
 
           staging=$(mktemp -d)
           mapfile -t pngs < <(find /tmp/evidence/screenshots -maxdepth 1 -type f -name '*.png' | sort)
@@ -576,7 +585,11 @@ jobs:
               echo "| --- | ---: |"
               echo "| Status | ${JOB_STATUS} |"
               echo "| Run | [${GITHUB_RUN_ID}](${run_url}) |"
-              echo "| Issue | #${ISSUE_NUMBER} |"
+              if [ -n "${ISSUE_NUMBER}" ] && [ "${ISSUE_NUMBER}" != "0" ]; then
+                echo "| Issue | #${ISSUE_NUMBER} |"
+              else
+                echo "| Issue | ${GLIMMUNG_ISSUE_ID} |"
+              fi
               echo "| Cost | \$${cost} |"
               echo "| Turns | ${turns} |"
               echo "| Tool calls | ${tools} |"
@@ -599,14 +612,18 @@ jobs:
               echo "| --- | ---: |"
               echo "| Status | ${JOB_STATUS} |"
               echo "| Run | [${GITHUB_RUN_ID}](${run_url}) |"
-              echo "| Issue | #${ISSUE_NUMBER} |"
+              if [ -n "${ISSUE_NUMBER}" ] && [ "${ISSUE_NUMBER}" != "0" ]; then
+                echo "| Issue | #${ISSUE_NUMBER} |"
+              else
+                echo "| Issue | ${GLIMMUNG_ISSUE_ID} |"
+              fi
               echo ""
               echo "_No agent events captured — see run logs for failure detail._"
             } > "${body_file}"
           fi
 
           cat "${body_file}" >> "${GITHUB_STEP_SUMMARY}"
-          if [ -n "${ISSUE_NUMBER:-}" ]; then
+          if [ -n "${ISSUE_NUMBER:-}" ] && [ "${ISSUE_NUMBER}" != "0" ]; then
             gh issue comment "${ISSUE_NUMBER}" --body-file "${body_file}" \
               || echo "::warning::failed to post summary on issue #${ISSUE_NUMBER}; continuing"
           fi

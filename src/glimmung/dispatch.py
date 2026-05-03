@@ -150,7 +150,10 @@ async def dispatch_run(
             )
         issue, _ = found
     project_name = issue.project
-    repo = issue.metadata.github_issue_repo
+    project_doc = await _read_project(cosmos, project_name)
+    project_repo = str((project_doc or {}).get("githubRepo") or "")
+    github_issue_repo = issue.metadata.github_issue_repo
+    repo = github_issue_repo or project_repo
     issue_number = issue.metadata.github_issue_number
 
     # 2. Resolve workflow.
@@ -221,7 +224,7 @@ async def dispatch_run(
 
     # 5. Lease + workflow_dispatch.
     metadata: dict[str, Any] = {
-        "issue_id": issue.id,
+        "issue_title": issue.title,
         "issue_lock_holder_id": holder_id,
         **(extra_metadata or {}),
     }
@@ -231,9 +234,11 @@ async def dispatch_run(
     if run_id is not None:
         metadata["run_id"] = run_id
         metadata["attempt_index"] = "0"
-    if repo and issue_number is not None:
+    if github_issue_repo and issue_number is not None:
         metadata["issue_number"] = str(issue_number)
-        metadata["issue_repo"] = repo
+        metadata["issue_repo"] = github_issue_repo
+    else:
+        metadata["issue_id"] = issue.id
     requirements = workflow_doc.get("defaultRequirements", {}) or {}
     lease, host = await lease_ops.acquire(
         cosmos,
@@ -597,6 +602,13 @@ async def _find_issue_anywhere(cosmos: Cosmos, *, issue_id: str):
     from glimmung.models import Issue
     doc = {k: v for k, v in docs[0].items() if not k.startswith("_")}
     return Issue.model_validate(doc)
+
+
+async def _read_project(cosmos: Cosmos, project_name: str) -> dict[str, Any] | None:
+    try:
+        return await cosmos.projects.read_item(item=project_name, partition_key=project_name)
+    except Exception:
+        return None
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────

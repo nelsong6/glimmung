@@ -765,8 +765,18 @@ async def test_dispatch_by_issue_id_dispatches_native_issue(app):
         parameters=[{"name": "@id", "value": result.run_id}],
     )]
     assert runs[0]["issue_id"] == issue.id
-    assert runs[0]["issue_repo"] == ""
+    assert runs[0]["issue_repo"] == "nelsong6/ambience"
     assert runs[0]["issue_number"] == 0
+
+    lease_docs = [d async for d in app.state.cosmos.leases.query_items(
+        "SELECT * FROM c WHERE c.id = @id",
+        parameters=[{"name": "@id", "value": result.lease_id}],
+    )]
+    metadata = lease_docs[0]["metadata"]
+    assert metadata["issue_id"] == issue.id
+    assert metadata["issue_title"] == "native-only issue"
+    assert "issue_number" not in metadata
+    assert "issue_repo" not in metadata
 
 
 @pytest.mark.asyncio
