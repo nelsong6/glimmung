@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
+from pathlib import Path
 from typing import Any
 
 from azure.identity.aio import DefaultAzureCredential
@@ -40,6 +42,43 @@ class ArtifactStore:
             content_settings=ContentSettings(content_type="application/json"),
         )
         return f"blob://{self._container}/{blob_name}"
+
+    async def upload_file(
+        self,
+        *,
+        blob_name: str,
+        path: str | Path,
+        content_type: str | None = None,
+    ) -> str:
+        blob = self._service.get_blob_client(
+            container=self._container,
+            blob=blob_name,
+        )
+        guessed_type = content_type or mimetypes.guess_type(str(path))[0]
+        with Path(path).open("rb") as f:
+            await blob.upload_blob(
+                f,
+                overwrite=True,
+                content_settings=ContentSettings(
+                    content_type=guessed_type or "application/octet-stream",
+                ),
+            )
+        return f"blob://{self._container}/{blob_name}"
+
+    async def download(self, *, blob_name: str) -> tuple[bytes, str]:
+        blob = self._service.get_blob_client(
+            container=self._container,
+            blob=blob_name,
+        )
+        props = await blob.get_blob_properties()
+        stream = await blob.download_blob()
+        body = await stream.readall()
+        content_type = (
+            props.content_settings.content_type
+            if props.content_settings is not None
+            else None
+        )
+        return body, content_type or "application/octet-stream"
 
     async def close(self) -> None:
         await self._service.close()
