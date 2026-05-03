@@ -14,8 +14,8 @@ class Cosmos:
 
     Containers are created on startup if they don't exist. Auth is via
     workload identity (DefaultAzureCredential picks up the AKS-injected
-    federated token; the infra-shared-identity has Data Contributor at
-    the account scope, granted in infra-bootstrap/tofu/cosmos-serverless.tf).
+    federated token; glimmung-identity has Data Contributor on the
+    glimmung database).
     """
 
     def __init__(self, settings: Settings):

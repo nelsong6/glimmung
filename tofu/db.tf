@@ -1,7 +1,7 @@
-# Cosmos DB NoSQL Database. Containers: projects, hosts, workflows, leases, runs, locks, signals, issues, prs.
-# Created here at the control plane; the runtime pod (workload identity) only
-# needs data-plane perms which are already granted on infra-shared-identity at
-# the account scope (infra-bootstrap/tofu/cosmos-serverless.tf line 45).
+# Cosmos DB NoSQL Database. Containers: projects, hosts, workflows, leases,
+# runs, locks, signals, issues, prs.
+# Created here at the control plane; the runtime pod uses glimmung-identity
+# with Cosmos data-plane scope limited to this database.
 
 resource "azurerm_cosmosdb_sql_database" "glimmung" {
   name                = "glimmung"
