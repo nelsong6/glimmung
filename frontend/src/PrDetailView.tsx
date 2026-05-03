@@ -35,6 +35,8 @@ type PrDetail = {
   run_id: string | null;
   run_state: string | null;
   validation_url: string | null;
+  session_launch_intent: string;
+  session_launch_url: string | null;
   run_attempts: number;
   run_cumulative_cost_usd: number;
   run_attempt_history: AttemptHistoryEntry[];
@@ -103,7 +105,12 @@ export function PrDetailView() {
   }, []);
 
   const launchSession = () => {
-    if (!detail?.run_id || !detail.linked_issue_id || !tankBaseUrl) return;
+    if (!detail?.run_id || !detail.linked_issue_id) return;
+    if (detail.session_launch_url) {
+      window.open(detail.session_launch_url, "_blank", "noopener,noreferrer");
+      return;
+    }
+    if (!tankBaseUrl) return;
     const url = new URL(tankBaseUrl);
     url.searchParams.set("glimmung_run_id", detail.run_id);
     url.searchParams.set("glimmung_issue_id", detail.linked_issue_id);
@@ -222,15 +229,24 @@ export function PrDetailView() {
                   type="button"
                   className="link"
                   onClick={launchSession}
-                  disabled={!detail.run_id || !detail.linked_issue_id || !tankBaseUrl}
+                  disabled={
+                    !detail.run_id
+                    || !detail.linked_issue_id
+                    || (!detail.session_launch_url && !tankBaseUrl)
+                  }
                   title={
                     detail.run_id && detail.linked_issue_id
                       ? "Open a tank-operator session with this glimmung context"
                       : "Requires a linked glimmung run and issue"
                   }
                 >
-                  launch session
+                  {detail.session_launch_intent === "warm" ? "session ready" : "launch session"}
                 </button>
+                {detail.session_launch_intent === "warm" && (
+                  <span className="pill free" style={{ marginLeft: "0.5rem" }}>
+                    warm
+                  </span>
+                )}
               </span>
             </div>
           </div>

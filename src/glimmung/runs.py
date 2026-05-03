@@ -55,6 +55,7 @@ async def create_run(
     issue_id: str = "",
     issue_lock_holder_id: str | None = None,
     trigger_source: dict[str, Any] | None = None,
+    session_launch_intent: str = "cold",
 ) -> Run:
     """Create a Run record at initial dispatch time. Records the first
     PhaseAttempt with the caller-supplied phase name (matching a
@@ -90,6 +91,7 @@ async def create_run(
         cumulative_cost_usd=0.0,
         issue_lock_holder_id=issue_lock_holder_id,
         trigger_source=trigger_source,
+        session_launch_intent=session_launch_intent,
         created_at=now,
         updated_at=now,
     )
@@ -579,6 +581,7 @@ async def create_resumed_run(
         # immediately on the resumed Run; the entrypoint dispatch's
         # /started callback won't blow it away (first-arrival-wins).
         validation_url=prior_run.validation_url,
+        session_launch_intent=prior_run.session_launch_intent,
         cloned_from_run_id=prior_run.id,
         entrypoint_phase=entrypoint_phase,
         created_at=now,

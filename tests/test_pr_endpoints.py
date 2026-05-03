@@ -170,6 +170,56 @@ async def test_build_pr_detail_stitches_linked_issue_title(cosmos):
     assert detail.issue_title == "the linked issue title"
 
 
+@pytest.mark.asyncio
+async def test_build_pr_detail_surfaces_warm_session_launch_url(cosmos):
+    issue_doc = {
+        "id": "01JISSUEZZZ",
+        "project": "ambience",
+        "title": "the linked issue title",
+        "body": "",
+        "labels": ["agent-session:warm"],
+        "state": "open",
+        "metadata": {"source": "manual"},
+        "created_at": datetime.now(UTC).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
+        "schema_version": 1,
+    }
+    await cosmos.issues.create_item(issue_doc)
+    run_doc = {
+        "id": "01JRUNWARM",
+        "project": "ambience",
+        "workflow": "issue-agent",
+        "issue_id": "01JISSUEZZZ",
+        "issue_repo": "nelsong6/ambience",
+        "issue_number": 42,
+        "state": "passed",
+        "budget": {"total": 25.0},
+        "attempts": [],
+        "cumulative_cost_usd": 0.0,
+        "trigger_source": {"kind": "glimmung_ui"},
+        "validation_url": "https://preview.example.test",
+        "session_launch_intent": "warm",
+        "created_at": datetime.now(UTC).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+    await cosmos.runs.create_item(run_doc)
+    pr = await pr_ops.create_pr(
+        cosmos, project="ambience", repo="nelsong6/ambience",
+        number=14, title="t", branch="b",
+        linked_issue_id="01JISSUEZZZ", linked_run_id="01JRUNWARM",
+    )
+
+    detail = await _build_pr_detail(cosmos, pr=pr)
+
+    assert detail.session_launch_intent == "warm"
+    assert detail.validation_url == "https://preview.example.test"
+    assert detail.session_launch_url is not None
+    assert "glimmung_run_id=01JRUNWARM" in detail.session_launch_url
+    assert "glimmung_issue_id=01JISSUEZZZ" in detail.session_launch_url
+    assert f"glimmung_pr_id={pr.id}" in detail.session_launch_url
+    assert "validation_url=https%3A%2F%2Fpreview.example.test" in detail.session_launch_url
+
+
 # ─── POST /v1/prs idempotence ───────────────────────────────────────────────
 
 
