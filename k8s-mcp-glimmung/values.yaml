@@ -12,7 +12,7 @@ image:
   # SHA-pinned. mcp-glimmung-build.yml rewrites this tag on every push to
   # main via a `[skip ci]` follow-up commit. Quoted so all-digit short-SHAs
   # don't get parsed as floats — see reference_yaml_tag_quoting.md.
-  tag: "20fcf22"
+  tag: "ec9bf5d"
   pullPolicy: IfNotPresent
 
 # Loopback-only port the Python uvicorn server listens on.

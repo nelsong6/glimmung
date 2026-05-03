@@ -1,5 +1,6 @@
 # Cosmos DB NoSQL Database. Containers: projects, hosts, workflows, leases,
-# runs, locks, signals, issues, prs.
+# runs, run_events, locks, signals, issues, reports, report_versions, and
+# legacy prs.
 # Created here at the control plane; the runtime pod uses glimmung-identity
 # with Cosmos data-plane scope limited to this database.
 
@@ -92,6 +93,23 @@ resource "azurerm_cosmosdb_sql_container" "runs" {
   }
 }
 
+# Ordered native-runner event/log stream. One doc per `(run_id, job_id, seq)`;
+# partitioned by project so hot log reads stay with the run graph.
+resource "azurerm_cosmosdb_sql_container" "run_events" {
+  name                = "run_events"
+  resource_group_name = local.infra.resource_group_name
+  account_name        = data.azurerm_cosmosdb_account.infra.name
+  database_name       = azurerm_cosmosdb_sql_database.glimmung.name
+  partition_key_paths = ["/project"]
+
+  indexing_policy {
+    indexing_mode = "consistent"
+    included_path {
+      path = "/*"
+    }
+  }
+}
+
 # Lock primitive (W1 substrate). Generic mutual-exclusion claims keyed
 # by (scope, key) — used by per-PR triage serialization (#19), per-issue
 # dispatch serialization (#20), signal-drain locks, and any future
@@ -158,16 +176,41 @@ resource "azurerm_cosmosdb_sql_container" "issues" {
   }
 }
 
-# Glimmung-native PRs (#41). Mirrors the Issue substrate (#28): glimmung
-# is the source of truth for PR conversation (title/body/state plus reviews
-# and comments), GitHub is one syndication target. Lets the read path
-# (`/v1/prs/detail`) render entirely from Cosmos with no live-GH stitch,
-# and gives the iteration-graph viewer (#43) PR-side conversation nodes
-# without per-request GH calls. Same partition strategy as `issues` /
-# `runs` (`/project`) — listing open PRs for a project stays single-
-# partition.
+# Legacy PR container. Kept only until the one-shot migration into
+# `reports`/`report_versions` has run in production; code no longer reads
+# this container.
 resource "azurerm_cosmosdb_sql_container" "prs" {
   name                = "prs"
+  resource_group_name = local.infra.resource_group_name
+  account_name        = data.azurerm_cosmosdb_account.infra.name
+  database_name       = azurerm_cosmosdb_sql_database.glimmung.name
+  partition_key_paths = ["/project"]
+
+  indexing_policy {
+    indexing_mode = "consistent"
+    included_path {
+      path = "/*"
+    }
+  }
+}
+
+resource "azurerm_cosmosdb_sql_container" "reports" {
+  name                = "reports"
+  resource_group_name = local.infra.resource_group_name
+  account_name        = data.azurerm_cosmosdb_account.infra.name
+  database_name       = azurerm_cosmosdb_sql_database.glimmung.name
+  partition_key_paths = ["/project"]
+
+  indexing_policy {
+    indexing_mode = "consistent"
+    included_path {
+      path = "/*"
+    }
+  }
+}
+
+resource "azurerm_cosmosdb_sql_container" "report_versions" {
+  name                = "report_versions"
   resource_group_name = local.infra.resource_group_name
   account_name        = data.azurerm_cosmosdb_account.infra.name
   database_name       = azurerm_cosmosdb_sql_database.glimmung.name

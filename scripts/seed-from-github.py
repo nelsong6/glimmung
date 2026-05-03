@@ -1,4 +1,4 @@
-"""One-shot seed of glimmung's `prs` container from GitHub.
+"""One-shot seed of glimmung's `reports` container from GitHub.
 
 Glimmung is the system of record for issues — they are not seeded
 from GH. PRs still pull from GH because the dashboards want the
@@ -19,7 +19,7 @@ Or in-cluster (where the workload identity is already wired):
         python -m scripts.seed_from_github --project glimmung
 
 Steps per project:
-    1. Pull every open + recently-merged PR. ensure_pr_for_github each
+    1. Pull every open + recently-merged PR. ensure_report_for_github each
        one (with the live GH-side title / body / branch / etc.).
     2. Best-effort populate `linked_issue_id` by parsing `Closes #N` /
        `Fixes #N` in seeded PR bodies + matching to existing glimmung
@@ -44,7 +44,7 @@ import httpx
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from glimmung import issues as issue_ops  # noqa: E402
-from glimmung import prs as pr_ops  # noqa: E402
+from glimmung import reports as report_ops  # noqa: E402
 from glimmung import runs as run_ops  # noqa: E402
 from glimmung.db import Cosmos, query_all  # noqa: E402
 from glimmung.github_app import GitHubAppTokenMinter  # noqa: E402
@@ -97,7 +97,7 @@ async def seed_prs(
     project: str,
     repo: str,
 ) -> dict[str, int]:
-    """Pull every open + closed PR. ensure_pr_for_github each one with
+    """Pull every open + closed PR. ensure_report_for_github each one with
     the live GH-side fields, then close/merge as appropriate based on
     GH's state.
 
@@ -117,7 +117,7 @@ async def seed_prs(
         head_sha = ((gh_pr.get("head") or {}).get("sha") or "")
         html_url = gh_pr.get("html_url") or ""
 
-        pr, etag, created = await pr_ops.ensure_pr_for_github(
+        pr, etag, created = await report_ops.ensure_report_for_github(
             cosmos, project=project, repo=repo, number=number,
             title=title, branch=branch, body=body,
             base_ref=base_ref, head_sha=head_sha, html_url=html_url,
@@ -126,7 +126,7 @@ async def seed_prs(
             counts["created"] += 1
         else:
             # Refresh fields on existing PRs in case GH state has drifted.
-            pr, etag = await pr_ops.update_pr(
+            pr, etag = await report_ops.update_report(
                 cosmos, pr=pr, etag=etag,
                 title=title, body=body, branch=branch,
                 base_ref=base_ref, head_sha=head_sha, html_url=html_url,
@@ -142,23 +142,23 @@ async def seed_prs(
             except ValueError:
                 ts = None
             if pr.merged_at is None:
-                pr, etag = await pr_ops.merge_pr(
+                pr, etag = await report_ops.merge_report(
                     cosmos, pr=pr, etag=etag, merged_by=merged_by, merged_at=ts,
                 )
                 counts["merged"] += 1
             else:
                 counts["unchanged"] += 1
         elif gh_state == "closed":
-            from glimmung.models import PRState
-            if pr.state == PRState.OPEN:
-                pr, etag = await pr_ops.close_pr(cosmos, pr=pr, etag=etag)
+            from glimmung.models import ReportState
+            if pr.state == ReportState.READY:
+                pr, etag = await report_ops.close_report(cosmos, pr=pr, etag=etag)
                 counts["closed"] += 1
             else:
                 counts["unchanged"] += 1
         else:
-            from glimmung.models import PRState
-            if pr.state == PRState.CLOSED and pr.merged_at is None:
-                pr, etag = await pr_ops.reopen_pr(cosmos, pr=pr, etag=etag)
+            from glimmung.models import ReportState
+            if pr.state == ReportState.CLOSED and pr.merged_at is None:
+                pr, etag = await report_ops.reopen_report(cosmos, pr=pr, etag=etag)
                 counts["reopened"] += 1
             else:
                 counts["unchanged"] += 1
@@ -182,7 +182,7 @@ async def link_prs(
     Both are skipped if the linkage is already set (idempotent re-run)."""
     log.info("linking seeded PRs in %s", repo)
     pr_docs = await query_all(
-        cosmos.prs,
+        cosmos.reports,
         "SELECT * FROM c WHERE c.project = @p AND c.repo = @r",
         parameters=[
             {"name": "@p", "value": project},
@@ -221,11 +221,11 @@ async def link_prs(
             continue
 
         # Re-read for etag safety + apply.
-        found = await pr_ops.read_pr(cosmos, project=project, pr_id=pr_id)
+        found = await report_ops.read_report(cosmos, project=project, report_id=pr_id)
         if found is None:
             continue
         pr_obj, etag = found
-        await pr_ops.update_pr(
+        await report_ops.update_report(
             cosmos, pr=pr_obj, etag=etag,
             linked_issue_id=new_issue_id,
             linked_run_id=new_run_id,
@@ -240,7 +240,7 @@ async def link_prs(
 async def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "One-shot seed of glimmung's prs container from the "
+            "One-shot seed of glimmung's reports container from the "
             "registered project's GitHub repo. Idempotent."
         ),
     )
@@ -249,7 +249,7 @@ async def main() -> int:
         help="Glimmung project name (must be registered in `projects`).",
     )
     parser.add_argument(
-        "--skip-prs", action="store_true",
+        "--skip-reports", action="store_true",
         help="Skip the PRs import phase.",
     )
     parser.add_argument(
@@ -297,11 +297,11 @@ async def main() -> int:
             return 3
         log.info("seeding project=%s repo=%s", args.project, repo)
 
-        if not args.skip_prs:
+        if not args.skip_reports:
             pr_counts = await seed_prs(
                 cosmos, minter, project=args.project, repo=repo,
             )
-            log.info("prs: %s", pr_counts)
+            log.info("reports: %s", pr_counts)
         if not args.skip_linking:
             link_counts = await link_prs(
                 cosmos, project=args.project, repo=repo,

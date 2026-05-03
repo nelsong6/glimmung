@@ -11,9 +11,9 @@ PUBLIC_READ_ROUTES = {
     ("GET", "/v1/issues/by-id/{project}/{issue_id}"),
     ("GET", "/v1/issues/{repo_owner}/{repo_name}/{issue_number}/graph"),
     ("GET", "/v1/graph"),
-    ("GET", "/v1/prs"),
-    ("GET", "/v1/prs/{repo_owner}/{repo_name}/{pr_number}"),
-    ("GET", "/v1/prs/by-id/{project}/{pr_id}"),
+    ("GET", "/v1/reports"),
+    ("GET", "/v1/reports/{repo_owner}/{repo_name}/{pr_number}"),
+    ("GET", "/v1/reports/by-id/{project}/{report_id}"),
 }
 
 MUTATING_ADMIN_ROUTES = {
@@ -23,8 +23,8 @@ MUTATING_ADMIN_ROUTES = {
     ("POST", "/v1/issues"),
     ("PATCH", "/v1/issues/by-id/{project}/{issue_id}"),
     ("POST", "/v1/runs/dispatch"),
-    ("POST", "/v1/prs"),
-    ("PATCH", "/v1/prs/by-id/{project}/{pr_id}"),
+    ("POST", "/v1/reports"),
+    ("PATCH", "/v1/reports/by-id/{project}/{report_id}"),
     ("POST", "/v1/signals"),
 }
 
@@ -63,15 +63,12 @@ def test_native_issue_by_id_route_precedes_legacy_issue_route() -> None:
     )
 
 
-def test_pr_by_id_route_precedes_legacy_pr_route() -> None:
-    """Same route-order trap as native Issue detail: if the legacy
-    three-segment PR route is first, `/v1/prs/by-id/{project}/{pr_id}`
-    is parsed as `{owner=by-id}/{repo=project}/{pr_number=pr_id}` and
-    returns 422 before the canonical-id route can run."""
+def test_report_by_id_route_precedes_repo_number_route() -> None:
+    """Same route-order trap as native Issue detail."""
     pr_route_paths = [
         route.path for route in app.routes
         if isinstance(route, APIRoute) and "GET" in route.methods
     ]
-    assert pr_route_paths.index("/v1/prs/by-id/{project}/{pr_id}") < (
-        pr_route_paths.index("/v1/prs/{repo_owner}/{repo_name}/{pr_number}")
+    assert pr_route_paths.index("/v1/reports/by-id/{project}/{report_id}") < (
+        pr_route_paths.index("/v1/reports/{repo_owner}/{repo_name}/{pr_number}")
     )

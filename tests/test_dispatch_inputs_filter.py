@@ -34,7 +34,7 @@ def _cosmos() -> SimpleNamespace:
         runs=FakeContainer("runs", "/project"),
         locks=FakeContainer("locks", "/scope"),
         issues=FakeContainer("issues", "/project"),
-        prs=FakeContainer("prs", "/project"),
+        reports=FakeContainer("reports", "/project"),
     )
 
 
@@ -208,6 +208,94 @@ async def test_triage_metadata_passes_through_workflow_facing_keys(
         "feedback", "recent_comments", "prior_verification_artifact_url",
     ):
         assert forwarded in captured["inputs"], f"{forwarded} should forward"
+
+
+@pytest.mark.asyncio
+async def test_native_k8s_job_phase_never_dispatches_github_actions(
+    app_state, monkeypatch,
+):
+    await _seed(app_state, project="ambience", repo="nelsong6/ambience",
+                workflow_name="native-agent", workflow_filename="")
+    doc = await app_state.state.cosmos.workflows.read_item(
+        item="native-agent", partition_key="ambience",
+    )
+    doc["phases"][0]["kind"] = "k8s_job"
+    doc["phases"][0]["jobs"] = [{
+        "id": "agent",
+        "name": None,
+        "image": "runner:latest",
+        "command": [],
+        "args": [],
+        "env": {},
+        "steps": [{"slug": "clone-repo", "title": None}],
+        "timeoutSeconds": None,
+    }]
+    await app_state.state.cosmos.workflows.replace_item(item="native-agent", body=doc)
+
+    calls: list[dict[str, Any]] = []
+    async def fake_dispatch(minter, **kwargs):
+        calls.append(kwargs)
+    monkeypatch.setattr("glimmung.app.dispatch_workflow", fake_dispatch)
+
+    lease = _lease_doc(
+        lease_id="01ABC", project="ambience", workflow="native-agent",
+        metadata={"run_id": "01RUN", "attempt_index": "0"},
+    )
+    dispatched = await _maybe_dispatch_workflow(app_state, lease, _host())
+
+    assert dispatched is True
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_native_k8s_job_phase_launches_native_runner_not_github(
+    app_state, monkeypatch,
+):
+    await _seed(app_state, project="ambience", repo="nelsong6/ambience",
+                workflow_name="native-agent", workflow_filename="")
+    doc = await app_state.state.cosmos.workflows.read_item(
+        item="native-agent", partition_key="ambience",
+    )
+    doc["phases"][0]["kind"] = "k8s_job"
+    doc["phases"][0]["jobs"] = [{
+        "id": "agent",
+        "name": None,
+        "image": "runner:latest",
+        "command": [],
+        "args": [],
+        "env": {},
+        "steps": [{"slug": "clone-repo", "title": None}],
+        "timeoutSeconds": None,
+    }]
+    await app_state.state.cosmos.workflows.replace_item(item="native-agent", body=doc)
+
+    github_calls: list[dict[str, Any]] = []
+    async def fake_dispatch(minter, **kwargs):
+        github_calls.append(kwargs)
+    monkeypatch.setattr("glimmung.app.dispatch_workflow", fake_dispatch)
+
+    native_calls: list[dict[str, Any]] = []
+
+    class FakeNativeLauncher:
+        async def launch(self, cosmos, *, lease_doc, workflow_doc, phase):
+            native_calls.append({
+                "lease": lease_doc["id"],
+                "workflow": workflow_doc["name"],
+                "phase": phase.name,
+            })
+            return "glim-run-0"
+
+    app_state.state.native_k8s_launcher = FakeNativeLauncher()
+    lease = _lease_doc(
+        lease_id="01ABC", project="ambience", workflow="native-agent",
+        metadata={"run_id": "01RUN", "attempt_index": "0"},
+    )
+
+    dispatched = await _maybe_dispatch_workflow(app_state, lease, _host("native-k8s"))
+
+    assert dispatched is True
+    assert github_calls == []
+    assert native_calls == [{"lease": "01ABC", "workflow": "native-agent", "phase": "agent"}]
 
 
 def test_allowlist_is_intentional_not_accidental():

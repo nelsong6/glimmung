@@ -4,8 +4,8 @@ import { AdminPanel } from "./AdminPanel";
 import { GraphView } from "./GraphView";
 import { IssueDetailView } from "./IssueDetailView";
 import { IssuesView } from "./IssuesView";
-import { PrDetailView } from "./PrDetailView";
-import { PrsView } from "./PrsView";
+import { ReportDetailView } from "./ReportDetailView";
+import { ReportsView } from "./ReportsView";
 import { StyleguideView } from "./StyleguideView";
 import { authedFetch, currentAccount, initAuth, signIn, signOut } from "./auth";
 import type { AccountInfo } from "@azure/msal-browser";
@@ -64,7 +64,7 @@ type Snapshot = {
 
 type Connection = "live" | "stale" | "dead";
 
-type Inflight = { issues: boolean; prs: boolean };
+type Inflight = { issues: boolean; reports: boolean };
 
 type Selection =
   | { kind: "all" }
@@ -119,8 +119,8 @@ export function App() {
           <Route path="in-progress" element={null} />
           <Route path="lineage" element={null} />
         </Route>
-        <Route path="prs" element={<PrsRoute />} />
-        <Route path="prs/:owner/:repo/:n" element={<PrDetailView />} />
+        <Route path="reports" element={<ReportsRoute />} />
+        <Route path="reports/:owner/:repo/:n" element={<ReportDetailView />} />
       </Route>
     </Routes>
   );
@@ -134,7 +134,7 @@ function Layout() {
   const [account, setAccount] = useState<AccountInfo | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [showAdmin, setShowAdmin] = useState(false);
-  const [inflight, setInflight] = useState<Inflight>({ issues: false, prs: false });
+  const [inflight, setInflight] = useState<Inflight>({ issues: false, reports: false });
 
   useEffect(() => {
     initAuth()
@@ -177,7 +177,7 @@ function Layout() {
     };
   }, [lastUpdate]);
 
-  // Poll /v1/issues + /v1/prs to drive the pulsing dot on the issues/prs
+  // Poll /v1/issues + /v1/reports to drive the pulsing dot on the issues/reports
   // tabs when something has a lock held. Cheap public reads; 20s feels
   // live enough without hammering the API.
   useEffect(() => {
@@ -186,14 +186,14 @@ function Layout() {
       try {
         const [iRes, pRes] = await Promise.all([
           fetch("/v1/issues"),
-          fetch("/v1/prs"),
+          fetch("/v1/reports"),
         ]);
         const issues = iRes.ok ? ((await iRes.json()) as Array<{ issue_lock_held?: boolean }>) : [];
-        const prs = pRes.ok ? ((await pRes.json()) as Array<{ pr_lock_held?: boolean }>) : [];
+        const reports = pRes.ok ? ((await pRes.json()) as Array<{ pr_lock_held?: boolean }>) : [];
         if (cancelled) return;
         setInflight({
           issues: Array.isArray(issues) && issues.some((x) => x.issue_lock_held),
-          prs: Array.isArray(prs) && prs.some((x) => x.pr_lock_held),
+          reports: Array.isArray(reports) && reports.some((x) => x.pr_lock_held),
         });
       } catch {
         // keep last value on transient failures
@@ -406,9 +406,9 @@ function Layout() {
           <NavLink to="/graph" className={tabLinkClass}>
             graph
           </NavLink>
-          <NavLink to="/prs" className={tabLinkClass}>
-            prs
-            {inflight.prs && <span className="tab-dot" />}
+          <NavLink to="/reports" className={tabLinkClass}>
+            reports
+            {inflight.reports && <span className="tab-dot" />}
           </NavLink>
         </div>
 
@@ -446,10 +446,10 @@ function GraphRoute() {
   );
 }
 
-function PrsRoute() {
+function ReportsRoute() {
   const { selected } = useOutletContext<LayoutContext>();
   return (
-    <PrsView
+    <ReportsView
       projectFilter={selected.kind === "all" ? null : selected.project}
     />
   );

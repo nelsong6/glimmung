@@ -10,7 +10,7 @@ log = logging.getLogger(__name__)
 
 
 class Cosmos:
-    """Owns the Cosmos client and the nine containers.
+    """Owns the Cosmos client and configured containers.
 
     Containers are created on startup if they don't exist. Auth is via
     workload identity (DefaultAzureCredential picks up the AKS-injected
@@ -28,10 +28,13 @@ class Cosmos:
         self.hosts: ContainerProxy | None = None
         self.leases: ContainerProxy | None = None
         self.runs: ContainerProxy | None = None
+        self.run_events: ContainerProxy | None = None
         self.locks: ContainerProxy | None = None
         self.signals: ContainerProxy | None = None
         self.issues: ContainerProxy | None = None
-        self.prs: ContainerProxy | None = None
+        self.legacy_prs: ContainerProxy | None = None
+        self.reports: ContainerProxy | None = None
+        self.report_versions: ContainerProxy | None = None
 
     async def start(self) -> None:
         # Database + containers are pre-created by tofu/ (per-app pattern,
@@ -48,11 +51,17 @@ class Cosmos:
         self.hosts = self._db.get_container_client("hosts")
         self.leases = self._db.get_container_client("leases")
         self.runs = self._db.get_container_client("runs")
+        self.run_events = self._db.get_container_client("run_events")
         self.locks = self._db.get_container_client("locks")
         self.signals = self._db.get_container_client("signals")
         self.issues = self._db.get_container_client("issues")
-        self.prs = self._db.get_container_client("prs")
-        log.info("cosmos clients ready: projects, workflows, hosts, leases, runs, locks, signals, issues, prs")
+        self.legacy_prs = self._db.get_container_client("prs")
+        self.reports = self._db.get_container_client("reports")
+        self.report_versions = self._db.get_container_client("report_versions")
+        log.info(
+            "cosmos clients ready: projects, workflows, hosts, leases, runs, run_events, locks, "
+            "signals, issues, reports, report_versions"
+        )
 
     async def stop(self) -> None:
         if self._client is not None:

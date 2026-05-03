@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -18,7 +20,9 @@ from ulid import ULID
 from glimmung import issues as issue_ops
 from glimmung import leases as lease_ops
 from glimmung import locks as lock_ops
-from glimmung import prs as pr_ops
+from glimmung import native_events as native_event_ops
+from glimmung import native_k8s as native_k8s_ops
+from glimmung import reports as report_ops
 from glimmung import runs as run_ops
 from glimmung import signals as signal_ops
 from glimmung.dispatch import DispatchResult, ResumeResult, dispatch_resumed_run, dispatch_run
@@ -38,9 +42,9 @@ from glimmung.github_app import (
 )
 from glimmung.locks import LockBusy
 from glimmung.models import (
-    PR,
-    PRReview,
-    PRReviewState,
+    Report,
+    ReportReview,
+    ReportReviewState,
     BudgetConfig,
     Host,
     Issue,
@@ -50,8 +54,11 @@ from glimmung.models import (
     LeaseRequest,
     LeaseResponse,
     LeaseState,
+    NativeJobSpec,
+    NativeRunEventType,
+    NativeStepSpec,
     PhaseSpec,
-    PRState,
+    ReportState,
     PrPrimitiveSpec,
     Project,
     ProjectRegister,
@@ -68,6 +75,7 @@ from glimmung.models import (
     VerificationResult,
     Workflow,
     WorkflowRegister,
+    native_job_attempts_from_specs,
     substitute_phase_inputs,
     validate_phase_input_refs,
 )
@@ -93,6 +101,30 @@ def _issue_lock_key(
     return None
 
 
+def _attempt_token_sha256(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _require_native_attempt_token(request: Request, run: Run) -> None:
+    """Validate native callback token when the attempt has one bound.
+
+    Legacy callback paths and older test fixtures have no token hash on
+    the attempt; those remain run-id capability callbacks. Native Job
+    launch will bind the hash before the pod starts.
+    """
+    if not run.attempts:
+        raise HTTPException(409, f"run {run.id} has no attempts")
+    expected = run.attempts[-1].capability_token_sha256
+    if not expected:
+        return
+    presented = request.headers.get("x-glimmung-attempt-token", "")
+    if not presented:
+        raise HTTPException(401, "missing x-glimmung-attempt-token")
+    actual = _attempt_token_sha256(presented)
+    if not hmac.compare_digest(actual, expected):
+        raise HTTPException(403, "invalid x-glimmung-attempt-token")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
@@ -100,6 +132,7 @@ async def lifespan(app: FastAPI):
     await cosmos.start()
     app.state.cosmos = cosmos
     app.state.settings = settings
+    app.state.native_k8s_launcher = native_k8s_ops.NativeKubernetesLauncher(settings)
 
     if settings.github_app_id and settings.github_app_private_key and settings.github_app_installation_id:
         app.state.gh_minter = GitHubAppTokenMinter(
@@ -199,8 +232,8 @@ async def _resolve_signal_pr(
     looks_like_id = len(target_id) == 26 and target_id.isalnum() and not target_id.isdigit()
 
     if looks_like_id:
-        pr_lookup = await pr_ops.read_pr(
-            cosmos, project=signal.target_repo, pr_id=target_id,
+        pr_lookup = await report_ops.read_report(
+            cosmos, project=signal.target_repo, report_id=target_id,
         )
         if pr_lookup is None:
             log.warning(
@@ -357,9 +390,12 @@ async def _triage_apply(
 
 async def _promote_loop(app: FastAPI, settings: Settings) -> None:
     """Periodically retry pending leases against current free capacity.
-    Fires workflow_dispatch for each newly-assigned lease."""
+    Fires the appropriate runner for each newly-assigned lease."""
     while True:
         try:
+            native_assigned = await lease_ops.promote_pending_native(app.state.cosmos, settings)
+            for lease_doc, host in native_assigned:
+                await _maybe_dispatch_workflow(app, lease_doc, host)
             assigned = await lease_ops.promote_pending(app.state.cosmos)
             for lease_doc, host in assigned:
                 await _maybe_dispatch_workflow(app, lease_doc, host)
@@ -420,25 +456,13 @@ async def _run_issue_workflow_metadata(cosmos: Cosmos, run: Run) -> dict[str, st
 
 
 async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host: Host) -> bool:
-    """Fire workflow_dispatch for the lease's (project, workflow). Returns
-    True on a successful dispatch OR a no-op (no GH minter, project not
-    registered, workflow doc missing); False only when the dispatch was
-    attempted and `dispatch_workflow` raised. The True-on-no-op shape
-    keeps the existing test surface (gh_minter=None as a global mute)
-    working without back-out side effects, while still letting
-    `dispatch_run` distinguish "GH actually said no" from "we never even
-    tried" — the former is the orphan-producing case that should roll
-    back the lease + lock instead of leaving a Run stranded
-    IN_PROGRESS."""
-    minter: GitHubAppTokenMinter | None = app.state.gh_minter
-    if minter is None:
-        return True
+    """Fire the runner for the lease's (project, workflow).
 
+    GitHub Actions phases call workflow_dispatch. Native `k8s_job` phases
+    create a Kubernetes Job. Returns True on success or intentional test
+    no-op; False only when a runner dispatch was attempted and failed.
+    """
     cosmos: Cosmos = app.state.cosmos
-    project_doc = await _read_project(cosmos, lease_doc["project"])
-    if not project_doc or not project_doc.get("githubRepo"):
-        return True
-
     workflow_name = lease_doc.get("workflow")
     if not workflow_name:
         log.warning("lease %s has no workflow; skipping dispatch", lease_doc["id"])
@@ -464,6 +488,38 @@ async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host
             lease_doc["project"], workflow_name,
         )
         return True
+    if target_phase.get("kind") == "k8s_job":
+        launcher = getattr(app.state, "native_k8s_launcher", None)
+        if launcher is None:
+            log.info(
+                "native dispatch (no launcher): would launch %s/%s phase %s for lease %s",
+                lease_doc["project"], workflow_name, target_phase["name"], lease_doc["id"],
+            )
+            return True
+        try:
+            job_name = await launcher.launch(
+                cosmos,
+                lease_doc=lease_doc,
+                workflow_doc=workflow_doc,
+                phase=_phase_from_doc(target_phase),
+            )
+            log.info(
+                "launched native job %s for lease %s (project=%s workflow=%s phase=%s)",
+                job_name, lease_doc["id"], lease_doc["project"], workflow_name,
+                target_phase["name"],
+            )
+            return True
+        except Exception:
+            log.exception("native dispatch failed for lease %s", lease_doc["id"])
+            return False
+
+    minter: GitHubAppTokenMinter | None = app.state.gh_minter
+    if minter is None:
+        return True
+    project_doc = await _read_project(cosmos, lease_doc["project"])
+    if not project_doc or not project_doc.get("githubRepo"):
+        return True
+
     workflow_filename = target_phase["workflowFilename"]
     workflow_ref = target_phase.get("workflowRef") or "main"
 
@@ -499,6 +555,35 @@ async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host
     except Exception:
         log.exception("workflow_dispatch failed for lease %s", lease_doc["id"])
         return False
+
+
+async def _release_native_attempt_lease(cosmos: Cosmos, run: Run) -> None:
+    """Release the active native lease for the latest attempt, if present."""
+    if not run.attempts:
+        return
+    attempt = run.attempts[-1]
+    docs = await query_all(
+        cosmos.leases,
+        (
+            "SELECT * FROM c WHERE c.project = @p AND c.state = @s "
+            "AND c.metadata.native_k8s = true AND c.metadata.run_id = @r "
+            "AND c.metadata.attempt_index = @a"
+        ),
+        parameters=[
+            {"name": "@p", "value": run.project},
+            {"name": "@s", "value": LeaseState.ACTIVE.value},
+            {"name": "@r", "value": run.id},
+            {"name": "@a", "value": str(attempt.attempt_index)},
+        ],
+    )
+    for doc in docs:
+        try:
+            await lease_ops.release(cosmos, doc["id"], run.project)
+        except Exception:
+            log.exception(
+                "failed to release native lease %s for run %s attempt %d",
+                doc.get("id"), run.id, attempt.attempt_index,
+            )
 
 
 async def _release_locks_on_terminal(
@@ -623,7 +708,7 @@ async def _process_run_completion(
     *,
     run: Run,
     etag: str,
-    workflow_run_id: int,
+    workflow_run_id: int | None,
     conclusion: str,
     verification_result: VerificationResult | None,
     repo: str,
@@ -647,6 +732,7 @@ async def _process_run_completion(
     from the completed callback, persisted on the latest attempt.
     """
     cosmos: Cosmos = app.state.cosmos
+    minter: GitHubAppTokenMinter | None = app.state.gh_minter
 
     run, etag = await run_ops.record_completion(
         cosmos,
@@ -729,12 +815,13 @@ async def _process_run_completion(
     # Any abort decision.
     reason = abort_explanation(run, workflow_model, decision)
     await run_ops.mark_aborted(cosmos, run=run, etag=etag, reason=reason)
-    try:
-        await post_issue_comment(
-            minter, repo=repo, issue_number=run.issue_number, body=reason,
-        )
-    except Exception:
-        log.exception("failed to post abort comment on %s#%d", repo, run.issue_number)
+    if minter is not None and run.issue_number:
+        try:
+            await post_issue_comment(
+                minter, repo=repo, issue_number=run.issue_number, body=reason,
+            )
+        except Exception:
+            log.exception("failed to post abort comment on %s#%d", repo, run.issue_number)
     return decision.value
 
 
@@ -786,7 +873,9 @@ async def _dispatch_retry(
     run, _ = await run_ops.append_attempt(
         cosmos, run=run, etag=etag,
         phase_name=target_phase.name,
-        workflow_filename=target_phase.workflow_filename,
+        workflow_filename=_phase_runner_label(target_phase),
+        phase_kind=target_phase.kind,
+        jobs=native_job_attempts_from_specs(target_phase.jobs),
     )
 
     requirements = target_phase.requirements or workflow_model.default_requirements
@@ -797,11 +886,12 @@ async def _dispatch_retry(
         "phase_name": target_phase.name,
         "attempt_index": str(len(run.attempts) - 1),
     }
-    lease, host = await lease_ops.acquire(
-        cosmos,
-        settings,
+    lease, host = await _acquire_phase_lease(
+        cosmos=cosmos,
+        settings=settings,
         project=run.project,
         workflow=run.workflow,
+        phase=target_phase,
         requirements=requirements,
         metadata=metadata,
     )
@@ -812,6 +902,15 @@ async def _dispatch_retry(
             "Manual re-dispatch required (see #18 followup).",
             run.id, lease.id,
         )
+        return
+    if target_phase.kind == "k8s_job":
+        lease_doc = {
+            **lease_ops._lease_to_doc(lease),
+            "id": lease.id,
+            "project": lease.project,
+            "workflow": lease.workflow,
+        }
+        await _maybe_dispatch_workflow(app, lease_doc, host)
         return
 
     # Resolve the prior attempt's artifact URL lazily — only the retry
@@ -873,6 +972,39 @@ def _next_phase_after(workflow: Workflow, phase_name: str):
     return None
 
 
+def _phase_runner_label(phase: PhaseSpec) -> str:
+    return phase.workflow_filename or f"{phase.kind}:{phase.name}"
+
+
+async def _acquire_phase_lease(
+    *,
+    cosmos: Cosmos,
+    settings: Settings,
+    project: str,
+    workflow: str,
+    phase: PhaseSpec,
+    requirements: dict[str, Any],
+    metadata: dict[str, Any],
+) -> tuple[Lease, Host | None]:
+    if phase.kind == "k8s_job":
+        return await lease_ops.acquire_native(
+            cosmos,
+            settings,
+            project=project,
+            workflow=workflow,
+            requirements=requirements,
+            metadata=metadata,
+        )
+    return await lease_ops.acquire(
+        cosmos,
+        settings,
+        project=project,
+        workflow=workflow,
+        requirements=requirements,
+        metadata=metadata,
+    )
+
+
 def _collect_phase_outputs(run: Run) -> dict[str, dict[str, str]]:
     """Build the prior-outputs map for ref substitution. Walks attempts
     in order so the latest attempt of each phase wins (matters when a
@@ -928,7 +1060,9 @@ async def _dispatch_next_phase(
     run, etag = await run_ops.append_attempt(
         cosmos, run=run, etag=etag,
         phase_name=next_phase.name,
-        workflow_filename=next_phase.workflow_filename,
+        workflow_filename=_phase_runner_label(next_phase),
+        phase_kind=next_phase.kind,
+        jobs=native_job_attempts_from_specs(next_phase.jobs),
     )
 
     requirements = next_phase.requirements or workflow_model.default_requirements
@@ -948,11 +1082,12 @@ async def _dispatch_next_phase(
         # str] cleanly.
         "phase_inputs": dict(substituted),
     }
-    lease, host = await lease_ops.acquire(
-        cosmos,
-        settings,
+    lease, host = await _acquire_phase_lease(
+        cosmos=cosmos,
+        settings=settings,
         project=run.project,
         workflow=run.workflow,
+        phase=next_phase,
         requirements=requirements,
         metadata=metadata,
     )
@@ -965,6 +1100,15 @@ async def _dispatch_next_phase(
             "forward dispatch: no host for run %s phase %r; lease %s pending",
             run.id, next_phase.name, lease.id,
         )
+        return
+    if next_phase.kind == "k8s_job":
+        lease_doc = {
+            **lease_ops._lease_to_doc(lease),
+            "id": lease.id,
+            "project": lease.project,
+            "workflow": lease.workflow,
+        }
+        await _maybe_dispatch_workflow(app, lease_doc, host)
         return
 
     if minter is None:
@@ -1074,9 +1218,11 @@ async def _dispatch_triage(
     run, etag = await run_ops.reopen_for_recycle(
         cosmos, run=run, etag=etag,
         phase_name=target_phase.name,
-        workflow_filename=target_phase.workflow_filename,
+        workflow_filename=_phase_runner_label(target_phase),
         pr_lock_holder_id=holder_id,
         issue_lock_holder_id=holder_id,
+        phase_kind=target_phase.kind,
+        jobs=native_job_attempts_from_specs(target_phase.jobs),
     )
 
     requirements = target_phase.requirements or workflow_model.default_requirements
@@ -1088,9 +1234,10 @@ async def _dispatch_triage(
         "attempt_index": str(len(run.attempts) - 1),
         "issue_lock_holder_id": holder_id,
     }
-    lease, host = await lease_ops.acquire(
-        cosmos, settings,
+    lease, host = await _acquire_phase_lease(
+        cosmos=cosmos, settings=settings,
         project=run.project, workflow=run.workflow,
+        phase=target_phase,
         requirements=requirements,
         metadata=metadata,
     )
@@ -1101,6 +1248,15 @@ async def _dispatch_triage(
             "Manual re-dispatch may be required.",
             run.id, lease.id,
         )
+        return
+    if target_phase.kind == "k8s_job":
+        lease_doc = {
+            **lease_ops._lease_to_doc(lease),
+            "id": lease.id,
+            "project": lease.project,
+            "workflow": lease.workflow,
+        }
+        await _maybe_dispatch_workflow(app, lease_doc, host)
         return
 
     if minter is None:
@@ -1181,7 +1337,7 @@ async def _open_pr_primitive(*, run: Run, workflow: Workflow) -> None:
         pr_number = already.pr_number
         html_url = already.html_url
 
-    pr, etag, _created = await pr_ops.ensure_pr_for_github(
+    pr, etag, _created = await report_ops.ensure_report_for_github(
         cosmos,
         project=run.project,
         repo=run.issue_repo,
@@ -1191,8 +1347,10 @@ async def _open_pr_primitive(*, run: Run, workflow: Workflow) -> None:
         body=rich_body,
         base_ref=base,
         html_url=html_url,
+        linked_issue_id=run.issue_id or None,
+        linked_run_id=run.id,
     )
-    pr, _ = await pr_ops.update_pr(
+    pr, _ = await report_ops.update_report(
         cosmos,
         pr=pr,
         etag=etag,
@@ -1239,7 +1397,7 @@ async def _open_pr_primitive(*, run: Run, workflow: Workflow) -> None:
 
 def _glimmung_pr_detail_url(*, settings: Settings, repo: str, number: int) -> str:
     base_url = getattr(settings, "glimmung_base_url", "https://glimmung.romaine.life")
-    return f"{base_url.rstrip('/')}/prs/{repo}/{number}"
+    return f"{base_url.rstrip('/')}/reports/{repo}/{number}"
 
 
 def _thin_github_pr_body(*, run: Run, glimmung_url: str | None) -> str:
@@ -1355,6 +1513,26 @@ def _recycle_policy_to_doc(rp: Any) -> dict[str, Any] | None:
     return {"maxAttempts": rp.max_attempts, "on": list(rp.on), "landsAt": rp.lands_at}
 
 
+def _native_step_to_doc(step: NativeStepSpec) -> dict[str, Any]:
+    return {
+        "slug": step.slug,
+        "title": step.title,
+    }
+
+
+def _native_job_to_doc(job: NativeJobSpec) -> dict[str, Any]:
+    return {
+        "id": job.id,
+        "name": job.name,
+        "image": job.image,
+        "command": list(job.command),
+        "args": list(job.args),
+        "env": dict(job.env),
+        "steps": [_native_step_to_doc(step) for step in job.steps],
+        "timeoutSeconds": job.timeout_seconds,
+    }
+
+
 def _phase_to_doc(p: Any) -> dict[str, Any]:
     return {
         "name": p.name,
@@ -1366,6 +1544,7 @@ def _phase_to_doc(p: Any) -> dict[str, Any]:
         "recyclePolicy": _recycle_policy_to_doc(p.recycle_policy),
         "inputs": dict(p.inputs),
         "outputs": list(p.outputs),
+        "jobs": [_native_job_to_doc(job) for job in p.jobs],
     }
 
 
@@ -1405,13 +1584,29 @@ def _phase_from_doc(d: dict[str, Any]):
     return PhaseSpec(
         name=d["name"],
         kind=d.get("kind", "gha_dispatch"),
-        workflow_filename=d["workflowFilename"],
+        workflow_filename=d.get("workflowFilename") or "",
         workflow_ref=d.get("workflowRef") or "main",
         requirements=d.get("requirements"),
         verify=bool(d.get("verify", False)),
         recycle_policy=_recycle_policy_from_doc(d.get("recyclePolicy")),
         inputs=dict(d.get("inputs") or {}),
         outputs=list(d.get("outputs") or []),
+        jobs=[
+            NativeJobSpec(
+                id=j["id"],
+                name=j.get("name"),
+                image=j["image"],
+                command=list(j.get("command") or []),
+                args=list(j.get("args") or []),
+                env={str(k): str(v) for k, v in (j.get("env") or {}).items()},
+                steps=[
+                    NativeStepSpec(slug=s["slug"], title=s.get("title"))
+                    for s in (j.get("steps") or [])
+                ],
+                timeout_seconds=j.get("timeoutSeconds"),
+            )
+            for j in (d.get("jobs") or [])
+        ],
     )
 
 
@@ -1903,6 +2098,34 @@ class RunCallbackResult(BaseModel):
     pr_lock_released: bool | None = None
 
 
+class NativeRunEventRequest(BaseModel):
+    job_id: str
+    seq: int
+    event: NativeRunEventType
+    step_slug: str | None = None
+    message: str | None = None
+    exit_code: int | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class NativeRunEventResult(BaseModel):
+    run_id: str
+    job_id: str
+    seq: int
+    accepted: bool = True
+
+
+class NativeRunCompletedRequest(BaseModel):
+    conclusion: str = "success"
+    verification: dict[str, Any] | None = None
+    screenshots_markdown: str | None = None
+    outputs: dict[str, str] | None = None
+
+
+class NativeRunFailedRequest(BaseModel):
+    reason: str
+
+
 @app.post(
     "/v1/runs/{project}/{run_id}/started",
     response_model=RunCallbackResult,
@@ -2038,6 +2261,145 @@ async def run_completed(
         decision=decision_value,
         issue_lock_released=result_dict.get("issue_lock_released"),
         pr_lock_released=result_dict.get("pr_lock_released"),
+    )
+
+
+@app.post(
+    "/v1/runs/{project}/{run_id}/native/events",
+    response_model=NativeRunEventResult,
+)
+async def native_run_event(
+    req: NativeRunEventRequest,
+    request: Request,
+    project: str = Path(...),
+    run_id: str = Path(...),
+) -> NativeRunEventResult:
+    """Native k8s_job callback for step boundaries and ordered log chunks."""
+    cosmos: Cosmos = app.state.cosmos
+    found = await run_ops.read_run(cosmos, project=project, run_id=run_id)
+    if found is None:
+        raise HTTPException(404, f"no run {project}/{run_id}")
+    run, etag = found
+    _require_native_attempt_token(request, run)
+    try:
+        await native_event_ops.record_native_event(
+            cosmos,
+            run=run,
+            etag=etag,
+            job_id=req.job_id,
+            seq=req.seq,
+            event=req.event,
+            step_slug=req.step_slug,
+            message=req.message,
+            exit_code=req.exit_code,
+            metadata=req.metadata,
+        )
+    except native_event_ops.NativeEventError as e:
+        raise HTTPException(409, str(e))
+    return NativeRunEventResult(run_id=run_id, job_id=req.job_id, seq=req.seq)
+
+
+@app.post(
+    "/v1/runs/{project}/{run_id}/native/completed",
+    response_model=RunCallbackResult,
+)
+async def native_run_completed(
+    req: NativeRunCompletedRequest,
+    request: Request,
+    project: str = Path(...),
+    run_id: str = Path(...),
+) -> RunCallbackResult:
+    """Native k8s_job completion callback.
+
+    Verifies ordered event continuity and terminal step states before
+    driving the same decision-engine path as the existing workflow
+    callback. Native attempts have no GitHub workflow_run_id, so the run
+    attempt stores that field as null.
+    """
+    cosmos: Cosmos = app.state.cosmos
+    found = await run_ops.read_run(cosmos, project=project, run_id=run_id)
+    if found is None:
+        raise HTTPException(404, f"no run {project}/{run_id}")
+    run, etag = found
+    _require_native_attempt_token(request, run)
+    try:
+        await native_event_ops.assert_native_completion_ready(cosmos, run=run)
+    except native_event_ops.NativeEventError as e:
+        raise HTTPException(409, str(e))
+
+    phase_outputs = await _validate_phase_outputs(
+        cosmos, run=run, posted_outputs=req.outputs,
+    )
+
+    verification_result: VerificationResult | None = None
+    if req.verification is not None:
+        try:
+            verification_result = VerificationResult.model_validate(req.verification)
+        except Exception:
+            log.warning(
+                "native run %s/%s: posted verification didn't validate; "
+                "decision engine will treat as malformed",
+                project, run_id,
+            )
+
+    await _release_native_attempt_lease(cosmos, run)
+    decision_value = await _process_run_completion(
+        run=run,
+        etag=etag,
+        workflow_run_id=None,
+        conclusion=req.conclusion,
+        verification_result=verification_result,
+        repo=run.issue_repo,
+        screenshots_markdown=req.screenshots_markdown,
+        phase_outputs=phase_outputs,
+    )
+
+    result_dict: dict[str, Any] = {}
+    terminal = decision_value in (
+        RunDecision.ADVANCE.value,
+        RunDecision.ABORT_BUDGET_ATTEMPTS.value,
+        RunDecision.ABORT_BUDGET_COST.value,
+        RunDecision.ABORT_MALFORMED.value,
+    )
+    if terminal:
+        post = await run_ops.read_run(cosmos, project=project, run_id=run_id)
+        post_run = post[0] if post is not None else run
+        await _release_locks_on_terminal(
+            run=post_run, repo=run.issue_repo, result=result_dict,
+        )
+
+    return RunCallbackResult(
+        run_id=run.id,
+        decision=decision_value,
+        issue_lock_released=result_dict.get("issue_lock_released"),
+        pr_lock_released=result_dict.get("pr_lock_released"),
+    )
+
+
+@app.post(
+    "/v1/runs/{project}/{run_id}/native/failed",
+    response_model=AbortRunResult,
+)
+async def native_run_failed(
+    req: NativeRunFailedRequest,
+    request: Request,
+    project: str = Path(...),
+    run_id: str = Path(...),
+) -> AbortRunResult:
+    """Native k8s_job failure callback for failures before completion."""
+    cosmos: Cosmos = app.state.cosmos
+    found = await run_ops.read_run(cosmos, project=project, run_id=run_id)
+    if found is None:
+        raise HTTPException(404, f"no run {project}/{run_id}")
+    run, _etag = found
+    _require_native_attempt_token(request, run)
+    await _release_native_attempt_lease(cosmos, run)
+    return await _abort_run(
+        cosmos,
+        getattr(app.state, "gh_minter", None),
+        run_id=run_id,
+        project=project,
+        reason=req.reason,
     )
 
 
@@ -2513,12 +2875,12 @@ def _render_glimmung_pr_body(meta: dict[str, str]) -> str:
 
 
 async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
-    """Mirror `pull_request.*` events into the glimmung `prs` container.
+    """Mirror `pull_request.*` events into the glimmung `reports` container.
 
     Pre-#50 this parsed `Closes #N` from the PR body to link a Run to a
-    GH PR number. Post-#50 the PR is the canonical entity in glimmung's
-    own `prs` container and the run/issue linkage is set explicitly by
-    the agent's `POST /v1/prs` step (#50 slice 4) — the webhook's job
+    GH PR number. Report is now the canonical entity in glimmung's
+    own `reports` container and the run/issue linkage is set explicitly by
+    the agent's `POST /v1/reports` step (#50 slice 4) — the webhook's job
     is just to keep glimmung's PR document in sync with GH's lifecycle
     (state transitions, head sha refreshes, title/body edits).
 
@@ -2528,7 +2890,7 @@ async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
         fire reopened for those but the guard is cheap).
       - synchronize / edited: refresh head_sha + title/body so the
         dashboard shows the latest commit.
-      - closed: close_pr or merge_pr depending on `pr.merged`.
+      - closed: close_report or merge_report depending on `pr.merged`.
       - other: ignored.
     """
     action = payload.get("action") or ""
@@ -2567,8 +2929,9 @@ async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
     meta = _parse_glimmung_meta(raw_body)
     rich_body = _render_glimmung_pr_body(meta) if meta else ""
     body = rich_body or raw_body
+    linked_issue_id = meta.get("issue_id") if meta else None
 
-    pr, etag, created = await pr_ops.ensure_pr_for_github(
+    pr, etag, created = await report_ops.ensure_report_for_github(
         cosmos,
         project=project,
         repo=repo,
@@ -2579,18 +2942,21 @@ async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
         base_ref=base_ref,
         head_sha=head_sha,
         html_url=html_url,
+        linked_issue_id=linked_issue_id,
     )
     outcome: dict[str, Any] = {
         "pr_id": pr.id,
         "created": created,
         "action": action,
     }
+    if linked_issue_id:
+        outcome["linked_issue_id"] = linked_issue_id
 
-    # ensure_pr_for_github only honors create-time fields. For an
+    # ensure_report_for_github only honors create-time fields. For an
     # existing PR, patch the user-editable + GH-provided fields so
     # Cosmos stays in sync with GH edits + commits.
     if not created and action in ("opened", "reopened", "edited", "synchronize"):
-        pr, etag = await pr_ops.update_pr(
+        pr, etag = await report_ops.update_report(
             cosmos, pr=pr, etag=etag,
             title=title or None,
             body=body if body else None,
@@ -2603,9 +2969,8 @@ async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
 
     # Apply linkages from the marker (idempotent — same id wins on
     # webhook redelivery).
-    linked_issue_id = meta.get("issue_id") if meta else None
     if linked_issue_id and pr.linked_issue_id != linked_issue_id:
-        pr, etag = await pr_ops.update_pr(
+        pr, etag = await report_ops.update_report(
             cosmos, pr=pr, etag=etag,
             linked_issue_id=linked_issue_id,
         )
@@ -2620,32 +2985,32 @@ async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
         )
         if run_lookup is not None:
             run_for_link, _ = run_lookup
-            pr, etag = await pr_ops.update_pr(
+            pr, etag = await report_ops.update_report(
                 cosmos, pr=pr, etag=etag,
                 linked_run_id=run_for_link.id,
             )
             outcome["linked_run_id"] = run_for_link.id
 
-    if action == "reopened" and pr.state == PRState.CLOSED:
+    if action == "reopened":
         if pr.merged_at is not None:
             log.warning(
                 "pull_request.reopened on already-merged PR %s#%d (glimmung id %s); ignoring",
                 repo, pr_number, pr.id,
             )
             outcome["reopen_ignored"] = "merged"
-        else:
-            pr, etag = await pr_ops.reopen_pr(cosmos, pr=pr, etag=etag)
+        elif pr.state == ReportState.CLOSED:
+            pr, etag = await report_ops.reopen_report(cosmos, pr=pr, etag=etag)
             outcome["reopened"] = True
 
     if action == "closed":
         if pr_merged:
-            pr, etag = await pr_ops.merge_pr(
+            pr, etag = await report_ops.merge_report(
                 cosmos, pr=pr, etag=etag,
                 merged_by=merged_by_user or "unknown",
             )
             outcome["merged"] = True
         else:
-            pr, etag = await pr_ops.close_pr(cosmos, pr=pr, etag=etag)
+            pr, etag = await report_ops.close_report(cosmos, pr=pr, etag=etag)
             outcome["closed"] = True
 
     return outcome
@@ -2678,22 +3043,22 @@ async def _handle_pull_request_review(payload: dict[str, Any]) -> dict[str, Any]
     target_repo = repo
     target_id = str(pr_number)
     mirrored_review = False
-    found = await pr_ops.find_pr_by_repo_number(
+    found = await report_ops.find_report_by_repo_number(
         cosmos, repo=repo, number=int(pr_number),
     )
     if found is not None:
         pr, etag = found
         target_repo = pr.project
         target_id = pr.id
-        raw_state = str(review.get("state") or PRReviewState.COMMENTED.value).lower()
+        raw_state = str(review.get("state") or ReportReviewState.COMMENTED.value).lower()
         try:
-            review_state = PRReviewState(raw_state)
+            review_state = ReportReviewState(raw_state)
         except ValueError:
             log.warning(
                 "pull_request_review.submitted on %s#%d has unknown state %r; recording as commented",
                 repo, int(pr_number), raw_state,
             )
-            review_state = PRReviewState.COMMENTED
+            review_state = ReportReviewState.COMMENTED
         submitted_at_raw = review.get("submitted_at")
         submitted_at = datetime.now(UTC)
         if submitted_at_raw:
@@ -2706,11 +3071,11 @@ async def _handle_pull_request_review(payload: dict[str, Any]) -> dict[str, Any]
                     "pull_request_review.submitted on %s#%d has invalid submitted_at %r; using now",
                     repo, int(pr_number), submitted_at_raw,
                 )
-        await pr_ops.append_pr_review(
+        await report_ops.append_report_review(
             cosmos,
             pr=pr,
             etag=etag,
-            review=PRReview(
+            review=ReportReview(
                 id=str(ULID()),
                 gh_id=review.get("id"),
                 author=(review.get("user") or {}).get("login") or "",
@@ -3327,12 +3692,15 @@ async def _build_system_graph(
 
     run_ids = {r.id for r in runs}
     pr_docs = await query_all(
-        cosmos.prs,
-        "SELECT * FROM c WHERE c.state = @s ORDER BY c.created_at ASC",
-        parameters=[{"name": "@s", "value": PRState.OPEN.value}],
+        cosmos.reports,
+        "SELECT * FROM c WHERE c.state = @ready OR c.state = @needs_review ORDER BY c.created_at ASC",
+        parameters=[
+            {"name": "@ready", "value": ReportState.READY.value},
+            {"name": "@needs_review", "value": ReportState.NEEDS_REVIEW.value},
+        ],
     )
     for doc in pr_docs:
-        pr = PR.model_validate({k: v for k, v in doc.items() if not k.startswith("_")})
+        pr = Report.model_validate({k: v for k, v in doc.items() if not k.startswith("_")})
         if pr.linked_issue_id not in issue_ids and pr.linked_run_id not in run_ids:
             continue
         if project is not None and pr.project != project:
@@ -3698,23 +4066,19 @@ async def dispatch_run_endpoint(req: DispatchRequest) -> DispatchResult:
 
 
 
-# ─── PR view + reject signal (#19) ───────────────────────────────────────────────
+# ─── Report view + reject signal (#19) ─────────────────────────────────────
 
 
-class PrRow(BaseModel):
-    """One row in the PR view. Sourced from the `prs` container (#50
-    slice 2 cutover). The optional Run join lights up the runtime
-    columns (state, attempts, cumulative cost) when a glimmung Run is
-    linked; manual PRs mirror in without a Run and surface the same
-    way the dashboard already shows non-agent activity."""
-    id: str                                # glimmung PR id (ULID)
+class ReportRow(BaseModel):
+    """One row in the Report view."""
+    id: str                                # glimmung Report id
     project: str
     repo: str
     pr_number: int                         # GH PR number (preserved on seed)
     pr_branch: str | None = None
     title: str = ""
-    state: str = "open"                    # PRState value: open | closed
-    merged: bool = False                   # CLOSED + merged_at != None
+    state: str = ReportState.READY.value
+    merged: bool = False
     html_url: str | None = None
     linked_issue_id: str | None = None
     linked_run_id: str | None = None
@@ -3729,7 +4093,7 @@ class PrRow(BaseModel):
     pr_lock_held: bool = False             # triage in flight
 
 
-class PrDetail(BaseModel):
+class ReportDetail(BaseModel):
     id: str
     project: str
     repo: str
@@ -3737,7 +4101,7 @@ class PrDetail(BaseModel):
     pr_branch: str | None = None
     title: str = ""
     body: str = ""
-    state: str = "open"
+    state: str = ReportState.READY.value
     merged: bool = False
     base_ref: str = "main"
     head_sha: str = ""
@@ -3759,9 +4123,8 @@ class PrDetail(BaseModel):
     pr_lock_held: bool = False
 
 
-class PrCreateRequest(BaseModel):
-    """POST /v1/prs body — agent open-PR step calls this immediately
-    after the GH PR has been opened (#50 slice 4)."""
+class ReportCreateRequest(BaseModel):
+    """POST /v1/reports body for registering a GitHub PR syndication target."""
     project: str
     repo: str
     number: int
@@ -3775,12 +4138,8 @@ class PrCreateRequest(BaseModel):
     linked_run_id: str | None = None
 
 
-class PrUpdateRequest(BaseModel):
-    """PATCH /v1/prs/by-id/{project}/{pr_id} body. Same shape as the
-    update_pr substrate signature, plus an optional `state` transition
-    (`open` / `closed` / `merged`). Closed-vs-merged uses two distinct
-    state values because they hit two different substrate functions
-    (`close_pr` vs `merge_pr`)."""
+class ReportUpdateRequest(BaseModel):
+    """PATCH /v1/reports/by-id/{project}/{report_id} body."""
     title: str | None = None
     body: str | None = None
     branch: str | None = None
@@ -3789,27 +4148,23 @@ class PrUpdateRequest(BaseModel):
     html_url: str | None = None
     linked_issue_id: str | None = None
     linked_run_id: str | None = None
-    state: str | None = None               # "open" | "closed" | "merged"
+    state: str | None = None               # ready | needs_review | failed | closed | merged
     merged_by: str | None = None           # required when state="merged"
 
 
 @app.get(
-    "/v1/prs",
-    response_model=list[PrRow],
+    "/v1/reports",
+    response_model=list[ReportRow],
 )
-async def list_prs() -> list[PrRow]:
-    """All PRs across registered projects. Sourced from the Cosmos
-    `prs` container (#50 slice 2 cutover). Bulk-loads `runs` once for
-    the linked-Run join + `locks` once for the lock state, mirroring the
-    /v1/issues read path's perf shape."""
-    return await _list_prs_from_cosmos(app.state.cosmos)
+async def list_reports() -> list[ReportRow]:
+    """All Reports across registered projects."""
+    return await _list_reports_from_cosmos(app.state.cosmos)
 
 
-async def _list_prs_from_cosmos(cosmos: Cosmos) -> list[PrRow]:
-    """Read-path for `/v1/prs`; lifted out so tests can drive it
-    directly without standing up a FastAPI client."""
-    prs = await pr_ops.list_prs(cosmos)
-    if not prs:
+async def _list_reports_from_cosmos(cosmos: Cosmos) -> list[ReportRow]:
+    """Read path for `/v1/reports`, lifted out for focused tests."""
+    reports = await report_ops.list_reports(cosmos)
+    if not reports:
         return []
 
     run_docs = await query_all(cosmos.runs, "SELECT * FROM c")
@@ -3832,8 +4187,8 @@ async def _list_prs_from_cosmos(cosmos: Cosmos) -> list[PrRow]:
     locks_by_key = {doc["key"]: doc for doc in lock_docs}
 
     now = datetime.now(UTC)
-    rows: list[PrRow] = []
-    for pr in prs:
+    rows: list[ReportRow] = []
+    for pr in reports:
         run_doc = None
         if pr.linked_run_id:
             run_doc = runs_by_id.get(pr.linked_run_id)
@@ -3846,7 +4201,7 @@ async def _list_prs_from_cosmos(cosmos: Cosmos) -> list[PrRow]:
             expires_at = datetime.fromisoformat(lock_doc["expires_at"])
             pr_lock_held = expires_at > now
 
-        row = PrRow(
+        row = ReportRow(
             id=pr.id,
             project=pr.project,
             repo=pr.repo,
@@ -3888,59 +4243,46 @@ async def _list_prs_from_cosmos(cosmos: Cosmos) -> list[PrRow]:
 
 
 @app.get(
-    "/v1/prs/by-id/{project}/{pr_id}",
-    response_model=PrDetail,
+    "/v1/reports/by-id/{project}/{report_id}",
+    response_model=ReportDetail,
 )
-async def pr_detail_by_id(
+async def report_detail_by_id(
     project: str = Path(...),
-    pr_id: str = Path(...),
-) -> PrDetail:
-    """Detail view keyed by glimmung PR id. Mirrors the issue-by-id
-    pattern: useful when the caller already has the canonical id and
-    avoids the (repo, number) cross-partition lookup.
-
-    Keep this route above the legacy three-segment GH route. Otherwise
-    FastAPI attempts to parse `/v1/prs/by-id/{project}/{pr_id}` as
-    `{repo_owner}/{repo_name}/{pr_number}` and returns a 422 before this
-    handler can run.
-    """
+    report_id: str = Path(...),
+) -> ReportDetail:
+    """Detail view keyed by canonical Glimmung Report id."""
     cosmos: Cosmos = app.state.cosmos
-    found = await pr_ops.read_pr(cosmos, project=project, pr_id=pr_id)
+    found = await report_ops.read_report(cosmos, project=project, report_id=report_id)
     if found is None:
-        raise HTTPException(404, f"no glimmung PR {project}/{pr_id}")
+        raise HTTPException(404, f"no glimmung Report {project}/{report_id}")
     pr, _ = found
-    return await _build_pr_detail(cosmos, pr=pr)
+    return await _build_report_detail(cosmos, pr=pr)
 
 
 @app.get(
-    "/v1/prs/{repo_owner}/{repo_name}/{pr_number}",
-    response_model=PrDetail,
+    "/v1/reports/{repo_owner}/{repo_name}/{pr_number}",
+    response_model=ReportDetail,
 )
-async def pr_detail(
+async def report_detail(
     repo_owner: str = Path(...),
     repo_name: str = Path(...),
     pr_number: int = Path(...),
-) -> PrDetail:
-    """PR detail view. Reads the PR document from Cosmos `prs` (#50
-    slice 2). Stitches in the linked Run state if a Run id is on the
-    PR; otherwise looks up the most recent Run by `(repo, pr_number)`
-    so legacy agent-opened PRs (pre-#50, no `linked_run_id`) still
-    show their Run history."""
+) -> ReportDetail:
+    """Report detail view keyed by GitHub PR coordinates."""
     repo = f"{repo_owner}/{repo_name}"
     cosmos: Cosmos = app.state.cosmos
-    found = await pr_ops.find_pr_by_repo_number(
+    found = await report_ops.find_report_by_repo_number(
         cosmos, repo=repo, number=pr_number,
     )
     if found is None:
-        raise HTTPException(404, f"no glimmung PR {repo}#{pr_number}")
+        raise HTTPException(404, f"no glimmung Report for {repo}#{pr_number}")
     pr, _ = found
-    return await _build_pr_detail(cosmos, pr=pr)
+    return await _build_report_detail(cosmos, pr=pr)
 
 
-async def _build_pr_detail(cosmos: Cosmos, *, pr: PR) -> PrDetail:
-    """Render a PR + its linked Run state into the `PrDetail` view.
-    Shared by both the URL-keyed and id-keyed detail endpoints."""
-    detail = PrDetail(
+async def _build_report_detail(cosmos: Cosmos, *, pr: Report) -> ReportDetail:
+    """Render a Report plus linked Run state."""
+    detail = ReportDetail(
         id=pr.id,
         project=pr.project,
         repo=pr.repo,
@@ -3968,7 +4310,7 @@ async def _build_pr_detail(cosmos: Cosmos, *, pr: PR) -> PrDetail:
             run = Run.model_validate({k: v for k, v in doc.items() if not k.startswith("_")})
         except Exception:
             log.warning(
-                "pr_detail: linked_run_id=%s on PR %s/%d not readable; falling back",
+                "report_detail: linked_run_id=%s on Report %s/%d not readable; falling back",
                 pr.linked_run_id, pr.repo, pr.number,
             )
     if run is None:
@@ -4026,7 +4368,7 @@ async def _build_pr_detail(cosmos: Cosmos, *, pr: PR) -> PrDetail:
     return detail
 
 
-def _tank_session_launch_url(*, settings: Settings, run: Run, pr: PR) -> str:
+def _tank_session_launch_url(*, settings: Settings, run: Run, pr: Report) -> str:
     return _tank_session_launch_url_from_fields(
         settings=settings,
         run_id=run.id,
@@ -4055,16 +4397,12 @@ def _tank_session_launch_url_from_fields(
 
 
 @app.post(
-    "/v1/prs",
-    response_model=PrDetail,
+    "/v1/reports",
+    response_model=ReportDetail,
     dependencies=[Depends(require_admin_user)],
 )
-async def create_pr_endpoint(req: PrCreateRequest) -> PrDetail:
-    """Register a glimmung PR. The agent's open-PR step (#50 slice 4)
-    is the primary caller: it opens a thin GH PR (one-line link to the
-    glimmung PR entity) and immediately registers the rich entity here.
-    Idempotent on `(repo, number)` — re-registration of an existing
-    PR returns the existing entity rather than minting a duplicate."""
+async def create_report_endpoint(req: ReportCreateRequest) -> ReportDetail:
+    """Register a Glimmung Report for an existing GitHub PR."""
     cosmos: Cosmos = app.state.cosmos
     project_doc = await _read_project(cosmos, req.project)
     if not project_doc:
@@ -4075,7 +4413,7 @@ async def create_pr_endpoint(req: PrCreateRequest) -> PrDetail:
         raise HTTPException(400, "branch required")
 
     # Idempotent ensure semantics.
-    pr, _etag, created = await pr_ops.ensure_pr_for_github(
+    pr, _etag, created = await report_ops.ensure_report_for_github(
         cosmos,
         project=req.project,
         repo=req.repo,
@@ -4086,51 +4424,51 @@ async def create_pr_endpoint(req: PrCreateRequest) -> PrDetail:
         base_ref=req.base_ref,
         head_sha=req.head_sha,
         html_url=req.html_url,
+        linked_issue_id=req.linked_issue_id,
+        linked_run_id=req.linked_run_id,
     )
     if not created and (
         req.linked_issue_id is not None or req.linked_run_id is not None
     ):
-        # ensure_pr_for_github only honors create-time fields. Patch the
+        # ensure_report_for_github only honors create-time fields. Patch the
         # linkages on after the fact so callers don't have to round-trip
         # through PATCH for the common "found existing PR, attach
         # linkage" case.
-        found = await pr_ops.read_pr(cosmos, project=req.project, pr_id=pr.id)
+        found = await report_ops.read_report(cosmos, project=req.project, report_id=pr.id)
         assert found is not None
         pr, etag = found
-        pr, _ = await pr_ops.update_pr(
+        pr, _ = await report_ops.update_report(
             cosmos, pr=pr, etag=etag,
             linked_issue_id=req.linked_issue_id,
             linked_run_id=req.linked_run_id,
         )
     elif created and (req.linked_issue_id or req.linked_run_id):
-        found = await pr_ops.read_pr(cosmos, project=req.project, pr_id=pr.id)
+        found = await report_ops.read_report(cosmos, project=req.project, report_id=pr.id)
         assert found is not None
         pr, etag = found
-        pr, _ = await pr_ops.update_pr(
+        pr, _ = await report_ops.update_report(
             cosmos, pr=pr, etag=etag,
             linked_issue_id=req.linked_issue_id,
             linked_run_id=req.linked_run_id,
         )
-    return await _build_pr_detail(cosmos, pr=pr)
+    return await _build_report_detail(cosmos, pr=pr)
 
 
 @app.patch(
-    "/v1/prs/by-id/{project}/{pr_id}",
-    response_model=PrDetail,
+    "/v1/reports/by-id/{project}/{report_id}",
+    response_model=ReportDetail,
     dependencies=[Depends(require_admin_user)],
 )
-async def patch_pr_endpoint(
-    req: PrUpdateRequest,
+async def patch_report_endpoint(
+    req: ReportUpdateRequest,
     project: str = Path(...),
-    pr_id: str = Path(...),
-) -> PrDetail:
-    """Patch PR fields + state transitions. State transitions go through
-    `close_pr` / `merge_pr` / `reopen_pr` so the timestamp invariants
-    (closed-vs-merged, merged_by) stay consistent at the call site."""
+    report_id: str = Path(...),
+) -> ReportDetail:
+    """Patch Report fields + state transitions."""
     cosmos: Cosmos = app.state.cosmos
-    found = await pr_ops.read_pr(cosmos, project=project, pr_id=pr_id)
+    found = await report_ops.read_report(cosmos, project=project, report_id=report_id)
     if found is None:
-        raise HTTPException(404, f"no glimmung PR {project}/{pr_id}")
+        raise HTTPException(404, f"no glimmung Report {project}/{report_id}")
     pr, etag = found
 
     if any(
@@ -4139,7 +4477,7 @@ async def patch_pr_endpoint(
             req.head_sha, req.html_url, req.linked_issue_id, req.linked_run_id,
         )
     ):
-        pr, etag = await pr_ops.update_pr(
+        pr, etag = await report_ops.update_report(
             cosmos, pr=pr, etag=etag,
             title=req.title,
             body=req.body,
@@ -4153,22 +4491,38 @@ async def patch_pr_endpoint(
 
     if req.state is not None:
         target = req.state.lower()
-        if target == "closed" and pr.state == PRState.OPEN:
-            pr, etag = await pr_ops.close_pr(cosmos, pr=pr, etag=etag)
+        if target == "closed" and pr.state not in (ReportState.CLOSED, ReportState.MERGED):
+            pr, etag = await report_ops.close_report(cosmos, pr=pr, etag=etag)
         elif target == "merged":
             if not req.merged_by:
                 raise HTTPException(400, "state='merged' requires merged_by")
-            pr, etag = await pr_ops.merge_pr(
+            pr, etag = await report_ops.merge_report(
                 cosmos, pr=pr, etag=etag, merged_by=req.merged_by,
             )
-        elif target == "open" and pr.state == PRState.CLOSED:
+        elif target == "ready" and pr.state != ReportState.READY:
             if pr.merged_at is not None:
-                raise HTTPException(409, "merged PR cannot be reopened")
-            pr, etag = await pr_ops.reopen_pr(cosmos, pr=pr, etag=etag)
-        elif target not in ("open", "closed", "merged"):
-            raise HTTPException(400, f"state must be 'open' | 'closed' | 'merged', not {req.state!r}")
+                raise HTTPException(409, "merged Report cannot be reopened")
+            if pr.state == ReportState.CLOSED:
+                pr, etag = await report_ops.reopen_report(cosmos, pr=pr, etag=etag)
+            else:
+                pr, etag = await report_ops.set_report_state(
+                    cosmos, pr=pr, etag=etag, state=ReportState.READY,
+                )
+        elif target == "needs_review":
+            pr, etag = await report_ops.set_report_state(
+                cosmos, pr=pr, etag=etag, state=ReportState.NEEDS_REVIEW,
+            )
+        elif target == "failed":
+            pr, etag = await report_ops.set_report_state(
+                cosmos, pr=pr, etag=etag, state=ReportState.FAILED,
+            )
+        elif target not in ("ready", "closed", "merged", "needs_review", "failed"):
+            raise HTTPException(
+                400,
+                "state must be 'ready' | 'needs_review' | 'failed' | 'closed' | 'merged'",
+            )
 
-    return await _build_pr_detail(cosmos, pr=pr)
+    return await _build_report_detail(cosmos, pr=pr)
 
 
 @app.post(

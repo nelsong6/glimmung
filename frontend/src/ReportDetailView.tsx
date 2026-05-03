@@ -1,21 +1,17 @@
 /**
- * PR detail view — reject-with-feedback action lives here.
+ * Report detail view — reject-with-feedback action lives here.
  *
- * Post-#50: PR meta (title/body/state) sourced from the glimmung `prs`
- * container; runtime fields (run_state, attempt history) come from the
- * linked Run when one exists. Submit POSTs a `glimmung_ui` reject
- * signal; the drain loop processes it through the triage decision
- * engine and (if budget allows) dispatches the triage workflow with
- * the feedback as context.
+ * Report meta comes from Glimmung; GitHub PR coordinates are syndication
+ * metadata when present. Runtime fields come from the linked Run.
  *
- * Routed via `/prs/<owner>/<repo>/<n>`. Repo + PR number are derived
+ * Routed via `/reports/<owner>/<repo>/<n>`. Repo + PR number are derived
  * from URL params so deep-link reloads land directly here.
  */
 import { useEffect, useState } from "react";
 import { useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { authedFetch, publicConfig } from "./auth";
 
-type PrDetail = {
+type ReportDetail = {
   id: string;
   project: string;
   repo: string;
@@ -66,33 +62,33 @@ type AuthContext = {
   signedIn: boolean;
 };
 
-type PrDetailRouteParams = {
+type ReportDetailRouteParams = {
   owner?: string;
   repo?: string;
   n?: string;
 };
 
-export function PrDetailView() {
+export function ReportDetailView() {
   const navigate = useNavigate();
-  const params = useParams<PrDetailRouteParams>();
+  const params = useParams<ReportDetailRouteParams>();
   const { signedIn } = useOutletContext<AuthContext>();
   const repo = `${params.owner ?? ""}/${params.repo ?? ""}`;
   const prNumber = parseInt(params.n ?? "0", 10);
 
-  const [detail, setDetail] = useState<PrDetail | null>(null);
+  const [detail, setDetail] = useState<ReportDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState("");
   const [reject, setReject] = useState<RejectStatus>({ kind: "idle" });
   const [tankBaseUrl, setTankBaseUrl] = useState("");
 
-  const onBack = () => navigate("/prs");
+  const onBack = () => navigate("/reports");
 
   const refresh = async () => {
     setError(null);
     try {
-      const r = await fetch(`/v1/prs/${repo}/${prNumber}`);
-      if (!r.ok) throw new Error(`/v1/prs/${repo}/${prNumber} -> ${r.status}`);
-      setDetail((await r.json()) as PrDetail);
+      const r = await fetch(`/v1/reports/${repo}/${prNumber}`);
+      if (!r.ok) throw new Error(`/v1/reports/${repo}/${prNumber} -> ${r.status}`);
+      setDetail((await r.json()) as ReportDetail);
     } catch (e) {
       setError(String(e));
     }
@@ -131,7 +127,7 @@ export function PrDetailView() {
     setReject({ kind: "submitting" });
     try {
       // Post-#50 signal shape: target_repo is the project name, target_id
-      // is the glimmung PR id (ULID). The drain accepts both shapes for
+      // is the Glimmung Report id. The drain accepts both shapes for
       // backwards-compat with in-flight pre-#50 signals.
       const r = await authedFetch("/v1/signals", {
         method: "POST",
@@ -306,7 +302,7 @@ export function PrDetailView() {
           <h2>Reject with feedback</h2>
           <p className="dim">
             Glimmung will dispatch the triage workflow with this feedback as context.
-            Subject to the run&apos;s budget. Subsequent rejects on this PR queue cleanly
+            Subject to the run&apos;s budget. Subsequent rejects on this Report queue cleanly
             — they wait for any in-flight triage to complete.
           </p>
           <textarea

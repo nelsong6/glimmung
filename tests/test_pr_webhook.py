@@ -2,7 +2,7 @@
 
 Pre-#50 the `pull_request.*` handler parsed `Closes #N` from PR bodies
 to link Runs to PRs by GH coords. Post-#50 the handler mirrors GH's
-PR lifecycle into the glimmung `prs` container and the run/issue
+PR lifecycle into the glimmung `reports` container and the run/issue
 linkage is set explicitly by the agent (slice 4) — these tests pin
 the new mirror behavior + the post-#50 signal shape (target_repo =
 project name, target_id = glimmung PR id).
@@ -16,15 +16,15 @@ from unittest.mock import patch
 
 import pytest
 
-from glimmung import prs as pr_ops
+from glimmung import reports as report_ops
 from glimmung.app import (
     _handle_pull_request,
     _handle_pull_request_review,
     _resolve_signal_pr,
 )
 from glimmung.models import (
-    PRReviewState,
-    PRState,
+    ReportReviewState,
+    ReportState,
     Signal,
     SignalSource,
     SignalState,
@@ -37,7 +37,7 @@ from tests.cosmos_fake import FakeContainer
 @pytest.fixture
 def cosmos():
     return SimpleNamespace(
-        prs=FakeContainer("prs", "/project"),
+        reports=FakeContainer("reports", "/project"),
         runs=FakeContainer("runs", "/project"),
         issues=FakeContainer("issues", "/project"),
         projects=FakeContainer("projects", "/name"),
@@ -68,7 +68,7 @@ def _pr_payload(
     repo: str = "nelsong6/ambience",
     number: int = 14,
     title: str = "agent: fix the dispatcher",
-    body: str = "spec link: https://glimmung.romaine.life/prs/ambience/01JABC",
+    body: str = "spec link: https://glimmung.romaine.life/reports/ambience/01JABC",
     branch: str = "agent/issue-7",
     base: str = "main",
     head_sha: str = "abc123",
@@ -103,7 +103,7 @@ async def test_pr_opened_creates_glimmung_pr_doc(cosmos, app_state):
         outcome = await _handle_pull_request(_pr_payload(action="opened"))
 
     assert outcome["created"] is True
-    found = await pr_ops.find_pr_by_repo_number(
+    found = await report_ops.find_report_by_repo_number(
         cosmos, repo="nelsong6/ambience", number=14,
     )
     assert found is not None
@@ -113,8 +113,8 @@ async def test_pr_opened_creates_glimmung_pr_doc(cosmos, app_state):
     assert pr.base_ref == "main"
     assert pr.head_sha == "abc123"
     assert pr.html_url == "https://github.com/nelsong6/ambience/pull/14"
-    assert pr.state == PRState.OPEN
-    # Linkage stays unset — the agent's POST /v1/prs (slice 4) is the
+    assert pr.state == ReportState.READY
+    # Linkage stays unset — the agent's POST /v1/reports (slice 4) is the
     # authoritative source for linked_run_id / linked_issue_id.
     assert pr.linked_run_id is None
     assert pr.linked_issue_id is None
@@ -131,7 +131,7 @@ async def test_pr_opened_twice_does_not_duplicate(cosmos, app_state):
 
     assert first["created"] is True
     assert second["created"] is False
-    docs = [d async for d in cosmos.prs.query_items("SELECT * FROM c", parameters=[])]
+    docs = [d async for d in cosmos.reports.query_items("SELECT * FROM c", parameters=[])]
     assert len(docs) == 1
     # The second call patches title to match GH.
     assert docs[0]["title"] == "renamed"
@@ -147,7 +147,7 @@ async def test_pr_synchronize_refreshes_head_sha(cosmos, app_state):
         ))
 
     assert outcome["patched"] is True
-    found = await pr_ops.find_pr_by_repo_number(
+    found = await report_ops.find_report_by_repo_number(
         cosmos, repo="nelsong6/ambience", number=14,
     )
     pr, _ = found
@@ -164,11 +164,11 @@ async def test_pr_closed_without_merge_transitions_to_closed(cosmos, app_state):
         ))
 
     assert outcome["closed"] is True
-    found = await pr_ops.find_pr_by_repo_number(
+    found = await report_ops.find_report_by_repo_number(
         cosmos, repo="nelsong6/ambience", number=14,
     )
     pr, _ = found
-    assert pr.state == PRState.CLOSED
+    assert pr.state == ReportState.CLOSED
     assert pr.merged_at is None
 
 
@@ -182,11 +182,11 @@ async def test_pr_closed_with_merge_stamps_merged_metadata(cosmos, app_state):
         ))
 
     assert outcome["merged"] is True
-    found = await pr_ops.find_pr_by_repo_number(
+    found = await report_ops.find_report_by_repo_number(
         cosmos, repo="nelsong6/ambience", number=14,
     )
     pr, _ = found
-    assert pr.state == PRState.CLOSED
+    assert pr.state == ReportState.MERGED
     assert pr.merged_at is not None
     assert pr.merged_by == "nelsong6"
 
@@ -206,12 +206,12 @@ async def test_pr_reopened_on_merged_pr_is_a_no_op(cosmos, app_state):
         ))
 
     assert outcome.get("reopen_ignored") == "merged"
-    found = await pr_ops.find_pr_by_repo_number(
+    found = await report_ops.find_report_by_repo_number(
         cosmos, repo="nelsong6/ambience", number=14,
     )
     pr, _ = found
     # State stays CLOSED (merged) — no transition.
-    assert pr.state == PRState.CLOSED
+    assert pr.state == ReportState.MERGED
     assert pr.merged_at is not None
 
 
@@ -230,11 +230,11 @@ async def test_pr_reopened_after_close_without_merge_transitions_to_open(
         ))
 
     assert outcome.get("reopened") is True
-    found = await pr_ops.find_pr_by_repo_number(
+    found = await report_ops.find_report_by_repo_number(
         cosmos, repo="nelsong6/ambience", number=14,
     )
     pr, _ = found
-    assert pr.state == PRState.OPEN
+    assert pr.state == ReportState.READY
 
 
 @pytest.mark.asyncio
@@ -257,7 +257,7 @@ async def test_review_signal_targets_glimmung_pr_id_when_pr_exists(
     drain looks up the glimmung PR doc directly rather than going
     through GH coords."""
     await _register_project(cosmos, "ambience", "nelsong6/ambience")
-    pr = await pr_ops.create_pr(
+    pr = await report_ops.create_report(
         cosmos, project="ambience", repo="nelsong6/ambience",
         number=42, title="t", branch="b",
     )
@@ -286,19 +286,19 @@ async def test_review_signal_targets_glimmung_pr_id_when_pr_exists(
     assert sig["target_type"] == "pr"
     assert sig["target_repo"] == "ambience"        # project name, not GH repo
     assert sig["target_id"] == pr.id               # glimmung PR id, not GH number
-    fetched, _ = await pr_ops.read_pr(cosmos, project="ambience", pr_id=pr.id)
+    fetched, _ = await report_ops.read_report(cosmos, project="ambience", report_id=pr.id)
     assert len(fetched.reviews) == 1
     mirrored = fetched.reviews[0]
     assert mirrored.gh_id == 99999
     assert mirrored.author == "nelsong6"
-    assert mirrored.state == PRReviewState.CHANGES_REQUESTED
+    assert mirrored.state == ReportReviewState.CHANGES_REQUESTED
     assert mirrored.body == "this needs another iteration"
 
 
 @pytest.mark.asyncio
 async def test_review_mirror_dedupes_on_redelivery(cosmos, app_state):
     await _register_project(cosmos, "ambience", "nelsong6/ambience")
-    pr = await pr_ops.create_pr(
+    pr = await report_ops.create_report(
         cosmos, project="ambience", repo="nelsong6/ambience",
         number=42, title="t", branch="b",
     )
@@ -327,9 +327,9 @@ async def test_review_mirror_dedupes_on_redelivery(cosmos, app_state):
 
     assert first["mirrored_review"] is True
     assert second["mirrored_review"] is True
-    fetched, _ = await pr_ops.read_pr(cosmos, project="ambience", pr_id=pr.id)
+    fetched, _ = await report_ops.read_report(cosmos, project="ambience", report_id=pr.id)
     assert len(fetched.reviews) == 1
-    assert fetched.reviews[0].state == PRReviewState.APPROVED
+    assert fetched.reviews[0].state == ReportReviewState.APPROVED
     assert fetched.reviews[0].body == "ship it"
 
 
@@ -338,7 +338,7 @@ async def test_review_signal_falls_back_to_gh_coords_when_no_glimmung_pr(
     cosmos, app_state,
 ):
     """If the webhook handler races and the glimmung PR isn't there
-    yet (rare; ensure_pr_for_github usually wins), the signal falls
+    yet (rare; ensure_report_for_github usually wins), the signal falls
     back to the legacy `(repo, gh_pr_number)` shape so it's not lost.
     The drain accepts both shapes."""
     await _register_project(cosmos, "ambience", "nelsong6/ambience")
@@ -380,9 +380,9 @@ def _signal(*, target_repo: str, target_id: str) -> Signal:
 
 @pytest.mark.asyncio
 async def test_resolve_signal_pr_handles_glimmung_id_shape(cosmos):
-    """ULID-shaped target_id resolves through `prs.read_pr` and pulls
+    """ULID-shaped target_id resolves through `reports.read_report` and pulls
     in the linked Run when present."""
-    await pr_ops.create_pr(
+    await report_ops.create_report(
         cosmos, project="ambience", repo="nelsong6/ambience",
         number=14, title="t", branch="b", linked_run_id="01JRUN00000",
     )
@@ -402,7 +402,7 @@ async def test_resolve_signal_pr_handles_glimmung_id_shape(cosmos):
         "budget": {"max_attempts": 3, "max_cost_usd": 25.0},
     }
     await cosmos.runs.create_item(run_doc)
-    found = await pr_ops.find_pr_by_repo_number(
+    found = await report_ops.find_report_by_repo_number(
         cosmos, repo="nelsong6/ambience", number=14,
     )
     pr, _ = found

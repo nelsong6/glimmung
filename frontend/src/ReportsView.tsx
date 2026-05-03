@@ -1,18 +1,16 @@
 /**
- * PRs view — PRs across registered repos. Each row links to the
- * PR's detail view, where the reject-with-feedback action lives.
+ * Reports view across registered repos. Each row links to the Report detail
+ * view, where the reject-with-feedback action lives.
  *
- * Post-#50: sourced from `/v1/prs` which reads the glimmung `prs`
- * container directly. Rows include both agent-opened PRs (carry a
- * linked Run) and manual PRs (no run linkage). Refresh on mount +
- * manual refresh button.
+ * Sourced from `/v1/reports`. Rows include both agent-opened GitHub PR
+ * reports and manually mirrored PRs with no run linkage.
  *
- * Row click navigates to `/prs/<owner>/<repo>/<n>`.
+ * Row click navigates to `/reports/<owner>/<repo>/<n>`.
  */
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-type PrRow = {
+type ReportRow = {
   id: string;
   project: string;
   repo: string;
@@ -32,13 +30,13 @@ type PrRow = {
   pr_lock_held: boolean;
 };
 
-export function PrsView({
+export function ReportsView({
   projectFilter,
 }: {
   projectFilter: string | null;
 }) {
   const navigate = useNavigate();
-  const [rows, setRows] = useState<PrRow[] | null>(null);
+  const [rows, setRows] = useState<ReportRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -46,9 +44,9 @@ export function PrsView({
     setLoading(true);
     setError(null);
     try {
-      const r = await fetch("/v1/prs");
-      if (!r.ok) throw new Error(`/v1/prs -> ${r.status}`);
-      setRows((await r.json()) as PrRow[]);
+      const r = await fetch("/v1/reports");
+      if (!r.ok) throw new Error(`/v1/reports -> ${r.status}`);
+      setRows((await r.json()) as ReportRow[]);
     } catch (e) {
       setError(String(e));
       setRows(null);
@@ -71,7 +69,7 @@ export function PrsView({
   return (
     <>
       <h2>
-        PRs{visibleRows ? ` (${visibleRows.length})` : ""}
+        Reports{visibleRows ? ` (${visibleRows.length})` : ""}
         {projectFilter && (
           <span className="filter-hint"> — filtered to {projectFilter}</span>
         )}
@@ -90,15 +88,15 @@ export function PrsView({
       ) : visibleRows && visibleRows.length === 0 ? (
         <div className="empty">
           {projectFilter
-            ? `No PRs for ${projectFilter}.`
-            : "No PRs yet."}
+            ? `No reports for ${projectFilter}.`
+            : "No reports yet."}
         </div>
       ) : visibleRows ? (
         <table>
           <thead>
             <tr>
               <th>Project</th>
-              <th>PR</th>
+              <th>GitHub PR</th>
               <th>Title</th>
               <th>Issue</th>
               <th>Status</th>
@@ -113,7 +111,7 @@ export function PrsView({
               <tr
                 key={row.id}
                 className={row.pr_lock_held ? "eligible" : ""}
-                onClick={() => navigate(`/prs/${row.repo}/${row.pr_number}`)}
+                onClick={() => navigate(`/reports/${row.repo}/${row.pr_number}`)}
                 style={{ cursor: "pointer" }}
               >
                 <td>{row.project}</td>
@@ -167,9 +165,9 @@ function runStatePill(state: string): string {
   return "dim";
 }
 
-function prStatePill(row: PrRow): string {
+function prStatePill(row: ReportRow): string {
   if (row.merged) return "free";
-  if (row.state === "open") return "busy";
+  if (row.state === "ready" || row.state === "needs_review") return "busy";
   if (row.state === "closed") return "dim";
   return "dim";
 }

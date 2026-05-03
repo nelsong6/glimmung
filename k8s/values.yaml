@@ -3,17 +3,27 @@ image:
   # SHA-pinned. The build workflow rewrites this line on every push to main
   # via a `[skip ci]` follow-up commit. Quote the value so all-digit short
   # SHAs aren't reformatted as scientific notation by YAML.
-  tag: "d51909d"
+  tag: "0770b18"
   pullPolicy: IfNotPresent
 
 namespace: glimmung
 serviceAccount: infra-shared
-# Pinned by tofu/identity.tf's `glimmung_identity_client_id` output.
-# Update here whenever that identity is recreated; the infra slice that
-# moves it into Glimmung's resource group is one such rollout.
-# See tofu/identity.tf for the scoped identity model.
+# Pinned by tofu/identity.tf's current `glimmung_identity_client_id` output.
+# After the staged dedicated-identity apply, update this to
+# `glimmung_dedicated_identity_client_id` in a chart-only cutover PR.
 serviceAccountClientId: "718fd28c-892a-43e9-89c3-9ee3f0f8d073"
 replicas: 1
+
+nativeRunner:
+  namespace: glimmung-runs
+  serviceAccount: glimmung-native-runner
+  callbackBaseUrl: http://glimmung.glimmung.svc.cluster.local:8000
+  projectConcurrency: 5
+  globalConcurrency: 5
+  jobTtlSeconds: 259200
+  # Filled by tofu's `glimmung_native_runner_identity_client_id` output once
+  # the native runner identity is applied.
+  serviceAccountClientId: ""
 
 # In-cluster admin auth via Kubernetes service-account tokens. When enabled,
 # admin endpoints (/v1/projects, /v1/workflows, /v1/hosts) accept a bearer

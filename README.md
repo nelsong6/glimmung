@@ -81,8 +81,8 @@ matching surface in the same PR:
 | GET    | `/v1/issues`                      | List open issues across all registered repos (live GH API). |
 | GET    | `/v1/issues/{owner}/{repo}/{n}`   | Issue detail (title, body, labels, last-run, lock state). |
 | POST   | `/v1/runs/dispatch`               | UI-initiated dispatch (`{repo, issue_number, workflow?}`). Same path as the label-webhook trigger; per-issue lock-serialized. |
-| GET    | `/v1/prs`                         | Agent-opened PR history across registered repos (linked Run + state). |
-| GET    | `/v1/prs/{owner}/{repo}/{n}`      | PR detail with attempt history + reject feedback surface. |
+| GET    | `/v1/reports`                     | Report history across registered repos (GitHub PR syndication metadata + linked Run state). |
+| GET    | `/v1/reports/{owner}/{repo}/{n}`  | Report detail with attempt history + reject feedback surface. |
 | POST   | `/v1/signals`                     | Enqueue a Signal (e.g., `{target_type:"pr", target_repo, target_id, source:"glimmung_ui", payload:{kind:"reject", feedback:"…"}}`). UI reject button uses this. |
 
 Admin endpoints accept **either** auth path:

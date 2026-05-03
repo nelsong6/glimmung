@@ -39,6 +39,7 @@ class ProjectRegister(BaseModel):
 # per phase kind.
 VERIFY_PHASE_TRIGGERS: frozenset[str] = frozenset({"verify_fail", "verify_malformed"})
 PR_PRIMITIVE_TRIGGERS: frozenset[str] = frozenset({"pr_review_changes_requested"})
+PHASE_KINDS: frozenset[str] = frozenset({"gha_dispatch", "k8s_job"})
 
 
 # Cross-phase input ref expression: `${{ phases.<phase_name>.outputs.<key> }}`.
@@ -155,14 +156,39 @@ class RecyclePolicy(BaseModel):
     lands_at: str = "self"
 
 
+class NativeStepSpec(BaseModel):
+    """App-owned observational step boundary inside a native Kubernetes Job."""
+    slug: str
+    title: str | None = None
+
+
+class NativeJobSpec(BaseModel):
+    """One app-owned native runner Job inside a phase.
+
+    v1 executes jobs sequentially inside the phase. The command/image/env
+    belong to the app's workflow registration; Glimmung supplies universal
+    run context and callback mechanics around it.
+    """
+    id: str
+    name: str | None = None
+    image: str
+    command: list[str] = Field(default_factory=list)
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    steps: list[NativeStepSpec] = Field(default_factory=list)
+    timeout_seconds: int | None = None
+
+
 class PhaseSpec(BaseModel):
-    """One step in a workflow's pipeline. v1 supports `kind="gha_dispatch"`
-    only — phases dispatch a GitHub Actions workflow. `kind="llm"` and other
-    native kinds are reserved.
+    """One phase in a workflow's pipeline.
+
+    `gha_dispatch` phases dispatch a GitHub Actions workflow, preserved for
+    legacy/exception flows. `k8s_job` phases run app-owned native Kubernetes
+    Jobs and expose first-class job/step observations.
 
     Verify is opt-in: when true, the phase emits `verification.json` and the
     decision engine routes through `recycle_policy`. When false, any
-    non-`success` GHA conclusion ends the run (GHA-job semantics) and
+    non-`success` runner conclusion ends the run (job semantics) and
     `recycle_policy` is invalid.
 
     `inputs` and `outputs` plumb data between phases (multi-phase runtime,
@@ -174,13 +200,14 @@ class PhaseSpec(BaseModel):
     validation runs at registration time."""
     name: str
     kind: str = "gha_dispatch"
-    workflow_filename: str
+    workflow_filename: str = ""
     workflow_ref: str = "main"
     inputs: dict[str, str] = Field(default_factory=dict)
     outputs: list[str] = Field(default_factory=list)
     requirements: dict[str, Any] | None = None
     verify: bool = False
     recycle_policy: RecyclePolicy | None = None
+    jobs: list[NativeJobSpec] = Field(default_factory=list)
 
 
 class PrPrimitiveSpec(BaseModel):
@@ -233,10 +260,41 @@ class WorkflowRegister(BaseModel):
         if len(set(names)) != len(names):
             raise ValueError(f"phase names must be unique within a workflow; got {names}")
         for p in self.phases:
-            if p.kind != "gha_dispatch":
+            if p.kind not in PHASE_KINDS:
                 raise ValueError(
-                    f"phase {p.name!r} kind={p.kind!r} not supported in v1 (only 'gha_dispatch')"
+                    f"phase {p.name!r} kind={p.kind!r} not supported in v1 "
+                    f"(valid: {sorted(PHASE_KINDS)})"
                 )
+            if p.kind == "gha_dispatch":
+                if not p.workflow_filename:
+                    raise ValueError(
+                        f"phase {p.name!r} kind='gha_dispatch' requires workflow_filename"
+                    )
+                if p.jobs:
+                    raise ValueError(
+                        f"phase {p.name!r} kind='gha_dispatch' cannot declare native jobs"
+                    )
+            if p.kind == "k8s_job":
+                if not p.jobs:
+                    raise ValueError(
+                        f"phase {p.name!r} kind='k8s_job' must declare at least one job"
+                    )
+                job_ids = [j.id for j in p.jobs]
+                if len(set(job_ids)) != len(job_ids):
+                    raise ValueError(
+                        f"phase {p.name!r} job ids must be unique; got {job_ids}"
+                    )
+                for job in p.jobs:
+                    step_slugs = [s.slug for s in job.steps]
+                    if not step_slugs:
+                        raise ValueError(
+                            f"phase {p.name!r} job {job.id!r} must declare at least one step"
+                        )
+                    if len(set(step_slugs)) != len(step_slugs):
+                        raise ValueError(
+                            f"phase {p.name!r} job {job.id!r} step slugs must be unique; "
+                            f"got {step_slugs}"
+                        )
             if p.recycle_policy is not None:
                 if not p.verify:
                     raise ValueError(
@@ -358,6 +416,55 @@ class VerificationResult(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class NativeStepState(str, Enum):
+    PENDING = "pending"
+    ACTIVE = "active"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class NativeStepAttempt(BaseModel):
+    slug: str
+    title: str | None = None
+    state: NativeStepState = NativeStepState.PENDING
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    exit_code: int | None = None
+    message: str | None = None
+
+
+class NativeJobAttempt(BaseModel):
+    job_id: str
+    name: str | None = None
+    state: NativeStepState = NativeStepState.PENDING
+    steps: list[NativeStepAttempt] = Field(default_factory=list)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    last_seq: int = 0
+
+
+class NativeRunEventType(str, Enum):
+    STEP_STARTED = "step_started"
+    LOG = "log"
+    STEP_COMPLETED = "step_completed"
+    STEP_FAILED = "step_failed"
+
+
+def native_job_attempts_from_specs(jobs: list[NativeJobSpec]) -> list[NativeJobAttempt]:
+    return [
+        NativeJobAttempt(
+            job_id=job.id,
+            name=job.name,
+            steps=[
+                NativeStepAttempt(slug=step.slug, title=step.title)
+                for step in job.steps
+            ],
+        )
+        for job in jobs
+    ]
+
+
 class PhaseAttempt(BaseModel):
     """One dispatch of a phase (or the PR primitive). `phase` is the phase
     name from the workflow's `phases` list, or a glimmung-reserved name for
@@ -366,6 +473,7 @@ class PhaseAttempt(BaseModel):
     and the rollup falls back to `verification.cost_usd`."""
     attempt_index: int                         # 0-based; 0 == initial dispatch
     phase: str                                 # phase name from PhaseSpec.name
+    phase_kind: str = "gha_dispatch"
     workflow_filename: str
     workflow_run_id: int | None = None         # GH Actions run id; populated on completion
     dispatched_at: datetime
@@ -381,6 +489,11 @@ class PhaseAttempt(BaseModel):
     # multi-phase runtime (PR 3 of #101) substitutes these into the next
     # phase's `workflow_dispatch.inputs` per its declared `inputs` refs.
     phase_outputs: dict[str, str] | None = None
+    # Native k8s_job observations. Jobs/steps are initialized from the
+    # workflow registration and then updated by native runner callbacks.
+    jobs: list[NativeJobAttempt] = Field(default_factory=list)
+    log_archive_url: str | None = None
+    capability_token_sha256: str | None = None
     # Resume primitive (#111) — set when this attempt is a skip-mark
     # synthesized during run resumption, not a real dispatch. The phase
     # didn't actually execute; `phase_outputs` were carried forward from
@@ -670,28 +783,22 @@ class Issue(BaseModel):
     closed_at: datetime | None = None
 
 
-# ─── Glimmung-native PRs (#41) ─────────────────────────────────────────────
+# ─── Glimmung Reports ──────────────────────────────────────────────────────
 #
-# Mirrors the Issue substrate (#28) shape. A PR is the canonical record of
-# a code-change conversation: title/body/state plus the reviews and comments
-# that constrain whether the change can land. Stored in `prs`, partitioned
-# by `/project`. Unlike Issues, PRs are inherently a GitHub concept — there's
-# no "Slack PR" — so `repo` and `number` live on the PR top-level rather
-# than under a metadata object.
-#
-# The substrate (this PR) lands the model + CRUD primitives only. Consumer
-# PRs wire `pull_request.*` webhook events into `_mirror_github_pr` (rich-
-# document mirror), `pr_detail` reads off this container instead of the live
-# GH API, and `Run.pr_id` joins runs to PRs the same way `Run.issue_id`
-# joins runs to Issues.
+# Report is the canonical Glimmung review object. GitHub pull requests are
+# one syndication target, so their repo/number/branch metadata stays on the
+# record when present, but Report is the object the UI/API/MCP surfaces own.
 
 
-class PRState(str, Enum):
-    OPEN = "open"
+class ReportState(str, Enum):
+    READY = "ready"
+    NEEDS_REVIEW = "needs_review"
+    FAILED = "failed"
     CLOSED = "closed"
+    MERGED = "merged"
 
 
-class PRReviewState(str, Enum):
+class ReportReviewState(str, Enum):
     """GH review verdicts. `DISMISSED` is the post-state when an author or
     maintainer dismisses an earlier review; we record it as a separate review
     entry rather than mutating the original so the audit trail stays append-
@@ -702,11 +809,8 @@ class PRReviewState(str, Enum):
     DISMISSED = "dismissed"
 
 
-class PRComment(BaseModel):
-    """One comment on a PR thread. Sourced from the `issue_comment` webhook
-    when the issue is a PR (discriminator: `payload.issue.pull_request` is
-    set). `gh_id` is the GitHub-side comment id used for idempotent dedupe
-    on webhook re-delivery."""
+class ReportComment(BaseModel):
+    """One mirrored GitHub PR comment or Glimmung-native report comment."""
     id: str                                  # ULID; glimmung-side id
     gh_id: int | None = None                 # GH comment id; mirror dedupe key
     author: str                              # GH login
@@ -716,45 +820,51 @@ class PRComment(BaseModel):
     html_url: str | None = None
 
 
-class PRReview(BaseModel):
-    """One review submission on a PR. Sourced from `pull_request_review.
-    submitted` (and `.dismissed`). `gh_id` is the GitHub-side review id used
-    for idempotent dedupe on webhook re-delivery."""
+class ReportReview(BaseModel):
+    """One mirrored GitHub PR review submission."""
     id: str                                  # ULID
     gh_id: int | None = None                 # GH review id; mirror dedupe key
     author: str
-    state: PRReviewState
+    state: ReportReviewState
     body: str = ""
     submitted_at: datetime
     html_url: str | None = None
 
 
-class PR(BaseModel):
+class Report(BaseModel):
     schema_version: int = 1
-    id: str                                  # ULID; canonical glimmung-PR-id
+    id: str                                  # canonical glimmung Report id
     project: str                             # partition key
-    repo: str                                # "<owner>/<repo>"
-    number: int                              # GH PR number (denormalized at top-level; see banner above)
+    repo: str                                # GitHub "<owner>/<repo>" when syndicated
+    number: int                              # GitHub PR number when syndicated
     title: str
     body: str = ""
-    state: PRState = PRState.OPEN
-    branch: str                              # head ref
+    state: ReportState = ReportState.READY
+    branch: str                              # GitHub head ref when syndicated
     base_ref: str = "main"                   # base ref
     head_sha: str = ""                       # latest head commit sha; updated on `pull_request.synchronize`
     html_url: str = ""
-    comments: list[PRComment] = Field(default_factory=list)
-    reviews: list[PRReview] = Field(default_factory=list)
-    # Cross-substrate linkages (#50). Set by the agent's open-PR step and
-    # by the seed script's `Closes #N` parser; both are explicit IDs so
-    # downstream consumers don't have to re-derive from PR-body text.
-    # Optional because not every PR is agent-opened (manual humans-only
-    # PRs land here from the webhook mirror without a Run / Issue link).
+    comments: list[ReportComment] = Field(default_factory=list)
+    reviews: list[ReportReview] = Field(default_factory=list)
     linked_issue_id: str | None = None       # glimmung Issue.id (ULID)
     linked_run_id: str | None = None         # glimmung Run.id (ULID)
     created_at: datetime
     updated_at: datetime
-    # CLOSED-with-merge sets both; CLOSED-without-merge leaves them None.
-    # Reopen (CLOSED→OPEN) only applies to never-merged PRs; merged PRs
-    # cannot be reopened on the GH side.
     merged_at: datetime | None = None
     merged_by: str | None = None
+
+
+class ReportVersion(BaseModel):
+    schema_version: int = 1
+    id: str                                  # "<report_id>.<version>"
+    project: str                             # partition key
+    report_id: str
+    version: int = 0
+    state: ReportState = ReportState.READY
+    title: str
+    body: str = ""
+    linked_run_id: str | None = None
+    github_repo: str | None = None
+    github_pr_number: int | None = None
+    github_html_url: str | None = None
+    created_at: datetime

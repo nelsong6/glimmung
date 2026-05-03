@@ -29,7 +29,7 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
     @mcp.tool()
     def get_issue_graph(repo_owner: str, repo_name: str, issue_number: int) -> dict[str, Any]:
         """Lineage graph for one Issue: every Run dispatched against it,
-        every PhaseAttempt inside each Run, the PR(s) opened, and the
+        every PhaseAttempt inside each Run, the Report(s) opened, and the
         Signals fed back."""
         return client.get(f"/v1/issues/{repo_owner}/{repo_name}/{issue_number}/graph")
 
@@ -39,19 +39,19 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         return client.get("/v1/issues")
 
     @mcp.tool()
-    def get_pr(repo_owner: str, repo_name: str, pr_number: int) -> dict[str, Any]:
-        """Detail view of a glimmung PR keyed by GitHub repo coords."""
-        return client.get(f"/v1/prs/{repo_owner}/{repo_name}/{pr_number}")
+    def get_report(repo_owner: str, repo_name: str, pr_number: int) -> dict[str, Any]:
+        """Detail view of a Glimmung Report keyed by GitHub PR coords."""
+        return client.get(f"/v1/reports/{repo_owner}/{repo_name}/{pr_number}")
 
     @mcp.tool()
-    def get_pr_by_id(project: str, pr_id: str) -> dict[str, Any]:
-        """Detail view of a glimmung PR keyed by its glimmung id."""
-        return client.get(f"/v1/prs/by-id/{project}/{pr_id}")
+    def get_report_by_id(project: str, report_id: str) -> dict[str, Any]:
+        """Detail view of a Glimmung Report keyed by its canonical id."""
+        return client.get(f"/v1/reports/by-id/{project}/{report_id}")
 
     @mcp.tool()
-    def list_prs() -> list[dict[str, Any]]:
-        """List all glimmung PRs across projects."""
-        return client.get("/v1/prs")
+    def list_reports() -> list[dict[str, Any]]:
+        """List all Glimmung Reports across projects."""
+        return client.get("/v1/reports")
 
     @mcp.tool()
     def get_state() -> dict[str, Any]:
@@ -128,8 +128,9 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         time, so a typo in `${{ phases.NAME.outputs.KEY }}` surfaces
         before it can corrupt a run.
 
-        `phases` is a list of PhaseSpec dicts; each must declare `name`
-        and `workflow_filename`. Optional fields: `kind` (default
+        `phases` is a list of PhaseSpec dicts; `gha_dispatch` phases
+        declare `workflow_filename`, while `k8s_job` phases declare
+        `jobs` with app-owned `steps`. Optional fields: `kind` (default
         "gha_dispatch"), `workflow_ref`, `inputs`, `outputs`,
         `requirements`, `verify`, `recycle_policy`. `pr` is a
         PrPrimitiveSpec dict (`enabled`, `recycle_policy`); omit for the
@@ -383,7 +384,7 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         return client.post("/v1/runs/dispatch", json=payload)
 
     @mcp.tool()
-    def create_pr(
+    def create_report(
         project: str,
         repo: str,
         number: int,
@@ -396,7 +397,7 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         linked_issue_id: str | None = None,
         linked_run_id: str | None = None,
     ) -> dict[str, Any]:
-        """Register a glimmung PR after the GitHub PR exists. Idempotent
+        """Register a Glimmung Report after the GitHub PR exists. Idempotent
         on `(repo, number)` and can attach `linked_issue_id` /
         `linked_run_id` during either create or re-registration."""
         payload: dict[str, Any] = {
@@ -414,12 +415,12 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
             payload["linked_issue_id"] = linked_issue_id
         if linked_run_id is not None:
             payload["linked_run_id"] = linked_run_id
-        return client.post("/v1/prs", json=payload)
+        return client.post("/v1/reports", json=payload)
 
     @mcp.tool()
-    def patch_pr(
+    def patch_report(
         project: str,
-        pr_id: str,
+        report_id: str,
         title: str | None = None,
         body: str | None = None,
         branch: str | None = None,
@@ -431,10 +432,7 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         state: str | None = None,
         merged_by: str | None = None,
     ) -> dict[str, Any]:
-        """Patch a PR. All fields optional — None means \"don't change\".
-        `state` is \"open\", \"closed\", or \"merged\"; \"merged\" requires
-        `merged_by`. Closed-vs-merged route to close_pr vs merge_pr
-        (different timestamp invariants)."""
+        """Patch a Report. All fields optional; None means don't change."""
         payload: dict[str, Any] = {}
         for k, v in {
             "title": title,
@@ -450,4 +448,4 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         }.items():
             if v is not None:
                 payload[k] = v
-        return client.patch(f"/v1/prs/by-id/{project}/{pr_id}", json=payload)
+        return client.patch(f"/v1/reports/by-id/{project}/{report_id}", json=payload)
