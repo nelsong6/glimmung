@@ -379,6 +379,33 @@ _DISPATCH_INPUT_KEYS = frozenset({
 })
 
 
+async def _run_issue_workflow_metadata(cosmos: Cosmos, run: Run) -> dict[str, str]:
+    """Workflow-facing issue inputs for a Run.
+
+    Legacy GH-anchored runs get `issue_number`; native Glimmung runs get
+    `issue_id`. Never send `issue_number=0`: GitHub treats non-empty
+    strings as truthy in run-name expressions, and downstream shell
+    guards must not confuse native issues for GitHub issue #0.
+    """
+    metadata: dict[str, str] = {}
+    if run.issue_number:
+        metadata["issue_number"] = str(run.issue_number)
+        if run.issue_repo:
+            metadata["issue_repo"] = run.issue_repo
+    elif run.issue_id:
+        metadata["issue_id"] = run.issue_id
+
+    if run.issue_id:
+        try:
+            doc = await cosmos.issues.read_item(item=run.issue_id, partition_key=run.project)
+            title = str(doc.get("title") or "")
+            if title:
+                metadata["issue_title"] = title
+        except Exception:
+            pass
+    return metadata
+
+
 async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host: Host) -> bool:
     """Fire workflow_dispatch for the lease's (project, workflow). Returns
     True on a successful dispatch OR a no-op (no GH minter, project not
@@ -745,9 +772,9 @@ async def _dispatch_retry(
     )
 
     requirements = target_phase.requirements or workflow_model.default_requirements
+    issue_metadata = await _run_issue_workflow_metadata(cosmos, run)
     metadata = {
-        "issue_number": str(run.issue_number),
-        "issue_repo": run.issue_repo,
+        **issue_metadata,
         "run_id": run.id,
         "phase_name": target_phase.name,
         "attempt_index": str(len(run.attempts) - 1),
@@ -790,7 +817,10 @@ async def _dispatch_retry(
     inputs = {
         "host": host.name,
         "lease_id": lease.id,
-        "issue_number": str(run.issue_number),
+        **{
+            k: v for k, v in issue_metadata.items()
+            if k in _DISPATCH_INPUT_KEYS
+        },
         "run_id": run.id,
         "prior_verification_artifact_url": prior_artifact_url,
         "attempt_index": str(len(run.attempts) - 1),
@@ -884,10 +914,9 @@ async def _dispatch_next_phase(
     )
 
     requirements = next_phase.requirements or workflow_model.default_requirements
+    issue_metadata = await _run_issue_workflow_metadata(cosmos, run)
     metadata = {
-        "issue_id": run.issue_id,
-        "issue_number": str(run.issue_number),
-        "issue_repo": run.issue_repo,
+        **issue_metadata,
         "issue_lock_holder_id": run.issue_lock_holder_id or "",
         "run_id": run.id,
         "phase_name": next_phase.name,
@@ -933,7 +962,10 @@ async def _dispatch_next_phase(
     inputs = {
         "host": host.name,
         "lease_id": lease.id,
-        "issue_number": str(run.issue_number),
+        **{
+            k: v for k, v in issue_metadata.items()
+            if k in _DISPATCH_INPUT_KEYS
+        },
         "run_id": run.id,
         "attempt_index": "0",
         **{k: str(v) for k, v in substituted.items()},
@@ -1030,9 +1062,9 @@ async def _dispatch_triage(
     )
 
     requirements = target_phase.requirements or workflow_model.default_requirements
+    issue_metadata = await _run_issue_workflow_metadata(cosmos, run)
     metadata = {
-        "issue_number": str(run.issue_number),
-        "issue_repo": run.issue_repo,
+        **issue_metadata,
         "run_id": run.id,
         "phase_name": target_phase.name,
         "attempt_index": str(len(run.attempts) - 1),
@@ -1061,7 +1093,10 @@ async def _dispatch_triage(
     inputs = {
         "host": host.name,
         "lease_id": lease.id,
-        "issue_number": str(run.issue_number),
+        **{
+            k: v for k, v in issue_metadata.items()
+            if k in _DISPATCH_INPUT_KEYS
+        },
         "pr_number": str(run.pr_number) if run.pr_number is not None else "",
         "run_id": run.id,
         "attempt_index": str(len(run.attempts) - 1),
