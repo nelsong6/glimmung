@@ -91,6 +91,7 @@ def test_job_manifest_maps_phase_jobs_to_sequential_pod_containers():
             "run_id": "01KRNATIVE0000000000000000",
             "attempt_index": "2",
             "issue_id": "01ISSUE",
+            "issue_body": "Use the validation URL and make the requested change.",
             "phase_inputs": {
                 "target-ref": "main",
                 "prod_namespace": "glimmung",
@@ -120,6 +121,9 @@ def test_job_manifest_maps_phase_jobs_to_sequential_pod_containers():
     assert env["APP_ENV"]["value"] == "test"
     assert env["GLIMMUNG_RUN_ID"]["value"] == "01KRNATIVE0000000000000000"
     assert env["GLIMMUNG_JOB_ID"]["value"] == "agent"
+    assert env["GLIMMUNG_ISSUE_BODY"]["value"] == (
+        "Use the validation URL and make the requested change."
+    )
     assert env["GLIMMUNG_INPUT_TARGET_REF"]["value"] == "main"
     assert env["GLIMMUNG_VALIDATION_NAMESPACE"]["value"] == (
         "glim-run-01krnative0000000000000000-2"

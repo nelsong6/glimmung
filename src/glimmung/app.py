@@ -446,9 +446,11 @@ async def _run_issue_workflow_metadata(cosmos: Cosmos, run: Run) -> dict[str, st
     """Workflow-facing issue inputs for a Run.
 
     Legacy GH-anchored runs get `issue_number`; native Glimmung runs get
-    `issue_id`. Never send `issue_number=0`: GitHub treats non-empty
-    strings as truthy in run-name expressions, and downstream shell
-    guards must not confuse native issues for GitHub issue #0.
+    `issue_id`. Native runners also receive the issue body through
+    metadata/env so they do not have to recover instructions from GitHub
+    Issues or frontend URLs. Never send `issue_number=0`: GitHub treats
+    non-empty strings as truthy in run-name expressions, and downstream
+    shell guards must not confuse native issues for GitHub issue #0.
     """
     metadata: dict[str, str] = {}
     if run.issue_number:
@@ -464,6 +466,9 @@ async def _run_issue_workflow_metadata(cosmos: Cosmos, run: Run) -> dict[str, st
             title = str(doc.get("title") or "")
             if title:
                 metadata["issue_title"] = title
+            body = str(doc.get("body") or "")
+            if body:
+                metadata["issue_body"] = body
         except Exception:
             pass
     return metadata

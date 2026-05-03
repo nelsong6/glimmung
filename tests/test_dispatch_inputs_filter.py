@@ -122,6 +122,7 @@ async def test_internal_metadata_keys_are_filtered_out_of_inputs(
             # Workflow-facing — should pass through.
             "issue_number": "124",
             "issue_title": "Cave crystals",
+            "issue_body": "Render cave crystals in the scene.",
             "issue_id": "01ISSUE",
             "run_id": "01RUN",
             "attempt_index": "0",
@@ -144,7 +145,7 @@ async def test_internal_metadata_keys_are_filtered_out_of_inputs(
     }
     # Spot-check each internal key by name so a regression on any one
     # surfaces a precise failure instead of a generic dict mismatch.
-    for forbidden in ("issue_lock_holder_id", "issue_repo", "phase"):
+    for forbidden in ("issue_body", "issue_lock_holder_id", "issue_repo", "phase"):
         assert forbidden not in captured["inputs"]
 
 

@@ -228,6 +228,7 @@ async def dispatch_run(
     # 5. Lease + runner dispatch. GitHub Actions phases consume registered
     # host rows; native Kubernetes phases consume virtual native capacity.
     metadata: dict[str, Any] = {
+        "issue_body": issue.body or "",
         "issue_title": issue.title,
         "issue_lock_holder_id": holder_id,
         **(extra_metadata or {}),

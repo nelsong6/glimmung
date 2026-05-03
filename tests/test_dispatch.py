@@ -860,6 +860,7 @@ async def test_dispatch_by_issue_id_dispatches_native_issue(app):
     issue = await issue_ops.create_issue(
         app.state.cosmos, project="ambience",
         title="native-only issue",
+        body="Make the preview show the requested native change.",
     )
 
     result = await dispatch_run(
@@ -892,6 +893,7 @@ async def test_dispatch_by_issue_id_dispatches_native_issue(app):
     metadata = lease_docs[0]["metadata"]
     assert metadata["issue_id"] == issue.id
     assert metadata["issue_title"] == "native-only issue"
+    assert metadata["issue_body"] == "Make the preview show the requested native change."
     assert "issue_number" not in metadata
     assert "issue_repo" not in metadata
 
