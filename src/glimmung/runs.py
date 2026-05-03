@@ -380,6 +380,28 @@ async def set_latest_attempt_token_hash(
     return await _retry_on_conflict(cosmos, run, etag, apply)
 
 
+async def record_log_archive_url(
+    cosmos: Cosmos,
+    *,
+    run: Run,
+    etag: str,
+    attempt_index: int,
+    log_archive_url: str,
+) -> tuple[Run, str]:
+    """Stamp the private native log archive ref on a specific attempt."""
+    def apply(r: Run) -> Run:
+        attempt = next((a for a in r.attempts if a.attempt_index == attempt_index), None)
+        if attempt is None:
+            raise RuntimeError(
+                f"run {r.id} has no attempt {attempt_index} to archive"
+            )
+        if attempt.log_archive_url == log_archive_url:
+            return r
+        attempt.log_archive_url = log_archive_url
+        return r.model_copy(update={"updated_at": _now()})
+    return await _retry_on_conflict(cosmos, run, etag, apply)
+
+
 async def record_completion(
     cosmos: Cosmos,
     *,

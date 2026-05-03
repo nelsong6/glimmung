@@ -25,6 +25,7 @@ from glimmung import native_k8s as native_k8s_ops
 from glimmung import reports as report_ops
 from glimmung import runs as run_ops
 from glimmung import signals as signal_ops
+from glimmung.artifacts import ArtifactStore
 from glimmung.dispatch import DispatchResult, ResumeResult, dispatch_resumed_run, dispatch_run
 from glimmung.auth import User, require_admin_user
 from glimmung.db import Cosmos, query_all
@@ -133,6 +134,7 @@ async def lifespan(app: FastAPI):
     app.state.cosmos = cosmos
     app.state.settings = settings
     app.state.native_k8s_launcher = native_k8s_ops.NativeKubernetesLauncher(settings)
+    app.state.artifact_store = ArtifactStore(settings)
 
     if settings.github_app_id and settings.github_app_private_key and settings.github_app_installation_id:
         app.state.gh_minter = GitHubAppTokenMinter(
@@ -160,6 +162,7 @@ async def lifespan(app: FastAPI):
             sweep_task, promote_task, lock_sweep_task, drain_task,
             return_exceptions=True,
         )
+        await app.state.artifact_store.close()
         await cosmos.stop()
 
 
@@ -606,6 +609,78 @@ async def _cleanup_native_attempt_secret(run: Run, attempt_index: int) -> None:
             run.id, attempt.attempt_index,
         )
         return
+
+
+async def _archive_native_attempt_logs(
+    cosmos: Cosmos,
+    *,
+    run: Run,
+    etag: str,
+    attempt_index: int,
+) -> tuple[Run, str]:
+    """Synchronously archive native event/log rows before terminal mutation."""
+    attempt = next((a for a in run.attempts if a.attempt_index == attempt_index), None)
+    if attempt is None or attempt.phase_kind != "k8s_job":
+        return run, etag
+    if attempt.log_archive_url:
+        return run, etag
+
+    artifact_store = getattr(app.state, "artifact_store", None)
+    if artifact_store is None:
+        raise HTTPException(503, "artifact store is not configured")
+
+    docs = await query_all(
+        cosmos.run_events,
+        (
+            "SELECT * FROM c WHERE c.project = @p AND c.run_id = @r "
+            "AND c.attempt_index = @a"
+        ),
+        parameters=[
+            {"name": "@p", "value": run.project},
+            {"name": "@r", "value": run.id},
+            {"name": "@a", "value": attempt_index},
+        ],
+    )
+    docs.sort(key=lambda d: (str(d.get("job_id") or ""), int(d.get("seq") or 0)))
+    events = [
+        {k: v for k, v in doc.items() if not k.startswith("_")}
+        for doc in docs
+    ]
+    blob_name = (
+        f"runs/{run.project}/{run.id}/attempts/{attempt_index}/native-events.json"
+    )
+    payload = {
+        "schema_version": 1,
+        "project": run.project,
+        "run_id": run.id,
+        "attempt_index": attempt_index,
+        "phase": attempt.phase,
+        "phase_kind": attempt.phase_kind,
+        "jobs": [job.model_dump(mode="json") for job in attempt.jobs],
+        "events": events,
+        "archived_at": datetime.now(UTC).isoformat(),
+    }
+    try:
+        archive_url = await artifact_store.upload_json(
+            blob_name=blob_name,
+            payload=payload,
+        )
+    except Exception:
+        log.exception(
+            "native log archive failed for run %s attempt %d",
+            run.id, attempt_index,
+        )
+        raise HTTPException(
+            502,
+            f"failed to archive native logs for run {run.id}",
+        )
+    return await run_ops.record_log_archive_url(
+        cosmos,
+        run=run,
+        etag=etag,
+        attempt_index=attempt_index,
+        log_archive_url=archive_url,
+    )
 
 
 async def _release_locks_on_terminal(
@@ -2371,6 +2446,9 @@ async def native_run_completed(
                 project, run_id,
             )
 
+    run, etag = await _archive_native_attempt_logs(
+        cosmos, run=run, etag=etag, attempt_index=attempt_index,
+    )
     await _release_native_attempt_lease(cosmos, run)
     decision_value = await _process_run_completion(
         run=run,
@@ -2424,6 +2502,9 @@ async def native_run_failed(
     run, _etag = found
     _require_native_attempt_token(request, run)
     attempt_index = run.attempts[-1].attempt_index
+    run, _etag = await _archive_native_attempt_logs(
+        cosmos, run=run, etag=_etag, attempt_index=attempt_index,
+    )
     await _release_native_attempt_lease(cosmos, run)
     result = await _abort_run(
         cosmos,
