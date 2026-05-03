@@ -30,6 +30,9 @@ from glimmung.models import (
     RunState,
     VerificationResult,
     Workflow,
+    NativeJobAttempt,
+    NativeStepState,
+    native_job_attempts_from_specs,
 )
 
 log = logging.getLogger(__name__)
@@ -52,6 +55,8 @@ async def create_run(
     budget: BudgetConfig,
     initial_phase_name: str,
     initial_workflow_filename: str,
+    initial_phase_kind: str = "gha_dispatch",
+    initial_jobs: list[NativeJobAttempt] | None = None,
     issue_id: str = "",
     issue_lock_holder_id: str | None = None,
     trigger_source: dict[str, Any] | None = None,
@@ -84,8 +89,10 @@ async def create_run(
             PhaseAttempt(
                 attempt_index=0,
                 phase=initial_phase_name,
+                phase_kind=initial_phase_kind,
                 workflow_filename=initial_workflow_filename,
                 dispatched_at=now,
+                jobs=initial_jobs or [],
             )
         ],
         cumulative_cost_usd=0.0,
@@ -256,6 +263,8 @@ async def reopen_for_recycle(
     workflow_filename: str,
     pr_lock_holder_id: str,
     issue_lock_holder_id: str,
+    phase_kind: str = "gha_dispatch",
+    jobs: list[NativeJobAttempt] | None = None,
 ) -> tuple[Run, str]:
     """Re-open a PASSED Run via the PR primitive's recycle path: state
     PASSED → IN_PROGRESS, append a new PhaseAttempt at `phase_name` (the
@@ -268,8 +277,10 @@ async def reopen_for_recycle(
         r.attempts.append(PhaseAttempt(
             attempt_index=next_idx,
             phase=phase_name,
+            phase_kind=phase_kind,
             workflow_filename=workflow_filename,
             dispatched_at=_now(),
+            jobs=jobs or [],
         ))
         return r.model_copy(update={
             "state": RunState.IN_PROGRESS,
@@ -308,7 +319,7 @@ async def record_started(
     *,
     run: Run,
     etag: str,
-    workflow_run_id: int,
+    workflow_run_id: int | None,
     validation_url: str | None = None,
 ) -> tuple[Run, str]:
     """Stamp the GH Actions `workflow_run.id` onto the latest attempt.
@@ -389,7 +400,7 @@ async def record_completion(
 
 def _apply_completion(
     run: Run,
-    workflow_run_id: int,
+    workflow_run_id: int | None,
     conclusion: str,
     verification: VerificationResult | None,
     artifact_url: str | None,
@@ -457,6 +468,8 @@ async def append_attempt(
     etag: str,
     phase_name: str,
     workflow_filename: str,
+    phase_kind: str = "gha_dispatch",
+    jobs: list[NativeJobAttempt] | None = None,
 ) -> tuple[Run, str]:
     """Append a new PhaseAttempt to an in-progress run for a freshly-
     dispatched workflow. `phase_name` is the recycle policy's `lands_at`
@@ -469,8 +482,10 @@ async def append_attempt(
         r.attempts.append(PhaseAttempt(
             attempt_index=next_idx,
             phase=phase_name,
+            phase_kind=phase_kind,
             workflow_filename=workflow_filename,
             dispatched_at=_now(),
+            jobs=jobs or [],
         ))
         return r.model_copy(update={"updated_at": _now()})
     return await _retry_on_conflict(cosmos, run, etag, apply)
@@ -548,10 +563,20 @@ async def create_resumed_run(
                 f"resume: phase {phase_name!r} disappeared between "
                 "validation and skipped-attempt synthesis"
             )
+        skipped_jobs = native_job_attempts_from_specs(phase_spec.jobs)
+        for job in skipped_jobs:
+            job.state = NativeStepState.SKIPPED
+            job.started_at = now
+            job.completed_at = now
+            for step in job.steps:
+                step.state = NativeStepState.SKIPPED
+                step.started_at = now
+                step.completed_at = now
         skipped_attempts.append(PhaseAttempt(
             attempt_index=idx,
             phase=phase_name,
-            workflow_filename=phase_spec.workflow_filename,
+            phase_kind=phase_spec.kind,
+            workflow_filename=phase_spec.workflow_filename or f"{phase_spec.kind}:{phase_spec.name}",
             workflow_run_id=None,
             dispatched_at=now,
             completed_at=now,
@@ -561,6 +586,7 @@ async def create_resumed_run(
             artifact_url=None,
             decision=None,
             phase_outputs=dict(prior_a.phase_outputs or {}),
+            jobs=skipped_jobs,
             skipped_from_run_id=prior_run.id,
         ))
 

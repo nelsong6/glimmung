@@ -1,5 +1,6 @@
 # Cosmos DB NoSQL Database. Containers: projects, hosts, workflows, leases,
-# runs, locks, signals, issues, reports, report_versions, and legacy prs.
+# runs, run_events, locks, signals, issues, reports, report_versions, and
+# legacy prs.
 # Created here at the control plane; the runtime pod (workload identity) only
 # needs data-plane perms which are already granted on infra-shared-identity at
 # the account scope (infra-bootstrap/tofu/cosmos-serverless.tf line 45).
@@ -80,6 +81,23 @@ resource "azurerm_cosmosdb_sql_container" "leases" {
 # always project-scoped, per-project queries stay single-partition.
 resource "azurerm_cosmosdb_sql_container" "runs" {
   name                = "runs"
+  resource_group_name = local.infra.resource_group_name
+  account_name        = data.azurerm_cosmosdb_account.infra.name
+  database_name       = azurerm_cosmosdb_sql_database.glimmung.name
+  partition_key_paths = ["/project"]
+
+  indexing_policy {
+    indexing_mode = "consistent"
+    included_path {
+      path = "/*"
+    }
+  }
+}
+
+# Ordered native-runner event/log stream. One doc per `(run_id, job_id, seq)`;
+# partitioned by project so hot log reads stay with the run graph.
+resource "azurerm_cosmosdb_sql_container" "run_events" {
+  name                = "run_events"
   resource_group_name = local.infra.resource_group_name
   account_name        = data.azurerm_cosmosdb_account.infra.name
   database_name       = azurerm_cosmosdb_sql_database.glimmung.name

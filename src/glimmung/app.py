@@ -18,6 +18,7 @@ from ulid import ULID
 from glimmung import issues as issue_ops
 from glimmung import leases as lease_ops
 from glimmung import locks as lock_ops
+from glimmung import native_events as native_event_ops
 from glimmung import reports as report_ops
 from glimmung import runs as run_ops
 from glimmung import signals as signal_ops
@@ -50,6 +51,9 @@ from glimmung.models import (
     LeaseRequest,
     LeaseResponse,
     LeaseState,
+    NativeJobSpec,
+    NativeRunEventType,
+    NativeStepSpec,
     PhaseSpec,
     ReportState,
     PrPrimitiveSpec,
@@ -68,6 +72,7 @@ from glimmung.models import (
     VerificationResult,
     Workflow,
     WorkflowRegister,
+    native_job_attempts_from_specs,
     substitute_phase_inputs,
     validate_phase_input_refs,
 )
@@ -464,6 +469,13 @@ async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host
             lease_doc["project"], workflow_name,
         )
         return True
+    if target_phase.get("kind") == "k8s_job":
+        log.warning(
+            "workflow %s/%s phase %s is k8s_job; native Job creation is handled "
+            "outside GitHub Actions and is not dispatched via workflow_dispatch",
+            lease_doc["project"], workflow_name, target_phase["name"],
+        )
+        return True
     workflow_filename = target_phase["workflowFilename"]
     workflow_ref = target_phase.get("workflowRef") or "main"
 
@@ -623,7 +635,7 @@ async def _process_run_completion(
     *,
     run: Run,
     etag: str,
-    workflow_run_id: int,
+    workflow_run_id: int | None,
     conclusion: str,
     verification_result: VerificationResult | None,
     repo: str,
@@ -647,6 +659,7 @@ async def _process_run_completion(
     from the completed callback, persisted on the latest attempt.
     """
     cosmos: Cosmos = app.state.cosmos
+    minter: GitHubAppTokenMinter | None = app.state.gh_minter
 
     run, etag = await run_ops.record_completion(
         cosmos,
@@ -729,12 +742,13 @@ async def _process_run_completion(
     # Any abort decision.
     reason = abort_explanation(run, workflow_model, decision)
     await run_ops.mark_aborted(cosmos, run=run, etag=etag, reason=reason)
-    try:
-        await post_issue_comment(
-            minter, repo=repo, issue_number=run.issue_number, body=reason,
-        )
-    except Exception:
-        log.exception("failed to post abort comment on %s#%d", repo, run.issue_number)
+    if minter is not None and run.issue_number:
+        try:
+            await post_issue_comment(
+                minter, repo=repo, issue_number=run.issue_number, body=reason,
+            )
+        except Exception:
+            log.exception("failed to post abort comment on %s#%d", repo, run.issue_number)
     return decision.value
 
 
@@ -786,7 +800,9 @@ async def _dispatch_retry(
     run, _ = await run_ops.append_attempt(
         cosmos, run=run, etag=etag,
         phase_name=target_phase.name,
-        workflow_filename=target_phase.workflow_filename,
+        workflow_filename=_phase_runner_label(target_phase),
+        phase_kind=target_phase.kind,
+        jobs=native_job_attempts_from_specs(target_phase.jobs),
     )
 
     requirements = target_phase.requirements or workflow_model.default_requirements
@@ -873,6 +889,10 @@ def _next_phase_after(workflow: Workflow, phase_name: str):
     return None
 
 
+def _phase_runner_label(phase: PhaseSpec) -> str:
+    return phase.workflow_filename or f"{phase.kind}:{phase.name}"
+
+
 def _collect_phase_outputs(run: Run) -> dict[str, dict[str, str]]:
     """Build the prior-outputs map for ref substitution. Walks attempts
     in order so the latest attempt of each phase wins (matters when a
@@ -928,7 +948,9 @@ async def _dispatch_next_phase(
     run, etag = await run_ops.append_attempt(
         cosmos, run=run, etag=etag,
         phase_name=next_phase.name,
-        workflow_filename=next_phase.workflow_filename,
+        workflow_filename=_phase_runner_label(next_phase),
+        phase_kind=next_phase.kind,
+        jobs=native_job_attempts_from_specs(next_phase.jobs),
     )
 
     requirements = next_phase.requirements or workflow_model.default_requirements
@@ -1074,9 +1096,11 @@ async def _dispatch_triage(
     run, etag = await run_ops.reopen_for_recycle(
         cosmos, run=run, etag=etag,
         phase_name=target_phase.name,
-        workflow_filename=target_phase.workflow_filename,
+        workflow_filename=_phase_runner_label(target_phase),
         pr_lock_holder_id=holder_id,
         issue_lock_holder_id=holder_id,
+        phase_kind=target_phase.kind,
+        jobs=native_job_attempts_from_specs(target_phase.jobs),
     )
 
     requirements = target_phase.requirements or workflow_model.default_requirements
@@ -1357,6 +1381,26 @@ def _recycle_policy_to_doc(rp: Any) -> dict[str, Any] | None:
     return {"maxAttempts": rp.max_attempts, "on": list(rp.on), "landsAt": rp.lands_at}
 
 
+def _native_step_to_doc(step: NativeStepSpec) -> dict[str, Any]:
+    return {
+        "slug": step.slug,
+        "title": step.title,
+    }
+
+
+def _native_job_to_doc(job: NativeJobSpec) -> dict[str, Any]:
+    return {
+        "id": job.id,
+        "name": job.name,
+        "image": job.image,
+        "command": list(job.command),
+        "args": list(job.args),
+        "env": dict(job.env),
+        "steps": [_native_step_to_doc(step) for step in job.steps],
+        "timeoutSeconds": job.timeout_seconds,
+    }
+
+
 def _phase_to_doc(p: Any) -> dict[str, Any]:
     return {
         "name": p.name,
@@ -1368,6 +1412,7 @@ def _phase_to_doc(p: Any) -> dict[str, Any]:
         "recyclePolicy": _recycle_policy_to_doc(p.recycle_policy),
         "inputs": dict(p.inputs),
         "outputs": list(p.outputs),
+        "jobs": [_native_job_to_doc(job) for job in p.jobs],
     }
 
 
@@ -1407,13 +1452,29 @@ def _phase_from_doc(d: dict[str, Any]):
     return PhaseSpec(
         name=d["name"],
         kind=d.get("kind", "gha_dispatch"),
-        workflow_filename=d["workflowFilename"],
+        workflow_filename=d.get("workflowFilename") or "",
         workflow_ref=d.get("workflowRef") or "main",
         requirements=d.get("requirements"),
         verify=bool(d.get("verify", False)),
         recycle_policy=_recycle_policy_from_doc(d.get("recyclePolicy")),
         inputs=dict(d.get("inputs") or {}),
         outputs=list(d.get("outputs") or []),
+        jobs=[
+            NativeJobSpec(
+                id=j["id"],
+                name=j.get("name"),
+                image=j["image"],
+                command=list(j.get("command") or []),
+                args=list(j.get("args") or []),
+                env={str(k): str(v) for k, v in (j.get("env") or {}).items()},
+                steps=[
+                    NativeStepSpec(slug=s["slug"], title=s.get("title"))
+                    for s in (j.get("steps") or [])
+                ],
+                timeout_seconds=j.get("timeoutSeconds"),
+            )
+            for j in (d.get("jobs") or [])
+        ],
     )
 
 
@@ -1905,6 +1966,34 @@ class RunCallbackResult(BaseModel):
     pr_lock_released: bool | None = None
 
 
+class NativeRunEventRequest(BaseModel):
+    job_id: str
+    seq: int
+    event: NativeRunEventType
+    step_slug: str | None = None
+    message: str | None = None
+    exit_code: int | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class NativeRunEventResult(BaseModel):
+    run_id: str
+    job_id: str
+    seq: int
+    accepted: bool = True
+
+
+class NativeRunCompletedRequest(BaseModel):
+    conclusion: str = "success"
+    verification: dict[str, Any] | None = None
+    screenshots_markdown: str | None = None
+    outputs: dict[str, str] | None = None
+
+
+class NativeRunFailedRequest(BaseModel):
+    reason: str
+
+
 @app.post(
     "/v1/runs/{project}/{run_id}/started",
     response_model=RunCallbackResult,
@@ -2040,6 +2129,132 @@ async def run_completed(
         decision=decision_value,
         issue_lock_released=result_dict.get("issue_lock_released"),
         pr_lock_released=result_dict.get("pr_lock_released"),
+    )
+
+
+@app.post(
+    "/v1/runs/{project}/{run_id}/native/events",
+    response_model=NativeRunEventResult,
+)
+async def native_run_event(
+    req: NativeRunEventRequest,
+    project: str = Path(...),
+    run_id: str = Path(...),
+) -> NativeRunEventResult:
+    """Native k8s_job callback for step boundaries and ordered log chunks."""
+    cosmos: Cosmos = app.state.cosmos
+    found = await run_ops.read_run(cosmos, project=project, run_id=run_id)
+    if found is None:
+        raise HTTPException(404, f"no run {project}/{run_id}")
+    run, etag = found
+    try:
+        await native_event_ops.record_native_event(
+            cosmos,
+            run=run,
+            etag=etag,
+            job_id=req.job_id,
+            seq=req.seq,
+            event=req.event,
+            step_slug=req.step_slug,
+            message=req.message,
+            exit_code=req.exit_code,
+            metadata=req.metadata,
+        )
+    except native_event_ops.NativeEventError as e:
+        raise HTTPException(409, str(e))
+    return NativeRunEventResult(run_id=run_id, job_id=req.job_id, seq=req.seq)
+
+
+@app.post(
+    "/v1/runs/{project}/{run_id}/native/completed",
+    response_model=RunCallbackResult,
+)
+async def native_run_completed(
+    req: NativeRunCompletedRequest,
+    project: str = Path(...),
+    run_id: str = Path(...),
+) -> RunCallbackResult:
+    """Native k8s_job completion callback.
+
+    Verifies ordered event continuity and terminal step states before
+    driving the same decision-engine path as the existing workflow
+    callback. Native attempts have no GitHub workflow_run_id, so the run
+    attempt stores that field as null.
+    """
+    cosmos: Cosmos = app.state.cosmos
+    found = await run_ops.read_run(cosmos, project=project, run_id=run_id)
+    if found is None:
+        raise HTTPException(404, f"no run {project}/{run_id}")
+    run, etag = found
+    try:
+        await native_event_ops.assert_native_completion_ready(cosmos, run=run)
+    except native_event_ops.NativeEventError as e:
+        raise HTTPException(409, str(e))
+
+    phase_outputs = await _validate_phase_outputs(
+        cosmos, run=run, posted_outputs=req.outputs,
+    )
+
+    verification_result: VerificationResult | None = None
+    if req.verification is not None:
+        try:
+            verification_result = VerificationResult.model_validate(req.verification)
+        except Exception:
+            log.warning(
+                "native run %s/%s: posted verification didn't validate; "
+                "decision engine will treat as malformed",
+                project, run_id,
+            )
+
+    decision_value = await _process_run_completion(
+        run=run,
+        etag=etag,
+        workflow_run_id=None,
+        conclusion=req.conclusion,
+        verification_result=verification_result,
+        repo=run.issue_repo,
+        screenshots_markdown=req.screenshots_markdown,
+        phase_outputs=phase_outputs,
+    )
+
+    result_dict: dict[str, Any] = {}
+    terminal = decision_value in (
+        RunDecision.ADVANCE.value,
+        RunDecision.ABORT_BUDGET_ATTEMPTS.value,
+        RunDecision.ABORT_BUDGET_COST.value,
+        RunDecision.ABORT_MALFORMED.value,
+    )
+    if terminal:
+        post = await run_ops.read_run(cosmos, project=project, run_id=run_id)
+        post_run = post[0] if post is not None else run
+        await _release_locks_on_terminal(
+            run=post_run, repo=run.issue_repo, result=result_dict,
+        )
+
+    return RunCallbackResult(
+        run_id=run.id,
+        decision=decision_value,
+        issue_lock_released=result_dict.get("issue_lock_released"),
+        pr_lock_released=result_dict.get("pr_lock_released"),
+    )
+
+
+@app.post(
+    "/v1/runs/{project}/{run_id}/native/failed",
+    response_model=AbortRunResult,
+)
+async def native_run_failed(
+    req: NativeRunFailedRequest,
+    project: str = Path(...),
+    run_id: str = Path(...),
+) -> AbortRunResult:
+    """Native k8s_job failure callback for failures before completion."""
+    return await _abort_run(
+        app.state.cosmos,
+        getattr(app.state, "gh_minter", None),
+        run_id=run_id,
+        project=project,
+        reason=req.reason,
     )
 
 
