@@ -73,7 +73,7 @@ for (const entry of pages) {
   // so a 500-ing page is diagnosable from the CI run.
   page.on("pageerror", (e) => console.log(`pageerror ${path}: ${e.message}`));
   try {
-    const resp = await page.goto(url, { timeout: TIMEOUT_MS, waitUntil: "networkidle" });
+    const resp = await page.goto(url, { timeout: TIMEOUT_MS, waitUntil: "domcontentloaded" });
     if (resp === null) {
       failures.push({ path, label, reason: "no response (data: or about: url?)" });
       await page.close();
@@ -85,6 +85,7 @@ for (const entry of pages) {
       await page.close();
       continue;
     }
+    await page.locator("body").waitFor({ state: "visible", timeout: TIMEOUT_MS });
     const out = join(OUT_DIR, `${label}.png`);
     await page.screenshot({ path: out, fullPage: true });
     captures.push({ path, label, url, status, out });
