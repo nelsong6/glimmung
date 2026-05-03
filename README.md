@@ -222,6 +222,11 @@ az ad signed-in-user show --query id -o tsv   # your object id
 Scope is the glimmung database only; sibling apps on the same Cosmos account
 stay unreachable.
 
+The attended-pickup launch flow ([#127](https://github.com/nelsong6/glimmung/issues/127))
+is dogfooded against real Glimmung PR rows: a Glimmung agent run produces an
+actual PR in this repo, and that PR is the fixture used to exercise
+`session ready` / `launch session` end-to-end before #127 can close.
+
 ## Verify-loop substrate (#18)
 
 Glimmung-as-orchestrator wedge: when a verify phase fails, glimmung re-dispatches an implementation phase with the prior verification artifact as additional context, repeating until verification passes, attempt count exceeds N, or cumulative cost exceeds $X. The substrate that lands here is reused by every other [meta #17](https://github.com/nelsong6/glimmung/issues/17) child.
