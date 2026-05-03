@@ -1,4 +1,5 @@
 import os
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -34,6 +35,6 @@ async def test_live_cosmos_lock_lifecycle_round_trip():
         cosmos, scope="ci-smoke", key="lock", holder_id="ci",
         ttl_seconds=600, now_factory=clock.as_factory(),
     )
-    assert extended.expires_at == clock.now() + extended.ttl
+    assert extended.expires_at == clock.now() + timedelta(seconds=600)
 
     assert await release_lock(cosmos, scope="ci-smoke", key="lock", holder_id="ci") is True
