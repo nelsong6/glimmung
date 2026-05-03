@@ -193,6 +193,10 @@ Default test runs use the deterministic in-memory Cosmos backing:
 uv run --extra dev pytest
 ```
 
+GitHub Actions runs the same fake-backed app suite on pull requests and pushes.
+Pushes to `main` also run a focused live Cosmos smoke with GitHub OIDC, using
+the database-scoped CI role assignment in [`tofu/test-access.tf`](tofu/test-access.tf).
+
 To exercise the same container surface against live Cosmos, opt in with:
 
 ```sh
