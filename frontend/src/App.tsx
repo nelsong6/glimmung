@@ -178,20 +178,15 @@ function Layout() {
   }, [lastUpdate]);
 
   // Poll /v1/issues + /v1/prs to drive the pulsing dot on the issues/prs
-  // tabs when something has a lock held. Cheap reads; 20s feels live
-  // enough without hammering the API. Skipped while signed out — both
-  // endpoints require auth.
+  // tabs when something has a lock held. Cheap public reads; 20s feels
+  // live enough without hammering the API.
   useEffect(() => {
-    if (!account) {
-      setInflight({ issues: false, prs: false });
-      return;
-    }
     let cancelled = false;
     const check = async () => {
       try {
         const [iRes, pRes] = await Promise.all([
-          authedFetch("/v1/issues"),
-          authedFetch("/v1/prs"),
+          fetch("/v1/issues"),
+          fetch("/v1/prs"),
         ]);
         const issues = iRes.ok ? ((await iRes.json()) as Array<{ issue_lock_held?: boolean }>) : [];
         const prs = pRes.ok ? ((await pRes.json()) as Array<{ pr_lock_held?: boolean }>) : [];
@@ -210,7 +205,7 @@ function Layout() {
       cancelled = true;
       window.clearInterval(t);
     };
-  }, [account]);
+  }, []);
 
   const matchesSelection = (l: Lease): boolean => {
     if (selected.kind === "all") return true;
@@ -443,20 +438,18 @@ function IssuesRoute() {
 }
 
 function GraphRoute() {
-  const { signedIn, selected } = useOutletContext<LayoutContext>();
+  const { selected } = useOutletContext<LayoutContext>();
   return (
     <GraphView
-      signedIn={signedIn}
       projectFilter={selected.kind === "all" ? null : selected.project}
     />
   );
 }
 
 function PrsRoute() {
-  const { signedIn, selected } = useOutletContext<LayoutContext>();
+  const { selected } = useOutletContext<LayoutContext>();
   return (
     <PrsView
-      signedIn={signedIn}
       projectFilter={selected.kind === "all" ? null : selected.project}
     />
   );

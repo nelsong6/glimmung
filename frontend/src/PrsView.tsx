@@ -11,7 +11,6 @@
  */
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { authedFetch } from "./auth";
 
 type PrRow = {
   id: string;
@@ -34,10 +33,8 @@ type PrRow = {
 };
 
 export function PrsView({
-  signedIn,
   projectFilter,
 }: {
-  signedIn: boolean;
   projectFilter: string | null;
 }) {
   const navigate = useNavigate();
@@ -46,15 +43,10 @@ export function PrsView({
   const [loading, setLoading] = useState(false);
 
   const refresh = async () => {
-    if (!signedIn) {
-      setRows(null);
-      setError("sign in to view PRs");
-      return;
-    }
     setLoading(true);
     setError(null);
     try {
-      const r = await authedFetch("/v1/prs");
+      const r = await fetch("/v1/prs");
       if (!r.ok) throw new Error(`/v1/prs -> ${r.status}`);
       setRows((await r.json()) as PrRow[]);
     } catch (e) {
@@ -68,11 +60,7 @@ export function PrsView({
   useEffect(() => {
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [signedIn]);
-
-  if (!signedIn) {
-    return <div className="empty">Sign in to view PRs.</div>;
-  }
+  }, []);
 
   const visibleRows = rows
     ? projectFilter

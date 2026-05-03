@@ -12,7 +12,7 @@
  * from URL params so deep-link reloads land directly here.
  */
 import { useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { authedFetch, publicConfig } from "./auth";
 
 type PrDetail = {
@@ -62,6 +62,10 @@ type RejectStatus =
   | { kind: "submitted"; signalId: string }
   | { kind: "error"; message: string };
 
+type AuthContext = {
+  signedIn: boolean;
+};
+
 type PrDetailRouteParams = {
   owner?: string;
   repo?: string;
@@ -71,6 +75,7 @@ type PrDetailRouteParams = {
 export function PrDetailView() {
   const navigate = useNavigate();
   const params = useParams<PrDetailRouteParams>();
+  const { signedIn } = useOutletContext<AuthContext>();
   const repo = `${params.owner ?? ""}/${params.repo ?? ""}`;
   const prNumber = parseInt(params.n ?? "0", 10);
 
@@ -85,7 +90,7 @@ export function PrDetailView() {
   const refresh = async () => {
     setError(null);
     try {
-      const r = await authedFetch(`/v1/prs/${repo}/${prNumber}`);
+      const r = await fetch(`/v1/prs/${repo}/${prNumber}`);
       if (!r.ok) throw new Error(`/v1/prs/${repo}/${prNumber} -> ${r.status}`);
       setDetail((await r.json()) as PrDetail);
     } catch (e) {
@@ -310,7 +315,7 @@ export function PrDetailView() {
             placeholder="What needs to change? e.g. 'the date format on the dashboard is wrong, should be ISO-8601'"
             rows={6}
             style={{ width: "100%", fontFamily: "inherit", padding: "0.5rem" }}
-            disabled={detail.pr_lock_held || reject.kind === "submitting"}
+            disabled={detail.pr_lock_held || reject.kind === "submitting" || !signedIn}
           />
           <div style={{ marginTop: "0.5rem" }}>
             <button
@@ -319,11 +324,12 @@ export function PrDetailView() {
               onClick={() => void submit()}
               disabled={
                 !feedback.trim()
+                || !signedIn
                 || detail.pr_lock_held
                 || reject.kind === "submitting"
               }
             >
-              {reject.kind === "submitting" ? "submitting…" : "submit reject"}
+              {reject.kind === "submitting" ? "submitting…" : signedIn ? "submit reject" : "sign in"}
             </button>
             {reject.kind === "submitted" && (
               <span className="pill free" style={{ marginLeft: "0.5rem" }}>

@@ -60,15 +60,10 @@ export function IssuesView({
   const [dispatchStatus, setDispatchStatus] = useState<DispatchStatus>({ kind: "idle" });
 
   const refresh = async () => {
-    if (!signedIn) {
-      setRows(null);
-      setError("sign in to view issues");
-      return;
-    }
     setLoading(true);
     setError(null);
     try {
-      const r = await authedFetch("/v1/issues");
+      const r = await fetch("/v1/issues");
       if (!r.ok) throw new Error(`/v1/issues -> ${r.status}`);
       setRows((await r.json()) as IssueRow[]);
     } catch (e) {
@@ -115,10 +110,6 @@ export function IssuesView({
       );
     }
   };
-
-  if (!signedIn) {
-    return <div className="empty">Sign in to view issues.</div>;
-  }
 
   const visibleRows = rows
     ? projectFilter
@@ -198,11 +189,14 @@ export function IssuesView({
                       onClick={() => void dispatch(row)}
                       disabled={
                         row.issue_lock_held
+                        || !signedIn
                         || (status?.kind === "dispatching")
                       }
                     >
                       {row.issue_lock_held
                         ? "in flight"
+                        : !signedIn
+                        ? "sign in"
                         : status?.kind === "dispatching"
                         ? "dispatching…"
                         : "dispatch"}
