@@ -61,3 +61,17 @@ def test_native_issue_by_id_route_precedes_legacy_issue_route() -> None:
     assert issue_route_paths.index("/v1/issues/by-id/{project}/{issue_id}") < (
         issue_route_paths.index("/v1/issues/{repo_owner}/{repo_name}/{issue_number}")
     )
+
+
+def test_pr_by_id_route_precedes_legacy_pr_route() -> None:
+    """Same route-order trap as native Issue detail: if the legacy
+    three-segment PR route is first, `/v1/prs/by-id/{project}/{pr_id}`
+    is parsed as `{owner=by-id}/{repo=project}/{pr_number=pr_id}` and
+    returns 422 before the canonical-id route can run."""
+    pr_route_paths = [
+        route.path for route in app.routes
+        if isinstance(route, APIRoute) and "GET" in route.methods
+    ]
+    assert pr_route_paths.index("/v1/prs/by-id/{project}/{pr_id}") < (
+        pr_route_paths.index("/v1/prs/{repo_owner}/{repo_name}/{pr_number}")
+    )
