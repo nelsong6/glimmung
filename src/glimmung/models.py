@@ -466,6 +466,10 @@ class Run(BaseModel):
     # /_styleguide URL alongside the diff. None for non-frontend
     # workflows that don't expose a public env.
     validation_url: str | None = None
+    # Attended-pickup intent parsed from Issue labels at dispatch time.
+    # "warm" means the dashboard should surface a ready session-launch link
+    # once PR/run context exists; "cold" means launch remains explicit.
+    session_launch_intent: str = "cold"
     # Markdown block of inline screenshot embeds rendered by the
     # workflow's upload-to-blob step (#87 + #88). Stamped by the
     # `completed` callback. The PR composer drops this verbatim into

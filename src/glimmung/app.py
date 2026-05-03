@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path as FsPath
 from typing import Any
+from urllib.parse import urlencode
 
 from fastapi import Depends, FastAPI, HTTPException, Path, Request
 from fastapi.responses import FileResponse
@@ -3579,6 +3580,8 @@ class PrRow(BaseModel):
     run_id: str | None = None
     run_state: str | None = None
     validation_url: str | None = None
+    session_launch_intent: str = "cold"
+    session_launch_url: str | None = None
     run_attempts: int = 0
     run_cumulative_cost_usd: float = 0.0
     pr_lock_held: bool = False             # triage in flight
@@ -3604,6 +3607,8 @@ class PrDetail(BaseModel):
     run_id: str | None = None
     run_state: str | None = None
     validation_url: str | None = None
+    session_launch_intent: str = "cold"
+    session_launch_url: str | None = None
     run_attempts: int = 0
     run_cumulative_cost_usd: float = 0.0
     run_attempt_history: list[dict[str, Any]] = Field(default_factory=list)
@@ -3800,6 +3805,7 @@ async def _build_pr_detail(cosmos: Cosmos, *, pr: PR) -> PrDetail:
         detail.run_id = run.id
         detail.run_state = run.state.value
         detail.validation_url = run.validation_url
+        detail.session_launch_intent = run.session_launch_intent
         detail.run_attempts = len(run.attempts)
         detail.run_cumulative_cost_usd = run.cumulative_cost_usd
         if run.issue_number:
@@ -3825,6 +3831,12 @@ async def _build_pr_detail(cosmos: Cosmos, *, pr: PR) -> PrDetail:
             detail.issue_title = str(doc.get("title") or "")
         except Exception:
             pass
+    if run is not None and pr.linked_issue_id:
+        detail.session_launch_url = _tank_session_launch_url(
+            settings=getattr(app.state, "settings", get_settings()),
+            run=run,
+            pr=pr,
+        )
 
     existing_lock = await lock_ops.read_lock(
         cosmos, scope="pr", key=f"{pr.repo}#{pr.number}",
@@ -3835,6 +3847,17 @@ async def _build_pr_detail(cosmos: Cosmos, *, pr: PR) -> PrDetail:
         and existing_lock.expires_at > datetime.now(UTC)
     )
     return detail
+
+
+def _tank_session_launch_url(*, settings: Settings, run: Run, pr: PR) -> str:
+    params: dict[str, str] = {
+        "glimmung_run_id": run.id,
+        "glimmung_issue_id": run.issue_id,
+        "glimmung_pr_id": pr.id,
+    }
+    if run.validation_url:
+        params["validation_url"] = run.validation_url
+    return f"{settings.tank_operator_base_url.rstrip('/')}?{urlencode(params)}"
 
 
 @app.get(
