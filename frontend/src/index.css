@@ -672,16 +672,16 @@ header {
   font-family: inherit;
   text-align: left;
 }
-.graph-node:disabled {
-  cursor: default;
-}
-.graph-node:not(:disabled):hover {
+.graph-node:hover {
   background: var(--surface-hover);
 }
 .graph-node.free { border-left-color: var(--state-success-fg); }
 .graph-node.busy { border-left-color: var(--state-busy-fg); }
 .graph-node.drain { border-left-color: var(--state-danger-fg); }
 .graph-node.info { border-left-color: var(--state-info-fg); }
+.graph-node.stale {
+  background: color-mix(in srgb, var(--state-danger-bg) 36%, var(--surface));
+}
 .issue-node {
   width: 100%;
   max-width: none;
@@ -697,6 +697,9 @@ header {
 .graph-label {
   width: 100%;
   overflow-wrap: anywhere;
+}
+.stale-label {
+  color: var(--state-danger-fg);
 }
 
 .filter-hint {

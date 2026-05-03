@@ -23,6 +23,9 @@ type SystemGraph = {
   edges: GraphEdge[];
 };
 
+const STALE_RUN_MS = 30 * 60 * 1000;
+const STALE_SIGNAL_MS = 60 * 1000;
+
 export function GraphView({
   signedIn,
   projectFilter,
@@ -87,25 +90,31 @@ export function GraphView({
     });
   }, [graph]);
 
-  const openNode = (node: GraphNode) => {
-    if (node.kind === "issue") {
-      const repo = node.metadata.repo;
-      const number = node.metadata.number;
-      if (typeof repo === "string" && typeof number === "number") {
-        navigate(`/issues/${repo}/${number}`);
-        return;
-      }
-      const project = String(node.metadata.project ?? "");
-      const issueId = String(node.metadata.issue_id ?? "");
-      navigate(`/issues/${encodeURIComponent(project)}/${encodeURIComponent(issueId)}`);
+  const openIssue = (issue: GraphNode) => {
+    const repo = issue.metadata.repo;
+    const number = issue.metadata.number;
+    if (typeof repo === "string" && typeof number === "number") {
+      navigate(`/issues/${repo}/${number}`);
       return;
     }
-    if (node.kind === "pr") {
-      const repo = node.metadata.repo;
-      const number = node.metadata.number;
-      if (typeof repo === "string" && typeof number === "number") {
-        navigate(`/prs/${repo}/${number}`);
-      }
+    const project = String(issue.metadata.project ?? "");
+    const issueId = String(issue.metadata.issue_id ?? "");
+    navigate(`/issues/${encodeURIComponent(project)}/${encodeURIComponent(issueId)}`);
+  };
+
+  const openNode = (issue: GraphNode, node: GraphNode) => {
+    if (node.kind === "issue") {
+      openIssue(node);
+      return;
+    }
+    if (node.kind !== "pr") {
+      openIssue(issue);
+      return;
+    }
+    const repo = node.metadata.repo;
+    const number = node.metadata.number;
+    if (typeof repo === "string" && typeof number === "number") {
+      navigate(`/prs/${repo}/${number}`);
     }
   };
 
@@ -141,7 +150,7 @@ export function GraphView({
               <button
                 type="button"
                 className="graph-node issue-node"
-                onClick={() => openNode(issue)}
+                onClick={() => openIssue(issue)}
               >
                 <span className="graph-label">{issue.label}</span>
                 <span className="graph-meta mono">{String(issue.metadata.project ?? "")}</span>
@@ -155,12 +164,13 @@ export function GraphView({
                       type="button"
                       key={node.id}
                       className={`graph-node ${node.kind}-node ${nodeClass(node)}`}
-                      onClick={() => openNode(node)}
-                      disabled={node.kind !== "issue" && node.kind !== "pr"}
+                      onClick={() => openNode(issue, node)}
+                      title={isStale(node) ? staleTitle(node) : undefined}
                     >
                       <span className="graph-kind mono">{node.kind}</span>
                       <span className="graph-label">{node.label}</span>
                       {node.state && <span className="graph-state mono">{node.state}</span>}
+                      {isStale(node) && <span className="graph-state mono stale-label">stale</span>}
                     </button>
                   ))
                 )}
@@ -174,9 +184,25 @@ export function GraphView({
 }
 
 function nodeClass(node: GraphNode): string {
+  if (isStale(node)) return "drain stale";
   if (node.kind === "signal") return "info";
   if (node.state === "in_progress" || node.state === "pending") return "busy";
   if (node.state === "aborted" || node.state === "failure") return "drain";
   if (node.state === "open" || node.state === "success" || node.state === "passed") return "free";
   return "info";
+}
+
+function isStale(node: GraphNode): boolean {
+  if (!node.timestamp) return false;
+  const age = Date.now() - new Date(node.timestamp).getTime();
+  if (!Number.isFinite(age)) return false;
+  if (node.kind === "run" && node.state === "in_progress") return age > STALE_RUN_MS;
+  if (node.kind === "signal" && node.state === "pending") return age > STALE_SIGNAL_MS;
+  return false;
+}
+
+function staleTitle(node: GraphNode): string {
+  if (node.kind === "run") return "run has been in progress for more than 30 minutes";
+  if (node.kind === "signal") return "signal has been pending for more than 1 minute";
+  return "stale";
 }
