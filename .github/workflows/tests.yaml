@@ -53,4 +53,4 @@ jobs:
         env:
           GLIMMUNG_TEST_COSMOS: live
           GLIMMUNG_TEST_PREFIX: "ci-${{ github.run_id }}-${{ github.run_attempt }}:"
-        run: uv run --extra dev pytest tests/test_locks.py -q
+        run: uv run --extra dev pytest tests/test_live_cosmos_smoke.py -q
