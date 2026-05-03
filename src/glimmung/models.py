@@ -670,28 +670,22 @@ class Issue(BaseModel):
     closed_at: datetime | None = None
 
 
-# ─── Glimmung-native PRs (#41) ─────────────────────────────────────────────
+# ─── Glimmung Reports ──────────────────────────────────────────────────────
 #
-# Mirrors the Issue substrate (#28) shape. A PR is the canonical record of
-# a code-change conversation: title/body/state plus the reviews and comments
-# that constrain whether the change can land. Stored in `prs`, partitioned
-# by `/project`. Unlike Issues, PRs are inherently a GitHub concept — there's
-# no "Slack PR" — so `repo` and `number` live on the PR top-level rather
-# than under a metadata object.
-#
-# The substrate (this PR) lands the model + CRUD primitives only. Consumer
-# PRs wire `pull_request.*` webhook events into `_mirror_github_pr` (rich-
-# document mirror), `pr_detail` reads off this container instead of the live
-# GH API, and `Run.pr_id` joins runs to PRs the same way `Run.issue_id`
-# joins runs to Issues.
+# Report is the canonical Glimmung review object. GitHub pull requests are
+# one syndication target, so their repo/number/branch metadata stays on the
+# record when present, but Report is the object the UI/API/MCP surfaces own.
 
 
-class PRState(str, Enum):
-    OPEN = "open"
+class ReportState(str, Enum):
+    READY = "ready"
+    NEEDS_REVIEW = "needs_review"
+    FAILED = "failed"
     CLOSED = "closed"
+    MERGED = "merged"
 
 
-class PRReviewState(str, Enum):
+class ReportReviewState(str, Enum):
     """GH review verdicts. `DISMISSED` is the post-state when an author or
     maintainer dismisses an earlier review; we record it as a separate review
     entry rather than mutating the original so the audit trail stays append-
@@ -702,11 +696,8 @@ class PRReviewState(str, Enum):
     DISMISSED = "dismissed"
 
 
-class PRComment(BaseModel):
-    """One comment on a PR thread. Sourced from the `issue_comment` webhook
-    when the issue is a PR (discriminator: `payload.issue.pull_request` is
-    set). `gh_id` is the GitHub-side comment id used for idempotent dedupe
-    on webhook re-delivery."""
+class ReportComment(BaseModel):
+    """One mirrored GitHub PR comment or Glimmung-native report comment."""
     id: str                                  # ULID; glimmung-side id
     gh_id: int | None = None                 # GH comment id; mirror dedupe key
     author: str                              # GH login
@@ -716,45 +707,51 @@ class PRComment(BaseModel):
     html_url: str | None = None
 
 
-class PRReview(BaseModel):
-    """One review submission on a PR. Sourced from `pull_request_review.
-    submitted` (and `.dismissed`). `gh_id` is the GitHub-side review id used
-    for idempotent dedupe on webhook re-delivery."""
+class ReportReview(BaseModel):
+    """One mirrored GitHub PR review submission."""
     id: str                                  # ULID
     gh_id: int | None = None                 # GH review id; mirror dedupe key
     author: str
-    state: PRReviewState
+    state: ReportReviewState
     body: str = ""
     submitted_at: datetime
     html_url: str | None = None
 
 
-class PR(BaseModel):
+class Report(BaseModel):
     schema_version: int = 1
-    id: str                                  # ULID; canonical glimmung-PR-id
+    id: str                                  # canonical glimmung Report id
     project: str                             # partition key
-    repo: str                                # "<owner>/<repo>"
-    number: int                              # GH PR number (denormalized at top-level; see banner above)
+    repo: str                                # GitHub "<owner>/<repo>" when syndicated
+    number: int                              # GitHub PR number when syndicated
     title: str
     body: str = ""
-    state: PRState = PRState.OPEN
-    branch: str                              # head ref
+    state: ReportState = ReportState.READY
+    branch: str                              # GitHub head ref when syndicated
     base_ref: str = "main"                   # base ref
     head_sha: str = ""                       # latest head commit sha; updated on `pull_request.synchronize`
     html_url: str = ""
-    comments: list[PRComment] = Field(default_factory=list)
-    reviews: list[PRReview] = Field(default_factory=list)
-    # Cross-substrate linkages (#50). Set by the agent's open-PR step and
-    # by the seed script's `Closes #N` parser; both are explicit IDs so
-    # downstream consumers don't have to re-derive from PR-body text.
-    # Optional because not every PR is agent-opened (manual humans-only
-    # PRs land here from the webhook mirror without a Run / Issue link).
+    comments: list[ReportComment] = Field(default_factory=list)
+    reviews: list[ReportReview] = Field(default_factory=list)
     linked_issue_id: str | None = None       # glimmung Issue.id (ULID)
     linked_run_id: str | None = None         # glimmung Run.id (ULID)
     created_at: datetime
     updated_at: datetime
-    # CLOSED-with-merge sets both; CLOSED-without-merge leaves them None.
-    # Reopen (CLOSED→OPEN) only applies to never-merged PRs; merged PRs
-    # cannot be reopened on the GH side.
     merged_at: datetime | None = None
     merged_by: str | None = None
+
+
+class ReportVersion(BaseModel):
+    schema_version: int = 1
+    id: str                                  # "<report_id>.<version>"
+    project: str                             # partition key
+    report_id: str
+    version: int = 0
+    state: ReportState = ReportState.READY
+    title: str
+    body: str = ""
+    linked_run_id: str | None = None
+    github_repo: str | None = None
+    github_pr_number: int | None = None
+    github_html_url: str | None = None
+    created_at: datetime

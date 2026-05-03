@@ -1,45 +1,8 @@
-"""Glimmung-native PRs (#41).
+"""Cosmos-backed CRUD for Glimmung Reports.
 
-Cosmos-backed CRUD for the `prs` container. Mirrors the Issue substrate
-(#28): glimmung is the source of truth for PR conversation (title, body,
-state, reviews, comments), GitHub is one syndication target. The detail
-read path will source from this container with no live-GH stitch; the
-iteration-graph viewer (#43) will key its PR-conversation nodes off the
-docs stored here.
-
-API:
-- `create_pr(...)` — mint a new PR.
-- `read_pr(...)` — point-read by `(project, pr_id)`. Returns `(PR, etag)`
-  so callers can chain into a write without re-reading.
-- `update_pr(...)` — patch title / body / branch / base_ref / head_sha /
-  html_url. Etag-validated.
-- `close_pr(...)` — state OPEN → CLOSED without merge (e.g. PR rejected).
-- `merge_pr(...)` — state OPEN → CLOSED with `merged_at` + `merged_by` set.
-- `reopen_pr(...)` — CLOSED → OPEN. Only meaningful for never-merged PRs;
-  GH does not allow reopening a merged PR, so callers should not call this
-  on a PR with `merged_at` set. The function does not enforce that — the
-  contract belongs at the webhook-mirror call site, where we know whether
-  the inbound `pull_request.reopened` event refers to a merged PR.
-- `list_prs(project=None)` — list PRs, optionally project-scoped.
-- `list_open_prs(project=None)` — list open PRs, optionally project-scoped.
-- `find_pr_by_repo_number(...)` — cross-partition lookup by `(repo, number)`.
-  Used by the webhook mirror in the consumer PR to find the glimmung PR
-  for an inbound GH event.
-- `ensure_pr_for_github(...)` — find or mint a glimmung PR mirroring a GH
-  PR. Returns `(pr, etag, created)`. Used by the webhook mirror to
-  guarantee a PR exists before appending comments/reviews.
-- `append_pr_comment(...)`, `append_pr_review(...)` — append to the
-  embedded conversation lists, deduping on `gh_id` so webhook re-deliveries
-  are idempotent.
-
-`find_pr_by_run_id` is intentionally not in this PR — that helper requires
-`Run.pr_id`, which lands in the consumer PR that wires Run ↔ PR linkage
-on `Closes #N` parsing. Adding the lookup here without a working linkage
-field would be a stub.
-
-Concurrency model: same shape as `runs.py` / `issues.py` — `_etag` +
-`IfNotModified` on every mutating write, with a small retry loop on the
-rare conflict.
+Report is the canonical review object. GitHub pull requests remain a
+syndication target, so this module keeps repo/number/branch metadata for
+mirrored PRs while storing the source of truth in the `reports` container.
 """
 
 from __future__ import annotations
@@ -53,7 +16,7 @@ from azure.cosmos.exceptions import CosmosAccessConditionFailedError, CosmosReso
 from ulid import ULID
 
 from glimmung.db import Cosmos, query_all
-from glimmung.models import PR, PRComment, PRReview, PRState
+from glimmung.models import Report, ReportComment, ReportReview, ReportState
 
 log = logging.getLogger(__name__)
 
@@ -69,7 +32,7 @@ def _strip_meta(doc: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in doc.items() if not k.startswith("_")}
 
 
-async def create_pr(
+async def create_report(
     cosmos: Cosmos,
     *,
     project: str,
@@ -83,22 +46,22 @@ async def create_pr(
     html_url: str = "",
     linked_issue_id: str | None = None,
     linked_run_id: str | None = None,
-) -> PR:
-    """Mint a new PR in OPEN state. Returns the persisted PR.
+) -> Report:
+    """Mint a new Report in READY state. Returns the persisted Report.
 
-    `repo` and `number` are GH coords (PRs are inherently a GH concept; see
-    the model banner). `linked_issue_id` / `linked_run_id` are populated
-    by the agent's open-PR step (#50 slice 4) and by the seed script
-    (#50 slice 5)."""
+    `repo` and `number` are GitHub PR coordinates when the Report has a
+    GitHub syndication target.
+    """
     now = _now()
-    pr = PR(
-        id=str(ULID()),
+    report_id = linked_issue_id or str(ULID())
+    pr = Report(
+        id=report_id,
         project=project,
         repo=repo,
         number=number,
         title=title,
         body=body,
-        state=PRState.OPEN,
+        state=ReportState.READY,
         branch=branch,
         base_ref=base_ref,
         head_sha=head_sha,
@@ -108,32 +71,32 @@ async def create_pr(
         created_at=now,
         updated_at=now,
     )
-    await cosmos.prs.create_item(pr.model_dump(mode="json"))
+    await cosmos.reports.create_item(pr.model_dump(mode="json"))
     log.info(
-        "created PR %s in project=%s (%s#%d)",
+        "created Report %s in project=%s (%s#%d)",
         pr.id, project, repo, number,
     )
     return pr
 
 
-async def read_pr(
+async def read_report(
     cosmos: Cosmos,
     *,
     project: str,
-    pr_id: str,
-) -> tuple[PR, str] | None:
-    """Point-read a PR. Returns `(pr, etag)` or `None` if missing."""
+    report_id: str,
+) -> tuple[Report, str] | None:
+    """Point-read a Report. Returns `(pr, etag)` or `None` if missing."""
     try:
-        doc = await cosmos.prs.read_item(item=pr_id, partition_key=project)
+        doc = await cosmos.reports.read_item(item=report_id, partition_key=project)
     except CosmosResourceNotFoundError:
         return None
-    return PR.model_validate(_strip_meta(doc)), doc["_etag"]
+    return Report.model_validate(_strip_meta(doc)), doc["_etag"]
 
 
-async def update_pr(
+async def update_report(
     cosmos: Cosmos,
     *,
-    pr: PR,
+    pr: Report,
     etag: str,
     title: str | None = None,
     body: str | None = None,
@@ -143,12 +106,12 @@ async def update_pr(
     html_url: str | None = None,
     linked_issue_id: str | None = None,
     linked_run_id: str | None = None,
-) -> tuple[PR, str]:
-    """Patch fields on a PR. `None` means "don't change"; pass an empty
+) -> tuple[Report, str]:
+    """Patch fields on a Report. `None` means "don't change"; pass an empty
     string to actually clear a field. State transitions (close / merge /
     reopen) go through their dedicated functions so the timestamp
     invariants stay obvious at the call site."""
-    def apply(p: PR) -> PR:
+    def apply(p: Report) -> Report:
         updates: dict[str, Any] = {"updated_at": _now()}
         if title is not None:
             updates["title"] = title
@@ -171,46 +134,47 @@ async def update_pr(
     return await _retry_on_conflict(cosmos, pr, etag, apply)
 
 
-async def close_pr(
+async def close_report(
     cosmos: Cosmos,
     *,
-    pr: PR,
+    pr: Report,
     etag: str,
-) -> tuple[PR, str]:
-    """Transition OPEN → CLOSED without merge. For "PR rejected" / author-
-    closed flows. `merged_at` and `merged_by` stay `None`. Idempotent:
-    closing an already-closed PR is a no-op state-wise (still bumps
-    `updated_at` so the caller gets a fresh etag). Use `merge_pr` instead
+) -> tuple[Report, str]:
+    """Transition a Report to CLOSED without merge.
+
+    `merged_at` and `merged_by` stay `None`. Idempotent:
+    closing an already-closed Report is a no-op state-wise (still bumps
+    `updated_at` so the caller gets a fresh etag). Use `merge_report` instead
     if the close is the result of a merge."""
-    def apply(p: PR) -> PR:
-        if p.state == PRState.CLOSED:
+    def apply(p: Report) -> Report:
+        if p.state == ReportState.CLOSED:
             return p.model_copy(update={"updated_at": _now()})
         return p.model_copy(update={
-            "state": PRState.CLOSED,
+            "state": ReportState.CLOSED,
             "updated_at": _now(),
         })
     return await _retry_on_conflict(cosmos, pr, etag, apply)
 
 
-async def merge_pr(
+async def merge_report(
     cosmos: Cosmos,
     *,
-    pr: PR,
+    pr: Report,
     etag: str,
     merged_by: str,
     merged_at: datetime | None = None,
-) -> tuple[PR, str]:
-    """Transition OPEN → CLOSED with `merged_at` + `merged_by` stamped.
+) -> tuple[Report, str]:
+    """Transition a Report to MERGED with `merged_at` + `merged_by` stamped.
     `merged_at` defaults to now, but the webhook-mirror call site should
     pass the GH-event timestamp instead so the audit trail matches what
-    GitHub recorded. Idempotent: if the PR is already merged, the existing
+    GitHub recorded. Idempotent: if the Report is already merged, the existing
     merge metadata is preserved (we don't overwrite earlier `merged_at`
     with a later re-delivery)."""
-    def apply(p: PR) -> PR:
+    def apply(p: Report) -> Report:
         if p.merged_at is not None:
             return p.model_copy(update={"updated_at": _now()})
         return p.model_copy(update={
-            "state": PRState.CLOSED,
+            "state": ReportState.MERGED,
             "merged_at": merged_at or _now(),
             "merged_by": merged_by,
             "updated_at": _now(),
@@ -218,89 +182,97 @@ async def merge_pr(
     return await _retry_on_conflict(cosmos, pr, etag, apply)
 
 
-async def reopen_pr(
+async def reopen_report(
     cosmos: Cosmos,
     *,
-    pr: PR,
+    pr: Report,
     etag: str,
-) -> tuple[PR, str]:
-    """Transition CLOSED → OPEN. Caller's responsibility to ensure the PR
-    was not merged (GH does not allow reopening merged PRs, so an inbound
-    `pull_request.reopened` event for a merged PR is a webhook anomaly to
-    log + drop, not a state transition)."""
-    def apply(p: PR) -> PR:
-        if p.state == PRState.OPEN:
+) -> tuple[Report, str]:
+    """Transition a closed Report back to READY."""
+    def apply(p: Report) -> Report:
+        if p.state == ReportState.READY:
             return p.model_copy(update={"updated_at": _now()})
         return p.model_copy(update={
-            "state": PRState.OPEN,
+            "state": ReportState.READY,
             "updated_at": _now(),
         })
     return await _retry_on_conflict(cosmos, pr, etag, apply)
 
 
-async def list_open_prs(
+async def set_report_state(
+    cosmos: Cosmos,
+    *,
+    pr: Report,
+    etag: str,
+    state: ReportState,
+) -> tuple[Report, str]:
+    """Set non-GitHub terminal/review states such as NEEDS_REVIEW or FAILED."""
+    def apply(p: Report) -> Report:
+        return p.model_copy(update={"state": state, "updated_at": _now()})
+
+    return await _retry_on_conflict(cosmos, pr, etag, apply)
+
+
+async def list_active_reports(
     cosmos: Cosmos,
     *,
     project: str | None = None,
-) -> list[PR]:
-    """Return all OPEN PRs, oldest-first. Single-partition if `project` is
-    set; cross-partition otherwise (used by the global PRs view)."""
+) -> list[Report]:
+    """Return active Reports, oldest-first."""
     if project is not None:
         docs = await query_all(
-            cosmos.prs,
-            "SELECT * FROM c WHERE c.project = @p AND c.state = @s ORDER BY c.created_at ASC",
+            cosmos.reports,
+            "SELECT * FROM c WHERE c.project = @p AND (c.state = @ready OR c.state = @needs_review) ORDER BY c.created_at ASC",
             parameters=[
                 {"name": "@p", "value": project},
-                {"name": "@s", "value": PRState.OPEN.value},
+                {"name": "@ready", "value": ReportState.READY.value},
+                {"name": "@needs_review", "value": ReportState.NEEDS_REVIEW.value},
             ],
         )
     else:
         docs = await query_all(
-            cosmos.prs,
-            "SELECT * FROM c WHERE c.state = @s ORDER BY c.created_at ASC",
-            parameters=[{"name": "@s", "value": PRState.OPEN.value}],
+            cosmos.reports,
+            "SELECT * FROM c WHERE c.state = @ready OR c.state = @needs_review ORDER BY c.created_at ASC",
+            parameters=[
+                {"name": "@ready", "value": ReportState.READY.value},
+                {"name": "@needs_review", "value": ReportState.NEEDS_REVIEW.value},
+            ],
         )
-    return [PR.model_validate(_strip_meta(d)) for d in docs]
+    return [Report.model_validate(_strip_meta(d)) for d in docs]
 
 
-async def list_prs(
+async def list_reports(
     cosmos: Cosmos,
     *,
     project: str | None = None,
-) -> list[PR]:
-    """Return all PRs, newest-updated first. Single-partition if
-    `project` is set; cross-partition otherwise.
-
-    The dashboard and MCP list surfaces use this broader read path so
-    fast merge/close cycles remain visible after the PR is no longer
-    open. Active-only views should keep using `list_open_prs`.
-    """
+) -> list[Report]:
+    """Return all Reports, newest-updated first."""
     if project is not None:
         docs = await query_all(
-            cosmos.prs,
+            cosmos.reports,
             "SELECT * FROM c WHERE c.project = @p ORDER BY c.updated_at DESC",
             parameters=[{"name": "@p", "value": project}],
         )
     else:
         docs = await query_all(
-            cosmos.prs,
+            cosmos.reports,
             "SELECT * FROM c ORDER BY c.updated_at DESC",
         )
-    return [PR.model_validate(_strip_meta(d)) for d in docs]
+    return [Report.model_validate(_strip_meta(d)) for d in docs]
 
 
-async def find_pr_by_repo_number(
+async def find_report_by_repo_number(
     cosmos: Cosmos,
     *,
     repo: str,
     number: int,
-) -> tuple[PR, str] | None:
+) -> tuple[Report, str] | None:
     """Cross-partition lookup keyed off `(repo, number)`. The webhook
-    mirror uses this to find the glimmung PR for an inbound GH event
+    mirror uses this to find the glimmung Report for an inbound GH event
     (the event payload carries `repo` + `number`, not the glimmung id).
     Returns `(pr, etag)` or `None`."""
     docs = await query_all(
-        cosmos.prs,
+        cosmos.reports,
         "SELECT * FROM c WHERE c.repo = @r AND c.number = @n",
         parameters=[
             {"name": "@r", "value": repo},
@@ -310,19 +282,19 @@ async def find_pr_by_repo_number(
     if not docs:
         return None
     if len(docs) > 1:
-        # Two glimmung PRs pointing at the same GH PR is a semantic error
+        # Two glimmung PRs pointing at the same GH Report is a semantic error
         # — log loudly and pick the oldest. The webhook-import path in the
-        # consumer PR should de-duplicate on import via this same lookup.
+        # consumer Report should de-duplicate on import via this same lookup.
         log.warning(
             "multiple glimmung PRs link to %s#%d: %s",
             repo, number, [d["id"] for d in docs],
         )
         docs.sort(key=lambda d: d.get("created_at", ""))
     doc = docs[0]
-    return PR.model_validate(_strip_meta(doc)), doc["_etag"]
+    return Report.model_validate(_strip_meta(doc)), doc["_etag"]
 
 
-async def ensure_pr_for_github(
+async def ensure_report_for_github(
     cosmos: Cosmos,
     *,
     project: str,
@@ -334,20 +306,21 @@ async def ensure_pr_for_github(
     base_ref: str = "main",
     head_sha: str = "",
     html_url: str = "",
-) -> tuple[PR, str, bool]:
-    """Find or mint a glimmung PR mirroring a GH PR. Returns `(pr, etag,
-    created)`; `created=True` if this call minted the PR.
+    linked_issue_id: str | None = None,
+    linked_run_id: str | None = None,
+) -> tuple[Report, str, bool]:
+    """Find or mint a Report mirroring a GitHub PR.
 
     The webhook mirror calls this on every relevant `pull_request.*` event
     so subsequent comment / review appends always have a target. Title /
     body / branch / etc. only apply on create — the mirror's update path
     is the right tool for refreshing existing fields."""
-    existing = await find_pr_by_repo_number(cosmos, repo=repo, number=number)
+    existing = await find_report_by_repo_number(cosmos, repo=repo, number=number)
     if existing is not None:
         pr, etag = existing
         return pr, etag, False
 
-    pr = await create_pr(
+    pr = await create_report(
         cosmos,
         project=project,
         repo=repo,
@@ -358,27 +331,29 @@ async def ensure_pr_for_github(
         base_ref=base_ref,
         head_sha=head_sha,
         html_url=html_url,
+        linked_issue_id=linked_issue_id,
+        linked_run_id=linked_run_id,
     )
-    refreshed = await read_pr(cosmos, project=project, pr_id=pr.id)
+    refreshed = await read_report(cosmos, project=project, report_id=pr.id)
     if refreshed is None:
-        raise RuntimeError(f"ensure_pr_for_github: just-created PR {pr.id} not readable")
+        raise RuntimeError(f"ensure_report_for_github: just-created Report {pr.id} not readable")
     return refreshed[0], refreshed[1], True
 
 
-async def append_pr_comment(
+async def append_report_comment(
     cosmos: Cosmos,
     *,
-    pr: PR,
+    pr: Report,
     etag: str,
-    comment: PRComment,
-) -> tuple[PR, str]:
-    """Append a comment to a PR. Dedupes on `comment.gh_id` so webhook
+    comment: ReportComment,
+) -> tuple[Report, str]:
+    """Append a comment to a Report. Dedupes on `comment.gh_id` so webhook
     re-deliveries are idempotent — if a comment with the same `gh_id`
     already exists, the existing entry is left in place and the call is a
     no-op state-wise (still bumps `updated_at` so the caller gets a fresh
     etag). Comments without `gh_id` (e.g. glimmung-internal annotations)
     are always appended; the dedupe check is `gh_id is not None`."""
-    def apply(p: PR) -> PR:
+    def apply(p: Report) -> Report:
         if comment.gh_id is not None and any(
             c.gh_id == comment.gh_id for c in p.comments
         ):
@@ -390,16 +365,16 @@ async def append_pr_comment(
     return await _retry_on_conflict(cosmos, pr, etag, apply)
 
 
-async def append_pr_review(
+async def append_report_review(
     cosmos: Cosmos,
     *,
-    pr: PR,
+    pr: Report,
     etag: str,
-    review: PRReview,
-) -> tuple[PR, str]:
-    """Append a review to a PR. Dedupes on `review.gh_id` like
-    `append_pr_comment`."""
-    def apply(p: PR) -> PR:
+    review: ReportReview,
+) -> tuple[Report, str]:
+    """Append a review to a Report. Dedupes on `review.gh_id` like
+    `append_report_comment`."""
+    def apply(p: Report) -> Report:
         if review.gh_id is not None and any(
             r.gh_id == review.gh_id for r in p.reviews
         ):
@@ -411,8 +386,8 @@ async def append_pr_review(
     return await _retry_on_conflict(cosmos, pr, etag, apply)
 
 
-def github_pr_url_for(repo: str, number: int) -> str:
-    """Canonical glimmung-side rendering of a GH PR URL. Mirrors
+def github_pull_request_url_for(repo: str, number: int) -> str:
+    """Canonical rendering of a GitHub pull request URL. Mirrors
     `github_issue_url_for` so any code path that stitches a URL gets the
     same shape; future cross-lookup helpers can rely on the format being
     deterministic."""
@@ -421,10 +396,10 @@ def github_pr_url_for(repo: str, number: int) -> str:
 
 async def _retry_on_conflict(
     cosmos: Cosmos,
-    pr: PR,
+    pr: Report,
     etag: str,
-    apply: Callable[[PR], PR],
-) -> tuple[PR, str]:
+    apply: Callable[[Report], Report],
+) -> tuple[Report, str]:
     """Apply `apply(pr) -> pr` with optimistic concurrency. On `_etag`
     mismatch, re-read and retry. Returns `(updated_pr, new_etag)` so
     callers can chain ops without an extra read."""
@@ -433,7 +408,7 @@ async def _retry_on_conflict(
     for attempt in range(_MAX_CONFLICT_RETRIES):
         updated = apply(current)
         try:
-            response = await cosmos.prs.replace_item(
+            response = await cosmos.reports.replace_item(
                 item=updated.id,
                 body=updated.model_dump(mode="json"),
                 etag=current_etag,
@@ -443,8 +418,8 @@ async def _retry_on_conflict(
         except CosmosAccessConditionFailedError:
             if attempt == _MAX_CONFLICT_RETRIES - 1:
                 raise
-            log.info("PR %s replace_item conflict; re-reading and retrying", current.id)
-            doc = await cosmos.prs.read_item(item=current.id, partition_key=current.project)
-            current = PR.model_validate(_strip_meta(doc))
+            log.info("Report %s replace_item conflict; re-reading and retrying", current.id)
+            doc = await cosmos.reports.read_item(item=current.id, partition_key=current.project)
+            current = Report.model_validate(_strip_meta(doc))
             current_etag = doc["_etag"]
     raise RuntimeError("unreachable")
