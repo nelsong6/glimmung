@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from glimmung.native_k8s import NativeKubernetesLauncher, _job_manifest
@@ -40,6 +41,16 @@ class _RecordingLauncher(NativeKubernetesLauncher):
 
     async def _request(self, method: str, path: str, *, json=None):
         self.calls.append({"method": method, "path": path, "json": json})
+        return {}
+
+
+class _FailingRoleBindingLauncher(_RecordingLauncher):
+    async def _request(self, method: str, path: str, *, json=None):
+        self.calls.append({"method": method, "path": path, "json": json})
+        if method == "POST" and path.endswith("/rolebindings"):
+            request = httpx.Request(method, f"https://kubernetes.default.svc{path}")
+            response = httpx.Response(403, request=request)
+            raise httpx.HTTPStatusError("forbidden", request=request, response=response)
         return {}
 
 
@@ -226,3 +237,79 @@ async def test_launch_scaffolds_run_namespaces_and_rbac_before_job():
         "name": "glimmung-native-runner",
         "namespace": "glimmung-runs",
     }]
+
+
+@pytest.mark.asyncio
+async def test_launch_cleans_attempt_secret_when_scaffolding_fails():
+    launcher = _FailingRoleBindingLauncher(_settings())
+    cosmos = _cosmos()
+    now = datetime.now(UTC)
+    phase = PhaseSpec(
+        name="agent",
+        kind="k8s_job",
+        jobs=[
+            NativeJobSpec(
+                id="agent",
+                image="runner:agent",
+                steps=[NativeStepSpec(slug="run-agent")],
+            )
+        ],
+    )
+    run = Run(
+        id="01KRNATIVE0000000000000000",
+        project="ambience",
+        workflow="native-agent",
+        issue_id="01ISSUE",
+        issue_repo="nelsong6/ambience",
+        issue_number=117,
+        state=RunState.IN_PROGRESS,
+        budget=BudgetConfig(total=25.0),
+        attempts=[
+            PhaseAttempt(
+                attempt_index=0,
+                phase="agent",
+                phase_kind="k8s_job",
+                workflow_filename="k8s_job:agent",
+                dispatched_at=now,
+                jobs=native_job_attempts_from_specs(phase.jobs),
+            )
+        ],
+        created_at=now,
+        updated_at=now,
+    )
+    await cosmos.runs.create_item(run.model_dump(mode="json"))
+
+    lease_doc = {
+        "id": "01LEASE",
+        "project": "ambience",
+        "workflow": "native-agent",
+        "state": "active",
+        "host": "native-k8s",
+        "requirements": {},
+        "metadata": {
+            "native_k8s": True,
+            "run_id": run.id,
+            "attempt_index": "0",
+        },
+        "requestedAt": now.isoformat(),
+        "assignedAt": now.isoformat(),
+        "releasedAt": None,
+        "ttlSeconds": 14400,
+    }
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await launcher.launch(
+            cosmos,
+            lease_doc=lease_doc,
+            workflow_doc={"name": "native-agent"},
+            phase=phase,
+        )
+
+    assert {
+        "method": "DELETE",
+        "path": (
+            "/api/v1/namespaces/glimmung-runs/secrets/"
+            "glim-01krnative0000000000000000-0-token"
+        ),
+        "json": None,
+    } in launcher.calls

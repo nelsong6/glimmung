@@ -6,6 +6,7 @@ import base64
 import hashlib
 import re
 import secrets
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -59,29 +60,34 @@ class NativeKubernetesLauncher:
         job_name = _resource_name("glim", run_id, attempt_index)
         secret_name = f"{job_name}-token"
         token = await self._ensure_attempt_secret(secret_name)
-        await run_ops.set_latest_attempt_token_hash(
-            cosmos,
-            run=run,
-            etag=etag,
-            token_sha256=_sha256(token),
-        )
-        await self._ensure_run_namespace_access(
-            lease_doc=lease_doc,
-            workflow_doc=workflow_doc,
-            phase=phase,
-            run_id=run_id,
-            attempt_index=attempt_index,
-        )
+        try:
+            await run_ops.set_latest_attempt_token_hash(
+                cosmos,
+                run=run,
+                etag=etag,
+                token_sha256=_sha256(token),
+            )
+            await self._ensure_run_namespace_access(
+                lease_doc=lease_doc,
+                workflow_doc=workflow_doc,
+                phase=phase,
+                run_id=run_id,
+                attempt_index=attempt_index,
+            )
 
-        manifest = _job_manifest(
-            settings=self._settings,
-            lease_doc=lease_doc,
-            workflow_doc=workflow_doc,
-            phase=phase,
-            job_name=job_name,
-            secret_name=secret_name,
-        )
-        await self._create_job(job_name, manifest)
+            manifest = _job_manifest(
+                settings=self._settings,
+                lease_doc=lease_doc,
+                workflow_doc=workflow_doc,
+                phase=phase,
+                job_name=job_name,
+                secret_name=secret_name,
+            )
+            await self._create_job(job_name, manifest)
+        except Exception:
+            with suppress(Exception):
+                await self.delete_attempt_secret(run_id=run_id, attempt_index=attempt_index)
+            raise
         await _stamp_lease_launched(
             cosmos,
             lease_doc=lease_doc,
