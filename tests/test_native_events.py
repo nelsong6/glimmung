@@ -10,9 +10,12 @@ from starlette.requests import Request
 from glimmung.app import (
     NativeRunCompletedRequest,
     NativeRunEventRequest,
+    NativeRunFailedRequest,
     _attempt_token_sha256,
+    native_github_token,
     native_run_completed,
     native_run_event,
+    native_run_failed,
 )
 from glimmung.models import (
     BudgetConfig,
@@ -45,8 +48,32 @@ def cosmos():
     )
 
 
-def _app_with(cosmos):
-    return SimpleNamespace(state=SimpleNamespace(cosmos=cosmos, gh_minter=None, settings=None))
+class _TokenMinter:
+    def __init__(self):
+        self.calls = []
+
+    async def repository_token(self, *, repo: str, permissions=None):
+        self.calls.append({"repo": repo, "permissions": permissions})
+        return "repo-token", "2030-01-01T00:00:00Z"
+
+
+class _NativeLauncher:
+    def __init__(self):
+        self.deleted = []
+
+    async def delete_attempt_secret(self, *, run_id: str, attempt_index: int) -> None:
+        self.deleted.append((run_id, attempt_index))
+
+
+def _app_with(cosmos, *, gh_minter=None, native_k8s_launcher=None):
+    return SimpleNamespace(
+        state=SimpleNamespace(
+            cosmos=cosmos,
+            gh_minter=gh_minter,
+            settings=None,
+            native_k8s_launcher=native_k8s_launcher,
+        )
+    )
 
 
 def _request(token: str | None = None) -> Request:
@@ -237,7 +264,11 @@ async def test_native_completion_requires_no_sequence_gaps(cosmos, monkeypatch):
 @pytest.mark.asyncio
 async def test_native_completion_drives_decision_and_marks_run_passed(cosmos, monkeypatch):
     run = await _seed_native_run(cosmos)
-    monkeypatch.setattr("glimmung.app.app", _app_with(cosmos))
+    launcher = _NativeLauncher()
+    monkeypatch.setattr(
+        "glimmung.app.app",
+        _app_with(cosmos, native_k8s_launcher=launcher),
+    )
     await cosmos.leases.create_item({
         "id": "01LEASE",
         "project": run.project,
@@ -306,6 +337,27 @@ async def test_native_completion_drives_decision_and_marks_run_passed(cosmos, mo
     assert doc["attempts"][0]["verification"]["status"] == "pass"
     lease = await cosmos.leases.read_item(item="01LEASE", partition_key=run.project)
     assert lease["state"] == "released"
+    assert launcher.deleted == [(run.id, 0)]
+
+
+@pytest.mark.asyncio
+async def test_native_failure_deletes_attempt_secret(cosmos, monkeypatch):
+    run = await _seed_native_run(cosmos)
+    launcher = _NativeLauncher()
+    monkeypatch.setattr(
+        "glimmung.app.app",
+        _app_with(cosmos, native_k8s_launcher=launcher),
+    )
+
+    result = await native_run_failed(
+        NativeRunFailedRequest(reason="runner failed before posting completion"),
+        request=_request(),
+        project=run.project,
+        run_id=run.id,
+    )
+
+    assert result.state == "aborted"
+    assert launcher.deleted == [(run.id, 0)]
 
 
 @pytest.mark.asyncio
@@ -347,3 +399,71 @@ async def test_native_callbacks_require_bound_attempt_token(cosmos, monkeypatch)
         run_id=run.id,
     )
     assert result.accepted is True
+
+
+@pytest.mark.asyncio
+async def test_native_github_token_requires_bound_attempt_token_and_mints_repo_token(
+    cosmos, monkeypatch,
+):
+    run = await _seed_native_run(cosmos)
+    doc = await cosmos.runs.read_item(item=run.id, partition_key=run.project)
+    doc["attempts"][0]["capability_token_sha256"] = _attempt_token_sha256("secret-token")
+    await cosmos.runs.replace_item(item=run.id, body=doc)
+    minter = _TokenMinter()
+    monkeypatch.setattr("glimmung.app.app", _app_with(cosmos, gh_minter=minter))
+
+    with pytest.raises(HTTPException) as missing:
+        await native_github_token(
+            request=_request(),
+            project=run.project,
+            run_id=run.id,
+        )
+    assert missing.value.status_code == 401
+
+    with pytest.raises(HTTPException) as wrong:
+        await native_github_token(
+            request=_request("wrong-token"),
+            project=run.project,
+            run_id=run.id,
+        )
+    assert wrong.value.status_code == 403
+
+    result = await native_github_token(
+        request=_request("secret-token"),
+        project=run.project,
+        run_id=run.id,
+    )
+
+    assert result.repo == "nelsong6/ambience"
+    assert result.token == "repo-token"
+    assert result.expires_at == "2030-01-01T00:00:00Z"
+    assert minter.calls == [{"repo": "nelsong6/ambience", "permissions": None}]
+
+
+@pytest.mark.asyncio
+async def test_native_github_token_falls_back_to_project_repo(cosmos, monkeypatch):
+    run = await _seed_native_run(cosmos)
+    doc = await cosmos.runs.read_item(item=run.id, partition_key=run.project)
+    doc["issue_repo"] = ""
+    doc["attempts"][0]["capability_token_sha256"] = _attempt_token_sha256("secret-token")
+    await cosmos.runs.replace_item(item=run.id, body=doc)
+    await cosmos.projects.create_item({
+        "id": run.project,
+        "name": run.project,
+        "githubRepo": "nelsong6/ambience",
+        "defaultWorkflow": "native-agent",
+        "hostSelector": {},
+        "createdAt": datetime.now(UTC).isoformat(),
+    })
+    minter = _TokenMinter()
+    monkeypatch.setattr("glimmung.app.app", _app_with(cosmos, gh_minter=minter))
+
+    result = await native_github_token(
+        request=_request("secret-token"),
+        project=run.project,
+        run_id=run.id,
+    )
+
+    assert result.repo == "nelsong6/ambience"
+    assert result.token == "repo-token"
+    assert minter.calls == [{"repo": "nelsong6/ambience", "permissions": None}]
