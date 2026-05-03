@@ -24,7 +24,7 @@ def _settings():
     return SimpleNamespace(
         native_runner_namespace="glimmung-runs",
         native_runner_service_account="glimmung-native-runner",
-        native_runner_callback_base_url="http://glimmung.glimmung.svc.cluster.local:8000",
+        native_runner_callback_base_url="http://glimmung.glimmung.svc.cluster.local",
         native_runner_job_ttl_seconds=259200,
         native_runner_namespace_role="admin",
         k8s_sa_token_path="/var/run/token",
@@ -117,7 +117,7 @@ def test_job_manifest_maps_phase_jobs_to_sequential_pod_containers():
         "glim-run-01krnative0000000000000000-2,glimmung"
     )
     assert env["GLIMMUNG_GITHUB_TOKEN_URL"]["value"] == (
-        "http://glimmung.glimmung.svc.cluster.local:8000"
+        "http://glimmung.glimmung.svc.cluster.local"
         "/v1/runs/ambience/01KRNATIVE0000000000000000/native/github-token"
     )
     assert env["GLIMMUNG_ATTEMPT_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == (

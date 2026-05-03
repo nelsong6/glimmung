@@ -16,7 +16,7 @@ replicas: 1
 nativeRunner:
   namespace: glimmung-runs
   serviceAccount: glimmung-native-runner
-  callbackBaseUrl: http://glimmung.glimmung.svc.cluster.local:8000
+  callbackBaseUrl: http://glimmung.glimmung.svc.cluster.local
   projectConcurrency: 5
   globalConcurrency: 5
   jobTtlSeconds: 259200

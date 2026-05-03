@@ -86,7 +86,7 @@ class Settings(BaseSettings):
     # a short-lived Secret.
     native_runner_namespace: str = "glimmung-runs"
     native_runner_service_account: str = "glimmung-native-runner"
-    native_runner_callback_base_url: str = "http://glimmung.glimmung.svc.cluster.local:8000"
+    native_runner_callback_base_url: str = "http://glimmung.glimmung.svc.cluster.local"
     native_runner_project_concurrency: int = 5
     native_runner_global_concurrency: int = 5
     native_runner_job_ttl_seconds: int = 259200
