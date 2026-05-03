@@ -172,6 +172,26 @@ cd frontend && npm install && npm run dev
 # proxies /v1/* to localhost:8000
 ```
 
+## Tests
+
+Default test runs use the deterministic in-memory Cosmos backing:
+
+```sh
+uv run --extra dev pytest
+```
+
+To exercise the same container surface against live Cosmos, opt in with:
+
+```sh
+az login
+GLIMMUNG_TEST_COSMOS=live uv run --extra dev pytest
+```
+
+The live adapter in [`tests/cosmos_fake.py`](tests/cosmos_fake.py) prefixes
+every partition-key value with a per-session `test-...:` namespace and sweeps
+that namespace on first use. Set `GLIMMUNG_TEST_PREFIX=test-my-run:` to reuse
+or inspect a specific namespace.
+
 ## Verify-loop substrate (#18)
 
 Glimmung-as-orchestrator wedge: when a verify phase fails, glimmung re-dispatches an implementation phase with the prior verification artifact as additional context, repeating until verification passes, attempt count exceeds N, or cumulative cost exceeds $X. The substrate that lands here is reused by every other [meta #17](https://github.com/nelsong6/glimmung/issues/17) child.
@@ -280,7 +300,11 @@ Deterministic: `f"{scope}::{urllib.parse.quote(key, safe='')}"`. Cosmos forbids 
 
 ### Test coverage
 
-29 unit tests in [`tests/test_locks.py`](tests/test_locks.py), all backed by the in-memory Cosmos fake at [`tests/cosmos_fake.py`](tests/cosmos_fake.py) so `_etag`/`IfNotModified` semantics + TTL behavior are exercised deterministically.
+29 unit tests in [`tests/test_locks.py`](tests/test_locks.py), backed by the
+Cosmos-compatible test container at [`tests/cosmos_fake.py`](tests/cosmos_fake.py)
+so `_etag`/`IfNotModified` semantics + TTL behavior are exercised
+deterministically by default and can be re-run against live Cosmos when
+`GLIMMUNG_TEST_COSMOS=live`.
 
 ## Signal bus + PR triage (#19)
 
