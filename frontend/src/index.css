@@ -515,22 +515,28 @@ header {
   font-size: 0.85rem;
 }
 .admin-form input[type="text"],
-.admin-form input:not([type="checkbox"]) {
+.admin-form input:not([type="checkbox"]),
+.admin-form textarea {
   flex: 1;
-  background: #0e0e10;
-  border: 1px solid #2a2a2e;
-  color: #d4d4d4;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--fg);
   padding: 6px 10px;
   border-radius: 4px;
   font-family: inherit;
   font-size: 0.9rem;
+}
+.admin-form textarea {
+  min-height: 88px;
+  resize: vertical;
 }
 .admin-form input.mono {
   font-family: var(--font-mono);
   font-size: 0.85rem;
 }
 .admin-form input:focus,
-.admin-form select:focus {
+.admin-form select:focus,
+.admin-form textarea:focus {
   outline: none;
   border-color: var(--border);
   border-left: 2px solid var(--state-success-fg);
@@ -569,6 +575,128 @@ header {
   border-radius: 4px;
   font-size: 0.85rem;
   font-family: var(--font-mono);
+}
+
+.issue-comments {
+  margin-top: 24px;
+}
+.comment-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.comment-row {
+  border-left: 2px solid var(--border);
+  padding: 10px 0 10px 14px;
+}
+.comment-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 6px;
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+}
+.comment-body {
+  white-space: pre-wrap;
+  font-family: inherit;
+  margin: 0;
+  color: var(--fg);
+}
+.comment-edit textarea {
+  width: 100%;
+  min-height: 96px;
+  resize: vertical;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-family: inherit;
+}
+.comment-edit textarea:focus {
+  outline: none;
+  border-color: var(--state-success-fg);
+}
+.comment-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.comment-form {
+  margin-top: 12px;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.system-graph {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.graph-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 30%) 1fr;
+  gap: 12px;
+  align-items: stretch;
+  border-bottom: 1px solid var(--border);
+  padding: 10px 0;
+}
+.graph-flow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+}
+.graph-flow::before {
+  content: "";
+  width: 18px;
+  height: 1px;
+  flex: 0 0 auto;
+  background: var(--border);
+}
+.graph-node {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 140px;
+  max-width: 240px;
+  padding: 8px 10px 8px 12px;
+  background: var(--surface);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--border);
+  border-radius: 4px;
+  font-family: inherit;
+  text-align: left;
+}
+.graph-node:disabled {
+  cursor: default;
+}
+.graph-node:not(:disabled):hover {
+  background: var(--surface-hover);
+}
+.graph-node.free { border-left-color: var(--state-success-fg); }
+.graph-node.busy { border-left-color: var(--state-busy-fg); }
+.graph-node.drain { border-left-color: var(--state-danger-fg); }
+.graph-node.info { border-left-color: var(--state-info-fg); }
+.issue-node {
+  width: 100%;
+  max-width: none;
+  border-left-color: var(--state-success-fg);
+}
+.graph-kind,
+.graph-state,
+.graph-meta {
+  color: var(--fg-muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+}
+.graph-label {
+  width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .filter-hint {

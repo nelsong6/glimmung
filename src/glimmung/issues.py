@@ -43,7 +43,7 @@ from azure.cosmos.exceptions import CosmosAccessConditionFailedError, CosmosReso
 from ulid import ULID
 
 from glimmung.db import Cosmos, query_all
-from glimmung.models import Issue, IssueMetadata, IssueSource, IssueState
+from glimmung.models import Issue, IssueComment, IssueMetadata, IssueSource, IssueState
 
 log = logging.getLogger(__name__)
 
@@ -148,6 +148,91 @@ async def update_issue(
         return i.model_copy(update=updates)
 
     return await _retry_on_conflict(cosmos, issue, etag, apply)
+
+
+async def add_comment(
+    cosmos: Cosmos,
+    *,
+    issue: Issue,
+    etag: str,
+    author: str,
+    body: str,
+) -> tuple[Issue, str, IssueComment]:
+    """Append a glimmung-authored comment to an Issue."""
+    now = _now()
+    comment = IssueComment(
+        id=str(ULID()),
+        author=author,
+        body=body,
+        created_at=now,
+        updated_at=now,
+    )
+
+    def apply(i: Issue) -> Issue:
+        return i.model_copy(update={
+            "comments": [*i.comments, comment],
+            "updated_at": _now(),
+        })
+
+    updated, new_etag = await _retry_on_conflict(cosmos, issue, etag, apply)
+    return updated, new_etag, comment
+
+
+async def update_comment(
+    cosmos: Cosmos,
+    *,
+    issue: Issue,
+    etag: str,
+    comment_id: str,
+    body: str,
+) -> tuple[Issue, str, IssueComment] | None:
+    """Replace a comment body by id. Returns None if the comment is missing."""
+    existing = next((c for c in issue.comments if c.id == comment_id), None)
+    if existing is None:
+        return None
+    now = _now()
+    updated_comment = existing.model_copy(update={"body": body, "updated_at": now})
+
+    def apply(i: Issue) -> Issue:
+        if not any(c.id == comment_id for c in i.comments):
+            return i
+        return i.model_copy(update={
+            "comments": [
+                updated_comment if c.id == comment_id else c
+                for c in i.comments
+            ],
+            "updated_at": _now(),
+        })
+
+    updated, new_etag = await _retry_on_conflict(cosmos, issue, etag, apply)
+    if not any(c.id == comment_id for c in updated.comments):
+        return None
+    return updated, new_etag, updated_comment
+
+
+async def remove_comment(
+    cosmos: Cosmos,
+    *,
+    issue: Issue,
+    etag: str,
+    comment_id: str,
+) -> tuple[Issue, str] | None:
+    """Remove a comment by id. Returns None if the comment is missing."""
+    if not any(c.id == comment_id for c in issue.comments):
+        return None
+
+    def apply(i: Issue) -> Issue:
+        if not any(c.id == comment_id for c in i.comments):
+            return i
+        return i.model_copy(update={
+            "comments": [c for c in i.comments if c.id != comment_id],
+            "updated_at": _now(),
+        })
+
+    updated, new_etag = await _retry_on_conflict(cosmos, issue, etag, apply)
+    if any(c.id == comment_id for c in updated.comments):
+        return None
+    return updated, new_etag
 
 
 async def close_issue(

@@ -16,12 +16,18 @@ from unittest.mock import patch
 import pytest
 from fastapi import HTTPException
 
-from glimmung.app import _build_issue_graph, issue_graph
+from glimmung.app import _build_issue_graph, _build_system_graph, issue_graph
 from glimmung.models import (
     BudgetConfig,
     PhaseAttempt,
+    PR,
+    PRState,
     Run,
     RunState,
+    Signal,
+    SignalSource,
+    SignalState,
+    SignalTargetType,
 )
 
 from tests.cosmos_fake import FakeContainer
@@ -85,7 +91,126 @@ async def _seed_run(cosmos, run: Run) -> None:
     await cosmos.runs.create_item(run.model_dump(mode="json"))
 
 
+async def _seed_pr(cosmos, pr: PR) -> None:
+    await cosmos.prs.create_item(pr.model_dump(mode="json"))
+
+
+async def _seed_signal(cosmos, signal: Signal) -> None:
+    await cosmos.signals.create_item(signal.model_dump(mode="json"))
+
+
 # ─── Classic graph (no resume involved) ───────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_system_graph_renders_open_issues_inflight_runs_prs_and_signals(cosmos):
+    issue_id = await _seed_issue(cosmos)
+    await _seed_issue(
+        cosmos,
+        project="ambience",
+        repo="nelsong6/ambience",
+        issue_number=117,
+        issue_id="01HZGRAPHOTHERISSUE",
+        title="Effect: Cottage smoke",
+    )
+    now = _now()
+    run = Run(
+        id="01KQSYSTEM_RUN",
+        project="ambience",
+        workflow="agent-run",
+        issue_id=issue_id,
+        issue_repo="nelsong6/ambience",
+        issue_number=116,
+        state=RunState.IN_PROGRESS,
+        budget=BudgetConfig(total=25.0),
+        attempts=[
+            PhaseAttempt(
+                attempt_index=0,
+                phase="env-prep",
+                workflow_filename="env-prep.yml",
+                dispatched_at=now,
+                completed_at=now,
+                conclusion="success",
+            ),
+            PhaseAttempt(
+                attempt_index=1,
+                phase="agent-execute",
+                workflow_filename="agent-execute.yml",
+                dispatched_at=now,
+            ),
+        ],
+        created_at=now,
+        updated_at=now,
+    )
+    await _seed_run(cosmos, run)
+    await _seed_pr(cosmos, PR(
+        id="01KQSYSTEM_PR",
+        project="ambience",
+        repo="nelsong6/ambience",
+        number=201,
+        title="agent: lava lamp",
+        state=PRState.OPEN,
+        branch="agent/lava",
+        linked_issue_id=issue_id,
+        linked_run_id=run.id,
+        created_at=now,
+        updated_at=now,
+    ))
+    await _seed_signal(cosmos, Signal(
+        id="01KQSYSTEM_SIGNAL",
+        target_type=SignalTargetType.RUN,
+        target_repo="ambience",
+        target_id=run.id,
+        source=SignalSource.GLIMMUNG_UI,
+        payload={"reason": "operator feedback"},
+        state=SignalState.PENDING,
+        enqueued_at=now,
+    ))
+
+    graph = await _build_system_graph(cosmos)
+
+    node_kinds = sorted(n.kind for n in graph.nodes)
+    assert node_kinds.count("issue") == 2
+    assert "run" in node_kinds
+    assert "attempt" in node_kinds
+    assert "pr" in node_kinds
+    assert "signal" in node_kinds
+    assert graph.issue_id == "system"
+    assert any(e.kind == "spawned" and e.source == f"issue:{issue_id}" for e in graph.edges)
+    assert any(e.kind == "opened" and e.source == f"run:{run.id}" for e in graph.edges)
+    assert any(e.kind == "feedback" and e.source == f"run:{run.id}" for e in graph.edges)
+
+
+@pytest.mark.asyncio
+async def test_system_graph_filters_by_project(cosmos):
+    ambience_issue_id = await _seed_issue(cosmos, project="ambience")
+    await _seed_issue(
+        cosmos,
+        project="glimmung",
+        repo="nelsong6/glimmung",
+        issue_number=41,
+        issue_id="01HZGRAPHGLIMMUNG",
+        title="PR reviews",
+    )
+    now = _now()
+    await _seed_run(cosmos, Run(
+        id="01KQSYSTEM_AMBIENCE_RUN",
+        project="ambience",
+        workflow="agent-run",
+        issue_id=ambience_issue_id,
+        issue_repo="nelsong6/ambience",
+        issue_number=116,
+        state=RunState.IN_PROGRESS,
+        budget=BudgetConfig(total=25.0),
+        attempts=[],
+        created_at=now,
+        updated_at=now,
+    ))
+
+    graph = await _build_system_graph(cosmos, project="glimmung")
+
+    assert [n.metadata["project"] for n in graph.nodes if n.kind == "issue"] == ["glimmung"]
+    assert all(n.kind != "run" for n in graph.nodes)
 
 
 @pytest.mark.asyncio

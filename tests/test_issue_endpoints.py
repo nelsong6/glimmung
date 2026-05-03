@@ -16,10 +16,15 @@ from fastapi import HTTPException
 
 from glimmung import issues as issue_ops
 from glimmung.app import (
+    IssueCommentRequest,
     IssueUpdateRequest,
     _build_issue_detail,
+    create_issue_comment_endpoint,
+    delete_issue_comment_endpoint,
+    update_issue_comment_endpoint,
     _list_issues_from_cosmos,
 )
+from glimmung.auth import User
 from glimmung.models import IssueState
 
 from tests.cosmos_fake import FakeContainer
@@ -102,6 +107,7 @@ async def test_build_detail_for_native_issue_omits_gh_fields(cosmos):
     assert detail.title == "rewrite the dispatcher"
     assert detail.body == "we should split it"
     assert detail.labels == ["epic"]
+    assert detail.comments == []
     assert detail.state == "open"
     assert detail.repo is None
     assert detail.number is None
@@ -122,6 +128,95 @@ async def test_build_detail_carries_gh_coords_when_present(cosmos):
     assert detail.repo == "nelsong6/ambience"
     assert detail.number == 12
     assert detail.html_url == "https://github.com/nelsong6/ambience/issues/12"
+
+
+@pytest.mark.asyncio
+async def test_build_detail_includes_issue_comments(cosmos):
+    issue = await issue_ops.create_issue(
+        cosmos, project="ambience", title="t",
+    )
+    fetched, etag = await issue_ops.read_issue(
+        cosmos, project="ambience", issue_id=issue.id,
+    )
+    issue, _, comment = await issue_ops.add_comment(
+        cosmos,
+        issue=fetched,
+        etag=etag,
+        author="nelson@example.com",
+        body="triage note",
+    )
+
+    detail = await _build_issue_detail(cosmos, issue=issue)
+
+    assert len(detail.comments) == 1
+    assert detail.comments[0] == comment
+
+
+@pytest.mark.asyncio
+async def test_issue_comment_endpoints_create_update_delete(cosmos, monkeypatch):
+    issue = await issue_ops.create_issue(cosmos, project="ambience", title="t")
+    monkeypatch.setattr(
+        "glimmung.app.app",
+        SimpleNamespace(state=SimpleNamespace(cosmos=cosmos)),
+    )
+    user = User(sub="u", email="nelson@example.com", name="Nelson")
+
+    comment = await create_issue_comment_endpoint(
+        IssueCommentRequest(body="first"),
+        project="ambience",
+        issue_id=issue.id,
+        user=user,
+    )
+    assert comment.author == "nelson@example.com"
+    assert comment.body == "first"
+
+    edited = await update_issue_comment_endpoint(
+        IssueCommentRequest(body="edited"),
+        project="ambience",
+        issue_id=issue.id,
+        comment_id=comment.id,
+        user=user,
+    )
+    assert edited.id == comment.id
+    assert edited.body == "edited"
+
+    detail = await delete_issue_comment_endpoint(
+        project="ambience",
+        issue_id=issue.id,
+        comment_id=comment.id,
+    )
+    assert detail.comments == []
+
+
+@pytest.mark.asyncio
+async def test_update_issue_comment_rejects_other_author(cosmos, monkeypatch):
+    issue = await issue_ops.create_issue(cosmos, project="ambience", title="t")
+    fetched, etag = await issue_ops.read_issue(
+        cosmos, project="ambience", issue_id=issue.id,
+    )
+    _, _, comment = await issue_ops.add_comment(
+        cosmos,
+        issue=fetched,
+        etag=etag,
+        author="author@example.com",
+        body="first",
+    )
+    monkeypatch.setattr(
+        "glimmung.app.app",
+        SimpleNamespace(state=SimpleNamespace(cosmos=cosmos)),
+    )
+    user = User(sub="u", email="other@example.com", name="Other")
+
+    with pytest.raises(HTTPException) as exc:
+        await update_issue_comment_endpoint(
+            IssueCommentRequest(body="edited"),
+            project="ambience",
+            issue_id=issue.id,
+            comment_id=comment.id,
+            user=user,
+        )
+
+    assert exc.value.status_code == 403
 
 
 # ─── PATCH endpoint logic (state transitions) ──────────────────────────
