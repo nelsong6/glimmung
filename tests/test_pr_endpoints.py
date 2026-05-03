@@ -117,6 +117,43 @@ async def test_list_prs_joins_run_via_linked_run_id(cosmos):
     assert row.issue_number == 7
 
 
+@pytest.mark.asyncio
+async def test_list_prs_surfaces_warm_session_launch_url(cosmos):
+    run_doc = {
+        "id": "01JRUNWARM",
+        "project": "ambience",
+        "issue_repo": "nelsong6/ambience",
+        "pr_number": 14,
+        "state": "passed",
+        "attempts": [{"attempt_index": 0}, {"attempt_index": 1}],
+        "cumulative_cost_usd": 0.0,
+        "issue_number": 0,
+        "issue_id": "01JISSUEZZZ",
+        "validation_url": "https://preview.example.test",
+        "session_launch_intent": "warm",
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    await cosmos.runs.create_item(run_doc)
+
+    pr = await pr_ops.create_pr(
+        cosmos, project="ambience", repo="nelsong6/ambience",
+        number=14, title="t", branch="agent/native",
+        linked_issue_id="01JISSUEZZZ",
+        linked_run_id="01JRUNWARM",
+    )
+
+    rows = await _list_prs_from_cosmos(cosmos)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.validation_url == "https://preview.example.test"
+    assert row.session_launch_intent == "warm"
+    assert row.session_launch_url is not None
+    assert "glimmung_run_id=01JRUNWARM" in row.session_launch_url
+    assert "glimmung_issue_id=01JISSUEZZZ" in row.session_launch_url
+    assert f"glimmung_pr_id={pr.id}" in row.session_launch_url
+    assert "validation_url=https%3A%2F%2Fpreview.example.test" in row.session_launch_url
+
+
 # ─── _build_pr_detail ────────────────────────────────────────────────────
 
 
