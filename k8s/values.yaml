@@ -8,10 +8,9 @@ image:
 
 namespace: glimmung
 serviceAccount: infra-shared
-# Pinned by tofu/identity.tf's current `glimmung_identity_client_id` output.
-# After the staged dedicated-identity apply, update this to
-# `glimmung_dedicated_identity_client_id` in a chart-only cutover PR.
-serviceAccountClientId: "718fd28c-892a-43e9-89c3-9ee3f0f8d073"
+# Dedicated Glimmung app identity from tofu/identity.tf's
+# `glimmung_dedicated_identity_client_id` output.
+serviceAccountClientId: "3644b9f0-2eb0-42dd-92a4-696f9a3ca090"
 replicas: 1
 
 nativeRunner:
@@ -21,9 +20,9 @@ nativeRunner:
   projectConcurrency: 5
   globalConcurrency: 5
   jobTtlSeconds: 259200
-  # Filled by tofu's `glimmung_native_runner_identity_client_id` output once
-  # the native runner identity is applied.
-  serviceAccountClientId: ""
+  # Dedicated native runner identity from tofu/identity.tf's
+  # `glimmung_native_runner_identity_client_id` output.
+  serviceAccountClientId: "a865aa27-e76e-4363-ab53-375712bd6db8"
 
 # In-cluster admin auth via Kubernetes service-account tokens. When enabled,
 # admin endpoints (/v1/projects, /v1/workflows, /v1/hosts) accept a bearer
