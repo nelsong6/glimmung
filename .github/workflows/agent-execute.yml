@@ -337,10 +337,14 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/evidence
           if grep -q '===EVIDENCE-TAR-START===' /tmp/agent-pod.log; then
-            sed -n '/===EVIDENCE-TAR-START===/,/===EVIDENCE-TAR-END===/{//!p;}' \
+            if ! sed -n '/===EVIDENCE-TAR-START===/,/===EVIDENCE-TAR-END===/{//!p;}' \
               /tmp/agent-pod.log \
-              | base64 -d \
-              | tar -xzf - -C /tmp/evidence
+              | base64 --decode --ignore-garbage \
+              | tar -xzf - -C /tmp/evidence; then
+              echo "::warning::failed to decode evidence tar from agent pod log; continuing without agent-supplied evidence"
+              rm -rf /tmp/evidence
+              mkdir -p /tmp/evidence
+            fi
           else
             echo "::warning::no evidence tar markers found in agent pod log"
           fi
