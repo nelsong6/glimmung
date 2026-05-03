@@ -41,6 +41,19 @@ Dockerfile            # multi-stage: node frontend build → python backend
 .github/workflows/    # build + ACR push + chart bump + tofu plan/apply
 ```
 
+## Contribution checklist
+
+When adding or changing a human/operator-facing HTTP endpoint, update the
+matching surface in the same PR:
+
+- Add or update the frontend affordance when the action belongs in the
+  dashboard.
+- Add or update the matching `mcp-glimmung` tool when the action should be
+  available to LLM/session callers.
+- If the endpoint is intentionally system-only (webhooks, lease lifecycle,
+  run callbacks, health/config/events), call that out in the PR so the HTTP
+  API and MCP surface do not drift silently.
+
 ## API
 
 ### Lease lifecycle (capability auth via lease_id; ULID is unguessable)
