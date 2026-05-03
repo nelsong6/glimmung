@@ -1336,6 +1336,7 @@ async def public_config() -> dict[str, str]:
     return {
         "entra_client_id": settings.entra_client_id,
         "authority": "https://login.microsoftonline.com/common",
+        "tank_operator_base_url": settings.tank_operator_base_url.rstrip("/"),
     }
 
 
@@ -3577,6 +3578,7 @@ class PrRow(BaseModel):
     issue_number: int | None = None        # legacy convenience for the dashboard
     run_id: str | None = None
     run_state: str | None = None
+    validation_url: str | None = None
     run_attempts: int = 0
     run_cumulative_cost_usd: float = 0.0
     pr_lock_held: bool = False             # triage in flight
@@ -3601,6 +3603,7 @@ class PrDetail(BaseModel):
     issue_title: str | None = None
     run_id: str | None = None
     run_state: str | None = None
+    validation_url: str | None = None
     run_attempts: int = 0
     run_cumulative_cost_usd: float = 0.0
     run_attempt_history: list[dict[str, Any]] = Field(default_factory=list)
@@ -3796,6 +3799,7 @@ async def _build_pr_detail(cosmos: Cosmos, *, pr: PR) -> PrDetail:
     if run is not None:
         detail.run_id = run.id
         detail.run_state = run.state.value
+        detail.validation_url = run.validation_url
         detail.run_attempts = len(run.attempts)
         detail.run_cumulative_cost_usd = run.cumulative_cost_usd
         if run.issue_number:

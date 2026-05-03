@@ -13,7 +13,7 @@
  */
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { authedFetch } from "./auth";
+import { authedFetch, publicConfig } from "./auth";
 
 type PrDetail = {
   id: string;
@@ -34,6 +34,7 @@ type PrDetail = {
   issue_title: string | null;
   run_id: string | null;
   run_state: string | null;
+  validation_url: string | null;
   run_attempts: number;
   run_cumulative_cost_usd: number;
   run_attempt_history: AttemptHistoryEntry[];
@@ -75,6 +76,7 @@ export function PrDetailView() {
   const [error, setError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState("");
   const [reject, setReject] = useState<RejectStatus>({ kind: "idle" });
+  const [tankBaseUrl, setTankBaseUrl] = useState("");
 
   const onBack = () => navigate("/prs");
 
@@ -93,6 +95,24 @@ export function PrDetailView() {
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repo, prNumber]);
+
+  useEffect(() => {
+    publicConfig()
+      .then((cfg) => setTankBaseUrl(cfg.tank_operator_base_url || ""))
+      .catch((e) => setError(String(e)));
+  }, []);
+
+  const launchSession = () => {
+    if (!detail?.run_id || !detail.linked_issue_id || !tankBaseUrl) return;
+    const url = new URL(tankBaseUrl);
+    url.searchParams.set("glimmung_run_id", detail.run_id);
+    url.searchParams.set("glimmung_issue_id", detail.linked_issue_id);
+    url.searchParams.set("glimmung_pr_id", detail.id);
+    if (detail.validation_url) {
+      url.searchParams.set("validation_url", detail.validation_url);
+    }
+    window.open(url.toString(), "_blank", "noopener,noreferrer");
+  };
 
   const submit = async () => {
     if (!feedback.trim() || !detail) return;
@@ -195,6 +215,24 @@ export function PrDetailView() {
                 </span>
               </div>
             )}
+            <div className="row">
+              <span className="key">session</span>
+              <span className="val">
+                <button
+                  type="button"
+                  className="link"
+                  onClick={launchSession}
+                  disabled={!detail.run_id || !detail.linked_issue_id || !tankBaseUrl}
+                  title={
+                    detail.run_id && detail.linked_issue_id
+                      ? "Open a tank-operator session with this glimmung context"
+                      : "Requires a linked glimmung run and issue"
+                  }
+                >
+                  launch session
+                </button>
+              </span>
+            </div>
           </div>
 
           {detail.body.trim() && (
