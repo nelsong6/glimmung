@@ -10,8 +10,9 @@ from pathlib import Path as FsPath
 from typing import Any
 from urllib.parse import urlencode
 
+from azure.core.exceptions import ResourceNotFoundError
 from fastapi import Depends, FastAPI, HTTPException, Path, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
@@ -124,6 +125,16 @@ def _require_native_attempt_token(request: Request, run: Run) -> None:
     actual = _attempt_token_sha256(presented)
     if not hmac.compare_digest(actual, expected):
         raise HTTPException(403, "invalid x-glimmung-attempt-token")
+
+
+def _serving_artifact_blob_name(blob_path: str) -> str:
+    blob_name = blob_path.strip("/")
+    parts = blob_name.split("/")
+    if not blob_name or any(part in ("", ".", "..") for part in parts):
+        raise HTTPException(404, "artifact not found")
+    if not blob_name.startswith(("runs/", "issues/", "reports/")):
+        raise HTTPException(404, "artifact not found")
+    return blob_name
 
 
 @asynccontextmanager
@@ -1779,6 +1790,29 @@ async def public_config() -> dict[str, str]:
         "authority": "https://login.microsoftonline.com/common",
         "tank_operator_base_url": settings.tank_operator_base_url.rstrip("/"),
     }
+
+
+@app.get("/v1/artifacts/{blob_path:path}")
+async def read_artifact(blob_path: str = Path(...)) -> Response:
+    """Serve Glimmung-owned private blob artifacts through the app.
+
+    Native runners upload screenshots and future evidence to the private
+    artifact container. Review surfaces link to this route instead of raw
+    storage URLs so the container stays private and Glimmung owns access.
+    """
+    artifact_store = getattr(app.state, "artifact_store", None)
+    if artifact_store is None:
+        raise HTTPException(503, "artifact store is not configured")
+    blob_name = _serving_artifact_blob_name(blob_path)
+    try:
+        body, content_type = await artifact_store.download(blob_name=blob_name)
+    except ResourceNotFoundError:
+        raise HTTPException(404, "artifact not found")
+    return Response(
+        content=body,
+        media_type=content_type,
+        headers={"Cache-Control": "public, max-age=300"},
+    )
 
 
 # ─── Lease lifecycle (capability-based via lease_id) ─────────────────────────────
