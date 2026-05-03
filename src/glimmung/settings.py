@@ -79,6 +79,18 @@ class Settings(BaseSettings):
     # external systems like GitHub while keeping rich PR context in Glimmung.
     glimmung_base_url: str = "https://glimmung.romaine.life"
 
+    # Native Kubernetes runner. `k8s_job` workflow phases do not consume
+    # registered self-hosted GitHub runner hosts; they use virtual capacity
+    # gates backed by leases, then Glimmung creates a Kubernetes Job in this
+    # namespace. Jobs receive callback context plus a per-attempt token from
+    # a short-lived Secret.
+    native_runner_namespace: str = "glimmung-runs"
+    native_runner_service_account: str = "glimmung-native-runner"
+    native_runner_callback_base_url: str = "http://glimmung.glimmung.svc.cluster.local:8000"
+    native_runner_project_concurrency: int = 5
+    native_runner_global_concurrency: int = 5
+    native_runner_job_ttl_seconds: int = 259200
+
 
 @lru_cache
 def get_settings() -> Settings:

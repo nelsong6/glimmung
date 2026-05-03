@@ -5,6 +5,10 @@ on the hosts container's `_etag` to grab a free host without colliding
 with concurrent acquirers. The retry loop is bounded by the number of
 free hosts (always small at this scale).
 
+Native Kubernetes phases use the same lease documents for queue visibility
+and cancellation, but their capacity is virtual: capped by project/global
+active native leases instead of registered host rows.
+
 `promote_pending` re-tries pending leases against current free capacity.
 Called periodically and after every release.
 """
@@ -19,6 +23,10 @@ from ulid import ULID
 from glimmung.db import Cosmos, query_all
 from glimmung.models import Host, Lease, LeaseState
 from glimmung.settings import Settings
+
+
+NATIVE_K8S_HOST = "native-k8s"
+NATIVE_K8S_METADATA_KEY = "native_k8s"
 
 
 def _utcnow_iso() -> str:
@@ -114,6 +122,78 @@ async def acquire(
     return pending, None
 
 
+def _native_host(now: str | None = None) -> Host:
+    ts = datetime.fromisoformat(now or _utcnow_iso())
+    return Host(
+        id=NATIVE_K8S_HOST,
+        name=NATIVE_K8S_HOST,
+        capabilities={"native_k8s": True},
+        current_lease_id=None,
+        last_heartbeat=ts,
+        last_used_at=ts,
+        drained=False,
+        created_at=ts,
+    )
+
+
+async def acquire_native(
+    cosmos: Cosmos,
+    settings: Settings,
+    *,
+    project: str,
+    workflow: str | None = None,
+    requirements: dict[str, Any],
+    metadata: dict[str, Any],
+    ttl_seconds: int | None = None,
+) -> tuple[Lease, Host | None]:
+    """Acquire virtual native-runner capacity.
+
+    The lease is ACTIVE immediately when both the per-project and global
+    native concurrency caps have room; otherwise it is PENDING and the
+    promote loop activates it later. `requirements` are retained on the lease
+    for observability/future scheduling but are not matched against host rows.
+    """
+    now = _utcnow_iso()
+    ttl = ttl_seconds or settings.lease_default_ttl_seconds
+    native_metadata = {**metadata, NATIVE_K8S_METADATA_KEY: True}
+    state = (
+        LeaseState.ACTIVE
+        if await native_capacity_available(cosmos, settings, project=project)
+        else LeaseState.PENDING
+    )
+    lease = Lease(
+        id=str(ULID()),
+        project=project,
+        workflow=workflow,
+        host=NATIVE_K8S_HOST if state == LeaseState.ACTIVE else None,
+        state=state,
+        requirements=requirements,
+        metadata=native_metadata,
+        requested_at=datetime.fromisoformat(now),
+        assigned_at=datetime.fromisoformat(now) if state == LeaseState.ACTIVE else None,
+        ttl_seconds=ttl,
+    )
+    await cosmos.leases.create_item(_lease_to_doc(lease))
+    return lease, _native_host(now) if state == LeaseState.ACTIVE else None
+
+
+async def native_capacity_available(
+    cosmos: Cosmos,
+    settings: Settings,
+    *,
+    project: str,
+) -> bool:
+    active = await query_all(
+        cosmos.leases,
+        "SELECT * FROM c WHERE c.state = @s AND c.metadata.native_k8s = true",
+        parameters=[{"name": "@s", "value": LeaseState.ACTIVE.value}],
+    )
+    project_cap = max(1, int(getattr(settings, "native_runner_project_concurrency", 5)))
+    global_cap = max(1, int(getattr(settings, "native_runner_global_concurrency", 5)))
+    project_active = sum(1 for doc in active if doc.get("project") == project)
+    return project_active < project_cap and len(active) < global_cap
+
+
 async def heartbeat(cosmos: Cosmos, lease_id: str, project: str) -> Lease:
     lease_doc = await cosmos.leases.read_item(item=lease_id, partition_key=project)
     if lease_doc["state"] != LeaseState.ACTIVE.value:
@@ -150,6 +230,8 @@ async def release(cosmos: Cosmos, lease_id: str, project: str) -> Lease:
 async def try_assign_pending(cosmos: Cosmos, lease_doc: dict[str, Any]) -> Host | None:
     """Try to assign a free host to an already-persisted pending lease.
     Returns the host if successful, None if no capacity matches."""
+    if (lease_doc.get("metadata") or {}).get(NATIVE_K8S_METADATA_KEY):
+        return None
     requirements = lease_doc.get("requirements", {})
     candidates_raw = await query_all(
         cosmos.hosts,
@@ -181,6 +263,45 @@ async def try_assign_pending(cosmos: Cosmos, lease_doc: dict[str, Any]) -> Host 
         except CosmosAccessConditionFailedError:
             continue
     return None
+
+
+async def try_activate_native_pending(
+    cosmos: Cosmos,
+    settings: Settings,
+    lease_doc: dict[str, Any],
+) -> Host | None:
+    """Try to activate a pending native lease against virtual capacity."""
+    if not (lease_doc.get("metadata") or {}).get(NATIVE_K8S_METADATA_KEY):
+        return None
+    if lease_doc.get("state") != LeaseState.PENDING.value:
+        return None
+    if not await native_capacity_available(cosmos, settings, project=lease_doc["project"]):
+        return None
+
+    now = _utcnow_iso()
+    lease_doc["host"] = NATIVE_K8S_HOST
+    lease_doc["state"] = LeaseState.ACTIVE.value
+    lease_doc["assignedAt"] = now
+    await cosmos.leases.replace_item(item=lease_doc["id"], body=lease_doc)
+    return _native_host(now)
+
+
+async def promote_pending_native(cosmos: Cosmos, settings: Settings) -> list[tuple[dict[str, Any], Host]]:
+    """Activate pending native leases while virtual capacity is available."""
+    pending = await query_all(
+        cosmos.leases,
+        (
+            "SELECT * FROM c WHERE c.state = @s AND c.metadata.native_k8s = true "
+            "ORDER BY c.requestedAt ASC"
+        ),
+        parameters=[{"name": "@s", "value": LeaseState.PENDING.value}],
+    )
+    assigned: list[tuple[dict[str, Any], Host]] = []
+    for lease_doc in pending:
+        host = await try_activate_native_pending(cosmos, settings, lease_doc)
+        if host is not None:
+            assigned.append((lease_doc, host))
+    return assigned
 
 
 async def promote_pending(cosmos: Cosmos) -> list[tuple[dict[str, Any], Host]]:

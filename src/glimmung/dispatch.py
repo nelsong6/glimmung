@@ -201,8 +201,8 @@ async def dispatch_run(
     # (fine because branches were agent-named); post-#69 the order matters.
     run_id: str | None = None
     phases = workflow_doc.get("phases") or []
+    initial_phase = phases[0] if phases else None
     if phases:
-        initial_phase = phases[0]
         budget = resolve_budget(
             effective_issue_labels,
             _budget_from_doc(workflow_doc.get("budget")),
@@ -225,7 +225,8 @@ async def dispatch_run(
         )
         run_id = run.id
 
-    # 5. Lease + workflow_dispatch.
+    # 5. Lease + runner dispatch. GitHub Actions phases consume registered
+    # host rows; native Kubernetes phases consume virtual native capacity.
     metadata: dict[str, Any] = {
         "issue_title": issue.title,
         "issue_lock_holder_id": holder_id,
@@ -237,20 +238,36 @@ async def dispatch_run(
     if run_id is not None:
         metadata["run_id"] = run_id
         metadata["attempt_index"] = "0"
+        if initial_phase is not None:
+            metadata["phase_name"] = initial_phase["name"]
     if github_issue_repo and issue_number is not None:
         metadata["issue_number"] = str(issue_number)
         metadata["issue_repo"] = github_issue_repo
     else:
         metadata["issue_id"] = issue.id
-    requirements = workflow_doc.get("defaultRequirements", {}) or {}
-    lease, host = await lease_ops.acquire(
-        cosmos,
-        settings,
-        project=project_name,
-        workflow=workflow_actual_name,
-        requirements=requirements,
-        metadata=metadata,
+    requirements = (
+        (initial_phase or {}).get("requirements")
+        or workflow_doc.get("defaultRequirements", {})
+        or {}
     )
+    if initial_phase is not None and initial_phase.get("kind") == "k8s_job":
+        lease, host = await lease_ops.acquire_native(
+            cosmos,
+            settings,
+            project=project_name,
+            workflow=workflow_actual_name,
+            requirements=requirements,
+            metadata=metadata,
+        )
+    else:
+        lease, host = await lease_ops.acquire(
+            cosmos,
+            settings,
+            project=project_name,
+            workflow=workflow_actual_name,
+            requirements=requirements,
+            metadata=metadata,
+        )
 
     if host is not None:
         # Inline import to avoid the app.py ↔ dispatch.py circular dep:
@@ -266,8 +283,7 @@ async def dispatch_run(
         }
         dispatched = await _maybe_dispatch_workflow(app, lease_doc, host)
         if not dispatched:
-            # GH refused the dispatch (typically a 422 on undeclared
-            # inputs — see _DISPATCH_INPUT_KEYS in app.py). Roll back the
+            # Runner dispatch failed before work started. Roll back the
             # lease + lock + Run so the issue isn't held for the lock TTL
             # on a phantom run.
             try:
@@ -288,14 +304,13 @@ async def dispatch_run(
                 )
             if run_id is not None:
                 try:
-                    # Mark the run aborted to avoid an orphan IN_PROGRESS row
-                    # (the symptom #20 was supposed to prevent).
+                    # Mark the run aborted to avoid an orphan IN_PROGRESS row.
                     doc = await cosmos.runs.read_item(item=run_id, partition_key=project_name)
                     from glimmung.models import Run
                     run_obj = Run.model_validate({k: v for k, v in doc.items() if not k.startswith("_")})
                     await run_ops.mark_aborted(
                         cosmos, run=run_obj, etag=doc["_etag"],
-                        reason="dispatch_failed: GitHub workflow_dispatch raised before run started",
+                        reason="dispatch_failed: runner dispatch failed before run started",
                     )
                 except Exception:
                     log.exception(
@@ -306,7 +321,7 @@ async def dispatch_run(
                 lease_id=lease.id,
                 run_id=run_id,
                 workflow=workflow_actual_name,
-                detail="GitHub workflow_dispatch raised; lease + lock + run rolled back",
+                detail="runner dispatch failed; lease + lock + run rolled back",
             )
 
     return DispatchResult(

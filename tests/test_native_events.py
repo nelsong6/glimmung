@@ -238,6 +238,23 @@ async def test_native_completion_requires_no_sequence_gaps(cosmos, monkeypatch):
 async def test_native_completion_drives_decision_and_marks_run_passed(cosmos, monkeypatch):
     run = await _seed_native_run(cosmos)
     monkeypatch.setattr("glimmung.app.app", _app_with(cosmos))
+    await cosmos.leases.create_item({
+        "id": "01LEASE",
+        "project": run.project,
+        "workflow": run.workflow,
+        "host": "native-k8s",
+        "state": "active",
+        "requirements": {},
+        "metadata": {
+            "native_k8s": True,
+            "run_id": run.id,
+            "attempt_index": "0",
+        },
+        "requestedAt": datetime.now(UTC).isoformat(),
+        "assignedAt": datetime.now(UTC).isoformat(),
+        "releasedAt": None,
+        "ttlSeconds": 14400,
+    })
 
     seq = 1
     for step in ("clone-repo", "run-agent"):
@@ -287,6 +304,8 @@ async def test_native_completion_drives_decision_and_marks_run_passed(cosmos, mo
     assert doc["state"] == "passed"
     assert doc["attempts"][0]["workflow_run_id"] is None
     assert doc["attempts"][0]["verification"]["status"] == "pass"
+    lease = await cosmos.leases.read_item(item="01LEASE", partition_key=run.project)
+    assert lease["state"] == "released"
 
 
 @pytest.mark.asyncio

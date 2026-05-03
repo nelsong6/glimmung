@@ -16,7 +16,7 @@ import pytest
 
 from glimmung import issues as issue_ops
 from glimmung.dispatch import dispatch_run
-from glimmung.models import IssueSource, RunState
+from glimmung.models import IssueSource, LeaseState, RunState
 
 from tests.cosmos_fake import FakeContainer
 
@@ -107,6 +107,41 @@ async def _register_workflow(
         "triggerLabel": trigger_label,
         "defaultRequirements": requirements or {},
         "metadata": metadata or {},
+        "createdAt": datetime.now(UTC).isoformat(),
+    })
+
+
+async def _register_native_workflow(app, *, project: str, name: str) -> None:
+    await app.state.cosmos.workflows.create_item({
+        "id": name,
+        "name": name,
+        "project": project,
+        "phases": [{
+            "name": "agent",
+            "kind": "k8s_job",
+            "workflowFilename": "",
+            "workflowRef": "main",
+            "requirements": None,
+            "verify": True,
+            "recyclePolicy": None,
+            "inputs": {},
+            "outputs": [],
+            "jobs": [{
+                "id": "agent",
+                "name": None,
+                "image": "runner:latest",
+                "command": [],
+                "args": [],
+                "env": {},
+                "steps": [{"slug": "run-agent", "title": None}],
+                "timeoutSeconds": None,
+            }],
+        }],
+        "pr": {"enabled": False, "recyclePolicy": None},
+        "budget": {"total": 25.0},
+        "triggerLabel": "agent-run",
+        "defaultRequirements": {},
+        "metadata": {},
         "createdAt": datetime.now(UTC).isoformat(),
     })
 
@@ -330,6 +365,60 @@ async def test_dispatch_returns_pending_when_no_host(app):
     assert result.host is None
     assert result.lease_id is not None
     assert result.run_id is not None  # Run is still created on PENDING
+
+
+@pytest.mark.asyncio
+async def test_native_dispatch_uses_virtual_capacity_without_registered_host(app):
+    await _register_project(app, "ambience", "nelsong6/ambience")
+    await _register_native_workflow(app, project="ambience", name="native-agent")
+    await _register_issue(app, project="ambience", repo="nelsong6/ambience", issue_number=100)
+
+    result = await dispatch_run(
+        app, repo="nelsong6/ambience", issue_number=100,
+        trigger_source={"kind": "glimmung_ui"},
+        workflow_name="native-agent",
+    )
+
+    assert result.state == "dispatched"
+    assert result.host == "native-k8s"
+    lease_doc = await _lease_doc_for(app, result.lease_id)
+    assert lease_doc["state"] == LeaseState.ACTIVE.value
+    assert lease_doc["metadata"]["native_k8s"] is True
+    assert lease_doc["metadata"]["phase_name"] == "agent"
+
+    run_doc = await app.state.cosmos.runs.read_item(
+        item=result.run_id, partition_key="ambience",
+    )
+    assert run_doc["attempts"][0]["phase_kind"] == "k8s_job"
+    assert run_doc["attempts"][0]["jobs"][0]["job_id"] == "agent"
+
+
+@pytest.mark.asyncio
+async def test_native_dispatch_respects_project_capacity(app):
+    app.state.settings.native_runner_project_concurrency = 1
+    app.state.settings.native_runner_global_concurrency = 5
+    await _register_project(app, "ambience", "nelsong6/ambience")
+    await _register_native_workflow(app, project="ambience", name="native-agent")
+    await _register_issue(app, project="ambience", repo="nelsong6/ambience", issue_number=101)
+    await _register_issue(app, project="ambience", repo="nelsong6/ambience", issue_number=102)
+
+    first = await dispatch_run(
+        app, repo="nelsong6/ambience", issue_number=101,
+        trigger_source={"kind": "glimmung_ui"},
+        workflow_name="native-agent",
+    )
+    second = await dispatch_run(
+        app, repo="nelsong6/ambience", issue_number=102,
+        trigger_source={"kind": "glimmung_ui"},
+        workflow_name="native-agent",
+    )
+
+    assert first.state == "dispatched"
+    assert second.state == "pending"
+    assert second.host is None
+    lease_doc = await _lease_doc_for(app, second.lease_id)
+    assert lease_doc["state"] == LeaseState.PENDING.value
+    assert lease_doc["metadata"]["native_k8s"] is True
 
 
 # ─── per-issue serialization ────────────────────────────────────────────────

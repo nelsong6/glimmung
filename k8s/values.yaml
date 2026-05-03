@@ -15,6 +15,18 @@ serviceAccount: infra-shared
 serviceAccountClientId: "718fd28c-892a-43e9-89c3-9ee3f0f8d073"
 replicas: 1
 
+nativeRunner:
+  namespace: glimmung-runs
+  serviceAccount: glimmung-native-runner
+  callbackBaseUrl: http://glimmung.glimmung.svc.cluster.local:8000
+  projectConcurrency: 5
+  globalConcurrency: 5
+  jobTtlSeconds: 259200
+  # Filled by tofu once the dedicated native runner identity is applied.
+  # Until then the ServiceAccount is created without workload identity
+  # annotation; the launcher code is still deployable and testable.
+  serviceAccountClientId: ""
+
 # In-cluster admin auth via Kubernetes service-account tokens. When enabled,
 # admin endpoints (/v1/projects, /v1/workflows, /v1/hosts) accept a bearer
 # token whose subject — resolved through TokenReview — matches an entry in
