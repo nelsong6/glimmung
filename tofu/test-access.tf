@@ -19,6 +19,11 @@
 #
 #   az ad signed-in-user show --query id -o tsv          # for org users
 #   az ad user show --id <upn> --query id -o tsv         # for guest MSAs
+#
+# CI uses the same GitHub OIDC-backed service principal that runs OpenTofu
+# applies. `data.azuread_client_config.current.object_id` is that service
+# principal's object id during CI, so the live smoke workflow can log in with
+# `vars.ARM_CLIENT_ID` and hit Cosmos without a separate static secret.
 # ============================================================================
 
 variable "dev_test_principal_ids" {
@@ -34,5 +39,13 @@ resource "azurerm_cosmosdb_sql_role_assignment" "dev_test_access" {
   account_name        = data.azurerm_cosmosdb_account.infra.name
   role_definition_id  = "${data.azurerm_cosmosdb_account.infra.id}/sqlRoleDefinitions/00000000-0000-0000-0000-000000000002"
   principal_id        = each.value
+  scope               = "${data.azurerm_cosmosdb_account.infra.id}/dbs/${azurerm_cosmosdb_sql_database.glimmung.name}"
+}
+
+resource "azurerm_cosmosdb_sql_role_assignment" "ci_test_access" {
+  resource_group_name = local.infra.resource_group_name
+  account_name        = data.azurerm_cosmosdb_account.infra.name
+  role_definition_id  = "${data.azurerm_cosmosdb_account.infra.id}/sqlRoleDefinitions/00000000-0000-0000-0000-000000000002"
+  principal_id        = data.azuread_client_config.current.object_id
   scope               = "${data.azurerm_cosmosdb_account.infra.id}/dbs/${azurerm_cosmosdb_sql_database.glimmung.name}"
 }
