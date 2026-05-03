@@ -382,6 +382,38 @@ async def test_completed_releases_issue_lock_on_terminal(cosmos, app_state):
 
 
 @pytest.mark.asyncio
+async def test_completed_releases_native_issue_lock_on_terminal(cosmos, app_state):
+    from glimmung import locks as lock_ops
+    await _register_project(cosmos, "glimmung", "nelsong6/glimmung")
+    await _register_workflow_with_recycle(cosmos, "glimmung")
+
+    holder = "01HZZZHOLDER000000000000"
+    run = await _seed_run(
+        cosmos, run_id="01KQTEST_RUN_NATIVE", project="glimmung",
+        issue_repo="nelsong6/glimmung", issue_number=0,
+        issue_lock_holder_id=holder,
+    )
+    await lock_ops.claim_lock(
+        cosmos, scope="issue", key=f"glimmung/{run.issue_id}",
+        holder_id=holder, ttl_seconds=14400, metadata={},
+    )
+
+    body = RunCompletedRequest(
+        workflow_run_id=1, conclusion="success",
+        verification={
+            "schema_version": 1, "status": "pass",
+            "reasons": [], "evidence_refs": [], "cost_usd": 0.0,
+        },
+    )
+    with patch("glimmung.app.app", app_state):
+        result = await run_completed(
+            body, project="glimmung", run_id=run.id,
+        )
+    assert result.decision == "advance"
+    assert result.issue_lock_released is True
+
+
+@pytest.mark.asyncio
 async def test_completed_malformed_verification_aborts(cosmos, app_state):
     await _register_project(cosmos, "ambience", "nelsong6/ambience")
     await _register_workflow_with_recycle(cosmos, "ambience")

@@ -80,6 +80,19 @@ from glimmung.verification import fetch_verification
 log = logging.getLogger(__name__)
 
 
+def _issue_lock_key(
+    *,
+    issue_repo: str | None,
+    issue_number: int | None,
+    issue_id: str | None,
+) -> str | None:
+    if issue_repo and issue_number is not None and issue_number > 0:
+        return f"{issue_repo}#{issue_number}"
+    if issue_id:
+        return f"glimmung/{issue_id}"
+    return None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
@@ -504,18 +517,23 @@ async def _release_locks_on_terminal(
 
     # Issue lock — keyed off the Run's stored holder_id so retries don't
     # release the lock the initial dispatch claimed.
-    if run.issue_lock_holder_id and run.issue_number:
+    issue_lock_key = _issue_lock_key(
+        issue_repo=run.issue_repo or repo,
+        issue_number=run.issue_number,
+        issue_id=run.issue_id,
+    )
+    if run.issue_lock_holder_id and issue_lock_key:
         try:
             released_lock = await lock_ops.release_lock(
                 cosmos, scope="issue",
-                key=f"{repo}#{run.issue_number}",
+                key=issue_lock_key,
                 holder_id=run.issue_lock_holder_id,
             )
             result["issue_lock_released"] = released_lock
         except Exception:
             log.exception(
-                "issue lock release failed for %s#%s holder=%s",
-                repo, run.issue_number, run.issue_lock_holder_id,
+                "issue lock release failed for %s holder=%s",
+                issue_lock_key, run.issue_lock_holder_id,
             )
 
     # PR lock — only set on triage cycles. Re-read the run for the
@@ -1554,6 +1572,7 @@ async def _cancel_lease(
 
     metadata = lease_doc.get("metadata") or {}
     issue_repo: str | None = metadata.get("issue_repo")
+    issue_id: str | None = metadata.get("issue_id")
     issue_number_raw = metadata.get("issue_number")
     issue_lock_holder_id: str | None = metadata.get("issue_lock_holder_id")
     issue_number: int | None = None
@@ -1566,7 +1585,12 @@ async def _cancel_lease(
     # 2. Find the active Run for this lease's issue, if any.
     run = None
     run_etag: str | None = None
-    if issue_number is not None:
+    if issue_id:
+        run = await run_ops.find_run_by_issue_id(cosmos, issue_id=issue_id)
+        if run is not None:
+            run_doc = await cosmos.runs.read_item(item=run.id, partition_key=run.project)
+            run_etag = run_doc["_etag"]
+    elif issue_number is not None:
         run_lookup = await run_ops.get_active_run(
             cosmos, project=project, issue_number=issue_number,
         )
@@ -1609,17 +1633,22 @@ async def _cancel_lease(
 
     # 5. Release the issue lock (if held) and PR lock (if Run was holding one).
     issue_lock_released: bool | None = None
-    if issue_lock_holder_id and issue_repo and issue_number is not None:
+    issue_lock_key = _issue_lock_key(
+        issue_repo=issue_repo,
+        issue_number=issue_number,
+        issue_id=issue_id,
+    )
+    if issue_lock_holder_id and issue_lock_key:
         try:
             issue_lock_released = bool(await lock_ops.release_lock(
                 cosmos, scope="issue",
-                key=f"{issue_repo}#{issue_number}",
+                key=issue_lock_key,
                 holder_id=issue_lock_holder_id,
             ))
         except Exception:
             log.exception(
-                "cancel_lease: issue lock release failed for %s#%s holder=%s",
-                issue_repo, issue_number, issue_lock_holder_id,
+                "cancel_lease: issue lock release failed for %s holder=%s",
+                issue_lock_key, issue_lock_holder_id,
             )
 
     pr_lock_released: bool | None = None
@@ -1710,17 +1739,15 @@ async def _abort_run(
     except Exception:
         raise HTTPException(404, f"run {run_id} not found in project {project!r}")
 
-    if run_doc["state"] in (RunState.PASSED.value, RunState.ABORTED.value):
-        return AbortRunResult(state="already_terminal", run_id=run_id)
-
     run = Run.model_validate(run_ops._strip_meta(run_doc))
+    terminal = run_doc["state"] in (RunState.PASSED.value, RunState.ABORTED.value)
     etag = run_doc["_etag"]
 
     # 2. GH cancel — only if the Run was dispatched (workflow_run_id set).
     # Orphans typically don't have one (that's why they're orphans), so
     # this is None in the common case.
     gh_cancelled: bool | None = None
-    if run.attempts and minter is not None:
+    if not terminal and run.attempts and minter is not None:
         latest = run.attempts[-1]
         gh_run_id = latest.workflow_run_id
         if gh_run_id is not None:
@@ -1737,26 +1764,32 @@ async def _abort_run(
                 gh_cancelled = False
 
     # 3. Mark the Run aborted.
-    try:
-        await run_ops.mark_aborted(cosmos, run=run, etag=etag, reason=reason)
-    except Exception:
-        log.exception("abort_run: mark_aborted failed for run %s", run.id)
-        raise HTTPException(500, f"mark_aborted failed for {run.id}")
+    if not terminal:
+        try:
+            await run_ops.mark_aborted(cosmos, run=run, etag=etag, reason=reason)
+        except Exception:
+            log.exception("abort_run: mark_aborted failed for run %s", run.id)
+            raise HTTPException(500, f"mark_aborted failed for {run.id}")
 
     # 4. Release the issue lock + PR lock if the Run was holding them.
     # Idempotent — release_lock returns False if we don't hold it.
     issue_lock_released: bool | None = None
-    if run.issue_lock_holder_id and run.issue_repo and run.issue_number is not None:
+    issue_lock_key = _issue_lock_key(
+        issue_repo=run.issue_repo,
+        issue_number=run.issue_number,
+        issue_id=run.issue_id,
+    )
+    if run.issue_lock_holder_id and issue_lock_key:
         try:
             issue_lock_released = bool(await lock_ops.release_lock(
                 cosmos, scope="issue",
-                key=f"{run.issue_repo}#{run.issue_number}",
+                key=issue_lock_key,
                 holder_id=run.issue_lock_holder_id,
             ))
         except Exception:
             log.exception(
-                "abort_run: issue lock release failed for %s#%s holder=%s",
-                run.issue_repo, run.issue_number, run.issue_lock_holder_id,
+                "abort_run: issue lock release failed for %s holder=%s",
+                issue_lock_key, run.issue_lock_holder_id,
             )
 
     pr_lock_released: bool | None = None
@@ -1774,7 +1807,7 @@ async def _abort_run(
             )
 
     return AbortRunResult(
-        state="aborted",
+        state="already_terminal" if terminal else "aborted",
         run_id=run.id,
         gh_run_cancelled=gh_cancelled,
         issue_lock_released=issue_lock_released,
