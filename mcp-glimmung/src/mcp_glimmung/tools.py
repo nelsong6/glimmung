@@ -1,9 +1,7 @@
 """mcp-glimmung tools — typed wrappers over glimmung's HTTP API.
 
-Read surface plus the by-id PATCH endpoints and selectively-exposed admin
-mutations (`abort_run`). Lease / dispatch / signal / hosts / webhook
-endpoints stay unexposed — those are runner / orchestrator concerns, not
-session concerns.
+Read surface plus session-safe mutations. Lease and webhook endpoints stay
+unexposed — those are runner / orchestrator concerns, not session concerns.
 """
 
 from typing import Any
@@ -66,6 +64,44 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
     def list_projects() -> list[dict[str, Any]]:
         """List configured glimmung projects."""
         return client.get("/v1/projects")
+
+    @mcp.tool()
+    def register_project(
+        name: str,
+        github_repo: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Upsert a glimmung Project. Use this when standing up a new
+        repository in the control plane before registering workflows or
+        native issues. `github_repo` is the canonical "owner/repo" slug;
+        `metadata` is an optional free-form bag preserved on the Project."""
+        return client.post(
+            "/v1/projects",
+            json={
+                "name": name,
+                "github_repo": github_repo,
+                "metadata": metadata or {},
+            },
+        )
+
+    @mcp.tool()
+    def register_host(
+        name: str,
+        capabilities: dict[str, Any] | None = None,
+        drained: bool = False,
+    ) -> dict[str, Any]:
+        """Upsert a runner Host. This is an admin/bootstrap tool: use it
+        to advertise a worker slot and its dispatch `capabilities`.
+        `drained=True` keeps the host registered but ineligible for new
+        leases."""
+        return client.post(
+            "/v1/hosts",
+            json={
+                "name": name,
+                "capabilities": capabilities or {},
+                "drained": drained,
+            },
+        )
 
     @mcp.tool()
     def list_workflows() -> list[dict[str, Any]]:
@@ -159,6 +195,50 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         if state is not None:
             payload["state"] = state
         return client.patch(f"/v1/issues/by-id/{project}/{issue_id}", json=payload)
+
+    @mcp.tool()
+    def create_issue(
+        project: str,
+        title: str,
+        body: str = "",
+        labels: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Mint a glimmung-native Issue. No GitHub issue is created; the
+        returned `id` is the canonical handle for detail, comments, and
+        dispatch APIs."""
+        return client.post(
+            "/v1/issues",
+            json={
+                "project": project,
+                "title": title,
+                "body": body,
+                "labels": labels or [],
+            },
+        )
+
+    @mcp.tool()
+    def enqueue_signal(
+        target_type: str,
+        target_repo: str,
+        target_id: str,
+        source: str = "glimmung_ui",
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Enqueue a Signal for the drain loop. Common values:
+        `target_type` is `pr`, `issue`, or `run`; `target_repo` is the
+        repository slug / partition key; `target_id` is a PR number,
+        issue number, or run id. Put the actionable feedback or trigger
+        detail in `payload`."""
+        return client.post(
+            "/v1/signals",
+            json={
+                "target_type": target_type,
+                "target_repo": target_repo,
+                "target_id": target_id,
+                "source": source,
+                "payload": payload or {},
+            },
+        )
 
     @mcp.tool()
     def replay_run_decision(
@@ -301,6 +381,40 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         if workflow is not None:
             payload["workflow"] = workflow
         return client.post("/v1/runs/dispatch", json=payload)
+
+    @mcp.tool()
+    def create_pr(
+        project: str,
+        repo: str,
+        number: int,
+        title: str,
+        branch: str,
+        body: str = "",
+        base_ref: str = "main",
+        head_sha: str = "",
+        html_url: str = "",
+        linked_issue_id: str | None = None,
+        linked_run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Register a glimmung PR after the GitHub PR exists. Idempotent
+        on `(repo, number)` and can attach `linked_issue_id` /
+        `linked_run_id` during either create or re-registration."""
+        payload: dict[str, Any] = {
+            "project": project,
+            "repo": repo,
+            "number": number,
+            "title": title,
+            "branch": branch,
+            "body": body,
+            "base_ref": base_ref,
+            "head_sha": head_sha,
+            "html_url": html_url,
+        }
+        if linked_issue_id is not None:
+            payload["linked_issue_id"] = linked_issue_id
+        if linked_run_id is not None:
+            payload["linked_run_id"] = linked_run_id
+        return client.post("/v1/prs", json=payload)
 
     @mcp.tool()
     def patch_pr(
