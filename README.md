@@ -205,6 +205,19 @@ every partition-key value with a per-session `test-...:` namespace and sweeps
 that namespace on first use. Set `GLIMMUNG_TEST_PREFIX=test-my-run:` to reuse
 or inspect a specific namespace.
 
+First-time setup grants your `az login` principal data-plane access on the
+glimmung Cosmos database (without it the first read fails with `readMetadata`
+denied). Add your Entra object id to `dev_test_principal_ids` in
+[`tofu/test-access.tf`](tofu/test-access.tf) and apply:
+
+```sh
+az ad signed-in-user show --query id -o tsv   # your object id
+# append to dev_test_principal_ids in tofu, then `tofu apply` from tofu/
+```
+
+Scope is the glimmung database only; sibling apps on the same Cosmos account
+stay unreachable.
+
 ## Verify-loop substrate (#18)
 
 Glimmung-as-orchestrator wedge: when a verify phase fails, glimmung re-dispatches an implementation phase with the prior verification artifact as additional context, repeating until verification passes, attempt count exceeds N, or cumulative cost exceeds $X. The substrate that lands here is reused by every other [meta #17](https://github.com/nelsong6/glimmung/issues/17) child.
