@@ -21,6 +21,7 @@ from glimmung import issues as issue_ops
 from glimmung import leases as lease_ops
 from glimmung import locks as lock_ops
 from glimmung import native_events as native_event_ops
+from glimmung import native_k8s as native_k8s_ops
 from glimmung import reports as report_ops
 from glimmung import runs as run_ops
 from glimmung import signals as signal_ops
@@ -131,6 +132,7 @@ async def lifespan(app: FastAPI):
     await cosmos.start()
     app.state.cosmos = cosmos
     app.state.settings = settings
+    app.state.native_k8s_launcher = native_k8s_ops.NativeKubernetesLauncher(settings)
 
     if settings.github_app_id and settings.github_app_private_key and settings.github_app_installation_id:
         app.state.gh_minter = GitHubAppTokenMinter(
@@ -388,9 +390,12 @@ async def _triage_apply(
 
 async def _promote_loop(app: FastAPI, settings: Settings) -> None:
     """Periodically retry pending leases against current free capacity.
-    Fires workflow_dispatch for each newly-assigned lease."""
+    Fires the appropriate runner for each newly-assigned lease."""
     while True:
         try:
+            native_assigned = await lease_ops.promote_pending_native(app.state.cosmos, settings)
+            for lease_doc, host in native_assigned:
+                await _maybe_dispatch_workflow(app, lease_doc, host)
             assigned = await lease_ops.promote_pending(app.state.cosmos)
             for lease_doc, host in assigned:
                 await _maybe_dispatch_workflow(app, lease_doc, host)
@@ -451,25 +456,13 @@ async def _run_issue_workflow_metadata(cosmos: Cosmos, run: Run) -> dict[str, st
 
 
 async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host: Host) -> bool:
-    """Fire workflow_dispatch for the lease's (project, workflow). Returns
-    True on a successful dispatch OR a no-op (no GH minter, project not
-    registered, workflow doc missing); False only when the dispatch was
-    attempted and `dispatch_workflow` raised. The True-on-no-op shape
-    keeps the existing test surface (gh_minter=None as a global mute)
-    working without back-out side effects, while still letting
-    `dispatch_run` distinguish "GH actually said no" from "we never even
-    tried" — the former is the orphan-producing case that should roll
-    back the lease + lock instead of leaving a Run stranded
-    IN_PROGRESS."""
-    minter: GitHubAppTokenMinter | None = app.state.gh_minter
-    if minter is None:
-        return True
+    """Fire the runner for the lease's (project, workflow).
 
+    GitHub Actions phases call workflow_dispatch. Native `k8s_job` phases
+    create a Kubernetes Job. Returns True on success or intentional test
+    no-op; False only when a runner dispatch was attempted and failed.
+    """
     cosmos: Cosmos = app.state.cosmos
-    project_doc = await _read_project(cosmos, lease_doc["project"])
-    if not project_doc or not project_doc.get("githubRepo"):
-        return True
-
     workflow_name = lease_doc.get("workflow")
     if not workflow_name:
         log.warning("lease %s has no workflow; skipping dispatch", lease_doc["id"])
@@ -496,12 +489,37 @@ async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host
         )
         return True
     if target_phase.get("kind") == "k8s_job":
-        log.warning(
-            "workflow %s/%s phase %s is k8s_job; native Job creation is handled "
-            "outside GitHub Actions and is not dispatched via workflow_dispatch",
-            lease_doc["project"], workflow_name, target_phase["name"],
-        )
+        launcher = getattr(app.state, "native_k8s_launcher", None)
+        if launcher is None:
+            log.info(
+                "native dispatch (no launcher): would launch %s/%s phase %s for lease %s",
+                lease_doc["project"], workflow_name, target_phase["name"], lease_doc["id"],
+            )
+            return True
+        try:
+            job_name = await launcher.launch(
+                cosmos,
+                lease_doc=lease_doc,
+                workflow_doc=workflow_doc,
+                phase=_phase_from_doc(target_phase),
+            )
+            log.info(
+                "launched native job %s for lease %s (project=%s workflow=%s phase=%s)",
+                job_name, lease_doc["id"], lease_doc["project"], workflow_name,
+                target_phase["name"],
+            )
+            return True
+        except Exception:
+            log.exception("native dispatch failed for lease %s", lease_doc["id"])
+            return False
+
+    minter: GitHubAppTokenMinter | None = app.state.gh_minter
+    if minter is None:
         return True
+    project_doc = await _read_project(cosmos, lease_doc["project"])
+    if not project_doc or not project_doc.get("githubRepo"):
+        return True
+
     workflow_filename = target_phase["workflowFilename"]
     workflow_ref = target_phase.get("workflowRef") or "main"
 
@@ -537,6 +555,35 @@ async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host
     except Exception:
         log.exception("workflow_dispatch failed for lease %s", lease_doc["id"])
         return False
+
+
+async def _release_native_attempt_lease(cosmos: Cosmos, run: Run) -> None:
+    """Release the active native lease for the latest attempt, if present."""
+    if not run.attempts:
+        return
+    attempt = run.attempts[-1]
+    docs = await query_all(
+        cosmos.leases,
+        (
+            "SELECT * FROM c WHERE c.project = @p AND c.state = @s "
+            "AND c.metadata.native_k8s = true AND c.metadata.run_id = @r "
+            "AND c.metadata.attempt_index = @a"
+        ),
+        parameters=[
+            {"name": "@p", "value": run.project},
+            {"name": "@s", "value": LeaseState.ACTIVE.value},
+            {"name": "@r", "value": run.id},
+            {"name": "@a", "value": str(attempt.attempt_index)},
+        ],
+    )
+    for doc in docs:
+        try:
+            await lease_ops.release(cosmos, doc["id"], run.project)
+        except Exception:
+            log.exception(
+                "failed to release native lease %s for run %s attempt %d",
+                doc.get("id"), run.id, attempt.attempt_index,
+            )
 
 
 async def _release_locks_on_terminal(
@@ -839,11 +886,12 @@ async def _dispatch_retry(
         "phase_name": target_phase.name,
         "attempt_index": str(len(run.attempts) - 1),
     }
-    lease, host = await lease_ops.acquire(
-        cosmos,
-        settings,
+    lease, host = await _acquire_phase_lease(
+        cosmos=cosmos,
+        settings=settings,
         project=run.project,
         workflow=run.workflow,
+        phase=target_phase,
         requirements=requirements,
         metadata=metadata,
     )
@@ -854,6 +902,15 @@ async def _dispatch_retry(
             "Manual re-dispatch required (see #18 followup).",
             run.id, lease.id,
         )
+        return
+    if target_phase.kind == "k8s_job":
+        lease_doc = {
+            **lease_ops._lease_to_doc(lease),
+            "id": lease.id,
+            "project": lease.project,
+            "workflow": lease.workflow,
+        }
+        await _maybe_dispatch_workflow(app, lease_doc, host)
         return
 
     # Resolve the prior attempt's artifact URL lazily — only the retry
@@ -917,6 +974,35 @@ def _next_phase_after(workflow: Workflow, phase_name: str):
 
 def _phase_runner_label(phase: PhaseSpec) -> str:
     return phase.workflow_filename or f"{phase.kind}:{phase.name}"
+
+
+async def _acquire_phase_lease(
+    *,
+    cosmos: Cosmos,
+    settings: Settings,
+    project: str,
+    workflow: str,
+    phase: PhaseSpec,
+    requirements: dict[str, Any],
+    metadata: dict[str, Any],
+) -> tuple[Lease, Host | None]:
+    if phase.kind == "k8s_job":
+        return await lease_ops.acquire_native(
+            cosmos,
+            settings,
+            project=project,
+            workflow=workflow,
+            requirements=requirements,
+            metadata=metadata,
+        )
+    return await lease_ops.acquire(
+        cosmos,
+        settings,
+        project=project,
+        workflow=workflow,
+        requirements=requirements,
+        metadata=metadata,
+    )
 
 
 def _collect_phase_outputs(run: Run) -> dict[str, dict[str, str]]:
@@ -996,11 +1082,12 @@ async def _dispatch_next_phase(
         # str] cleanly.
         "phase_inputs": dict(substituted),
     }
-    lease, host = await lease_ops.acquire(
-        cosmos,
-        settings,
+    lease, host = await _acquire_phase_lease(
+        cosmos=cosmos,
+        settings=settings,
         project=run.project,
         workflow=run.workflow,
+        phase=next_phase,
         requirements=requirements,
         metadata=metadata,
     )
@@ -1013,6 +1100,15 @@ async def _dispatch_next_phase(
             "forward dispatch: no host for run %s phase %r; lease %s pending",
             run.id, next_phase.name, lease.id,
         )
+        return
+    if next_phase.kind == "k8s_job":
+        lease_doc = {
+            **lease_ops._lease_to_doc(lease),
+            "id": lease.id,
+            "project": lease.project,
+            "workflow": lease.workflow,
+        }
+        await _maybe_dispatch_workflow(app, lease_doc, host)
         return
 
     if minter is None:
@@ -1138,9 +1234,10 @@ async def _dispatch_triage(
         "attempt_index": str(len(run.attempts) - 1),
         "issue_lock_holder_id": holder_id,
     }
-    lease, host = await lease_ops.acquire(
-        cosmos, settings,
+    lease, host = await _acquire_phase_lease(
+        cosmos=cosmos, settings=settings,
         project=run.project, workflow=run.workflow,
+        phase=target_phase,
         requirements=requirements,
         metadata=metadata,
     )
@@ -1151,6 +1248,15 @@ async def _dispatch_triage(
             "Manual re-dispatch may be required.",
             run.id, lease.id,
         )
+        return
+    if target_phase.kind == "k8s_job":
+        lease_doc = {
+            **lease_ops._lease_to_doc(lease),
+            "id": lease.id,
+            "project": lease.project,
+            "workflow": lease.workflow,
+        }
+        await _maybe_dispatch_workflow(app, lease_doc, host)
         return
 
     if minter is None:
@@ -2236,6 +2342,7 @@ async def native_run_completed(
                 project, run_id,
             )
 
+    await _release_native_attempt_lease(cosmos, run)
     decision_value = await _process_run_completion(
         run=run,
         etag=etag,
@@ -2286,6 +2393,7 @@ async def native_run_failed(
         raise HTTPException(404, f"no run {project}/{run_id}")
     run, _etag = found
     _require_native_attempt_token(request, run)
+    await _release_native_attempt_lease(cosmos, run)
     return await _abort_run(
         cosmos,
         getattr(app.state, "gh_minter", None),

@@ -27,6 +27,18 @@ spec:
               value: {{ .Values.cosmos.endpoint | quote }}
             - name: COSMOS_DATABASE
               value: {{ .Values.cosmos.database | quote }}
+            - name: NATIVE_RUNNER_NAMESPACE
+              value: {{ .Values.nativeRunner.namespace | quote }}
+            - name: NATIVE_RUNNER_SERVICE_ACCOUNT
+              value: {{ .Values.nativeRunner.serviceAccount | quote }}
+            - name: NATIVE_RUNNER_CALLBACK_BASE_URL
+              value: {{ .Values.nativeRunner.callbackBaseUrl | quote }}
+            - name: NATIVE_RUNNER_PROJECT_CONCURRENCY
+              value: {{ .Values.nativeRunner.projectConcurrency | quote }}
+            - name: NATIVE_RUNNER_GLOBAL_CONCURRENCY
+              value: {{ .Values.nativeRunner.globalConcurrency | quote }}
+            - name: NATIVE_RUNNER_JOB_TTL_SECONDS
+              value: {{ .Values.nativeRunner.jobTtlSeconds | quote }}
           envFrom:
             - secretRef:
                 name: {{ .Values.externalSecret.secretName }}
