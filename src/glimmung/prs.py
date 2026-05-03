@@ -20,6 +20,7 @@ API:
   on a PR with `merged_at` set. The function does not enforce that — the
   contract belongs at the webhook-mirror call site, where we know whether
   the inbound `pull_request.reopened` event refers to a merged PR.
+- `list_prs(project=None)` — list PRs, optionally project-scoped.
 - `list_open_prs(project=None)` — list open PRs, optionally project-scoped.
 - `find_pr_by_repo_number(...)` — cross-partition lookup by `(repo, number)`.
   Used by the webhook mirror in the consumer PR to find the glimmung PR
@@ -258,6 +259,32 @@ async def list_open_prs(
             cosmos.prs,
             "SELECT * FROM c WHERE c.state = @s ORDER BY c.created_at ASC",
             parameters=[{"name": "@s", "value": PRState.OPEN.value}],
+        )
+    return [PR.model_validate(_strip_meta(d)) for d in docs]
+
+
+async def list_prs(
+    cosmos: Cosmos,
+    *,
+    project: str | None = None,
+) -> list[PR]:
+    """Return all PRs, newest-updated first. Single-partition if
+    `project` is set; cross-partition otherwise.
+
+    The dashboard and MCP list surfaces use this broader read path so
+    fast merge/close cycles remain visible after the PR is no longer
+    open. Active-only views should keep using `list_open_prs`.
+    """
+    if project is not None:
+        docs = await query_all(
+            cosmos.prs,
+            "SELECT * FROM c WHERE c.project = @p ORDER BY c.updated_at DESC",
+            parameters=[{"name": "@p", "value": project}],
+        )
+    else:
+        docs = await query_all(
+            cosmos.prs,
+            "SELECT * FROM c ORDER BY c.updated_at DESC",
         )
     return [PR.model_validate(_strip_meta(d)) for d in docs]
 
