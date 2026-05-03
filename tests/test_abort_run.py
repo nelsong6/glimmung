@@ -48,6 +48,7 @@ async def _put_run(
     run_id: str, project: str, issue_repo: str, issue_number: int,
     workflow_run_id: int | None,
     state: RunState = RunState.IN_PROGRESS,
+    issue_id: str = "",
     issue_lock_holder_id: str | None = None,
     pr_number: int | None = None, pr_lock_holder_id: str | None = None,
 ) -> None:
@@ -71,7 +72,7 @@ async def _put_run(
     run = Run(
         id=run_id, project=project,
         workflow="agent-run",
-        issue_id="",
+        issue_id=issue_id,
         issue_repo=issue_repo, issue_number=issue_number,
         state=state,
         budget=BudgetConfig(),
@@ -134,6 +135,30 @@ async def test_abort_returns_already_terminal_for_aborted_run(cosmos, minter):
         cosmos, minter, run_id="run-1", project="p", reason="r",
     )
     assert result.state == "already_terminal"
+
+
+@pytest.mark.asyncio
+async def test_abort_already_terminal_releases_native_issue_lock(cosmos, minter):
+    await lock_ops.claim_lock(
+        cosmos, scope="issue", key="glimmung/01NATIVE",
+        holder_id="issue-holder", ttl_seconds=14400,
+    )
+    await _put_run(
+        cosmos, run_id="run-1", project="p", issue_repo="r/n",
+        issue_number=0, workflow_run_id=None, state=RunState.PASSED,
+        issue_id="01NATIVE", issue_lock_holder_id="issue-holder",
+    )
+
+    result = await _abort_run(
+        cosmos, minter, run_id="run-1", project="p", reason="cleanup",
+    )
+
+    assert result.state == "already_terminal"
+    assert result.issue_lock_released is True
+    lock_doc = await cosmos.locks.read_item(
+        item="issue::glimmung%2F01NATIVE", partition_key="issue",
+    )
+    assert lock_doc["state"] == "released"
 
 
 # ─── aborted (orphan: no workflow_run_id) ─────────────────────────────
