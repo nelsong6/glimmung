@@ -24,7 +24,7 @@
  * URL params so deep-link reloads land directly here.
  */
 import { useEffect, useMemo, useState } from "react";
-import { useLocation, useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { authedFetch } from "./auth";
 
 type IssueDetail = {
@@ -95,6 +95,10 @@ type AbortState =
   | { kind: "aborting" }
   | { kind: "error"; message: string };
 
+type AuthContext = {
+  signedIn: boolean;
+};
+
 type Tab = "issue" | "the_run" | "runs";
 
 const TAB_SLUGS: Record<Tab, string> = {
@@ -128,6 +132,7 @@ export function IssueDetailView() {
   const navigate = useNavigate();
   const location = useLocation();
   const params = useParams<IssueDetailRouteParams>();
+  const { signedIn } = useOutletContext<AuthContext>();
 
   // Two route shapes land here. GH-anchored has 3 segments after /issues
   // (`:owner/:repo/:n`); native has 2 (`:project/:issueId`). React-router
@@ -190,8 +195,8 @@ export function IssueDetailView() {
     const load = async () => {
       setError(null);
       try {
-        const requests: Promise<Response>[] = [authedFetch(detailUrl)];
-        if (graphUrl) requests.push(authedFetch(graphUrl));
+        const requests: Promise<Response>[] = [fetch(detailUrl)];
+        if (graphUrl) requests.push(fetch(graphUrl));
         const responses = await Promise.all(requests);
         const d = responses[0];
         if (!d.ok) throw new Error(`${detailUrl} -> ${d.status}`);
@@ -296,6 +301,7 @@ export function IssueDetailView() {
             {tab === "issue" && (
               <DescriptionTab
                 detail={detail}
+                signedIn={signedIn}
                 editing={editing}
                 onEdit={() => setEditing(true)}
                 onCancelEdit={() => setEditing(false)}
@@ -310,6 +316,7 @@ export function IssueDetailView() {
               <TheRunTab
                 graph={graph}
                 graphAvailable={!!graphUrl}
+                signedIn={signedIn}
                 repo={repoForLinks}
                 inFlight={isInFlight}
                 dispatchState={dispatchState}
@@ -416,6 +423,7 @@ function TabButton({
 
 function DescriptionTab({
   detail,
+  signedIn,
   editing,
   onEdit,
   onCancelEdit,
@@ -423,22 +431,25 @@ function DescriptionTab({
   onCommentChanged,
 }: {
   detail: IssueDetail;
+  signedIn: boolean;
   editing: boolean;
   onEdit: () => void;
   onCancelEdit: () => void;
   onSaved: () => void;
   onCommentChanged: () => void;
 }) {
-  if (editing) {
+  if (editing && signedIn) {
     return <IssueEditForm detail={detail} onCancel={onCancelEdit} onSaved={onSaved} />;
   }
   return (
     <>
-      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "0.5rem" }}>
-        <button type="button" className="link" onClick={onEdit}>
-          edit
-        </button>
-      </div>
+      {signedIn && (
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "0.5rem" }}>
+          <button type="button" className="link" onClick={onEdit}>
+            edit
+          </button>
+        </div>
+      )}
       {detail.body.trim() ? (
         <pre
           style={{
@@ -456,16 +467,18 @@ function DescriptionTab({
       ) : (
         <div className="empty dim">(no description)</div>
       )}
-      <IssueComments detail={detail} onChanged={onCommentChanged} />
+      <IssueComments detail={detail} signedIn={signedIn} onChanged={onCommentChanged} />
     </>
   );
 }
 
 function IssueComments({
   detail,
+  signedIn,
   onChanged,
 }: {
   detail: IssueDetail;
+  signedIn: boolean;
   onChanged: () => void;
 }) {
   const [body, setBody] = useState("");
@@ -588,7 +601,7 @@ function IssueComments({
                 ) : (
                   <pre className="comment-body">{comment.body}</pre>
                 )}
-                {!isEditing && (
+                {signedIn && !isEditing && (
                   <div className="comment-actions">
                     <button
                       type="button"
@@ -643,21 +656,23 @@ function IssueComments({
           })}
         </div>
       )}
-      <form className="admin-form comment-form" onSubmit={postComment}>
-        <label>
-          <span>comment</span>
-          <textarea
-            value={body}
-            onChange={(e) => setBody(e.target.value)}
-            rows={4}
-            disabled={busy}
-          />
-        </label>
-        {error && <div className="error">{error}</div>}
-        <button type="submit" disabled={busy || !body.trim()}>
-          {busy ? "posting…" : "comment"}
-        </button>
-      </form>
+      {signedIn && (
+        <form className="admin-form comment-form" onSubmit={postComment}>
+          <label>
+            <span>comment</span>
+            <textarea
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              rows={4}
+              disabled={busy}
+            />
+          </label>
+          {error && <div className="error">{error}</div>}
+          <button type="submit" disabled={busy || !body.trim()}>
+            {busy ? "posting…" : "comment"}
+          </button>
+        </form>
+      )}
     </section>
   );
 }
@@ -665,6 +680,7 @@ function IssueComments({
 function TheRunTab({
   graph,
   graphAvailable,
+  signedIn,
   repo,
   inFlight,
   dispatchState,
@@ -678,6 +694,7 @@ function TheRunTab({
 }: {
   graph: IssueGraph | null;
   graphAvailable: boolean;
+  signedIn: boolean;
   repo: string | null;
   inFlight: boolean;
   dispatchState: DispatchState;
@@ -722,7 +739,7 @@ function TheRunTab({
   }
 
   const dispatching = dispatchState.kind === "dispatching";
-  const dispatchDisabled = inFlight || dispatching;
+  const dispatchDisabled = inFlight || dispatching || !signedIn;
   // Abort button shows only when an actual run record exists in flight.
   // Lock-only state (issue_lock_held but no run yet) doesn't have a run
   // id to target; that case stays as "Run lock held — waiting…".
@@ -743,14 +760,14 @@ function TheRunTab({
         onClick={onRedispatch}
         disabled={dispatchDisabled}
       >
-        {dispatching ? "dispatching…" : inFlight ? "in flight" : "re-dispatch"}
+        {dispatching ? "dispatching…" : inFlight ? "in flight" : signedIn ? "re-dispatch" : "sign in"}
       </button>
       {dispatchState.kind === "error" && (
         <span className="pill drain" title={dispatchState.message}>
           error
         </span>
       )}
-      {abortableRunId && (
+      {signedIn && abortableRunId && (
         <span style={{ marginLeft: "1rem" }}>
           {armed || aborting ? (
             <span className="confirm">

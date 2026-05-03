@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { authedFetch } from "./auth";
 
 type GraphNode = {
   id: string;
@@ -27,10 +26,8 @@ const STALE_RUN_MS = 30 * 60 * 1000;
 const STALE_SIGNAL_MS = 60 * 1000;
 
 export function GraphView({
-  signedIn,
   projectFilter,
 }: {
-  signedIn: boolean;
   projectFilter: string | null;
 }) {
   const navigate = useNavigate();
@@ -39,18 +36,13 @@ export function GraphView({
   const [loading, setLoading] = useState(false);
 
   const refresh = async () => {
-    if (!signedIn) {
-      setGraph(null);
-      setError("sign in to view graph");
-      return;
-    }
     setLoading(true);
     setError(null);
     try {
       const url = projectFilter
         ? `/v1/graph?project=${encodeURIComponent(projectFilter)}`
         : "/v1/graph";
-      const r = await authedFetch(url);
+      const r = await fetch(url);
       if (!r.ok) throw new Error(`${url} -> ${r.status}`);
       setGraph((await r.json()) as SystemGraph);
     } catch (e) {
@@ -66,7 +58,7 @@ export function GraphView({
     const id = window.setInterval(() => void refresh(), 5000);
     return () => window.clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [signedIn, projectFilter]);
+  }, [projectFilter]);
 
   const rows = useMemo(() => {
     if (!graph) return [];
@@ -117,10 +109,6 @@ export function GraphView({
       navigate(`/prs/${repo}/${number}`);
     }
   };
-
-  if (!signedIn) {
-    return <div className="empty">Sign in to view graph.</div>;
-  }
 
   return (
     <>

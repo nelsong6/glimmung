@@ -69,9 +69,12 @@ export async function getIdToken(): Promise<string> {
 }
 
 export async function publicConfig(): Promise<GlimmungConfig> {
-  await initAuth();
-  if (!_config) throw new Error("auth config not initialized");
-  return _config;
+  if (!_config) {
+    const cfgRes = await fetch("/v1/config");
+    if (!cfgRes.ok) throw new Error(`config fetch failed: ${cfgRes.status}`);
+    _config = await cfgRes.json();
+  }
+  return _config!;
 }
 
 export async function authedFetch(input: RequestInfo, init: RequestInit = {}): Promise<Response> {

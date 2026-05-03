@@ -2245,7 +2245,7 @@ async def register_project(p: ProjectRegister) -> Project:
     return Project.model_validate(lease_ops._camel_to_snake(doc))
 
 
-@app.get("/v1/projects", response_model=list[Project], dependencies=[Depends(require_admin_user)])
+@app.get("/v1/projects", response_model=list[Project])
 async def list_projects() -> list[Project]:
     docs = await query_all(app.state.cosmos.projects, "SELECT * FROM c")
     return [Project.model_validate(lease_ops._camel_to_snake(d)) for d in docs]
@@ -2267,7 +2267,7 @@ async def register_workflow(w: WorkflowRegister) -> Workflow:
     return _doc_to_workflow(doc)
 
 
-@app.get("/v1/workflows", response_model=list[Workflow], dependencies=[Depends(require_admin_user)])
+@app.get("/v1/workflows", response_model=list[Workflow])
 async def list_workflows() -> list[Workflow]:
     docs = await query_all(app.state.cosmos.workflows, "SELECT * FROM c")
     return [_doc_to_workflow(d) for d in docs]
@@ -2772,7 +2772,6 @@ class DispatchRequest(BaseModel):
 @app.get(
     "/v1/issues",
     response_model=list[IssueRow],
-    dependencies=[Depends(require_admin_user)],
 )
 async def list_issues() -> list[IssueRow]:
     """All open glimmung Issues, across registered projects. Sourced
@@ -2882,7 +2881,6 @@ async def _list_issues_from_cosmos(cosmos: Cosmos) -> list[IssueRow]:
 @app.get(
     "/v1/issues/{repo_owner}/{repo_name}/{issue_number}",
     response_model=IssueDetail,
-    dependencies=[Depends(require_admin_user)],
 )
 async def issue_detail(
     repo_owner: str = Path(...),
@@ -2957,7 +2955,6 @@ async def _build_issue_detail(cosmos: Cosmos, *, issue: Issue) -> IssueDetail:
 @app.get(
     "/v1/issues/by-id/{project}/{issue_id}",
     response_model=IssueDetail,
-    dependencies=[Depends(require_admin_user)],
 )
 async def issue_detail_by_id(
     project: str = Path(...),
@@ -3134,7 +3131,6 @@ async def delete_issue_comment_endpoint(
 @app.get(
     "/v1/issues/{repo_owner}/{repo_name}/{issue_number}/graph",
     response_model=IssueGraph,
-    dependencies=[Depends(require_admin_user)],
 )
 async def issue_graph(
     repo_owner: str = Path(...),
@@ -3154,7 +3150,6 @@ async def issue_graph(
 @app.get(
     "/v1/graph",
     response_model=IssueGraph,
-    dependencies=[Depends(require_admin_user)],
 )
 async def system_graph(project: str | None = None) -> IssueGraph:
     """System-wide live graph (#43): every open Issue plus in-flight
@@ -3726,7 +3721,6 @@ class PrUpdateRequest(BaseModel):
 @app.get(
     "/v1/prs",
     response_model=list[PrRow],
-    dependencies=[Depends(require_admin_user)],
 )
 async def list_prs() -> list[PrRow]:
     """All PRs across registered projects. Sourced from the Cosmos
@@ -3809,7 +3803,6 @@ async def _list_prs_from_cosmos(cosmos: Cosmos) -> list[PrRow]:
 @app.get(
     "/v1/prs/{repo_owner}/{repo_name}/{pr_number}",
     response_model=PrDetail,
-    dependencies=[Depends(require_admin_user)],
 )
 async def pr_detail(
     repo_owner: str = Path(...),
@@ -3935,7 +3928,6 @@ def _tank_session_launch_url(*, settings: Settings, run: Run, pr: PR) -> str:
 @app.get(
     "/v1/prs/by-id/{project}/{pr_id}",
     response_model=PrDetail,
-    dependencies=[Depends(require_admin_user)],
 )
 async def pr_detail_by_id(
     project: str = Path(...),
