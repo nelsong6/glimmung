@@ -281,8 +281,9 @@ git clone "https://x-access-token:${GH_TOKEN}@github.com/${REPO_SLUG}.git" /work
 cd /workspace/repo
 git checkout -B "${BRANCH_NAME}"
 
+issue_ref="${ISSUE_NUMBER:-${GLIMMUNG_ISSUE_ID}}"
 cat > /tmp/issue-context.md <<EOF
-# Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}
+# Issue ${issue_ref}: ${ISSUE_TITLE}
 URL: ${ISSUE_URL}
 Validation env: ${VALIDATION_URL}
 EOF
@@ -344,6 +345,7 @@ def _agent_job_spec(
     namespace: str,
     job_name: str,
     issue_number: str,
+    issue_id: str,
     issue_title: str,
     issue_url: str,
     validation_url: str,
@@ -360,7 +362,7 @@ def _agent_job_spec(
             "namespace": namespace,
             "labels": {
                 "app.kubernetes.io/name": "glimmung-agent",
-                "glimmung.io/issue": str(issue_number),
+                "glimmung.io/issue": str(issue_number or issue_id),
             },
         },
         "spec": {
@@ -370,7 +372,7 @@ def _agent_job_spec(
                 "metadata": {
                     "labels": {
                         "app.kubernetes.io/name": "glimmung-agent",
-                        "glimmung.io/issue": str(issue_number),
+                        "glimmung.io/issue": str(issue_number or issue_id),
                     },
                 },
                 "spec": {
@@ -406,6 +408,7 @@ def _agent_job_spec(
                                 {"name": "NODE_EXTRA_CA_CERTS", "value": "/etc/claude-ca/ca.crt"},
                                 {"name": "HOME", "value": "/workspace"},
                                 {"name": "ISSUE_NUMBER", "value": str(issue_number)},
+                                {"name": "GLIMMUNG_ISSUE_ID", "value": str(issue_id)},
                                 {"name": "ISSUE_TITLE", "value": issue_title},
                                 {"name": "ISSUE_URL", "value": issue_url},
                                 {"name": "VALIDATION_URL", "value": validation_url},
@@ -440,6 +443,7 @@ def apply_agent_job(
     namespace: str,
     job_name: str,
     issue_number: str,
+    issue_id: str = "",
     issue_title: str,
     issue_url: str,
     validation_url: str,
@@ -452,6 +456,7 @@ def apply_agent_job(
         namespace=namespace,
         job_name=job_name,
         issue_number=issue_number,
+        issue_id=issue_id,
         issue_title=issue_title,
         issue_url=issue_url,
         validation_url=validation_url,

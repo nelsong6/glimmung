@@ -1,6 +1,6 @@
 name: Agent Run — env-prep
 
-run-name: "#${{ inputs.issue_number }} env-prep ${{ inputs.issue_title }} (${{ inputs.host }})"
+run-name: "issue ${{ inputs.issue_number || inputs.issue_id }} env-prep ${{ inputs.issue_title }} (${{ inputs.host }})"
 
 # Phase 1 of the multi-phase agent-run pipeline (glimmung#102).
 # Builds + deploys the per-issue validation env and verifies the
@@ -23,8 +23,8 @@ on:
         required: true
         type: string
       issue_number:
-        description: Issue number to address
-        required: true
+        description: Legacy GitHub issue number to address, when present.
+        required: false
         type: string
       issue_title:
         description: Issue title (informational)
@@ -124,12 +124,13 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
+          GLIMMUNG_ISSUE_ID: ${{ inputs.issue_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           HOST: ${{ inputs.host }}
         run: |
           set -euo pipefail
-          if [ -z "${ISSUE_NUMBER}" ]; then
-            echo "no issue_number; skipping run-start comment"
+          if [ -z "${ISSUE_NUMBER}" ] || [ "${ISSUE_NUMBER}" = "0" ]; then
+            echo "native glimmung issue ${GLIMMUNG_ISSUE_ID}; skipping GitHub issue run-start comment"
             exit 0
           fi
           body="agent run started (env-prep): ${RUN_URL} (host \`${HOST}\`)"
@@ -143,6 +144,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       ISSUE_NUMBER: ${{ inputs.issue_number }}
+      GLIMMUNG_ISSUE_ID: ${{ inputs.issue_id }}
       ISSUE_TITLE: ${{ inputs.issue_title }}
     steps:
       - name: Checkout
@@ -220,7 +222,9 @@ jobs:
         run: |
           set -euo pipefail
           short_sha=$(git rev-parse --short=7 HEAD)
-          slug="issue-${ISSUE_NUMBER}-${GITHUB_RUN_ID}-${short_sha}"
+          issue_ref="${ISSUE_NUMBER:-${GLIMMUNG_ISSUE_ID}}"
+          issue_ref="$(printf '%s' "${issue_ref}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-')"
+          slug="issue-${issue_ref}-${GITHUB_RUN_ID}-${short_sha}"
           {
             echo "RELEASE_NAME=${slug}"
             echo "PROD_NAMESPACE=glimmung"

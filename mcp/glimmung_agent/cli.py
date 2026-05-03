@@ -53,7 +53,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Render and `kubectl apply` the agent Job for one issue run.")
     p.add_argument("--namespace", required=True)
     p.add_argument("--job-name", required=True)
-    p.add_argument("--issue-number", required=True)
+    p.add_argument("--issue-number", default="")
+    p.add_argument("--issue-id", default="")
     p.add_argument("--issue-title", required=True)
     p.add_argument("--issue-url", required=True)
     p.add_argument("--validation-url", required=True)
@@ -118,6 +119,7 @@ def main() -> int:
                 namespace=args.namespace,
                 job_name=args.job_name,
                 issue_number=args.issue_number,
+                issue_id=args.issue_id,
                 issue_title=args.issue_title,
                 issue_url=args.issue_url,
                 validation_url=args.validation_url,

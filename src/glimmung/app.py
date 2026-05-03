@@ -356,7 +356,7 @@ async def _promote_loop(app: FastAPI, settings: Settings) -> None:
 
 
 # Lease metadata is dual-purpose: glimmung-internal bookkeeping
-# (`issue_id`, `issue_lock_holder_id`, `issue_repo`, `phase`) plus
+# (`issue_lock_holder_id`, `issue_repo`, `phase`) plus
 # workflow-facing inputs the consumer workflow declares in
 # `on.workflow_dispatch.inputs`. GitHub's workflow_dispatch endpoint
 # rejects undeclared inputs with 422, so splatting metadata wholesale
@@ -365,6 +365,7 @@ async def _promote_loop(app: FastAPI, settings: Settings) -> None:
 # `workflow_run_id`, which is the orphan shape `_abort_run` exists to
 # clean up. Allowlist what we forward; everything else stays internal.
 _DISPATCH_INPUT_KEYS = frozenset({
+    "issue_id",
     "issue_number",
     "issue_title",
     "gh_event",
