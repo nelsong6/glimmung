@@ -220,3 +220,24 @@ async def open_pull_request(
         return int(data["number"]), str(data.get("html_url", ""))
 
 
+async def update_pull_request_body(
+    minter: GitHubAppTokenMinter,
+    *,
+    repo: str,
+    number: int,
+    body: str,
+) -> None:
+    """PATCH /repos/{repo}/pulls/{number} with a replacement body."""
+    token = await minter.installation_token()
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.patch(
+            f"https://api.github.com/repos/{repo}/pulls/{number}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            json={"body": body},
+        )
+        r.raise_for_status()
+

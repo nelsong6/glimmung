@@ -15,19 +15,24 @@ from unittest.mock import patch
 
 import pytest
 
+from glimmung import prs as pr_ops
 from glimmung import runs as run_ops
 from glimmung.app import (
     RunCompletedRequest,
     RunStartedRequest,
+    _open_pr_primitive,
     run_completed,
     run_started,
 )
 from glimmung.models import (
     BudgetConfig,
     PhaseAttempt,
+    PhaseSpec,
+    PrPrimitiveSpec,
     Run,
     RunState,
     VerificationStatus,
+    Workflow,
 )
 
 from tests.cosmos_fake import FakeContainer
@@ -43,6 +48,7 @@ def cosmos():
         runs=FakeContainer("runs", "/project"),
         locks=FakeContainer("locks", "/scope"),
         issues=FakeContainer("issues", "/project"),
+        prs=FakeContainer("prs", "/project"),
     )
 
 
@@ -123,6 +129,124 @@ async def _seed_run(
     )
     await cosmos.runs.create_item(run.model_dump(mode="json"))
     return run
+
+
+def _workflow_with_pr(project: str, name: str = "agent") -> Workflow:
+    return Workflow(
+        id=name,
+        name=name,
+        project=project,
+        phases=[
+            PhaseSpec(
+                name="agent",
+                kind="gha_dispatch",
+                workflow_filename="agent-run.yml",
+                workflow_ref="main",
+                verify=True,
+            ),
+        ],
+        pr=PrPrimitiveSpec(enabled=True),
+        budget=BudgetConfig(total=25.0),
+        trigger_label="agent-run",
+        created_at=datetime.now(UTC),
+    )
+
+
+# ─── PR primitive ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_pr_primitive_registers_rich_glimmung_pr_and_thin_github_body(cosmos):
+    await _register_project(cosmos, "ambience", "nelsong6/ambience")
+    run = await _seed_run(
+        cosmos,
+        run_id="01KQTEST_RUN_PR1",
+        project="ambience",
+        issue_repo="nelsong6/ambience",
+        issue_number=117,
+    )
+    run.attempts[-1].workflow_run_id = 25255513874
+    run.validation_url = "https://issue-117.preview.example"
+    await cosmos.runs.replace_item(
+        item=run.id,
+        body=run.model_dump(mode="json"),
+        etag="1",
+    )
+    await cosmos.issues.create_item({
+        "id": run.issue_id,
+        "project": run.project,
+        "title": "Fix the ambience picker",
+        "body": "",
+        "state": "open",
+        "labels": [],
+        "source": {"kind": "github", "repo": run.issue_repo, "number": run.issue_number},
+        "created_at": datetime.now(UTC).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
+    })
+
+    open_calls: list[dict[str, str]] = []
+    update_calls: list[dict[str, str | int]] = []
+
+    async def fake_open_pull_request(_minter, **kwargs):
+        open_calls.append(kwargs)
+        return 77, "https://github.com/nelsong6/ambience/pull/77"
+
+    async def fake_update_pull_request_body(_minter, **kwargs):
+        update_calls.append(kwargs)
+
+    app_state = SimpleNamespace(
+        state=SimpleNamespace(
+            cosmos=cosmos,
+            settings=SimpleNamespace(glimmung_base_url="https://glimmung.test"),
+            gh_minter=object(),
+        ),
+    )
+    with (
+        patch("glimmung.app.app", app_state),
+        patch("glimmung.app.open_pull_request", fake_open_pull_request),
+        patch("glimmung.app.update_pull_request_body", fake_update_pull_request_body),
+    ):
+        await _open_pr_primitive(run=run, workflow=_workflow_with_pr("ambience"))
+
+    assert open_calls == [{
+        "repo": "nelsong6/ambience",
+        "head": "glimmung/01KQTEST_RUN_PR1",
+        "base": "main",
+        "title": "Fix the ambience picker",
+        "body": (
+            "Closes nelsong6/ambience#117\n\n"
+            "Canonical context is being prepared in Glimmung."
+        ),
+    }]
+    assert update_calls == [{
+        "repo": "nelsong6/ambience",
+        "number": 77,
+        "body": (
+            "Closes nelsong6/ambience#117\n\n"
+            "Canonical context: https://glimmung.test/prs/nelsong6/ambience/77"
+        ),
+    }]
+
+    found_pr = await pr_ops.find_pr_by_repo_number(
+        cosmos,
+        repo="nelsong6/ambience",
+        number=77,
+    )
+    assert found_pr is not None
+    pr, _ = found_pr
+    assert pr.title == "Fix the ambience picker"
+    assert pr.body != open_calls[0]["body"]
+    assert "## Preview" in pr.body
+    assert "https://issue-117.preview.example/_styleguide" in pr.body
+    assert pr.linked_issue_id == run.issue_id
+    assert pr.linked_run_id == run.id
+    assert pr.html_url == "https://github.com/nelsong6/ambience/pull/77"
+
+    found_run = await run_ops.read_run(cosmos, project="ambience", run_id=run.id)
+    assert found_run is not None
+    updated_run, _ = found_run
+    assert updated_run.pr_number == 77
+    assert updated_run.pr_branch == "glimmung/01KQTEST_RUN_PR1"
 
 
 # ─── /started ──────────────────────────────────────────────────────────────
