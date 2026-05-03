@@ -521,12 +521,12 @@ jobs:
             --argjson rid "${GITHUB_RUN_ID}" \
             --arg conclusion "success" \
             --arg shots "${SCREENSHOTS_MD}" \
-            '{workflow_run_id: $rid, conclusion: $conclusion, screenshots_markdown: ($shots | select(length > 0))}')
-          curl -sS -X POST \
+            '{workflow_run_id: $rid, conclusion: $conclusion}
+              + (if ($shots | length) > 0 then {screenshots_markdown: $shots} else {} end)')
+          curl -fsS -X POST \
             -H "Content-Type: application/json" \
             -d "${payload}" \
-            "${GLIMMUNG_BASE}/v1/runs/${GLIMMUNG_PROJECT}/${GLIMMUNG_RUN_ID}/completed" \
-            || echo "::warning::failed to post completed callback to glimmung; continuing"
+            "${GLIMMUNG_BASE}/v1/runs/${GLIMMUNG_PROJECT}/${GLIMMUNG_RUN_ID}/completed"
 
       - name: Label per-issue release + agent namespace by branch
         if: success() && inputs.pr_number == ''
