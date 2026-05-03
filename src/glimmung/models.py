@@ -493,6 +493,7 @@ class PhaseAttempt(BaseModel):
     # workflow registration and then updated by native runner callbacks.
     jobs: list[NativeJobAttempt] = Field(default_factory=list)
     log_archive_url: str | None = None
+    capability_token_sha256: str | None = None
     # Resume primitive (#111) — set when this attempt is a skip-mark
     # synthesized during run resumption, not a real dispatch. The phase
     # didn't actually execute; `phase_outputs` were carried forward from

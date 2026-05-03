@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -96,6 +98,30 @@ def _issue_lock_key(
     if issue_id:
         return f"glimmung/{issue_id}"
     return None
+
+
+def _attempt_token_sha256(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _require_native_attempt_token(request: Request, run: Run) -> None:
+    """Validate native callback token when the attempt has one bound.
+
+    Legacy callback paths and older test fixtures have no token hash on
+    the attempt; those remain run-id capability callbacks. Native Job
+    launch will bind the hash before the pod starts.
+    """
+    if not run.attempts:
+        raise HTTPException(409, f"run {run.id} has no attempts")
+    expected = run.attempts[-1].capability_token_sha256
+    if not expected:
+        return
+    presented = request.headers.get("x-glimmung-attempt-token", "")
+    if not presented:
+        raise HTTPException(401, "missing x-glimmung-attempt-token")
+    actual = _attempt_token_sha256(presented)
+    if not hmac.compare_digest(actual, expected):
+        raise HTTPException(403, "invalid x-glimmung-attempt-token")
 
 
 @asynccontextmanager
@@ -2138,6 +2164,7 @@ async def run_completed(
 )
 async def native_run_event(
     req: NativeRunEventRequest,
+    request: Request,
     project: str = Path(...),
     run_id: str = Path(...),
 ) -> NativeRunEventResult:
@@ -2147,6 +2174,7 @@ async def native_run_event(
     if found is None:
         raise HTTPException(404, f"no run {project}/{run_id}")
     run, etag = found
+    _require_native_attempt_token(request, run)
     try:
         await native_event_ops.record_native_event(
             cosmos,
@@ -2171,6 +2199,7 @@ async def native_run_event(
 )
 async def native_run_completed(
     req: NativeRunCompletedRequest,
+    request: Request,
     project: str = Path(...),
     run_id: str = Path(...),
 ) -> RunCallbackResult:
@@ -2186,6 +2215,7 @@ async def native_run_completed(
     if found is None:
         raise HTTPException(404, f"no run {project}/{run_id}")
     run, etag = found
+    _require_native_attempt_token(request, run)
     try:
         await native_event_ops.assert_native_completion_ready(cosmos, run=run)
     except native_event_ops.NativeEventError as e:
@@ -2245,12 +2275,19 @@ async def native_run_completed(
 )
 async def native_run_failed(
     req: NativeRunFailedRequest,
+    request: Request,
     project: str = Path(...),
     run_id: str = Path(...),
 ) -> AbortRunResult:
     """Native k8s_job failure callback for failures before completion."""
+    cosmos: Cosmos = app.state.cosmos
+    found = await run_ops.read_run(cosmos, project=project, run_id=run_id)
+    if found is None:
+        raise HTTPException(404, f"no run {project}/{run_id}")
+    run, _etag = found
+    _require_native_attempt_token(request, run)
     return await _abort_run(
-        app.state.cosmos,
+        cosmos,
         getattr(app.state, "gh_minter", None),
         run_id=run_id,
         project=project,

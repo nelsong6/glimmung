@@ -359,6 +359,27 @@ async def record_started(
     return await _retry_on_conflict(cosmos, run, etag, apply)
 
 
+async def set_latest_attempt_token_hash(
+    cosmos: Cosmos,
+    *,
+    run: Run,
+    etag: str,
+    token_sha256: str,
+) -> tuple[Run, str]:
+    """Attach a callback capability-token hash to the latest attempt.
+
+    Native runner callbacks present the raw token from a mounted Secret;
+    Glimmung stores only the hash on the Run attempt. Existing callbacks
+    without a hash remain capability-by-run-id for legacy GHA paths.
+    """
+    def apply(r: Run) -> Run:
+        if not r.attempts:
+            raise RuntimeError(f"run {r.id} has no attempts to bind token")
+        r.attempts[-1].capability_token_sha256 = token_sha256
+        return r.model_copy(update={"updated_at": _now()})
+    return await _retry_on_conflict(cosmos, run, etag, apply)
+
+
 async def record_completion(
     cosmos: Cosmos,
     *,

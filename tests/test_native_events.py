@@ -5,10 +5,12 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from starlette.requests import Request
 
 from glimmung.app import (
     NativeRunCompletedRequest,
     NativeRunEventRequest,
+    _attempt_token_sha256,
     native_run_completed,
     native_run_event,
 )
@@ -45,6 +47,13 @@ def cosmos():
 
 def _app_with(cosmos):
     return SimpleNamespace(state=SimpleNamespace(cosmos=cosmos, gh_minter=None, settings=None))
+
+
+def _request(token: str | None = None) -> Request:
+    headers = []
+    if token is not None:
+        headers.append((b"x-glimmung-attempt-token", token.encode("utf-8")))
+    return Request({"type": "http", "headers": headers})
 
 
 def _native_jobs():
@@ -136,6 +145,7 @@ async def test_native_step_events_update_run_and_persist_ordered_logs(cosmos, mo
             event=NativeRunEventType.STEP_STARTED,
             step_slug="clone-repo",
         ),
+        request=_request(),
         project=run.project,
         run_id=run.id,
     )
@@ -147,6 +157,7 @@ async def test_native_step_events_update_run_and_persist_ordered_logs(cosmos, mo
             step_slug="clone-repo",
             message="cloned main",
         ),
+        request=_request(),
         project=run.project,
         run_id=run.id,
     )
@@ -158,6 +169,7 @@ async def test_native_step_events_update_run_and_persist_ordered_logs(cosmos, mo
             step_slug="clone-repo",
             exit_code=0,
         ),
+        request=_request(),
         project=run.project,
         run_id=run.id,
     )
@@ -186,6 +198,7 @@ async def test_native_completion_requires_no_sequence_gaps(cosmos, monkeypatch):
                 event=NativeRunEventType.STEP_STARTED,
                 step_slug=step,
             ),
+            request=_request(),
             project=run.project,
             run_id=run.id,
         )
@@ -197,6 +210,7 @@ async def test_native_completion_requires_no_sequence_gaps(cosmos, monkeypatch):
                 step_slug=step,
                 exit_code=0,
             ),
+            request=_request(),
             project=run.project,
             run_id=run.id,
         )
@@ -212,6 +226,7 @@ async def test_native_completion_requires_no_sequence_gaps(cosmos, monkeypatch):
                     "cost_usd": 0.01,
                 },
             ),
+            request=_request(),
             project=run.project,
             run_id=run.id,
         )
@@ -233,6 +248,7 @@ async def test_native_completion_drives_decision_and_marks_run_passed(cosmos, mo
                 event=NativeRunEventType.STEP_STARTED,
                 step_slug=step,
             ),
+            request=_request(),
             project=run.project,
             run_id=run.id,
         )
@@ -245,6 +261,7 @@ async def test_native_completion_drives_decision_and_marks_run_passed(cosmos, mo
                 step_slug=step,
                 exit_code=0,
             ),
+            request=_request(),
             project=run.project,
             run_id=run.id,
         )
@@ -260,6 +277,7 @@ async def test_native_completion_drives_decision_and_marks_run_passed(cosmos, mo
                 "cost_usd": 0.05,
             },
         ),
+        request=_request(),
         project=run.project,
         run_id=run.id,
     )
@@ -269,3 +287,44 @@ async def test_native_completion_drives_decision_and_marks_run_passed(cosmos, mo
     assert doc["state"] == "passed"
     assert doc["attempts"][0]["workflow_run_id"] is None
     assert doc["attempts"][0]["verification"]["status"] == "pass"
+
+
+@pytest.mark.asyncio
+async def test_native_callbacks_require_bound_attempt_token(cosmos, monkeypatch):
+    run = await _seed_native_run(cosmos)
+    monkeypatch.setattr("glimmung.app.app", _app_with(cosmos))
+    doc = await cosmos.runs.read_item(item=run.id, partition_key=run.project)
+    doc["attempts"][0]["capability_token_sha256"] = _attempt_token_sha256("secret-token")
+    await cosmos.runs.replace_item(item=run.id, body=doc)
+
+    req = NativeRunEventRequest(
+        job_id="agent",
+        seq=1,
+        event=NativeRunEventType.STEP_STARTED,
+        step_slug="clone-repo",
+    )
+    with pytest.raises(HTTPException) as missing:
+        await native_run_event(
+            req,
+            request=_request(),
+            project=run.project,
+            run_id=run.id,
+        )
+    assert missing.value.status_code == 401
+
+    with pytest.raises(HTTPException) as wrong:
+        await native_run_event(
+            req,
+            request=_request("wrong-token"),
+            project=run.project,
+            run_id=run.id,
+        )
+    assert wrong.value.status_code == 403
+
+    result = await native_run_event(
+        req,
+        request=_request("secret-token"),
+        project=run.project,
+        run_id=run.id,
+    )
+    assert result.accepted is True
