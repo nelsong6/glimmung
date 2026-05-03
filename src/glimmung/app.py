@@ -372,6 +372,7 @@ _DISPATCH_INPUT_KEYS = frozenset({
     "prior_verification_artifact_url",
     "feedback",
     "pr_number",
+    "recent_comments",
 })
 
 

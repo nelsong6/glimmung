@@ -76,6 +76,7 @@ async def _register_workflow(
     trigger_label: str = "agent-run",
     retry_workflow_filename: str = "",  # legacy kwarg, see note below
     requirements: dict | None = None,
+    metadata: dict | None = None,
 ) -> None:
     """Test helper that writes the #69 schema directly to Cosmos. The
     `retry_workflow_filename` kwarg is preserved as a legacy hint: when
@@ -105,7 +106,7 @@ async def _register_workflow(
         "budget": {"total": 25.0},
         "triggerLabel": trigger_label,
         "defaultRequirements": requirements or {},
-        "metadata": {},
+        "metadata": metadata or {},
         "createdAt": datetime.now(UTC).isoformat(),
     })
 
@@ -146,6 +147,15 @@ async def _register_issue(
         github_issue_number=issue_number,
     )
     return issue.id
+
+
+async def _lease_doc_for(app, lease_id: str) -> dict:
+    docs = [d async for d in app.state.cosmos.leases.query_items(
+        "SELECT * FROM c WHERE c.id = @id",
+        parameters=[{"name": "@id", "value": lease_id}],
+    )]
+    assert len(docs) == 1
+    return docs[0]
 
 
 # ─── happy paths ───────────────────────────────────────────────────────────────
@@ -190,6 +200,82 @@ async def test_dispatch_creates_lock_lease_and_run_when_workflow_opts_in(app):
     assert run_docs[0]["state"] == RunState.IN_PROGRESS.value
     assert run_docs[0]["issue_lock_holder_id"] == result.issue_lock_holder_id
     assert run_docs[0]["trigger_source"] == {"kind": "glimmung_ui"}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_includes_recent_comments_when_workflow_opts_in(app):
+    await _register_project(app, "ambience", "nelsong6/ambience")
+    await _register_workflow(
+        app,
+        project="ambience",
+        name="issue-agent",
+        retry_workflow_filename="agent-retry.yml",
+        metadata={"include_recent_comments": True},
+    )
+    await _register_host(app, "runner-1")
+    issue_id = await _register_issue(
+        app,
+        project="ambience",
+        repo="nelsong6/ambience",
+        issue_number=42,
+    )
+    issue, etag = await issue_ops.read_issue(
+        app.state.cosmos, project="ambience", issue_id=issue_id,
+    )
+    for idx in range(6):
+        issue, etag, _ = await issue_ops.add_comment(
+            app.state.cosmos,
+            issue=issue,
+            etag=etag,
+            author=f"user-{idx}",
+            body=f"comment {idx}",
+        )
+
+    result = await dispatch_run(
+        app, repo="nelsong6/ambience", issue_number=42,
+        trigger_source={"kind": "glimmung_ui"},
+    )
+
+    lease_doc = await _lease_doc_for(app, result.lease_id)
+    recent = lease_doc["metadata"]["recent_comments"]
+    assert "comment 0" not in recent
+    assert "comment 1" in recent
+    assert "comment 5" in recent
+    assert "user-5" in recent
+
+
+@pytest.mark.asyncio
+async def test_dispatch_omits_recent_comments_by_default(app):
+    await _register_project(app, "ambience", "nelsong6/ambience")
+    await _register_workflow(
+        app, project="ambience", name="issue-agent",
+        retry_workflow_filename="agent-retry.yml",
+    )
+    await _register_host(app, "runner-1")
+    issue_id = await _register_issue(
+        app,
+        project="ambience",
+        repo="nelsong6/ambience",
+        issue_number=42,
+    )
+    issue, etag = await issue_ops.read_issue(
+        app.state.cosmos, project="ambience", issue_id=issue_id,
+    )
+    await issue_ops.add_comment(
+        app.state.cosmos,
+        issue=issue,
+        etag=etag,
+        author="nelson",
+        body="do not include unless opted in",
+    )
+
+    result = await dispatch_run(
+        app, repo="nelsong6/ambience", issue_number=42,
+        trigger_source={"kind": "glimmung_ui"},
+    )
+
+    lease_doc = await _lease_doc_for(app, result.lease_id)
+    assert "recent_comments" not in lease_doc["metadata"]
 
 
 @pytest.mark.asyncio
