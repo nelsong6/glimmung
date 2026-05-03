@@ -18,6 +18,7 @@ from glimmung import locks as lock_ops
 from glimmung.app import _abort_run
 from glimmung.models import (
     BudgetConfig,
+    LeaseState,
     PhaseAttempt,
     Run,
     RunState,
@@ -183,6 +184,90 @@ async def test_abort_orphan_with_no_workflow_run_id_skips_gh_cancel(cosmos, mint
     run_doc = await cosmos.runs.read_item(item="run-1", partition_key="p")
     assert run_doc["state"] == RunState.ABORTED.value
     assert run_doc["abort_reason"] == "orphaned"
+
+
+@pytest.mark.asyncio
+async def test_abort_releases_native_leases_by_run_id_not_attempt_index(cosmos, minter):
+    """Pre-fix native leases can carry stale attempt_index metadata.
+
+    Abort cleanup must still release every active/pending native lease for the
+    Run so stale capacity tokens cannot survive the terminal transition.
+    """
+    now = datetime.now(UTC)
+    run = Run(
+        id="run-1",
+        project="p",
+        workflow="agent-run",
+        issue_repo="r/n",
+        issue_number=42,
+        state=RunState.IN_PROGRESS,
+        budget=BudgetConfig(),
+        attempts=[
+            PhaseAttempt(
+                attempt_index=0,
+                phase="env-prep",
+                phase_kind="k8s_job",
+                workflow_filename="",
+                dispatched_at=now,
+            ),
+            PhaseAttempt(
+                attempt_index=1,
+                phase="agent-execute",
+                phase_kind="k8s_job",
+                workflow_filename="",
+                dispatched_at=now,
+            ),
+        ],
+        created_at=now,
+        updated_at=now,
+    )
+    await cosmos.runs.create_item(run.model_dump(mode="json"))
+    await cosmos.leases.create_item({
+        "id": "stale-active",
+        "project": "p",
+        "workflow": "agent-run",
+        "host": "native-k8s",
+        "state": LeaseState.ACTIVE.value,
+        "requirements": {},
+        "metadata": {
+            "native_k8s": True,
+            "run_id": "run-1",
+            "attempt_index": "0",
+        },
+        "requestedAt": now.isoformat(),
+        "assignedAt": now.isoformat(),
+        "releasedAt": None,
+        "ttlSeconds": 14400,
+    })
+    await cosmos.leases.create_item({
+        "id": "queued",
+        "project": "p",
+        "workflow": "agent-run",
+        "host": None,
+        "state": LeaseState.PENDING.value,
+        "requirements": {},
+        "metadata": {
+            "native_k8s": True,
+            "run_id": "run-1",
+            "attempt_index": "1",
+        },
+        "requestedAt": now.isoformat(),
+        "assignedAt": None,
+        "releasedAt": None,
+        "ttlSeconds": 14400,
+    })
+
+    result = await _abort_run(
+        cosmos, minter, run_id="run-1", project="p", reason="cleanup",
+    )
+
+    assert result.state == "aborted"
+    active_doc = await cosmos.leases.read_item(
+        item="stale-active", partition_key="p",
+    )
+    pending_doc = await cosmos.leases.read_item(item="queued", partition_key="p")
+    assert active_doc["state"] == LeaseState.RELEASED.value
+    assert pending_doc["state"] == LeaseState.RELEASED.value
 
 
 # ─── aborted (with GH cancel) ─────────────────────────────────────────
