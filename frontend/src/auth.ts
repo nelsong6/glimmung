@@ -3,6 +3,7 @@ import { PublicClientApplication, type AccountInfo, type Configuration } from "@
 type GlimmungConfig = {
   entra_client_id: string;
   authority: string;
+  tank_operator_base_url: string;
 };
 
 let _msal: PublicClientApplication | null = null;
@@ -65,6 +66,12 @@ export async function getIdToken(): Promise<string> {
   if (!account) throw new Error("not signed in");
   const result = await _msal.acquireTokenSilent({ scopes: SCOPES, account });
   return result.idToken;
+}
+
+export async function publicConfig(): Promise<GlimmungConfig> {
+  await initAuth();
+  if (!_config) throw new Error("auth config not initialized");
+  return _config;
 }
 
 export async function authedFetch(input: RequestInfo, init: RequestInit = {}): Promise<Response> {

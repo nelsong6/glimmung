@@ -70,6 +70,11 @@ class Settings(BaseSettings):
     # Sweep job cadence
     sweep_interval_seconds: int = 60
 
+    # Browser launch target for attended tank-operator sessions. Glimmung
+    # passes canonical ids as URL params; tank-operator creates the session on
+    # its own origin so the user's tank auth cookie applies.
+    tank_operator_base_url: str = "https://tank.romaine.life"
+
 
 @lru_cache
 def get_settings() -> Settings:
