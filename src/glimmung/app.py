@@ -2880,6 +2880,31 @@ async def _list_issues_from_cosmos(cosmos: Cosmos) -> list[IssueRow]:
 
 
 @app.get(
+    "/v1/issues/by-id/{project}/{issue_id}",
+    response_model=IssueDetail,
+)
+async def issue_detail_by_id(
+    project: str = Path(...),
+    issue_id: str = Path(...),
+) -> IssueDetail:
+    """Detail view keyed by glimmung issue id. Used for glimmung-native
+    issues (which have no GH coords to slot into the URL-keyed path)
+    and as the canonical handle for any caller that already has an id.
+
+    Keep this route above the legacy three-segment GH route. Otherwise
+    FastAPI attempts to parse `/v1/issues/by-id/{project}/{issue_id}` as
+    `{repo_owner}/{repo_name}/{issue_number}` and returns a 422 before
+    this handler can run.
+    """
+    cosmos: Cosmos = app.state.cosmos
+    found = await issue_ops.read_issue(cosmos, project=project, issue_id=issue_id)
+    if found is None:
+        raise HTTPException(404, f"no glimmung issue {project}/{issue_id}")
+    issue, _ = found
+    return await _build_issue_detail(cosmos, issue=issue)
+
+
+@app.get(
     "/v1/issues/{repo_owner}/{repo_name}/{issue_number}",
     response_model=IssueDetail,
 )
@@ -2951,25 +2976,6 @@ async def _build_issue_detail(cosmos: Cosmos, *, issue: Issue) -> IssueDetail:
         and existing_lock.expires_at > datetime.now(UTC)
     )
     return detail
-
-
-@app.get(
-    "/v1/issues/by-id/{project}/{issue_id}",
-    response_model=IssueDetail,
-)
-async def issue_detail_by_id(
-    project: str = Path(...),
-    issue_id: str = Path(...),
-) -> IssueDetail:
-    """Detail view keyed by glimmung issue id. Used for glimmung-native
-    issues (which have no GH coords to slot into the URL-keyed path)
-    and as the canonical handle for any caller that already has an id."""
-    cosmos: Cosmos = app.state.cosmos
-    found = await issue_ops.read_issue(cosmos, project=project, issue_id=issue_id)
-    if found is None:
-        raise HTTPException(404, f"no glimmung issue {project}/{issue_id}")
-    issue, _ = found
-    return await _build_issue_detail(cosmos, issue=issue)
 
 
 @app.post(
