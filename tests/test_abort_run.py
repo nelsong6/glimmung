@@ -35,7 +35,7 @@ def _cosmos() -> SimpleNamespace:
         runs=FakeContainer("runs", "/project"),
         locks=FakeContainer("locks", "/scope"),
         issues=FakeContainer("issues", "/project"),
-        prs=FakeContainer("prs", "/project"),
+        reports=FakeContainer("reports", "/project"),
     )
 
 

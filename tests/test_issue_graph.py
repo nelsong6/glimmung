@@ -20,8 +20,8 @@ from glimmung.app import _build_issue_graph, _build_system_graph, issue_graph
 from glimmung.models import (
     BudgetConfig,
     PhaseAttempt,
-    PR,
-    PRState,
+    Report,
+    ReportState,
     Run,
     RunState,
     Signal,
@@ -44,7 +44,7 @@ def cosmos():
         locks=FakeContainer("locks", "/scope"),
         signals=FakeContainer("signals", "/target_repo"),
         issues=FakeContainer("issues", "/project"),
-        prs=FakeContainer("prs", "/project"),
+        reports=FakeContainer("reports", "/project"),
     )
 
 
@@ -91,8 +91,8 @@ async def _seed_run(cosmos, run: Run) -> None:
     await cosmos.runs.create_item(run.model_dump(mode="json"))
 
 
-async def _seed_pr(cosmos, pr: PR) -> None:
-    await cosmos.prs.create_item(pr.model_dump(mode="json"))
+async def _seed_pr(cosmos, pr: Report) -> None:
+    await cosmos.reports.create_item(pr.model_dump(mode="json"))
 
 
 async def _seed_signal(cosmos, signal: Signal) -> None:
@@ -143,13 +143,13 @@ async def test_system_graph_renders_open_issues_inflight_runs_prs_and_signals(co
         updated_at=now,
     )
     await _seed_run(cosmos, run)
-    await _seed_pr(cosmos, PR(
+    await _seed_pr(cosmos, Report(
         id="01KQSYSTEM_PR",
         project="ambience",
         repo="nelsong6/ambience",
         number=201,
         title="agent: lava lamp",
-        state=PRState.OPEN,
+        state=ReportState.READY,
         branch="agent/lava",
         linked_issue_id=issue_id,
         linked_run_id=run.id,
@@ -190,7 +190,7 @@ async def test_system_graph_filters_by_project(cosmos):
         repo="nelsong6/glimmung",
         issue_number=41,
         issue_id="01HZGRAPHGLIMMUNG",
-        title="PR reviews",
+        title="Report reviews",
     )
     now = _now()
     await _seed_run(cosmos, Run(

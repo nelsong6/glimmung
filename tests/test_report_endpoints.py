@@ -1,8 +1,8 @@
 """PR API surface tests (#50 slice 2).
 
-Covers the post-#50 PR endpoints: GET /v1/prs (Cosmos cutover from
-runs container), POST /v1/prs (agent registration + idempotent re-
-register), PATCH /v1/prs/by-id with state transitions (close, merge,
+Covers the post-#50 PR endpoints: GET /v1/reports (Cosmos cutover from
+runs container), POST /v1/reports (agent registration + idempotent re-
+register), PATCH /v1/reports/by-id with state transitions (close, merge,
 reopen). Mirrors the test_issue_endpoints style — direct helper
 invocation against the in-memory cosmos fake.
 """
@@ -15,14 +15,14 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from glimmung import prs as pr_ops
+from glimmung import reports as report_ops
 from glimmung.app import (
-    PrCreateRequest,
-    PrUpdateRequest,
-    _build_pr_detail,
-    _list_prs_from_cosmos,
+    ReportCreateRequest,
+    ReportUpdateRequest,
+    _build_report_detail,
+    _list_reports_from_cosmos,
 )
-from glimmung.models import PRState
+from glimmung.models import ReportState
 
 from tests.cosmos_fake import FakeContainer
 
@@ -30,54 +30,54 @@ from tests.cosmos_fake import FakeContainer
 @pytest.fixture
 def cosmos():
     return SimpleNamespace(
-        prs=FakeContainer("prs", "/project"),
+        reports=FakeContainer("reports", "/project"),
         runs=FakeContainer("runs", "/project"),
         issues=FakeContainer("issues", "/project"),
         locks=FakeContainer("locks", "/scope"),
     )
 
 
-# ─── list_prs ────────────────────────────────────────────────────────────────
+# ─── list_reports ────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
 async def test_list_prs_surfaces_prs_from_cosmos(cosmos):
     """Pre-#50 the listing read from `runs` and required a Run with
-    pr_number set. Post-#50 it reads `prs` directly — manual PRs without
+    pr_number set. It now reads `reports` directly — manual PRs without
     a Run still surface."""
-    await pr_ops.create_pr(
+    await report_ops.create_report(
         cosmos, project="ambience", repo="nelsong6/ambience",
         number=12, title="manual fix", branch="hotfix/12",
         html_url="https://github.com/nelsong6/ambience/pull/12",
     )
-    await pr_ops.create_pr(
+    await report_ops.create_report(
         cosmos, project="ambience", repo="nelsong6/ambience",
         number=14, title="agent fix", branch="agent/issue-7",
     )
 
-    rows = await _list_prs_from_cosmos(cosmos)
+    rows = await _list_reports_from_cosmos(cosmos)
     assert len(rows) == 2
     # Sorted by descending pr_number.
     assert [r.pr_number for r in rows] == [14, 12]
     for row in rows:
         assert row.id  # ULID always present
-        assert row.state == "open"
+        assert row.state == "ready"
         assert row.merged is False
         assert row.run_state is None  # no run linkage yet
 
 
 @pytest.mark.asyncio
 async def test_list_prs_includes_closed(cosmos):
-    pr = await pr_ops.create_pr(
+    pr = await report_ops.create_report(
         cosmos, project="ambience", repo="nelsong6/ambience",
         number=12, title="t", branch="b",
     )
-    found = await pr_ops.read_pr(cosmos, project="ambience", pr_id=pr.id)
+    found = await report_ops.read_report(cosmos, project="ambience", report_id=pr.id)
     assert found is not None
     pr, etag = found
-    await pr_ops.close_pr(cosmos, pr=pr, etag=etag)
+    await report_ops.close_report(cosmos, pr=pr, etag=etag)
 
-    rows = await _list_prs_from_cosmos(cosmos)
+    rows = await _list_reports_from_cosmos(cosmos)
     assert len(rows) == 1
     assert rows[0].pr_number == 12
     assert rows[0].state == "closed"
@@ -101,13 +101,13 @@ async def test_list_prs_joins_run_via_linked_run_id(cosmos):
     }
     await cosmos.runs.create_item(run_doc)
 
-    await pr_ops.create_pr(
+    await report_ops.create_report(
         cosmos, project="ambience", repo="nelsong6/ambience",
         number=14, title="t", branch="agent/issue-7",
         linked_run_id="01JRUNAAAA",
     )
 
-    rows = await _list_prs_from_cosmos(cosmos)
+    rows = await _list_reports_from_cosmos(cosmos)
     assert len(rows) == 1
     row = rows[0]
     assert row.linked_run_id == "01JRUNAAAA"
@@ -135,14 +135,14 @@ async def test_list_prs_surfaces_warm_session_launch_url(cosmos):
     }
     await cosmos.runs.create_item(run_doc)
 
-    pr = await pr_ops.create_pr(
+    pr = await report_ops.create_report(
         cosmos, project="ambience", repo="nelsong6/ambience",
         number=14, title="t", branch="agent/native",
         linked_issue_id="01JISSUEZZZ",
         linked_run_id="01JRUNWARM",
     )
 
-    rows = await _list_prs_from_cosmos(cosmos)
+    rows = await _list_reports_from_cosmos(cosmos)
     assert len(rows) == 1
     row = rows[0]
     assert row.validation_url == "https://preview.example.test"
@@ -154,25 +154,25 @@ async def test_list_prs_surfaces_warm_session_launch_url(cosmos):
     assert "validation_url=https%3A%2F%2Fpreview.example.test" in row.session_launch_url
 
 
-# ─── _build_pr_detail ────────────────────────────────────────────────────
+# ─── _build_report_detail ────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_build_pr_detail_for_manual_pr(cosmos):
-    pr = await pr_ops.create_pr(
+async def test_build_report_detail_for_manual_pr(cosmos):
+    pr = await report_ops.create_report(
         cosmos, project="ambience", repo="nelsong6/ambience",
         number=21, title="manual", branch="x", body="motivation: ...",
         html_url="https://github.com/nelsong6/ambience/pull/21",
         head_sha="abc123",
     )
 
-    detail = await _build_pr_detail(cosmos, pr=pr)
+    detail = await _build_report_detail(cosmos, pr=pr)
     assert detail.id == pr.id
     assert detail.repo == "nelsong6/ambience"
     assert detail.pr_number == 21
     assert detail.title == "manual"
     assert detail.body == "motivation: ..."
-    assert detail.state == "open"
+    assert detail.state == "ready"
     assert detail.merged is False
     assert detail.head_sha == "abc123"
     assert detail.run_state is None
@@ -182,8 +182,8 @@ async def test_build_pr_detail_for_manual_pr(cosmos):
 
 
 @pytest.mark.asyncio
-async def test_build_pr_detail_stitches_linked_issue_title(cosmos):
-    """When linked_issue_id is set, _build_pr_detail reads the Issue
+async def test_build_report_detail_stitches_linked_issue_title(cosmos):
+    """When linked_issue_id is set, _build_report_detail reads the Issue
     title and surfaces it for the dashboard."""
     issue_doc = {
         "id": "01JISSUEZZZ",
@@ -199,18 +199,18 @@ async def test_build_pr_detail_stitches_linked_issue_title(cosmos):
     }
     await cosmos.issues.create_item(issue_doc)
 
-    pr = await pr_ops.create_pr(
+    pr = await report_ops.create_report(
         cosmos, project="ambience", repo="nelsong6/ambience",
         number=14, title="t", branch="b",
         linked_issue_id="01JISSUEZZZ",
     )
-    detail = await _build_pr_detail(cosmos, pr=pr)
+    detail = await _build_report_detail(cosmos, pr=pr)
     assert detail.linked_issue_id == "01JISSUEZZZ"
     assert detail.issue_title == "the linked issue title"
 
 
 @pytest.mark.asyncio
-async def test_build_pr_detail_surfaces_warm_session_launch_url(cosmos):
+async def test_build_report_detail_surfaces_warm_session_launch_url(cosmos):
     issue_doc = {
         "id": "01JISSUEZZZ",
         "project": "ambience",
@@ -242,13 +242,13 @@ async def test_build_pr_detail_surfaces_warm_session_launch_url(cosmos):
         "updated_at": datetime.now(UTC).isoformat(),
     }
     await cosmos.runs.create_item(run_doc)
-    pr = await pr_ops.create_pr(
+    pr = await report_ops.create_report(
         cosmos, project="ambience", repo="nelsong6/ambience",
         number=14, title="t", branch="b",
         linked_issue_id="01JISSUEZZZ", linked_run_id="01JRUNWARM",
     )
 
-    detail = await _build_pr_detail(cosmos, pr=pr)
+    detail = await _build_report_detail(cosmos, pr=pr)
 
     assert detail.session_launch_intent == "warm"
     assert detail.validation_url == "https://preview.example.test"
@@ -259,19 +259,19 @@ async def test_build_pr_detail_surfaces_warm_session_launch_url(cosmos):
     assert "validation_url=https%3A%2F%2Fpreview.example.test" in detail.session_launch_url
 
 
-# ─── POST /v1/prs idempotence ───────────────────────────────────────────────
+# ─── POST /v1/reports idempotence ───────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
 async def test_create_pr_endpoint_logic_is_idempotent_on_repo_number(cosmos):
-    """The endpoint's body uses ensure_pr_for_github, so two POSTs with
+    """The endpoint's body uses ensure_report_for_github, so two POSTs with
     the same (repo, number) return the same PR id rather than minting
     a duplicate."""
-    a, _, created_a = await pr_ops.ensure_pr_for_github(
+    a, _, created_a = await report_ops.ensure_report_for_github(
         cosmos, project="ambience", repo="nelsong6/ambience",
         number=14, title="t", branch="b",
     )
-    b, _, created_b = await pr_ops.ensure_pr_for_github(
+    b, _, created_b = await report_ops.ensure_report_for_github(
         cosmos, project="ambience", repo="nelsong6/ambience",
         number=14, title="different title", branch="b",
     )
@@ -282,8 +282,8 @@ async def test_create_pr_endpoint_logic_is_idempotent_on_repo_number(cosmos):
 
 @pytest.mark.asyncio
 async def test_create_pr_request_validation():
-    """PrCreateRequest defaults: body empty, base_ref main, no linkages."""
-    req = PrCreateRequest(
+    """ReportCreateRequest defaults: body empty, base_ref main, no linkages."""
+    req = ReportCreateRequest(
         project="ambience", repo="nelsong6/ambience",
         number=14, title="t", branch="b",
     )
@@ -298,27 +298,27 @@ async def test_create_pr_request_validation():
 
 @pytest.mark.asyncio
 async def test_patch_state_closed_transitions_open_pr(cosmos):
-    pr = await pr_ops.create_pr(
+    pr = await report_ops.create_report(
         cosmos, project="ambience", repo="nelsong6/ambience",
         number=14, title="t", branch="b",
     )
 
-    found = await pr_ops.read_pr(cosmos, project="ambience", pr_id=pr.id)
+    found = await report_ops.read_report(cosmos, project="ambience", report_id=pr.id)
     assert found is not None
     pr, etag = found
 
-    req = PrUpdateRequest(state="closed")
-    if req.state == "closed" and pr.state == PRState.OPEN:
-        pr, etag = await pr_ops.close_pr(cosmos, pr=pr, etag=etag)
+    req = ReportUpdateRequest(state="closed")
+    if req.state == "closed" and pr.state == ReportState.READY:
+        pr, etag = await report_ops.close_report(cosmos, pr=pr, etag=etag)
 
-    assert pr.state == PRState.CLOSED
+    assert pr.state == ReportState.CLOSED
     assert pr.merged_at is None  # closed-without-merge
 
 
 @pytest.mark.asyncio
 async def test_patch_state_merged_requires_merged_by(cosmos):
     """Mirrors patch_pr_endpoint's guard."""
-    req = PrUpdateRequest(state="merged")
+    req = ReportUpdateRequest(state="merged")
     with pytest.raises(HTTPException) as exc:
         if not req.merged_by:
             raise HTTPException(400, "state='merged' requires merged_by")
@@ -327,18 +327,18 @@ async def test_patch_state_merged_requires_merged_by(cosmos):
 
 @pytest.mark.asyncio
 async def test_patch_state_merged_stamps_merged_at_and_by(cosmos):
-    pr = await pr_ops.create_pr(
+    pr = await report_ops.create_report(
         cosmos, project="ambience", repo="nelsong6/ambience",
         number=14, title="t", branch="b",
     )
-    found = await pr_ops.read_pr(cosmos, project="ambience", pr_id=pr.id)
+    found = await report_ops.read_report(cosmos, project="ambience", report_id=pr.id)
     assert found is not None
     pr, etag = found
 
-    pr, _ = await pr_ops.merge_pr(
+    pr, _ = await report_ops.merge_report(
         cosmos, pr=pr, etag=etag, merged_by="nelsong6",
     )
-    assert pr.state == PRState.CLOSED
+    assert pr.state == ReportState.MERGED
     assert pr.merged_at is not None
     assert pr.merged_by == "nelsong6"
 
@@ -346,37 +346,37 @@ async def test_patch_state_merged_stamps_merged_at_and_by(cosmos):
 @pytest.mark.asyncio
 async def test_patch_state_reopen_blocked_on_merged_pr(cosmos):
     """The endpoint guards: merged PRs cannot be reopened (matches GH)."""
-    pr = await pr_ops.create_pr(
+    pr = await report_ops.create_report(
         cosmos, project="ambience", repo="nelsong6/ambience",
         number=14, title="t", branch="b",
     )
-    found = await pr_ops.read_pr(cosmos, project="ambience", pr_id=pr.id)
+    found = await report_ops.read_report(cosmos, project="ambience", report_id=pr.id)
     assert found is not None
     pr, etag = found
-    pr, _ = await pr_ops.merge_pr(
+    pr, _ = await report_ops.merge_report(
         cosmos, pr=pr, etag=etag, merged_by="nelsong6",
     )
 
-    req = PrUpdateRequest(state="open")
+    req = ReportUpdateRequest(state="ready")
     with pytest.raises(HTTPException) as exc:
-        if req.state == "open" and pr.state == PRState.CLOSED and pr.merged_at is not None:
-            raise HTTPException(409, "merged PR cannot be reopened")
+        if req.state == "ready" and pr.merged_at is not None:
+            raise HTTPException(409, "merged Report cannot be reopened")
     assert exc.value.status_code == 409
 
 
 @pytest.mark.asyncio
 async def test_patch_can_attach_run_linkage_to_existing_pr(cosmos):
     """A PATCH that just sets linked_run_id (no other field changes)
-    threads through update_pr cleanly."""
-    pr = await pr_ops.create_pr(
+    threads through update_report cleanly."""
+    pr = await report_ops.create_report(
         cosmos, project="ambience", repo="nelsong6/ambience",
         number=14, title="t", branch="b",
     )
-    found = await pr_ops.read_pr(cosmos, project="ambience", pr_id=pr.id)
+    found = await report_ops.read_report(cosmos, project="ambience", report_id=pr.id)
     assert found is not None
     pr, etag = found
 
-    pr, _ = await pr_ops.update_pr(
+    pr, _ = await report_ops.update_report(
         cosmos, pr=pr, etag=etag,
         linked_run_id="01JRUNAAAA", linked_issue_id="01JISSAAA",
     )

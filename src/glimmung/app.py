@@ -18,7 +18,7 @@ from ulid import ULID
 from glimmung import issues as issue_ops
 from glimmung import leases as lease_ops
 from glimmung import locks as lock_ops
-from glimmung import prs as pr_ops
+from glimmung import reports as report_ops
 from glimmung import runs as run_ops
 from glimmung import signals as signal_ops
 from glimmung.dispatch import DispatchResult, ResumeResult, dispatch_resumed_run, dispatch_run
@@ -38,9 +38,9 @@ from glimmung.github_app import (
 )
 from glimmung.locks import LockBusy
 from glimmung.models import (
-    PR,
-    PRReview,
-    PRReviewState,
+    Report,
+    ReportReview,
+    ReportReviewState,
     BudgetConfig,
     Host,
     Issue,
@@ -51,7 +51,7 @@ from glimmung.models import (
     LeaseResponse,
     LeaseState,
     PhaseSpec,
-    PRState,
+    ReportState,
     PrPrimitiveSpec,
     Project,
     ProjectRegister,
@@ -199,8 +199,8 @@ async def _resolve_signal_pr(
     looks_like_id = len(target_id) == 26 and target_id.isalnum() and not target_id.isdigit()
 
     if looks_like_id:
-        pr_lookup = await pr_ops.read_pr(
-            cosmos, project=signal.target_repo, pr_id=target_id,
+        pr_lookup = await report_ops.read_report(
+            cosmos, project=signal.target_repo, report_id=target_id,
         )
         if pr_lookup is None:
             log.warning(
@@ -1181,7 +1181,7 @@ async def _open_pr_primitive(*, run: Run, workflow: Workflow) -> None:
         pr_number = already.pr_number
         html_url = already.html_url
 
-    pr, etag, _created = await pr_ops.ensure_pr_for_github(
+    pr, etag, _created = await report_ops.ensure_report_for_github(
         cosmos,
         project=run.project,
         repo=run.issue_repo,
@@ -1191,8 +1191,10 @@ async def _open_pr_primitive(*, run: Run, workflow: Workflow) -> None:
         body=rich_body,
         base_ref=base,
         html_url=html_url,
+        linked_issue_id=run.issue_id or None,
+        linked_run_id=run.id,
     )
-    pr, _ = await pr_ops.update_pr(
+    pr, _ = await report_ops.update_report(
         cosmos,
         pr=pr,
         etag=etag,
@@ -1239,7 +1241,7 @@ async def _open_pr_primitive(*, run: Run, workflow: Workflow) -> None:
 
 def _glimmung_pr_detail_url(*, settings: Settings, repo: str, number: int) -> str:
     base_url = getattr(settings, "glimmung_base_url", "https://glimmung.romaine.life")
-    return f"{base_url.rstrip('/')}/prs/{repo}/{number}"
+    return f"{base_url.rstrip('/')}/reports/{repo}/{number}"
 
 
 def _thin_github_pr_body(*, run: Run, glimmung_url: str | None) -> str:
@@ -2513,12 +2515,12 @@ def _render_glimmung_pr_body(meta: dict[str, str]) -> str:
 
 
 async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
-    """Mirror `pull_request.*` events into the glimmung `prs` container.
+    """Mirror `pull_request.*` events into the glimmung `reports` container.
 
     Pre-#50 this parsed `Closes #N` from the PR body to link a Run to a
-    GH PR number. Post-#50 the PR is the canonical entity in glimmung's
-    own `prs` container and the run/issue linkage is set explicitly by
-    the agent's `POST /v1/prs` step (#50 slice 4) — the webhook's job
+    GH PR number. Report is now the canonical entity in glimmung's
+    own `reports` container and the run/issue linkage is set explicitly by
+    the agent's `POST /v1/reports` step (#50 slice 4) — the webhook's job
     is just to keep glimmung's PR document in sync with GH's lifecycle
     (state transitions, head sha refreshes, title/body edits).
 
@@ -2528,7 +2530,7 @@ async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
         fire reopened for those but the guard is cheap).
       - synchronize / edited: refresh head_sha + title/body so the
         dashboard shows the latest commit.
-      - closed: close_pr or merge_pr depending on `pr.merged`.
+      - closed: close_report or merge_report depending on `pr.merged`.
       - other: ignored.
     """
     action = payload.get("action") or ""
@@ -2567,8 +2569,9 @@ async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
     meta = _parse_glimmung_meta(raw_body)
     rich_body = _render_glimmung_pr_body(meta) if meta else ""
     body = rich_body or raw_body
+    linked_issue_id = meta.get("issue_id") if meta else None
 
-    pr, etag, created = await pr_ops.ensure_pr_for_github(
+    pr, etag, created = await report_ops.ensure_report_for_github(
         cosmos,
         project=project,
         repo=repo,
@@ -2579,18 +2582,21 @@ async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
         base_ref=base_ref,
         head_sha=head_sha,
         html_url=html_url,
+        linked_issue_id=linked_issue_id,
     )
     outcome: dict[str, Any] = {
         "pr_id": pr.id,
         "created": created,
         "action": action,
     }
+    if linked_issue_id:
+        outcome["linked_issue_id"] = linked_issue_id
 
-    # ensure_pr_for_github only honors create-time fields. For an
+    # ensure_report_for_github only honors create-time fields. For an
     # existing PR, patch the user-editable + GH-provided fields so
     # Cosmos stays in sync with GH edits + commits.
     if not created and action in ("opened", "reopened", "edited", "synchronize"):
-        pr, etag = await pr_ops.update_pr(
+        pr, etag = await report_ops.update_report(
             cosmos, pr=pr, etag=etag,
             title=title or None,
             body=body if body else None,
@@ -2603,9 +2609,8 @@ async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
 
     # Apply linkages from the marker (idempotent — same id wins on
     # webhook redelivery).
-    linked_issue_id = meta.get("issue_id") if meta else None
     if linked_issue_id and pr.linked_issue_id != linked_issue_id:
-        pr, etag = await pr_ops.update_pr(
+        pr, etag = await report_ops.update_report(
             cosmos, pr=pr, etag=etag,
             linked_issue_id=linked_issue_id,
         )
@@ -2620,32 +2625,32 @@ async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
         )
         if run_lookup is not None:
             run_for_link, _ = run_lookup
-            pr, etag = await pr_ops.update_pr(
+            pr, etag = await report_ops.update_report(
                 cosmos, pr=pr, etag=etag,
                 linked_run_id=run_for_link.id,
             )
             outcome["linked_run_id"] = run_for_link.id
 
-    if action == "reopened" and pr.state == PRState.CLOSED:
+    if action == "reopened":
         if pr.merged_at is not None:
             log.warning(
                 "pull_request.reopened on already-merged PR %s#%d (glimmung id %s); ignoring",
                 repo, pr_number, pr.id,
             )
             outcome["reopen_ignored"] = "merged"
-        else:
-            pr, etag = await pr_ops.reopen_pr(cosmos, pr=pr, etag=etag)
+        elif pr.state == ReportState.CLOSED:
+            pr, etag = await report_ops.reopen_report(cosmos, pr=pr, etag=etag)
             outcome["reopened"] = True
 
     if action == "closed":
         if pr_merged:
-            pr, etag = await pr_ops.merge_pr(
+            pr, etag = await report_ops.merge_report(
                 cosmos, pr=pr, etag=etag,
                 merged_by=merged_by_user or "unknown",
             )
             outcome["merged"] = True
         else:
-            pr, etag = await pr_ops.close_pr(cosmos, pr=pr, etag=etag)
+            pr, etag = await report_ops.close_report(cosmos, pr=pr, etag=etag)
             outcome["closed"] = True
 
     return outcome
@@ -2678,22 +2683,22 @@ async def _handle_pull_request_review(payload: dict[str, Any]) -> dict[str, Any]
     target_repo = repo
     target_id = str(pr_number)
     mirrored_review = False
-    found = await pr_ops.find_pr_by_repo_number(
+    found = await report_ops.find_report_by_repo_number(
         cosmos, repo=repo, number=int(pr_number),
     )
     if found is not None:
         pr, etag = found
         target_repo = pr.project
         target_id = pr.id
-        raw_state = str(review.get("state") or PRReviewState.COMMENTED.value).lower()
+        raw_state = str(review.get("state") or ReportReviewState.COMMENTED.value).lower()
         try:
-            review_state = PRReviewState(raw_state)
+            review_state = ReportReviewState(raw_state)
         except ValueError:
             log.warning(
                 "pull_request_review.submitted on %s#%d has unknown state %r; recording as commented",
                 repo, int(pr_number), raw_state,
             )
-            review_state = PRReviewState.COMMENTED
+            review_state = ReportReviewState.COMMENTED
         submitted_at_raw = review.get("submitted_at")
         submitted_at = datetime.now(UTC)
         if submitted_at_raw:
@@ -2706,11 +2711,11 @@ async def _handle_pull_request_review(payload: dict[str, Any]) -> dict[str, Any]
                     "pull_request_review.submitted on %s#%d has invalid submitted_at %r; using now",
                     repo, int(pr_number), submitted_at_raw,
                 )
-        await pr_ops.append_pr_review(
+        await report_ops.append_report_review(
             cosmos,
             pr=pr,
             etag=etag,
-            review=PRReview(
+            review=ReportReview(
                 id=str(ULID()),
                 gh_id=review.get("id"),
                 author=(review.get("user") or {}).get("login") or "",
@@ -3327,12 +3332,15 @@ async def _build_system_graph(
 
     run_ids = {r.id for r in runs}
     pr_docs = await query_all(
-        cosmos.prs,
-        "SELECT * FROM c WHERE c.state = @s ORDER BY c.created_at ASC",
-        parameters=[{"name": "@s", "value": PRState.OPEN.value}],
+        cosmos.reports,
+        "SELECT * FROM c WHERE c.state = @ready OR c.state = @needs_review ORDER BY c.created_at ASC",
+        parameters=[
+            {"name": "@ready", "value": ReportState.READY.value},
+            {"name": "@needs_review", "value": ReportState.NEEDS_REVIEW.value},
+        ],
     )
     for doc in pr_docs:
-        pr = PR.model_validate({k: v for k, v in doc.items() if not k.startswith("_")})
+        pr = Report.model_validate({k: v for k, v in doc.items() if not k.startswith("_")})
         if pr.linked_issue_id not in issue_ids and pr.linked_run_id not in run_ids:
             continue
         if project is not None and pr.project != project:
@@ -3698,23 +3706,19 @@ async def dispatch_run_endpoint(req: DispatchRequest) -> DispatchResult:
 
 
 
-# ─── PR view + reject signal (#19) ───────────────────────────────────────────────
+# ─── Report view + reject signal (#19) ─────────────────────────────────────
 
 
-class PrRow(BaseModel):
-    """One row in the PR view. Sourced from the `prs` container (#50
-    slice 2 cutover). The optional Run join lights up the runtime
-    columns (state, attempts, cumulative cost) when a glimmung Run is
-    linked; manual PRs mirror in without a Run and surface the same
-    way the dashboard already shows non-agent activity."""
-    id: str                                # glimmung PR id (ULID)
+class ReportRow(BaseModel):
+    """One row in the Report view."""
+    id: str                                # glimmung Report id
     project: str
     repo: str
     pr_number: int                         # GH PR number (preserved on seed)
     pr_branch: str | None = None
     title: str = ""
-    state: str = "open"                    # PRState value: open | closed
-    merged: bool = False                   # CLOSED + merged_at != None
+    state: str = ReportState.READY.value
+    merged: bool = False
     html_url: str | None = None
     linked_issue_id: str | None = None
     linked_run_id: str | None = None
@@ -3729,7 +3733,7 @@ class PrRow(BaseModel):
     pr_lock_held: bool = False             # triage in flight
 
 
-class PrDetail(BaseModel):
+class ReportDetail(BaseModel):
     id: str
     project: str
     repo: str
@@ -3737,7 +3741,7 @@ class PrDetail(BaseModel):
     pr_branch: str | None = None
     title: str = ""
     body: str = ""
-    state: str = "open"
+    state: str = ReportState.READY.value
     merged: bool = False
     base_ref: str = "main"
     head_sha: str = ""
@@ -3759,9 +3763,8 @@ class PrDetail(BaseModel):
     pr_lock_held: bool = False
 
 
-class PrCreateRequest(BaseModel):
-    """POST /v1/prs body — agent open-PR step calls this immediately
-    after the GH PR has been opened (#50 slice 4)."""
+class ReportCreateRequest(BaseModel):
+    """POST /v1/reports body for registering a GitHub PR syndication target."""
     project: str
     repo: str
     number: int
@@ -3775,12 +3778,8 @@ class PrCreateRequest(BaseModel):
     linked_run_id: str | None = None
 
 
-class PrUpdateRequest(BaseModel):
-    """PATCH /v1/prs/by-id/{project}/{pr_id} body. Same shape as the
-    update_pr substrate signature, plus an optional `state` transition
-    (`open` / `closed` / `merged`). Closed-vs-merged uses two distinct
-    state values because they hit two different substrate functions
-    (`close_pr` vs `merge_pr`)."""
+class ReportUpdateRequest(BaseModel):
+    """PATCH /v1/reports/by-id/{project}/{report_id} body."""
     title: str | None = None
     body: str | None = None
     branch: str | None = None
@@ -3789,27 +3788,23 @@ class PrUpdateRequest(BaseModel):
     html_url: str | None = None
     linked_issue_id: str | None = None
     linked_run_id: str | None = None
-    state: str | None = None               # "open" | "closed" | "merged"
+    state: str | None = None               # ready | needs_review | failed | closed | merged
     merged_by: str | None = None           # required when state="merged"
 
 
 @app.get(
-    "/v1/prs",
-    response_model=list[PrRow],
+    "/v1/reports",
+    response_model=list[ReportRow],
 )
-async def list_prs() -> list[PrRow]:
-    """All PRs across registered projects. Sourced from the Cosmos
-    `prs` container (#50 slice 2 cutover). Bulk-loads `runs` once for
-    the linked-Run join + `locks` once for the lock state, mirroring the
-    /v1/issues read path's perf shape."""
-    return await _list_prs_from_cosmos(app.state.cosmos)
+async def list_reports() -> list[ReportRow]:
+    """All Reports across registered projects."""
+    return await _list_reports_from_cosmos(app.state.cosmos)
 
 
-async def _list_prs_from_cosmos(cosmos: Cosmos) -> list[PrRow]:
-    """Read-path for `/v1/prs`; lifted out so tests can drive it
-    directly without standing up a FastAPI client."""
-    prs = await pr_ops.list_prs(cosmos)
-    if not prs:
+async def _list_reports_from_cosmos(cosmos: Cosmos) -> list[ReportRow]:
+    """Read path for `/v1/reports`, lifted out for focused tests."""
+    reports = await report_ops.list_reports(cosmos)
+    if not reports:
         return []
 
     run_docs = await query_all(cosmos.runs, "SELECT * FROM c")
@@ -3832,8 +3827,8 @@ async def _list_prs_from_cosmos(cosmos: Cosmos) -> list[PrRow]:
     locks_by_key = {doc["key"]: doc for doc in lock_docs}
 
     now = datetime.now(UTC)
-    rows: list[PrRow] = []
-    for pr in prs:
+    rows: list[ReportRow] = []
+    for pr in reports:
         run_doc = None
         if pr.linked_run_id:
             run_doc = runs_by_id.get(pr.linked_run_id)
@@ -3846,7 +3841,7 @@ async def _list_prs_from_cosmos(cosmos: Cosmos) -> list[PrRow]:
             expires_at = datetime.fromisoformat(lock_doc["expires_at"])
             pr_lock_held = expires_at > now
 
-        row = PrRow(
+        row = ReportRow(
             id=pr.id,
             project=pr.project,
             repo=pr.repo,
@@ -3888,59 +3883,46 @@ async def _list_prs_from_cosmos(cosmos: Cosmos) -> list[PrRow]:
 
 
 @app.get(
-    "/v1/prs/by-id/{project}/{pr_id}",
-    response_model=PrDetail,
+    "/v1/reports/by-id/{project}/{report_id}",
+    response_model=ReportDetail,
 )
-async def pr_detail_by_id(
+async def report_detail_by_id(
     project: str = Path(...),
-    pr_id: str = Path(...),
-) -> PrDetail:
-    """Detail view keyed by glimmung PR id. Mirrors the issue-by-id
-    pattern: useful when the caller already has the canonical id and
-    avoids the (repo, number) cross-partition lookup.
-
-    Keep this route above the legacy three-segment GH route. Otherwise
-    FastAPI attempts to parse `/v1/prs/by-id/{project}/{pr_id}` as
-    `{repo_owner}/{repo_name}/{pr_number}` and returns a 422 before this
-    handler can run.
-    """
+    report_id: str = Path(...),
+) -> ReportDetail:
+    """Detail view keyed by canonical Glimmung Report id."""
     cosmos: Cosmos = app.state.cosmos
-    found = await pr_ops.read_pr(cosmos, project=project, pr_id=pr_id)
+    found = await report_ops.read_report(cosmos, project=project, report_id=report_id)
     if found is None:
-        raise HTTPException(404, f"no glimmung PR {project}/{pr_id}")
+        raise HTTPException(404, f"no glimmung Report {project}/{report_id}")
     pr, _ = found
-    return await _build_pr_detail(cosmos, pr=pr)
+    return await _build_report_detail(cosmos, pr=pr)
 
 
 @app.get(
-    "/v1/prs/{repo_owner}/{repo_name}/{pr_number}",
-    response_model=PrDetail,
+    "/v1/reports/{repo_owner}/{repo_name}/{pr_number}",
+    response_model=ReportDetail,
 )
-async def pr_detail(
+async def report_detail(
     repo_owner: str = Path(...),
     repo_name: str = Path(...),
     pr_number: int = Path(...),
-) -> PrDetail:
-    """PR detail view. Reads the PR document from Cosmos `prs` (#50
-    slice 2). Stitches in the linked Run state if a Run id is on the
-    PR; otherwise looks up the most recent Run by `(repo, pr_number)`
-    so legacy agent-opened PRs (pre-#50, no `linked_run_id`) still
-    show their Run history."""
+) -> ReportDetail:
+    """Report detail view keyed by GitHub PR coordinates."""
     repo = f"{repo_owner}/{repo_name}"
     cosmos: Cosmos = app.state.cosmos
-    found = await pr_ops.find_pr_by_repo_number(
+    found = await report_ops.find_report_by_repo_number(
         cosmos, repo=repo, number=pr_number,
     )
     if found is None:
-        raise HTTPException(404, f"no glimmung PR {repo}#{pr_number}")
+        raise HTTPException(404, f"no glimmung Report for {repo}#{pr_number}")
     pr, _ = found
-    return await _build_pr_detail(cosmos, pr=pr)
+    return await _build_report_detail(cosmos, pr=pr)
 
 
-async def _build_pr_detail(cosmos: Cosmos, *, pr: PR) -> PrDetail:
-    """Render a PR + its linked Run state into the `PrDetail` view.
-    Shared by both the URL-keyed and id-keyed detail endpoints."""
-    detail = PrDetail(
+async def _build_report_detail(cosmos: Cosmos, *, pr: Report) -> ReportDetail:
+    """Render a Report plus linked Run state."""
+    detail = ReportDetail(
         id=pr.id,
         project=pr.project,
         repo=pr.repo,
@@ -3968,7 +3950,7 @@ async def _build_pr_detail(cosmos: Cosmos, *, pr: PR) -> PrDetail:
             run = Run.model_validate({k: v for k, v in doc.items() if not k.startswith("_")})
         except Exception:
             log.warning(
-                "pr_detail: linked_run_id=%s on PR %s/%d not readable; falling back",
+                "report_detail: linked_run_id=%s on Report %s/%d not readable; falling back",
                 pr.linked_run_id, pr.repo, pr.number,
             )
     if run is None:
@@ -4026,7 +4008,7 @@ async def _build_pr_detail(cosmos: Cosmos, *, pr: PR) -> PrDetail:
     return detail
 
 
-def _tank_session_launch_url(*, settings: Settings, run: Run, pr: PR) -> str:
+def _tank_session_launch_url(*, settings: Settings, run: Run, pr: Report) -> str:
     return _tank_session_launch_url_from_fields(
         settings=settings,
         run_id=run.id,
@@ -4055,16 +4037,12 @@ def _tank_session_launch_url_from_fields(
 
 
 @app.post(
-    "/v1/prs",
-    response_model=PrDetail,
+    "/v1/reports",
+    response_model=ReportDetail,
     dependencies=[Depends(require_admin_user)],
 )
-async def create_pr_endpoint(req: PrCreateRequest) -> PrDetail:
-    """Register a glimmung PR. The agent's open-PR step (#50 slice 4)
-    is the primary caller: it opens a thin GH PR (one-line link to the
-    glimmung PR entity) and immediately registers the rich entity here.
-    Idempotent on `(repo, number)` — re-registration of an existing
-    PR returns the existing entity rather than minting a duplicate."""
+async def create_report_endpoint(req: ReportCreateRequest) -> ReportDetail:
+    """Register a Glimmung Report for an existing GitHub PR."""
     cosmos: Cosmos = app.state.cosmos
     project_doc = await _read_project(cosmos, req.project)
     if not project_doc:
@@ -4075,7 +4053,7 @@ async def create_pr_endpoint(req: PrCreateRequest) -> PrDetail:
         raise HTTPException(400, "branch required")
 
     # Idempotent ensure semantics.
-    pr, _etag, created = await pr_ops.ensure_pr_for_github(
+    pr, _etag, created = await report_ops.ensure_report_for_github(
         cosmos,
         project=req.project,
         repo=req.repo,
@@ -4086,51 +4064,51 @@ async def create_pr_endpoint(req: PrCreateRequest) -> PrDetail:
         base_ref=req.base_ref,
         head_sha=req.head_sha,
         html_url=req.html_url,
+        linked_issue_id=req.linked_issue_id,
+        linked_run_id=req.linked_run_id,
     )
     if not created and (
         req.linked_issue_id is not None or req.linked_run_id is not None
     ):
-        # ensure_pr_for_github only honors create-time fields. Patch the
+        # ensure_report_for_github only honors create-time fields. Patch the
         # linkages on after the fact so callers don't have to round-trip
         # through PATCH for the common "found existing PR, attach
         # linkage" case.
-        found = await pr_ops.read_pr(cosmos, project=req.project, pr_id=pr.id)
+        found = await report_ops.read_report(cosmos, project=req.project, report_id=pr.id)
         assert found is not None
         pr, etag = found
-        pr, _ = await pr_ops.update_pr(
+        pr, _ = await report_ops.update_report(
             cosmos, pr=pr, etag=etag,
             linked_issue_id=req.linked_issue_id,
             linked_run_id=req.linked_run_id,
         )
     elif created and (req.linked_issue_id or req.linked_run_id):
-        found = await pr_ops.read_pr(cosmos, project=req.project, pr_id=pr.id)
+        found = await report_ops.read_report(cosmos, project=req.project, report_id=pr.id)
         assert found is not None
         pr, etag = found
-        pr, _ = await pr_ops.update_pr(
+        pr, _ = await report_ops.update_report(
             cosmos, pr=pr, etag=etag,
             linked_issue_id=req.linked_issue_id,
             linked_run_id=req.linked_run_id,
         )
-    return await _build_pr_detail(cosmos, pr=pr)
+    return await _build_report_detail(cosmos, pr=pr)
 
 
 @app.patch(
-    "/v1/prs/by-id/{project}/{pr_id}",
-    response_model=PrDetail,
+    "/v1/reports/by-id/{project}/{report_id}",
+    response_model=ReportDetail,
     dependencies=[Depends(require_admin_user)],
 )
-async def patch_pr_endpoint(
-    req: PrUpdateRequest,
+async def patch_report_endpoint(
+    req: ReportUpdateRequest,
     project: str = Path(...),
-    pr_id: str = Path(...),
-) -> PrDetail:
-    """Patch PR fields + state transitions. State transitions go through
-    `close_pr` / `merge_pr` / `reopen_pr` so the timestamp invariants
-    (closed-vs-merged, merged_by) stay consistent at the call site."""
+    report_id: str = Path(...),
+) -> ReportDetail:
+    """Patch Report fields + state transitions."""
     cosmos: Cosmos = app.state.cosmos
-    found = await pr_ops.read_pr(cosmos, project=project, pr_id=pr_id)
+    found = await report_ops.read_report(cosmos, project=project, report_id=report_id)
     if found is None:
-        raise HTTPException(404, f"no glimmung PR {project}/{pr_id}")
+        raise HTTPException(404, f"no glimmung Report {project}/{report_id}")
     pr, etag = found
 
     if any(
@@ -4139,7 +4117,7 @@ async def patch_pr_endpoint(
             req.head_sha, req.html_url, req.linked_issue_id, req.linked_run_id,
         )
     ):
-        pr, etag = await pr_ops.update_pr(
+        pr, etag = await report_ops.update_report(
             cosmos, pr=pr, etag=etag,
             title=req.title,
             body=req.body,
@@ -4153,22 +4131,38 @@ async def patch_pr_endpoint(
 
     if req.state is not None:
         target = req.state.lower()
-        if target == "closed" and pr.state == PRState.OPEN:
-            pr, etag = await pr_ops.close_pr(cosmos, pr=pr, etag=etag)
+        if target == "closed" and pr.state not in (ReportState.CLOSED, ReportState.MERGED):
+            pr, etag = await report_ops.close_report(cosmos, pr=pr, etag=etag)
         elif target == "merged":
             if not req.merged_by:
                 raise HTTPException(400, "state='merged' requires merged_by")
-            pr, etag = await pr_ops.merge_pr(
+            pr, etag = await report_ops.merge_report(
                 cosmos, pr=pr, etag=etag, merged_by=req.merged_by,
             )
-        elif target == "open" and pr.state == PRState.CLOSED:
+        elif target == "ready" and pr.state != ReportState.READY:
             if pr.merged_at is not None:
-                raise HTTPException(409, "merged PR cannot be reopened")
-            pr, etag = await pr_ops.reopen_pr(cosmos, pr=pr, etag=etag)
-        elif target not in ("open", "closed", "merged"):
-            raise HTTPException(400, f"state must be 'open' | 'closed' | 'merged', not {req.state!r}")
+                raise HTTPException(409, "merged Report cannot be reopened")
+            if pr.state == ReportState.CLOSED:
+                pr, etag = await report_ops.reopen_report(cosmos, pr=pr, etag=etag)
+            else:
+                pr, etag = await report_ops.set_report_state(
+                    cosmos, pr=pr, etag=etag, state=ReportState.READY,
+                )
+        elif target == "needs_review":
+            pr, etag = await report_ops.set_report_state(
+                cosmos, pr=pr, etag=etag, state=ReportState.NEEDS_REVIEW,
+            )
+        elif target == "failed":
+            pr, etag = await report_ops.set_report_state(
+                cosmos, pr=pr, etag=etag, state=ReportState.FAILED,
+            )
+        elif target not in ("ready", "closed", "merged", "needs_review", "failed"):
+            raise HTTPException(
+                400,
+                "state must be 'ready' | 'needs_review' | 'failed' | 'closed' | 'merged'",
+            )
 
-    return await _build_pr_detail(cosmos, pr=pr)
+    return await _build_report_detail(cosmos, pr=pr)
 
 
 @app.post(

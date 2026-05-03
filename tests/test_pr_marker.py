@@ -16,13 +16,13 @@ from unittest.mock import patch
 
 import pytest
 
-from glimmung import prs as pr_ops
+from glimmung import reports as report_ops
 from glimmung.app import (
     _handle_pull_request,
     _parse_glimmung_meta,
     _render_glimmung_pr_body,
 )
-from glimmung.models import PRState
+from glimmung.models import ReportState
 
 from tests.cosmos_fake import FakeContainer
 
@@ -34,7 +34,7 @@ def test_parse_glimmung_meta_extracts_key_value_pairs():
     body = """\
 Closes #42.
 
-Glimmung PR: https://glimmung.romaine.life/prs?issue=01JABC
+Glimmung PR: https://glimmung.romaine.life/reports?issue=01JABC
 
 <!-- glimmung-meta
 project=glimmung
@@ -92,7 +92,7 @@ def test_render_glimmung_pr_body_handles_missing_keys():
 @pytest.fixture
 def cosmos():
     return SimpleNamespace(
-        prs=FakeContainer("prs", "/project"),
+        reports=FakeContainer("reports", "/project"),
         runs=FakeContainer("runs", "/project"),
         issues=FakeContainer("issues", "/project"),
         projects=FakeContainer("projects", "/name"),
@@ -111,7 +111,7 @@ def _agent_payload(*, issue_id: str = "01JABC0000000000000000000A") -> dict:
     notes_b64 = base64.b64encode(b"## Notes\n- thing\n").decode()
     body = (
         f"Closes #42.\n\n"
-        f"Glimmung PR: https://glimmung.romaine.life/prs?issue={issue_id}\n\n"
+        f"Glimmung PR: https://glimmung.romaine.life/reports?issue={issue_id}\n\n"
         f"<!-- glimmung-meta\n"
         f"project=glimmung\n"
         f"issue_number=42\n"
@@ -155,7 +155,7 @@ async def test_agent_pr_open_attaches_linked_issue_id(cosmos, app_state):
     assert outcome["created"] is True
     assert outcome.get("linked_issue_id") == "01JABC0000000000000000000A"
 
-    found = await pr_ops.find_pr_by_repo_number(
+    found = await report_ops.find_report_by_repo_number(
         cosmos, repo="nelsong6/glimmung", number=99,
     )
     pr, _ = found
@@ -199,7 +199,7 @@ async def test_pr_open_without_marker_falls_back_to_raw_body(cosmos, app_state):
 
     assert outcome["created"] is True
     assert "linked_issue_id" not in outcome
-    found = await pr_ops.find_pr_by_repo_number(
+    found = await report_ops.find_report_by_repo_number(
         cosmos, repo="nelsong6/glimmung", number=12,
     )
     pr, _ = found
@@ -242,10 +242,10 @@ async def test_agent_pr_open_derives_linked_run_when_run_exists(cosmos, app_stat
         outcome = await _handle_pull_request(_agent_payload())
 
     assert outcome.get("linked_run_id") == "01JRUN5500000000"
-    found = await pr_ops.find_pr_by_repo_number(
+    found = await report_ops.find_report_by_repo_number(
         cosmos, repo="nelsong6/glimmung", number=99,
     )
     pr, _ = found
     assert pr.linked_run_id == "01JRUN5500000000"
     assert pr.linked_issue_id == "01JABC0000000000000000000A"
-    assert pr.state == PRState.OPEN
+    assert pr.state == ReportState.READY

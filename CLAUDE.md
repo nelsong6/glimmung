@@ -34,6 +34,12 @@ Glimmung is the platform a small SDLC operates on top of, across multiple projec
 
 At its best: humans set direction, agents execute in lanes, and the system gracefully handles everything around the work — queue, retry, escalate, abort, surface.
 
+## Current runner direction
+
+GitHub Issues are not part of the live Glimmung issue/run loop. GitHub Issues may still be used as temporary backlog/tracker notes until Glimmung is self-hosting that surface.
+
+For web-native apps, Glimmung is moving off GitHub Actions as the runner source and onto Glimmung-managed Kubernetes Jobs. Keep `gha_dispatch` supported for legacy/exception flows, especially Spirelens for now, but do not route new Ambience-native work through GitHub Actions. GitHub PRs remain a syndication/review target; the canonical Glimmung review object is Report.
+
 ## Frontend / design
 
 Anything that touches the dashboard UI (`frontend/src/`) — new views, new components, copy changes, color tweaks — should follow the design system at `design-system/`.

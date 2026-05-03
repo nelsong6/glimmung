@@ -69,7 +69,7 @@ def test_create_issue_posts_native_issue_payload() -> None:
 def test_create_pr_posts_registration_payload() -> None:
     tools, client = _registered_tools()
 
-    result = tools["create_pr"](
+    result = tools["create_report"](
         project="glimmung",
         repo="nelsong6/glimmung",
         number=123,
@@ -79,7 +79,7 @@ def test_create_pr_posts_registration_payload() -> None:
         linked_run_id="run-1",
     )
 
-    assert result["path"] == "/v1/prs"
+    assert result["path"] == "/v1/reports"
     assert result["json"] == {
         "project": "glimmung",
         "repo": "nelsong6/glimmung",
@@ -93,7 +93,7 @@ def test_create_pr_posts_registration_payload() -> None:
         "linked_issue_id": "issue-1",
         "linked_run_id": "run-1",
     }
-    assert client.calls[-1] == ("POST", "/v1/prs", None, result["json"])
+    assert client.calls[-1] == ("POST", "/v1/reports", None, result["json"])
 
 
 def test_enqueue_signal_posts_drain_loop_payload() -> None:

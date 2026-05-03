@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
-from glimmung import prs as pr_ops
+from glimmung import reports as report_ops
 from glimmung import runs as run_ops
 from glimmung.app import (
     RunCompletedRequest,
@@ -48,7 +48,7 @@ def cosmos():
         runs=FakeContainer("runs", "/project"),
         locks=FakeContainer("locks", "/scope"),
         issues=FakeContainer("issues", "/project"),
-        prs=FakeContainer("prs", "/project"),
+        reports=FakeContainer("reports", "/project"),
     )
 
 
@@ -223,11 +223,11 @@ async def test_pr_primitive_registers_rich_glimmung_pr_and_thin_github_body(cosm
         "number": 77,
         "body": (
             "Closes nelsong6/ambience#117\n\n"
-            "Canonical context: https://glimmung.test/prs/nelsong6/ambience/77"
+            "Canonical context: https://glimmung.test/reports/nelsong6/ambience/77"
         ),
     }]
 
-    found_pr = await pr_ops.find_pr_by_repo_number(
+    found_pr = await report_ops.find_report_by_repo_number(
         cosmos,
         repo="nelsong6/ambience",
         number=77,
