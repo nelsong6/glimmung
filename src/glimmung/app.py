@@ -3729,7 +3729,7 @@ class PrUpdateRequest(BaseModel):
     dependencies=[Depends(require_admin_user)],
 )
 async def list_prs() -> list[PrRow]:
-    """All open PRs across registered projects. Sourced from the Cosmos
+    """All PRs across registered projects. Sourced from the Cosmos
     `prs` container (#50 slice 2 cutover). Bulk-loads `runs` once for
     the linked-Run join + `locks` once for the lock state, mirroring the
     /v1/issues read path's perf shape."""
@@ -3739,7 +3739,7 @@ async def list_prs() -> list[PrRow]:
 async def _list_prs_from_cosmos(cosmos: Cosmos) -> list[PrRow]:
     """Read-path for `/v1/prs`; lifted out so tests can drive it
     directly without standing up a FastAPI client."""
-    prs = await pr_ops.list_open_prs(cosmos)
+    prs = await pr_ops.list_prs(cosmos)
     if not prs:
         return []
 

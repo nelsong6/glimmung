@@ -41,7 +41,7 @@ def cosmos():
 
 
 @pytest.mark.asyncio
-async def test_list_prs_surfaces_open_prs_from_cosmos(cosmos):
+async def test_list_prs_surfaces_prs_from_cosmos(cosmos):
     """Pre-#50 the listing read from `runs` and required a Run with
     pr_number set. Post-#50 it reads `prs` directly — manual PRs without
     a Run still surface."""
@@ -67,7 +67,7 @@ async def test_list_prs_surfaces_open_prs_from_cosmos(cosmos):
 
 
 @pytest.mark.asyncio
-async def test_list_prs_omits_closed(cosmos):
+async def test_list_prs_includes_closed(cosmos):
     pr = await pr_ops.create_pr(
         cosmos, project="ambience", repo="nelsong6/ambience",
         number=12, title="t", branch="b",
@@ -78,7 +78,9 @@ async def test_list_prs_omits_closed(cosmos):
     await pr_ops.close_pr(cosmos, pr=pr, etag=etag)
 
     rows = await _list_prs_from_cosmos(cosmos)
-    assert rows == []
+    assert len(rows) == 1
+    assert rows[0].pr_number == 12
+    assert rows[0].state == "closed"
 
 
 @pytest.mark.asyncio

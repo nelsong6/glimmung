@@ -1,5 +1,5 @@
 /**
- * PRs view — open PRs across registered repos. Each row links to the
+ * PRs view — PRs across registered repos. Each row links to the
  * PR's detail view, where the reject-with-feedback action lives.
  *
  * Post-#50: sourced from `/v1/prs` which reads the glimmung `prs`
@@ -83,7 +83,7 @@ export function PrsView({
   return (
     <>
       <h2>
-        Open PRs{visibleRows ? ` (${visibleRows.length})` : ""}
+        PRs{visibleRows ? ` (${visibleRows.length})` : ""}
         {projectFilter && (
           <span className="filter-hint"> — filtered to {projectFilter}</span>
         )}
@@ -102,8 +102,8 @@ export function PrsView({
       ) : visibleRows && visibleRows.length === 0 ? (
         <div className="empty">
           {projectFilter
-            ? `No open PRs for ${projectFilter}.`
-            : "No open PRs yet."}
+            ? `No PRs for ${projectFilter}.`
+            : "No PRs yet."}
         </div>
       ) : visibleRows ? (
         <table>
@@ -113,6 +113,7 @@ export function PrsView({
               <th>PR</th>
               <th>Title</th>
               <th>Issue</th>
+              <th>Status</th>
               <th>Run state</th>
               <th>Attempts</th>
               <th>Cost</th>
@@ -134,6 +135,11 @@ export function PrsView({
                 <td>{row.title || <span className="dim">—</span>}</td>
                 <td className="mono dim">
                   {row.issue_number !== null ? `#${row.issue_number}` : "—"}
+                </td>
+                <td>
+                  <span className={`pill ${prStatePill(row)}`}>
+                    {row.merged ? "merged" : row.state}
+                  </span>
                 </td>
                 <td>
                   {row.run_state ? (
@@ -170,5 +176,12 @@ function runStatePill(state: string): string {
   if (state === "passed") return "free";
   if (state === "in_progress") return "busy";
   if (state === "aborted") return "drain";
+  return "dim";
+}
+
+function prStatePill(row: PrRow): string {
+  if (row.merged) return "free";
+  if (row.state === "open") return "busy";
+  if (row.state === "closed") return "dim";
   return "dim";
 }

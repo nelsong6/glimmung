@@ -1,7 +1,7 @@
 """Glimmung-native PRs substrate tests (#41).
 
 Backed by the in-memory Cosmos fake. Covers the PR lifecycle (create →
-read → update → close/merge → reopen) plus list-open filtering, the
+read → update → close/merge → reopen) plus list filtering, the
 `find_pr_by_repo_number` helper used by the webhook mirror, and the
 `append_pr_comment` / `append_pr_review` primitives the consumer PR will
 call on inbound conversation events.
@@ -24,6 +24,7 @@ from glimmung.prs import (
     ensure_pr_for_github,
     find_pr_by_repo_number,
     github_pr_url_for,
+    list_prs,
     list_open_prs,
     merge_pr,
     read_pr,
@@ -205,6 +206,18 @@ async def test_reopen_pr_transitions_back_to_open(cosmos):
 
 
 # ─── list_open ────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_list_prs_includes_closed_prs(cosmos):
+    a = await create_pr(cosmos, project="a", repo="r/n", number=1, title="a", branch="b1")
+    b = await create_pr(cosmos, project="a", repo="r/n", number=2, title="b", branch="b2")
+    fetched, etag = await read_pr(cosmos, project="a", pr_id=a.id)
+    await close_pr(cosmos, pr=fetched, etag=etag)
+
+    prs = await list_prs(cosmos, project="a")
+    assert sorted(p.id for p in prs) == sorted([a.id, b.id])
+    assert {p.id: p.state for p in prs}[a.id] == PRState.CLOSED
 
 
 @pytest.mark.asyncio
