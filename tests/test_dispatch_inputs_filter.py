@@ -210,6 +210,43 @@ async def test_triage_metadata_passes_through_workflow_facing_keys(
         assert forwarded in captured["inputs"], f"{forwarded} should forward"
 
 
+@pytest.mark.asyncio
+async def test_native_k8s_job_phase_never_dispatches_github_actions(
+    app_state, monkeypatch,
+):
+    await _seed(app_state, project="ambience", repo="nelsong6/ambience",
+                workflow_name="native-agent", workflow_filename="")
+    doc = await app_state.state.cosmos.workflows.read_item(
+        item="native-agent", partition_key="ambience",
+    )
+    doc["phases"][0]["kind"] = "k8s_job"
+    doc["phases"][0]["jobs"] = [{
+        "id": "agent",
+        "name": None,
+        "image": "runner:latest",
+        "command": [],
+        "args": [],
+        "env": {},
+        "steps": [{"slug": "clone-repo", "title": None}],
+        "timeoutSeconds": None,
+    }]
+    await app_state.state.cosmos.workflows.replace_item(item="native-agent", body=doc)
+
+    calls: list[dict[str, Any]] = []
+    async def fake_dispatch(minter, **kwargs):
+        calls.append(kwargs)
+    monkeypatch.setattr("glimmung.app.dispatch_workflow", fake_dispatch)
+
+    lease = _lease_doc(
+        lease_id="01ABC", project="ambience", workflow="native-agent",
+        metadata={"run_id": "01RUN", "attempt_index": "0"},
+    )
+    dispatched = await _maybe_dispatch_workflow(app_state, lease, _host())
+
+    assert dispatched is True
+    assert calls == []
+
+
 def test_allowlist_is_intentional_not_accidental():
     """If someone widens the allowlist, this assertion forces them to
     update the test too — keeps the contract documented in test code."""

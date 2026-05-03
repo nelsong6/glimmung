@@ -20,7 +20,7 @@ from glimmung.app import (
     patch_workflow_endpoint,
     register_workflow,
 )
-from glimmung.models import PhaseSpec, WorkflowRegister
+from glimmung.models import NativeJobSpec, NativeStepSpec, PhaseSpec, WorkflowRegister
 
 from tests.cosmos_fake import FakeContainer
 
@@ -296,3 +296,69 @@ async def test_register_workflow_2phase_with_inputs_and_outputs(cosmos, monkeypa
         "validation_url": "${{ phases.env-prep.outputs.validation_url }}",
         "image_tag": "${{ phases.env-prep.outputs.image_tag }}",
     }
+
+
+@pytest.mark.asyncio
+async def test_register_workflow_accepts_native_k8s_job_phase(cosmos, monkeypatch):
+    await _seed_project(cosmos, "ambience")
+    monkeypatch.setattr("glimmung.app.app", _app_with(cosmos))
+
+    reg = WorkflowRegister(
+        project="ambience",
+        name="native-agent",
+        phases=[
+            PhaseSpec(
+                name="agent-execute",
+                kind="k8s_job",
+                jobs=[
+                    NativeJobSpec(
+                        id="agent",
+                        image="romainecr.azurecr.io/ambience-runner:abc123",
+                        command=["/app/native-runner"],
+                        steps=[
+                            NativeStepSpec(slug="clone-repo"),
+                            NativeStepSpec(slug="run-agent", title="run agent"),
+                        ],
+                    )
+                ],
+                outputs=["branch"],
+                verify=True,
+            ),
+        ],
+    )
+
+    result = await register_workflow(reg)
+
+    assert result.phases[0].kind == "k8s_job"
+    assert result.phases[0].workflow_filename == ""
+    assert result.phases[0].jobs[0].id == "agent"
+    doc = await _read_workflow(cosmos, "ambience", "native-agent")
+    assert doc["phases"][0]["jobs"][0]["steps"] == [
+        {"slug": "clone-repo", "title": None},
+        {"slug": "run-agent", "title": "run agent"},
+    ]
+
+
+def test_k8s_job_phase_requires_unique_steps():
+    with pytest.raises(ValueError) as excinfo:
+        WorkflowRegister(
+            project="ambience",
+            name="native-agent",
+            phases=[
+                PhaseSpec(
+                    name="agent-execute",
+                    kind="k8s_job",
+                    jobs=[
+                        NativeJobSpec(
+                            id="agent",
+                            image="runner:latest",
+                            steps=[
+                                NativeStepSpec(slug="clone-repo"),
+                                NativeStepSpec(slug="clone-repo"),
+                            ],
+                        )
+                    ],
+                ),
+            ],
+        )
+    assert "step slugs must be unique" in str(excinfo.value)

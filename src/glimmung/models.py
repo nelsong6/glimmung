@@ -39,6 +39,7 @@ class ProjectRegister(BaseModel):
 # per phase kind.
 VERIFY_PHASE_TRIGGERS: frozenset[str] = frozenset({"verify_fail", "verify_malformed"})
 PR_PRIMITIVE_TRIGGERS: frozenset[str] = frozenset({"pr_review_changes_requested"})
+PHASE_KINDS: frozenset[str] = frozenset({"gha_dispatch", "k8s_job"})
 
 
 # Cross-phase input ref expression: `${{ phases.<phase_name>.outputs.<key> }}`.
@@ -155,14 +156,39 @@ class RecyclePolicy(BaseModel):
     lands_at: str = "self"
 
 
+class NativeStepSpec(BaseModel):
+    """App-owned observational step boundary inside a native Kubernetes Job."""
+    slug: str
+    title: str | None = None
+
+
+class NativeJobSpec(BaseModel):
+    """One app-owned native runner Job inside a phase.
+
+    v1 executes jobs sequentially inside the phase. The command/image/env
+    belong to the app's workflow registration; Glimmung supplies universal
+    run context and callback mechanics around it.
+    """
+    id: str
+    name: str | None = None
+    image: str
+    command: list[str] = Field(default_factory=list)
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    steps: list[NativeStepSpec] = Field(default_factory=list)
+    timeout_seconds: int | None = None
+
+
 class PhaseSpec(BaseModel):
-    """One step in a workflow's pipeline. v1 supports `kind="gha_dispatch"`
-    only — phases dispatch a GitHub Actions workflow. `kind="llm"` and other
-    native kinds are reserved.
+    """One phase in a workflow's pipeline.
+
+    `gha_dispatch` phases dispatch a GitHub Actions workflow, preserved for
+    legacy/exception flows. `k8s_job` phases run app-owned native Kubernetes
+    Jobs and expose first-class job/step observations.
 
     Verify is opt-in: when true, the phase emits `verification.json` and the
     decision engine routes through `recycle_policy`. When false, any
-    non-`success` GHA conclusion ends the run (GHA-job semantics) and
+    non-`success` runner conclusion ends the run (job semantics) and
     `recycle_policy` is invalid.
 
     `inputs` and `outputs` plumb data between phases (multi-phase runtime,
@@ -174,13 +200,14 @@ class PhaseSpec(BaseModel):
     validation runs at registration time."""
     name: str
     kind: str = "gha_dispatch"
-    workflow_filename: str
+    workflow_filename: str = ""
     workflow_ref: str = "main"
     inputs: dict[str, str] = Field(default_factory=dict)
     outputs: list[str] = Field(default_factory=list)
     requirements: dict[str, Any] | None = None
     verify: bool = False
     recycle_policy: RecyclePolicy | None = None
+    jobs: list[NativeJobSpec] = Field(default_factory=list)
 
 
 class PrPrimitiveSpec(BaseModel):
@@ -233,10 +260,41 @@ class WorkflowRegister(BaseModel):
         if len(set(names)) != len(names):
             raise ValueError(f"phase names must be unique within a workflow; got {names}")
         for p in self.phases:
-            if p.kind != "gha_dispatch":
+            if p.kind not in PHASE_KINDS:
                 raise ValueError(
-                    f"phase {p.name!r} kind={p.kind!r} not supported in v1 (only 'gha_dispatch')"
+                    f"phase {p.name!r} kind={p.kind!r} not supported in v1 "
+                    f"(valid: {sorted(PHASE_KINDS)})"
                 )
+            if p.kind == "gha_dispatch":
+                if not p.workflow_filename:
+                    raise ValueError(
+                        f"phase {p.name!r} kind='gha_dispatch' requires workflow_filename"
+                    )
+                if p.jobs:
+                    raise ValueError(
+                        f"phase {p.name!r} kind='gha_dispatch' cannot declare native jobs"
+                    )
+            if p.kind == "k8s_job":
+                if not p.jobs:
+                    raise ValueError(
+                        f"phase {p.name!r} kind='k8s_job' must declare at least one job"
+                    )
+                job_ids = [j.id for j in p.jobs]
+                if len(set(job_ids)) != len(job_ids):
+                    raise ValueError(
+                        f"phase {p.name!r} job ids must be unique; got {job_ids}"
+                    )
+                for job in p.jobs:
+                    step_slugs = [s.slug for s in job.steps]
+                    if not step_slugs:
+                        raise ValueError(
+                            f"phase {p.name!r} job {job.id!r} must declare at least one step"
+                        )
+                    if len(set(step_slugs)) != len(step_slugs):
+                        raise ValueError(
+                            f"phase {p.name!r} job {job.id!r} step slugs must be unique; "
+                            f"got {step_slugs}"
+                        )
             if p.recycle_policy is not None:
                 if not p.verify:
                     raise ValueError(
@@ -358,6 +416,55 @@ class VerificationResult(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class NativeStepState(str, Enum):
+    PENDING = "pending"
+    ACTIVE = "active"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class NativeStepAttempt(BaseModel):
+    slug: str
+    title: str | None = None
+    state: NativeStepState = NativeStepState.PENDING
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    exit_code: int | None = None
+    message: str | None = None
+
+
+class NativeJobAttempt(BaseModel):
+    job_id: str
+    name: str | None = None
+    state: NativeStepState = NativeStepState.PENDING
+    steps: list[NativeStepAttempt] = Field(default_factory=list)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    last_seq: int = 0
+
+
+class NativeRunEventType(str, Enum):
+    STEP_STARTED = "step_started"
+    LOG = "log"
+    STEP_COMPLETED = "step_completed"
+    STEP_FAILED = "step_failed"
+
+
+def native_job_attempts_from_specs(jobs: list[NativeJobSpec]) -> list[NativeJobAttempt]:
+    return [
+        NativeJobAttempt(
+            job_id=job.id,
+            name=job.name,
+            steps=[
+                NativeStepAttempt(slug=step.slug, title=step.title)
+                for step in job.steps
+            ],
+        )
+        for job in jobs
+    ]
+
+
 class PhaseAttempt(BaseModel):
     """One dispatch of a phase (or the PR primitive). `phase` is the phase
     name from the workflow's `phases` list, or a glimmung-reserved name for
@@ -366,6 +473,7 @@ class PhaseAttempt(BaseModel):
     and the rollup falls back to `verification.cost_usd`."""
     attempt_index: int                         # 0-based; 0 == initial dispatch
     phase: str                                 # phase name from PhaseSpec.name
+    phase_kind: str = "gha_dispatch"
     workflow_filename: str
     workflow_run_id: int | None = None         # GH Actions run id; populated on completion
     dispatched_at: datetime
@@ -381,6 +489,10 @@ class PhaseAttempt(BaseModel):
     # multi-phase runtime (PR 3 of #101) substitutes these into the next
     # phase's `workflow_dispatch.inputs` per its declared `inputs` refs.
     phase_outputs: dict[str, str] | None = None
+    # Native k8s_job observations. Jobs/steps are initialized from the
+    # workflow registration and then updated by native runner callbacks.
+    jobs: list[NativeJobAttempt] = Field(default_factory=list)
+    log_archive_url: str | None = None
     # Resume primitive (#111) — set when this attempt is a skip-mark
     # synthesized during run resumption, not a real dispatch. The phase
     # didn't actually execute; `phase_outputs` were carried forward from

@@ -128,8 +128,9 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         time, so a typo in `${{ phases.NAME.outputs.KEY }}` surfaces
         before it can corrupt a run.
 
-        `phases` is a list of PhaseSpec dicts; each must declare `name`
-        and `workflow_filename`. Optional fields: `kind` (default
+        `phases` is a list of PhaseSpec dicts; `gha_dispatch` phases
+        declare `workflow_filename`, while `k8s_job` phases declare
+        `jobs` with app-owned `steps`. Optional fields: `kind` (default
         "gha_dispatch"), `workflow_ref`, `inputs`, `outputs`,
         `requirements`, `verify`, `recycle_policy`. `pr` is a
         PrPrimitiveSpec dict (`enabled`, `recycle_policy`); omit for the

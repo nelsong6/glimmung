@@ -43,7 +43,7 @@ from glimmung import runs as run_ops
 from glimmung.budget import resolve_budget
 from glimmung.db import Cosmos, query_all
 from glimmung.locks import LockBusy
-from glimmung.models import BudgetConfig
+from glimmung.models import BudgetConfig, NativeJobSpec, native_job_attempts_from_specs
 
 log = logging.getLogger(__name__)
 
@@ -216,7 +216,9 @@ async def dispatch_run(
             issue_number=issue_number or 0,
             budget=budget,
             initial_phase_name=initial_phase["name"],
-            initial_workflow_filename=initial_phase["workflowFilename"],
+            initial_workflow_filename=_phase_runner_label(initial_phase),
+            initial_phase_kind=initial_phase.get("kind", "gha_dispatch"),
+            initial_jobs=_native_jobs_from_phase_doc(initial_phase),
             issue_lock_holder_id=holder_id,
             trigger_source=trigger_source,
             session_launch_intent=session_launch_intent_from_labels(effective_issue_labels),
@@ -670,3 +672,35 @@ def _budget_from_doc(doc: dict[str, Any] | None) -> BudgetConfig | None:
     if not doc:
         return None
     return BudgetConfig.model_validate(doc)
+
+
+def _phase_runner_label(phase_doc: dict[str, Any]) -> str:
+    return (
+        str(phase_doc.get("workflowFilename") or "")
+        or f"{phase_doc.get('kind', 'gha_dispatch')}:{phase_doc['name']}"
+    )
+
+
+def _native_jobs_from_phase_doc(phase_doc: dict[str, Any]):
+    if phase_doc.get("kind") != "k8s_job":
+        return []
+    jobs = [
+        NativeJobSpec(
+            id=j["id"],
+            name=j.get("name"),
+            image=j["image"],
+            command=list(j.get("command") or []),
+            args=list(j.get("args") or []),
+            env={str(k): str(v) for k, v in (j.get("env") or {}).items()},
+            steps=[
+                {
+                    "slug": s["slug"],
+                    "title": s.get("title"),
+                }
+                for s in (j.get("steps") or [])
+            ],
+            timeout_seconds=j.get("timeoutSeconds"),
+        )
+        for j in (phase_doc.get("jobs") or [])
+    ]
+    return native_job_attempts_from_specs(jobs)
