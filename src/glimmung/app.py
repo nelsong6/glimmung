@@ -3876,6 +3876,31 @@ async def _list_prs_from_cosmos(cosmos: Cosmos) -> list[PrRow]:
 
 
 @app.get(
+    "/v1/prs/by-id/{project}/{pr_id}",
+    response_model=PrDetail,
+)
+async def pr_detail_by_id(
+    project: str = Path(...),
+    pr_id: str = Path(...),
+) -> PrDetail:
+    """Detail view keyed by glimmung PR id. Mirrors the issue-by-id
+    pattern: useful when the caller already has the canonical id and
+    avoids the (repo, number) cross-partition lookup.
+
+    Keep this route above the legacy three-segment GH route. Otherwise
+    FastAPI attempts to parse `/v1/prs/by-id/{project}/{pr_id}` as
+    `{repo_owner}/{repo_name}/{pr_number}` and returns a 422 before this
+    handler can run.
+    """
+    cosmos: Cosmos = app.state.cosmos
+    found = await pr_ops.read_pr(cosmos, project=project, pr_id=pr_id)
+    if found is None:
+        raise HTTPException(404, f"no glimmung PR {project}/{pr_id}")
+    pr, _ = found
+    return await _build_pr_detail(cosmos, pr=pr)
+
+
+@app.get(
     "/v1/prs/{repo_owner}/{repo_name}/{pr_number}",
     response_model=PrDetail,
 )
@@ -3998,25 +4023,6 @@ def _tank_session_launch_url(*, settings: Settings, run: Run, pr: PR) -> str:
     if run.validation_url:
         params["validation_url"] = run.validation_url
     return f"{settings.tank_operator_base_url.rstrip('/')}?{urlencode(params)}"
-
-
-@app.get(
-    "/v1/prs/by-id/{project}/{pr_id}",
-    response_model=PrDetail,
-)
-async def pr_detail_by_id(
-    project: str = Path(...),
-    pr_id: str = Path(...),
-) -> PrDetail:
-    """Detail view keyed by glimmung PR id. Mirrors the issue-by-id
-    pattern: useful when the caller already has the canonical id and
-    avoids the (repo, number) cross-partition lookup."""
-    cosmos: Cosmos = app.state.cosmos
-    found = await pr_ops.read_pr(cosmos, project=project, pr_id=pr_id)
-    if found is None:
-        raise HTTPException(404, f"no glimmung PR {project}/{pr_id}")
-    pr, _ = found
-    return await _build_pr_detail(cosmos, pr=pr)
 
 
 @app.post(
