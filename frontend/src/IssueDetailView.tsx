@@ -37,9 +37,18 @@ type IssueDetail = {
   state: string;
   labels: string[];
   html_url: string | null;
+  comments: IssueComment[];
   last_run_id: string | null;
   last_run_state: string | null;
   issue_lock_held: boolean;
+};
+
+type IssueComment = {
+  id: string;
+  author: string;
+  body: string;
+  created_at: string;
+  updated_at: string;
 };
 
 export type IssueDetailTarget =
@@ -294,6 +303,7 @@ export function IssueDetailView() {
                   setEditing(false);
                   setRefreshTick((t) => t + 1);
                 }}
+                onCommentChanged={() => setRefreshTick((t) => t + 1)}
               />
             )}
             {tab === "the_run" && (
@@ -410,12 +420,14 @@ function DescriptionTab({
   onEdit,
   onCancelEdit,
   onSaved,
+  onCommentChanged,
 }: {
   detail: IssueDetail;
   editing: boolean;
   onEdit: () => void;
   onCancelEdit: () => void;
   onSaved: () => void;
+  onCommentChanged: () => void;
 }) {
   if (editing) {
     return <IssueEditForm detail={detail} onCancel={onCancelEdit} onSaved={onSaved} />;
@@ -444,7 +456,209 @@ function DescriptionTab({
       ) : (
         <div className="empty dim">(no description)</div>
       )}
+      <IssueComments detail={detail} onChanged={onCommentChanged} />
     </>
+  );
+}
+
+function IssueComments({
+  detail,
+  onChanged,
+}: {
+  detail: IssueDetail;
+  onChanged: () => void;
+}) {
+  const [body, setBody] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingBody, setEditingBody] = useState("");
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  const commentsUrl = `/v1/issues/by-id/${encodeURIComponent(detail.project)}/${encodeURIComponent(detail.id)}/comments`;
+
+  const postComment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const text = body.trim();
+    if (!text) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await authedFetch(commentsUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: text }),
+      });
+      if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+      setBody("");
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveEdit = async (commentId: string) => {
+    const text = editingBody.trim();
+    if (!text) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await authedFetch(`${commentsUrl}/${encodeURIComponent(commentId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: text }),
+      });
+      if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+      setEditingId(null);
+      setEditingBody("");
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteComment = async (commentId: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await authedFetch(`${commentsUrl}/${encodeURIComponent(commentId)}`, {
+        method: "DELETE",
+      });
+      if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+      setDeletingId(null);
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="issue-comments">
+      <h2>comments</h2>
+      {detail.comments.length === 0 ? (
+        <div className="empty dim">No comments yet.</div>
+      ) : (
+        <div className="comment-thread">
+          {detail.comments.map((comment) => {
+            const isEditing = editingId === comment.id;
+            const isDeleting = deletingId === comment.id;
+            return (
+              <article className="comment-row" key={comment.id}>
+                <div className="comment-meta">
+                  <span className="mono">{comment.author}</span>
+                  <span className="dim">{formatTimestamp(comment.updated_at)}</span>
+                </div>
+                {isEditing ? (
+                  <div className="comment-edit">
+                    <textarea
+                      value={editingBody}
+                      onChange={(e) => setEditingBody(e.target.value)}
+                      rows={4}
+                      disabled={busy}
+                    />
+                    <div className="comment-actions">
+                      <button
+                        type="button"
+                        className="link"
+                        onClick={() => void saveEdit(comment.id)}
+                        disabled={busy || !editingBody.trim()}
+                      >
+                        save
+                      </button>
+                      <span className="sep">/</span>
+                      <button
+                        type="button"
+                        className="link"
+                        onClick={() => {
+                          setEditingId(null);
+                          setEditingBody("");
+                        }}
+                        disabled={busy}
+                      >
+                        cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <pre className="comment-body">{comment.body}</pre>
+                )}
+                {!isEditing && (
+                  <div className="comment-actions">
+                    <button
+                      type="button"
+                      className="link"
+                      onClick={() => {
+                        setEditingId(comment.id);
+                        setEditingBody(comment.body);
+                        setDeletingId(null);
+                      }}
+                      disabled={busy}
+                    >
+                      edit
+                    </button>
+                    <span className="sep">/</span>
+                    {isDeleting ? (
+                      <>
+                        <button
+                          type="button"
+                          className="link danger-text"
+                          onClick={() => void deleteComment(comment.id)}
+                          disabled={busy}
+                        >
+                          delete?
+                        </button>
+                        <span className="sep">/</span>
+                        <button
+                          type="button"
+                          className="link"
+                          onClick={() => setDeletingId(null)}
+                          disabled={busy}
+                        >
+                          keep
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        className="link danger-text"
+                        onClick={() => {
+                          setDeletingId(comment.id);
+                          setEditingId(null);
+                        }}
+                        disabled={busy}
+                      >
+                        delete
+                      </button>
+                    )}
+                  </div>
+                )}
+              </article>
+            );
+          })}
+        </div>
+      )}
+      <form className="admin-form comment-form" onSubmit={postComment}>
+        <label>
+          <span>comment</span>
+          <textarea
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+            rows={4}
+            disabled={busy}
+          />
+        </label>
+        {error && <div className="error">{error}</div>}
+        <button type="submit" disabled={busy || !body.trim()}>
+          {busy ? "posting…" : "comment"}
+        </button>
+      </form>
+    </section>
   );
 }
 
@@ -1401,4 +1615,10 @@ function runStatePill(state: string): string {
   if (state === "in_progress") return "busy";
   if (state === "aborted") return "drain";
   return "";
+}
+
+function formatTimestamp(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
 }

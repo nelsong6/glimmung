@@ -23,6 +23,7 @@ from glimmung.app import (
     _resolve_signal_pr,
 )
 from glimmung.models import (
+    PRReviewState,
     PRState,
     Signal,
     SignalSource,
@@ -274,6 +275,7 @@ async def test_review_signal_targets_glimmung_pr_id_when_pr_exists(
     with patch("glimmung.app.app", app_state):
         outcome = await _handle_pull_request_review(review_payload)
 
+    assert outcome["mirrored_review"] is True
     sig_id = outcome["enqueued_signal"]
     docs = [d async for d in cosmos.signals.query_items(
         "SELECT * FROM c WHERE c.id = @id",
@@ -284,6 +286,51 @@ async def test_review_signal_targets_glimmung_pr_id_when_pr_exists(
     assert sig["target_type"] == "pr"
     assert sig["target_repo"] == "ambience"        # project name, not GH repo
     assert sig["target_id"] == pr.id               # glimmung PR id, not GH number
+    fetched, _ = await pr_ops.read_pr(cosmos, project="ambience", pr_id=pr.id)
+    assert len(fetched.reviews) == 1
+    mirrored = fetched.reviews[0]
+    assert mirrored.gh_id == 99999
+    assert mirrored.author == "nelsong6"
+    assert mirrored.state == PRReviewState.CHANGES_REQUESTED
+    assert mirrored.body == "this needs another iteration"
+
+
+@pytest.mark.asyncio
+async def test_review_mirror_dedupes_on_redelivery(cosmos, app_state):
+    await _register_project(cosmos, "ambience", "nelsong6/ambience")
+    pr = await pr_ops.create_pr(
+        cosmos, project="ambience", repo="nelsong6/ambience",
+        number=42, title="t", branch="b",
+    )
+    review_payload = {
+        "action": "submitted",
+        "repository": {"full_name": "nelsong6/ambience"},
+        "pull_request": {"number": 42},
+        "review": {
+            "state": "approved",
+            "body": "ship it",
+            "user": {"login": "reviewer"},
+            "id": 12345,
+            "submitted_at": "2026-05-03T02:00:00Z",
+        },
+    }
+    with patch("glimmung.app.app", app_state):
+        first = await _handle_pull_request_review(review_payload)
+        second = await _handle_pull_request_review({
+            **review_payload,
+            "review": {
+                **review_payload["review"],
+                "state": "changes_requested",
+                "body": "redelivery should not replace original",
+            },
+        })
+
+    assert first["mirrored_review"] is True
+    assert second["mirrored_review"] is True
+    fetched, _ = await pr_ops.read_pr(cosmos, project="ambience", pr_id=pr.id)
+    assert len(fetched.reviews) == 1
+    assert fetched.reviews[0].state == PRReviewState.APPROVED
+    assert fetched.reviews[0].body == "ship it"
 
 
 @pytest.mark.asyncio
@@ -304,6 +351,7 @@ async def test_review_signal_falls_back_to_gh_coords_when_no_glimmung_pr(
     with patch("glimmung.app.app", app_state):
         outcome = await _handle_pull_request_review(review_payload)
 
+    assert outcome["mirrored_review"] is False
     sig_id = outcome["enqueued_signal"]
     docs = [d async for d in cosmos.signals.query_items(
         "SELECT * FROM c WHERE c.id = @id",

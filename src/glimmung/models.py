@@ -640,6 +640,17 @@ class IssueMetadata(BaseModel):
     github_issue_number: int | None = None
 
 
+class IssueComment(BaseModel):
+    """One glimmung-authored comment on an Issue. There is no GitHub id:
+    post-#50 the glimmung Issue is canonical and GitHub is not the source
+    for this thread."""
+    id: str
+    author: str
+    body: str
+    created_at: datetime
+    updated_at: datetime
+
+
 class Issue(BaseModel):
     schema_version: int = 1
     id: str                                  # ULID; canonical glimmung-issue-id
@@ -649,6 +660,7 @@ class Issue(BaseModel):
     labels: list[str] = Field(default_factory=list)
     state: IssueState = IssueState.OPEN
     metadata: IssueMetadata = Field(default_factory=IssueMetadata)
+    comments: list[IssueComment] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
     closed_at: datetime | None = None

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { NavLink, Outlet, Route, Routes, useOutletContext } from "react-router-dom";
 import { AdminPanel } from "./AdminPanel";
+import { GraphView } from "./GraphView";
 import { IssueDetailView } from "./IssueDetailView";
 import { IssuesView } from "./IssuesView";
 import { PrDetailView } from "./PrDetailView";
@@ -96,6 +97,7 @@ export function App() {
       <Route path="/_styleguide" element={<StyleguideView />} />
       <Route path="/" element={<Layout />}>
         <Route index element={<CapacityRoute />} />
+        <Route path="graph" element={<GraphRoute />} />
         <Route path="issues" element={<IssuesRoute />} />
         <Route path="issues/:owner/:repo/:n" element={<IssueDetailView />}>
           {/* New tabs (#81): issue / the run / runs. */}
@@ -406,6 +408,9 @@ function Layout() {
             issues
             {inflight.issues && <span className="tab-dot" />}
           </NavLink>
+          <NavLink to="/graph" className={tabLinkClass}>
+            graph
+          </NavLink>
           <NavLink to="/prs" className={tabLinkClass}>
             prs
             {inflight.prs && <span className="tab-dot" />}
@@ -431,6 +436,16 @@ function IssuesRoute() {
   const { signedIn, selected } = useOutletContext<LayoutContext>();
   return (
     <IssuesView
+      signedIn={signedIn}
+      projectFilter={selected.kind === "all" ? null : selected.project}
+    />
+  );
+}
+
+function GraphRoute() {
+  const { signedIn, selected } = useOutletContext<LayoutContext>();
+  return (
+    <GraphView
       signedIn={signedIn}
       projectFilter={selected.kind === "all" ? null : selected.project}
     />

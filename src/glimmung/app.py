@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
+from ulid import ULID
 
 from glimmung import issues as issue_ops
 from glimmung import leases as lease_ops
@@ -20,7 +21,7 @@ from glimmung import prs as pr_ops
 from glimmung import runs as run_ops
 from glimmung import signals as signal_ops
 from glimmung.dispatch import DispatchResult, ResumeResult, dispatch_resumed_run, dispatch_run
-from glimmung.auth import require_admin_user
+from glimmung.auth import User, require_admin_user
 from glimmung.db import Cosmos, query_all
 from glimmung.decision import abort_explanation, decide
 from glimmung.github_app import (
@@ -36,9 +37,12 @@ from glimmung.github_app import (
 from glimmung.locks import LockBusy
 from glimmung.models import (
     PR,
+    PRReview,
+    PRReviewState,
     BudgetConfig,
     Host,
     Issue,
+    IssueComment,
     IssueState,
     Lease,
     LeaseRequest,
@@ -55,6 +59,7 @@ from glimmung.models import (
     Signal,
     SignalEnqueueRequest,
     SignalSource,
+    SignalState,
     SignalTargetType,
     StateSnapshot,
     TriageDecision,
@@ -2528,13 +2533,50 @@ async def _handle_pull_request_review(payload: dict[str, Any]) -> dict[str, Any]
     cosmos: Cosmos = app.state.cosmos
     target_repo = repo
     target_id = str(pr_number)
+    mirrored_review = False
     found = await pr_ops.find_pr_by_repo_number(
         cosmos, repo=repo, number=int(pr_number),
     )
     if found is not None:
-        pr, _ = found
+        pr, etag = found
         target_repo = pr.project
         target_id = pr.id
+        raw_state = str(review.get("state") or PRReviewState.COMMENTED.value).lower()
+        try:
+            review_state = PRReviewState(raw_state)
+        except ValueError:
+            log.warning(
+                "pull_request_review.submitted on %s#%d has unknown state %r; recording as commented",
+                repo, int(pr_number), raw_state,
+            )
+            review_state = PRReviewState.COMMENTED
+        submitted_at_raw = review.get("submitted_at")
+        submitted_at = datetime.now(UTC)
+        if submitted_at_raw:
+            try:
+                submitted_at = datetime.fromisoformat(
+                    str(submitted_at_raw).replace("Z", "+00:00")
+                )
+            except ValueError:
+                log.warning(
+                    "pull_request_review.submitted on %s#%d has invalid submitted_at %r; using now",
+                    repo, int(pr_number), submitted_at_raw,
+                )
+        await pr_ops.append_pr_review(
+            cosmos,
+            pr=pr,
+            etag=etag,
+            review=PRReview(
+                id=str(ULID()),
+                gh_id=review.get("id"),
+                author=(review.get("user") or {}).get("login") or "",
+                state=review_state,
+                body=review.get("body") or "",
+                submitted_at=submitted_at,
+                html_url=review.get("html_url"),
+            ),
+        )
+        mirrored_review = True
 
     sig = await signal_ops.enqueue_signal(
         cosmos,
@@ -2549,7 +2591,7 @@ async def _handle_pull_request_review(payload: dict[str, Any]) -> dict[str, Any]
             "review_id": review.get("id"),
         },
     )
-    return {"enqueued_signal": sig.id}
+    return {"enqueued_signal": sig.id, "mirrored_review": mirrored_review}
 
 
 # ─── Issues view + UI-initiated dispatch (#20) ───────────────────────────────────────
@@ -2585,6 +2627,7 @@ class IssueDetail(BaseModel):
     state: str = "open"
     labels: list[str] = Field(default_factory=list)
     html_url: str | None = None
+    comments: list[IssueComment] = Field(default_factory=list)
     last_run_id: str | None = None
     last_run_state: str | None = None
     issue_lock_held: bool = False
@@ -2606,6 +2649,10 @@ class IssueUpdateRequest(BaseModel):
     body: str | None = None
     labels: list[str] | None = None
     state: str | None = None
+
+
+class IssueCommentRequest(BaseModel):
+    body: str
 
 
 class GraphNode(BaseModel):
@@ -2807,6 +2854,7 @@ async def _build_issue_detail(cosmos: Cosmos, *, issue: Issue) -> IssueDetail:
         state=issue.state.value,
         labels=list(issue.labels),
         html_url=issue.metadata.github_issue_url,
+        comments=list(issue.comments),
     )
     latest_run = await run_ops.find_run_by_issue_id(cosmos, issue_id=issue.id)
     if latest_run is None and number is not None:
@@ -2915,6 +2963,99 @@ async def patch_issue_endpoint(
     return await _build_issue_detail(cosmos, issue=issue)
 
 
+@app.post(
+    "/v1/issues/by-id/{project}/{issue_id}/comments",
+    response_model=IssueComment,
+)
+async def create_issue_comment_endpoint(
+    req: IssueCommentRequest,
+    project: str = Path(...),
+    issue_id: str = Path(...),
+    user: User = Depends(require_admin_user),
+) -> IssueComment:
+    """Append a glimmung-authored Issue comment."""
+    if not req.body.strip():
+        raise HTTPException(400, "body required")
+    cosmos: Cosmos = app.state.cosmos
+    found = await issue_ops.read_issue(cosmos, project=project, issue_id=issue_id)
+    if found is None:
+        raise HTTPException(404, f"no glimmung issue {project}/{issue_id}")
+    issue, etag = found
+    _, _, comment = await issue_ops.add_comment(
+        cosmos,
+        issue=issue,
+        etag=etag,
+        author=user.email,
+        body=req.body,
+    )
+    return comment
+
+
+@app.patch(
+    "/v1/issues/by-id/{project}/{issue_id}/comments/{comment_id}",
+    response_model=IssueComment,
+)
+async def update_issue_comment_endpoint(
+    req: IssueCommentRequest,
+    project: str = Path(...),
+    issue_id: str = Path(...),
+    comment_id: str = Path(...),
+    user: User = Depends(require_admin_user),
+) -> IssueComment:
+    """Edit the signed-in admin's own Issue comment."""
+    if not req.body.strip():
+        raise HTTPException(400, "body required")
+    cosmos: Cosmos = app.state.cosmos
+    found = await issue_ops.read_issue(cosmos, project=project, issue_id=issue_id)
+    if found is None:
+        raise HTTPException(404, f"no glimmung issue {project}/{issue_id}")
+    issue, etag = found
+    existing = next((c for c in issue.comments if c.id == comment_id), None)
+    if existing is None:
+        raise HTTPException(404, f"no issue comment {comment_id}")
+    if existing.author != user.email:
+        raise HTTPException(403, "cannot edit another author's comment")
+    updated = await issue_ops.update_comment(
+        cosmos,
+        issue=issue,
+        etag=etag,
+        comment_id=comment_id,
+        body=req.body,
+    )
+    if updated is None:
+        raise HTTPException(404, f"no issue comment {comment_id}")
+    _, _, comment = updated
+    return comment
+
+
+@app.delete(
+    "/v1/issues/by-id/{project}/{issue_id}/comments/{comment_id}",
+    response_model=IssueDetail,
+    dependencies=[Depends(require_admin_user)],
+)
+async def delete_issue_comment_endpoint(
+    project: str = Path(...),
+    issue_id: str = Path(...),
+    comment_id: str = Path(...),
+) -> IssueDetail:
+    """Delete an Issue comment. Admin-auth gated."""
+    cosmos: Cosmos = app.state.cosmos
+    found = await issue_ops.read_issue(cosmos, project=project, issue_id=issue_id)
+    if found is None:
+        raise HTTPException(404, f"no glimmung issue {project}/{issue_id}")
+    issue, etag = found
+    removed = await issue_ops.remove_comment(
+        cosmos,
+        issue=issue,
+        etag=etag,
+        comment_id=comment_id,
+    )
+    if removed is None:
+        raise HTTPException(404, f"no issue comment {comment_id}")
+    issue, _ = removed
+    return await _build_issue_detail(cosmos, issue=issue)
+
+
 @app.get(
     "/v1/issues/{repo_owner}/{repo_name}/{issue_number}/graph",
     response_model=IssueGraph,
@@ -2933,6 +3074,206 @@ async def issue_graph(
     return await _build_issue_graph(
         app.state.cosmos, repo=repo, issue_number=issue_number,
     )
+
+
+@app.get(
+    "/v1/graph",
+    response_model=IssueGraph,
+    dependencies=[Depends(require_admin_user)],
+)
+async def system_graph(project: str | None = None) -> IssueGraph:
+    """System-wide live graph (#43): every open Issue plus in-flight
+    Runs, open PRs, and pending Signals that currently attach to them."""
+    return await _build_system_graph(app.state.cosmos, project=project)
+
+
+async def _build_system_graph(
+    cosmos: Cosmos, *, project: str | None = None,
+) -> IssueGraph:
+    issues = await issue_ops.list_open_issues(cosmos, project=project)
+    issue_ids = {i.id for i in issues}
+    issue_project_by_id = {i.id: i.project for i in issues}
+    nodes: list[GraphNode] = []
+    edges: list[GraphEdge] = []
+
+    for issue in issues:
+        nodes.append(GraphNode(
+            id=f"issue:{issue.id}",
+            kind="issue",
+            label=issue.title,
+            state=issue.state.value,
+            timestamp=issue.updated_at.isoformat(),
+            metadata={
+                "issue_id": issue.id,
+                "project": issue.project,
+                "repo": issue.metadata.github_issue_repo,
+                "number": issue.metadata.github_issue_number,
+                "html_url": issue.metadata.github_issue_url,
+                "labels": issue.labels,
+            },
+        ))
+
+    run_docs = await query_all(
+        cosmos.runs,
+        "SELECT * FROM c WHERE c.state = @s ORDER BY c.created_at ASC",
+        parameters=[{"name": "@s", "value": RunState.IN_PROGRESS.value}],
+    )
+    runs: list[Run] = []
+    for doc in run_docs:
+        run = Run.model_validate({k: v for k, v in doc.items() if not k.startswith("_")})
+        if run.issue_id not in issue_ids:
+            continue
+        if project is not None and run.project != project:
+            continue
+        runs.append(run)
+        run_node_id = f"run:{run.id}"
+        nodes.append(GraphNode(
+            id=run_node_id,
+            kind="run",
+            label=run.workflow,
+            state=run.state.value,
+            timestamp=run.created_at.isoformat(),
+            metadata={
+                "run_id": run.id,
+                "project": run.project,
+                "workflow": run.workflow,
+                "issue_id": run.issue_id,
+                "validation_url": run.validation_url,
+                "cumulative_cost_usd": run.cumulative_cost_usd,
+                "cloned_from_run_id": run.cloned_from_run_id,
+                "entrypoint_phase": run.entrypoint_phase,
+            },
+        ))
+        edges.append(GraphEdge(
+            source=f"issue:{run.issue_id}",
+            target=run_node_id,
+            kind="spawned",
+        ))
+        previous_attempt_node: str | None = None
+        for attempt in run.attempts:
+            attempt_node_id = f"attempt:{run.id}:{attempt.attempt_index}"
+            nodes.append(GraphNode(
+                id=attempt_node_id,
+                kind="attempt",
+                label=attempt.phase,
+                state=(
+                    "skipped" if attempt.skipped_from_run_id
+                    else attempt.conclusion or "in_progress"
+                ),
+                timestamp=attempt.dispatched_at.isoformat(),
+                metadata={
+                    "run_id": run.id,
+                    "attempt_index": attempt.attempt_index,
+                    "phase": attempt.phase,
+                    "workflow_filename": attempt.workflow_filename,
+                    "workflow_run_id": attempt.workflow_run_id,
+                    "completed_at": attempt.completed_at.isoformat()
+                    if attempt.completed_at else None,
+                    "decision": attempt.decision,
+                    "skipped_from_run_id": attempt.skipped_from_run_id,
+                },
+            ))
+            edges.append(GraphEdge(
+                source=run_node_id if previous_attempt_node is None else previous_attempt_node,
+                target=attempt_node_id,
+                kind="attempted" if previous_attempt_node is None else "retried",
+            ))
+            previous_attempt_node = attempt_node_id
+
+    run_ids = {r.id for r in runs}
+    pr_docs = await query_all(
+        cosmos.prs,
+        "SELECT * FROM c WHERE c.state = @s ORDER BY c.created_at ASC",
+        parameters=[{"name": "@s", "value": PRState.OPEN.value}],
+    )
+    for doc in pr_docs:
+        pr = PR.model_validate({k: v for k, v in doc.items() if not k.startswith("_")})
+        if pr.linked_issue_id not in issue_ids and pr.linked_run_id not in run_ids:
+            continue
+        if project is not None and pr.project != project:
+            continue
+        pr_node_id = f"pr:{pr.id}"
+        nodes.append(GraphNode(
+            id=pr_node_id,
+            kind="pr",
+            label=f"{pr.repo}#{pr.number}",
+            state=pr.state.value,
+            timestamp=pr.updated_at.isoformat(),
+            metadata={
+                "pr_id": pr.id,
+                "project": pr.project,
+                "repo": pr.repo,
+                "number": pr.number,
+                "title": pr.title,
+                "html_url": pr.html_url,
+                "linked_issue_id": pr.linked_issue_id,
+                "linked_run_id": pr.linked_run_id,
+                "review_count": len(pr.reviews),
+                "comment_count": len(pr.comments),
+            },
+        ))
+        if pr.linked_run_id in run_ids:
+            edges.append(GraphEdge(source=f"run:{pr.linked_run_id}", target=pr_node_id, kind="opened"))
+        elif pr.linked_issue_id in issue_ids:
+            edges.append(GraphEdge(source=f"issue:{pr.linked_issue_id}", target=pr_node_id, kind="opened"))
+
+    signal_docs = await query_all(
+        cosmos.signals,
+        "SELECT * FROM c WHERE c.state = @s ORDER BY c.enqueued_at ASC",
+        parameters=[{"name": "@s", "value": SignalState.PENDING.value}],
+    )
+    for doc in signal_docs:
+        sig = Signal.model_validate({k: v for k, v in doc.items() if not k.startswith("_")})
+        target_issue_id: str | None = None
+        target_node: str | None = None
+        if sig.target_type == SignalTargetType.ISSUE and sig.target_id in issue_ids:
+            target_issue_id = sig.target_id
+            target_node = f"issue:{sig.target_id}"
+        elif sig.target_type == SignalTargetType.RUN and sig.target_id in run_ids:
+            run = next(r for r in runs if r.id == sig.target_id)
+            target_issue_id = run.issue_id
+            target_node = f"run:{sig.target_id}"
+        elif (
+            sig.target_type == SignalTargetType.PR
+            and sig.target_repo in issue_project_by_id.values()
+        ):
+            # Post-#50 PR signals target `(project, pr_id)`. If the PR
+            # node is present, attach there; otherwise leave it out of
+            # the system view until a linked PR exists.
+            candidate = f"pr:{sig.target_id}"
+            if any(n.id == candidate for n in nodes):
+                target_node = candidate
+                target_issue_id = next(
+                    (
+                        str(n.metadata.get("linked_issue_id"))
+                        for n in nodes
+                        if n.id == candidate and n.metadata.get("linked_issue_id")
+                    ),
+                    None,
+                )
+        if target_node is None:
+            continue
+        if project is not None and target_issue_id is not None:
+            if issue_project_by_id.get(target_issue_id) != project:
+                continue
+        sig_node_id = f"signal:{sig.id}"
+        nodes.append(GraphNode(
+            id=sig_node_id,
+            kind="signal",
+            label=sig.source.value,
+            state=sig.state.value,
+            timestamp=sig.enqueued_at.isoformat(),
+            metadata={
+                "signal_id": sig.id,
+                "target_type": sig.target_type.value,
+                "target_repo": sig.target_repo,
+                "target_id": sig.target_id,
+                "payload": sig.payload,
+            },
+        ))
+        edges.append(GraphEdge(source=target_node, target=sig_node_id, kind="feedback"))
+
+    return IssueGraph(issue_id="system", nodes=nodes, edges=edges)
 
 
 async def _build_issue_graph(

@@ -13,13 +13,16 @@ from types import SimpleNamespace
 import pytest
 
 from glimmung.issues import (
+    add_comment,
     close_issue,
     create_issue,
     find_issue_by_github_url,
     github_issue_url_for,
     list_open_issues,
     read_issue,
+    remove_comment,
     reopen_issue,
+    update_comment,
     update_issue,
 )
 from glimmung.models import IssueSource, IssueState
@@ -49,6 +52,7 @@ async def test_create_issue_persists_with_open_state_and_defaults(cosmos):
     assert issue.metadata.source == IssueSource.MANUAL
     assert issue.metadata.github_issue_url is None
     assert issue.labels == []
+    assert issue.comments == []
     assert issue.closed_at is None
 
     # Round-trip: read back by id.
@@ -151,6 +155,87 @@ async def test_update_issue_recovers_from_stale_etag_via_retry(cosmos):
 
 
 # ─── close / reopen ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_add_comment_appends_to_issue(cosmos):
+    issue = await create_issue(cosmos, project="ambience", title="t")
+    fetched, etag = await read_issue(cosmos, project="ambience", issue_id=issue.id)
+
+    updated, new_etag, comment = await add_comment(
+        cosmos,
+        issue=fetched,
+        etag=etag,
+        author="nelson@example.com",
+        body="first note",
+    )
+
+    assert new_etag != etag
+    assert len(updated.comments) == 1
+    assert updated.comments[0] == comment
+    assert comment.author == "nelson@example.com"
+    assert comment.body == "first note"
+
+
+@pytest.mark.asyncio
+async def test_update_comment_replaces_body(cosmos):
+    issue = await create_issue(cosmos, project="ambience", title="t")
+    fetched, etag = await read_issue(cosmos, project="ambience", issue_id=issue.id)
+    issue, etag, comment = await add_comment(
+        cosmos, issue=fetched, etag=etag, author="a", body="old",
+    )
+
+    result = await update_comment(
+        cosmos,
+        issue=issue,
+        etag=etag,
+        comment_id=comment.id,
+        body="new",
+    )
+
+    assert result is not None
+    updated, _, updated_comment = result
+    assert len(updated.comments) == 1
+    assert updated.comments[0].body == "new"
+    assert updated_comment.id == comment.id
+    assert updated_comment.created_at == comment.created_at
+    assert updated_comment.updated_at >= comment.updated_at
+
+
+@pytest.mark.asyncio
+async def test_remove_comment_deletes_by_id(cosmos):
+    issue = await create_issue(cosmos, project="ambience", title="t")
+    fetched, etag = await read_issue(cosmos, project="ambience", issue_id=issue.id)
+    issue, etag, comment = await add_comment(
+        cosmos, issue=fetched, etag=etag, author="a", body="first",
+    )
+    issue, etag, keep = await add_comment(
+        cosmos, issue=issue, etag=etag, author="a", body="second",
+    )
+
+    result = await remove_comment(
+        cosmos,
+        issue=issue,
+        etag=etag,
+        comment_id=comment.id,
+    )
+
+    assert result is not None
+    updated, _ = result
+    assert [c.id for c in updated.comments] == [keep.id]
+
+
+@pytest.mark.asyncio
+async def test_comment_ops_return_none_for_missing_comment(cosmos):
+    issue = await create_issue(cosmos, project="ambience", title="t")
+    fetched, etag = await read_issue(cosmos, project="ambience", issue_id=issue.id)
+
+    assert await update_comment(
+        cosmos, issue=fetched, etag=etag, comment_id="missing", body="x",
+    ) is None
+    assert await remove_comment(
+        cosmos, issue=fetched, etag=etag, comment_id="missing",
+    ) is None
 
 
 @pytest.mark.asyncio
