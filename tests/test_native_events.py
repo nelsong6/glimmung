@@ -374,6 +374,71 @@ async def test_native_completion_drives_decision_and_marks_run_passed(cosmos, mo
 
 
 @pytest.mark.asyncio
+async def test_native_step_skipped_is_terminal_and_allows_completion(cosmos, monkeypatch):
+    run = await _seed_native_run(cosmos)
+    monkeypatch.setattr("glimmung.app.app", _app_with(cosmos))
+
+    await native_run_event(
+        NativeRunEventRequest(
+            job_id="agent",
+            seq=1,
+            event=NativeRunEventType.STEP_SKIPPED,
+            step_slug="clone-repo",
+            message="skipped by resume-from-step",
+            metadata={"resume_from_step": "run-agent"},
+        ),
+        request=_request(),
+        project=run.project,
+        run_id=run.id,
+    )
+    await native_run_event(
+        NativeRunEventRequest(
+            job_id="agent",
+            seq=2,
+            event=NativeRunEventType.STEP_STARTED,
+            step_slug="run-agent",
+        ),
+        request=_request(),
+        project=run.project,
+        run_id=run.id,
+    )
+    await native_run_event(
+        NativeRunEventRequest(
+            job_id="agent",
+            seq=3,
+            event=NativeRunEventType.STEP_COMPLETED,
+            step_slug="run-agent",
+            exit_code=0,
+        ),
+        request=_request(),
+        project=run.project,
+        run_id=run.id,
+    )
+
+    result = await native_run_completed(
+        NativeRunCompletedRequest(
+            verification={
+                "schema_version": 1,
+                "status": VerificationStatus.PASS.value,
+                "reasons": [],
+                "evidence_refs": [],
+                "cost_usd": 0.01,
+            },
+        ),
+        request=_request(),
+        project=run.project,
+        run_id=run.id,
+    )
+
+    assert result.decision == "advance"
+    doc = await cosmos.runs.read_item(item=run.id, partition_key=run.project)
+    job = doc["attempts"][0]["jobs"][0]
+    assert job["state"] == "succeeded"
+    assert job["steps"][0]["state"] == "skipped"
+    assert job["steps"][0]["message"] == "skipped by resume-from-step"
+
+
+@pytest.mark.asyncio
 async def test_native_failure_deletes_attempt_secret(cosmos, monkeypatch):
     run = await _seed_native_run(cosmos)
     launcher = _NativeLauncher()
