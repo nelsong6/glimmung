@@ -11,7 +11,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 from azure.core.exceptions import ResourceNotFoundError
-from fastapi import Depends, FastAPI, HTTPException, Path, Request
+from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -3426,7 +3426,11 @@ class DispatchRequest(BaseModel):
     "/v1/issues",
     response_model=list[IssueRow],
 )
-async def list_issues() -> list[IssueRow]:
+async def list_issues(
+    project: str | None = Query(None),
+    repo: str | None = Query(None),
+    limit: int | None = Query(None, ge=1, le=500),
+) -> list[IssueRow]:
     """All open glimmung Issues, across registered projects. Sourced
     from the Cosmos `issues` container — glimmung is the source of
     truth; nothing about GH issue activity flows back. Issues are
@@ -3436,10 +3440,21 @@ async def list_issues() -> list[IssueRow]:
     Labels are surfaced informationally only — they're a courtesy
     syndication surface, not a dispatch primitive. The dispatch button
     on each row is the trigger."""
-    return await _list_issues_from_cosmos(app.state.cosmos)
+    return await _list_issues_from_cosmos(
+        app.state.cosmos,
+        project=project,
+        repo=repo,
+        limit=limit,
+    )
 
 
-async def _list_issues_from_cosmos(cosmos: Cosmos) -> list[IssueRow]:
+async def _list_issues_from_cosmos(
+    cosmos: Cosmos,
+    *,
+    project: str | None = None,
+    repo: str | None = None,
+    limit: int | None = None,
+) -> list[IssueRow]:
     """Read-path for `/v1/issues`; lifted out so tests can drive it
     directly without standing up a FastAPI client. Returns the same
     `(project, -number)` ordering the UI table assumes.
@@ -3452,7 +3467,9 @@ async def _list_issues_from_cosmos(cosmos: Cosmos) -> list[IssueRow]:
     at this scale; if/when the runs container grows large enough that
     a full scan stops fitting in budget, narrow it by `issue_id IN`
     over the open-issue set."""
-    issues = await issue_ops.list_open_issues(cosmos)
+    issues = await issue_ops.list_open_issues(cosmos, project=project)
+    if repo is not None:
+        issues = [i for i in issues if i.metadata.github_issue_repo == repo]
     if not issues:
         return []
 
@@ -3528,6 +3545,8 @@ async def _list_issues_from_cosmos(cosmos: Cosmos) -> list[IssueRow]:
         -(r.number or 0),
         r.id,
     ))
+    if limit is not None:
+        rows = rows[:limit]
     return rows
 
 

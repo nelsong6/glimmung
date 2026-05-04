@@ -40,13 +40,27 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         return client.get(f"/v1/issues/{repo_owner}/{repo_name}/{issue_number}/graph")
 
     @mcp.tool()
-    def list_issues() -> list[dict[str, Any]]:
-        """List all Glimmung issues across projects.
+    def list_issues(
+        project: str | None = None,
+        repo: str | None = None,
+        limit: int | None = 50,
+    ) -> list[dict[str, Any]]:
+        """List Glimmung issues across projects, optionally filtered.
 
         Use to discover issue ids, project names, GitHub-backed issues, and
-        glimmung-native issues before dispatching or patching.
+        glimmung-native issues before dispatching or patching. `project`
+        filters by Glimmung project name, `repo` filters GitHub-backed
+        issues by owner/name, and `limit` caps returned rows.
         """
-        return client.get("/v1/issues")
+        params = {
+            "project": project,
+            "repo": repo,
+            "limit": limit,
+        }
+        return client.get(
+            "/v1/issues",
+            params={k: v for k, v in params.items() if v is not None},
+        )
 
     @mcp.tool()
     def get_report(repo_owner: str, repo_name: str, pr_number: int) -> dict[str, Any]:

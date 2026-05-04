@@ -66,6 +66,31 @@ def test_create_issue_posts_native_issue_payload() -> None:
     assert client.calls[-1] == ("POST", "/v1/issues", None, result["json"])
 
 
+def test_list_issues_passes_filters_and_defaults_limit() -> None:
+    tools, client = _registered_tools()
+
+    tools["list_issues"](project="glimmung", repo="nelsong6/glimmung", limit=10)
+
+    assert client.calls[-1] == (
+        "GET",
+        "/v1/issues",
+        {
+            "project": "glimmung",
+            "repo": "nelsong6/glimmung",
+            "limit": 10,
+        },
+        None,
+    )
+
+
+def test_list_issues_plain_call_caps_results() -> None:
+    tools, client = _registered_tools()
+
+    tools["list_issues"]()
+
+    assert client.calls[-1] == ("GET", "/v1/issues", {"limit": 50}, None)
+
+
 def test_create_pr_posts_registration_payload() -> None:
     tools, client = _registered_tools()
 
