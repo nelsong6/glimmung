@@ -28,7 +28,7 @@ jobs:
             file: Dockerfile
             context: .
           - name: mcp-glimmung
-            file: Dockerfile
+            file: mcp-glimmung/Dockerfile
             context: mcp-glimmung
     steps:
       - name: Checkout
