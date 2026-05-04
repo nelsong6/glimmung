@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # and release endpoints stay unauthenticated — the lease_id is the
     # capability (ULID, unguessable).
     entra_client_id: str = ""
+    # Separate SPA app registration for disposable/dev frontend hosts such as
+    # Frontman live-design environments. Production keeps ENTRA_CLIENT_ID.
+    entra_test_client_id: str = ""
     allowed_emails: str = ""  # comma-separated; auth.py splits + lowercases
 
     # Kubernetes SA-token alternative for admin endpoints — for in-cluster
