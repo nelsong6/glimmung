@@ -638,6 +638,32 @@ async def _cleanup_native_attempt_secret(run: Run, attempt_index: int) -> None:
             "attempt %d",
             run.id, attempt.attempt_index,
         )
+
+
+async def _cancel_native_attempt_jobs(run: Run) -> None:
+    """Ask Kubernetes to terminate active native attempt Jobs.
+
+    The launcher uses a 60-second grace period, after which Kubernetes hard
+    kills any remaining containers. Missing Jobs are treated as already
+    cleaned up.
+    """
+    launcher = getattr(app.state, "native_k8s_launcher", None)
+    if launcher is None:
+        return
+    for attempt in run.attempts:
+        if attempt.phase_kind != "k8s_job":
+            continue
+        try:
+            await launcher.delete_attempt_job(
+                run_id=run.id,
+                attempt_index=attempt.attempt_index,
+                grace_period_seconds=60,
+            )
+        except Exception:
+            log.exception(
+                "native cancel failed deleting Job for run %s attempt %d",
+                run.id, attempt.attempt_index,
+            )
         return
 
 
@@ -2076,6 +2102,7 @@ async def _cancel_lease(
                 gh_cancelled = False
 
     if run is not None and run_etag is not None:
+        await _cancel_native_attempt_jobs(run)
         try:
             await run_ops.mark_aborted(
                 cosmos, run=run, etag=run_etag, reason="cancelled_via_ui",
@@ -2228,6 +2255,7 @@ async def _abort_run(
 
     # 3. Mark the Run aborted.
     if not terminal:
+        await _cancel_native_attempt_jobs(run)
         try:
             await run_ops.mark_aborted(cosmos, run=run, etag=etag, reason=reason)
         except Exception:

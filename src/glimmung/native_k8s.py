@@ -154,6 +154,38 @@ class NativeKubernetesLauncher:
                 return
             raise
 
+    async def delete_attempt_job(
+        self,
+        *,
+        run_id: str,
+        attempt_index: int,
+        grace_period_seconds: int = 60,
+    ) -> None:
+        """Delete the native Kubernetes Job for an attempt.
+
+        Kubernetes sends SIGTERM to the pod and enforces the requested grace
+        period before killing remaining containers, which gives the runner a
+        bounded final-flush window on operator-initiated aborts.
+        """
+        namespace = self._settings.native_runner_namespace
+        job_name = _resource_name("glim", run_id, attempt_index)
+        body = {
+            "apiVersion": "v1",
+            "kind": "DeleteOptions",
+            "propagationPolicy": "Foreground",
+            "gracePeriodSeconds": grace_period_seconds,
+        }
+        try:
+            await self._request(
+                "DELETE",
+                f"/apis/batch/v1/namespaces/{namespace}/jobs/{job_name}",
+                json=body,
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return
+            raise
+
     async def _ensure_run_namespace_access(
         self,
         *,

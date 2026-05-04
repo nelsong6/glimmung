@@ -117,6 +117,7 @@ def test_job_manifest_maps_phase_jobs_to_sequential_pod_containers():
     spec = manifest["spec"]["template"]["spec"]
     assert manifest["spec"]["template"]["metadata"]["labels"]["azure.workload.identity/use"] == "true"
     assert spec["serviceAccountName"] == "glimmung-native-runner"
+
     assert spec["activeDeadlineSeconds"] == 90
     assert spec["initContainers"][0]["name"] == "clone"
     assert spec["containers"][0]["name"] == "agent"
@@ -148,6 +149,31 @@ def test_job_manifest_maps_phase_jobs_to_sequential_pod_containers():
     assert env["GLIMMUNG_ATTEMPT_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == (
         "glim-01krnative-2-token"
     )
+
+
+@pytest.mark.asyncio
+async def test_delete_attempt_job_uses_graceful_foreground_delete():
+    launcher = _RecordingLauncher(_settings())
+
+    await launcher.delete_attempt_job(
+        run_id="01KRNATIVE0000000000000000",
+        attempt_index=2,
+        grace_period_seconds=60,
+    )
+
+    assert launcher.calls == [{
+        "method": "DELETE",
+        "path": (
+            "/apis/batch/v1/namespaces/glimmung-runs/jobs/"
+            "glim-01krnative0000000000000000-2"
+        ),
+        "json": {
+            "apiVersion": "v1",
+            "kind": "DeleteOptions",
+            "propagationPolicy": "Foreground",
+            "gracePeriodSeconds": 60,
+        },
+    }]
 
 
 @pytest.mark.asyncio
