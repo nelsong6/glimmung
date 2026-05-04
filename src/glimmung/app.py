@@ -915,12 +915,12 @@ async def _process_run_completion(
             try:
                 await _open_pr_primitive(run=run, workflow=workflow_model)
             except PRCreateNoDiff as e:
-                log.warning("pr-primitive: no diff for run %s; aborting (%s)", run.id, e)
-                await run_ops.mark_aborted(
+                log.info("pr-primitive: no diff for run %s; review required (%s)", run.id, e)
+                await run_ops.mark_review_required(
                     cosmos, run=run, etag=etag,
                     reason=f"PR primitive: no diff between glimmung/{run.id} and base",
                 )
-                return "abort_no_diff"
+                return "review_required_no_diff"
             except Exception:
                 log.exception("pr-primitive: gh pr create failed for run %s", run.id)
                 await run_ops.mark_aborted(
@@ -1544,10 +1544,10 @@ async def _open_pr_primitive(*, run: Run, workflow: Workflow) -> None:
     body summarizes the run state in Glimmung; GitHub gets a thin pointer
     back to the canonical Glimmung PR row. On success, stamps `pr_number`
     and `pr_branch` on the Run via `link_pr_to_run`. On `PRCreateNoDiff`, the
-    caller turns this into a run-level abort (per #69 v1 — no-diff is a
-    terminal error). On `PRCreateAlreadyExists`, the existing PR's number
-    is recorded and the run continues — supports rewind/recycle paths
-    that re-enter after a PR is already open."""
+    caller marks the Run review_required so a human can inspect the
+    no-diff outcome. On `PRCreateAlreadyExists`, the existing PR's number is
+    recorded and the run continues — supports rewind/recycle paths that
+    re-enter after a PR is already open."""
     cosmos: Cosmos = app.state.cosmos
     minter: GitHubAppTokenMinter | None = app.state.gh_minter
     if minter is None:
@@ -2199,7 +2199,11 @@ async def _abort_run(
         raise HTTPException(404, f"run {run_id} not found in project {project!r}")
 
     run = Run.model_validate(run_ops._strip_meta(run_doc))
-    terminal = run_doc["state"] in (RunState.PASSED.value, RunState.ABORTED.value)
+    terminal = run_doc["state"] in (
+        RunState.PASSED.value,
+        RunState.REVIEW_REQUIRED.value,
+        RunState.ABORTED.value,
+    )
     etag = run_doc["_etag"]
 
     # 2. GH cancel — only if the Run was dispatched (workflow_run_id set).
@@ -3243,7 +3247,7 @@ async def _refresh_playbook_entries(cosmos: Cosmos, playbook: Playbook) -> None:
         if run.state == RunState.PASSED:
             entry.state = PlaybookEntryState.SUCCEEDED
             entry.completed_at = run.updated_at
-        elif run.state == RunState.ABORTED:
+        elif run.state in (RunState.REVIEW_REQUIRED, RunState.ABORTED):
             entry.state = PlaybookEntryState.FAILED
             entry.completed_at = run.updated_at
             entry.metadata = {

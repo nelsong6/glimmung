@@ -24,6 +24,7 @@ from glimmung.app import (
     run_completed,
     run_started,
 )
+from glimmung.github_app import PRCreateNoDiff
 from glimmung.models import (
     BudgetConfig,
     PhaseAttempt,
@@ -96,6 +97,29 @@ async def _register_workflow_with_recycle(
     })
 
 
+async def _register_workflow_with_pr(cosmos, project: str, name: str = "agent") -> None:
+    await cosmos.workflows.create_item({
+        "id": name,
+        "name": name,
+        "project": project,
+        "phases": [{
+            "name": "agent",
+            "kind": "gha_dispatch",
+            "workflowFilename": "agent-run.yml",
+            "workflowRef": "main",
+            "requirements": None,
+            "verify": True,
+            "recyclePolicy": None,
+        }],
+        "pr": {"enabled": True, "recyclePolicy": None},
+        "budget": {"total": 25.0},
+        "triggerLabel": "agent-run",
+        "defaultRequirements": {},
+        "metadata": {},
+        "createdAt": datetime.now(UTC).isoformat(),
+    })
+
+
 async def _seed_run(
     cosmos,
     *,
@@ -129,6 +153,20 @@ async def _seed_run(
     )
     await cosmos.runs.create_item(run.model_dump(mode="json"))
     return run
+
+
+async def _seed_issue_for_run(cosmos, run: Run, title: str = "Fix the ambience picker") -> None:
+    await cosmos.issues.create_item({
+        "id": run.issue_id,
+        "project": run.project,
+        "title": title,
+        "body": "",
+        "state": "open",
+        "labels": [],
+        "source": {"kind": "github", "repo": run.issue_repo, "number": run.issue_number},
+        "created_at": datetime.now(UTC).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
+    })
 
 
 def _workflow_with_pr(project: str, name: str = "agent") -> Workflow:
@@ -1045,6 +1083,49 @@ async def test_completed_marks_passed_after_last_phase(cosmos, app_state_with_se
     final, _ = found  # type: ignore[misc]
     assert final.state == RunState.PASSED
     assert len(final.attempts) == 2  # No new attempt — last phase is terminal.
+
+
+@pytest.mark.asyncio
+async def test_completed_pr_primitive_no_diff_marks_review_required(cosmos):
+    await _register_project(cosmos, "ambience", "nelsong6/ambience")
+    await _register_workflow_with_pr(cosmos, "ambience")
+    run = await _seed_run(
+        cosmos,
+        run_id="01KQTEST_RUN_NODIFF",
+        project="ambience",
+        issue_repo="nelsong6/ambience",
+        issue_number=218,
+    )
+    await _seed_issue_for_run(cosmos, run)
+
+    async def fake_open_pull_request(_minter, **_kwargs):
+        raise PRCreateNoDiff("No commits between main and glimmung/01KQTEST_RUN_NODIFF")
+
+    app_state = SimpleNamespace(
+        state=SimpleNamespace(
+            cosmos=cosmos,
+            settings=SimpleNamespace(glimmung_base_url="https://glimmung.test"),
+            gh_minter=object(),
+        ),
+    )
+    body = RunCompletedRequest(
+        workflow_run_id=1000,
+        conclusion="success",
+        verification=_pass_verification(),
+    )
+    with (
+        patch("glimmung.app.app", app_state),
+        patch("glimmung.app.open_pull_request", fake_open_pull_request),
+    ):
+        result = await run_completed(body, project="ambience", run_id=run.id)
+
+    assert result.decision == "review_required_no_diff"
+    found = await run_ops.read_run(cosmos, project="ambience", run_id=run.id)
+    final, _ = found  # type: ignore[misc]
+    assert final.state == RunState.REVIEW_REQUIRED
+    assert final.abort_reason == (
+        "PR primitive: no diff between glimmung/01KQTEST_RUN_NODIFF and base"
+    )
 
 
 @pytest.mark.asyncio
