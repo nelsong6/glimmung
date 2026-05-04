@@ -97,6 +97,10 @@ def test_job_manifest_maps_phase_jobs_to_sequential_pod_containers():
                 "prod_namespace": "glimmung",
                 "validation_url": "https://preview.invalid",
             },
+            "entrypoint_job_id": "agent",
+            "entrypoint_step_slug": "run-agent",
+            "artifact_refs": {"source": "blob://artifacts/source.tgz"},
+            "context": {"operator_note": "resume at agent step"},
         },
         "requestedAt": datetime.now(UTC).isoformat(),
     }
@@ -125,6 +129,12 @@ def test_job_manifest_maps_phase_jobs_to_sequential_pod_containers():
         "Use the validation URL and make the requested change."
     )
     assert env["GLIMMUNG_INPUT_TARGET_REF"]["value"] == "main"
+    assert env["GLIMMUNG_ENTRYPOINT_JOB_ID"]["value"] == "agent"
+    assert env["GLIMMUNG_ENTRYPOINT_STEP_SLUG"]["value"] == "run-agent"
+    assert env["GLIMMUNG_ARTIFACT_REFS"]["value"] == (
+        '{"source": "blob://artifacts/source.tgz"}'
+    )
+    assert env["GLIMMUNG_CONTEXT"]["value"] == '{"operator_note": "resume at agent step"}'
     assert env["GLIMMUNG_VALIDATION_NAMESPACE"]["value"] == (
         "glim-run-01krnative0000000000000000-2"
     )

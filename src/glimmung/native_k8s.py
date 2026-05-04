@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import re
 import secrets
 from contextlib import suppress
@@ -417,6 +418,16 @@ def _universal_env(
     for key in ("issue_id", "issue_repo", "issue_number", "issue_title", "issue_body"):
         if key in metadata:
             env.append({"name": f"GLIMMUNG_{_env_name(key)}", "value": str(metadata[key])})
+    for key in ("entrypoint_job_id", "entrypoint_step_slug"):
+        if key in metadata:
+            env.append({"name": f"GLIMMUNG_{_env_name(key)}", "value": str(metadata[key])})
+    for key in ("artifact_refs", "context"):
+        value = metadata.get(key)
+        if isinstance(value, dict) and value:
+            env.append({
+                "name": f"GLIMMUNG_{_env_name(key)}",
+                "value": json.dumps(value, sort_keys=True),
+            })
     phase_inputs = metadata.get("phase_inputs") or {}
     if isinstance(phase_inputs, dict):
         for key, value in phase_inputs.items():

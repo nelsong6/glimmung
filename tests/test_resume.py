@@ -25,6 +25,8 @@ from glimmung.app import (
 from glimmung.dispatch import dispatch_resumed_run
 from glimmung.models import (
     BudgetConfig,
+    NativeJobSpec,
+    NativeStepSpec,
     PhaseAttempt,
     Run,
     RunState,
@@ -53,6 +55,8 @@ def settings():
     return SimpleNamespace(
         lease_default_ttl_seconds=14400,  # 4h, matches prod default
         sweep_interval_seconds=60,
+        native_runner_project_concurrency=1,
+        native_runner_global_concurrency=1,
     )
 
 
@@ -104,6 +108,61 @@ async def _seed_workflow_two_phase(cosmos, project: str = "ambience") -> None:
             },
         ],
         "pr": {"enabled": True, "recyclePolicy": None},
+        "budget": {"total": 25.0},
+        "triggerLabel": "agent:run",
+        "defaultRequirements": {"project": project, "role": "agent"},
+        "metadata": {},
+        "createdAt": datetime.now(UTC).isoformat(),
+    })
+
+
+async def _seed_workflow_native_resume(cosmos, project: str = "ambience") -> None:
+    await cosmos.workflows.create_item({
+        "id": "agent-run",
+        "project": project,
+        "name": "agent-run",
+        "phases": [
+            {
+                "name": "env-prep",
+                "kind": "gha_dispatch",
+                "workflowFilename": "env-prep.yml",
+                "workflowRef": "main",
+                "requirements": None,
+                "verify": False,
+                "recyclePolicy": None,
+                "inputs": {},
+                "outputs": ["namespace"],
+            },
+            {
+                "name": "agent-execute",
+                "kind": "k8s_job",
+                "workflowFilename": "",
+                "workflowRef": "main",
+                "requirements": None,
+                "verify": False,
+                "recyclePolicy": None,
+                "inputs": {
+                    "namespace": "${{ phases.env-prep.outputs.namespace }}",
+                },
+                "outputs": [],
+                "jobs": [
+                    NativeJobSpec(
+                        id="clone",
+                        image="runner:clone",
+                        steps=[NativeStepSpec(slug="clone-repo")],
+                    ).model_dump(mode="json"),
+                    NativeJobSpec(
+                        id="agent",
+                        image="runner:agent",
+                        steps=[
+                            NativeStepSpec(slug="install"),
+                            NativeStepSpec(slug="run-agent"),
+                        ],
+                    ).model_dump(mode="json"),
+                ],
+            },
+        ],
+        "pr": {"enabled": False, "recyclePolicy": None},
         "budget": {"total": 25.0},
         "triggerLabel": "agent:run",
         "defaultRequirements": {"project": project, "role": "agent"},
@@ -165,6 +224,22 @@ async def _seed_aborted_run_at_agent_execute(
     )
     await cosmos.runs.create_item(run.model_dump(mode="json"))
     return run
+
+
+async def _occupy_native_capacity(cosmos, project: str = "ambience") -> None:
+    await cosmos.leases.create_item({
+        "id": "01KACTIVE_NATIVE",
+        "project": project,
+        "workflow": "other-run",
+        "host": "native-k8s",
+        "state": "active",
+        "requirements": {},
+        "metadata": {"native_k8s": True, "run_id": "other"},
+        "requestedAt": datetime.now(UTC).isoformat(),
+        "assignedAt": datetime.now(UTC).isoformat(),
+        "releasedAt": None,
+        "ttlSeconds": 14400,
+    })
 
 
 async def _seed_host(cosmos, name: str = "ambience-slot-1") -> None:
@@ -473,6 +548,51 @@ async def test_dispatch_resumed_run_returns_workflow_missing(cosmos, app_state):
         )
 
     assert result.state == "workflow_missing"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_resumed_run_records_native_step_boundary(cosmos, app_state):
+    await _seed_workflow_native_resume(cosmos)
+    prior = await _seed_aborted_run_at_agent_execute(cosmos)
+    await _occupy_native_capacity(cosmos)
+
+    with patch("glimmung.app.app", app_state):
+        result = await dispatch_resumed_run(
+            app_state,
+            project=prior.project,
+            prior_run_id=prior.id,
+            entrypoint_phase="agent-execute",
+            entrypoint_job_id="agent",
+            entrypoint_step_slug="run-agent",
+            input_overrides={"namespace": "preview-override"},
+            artifact_refs={"repo": "blob://artifacts/source.tgz"},
+            context={"operator_note": "resume at agent step"},
+            trigger_source={"kind": "resume_via_test"},
+        )
+
+    assert result.state == "pending"
+    assert result.new_run_id is not None
+    doc = await cosmos.runs.read_item(item=result.new_run_id, partition_key=prior.project)
+    entrypoint = doc["attempts"][1]
+    assert entrypoint["phase"] == "agent-execute"
+    clone_job = entrypoint["jobs"][0]
+    agent_job = entrypoint["jobs"][1]
+    assert clone_job["state"] == "skipped"
+    assert clone_job["steps"][0]["state"] == "skipped"
+    assert agent_job["state"] == "pending"
+    assert agent_job["steps"][0]["slug"] == "install"
+    assert agent_job["steps"][0]["state"] == "skipped"
+    assert agent_job["steps"][1]["slug"] == "run-agent"
+    assert agent_job["steps"][1]["state"] == "pending"
+
+    leases = list(cosmos.leases._items.values())
+    pending = next(d for d in leases if d["id"] != "01KACTIVE_NATIVE")
+    assert pending["state"] == "pending"
+    assert pending["metadata"]["entrypoint_job_id"] == "agent"
+    assert pending["metadata"]["entrypoint_step_slug"] == "run-agent"
+    assert pending["metadata"]["phase_inputs"]["namespace"] == "preview-override"
+    assert pending["metadata"]["artifact_refs"] == {"repo": "blob://artifacts/source.tgz"}
+    assert pending["metadata"]["context"] == {"operator_note": "resume at agent step"}
 
 
 # ─── HTTP endpoint ────────────────────────────────────────────────────────
