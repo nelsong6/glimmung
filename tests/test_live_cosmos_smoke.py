@@ -1,5 +1,5 @@
 import os
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -18,7 +18,7 @@ pytestmark = pytest.mark.skipif(
 @pytest.mark.asyncio
 async def test_live_cosmos_lock_lifecycle_round_trip():
     cosmos = SimpleNamespace(locks=FakeContainer("locks", "scope"))
-    clock = FrozenClock()
+    clock = FrozenClock(start=datetime.now(UTC))
 
     claimed = await claim_lock(
         cosmos, scope="ci-smoke", key="lock", holder_id="ci",
