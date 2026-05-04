@@ -1012,6 +1012,40 @@ async def _dispatch_retry(
         )
         return
 
+    if target_phase.kind == "k8s_job":
+        new_run, new_etag = await run_ops.create_resumed_run(
+            cosmos,
+            prior_run=run,
+            workflow=workflow_model,
+            entrypoint_phase=target_phase.name,
+            issue_lock_holder_id=run.issue_lock_holder_id,
+            trigger_source={
+                "kind": "native_recycle",
+                "cloned_from_run_id": run.id,
+                "phase_name": failing_phase_name,
+                "target_phase": target_phase.name,
+                "decision": RunDecision.RETRY.value,
+            },
+        )
+        await _dispatch_next_phase(
+            run=new_run,
+            etag=new_etag,
+            repo=repo,
+            workflow_model=workflow_model,
+            next_phase=target_phase,
+        )
+        await run_ops.mark_aborted(
+            cosmos,
+            run=run,
+            etag=etag,
+            reason=f"recycled into run {new_run.id} at phase {target_phase.name!r}",
+        )
+        log.info(
+            "dispatched native recycle child run %s from prior run %s phase=%s",
+            new_run.id, run.id, target_phase.name,
+        )
+        return
+
     # Append the next attempt *before* dispatching so a webhook redelivery
     # of the previous completion can detect and skip duplicate decision cycles.
     run, _ = await run_ops.append_attempt(

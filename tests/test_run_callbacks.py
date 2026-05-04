@@ -939,10 +939,42 @@ async def test_retry_dispatch_carries_phase_inputs_to_native_phase(
 
     found = await run_ops.read_run(cosmos, project="ambience", run_id=run.id)
     final, _ = found  # type: ignore[misc]
-    assert final.state == RunState.IN_PROGRESS
-    assert len(final.attempts) == 3
-    assert final.attempts[-1].phase == "agent-execute"
-    assert final.attempts[-1].phase_kind == "k8s_job"
+    assert final.state == RunState.ABORTED
+    assert final.abort_reason is not None
+    assert final.abort_reason.startswith("recycled into run ")
+    assert len(final.attempts) == 2
+
+    runs = await query_all(
+        cosmos.runs,
+        "SELECT * FROM c WHERE c.project = @p",
+        parameters=[{"name": "@p", "value": "ambience"}],
+    )
+    child_docs = [
+        doc for doc in runs
+        if doc.get("cloned_from_run_id") == run.id
+    ]
+    assert len(child_docs) == 1
+    child = Run.model_validate(child_docs[0])
+    assert child.state == RunState.IN_PROGRESS
+    assert child.issue_lock_holder_id == "01HOLDER"
+    assert child.entrypoint_phase == "agent-execute"
+    assert child.trigger_source == {
+        "kind": "native_recycle",
+        "cloned_from_run_id": run.id,
+        "phase_name": "agent-execute",
+        "target_phase": "agent-execute",
+        "decision": "retry",
+    }
+    assert len(child.attempts) == 2
+    assert child.attempts[0].phase == "env-prep"
+    assert child.attempts[0].skipped_from_run_id == run.id
+    assert child.attempts[0].phase_outputs == {
+        "validation_url": "https://preview.example",
+        "namespace": "glim-run-01-test-0",
+        "image_tag": "glim-run-01-test-0",
+    }
+    assert child.attempts[1].phase == "agent-execute"
+    assert child.attempts[1].phase_kind == "k8s_job"
 
     leases = await query_all(
         cosmos.leases,
@@ -951,9 +983,10 @@ async def test_retry_dispatch_carries_phase_inputs_to_native_phase(
     )
     retry_leases = [
         lease for lease in leases
-        if (lease.get("metadata") or {}).get("attempt_index") == "2"
+        if (lease.get("metadata") or {}).get("run_id") == child.id
     ]
     assert len(retry_leases) == 1
+    assert retry_leases[0]["metadata"]["attempt_index"] == "1"
     assert retry_leases[0]["metadata"]["phase_inputs"] == {
         "validation_url": "https://preview.example",
         "namespace": "glim-run-01-test-0",
