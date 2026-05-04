@@ -7,7 +7,7 @@ import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path as FsPath
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import urlencode
 
 from azure.core.exceptions import ResourceNotFoundError
@@ -3201,9 +3201,25 @@ async def register_project(p: ProjectRegister) -> Project:
 
 
 @app.get("/v1/projects", response_model=list[Project])
-async def list_projects() -> list[Project]:
+async def list_projects(
+    name: Annotated[str | None, Query()] = None,
+    github_repo: Annotated[str | None, Query()] = None,
+    limit: Annotated[int | None, Query(ge=1, le=500)] = None,
+) -> list[Project]:
     docs = await query_all(app.state.cosmos.projects, "SELECT * FROM c")
-    return [Project.model_validate(lease_ops._camel_to_snake(d)) for d in docs]
+    rows: list[Project] = []
+    name_needle = name.lower() if name else None
+    repo_needle = github_repo.lower() if github_repo else None
+    for d in docs:
+        project = Project.model_validate(lease_ops._camel_to_snake(d))
+        if name_needle and name_needle not in project.name.lower():
+            continue
+        if repo_needle and repo_needle not in project.github_repo.lower():
+            continue
+        rows.append(project)
+        if limit is not None and len(rows) >= limit:
+            break
+    return rows
 
 
 @app.post("/v1/workflows", response_model=Workflow, dependencies=[Depends(require_admin_user)])
@@ -3223,9 +3239,27 @@ async def register_workflow(w: WorkflowRegister) -> Workflow:
 
 
 @app.get("/v1/workflows", response_model=list[Workflow])
-async def list_workflows() -> list[Workflow]:
+async def list_workflows(
+    project: Annotated[str | None, Query()] = None,
+    name: Annotated[str | None, Query()] = None,
+    trigger_label: Annotated[str | None, Query()] = None,
+    limit: Annotated[int | None, Query(ge=1, le=500)] = None,
+) -> list[Workflow]:
     docs = await query_all(app.state.cosmos.workflows, "SELECT * FROM c")
-    return [_doc_to_workflow(d) for d in docs]
+    rows: list[Workflow] = []
+    name_needle = name.lower() if name else None
+    for d in docs:
+        workflow = _doc_to_workflow(d)
+        if project and workflow.project != project:
+            continue
+        if name_needle and name_needle not in workflow.name.lower():
+            continue
+        if trigger_label and workflow.trigger_label != trigger_label:
+            continue
+        rows.append(workflow)
+        if limit is not None and len(rows) >= limit:
+            break
+    return rows
 
 
 @app.post(
@@ -3260,9 +3294,16 @@ async def create_playbook_endpoint(req: PlaybookCreate) -> Playbook:
 
 @app.get("/v1/playbooks", response_model=list[Playbook])
 async def list_playbooks_endpoint(
-    project: str | None = Query(None),
+    project: Annotated[str | None, Query()] = None,
+    state: Annotated[PlaybookState | None, Query()] = None,
+    limit: Annotated[int | None, Query(ge=1, le=500)] = None,
 ) -> list[Playbook]:
-    return await playbook_ops.list_playbooks(app.state.cosmos, project=project)
+    return await playbook_ops.list_playbooks(
+        app.state.cosmos,
+        project=project,
+        state=state.value if state is not None else None,
+        limit=limit,
+    )
 
 
 @app.get("/v1/playbooks/{project}/{playbook_id}", response_model=Playbook)
@@ -5256,12 +5297,14 @@ async def report_detail(
 async def list_report_versions_endpoint(
     project: str = Path(...),
     report_id: str = Path(...),
+    limit: Annotated[int | None, Query(ge=1, le=500)] = None,
 ) -> list[ReportVersion]:
     """List immutable snapshots for a canonical Glimmung Report."""
     return await _list_report_versions_from_cosmos(
         app.state.cosmos,
         project=project,
         report_id=report_id,
+        limit=limit,
     )
 
 
@@ -5270,12 +5313,13 @@ async def _list_report_versions_from_cosmos(
     *,
     project: str,
     report_id: str,
+    limit: int | None = None,
 ) -> list[ReportVersion]:
     found = await report_ops.read_report(cosmos, project=project, report_id=report_id)
     if found is None:
         raise HTTPException(404, f"no glimmung Report {project}/{report_id}")
     return await report_ops.list_report_versions(
-        cosmos, project=project, report_id=report_id,
+        cosmos, project=project, report_id=report_id, limit=limit,
     )
 
 

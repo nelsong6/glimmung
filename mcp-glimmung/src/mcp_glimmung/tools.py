@@ -104,9 +104,20 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         return client.get(f"/v1/reports/by-id/{project}/{report_id}")
 
     @mcp.tool()
-    def list_report_versions(project: str, report_id: str) -> list[dict[str, Any]]:
-        """List immutable Glimmung report snapshots for one report, newest first."""
-        return client.get(f"/v1/reports/by-id/{project}/{report_id}/versions")
+    def list_report_versions(
+        project: str,
+        report_id: str,
+        limit: int | None = 50,
+    ) -> list[dict[str, Any]]:
+        """List immutable Glimmung report snapshots for one report, newest first.
+
+        `limit` caps returned snapshots.
+        """
+        params = {"limit": limit}
+        return client.get(
+            f"/v1/reports/by-id/{project}/{report_id}/versions",
+            params={k: v for k, v in params.items() if v is not None},
+        )
 
     @mcp.tool()
     def get_report_version(project: str, report_id: str, version: int) -> dict[str, Any]:
@@ -149,9 +160,24 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         return client.get("/v1/state")
 
     @mcp.tool()
-    def list_projects() -> list[dict[str, Any]]:
-        """List configured Glimmung projects and their GitHub repository bindings."""
-        return client.get("/v1/projects")
+    def list_projects(
+        name: str | None = None,
+        github_repo: str | None = None,
+        limit: int | None = 50,
+    ) -> list[dict[str, Any]]:
+        """List configured Glimmung projects and their GitHub repository bindings.
+
+        `name`, `github_repo`, and `limit` narrow large project lists.
+        """
+        params = {
+            "name": name,
+            "github_repo": github_repo,
+            "limit": limit,
+        }
+        return client.get(
+            "/v1/projects",
+            params={k: v for k, v in params.items() if v is not None},
+        )
 
     @mcp.tool()
     def register_project(
@@ -196,13 +222,28 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         )
 
     @mcp.tool()
-    def list_workflows() -> list[dict[str, Any]]:
-        """List Glimmung workflow definitions across projects.
+    def list_workflows(
+        project: str | None = None,
+        name: str | None = None,
+        trigger_label: str | None = None,
+        limit: int | None = 50,
+    ) -> list[dict[str, Any]]:
+        """List Glimmung workflow definitions across projects, optionally filtered.
 
         Use to discover workflow names, phase shapes, trigger labels, PR
         settings, budgets, and requirements before patching or registering.
+        `project`, `name`, `trigger_label`, and `limit` narrow large lists.
         """
-        return client.get("/v1/workflows")
+        params = {
+            "project": project,
+            "name": name,
+            "trigger_label": trigger_label,
+            "limit": limit,
+        }
+        return client.get(
+            "/v1/workflows",
+            params={k: v for k, v in params.items() if v is not None},
+        )
 
     @mcp.tool()
     def create_playbook(
@@ -233,9 +274,18 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         return client.post("/v1/playbooks", json=payload)
 
     @mcp.tool()
-    def list_playbooks(project: str | None = None) -> list[dict[str, Any]]:
-        """List Glimmung Playbooks, optionally scoped to one project."""
-        params = {"project": project} if project is not None else None
+    def list_playbooks(
+        project: str | None = None,
+        state: str | None = None,
+        limit: int | None = 50,
+    ) -> list[dict[str, Any]]:
+        """List Glimmung Playbooks, optionally filtered by project or state."""
+        params = {
+            "project": project,
+            "state": state,
+            "limit": limit,
+        }
+        params = {k: v for k, v in params.items() if v is not None}
         return client.get("/v1/playbooks", params=params)
 
     @mcp.tool()
