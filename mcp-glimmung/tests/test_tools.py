@@ -170,3 +170,47 @@ def test_register_project_and_host_post_admin_payloads() -> None:
         ("POST", "/v1/projects", None, project["json"]),
         ("POST", "/v1/hosts", None, host["json"]),
     ]
+
+
+def test_playbook_tools_call_http_surface() -> None:
+    tools, client = _registered_tools()
+
+    created = tools["create_playbook"](
+        project="glimmung",
+        title="Coordinated rollout",
+        description="storage slice",
+        entries=[{
+            "id": "one",
+            "issue": {
+                "title": "Land substrate",
+                "body": "models and API",
+                "labels": ["issue-agent"],
+            },
+        }],
+        concurrency_limit=1,
+        metadata={"source": "mcp-test"},
+    )
+    tools["list_playbooks"](project="glimmung")
+    tools["get_playbook"]("glimmung", "pb-1")
+
+    assert created["path"] == "/v1/playbooks"
+    assert created["json"] == {
+        "project": "glimmung",
+        "title": "Coordinated rollout",
+        "description": "storage slice",
+        "entries": [{
+            "id": "one",
+            "issue": {
+                "title": "Land substrate",
+                "body": "models and API",
+                "labels": ["issue-agent"],
+            },
+        }],
+        "metadata": {"source": "mcp-test"},
+        "concurrency_limit": 1,
+    }
+    assert client.calls[-3:] == [
+        ("POST", "/v1/playbooks", None, created["json"]),
+        ("GET", "/v1/playbooks", {"project": "glimmung"}, None),
+        ("GET", "/v1/playbooks/glimmung/pb-1", None, None),
+    ]

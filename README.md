@@ -77,6 +77,9 @@ matching surface in the same PR:
 | GET    | `/v1/projects`                    | List projects. |
 | POST   | `/v1/workflows`                   | Register/upsert a workflow under a project. |
 | GET    | `/v1/workflows`                   | List workflows. |
+| POST   | `/v1/playbooks`                   | Create a draft Playbook for a coordinated batch of issue specs. |
+| GET    | `/v1/playbooks`                   | List Playbooks, optionally filtered by project. |
+| GET    | `/v1/playbooks/{project}/{id}`    | Inspect a Playbook. |
 | POST   | `/v1/hosts`                       | Register/update a host. |
 | GET    | `/v1/issues`                      | List open issues across all registered repos (live GH API). |
 | GET    | `/v1/issues/{owner}/{repo}/{n}`   | Issue detail (title, body, labels, last-run, lock state). |
@@ -118,7 +121,7 @@ Lock TTL = `lease_default_ttl_seconds` (4h). Release happens at terminal Run tra
 
 ## Storage
 
-Cosmos DB NoSQL on the shared `infra-cosmos-serverless` account. Database `glimmung`, seven containers (all pre-created by [`tofu/db.tf`](tofu/db.tf)):
+Cosmos DB NoSQL on the shared `infra-cosmos-serverless` account. Database `glimmung`, containers pre-created by [`tofu/db.tf`](tofu/db.tf):
 
 - `projects` (partition key `/name`)
 - `workflows` (partition key `/project`)
@@ -127,6 +130,7 @@ Cosmos DB NoSQL on the shared `infra-cosmos-serverless` account. Database `glimm
 - `runs` (partition key `/project`) — verify-loop run state, see below
 - `locks` (partition key `/scope`) — generic mutual-exclusion primitive, see below
 - `signals` (partition key `/target_repo`) — signal bus for triage / re-entry / future automations, see below
+- `playbooks` (partition key `/project`) — stored operator plans for coordinated issue batches
 
 Runtime pod auth via the `infra-shared-identity` workload identity, which has `Cosmos DB Built-in Data Contributor` at the account scope (granted in [`infra-bootstrap/tofu/cosmos-serverless.tf`](https://github.com/nelsong6/infra-bootstrap/blob/main/tofu/cosmos-serverless.tf)). Container clients are obtained via `get_*_client` (no API call); reads/writes use the data-plane permissions. CREATE DATABASE / CREATE CONTAINER is control-plane and runs only via tofu under the app SP.
 
