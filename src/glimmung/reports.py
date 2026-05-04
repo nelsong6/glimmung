@@ -16,7 +16,7 @@ from azure.cosmos.exceptions import CosmosAccessConditionFailedError, CosmosReso
 from ulid import ULID
 
 from glimmung.db import Cosmos, query_all
-from glimmung.models import Report, ReportComment, ReportReview, ReportState
+from glimmung.models import Report, ReportComment, ReportReview, ReportState, ReportVersion
 
 log = logging.getLogger(__name__)
 
@@ -259,6 +259,89 @@ async def list_reports(
             "SELECT * FROM c ORDER BY c.updated_at DESC",
         )
     return [Report.model_validate(_strip_meta(d)) for d in docs]
+
+
+async def create_report_version(
+    cosmos: Cosmos,
+    *,
+    project: str,
+    report_id: str,
+    title: str,
+    body: str = "",
+    state: ReportState = ReportState.READY,
+    linked_run_id: str | None = None,
+    github_repo: str | None = None,
+    github_pr_number: int | None = None,
+    github_html_url: str | None = None,
+    version: int | None = None,
+) -> ReportVersion:
+    """Append an immutable ReportVersion snapshot.
+
+    If `version` is omitted, the next integer version for the Report is
+    assigned from the current stored history. Callers that mirror an external
+    numbering scheme can pass an explicit version; Cosmos will reject duplicate
+    ids, preserving immutability.
+    """
+    if version is None:
+        versions = await list_report_versions(
+            cosmos, project=project, report_id=report_id,
+        )
+        version = (max((v.version for v in versions), default=0) + 1)
+    if version < 0:
+        raise ValueError("version must be >= 0")
+
+    doc = ReportVersion(
+        id=f"{report_id}.{version}",
+        project=project,
+        report_id=report_id,
+        version=version,
+        state=state,
+        title=title,
+        body=body,
+        linked_run_id=linked_run_id,
+        github_repo=github_repo,
+        github_pr_number=github_pr_number,
+        github_html_url=github_html_url,
+        created_at=_now(),
+    )
+    await cosmos.report_versions.create_item(doc.model_dump(mode="json"))
+    return doc
+
+
+async def list_report_versions(
+    cosmos: Cosmos,
+    *,
+    project: str,
+    report_id: str,
+) -> list[ReportVersion]:
+    """Return immutable ReportVersion snapshots for a Report, newest first."""
+    docs = await query_all(
+        cosmos.report_versions,
+        "SELECT * FROM c WHERE c.project = @p AND c.report_id = @r ORDER BY c.version DESC",
+        parameters=[
+            {"name": "@p", "value": project},
+            {"name": "@r", "value": report_id},
+        ],
+    )
+    return [ReportVersion.model_validate(_strip_meta(d)) for d in docs]
+
+
+async def read_report_version(
+    cosmos: Cosmos,
+    *,
+    project: str,
+    report_id: str,
+    version: int,
+) -> ReportVersion | None:
+    """Point-read one ReportVersion by parent Report and integer version."""
+    try:
+        doc = await cosmos.report_versions.read_item(
+            item=f"{report_id}.{version}",
+            partition_key=project,
+        )
+    except CosmosResourceNotFoundError:
+        return None
+    return ReportVersion.model_validate(_strip_meta(doc))
 
 
 async def find_report_by_repo_number(

@@ -48,6 +48,7 @@ from glimmung.models import (
     Report,
     ReportReview,
     ReportReviewState,
+    ReportVersion,
     BudgetConfig,
     Host,
     Issue,
@@ -4471,6 +4472,18 @@ class ReportUpdateRequest(BaseModel):
     merged_by: str | None = None           # required when state="merged"
 
 
+class ReportVersionCreateRequest(BaseModel):
+    """POST /v1/reports/by-id/{project}/{report_id}/versions body."""
+    title: str
+    body: str = ""
+    state: str = ReportState.READY.value
+    linked_run_id: str | None = None
+    github_repo: str | None = None
+    github_pr_number: int | None = None
+    github_html_url: str | None = None
+    version: int | None = None
+
+
 @app.get(
     "/v1/reports",
     response_model=list[ReportRow],
@@ -4597,6 +4610,67 @@ async def report_detail(
         raise HTTPException(404, f"no glimmung Report for {repo}#{pr_number}")
     pr, _ = found
     return await _build_report_detail(cosmos, pr=pr)
+
+
+@app.get(
+    "/v1/reports/by-id/{project}/{report_id}/versions",
+    response_model=list[ReportVersion],
+)
+async def list_report_versions_endpoint(
+    project: str = Path(...),
+    report_id: str = Path(...),
+) -> list[ReportVersion]:
+    """List immutable snapshots for a canonical Glimmung Report."""
+    return await _list_report_versions_from_cosmos(
+        app.state.cosmos,
+        project=project,
+        report_id=report_id,
+    )
+
+
+async def _list_report_versions_from_cosmos(
+    cosmos: Cosmos,
+    *,
+    project: str,
+    report_id: str,
+) -> list[ReportVersion]:
+    found = await report_ops.read_report(cosmos, project=project, report_id=report_id)
+    if found is None:
+        raise HTTPException(404, f"no glimmung Report {project}/{report_id}")
+    return await report_ops.list_report_versions(
+        cosmos, project=project, report_id=report_id,
+    )
+
+
+@app.get(
+    "/v1/reports/by-id/{project}/{report_id}/versions/{version}",
+    response_model=ReportVersion,
+)
+async def report_version_detail_endpoint(
+    project: str = Path(...),
+    report_id: str = Path(...),
+    version: int = Path(...),
+) -> ReportVersion:
+    """Read one immutable ReportVersion snapshot."""
+    found = await report_ops.read_report(
+        cosmos=app.state.cosmos,
+        project=project,
+        report_id=report_id,
+    )
+    if found is None:
+        raise HTTPException(404, f"no glimmung Report {project}/{report_id}")
+    version_doc = await report_ops.read_report_version(
+        app.state.cosmos,
+        project=project,
+        report_id=report_id,
+        version=version,
+    )
+    if version_doc is None:
+        raise HTTPException(
+            404,
+            f"no glimmung ReportVersion {project}/{report_id}.{version}",
+        )
+    return version_doc
 
 
 async def _build_report_detail(cosmos: Cosmos, *, pr: Report) -> ReportDetail:
@@ -4771,6 +4845,48 @@ async def create_report_endpoint(req: ReportCreateRequest) -> ReportDetail:
             linked_run_id=req.linked_run_id,
         )
     return await _build_report_detail(cosmos, pr=pr)
+
+
+@app.post(
+    "/v1/reports/by-id/{project}/{report_id}/versions",
+    response_model=ReportVersion,
+    dependencies=[Depends(require_admin_user)],
+)
+async def create_report_version_endpoint(
+    req: ReportVersionCreateRequest,
+    project: str = Path(...),
+    report_id: str = Path(...),
+) -> ReportVersion:
+    """Append an immutable ReportVersion snapshot."""
+    cosmos: Cosmos = app.state.cosmos
+    found = await report_ops.read_report(cosmos, project=project, report_id=report_id)
+    if found is None:
+        raise HTTPException(404, f"no glimmung Report {project}/{report_id}")
+    if not req.title.strip():
+        raise HTTPException(400, "title required")
+    try:
+        state = ReportState(req.state)
+    except ValueError:
+        raise HTTPException(
+            400,
+            "state must be 'ready' | 'needs_review' | 'failed' | 'closed' | 'merged'",
+        ) from None
+    try:
+        return await report_ops.create_report_version(
+            cosmos,
+            project=project,
+            report_id=report_id,
+            title=req.title,
+            body=req.body,
+            state=state,
+            linked_run_id=req.linked_run_id,
+            github_repo=req.github_repo,
+            github_pr_number=req.github_pr_number,
+            github_html_url=req.github_html_url,
+            version=req.version,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.patch(

@@ -78,6 +78,16 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         return client.get(f"/v1/reports/by-id/{project}/{report_id}")
 
     @mcp.tool()
+    def list_report_versions(project: str, report_id: str) -> list[dict[str, Any]]:
+        """List immutable Glimmung report snapshots for one report, newest first."""
+        return client.get(f"/v1/reports/by-id/{project}/{report_id}/versions")
+
+    @mcp.tool()
+    def get_report_version(project: str, report_id: str, version: int) -> dict[str, Any]:
+        """Get one immutable Glimmung report snapshot by integer version."""
+        return client.get(f"/v1/reports/by-id/{project}/{report_id}/versions/{version}")
+
+    @mcp.tool()
     def list_reports() -> list[dict[str, Any]]:
         """List all Glimmung reports across projects.
 
@@ -558,6 +568,44 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         if linked_run_id is not None:
             payload["linked_run_id"] = linked_run_id
         return client.post("/v1/reports", json=payload)
+
+    @mcp.tool()
+    def create_report_version(
+        project: str,
+        report_id: str,
+        title: str,
+        body: str = "",
+        state: str = "ready",
+        linked_run_id: str | None = None,
+        github_repo: str | None = None,
+        github_pr_number: int | None = None,
+        github_html_url: str | None = None,
+        version: int | None = None,
+    ) -> dict[str, Any]:
+        """Create an immutable snapshot for a Glimmung report.
+
+        Use after materially changing or syndicating a report to preserve the
+        exact title/body/state and GitHub linkage observed at that point in
+        time. If `version` is omitted, the server assigns the next integer.
+        """
+        payload: dict[str, Any] = {
+            "title": title,
+            "body": body,
+            "state": state,
+        }
+        for k, v in {
+            "linked_run_id": linked_run_id,
+            "github_repo": github_repo,
+            "github_pr_number": github_pr_number,
+            "github_html_url": github_html_url,
+            "version": version,
+        }.items():
+            if v is not None:
+                payload[k] = v
+        return client.post(
+            f"/v1/reports/by-id/{project}/{report_id}/versions",
+            json=payload,
+        )
 
     @mcp.tool()
     def patch_report(
