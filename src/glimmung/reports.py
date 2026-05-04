@@ -245,19 +245,28 @@ async def list_reports(
     cosmos: Cosmos,
     *,
     project: str | None = None,
+    repo: str | None = None,
+    state: ReportState | None = None,
 ) -> list[Report]:
     """Return all Reports, newest-updated first."""
+    predicates: list[str] = []
+    parameters: list[dict[str, Any]] = []
     if project is not None:
-        docs = await query_all(
-            cosmos.reports,
-            "SELECT * FROM c WHERE c.project = @p ORDER BY c.updated_at DESC",
-            parameters=[{"name": "@p", "value": project}],
-        )
-    else:
-        docs = await query_all(
-            cosmos.reports,
-            "SELECT * FROM c ORDER BY c.updated_at DESC",
-        )
+        predicates.append("c.project = @p")
+        parameters.append({"name": "@p", "value": project})
+    if repo is not None:
+        predicates.append("c.repo = @r")
+        parameters.append({"name": "@r", "value": repo})
+    if state is not None:
+        predicates.append("c.state = @s")
+        parameters.append({"name": "@s", "value": state.value})
+
+    where = f" WHERE {' AND '.join(predicates)}" if predicates else ""
+    docs = await query_all(
+        cosmos.reports,
+        f"SELECT * FROM c{where} ORDER BY c.updated_at DESC",
+        parameters=parameters,
+    )
     return [Report.model_validate(_strip_meta(d)) for d in docs]
 
 

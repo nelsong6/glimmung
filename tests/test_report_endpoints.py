@@ -70,6 +70,32 @@ async def test_list_prs_surfaces_prs_from_cosmos(cosmos):
 
 
 @pytest.mark.asyncio
+async def test_list_prs_accepts_filters_and_limit(cosmos):
+    await report_ops.create_report(
+        cosmos, project="ambience", repo="nelsong6/ambience",
+        number=12, title="manual fix", branch="hotfix/12",
+    )
+    target = await report_ops.create_report(
+        cosmos, project="glimmung", repo="nelsong6/glimmung",
+        number=14, title="agent fix", branch="agent/issue-7",
+    )
+    await report_ops.create_report(
+        cosmos, project="glimmung", repo="nelsong6/other",
+        number=16, title="other fix", branch="agent/issue-8",
+    )
+
+    rows = await _list_reports_from_cosmos(
+        cosmos,
+        project="glimmung",
+        repo="nelsong6/glimmung",
+        state=ReportState.READY,
+        limit=1,
+    )
+
+    assert [r.id for r in rows] == [target.id]
+
+
+@pytest.mark.asyncio
 async def test_list_prs_includes_closed(cosmos):
     pr = await report_ops.create_report(
         cosmos, project="ambience", repo="nelsong6/ambience",
