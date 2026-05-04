@@ -78,10 +78,20 @@ def _allowed_service_accounts() -> set[str]:
     return out
 
 
-def _verify_entra_token(token: str) -> dict[str, Any]:
+def _entra_audiences() -> list[str]:
     settings = get_settings()
-    if not settings.entra_client_id:
+    audiences = [
+        value.strip()
+        for value in (settings.entra_client_id, settings.entra_test_client_id)
+        if value.strip()
+    ]
+    if not audiences:
         raise HTTPException(503, "ENTRA_CLIENT_ID not configured")
+    return audiences
+
+
+def _verify_entra_token(token: str) -> dict[str, Any]:
+    audiences = _entra_audiences()
 
     # JWKS lookup parses the unverified header, so a non-JWT bearer raises
     # PyJWTError here too — keep both calls under the same handler so callers
@@ -92,7 +102,7 @@ def _verify_entra_token(token: str) -> dict[str, Any]:
             token,
             signing_key.key,
             algorithms=[_ALG],
-            audience=settings.entra_client_id,
+            audience=audiences,
             options={"verify_iss": False},  # we check issuer regex below
         )
     except jwt.PyJWTError as e:

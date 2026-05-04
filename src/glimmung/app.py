@@ -1929,7 +1929,7 @@ async def healthz() -> dict[str, str]:
 
 
 @app.get("/v1/config")
-async def public_config() -> dict[str, str]:
+async def public_config(request: Request) -> dict[str, str]:
     """Public config consumed by the frontend at bootstrap. The client_id is
     not secret but is operationally managed (rotates on tofu re-create), so
     serve it from here instead of baking into the JS bundle.
@@ -1939,11 +1939,35 @@ async def public_config() -> dict[str, str]:
     audience=entra_client_id. No custom API scope needed (matches the
     tank-operator pattern exactly)."""
     settings = app.state.settings
+    host = _request_host(request)
+    client_id = _frontend_entra_client_id(settings, host)
     return {
-        "entra_client_id": settings.entra_client_id,
+        "entra_client_id": client_id,
         "authority": "https://login.microsoftonline.com/common",
         "tank_operator_base_url": settings.tank_operator_base_url.rstrip("/"),
     }
+
+
+def _request_host(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-host", "")
+    host = (forwarded.split(",", 1)[0] or request.headers.get("host", "")).strip()
+    if host.startswith("["):
+        return host.split("]", 1)[0].lstrip("[").lower()
+    return host.split(":", 1)[0].lower()
+
+
+def _frontend_entra_client_id(settings: Settings, host: str) -> str:
+    if settings.entra_test_client_id and _is_disposable_frontend_host(host):
+        return settings.entra_test_client_id
+    return settings.entra_client_id
+
+
+def _is_disposable_frontend_host(host: str) -> bool:
+    host = host.strip().lower().rstrip(".")
+    return (
+        host == "glimmung.dev.romaine.life"
+        or host.endswith(".glimmung.dev.romaine.life")
+    )
 
 
 @app.get("/v1/artifacts/{blob_path:path}")

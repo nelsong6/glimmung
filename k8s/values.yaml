@@ -93,5 +93,7 @@ externalSecret:
       kvKey: glimmung-github-webhook-secret
     - envVar: ENTRA_CLIENT_ID
       kvKey: glimmung-oauth-client-id
+    - envVar: ENTRA_TEST_CLIENT_ID
+      kvKey: glimmung-oauth-test-client-id
     - envVar: ALLOWED_EMAILS
       kvKey: glimmung-oauth-allowed-emails
