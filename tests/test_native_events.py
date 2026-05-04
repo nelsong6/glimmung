@@ -17,6 +17,7 @@ from glimmung.app import (
     native_run_event,
     native_run_events,
     native_run_failed,
+    native_run_status,
 )
 from glimmung.models import (
     BudgetConfig,
@@ -737,6 +738,37 @@ async def test_native_github_token_requires_bound_attempt_token_and_mints_repo_t
     assert result.token == "repo-token"
     assert result.expires_at == "2030-01-01T00:00:00Z"
     assert minter.calls == [{"repo": "nelsong6/ambience", "permissions": None}]
+
+
+@pytest.mark.asyncio
+async def test_native_status_reports_cancellation_intent(cosmos, monkeypatch):
+    run = await _seed_native_run(cosmos)
+    doc = await cosmos.runs.read_item(item=run.id, partition_key=run.project)
+    doc["attempts"][0]["capability_token_sha256"] = _attempt_token_sha256("secret-token")
+    doc["attempts"][0]["cancel_requested_at"] = "2026-05-04T06:55:00+00:00"
+    doc["attempts"][0]["cancel_reason"] = "cancelled_via_ui"
+    await cosmos.runs.replace_item(item=run.id, body=doc)
+    monkeypatch.setattr("glimmung.app.app", _app_with(cosmos))
+
+    with pytest.raises(HTTPException) as missing:
+        await native_run_status(
+            request=_request(),
+            project=run.project,
+            run_id=run.id,
+        )
+    assert missing.value.status_code == 401
+
+    result = await native_run_status(
+        request=_request("secret-token"),
+        project=run.project,
+        run_id=run.id,
+    )
+
+    assert result.state == RunState.IN_PROGRESS
+    assert result.attempt_index == 0
+    assert result.cancel_requested is True
+    assert result.cancel_reason == "cancelled_via_ui"
+    assert result.cancel_requested_at is not None
 
 
 @pytest.mark.asyncio

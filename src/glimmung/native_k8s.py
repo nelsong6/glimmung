@@ -426,6 +426,10 @@ def _universal_env(
             "value": f"{base_url}/v1/runs/{project}/{run_id}/native/events",
         },
         {
+            "name": "GLIMMUNG_STATUS_URL",
+            "value": f"{base_url}/v1/runs/{project}/{run_id}/native/status",
+        },
+        {
             "name": "GLIMMUNG_COMPLETED_URL",
             "value": f"{base_url}/v1/runs/{project}/{run_id}/native/completed",
         },

@@ -294,7 +294,10 @@ async def test_abort_deletes_native_jobs_with_grace_period(cosmos, minter, monke
     launcher = _RecordingNativeLauncher()
     monkeypatch.setattr(
         "glimmung.app.app",
-        SimpleNamespace(state=SimpleNamespace(native_k8s_launcher=launcher)),
+        SimpleNamespace(state=SimpleNamespace(
+            cosmos=cosmos,
+            native_k8s_launcher=launcher,
+        )),
     )
     run = Run(
         id="run-1",
@@ -332,7 +335,11 @@ async def test_abort_deletes_native_jobs_with_grace_period(cosmos, minter, monke
     assert result.state == "aborted"
     assert launcher.deleted_jobs == [
         {"run_id": "run-1", "attempt_index": 0, "grace_period_seconds": 60},
+        {"run_id": "run-1", "attempt_index": 1, "grace_period_seconds": 60},
     ]
+    run_doc = await cosmos.runs.read_item(item="run-1", partition_key="p")
+    assert run_doc["attempts"][1]["cancel_requested_at"] is not None
+    assert run_doc["attempts"][1]["cancel_reason"] == "cleanup"
 
 
 # ─── aborted (with GH cancel) ─────────────────────────────────────────

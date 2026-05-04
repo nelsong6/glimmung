@@ -640,13 +640,31 @@ async def _cleanup_native_attempt_secret(run: Run, attempt_index: int) -> None:
         )
 
 
-async def _cancel_native_attempt_jobs(run: Run) -> None:
+async def _cancel_native_attempt_jobs(run: Run, *, reason: str) -> None:
     """Ask Kubernetes to terminate active native attempt Jobs.
 
     The launcher uses a 60-second grace period, after which Kubernetes hard
     kills any remaining containers. Missing Jobs are treated as already
     cleaned up.
     """
+    if not any(attempt.phase_kind == "k8s_job" for attempt in run.attempts):
+        return
+
+    cosmos: Cosmos | None = getattr(app.state, "cosmos", None)
+    if cosmos is not None:
+        found = await run_ops.read_run(cosmos, project=run.project, run_id=run.id)
+        if found is not None:
+            current_run, current_etag = found
+            try:
+                run, _ = await run_ops.request_latest_native_attempt_cancel(
+                    cosmos,
+                    run=current_run,
+                    etag=current_etag,
+                    reason=reason,
+                )
+            except Exception:
+                log.exception("native cancel failed recording intent for run %s", run.id)
+
     launcher = getattr(app.state, "native_k8s_launcher", None)
     if launcher is None:
         return
@@ -664,7 +682,6 @@ async def _cancel_native_attempt_jobs(run: Run) -> None:
                 "native cancel failed deleting Job for run %s attempt %d",
                 run.id, attempt.attempt_index,
             )
-        return
 
 
 async def _archive_native_attempt_logs(
@@ -2102,7 +2119,7 @@ async def _cancel_lease(
                 gh_cancelled = False
 
     if run is not None and run_etag is not None:
-        await _cancel_native_attempt_jobs(run)
+        await _cancel_native_attempt_jobs(run, reason="cancelled_via_ui")
         try:
             await run_ops.mark_aborted(
                 cosmos, run=run, etag=run_etag, reason="cancelled_via_ui",
@@ -2255,7 +2272,7 @@ async def _abort_run(
 
     # 3. Mark the Run aborted.
     if not terminal:
-        await _cancel_native_attempt_jobs(run)
+        await _cancel_native_attempt_jobs(run, reason=reason)
         try:
             await run_ops.mark_aborted(cosmos, run=run, etag=etag, reason=reason)
         except Exception:
@@ -2439,6 +2456,16 @@ class NativeRunLogsResponse(BaseModel):
     job_id: str | None = None
     events: list[NativeRunLogEvent]
     archive_url: str | None = None
+
+
+class NativeRunStatusResponse(BaseModel):
+    project: str
+    run_id: str
+    state: RunState
+    attempt_index: int
+    cancel_requested: bool = False
+    cancel_requested_at: datetime | None = None
+    cancel_reason: str | None = None
 
 
 class NativeRunCompletedRequest(BaseModel):
@@ -2678,6 +2705,37 @@ async def native_run_events(
         job_id=job_id,
         events=[NativeRunLogEvent.model_validate(d) for d in docs],
         archive_url=archive_url,
+    )
+
+
+@app.get(
+    "/v1/runs/{project}/{run_id}/native/status",
+    response_model=NativeRunStatusResponse,
+)
+async def native_run_status(
+    request: Request,
+    project: str = Path(...),
+    run_id: str = Path(...),
+) -> NativeRunStatusResponse:
+    """Runner-observable native run status, including cancellation intent."""
+    cosmos: Cosmos = app.state.cosmos
+    found = await run_ops.read_run(cosmos, project=project, run_id=run_id)
+    if found is None:
+        raise HTTPException(404, f"no run {project}/{run_id}")
+    run, _etag = found
+    _require_native_attempt_token(request, run)
+    if not run.attempts or run.attempts[-1].phase_kind != "k8s_job":
+        raise HTTPException(409, f"run {run.id} latest attempt is not native")
+
+    attempt = run.attempts[-1]
+    return NativeRunStatusResponse(
+        project=project,
+        run_id=run_id,
+        state=run.state,
+        attempt_index=attempt.attempt_index,
+        cancel_requested=attempt.cancel_requested_at is not None,
+        cancel_requested_at=attempt.cancel_requested_at,
+        cancel_reason=attempt.cancel_reason,
     )
 
 

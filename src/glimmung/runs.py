@@ -402,6 +402,28 @@ async def record_log_archive_url(
     return await _retry_on_conflict(cosmos, run, etag, apply)
 
 
+async def request_latest_native_attempt_cancel(
+    cosmos: Cosmos,
+    *,
+    run: Run,
+    etag: str,
+    reason: str,
+) -> tuple[Run, str]:
+    """Record operator cancellation intent on the latest native attempt."""
+    def apply(r: Run) -> Run:
+        if not r.attempts:
+            raise RuntimeError(f"run {r.id} has no attempts to cancel")
+        attempt = r.attempts[-1]
+        if attempt.phase_kind != "k8s_job":
+            return r
+        if attempt.cancel_requested_at is None:
+            attempt.cancel_requested_at = _now()
+        if not attempt.cancel_reason:
+            attempt.cancel_reason = reason
+        return r.model_copy(update={"updated_at": _now()})
+    return await _retry_on_conflict(cosmos, run, etag, apply)
+
+
 async def record_completion(
     cosmos: Cosmos,
     *,
