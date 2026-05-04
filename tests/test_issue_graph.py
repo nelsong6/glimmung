@@ -305,6 +305,71 @@ async def test_graph_renders_issue_run_attempts(cosmos, app_state):
     assert native_attempt.metadata["log_archive_url"].endswith("/native-events.json")
 
 
+@pytest.mark.asyncio
+async def test_graph_renders_report_terminal_node_for_run(cosmos, app_state):
+    issue_id = await _seed_issue(cosmos)
+    now = _now()
+    run = Run(
+        id="01KQGRAPH_REPORT_RUN",
+        project="ambience",
+        workflow="agent-run",
+        issue_id=issue_id,
+        issue_repo="nelsong6/ambience",
+        issue_number=116,
+        state=RunState.PASSED,
+        budget=BudgetConfig(total=25.0),
+        attempts=[
+            PhaseAttempt(
+                attempt_index=0,
+                phase="agent-execute",
+                workflow_filename="agent-execute.yml",
+                dispatched_at=now,
+                completed_at=now,
+                conclusion="success",
+            ),
+        ],
+        pr_number=42,
+        pr_branch="glimmung/01KQGRAPH_REPORT_RUN",
+        created_at=now,
+        updated_at=now,
+    )
+    await _seed_run(cosmos, run)
+    report = Report(
+        id="01KQREPORTNODE",
+        project="ambience",
+        repo="nelsong6/ambience",
+        number=42,
+        title="Report terminal",
+        branch="glimmung/01KQGRAPH_REPORT_RUN",
+        head_sha="abc123",
+        html_url="https://github.com/nelsong6/ambience/pull/42",
+        linked_issue_id=issue_id,
+        linked_run_id=run.id,
+        state=ReportState.READY,
+        created_at=now,
+        updated_at=now,
+    )
+    await _seed_pr(cosmos, report)
+
+    graph = await _build_issue_graph(
+        cosmos, repo="nelsong6/ambience", issue_number=116,
+    )
+
+    report_node = next(n for n in graph.nodes if n.id == "pr:01KQREPORTNODE")
+    assert report_node.kind == "pr"
+    assert report_node.label == "Report #42"
+    assert report_node.metadata["report_id"] == "01KQREPORTNODE"
+    run_node = next(n for n in graph.nodes if n.id == f"run:{run.id}")
+    assert run_node.metadata["report_id"] == "01KQREPORTNODE"
+    assert run_node.metadata["report_state"] == "ready"
+    assert any(
+        e.source == f"run:{run.id}"
+        and e.target == "pr:01KQREPORTNODE"
+        and e.kind == "opened"
+        for e in graph.edges
+    )
+
+
 # ─── Resume case ──────────────────────────────────────────────────────────
 
 

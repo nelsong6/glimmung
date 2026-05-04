@@ -937,6 +937,9 @@ function PipelineDag({
 }) {
   const phases = useMemo(() => phaseNodesForRun(graph, run), [graph, run]);
   const meta = run.metadata;
+  const reportId = stringOrNull(meta.report_id);
+  const reportState = stringOrNull(meta.report_state);
+  const reportTitle = stringOrNull(meta.report_title);
   const prNumber = numberOrNull(meta.pr_number);
   const prBranch = stringOrNull(meta.pr_branch);
   return (
@@ -954,14 +957,15 @@ function PipelineDag({
       <div className="dag-edge" aria-hidden="true">→</div>
       <button
         type="button"
-        className={`dag-node dag-node-pr${prNumber ? " opened" : " pending"}${selectedNodeId === "pr" ? " selected" : ""}`}
+        className={`dag-node dag-node-pr${reportId || prNumber ? " opened" : " pending"}${selectedNodeId === "pr" ? " selected" : ""}`}
         onClick={() => onSelectNode(selectedNodeId === "pr" ? null : "pr")}
         aria-pressed={selectedNodeId === "pr"}
       >
-        <div className="dag-node-label">pr</div>
+        <div className="dag-node-label">report</div>
         <div className="dag-node-state mono">
-          {prNumber ? `#${prNumber}` : prBranch ? prBranch : "pending"}
+          {reportState ?? (prNumber ? `#${prNumber}` : prBranch ? prBranch : "pending")}
         </div>
+        {reportTitle && <div className="dag-node-meta dim mono">{reportTitle}</div>}
       </button>
     </div>
   );
@@ -1074,15 +1078,19 @@ function DrillIn({
   if (nodeId === null) return null;
   const meta = run.metadata;
   if (nodeId === "pr") {
+    const reportId = stringOrNull(meta.report_id);
+    const reportState = stringOrNull(meta.report_state);
+    const reportTitle = stringOrNull(meta.report_title);
+    const reportUrl = stringOrNull(meta.report_url);
     const prNumber = numberOrNull(meta.pr_number);
     const prBranch = stringOrNull(meta.pr_branch);
     return (
       <div className="run-panel">
         <div className="run-panel-header">
           <div>
-            <strong>pr</strong>
-            <span className={`pill ${prNumber ? "free" : ""}`} style={{ marginLeft: "0.5rem" }}>
-              {prNumber ? "opened" : "pending"}
+            <strong>report</strong>
+            <span className={`pill ${reportId || prNumber ? "free" : ""}`} style={{ marginLeft: "0.5rem" }}>
+              {reportState ?? (prNumber ? "opened" : "pending")}
             </span>
           </div>
           <button type="button" className="link" onClick={onClose}>
@@ -1090,15 +1098,26 @@ function DrillIn({
           </button>
         </div>
         <div className="run-panel-meta">
+          {reportId && (
+            <div>
+              <span className="key">report</span>{" "}
+              <span className="mono" title={reportId}>{reportId.slice(0, 8)}…</span>
+            </div>
+          )}
+          {reportTitle && (
+            <div>
+              <span className="key">title</span> <span>{reportTitle}</span>
+            </div>
+          )}
           {prNumber !== null && repo ? (
             <div>
               <span className="key">PR</span>{" "}
-              <a className="mono" href={`https://github.com/${repo}/pull/${prNumber}`} target="_blank" rel="noreferrer">
+              <a className="mono" href={reportUrl || `https://github.com/${repo}/pull/${prNumber}`} target="_blank" rel="noreferrer">
                 #{prNumber}
               </a>
             </div>
           ) : (
-            <div className="dim mono">No PR opened yet for this run.</div>
+            <div className="dim mono">No report opened yet for this run.</div>
           )}
           {prBranch && (
             <div>

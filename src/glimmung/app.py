@@ -4474,6 +4474,28 @@ async def _build_issue_graph(
     }
     run_ids = {d["id"] for d in run_docs}
 
+    report_docs = await query_all(
+        cosmos.reports,
+        "SELECT * FROM c WHERE c.project = @p",
+        parameters=[{"name": "@p", "value": issue.project}],
+    )
+    reports: list[Report] = []
+    for doc in report_docs:
+        report = Report.model_validate({
+            k: v for k, v in doc.items() if not k.startswith("_")
+        })
+        if (
+            report.linked_issue_id == issue.id
+            or (report.linked_run_id is not None and report.linked_run_id in run_ids)
+            or (report.repo == repo and report.number in pr_numbers)
+        ):
+            reports.append(report)
+    reports.sort(key=lambda p: p.created_at)
+    report_by_run_id = {
+        p.linked_run_id: p for p in reports if p.linked_run_id is not None
+    }
+    report_by_number = {p.number: p for p in reports if p.repo == repo}
+
     # All signals on this repo; filter in-memory to those targeting the
     # issue / one of its PRs / one of its Runs. Cross-partition but
     # signals is small so this is cheap.
@@ -4520,6 +4542,38 @@ async def _build_issue_graph(
     ))
 
     pr_node_by_number: dict[int, str] = {}
+    pr_node_by_run_id: dict[str, str] = {}
+    issue_report_nodes: list[str] = []
+    for pr in reports:
+        pr_id = f"pr:{pr.id}"
+        nodes.append(GraphNode(
+            id=pr_id,
+            kind="pr",
+            label=f"Report #{pr.number}",
+            state=pr.state.value,
+            timestamp=pr.updated_at.isoformat(),
+            metadata={
+                "report_id": pr.id,
+                "project": pr.project,
+                "repo": pr.repo,
+                "number": pr.number,
+                "title": pr.title,
+                "branch": pr.branch,
+                "base_ref": pr.base_ref,
+                "head_sha": pr.head_sha,
+                "html_url": pr.html_url,
+                "linked_issue_id": pr.linked_issue_id,
+                "linked_run_id": pr.linked_run_id,
+                "review_count": len(pr.reviews),
+                "comment_count": len(pr.comments),
+            },
+        ))
+        pr_node_by_number[pr.number] = pr_id
+        if pr.linked_run_id:
+            pr_node_by_run_id[pr.linked_run_id] = pr_id
+        elif pr.linked_issue_id == issue.id:
+            issue_report_nodes.append(pr_id)
+
     for d in run_docs:
         prn = d.get("pr_number")
         if prn is None:
@@ -4543,6 +4597,9 @@ async def _build_issue_graph(
     for d in run_docs:
         run_id = d["id"]
         run_node_id = f"run:{run_id}"
+        linked_report = report_by_run_id.get(run_id)
+        if linked_report is None and d.get("pr_number") is not None:
+            linked_report = report_by_number.get(int(d["pr_number"]))
         nodes.append(GraphNode(
             id=run_node_id,
             kind="run",
@@ -4557,6 +4614,10 @@ async def _build_issue_graph(
                 "issue_lock_holder_id": d.get("issue_lock_holder_id"),
                 "pr_number": d.get("pr_number"),
                 "pr_branch": d.get("pr_branch"),
+                "report_id": linked_report.id if linked_report else None,
+                "report_state": linked_report.state.value if linked_report else None,
+                "report_title": linked_report.title if linked_report else None,
+                "report_url": linked_report.html_url if linked_report else None,
                 # Resume primitive (#111) — surface the lineage pointers
                 # so the dashboard can render the Run-lineage tree
                 # (parent-child across resume-spawned Runs) and the
@@ -4622,12 +4683,21 @@ async def _build_issue_graph(
             prev_attempt_node = attempt_node_id
 
         prn = d.get("pr_number")
-        if prn is not None:
+        if run_id in pr_node_by_run_id:
+            edges.append(GraphEdge(
+                source=run_node_id,
+                target=pr_node_by_run_id[run_id],
+                kind="opened",
+            ))
+        elif prn is not None:
             edges.append(GraphEdge(
                 source=run_node_id,
                 target=pr_node_by_number[int(prn)],
                 kind="opened",
             ))
+
+    for pr_id in issue_report_nodes:
+        edges.append(GraphEdge(source=issue_node_id, target=pr_id, kind="opened"))
 
     for s in relevant_signals:
         sig_node_id = f"signal:{s['id']}"
