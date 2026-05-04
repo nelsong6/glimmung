@@ -15,6 +15,7 @@ from glimmung.app import (
     native_github_token,
     native_run_completed,
     native_run_event,
+    native_run_events,
     native_run_failed,
 )
 from glimmung.models import (
@@ -229,6 +230,47 @@ async def test_native_step_events_update_run_and_persist_ordered_logs(cosmos, mo
         partition_key=run.project,
     )
     assert log_doc["message"] == "cloned main"
+
+
+@pytest.mark.asyncio
+async def test_native_run_events_read_hot_logs_in_order(cosmos, monkeypatch):
+    run = await _seed_native_run(cosmos)
+    monkeypatch.setattr("glimmung.app.app", _app_with(cosmos))
+
+    for seq, event, step, message in [
+        (2, NativeRunEventType.LOG, "clone-repo", "cloned main"),
+        (1, NativeRunEventType.STEP_STARTED, "clone-repo", ""),
+        (3, NativeRunEventType.STEP_COMPLETED, "clone-repo", ""),
+    ]:
+        await native_run_event(
+            NativeRunEventRequest(
+                job_id="agent",
+                seq=seq,
+                event=event,
+                step_slug=step,
+                message=message,
+                exit_code=0 if event == NativeRunEventType.STEP_COMPLETED else None,
+            ),
+            request=_request(),
+            project=run.project,
+            run_id=run.id,
+        )
+
+    result = await native_run_events(
+        project=run.project,
+        run_id=run.id,
+        attempt_index=0,
+        job_id=None,
+        limit=None,
+    )
+
+    assert result.project == "ambience"
+    assert result.run_id == run.id
+    assert result.attempt_index == 0
+    assert result.archive_url is None
+    assert [e.seq for e in result.events] == [1, 2, 3]
+    assert result.events[1].event == NativeRunEventType.LOG
+    assert result.events[1].message == "cloned main"
 
 
 @pytest.mark.asyncio

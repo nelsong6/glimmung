@@ -2350,6 +2350,31 @@ class NativeRunEventResult(BaseModel):
     accepted: bool = True
 
 
+class NativeRunLogEvent(BaseModel):
+    id: str
+    project: str
+    run_id: str
+    attempt_index: int
+    phase: str
+    job_id: str
+    seq: int
+    event: NativeRunEventType
+    step_slug: str = ""
+    message: str = ""
+    exit_code: int | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: str
+
+
+class NativeRunLogsResponse(BaseModel):
+    project: str
+    run_id: str
+    attempt_index: int | None = None
+    job_id: str | None = None
+    events: list[NativeRunLogEvent]
+    archive_url: str | None = None
+
+
 class NativeRunCompletedRequest(BaseModel):
     conclusion: str = "success"
     verification: dict[str, Any] | None = None
@@ -2538,6 +2563,56 @@ async def native_run_event(
     except native_event_ops.NativeEventError as e:
         raise HTTPException(409, str(e))
     return NativeRunEventResult(run_id=run_id, job_id=req.job_id, seq=req.seq)
+
+
+@app.get(
+    "/v1/runs/{project}/{run_id}/native/events",
+    response_model=NativeRunLogsResponse,
+)
+async def native_run_events(
+    project: str = Path(...),
+    run_id: str = Path(...),
+    attempt_index: int | None = Query(None, ge=0),
+    job_id: str | None = Query(None),
+    limit: int | None = Query(None, ge=1, le=1000),
+) -> NativeRunLogsResponse:
+    """Read hot native step/log events for a Run.
+
+    This is intentionally a read-only dashboard/MCP surface over the
+    `run_events` hot store. Older archived attempts are advertised via
+    `archive_url`; archive hydration remains a separate path.
+    """
+    cosmos: Cosmos = app.state.cosmos
+    found = await run_ops.read_run(cosmos, project=project, run_id=run_id)
+    if found is None:
+        raise HTTPException(404, f"no run {project}/{run_id}")
+    run, _etag = found
+
+    archive_url: str | None = None
+    if attempt_index is not None:
+        attempt = next((a for a in run.attempts if a.attempt_index == attempt_index), None)
+        if attempt is None:
+            raise HTTPException(
+                404, f"run {project}/{run_id} has no attempt {attempt_index}",
+            )
+        archive_url = attempt.log_archive_url
+
+    docs = await native_event_ops.list_native_events(
+        cosmos,
+        project=project,
+        run_id=run_id,
+        attempt_index=attempt_index,
+        job_id=job_id,
+        limit=limit,
+    )
+    return NativeRunLogsResponse(
+        project=project,
+        run_id=run_id,
+        attempt_index=attempt_index,
+        job_id=job_id,
+        events=[NativeRunLogEvent.model_validate(d) for d in docs],
+        archive_url=archive_url,
+    )
 
 
 @app.post(

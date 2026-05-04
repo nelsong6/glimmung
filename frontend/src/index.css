@@ -1032,3 +1032,47 @@ h2 .inline-action,
 .attempt-card-reasons li {
   margin-bottom: 2px;
 }
+.native-log-panel {
+  margin-top: 10px;
+  border-top: 1px solid #242428;
+  padding-top: 10px;
+  font-size: 0.8rem;
+}
+.native-log-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.native-log-head .key {
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.7rem;
+}
+.native-log-lines {
+  display: grid;
+  gap: 3px;
+  max-height: 260px;
+  overflow: auto;
+}
+.native-log-line {
+  display: grid;
+  grid-template-columns: 42px minmax(72px, 0.7fr) minmax(96px, 1fr) minmax(120px, 1fr) minmax(0, 3fr) auto;
+  gap: 8px;
+  align-items: start;
+  border-radius: 3px;
+  padding: 3px 6px;
+  background: #08080a;
+}
+.native-log-line.step_failed {
+  border-left: 2px solid var(--state-danger-fg);
+}
+.native-log-line.step_completed,
+.native-log-line.step_skipped {
+  border-left: 2px solid var(--state-success-fg);
+}
+.native-log-message {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

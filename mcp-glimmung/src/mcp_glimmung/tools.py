@@ -41,6 +41,32 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         return client.get(f"/v1/issues/{repo_owner}/{repo_name}/{issue_number}/graph")
 
     @mcp.tool()
+    def get_native_run_events(
+        project: str,
+        run_id: str,
+        attempt_index: int | None = None,
+        job_id: str | None = None,
+        limit: int | None = 200,
+    ) -> dict[str, Any]:
+        """Read hot native k8s_job step/log events for a Glimmung run.
+
+        Use with graph attempt metadata (`phase_kind == "k8s_job"`) to inspect
+        the ordered runner event stream. `attempt_index` narrows to one
+        PhaseAttempt, `job_id` narrows to one native job, and `limit` caps the
+        returned hot rows. Older archived attempts expose `archive_url` in the
+        response when hot rows have been pruned or archived.
+        """
+        params = {
+            "attempt_index": attempt_index,
+            "job_id": job_id,
+            "limit": limit,
+        }
+        return client.get(
+            f"/v1/runs/{project}/{run_id}/native/events",
+            params={k: v for k, v in params.items() if v is not None},
+        )
+
+    @mcp.tool()
     def list_issues(
         project: str | None = None,
         repo: str | None = None,
