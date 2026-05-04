@@ -30,6 +30,19 @@ Project ──< Workflow ──< Lease ──── Host (venue)
 
 The "agent" — Claude Code, Codex, whatever runs inside the workflow — is opaque to glimmung. We dispatch a venue to a workflow; the workflow runs an agent on it.
 
+For larger feature work, Glimmung separates planning context from execution:
+
+```
+Epic -> Playbook -> ordered Entries -> Issue -> Run -> Report/evidence -> next Entry
+```
+
+- **Epic** = durable feature context: why, goal, constraints, non-goals, success criteria.
+- **Playbook** = executable ordered plan: entries, dependencies, gates, concurrency, dispatch state.
+
+The initial relationship is intentionally 1:1: one Epic owns one Playbook.
+See [Epics and Playbooks](docs/epics-and-playbooks.md) for the object
+boundary and follow-up implementation surface.
+
 ## Layout
 
 ```
@@ -131,6 +144,10 @@ Cosmos DB NoSQL on the shared `infra-cosmos-serverless` account. Database `glimm
 - `locks` (partition key `/scope`) — generic mutual-exclusion primitive, see below
 - `signals` (partition key `/target_repo`) — signal bus for triage / re-entry / future automations, see below
 - `playbooks` (partition key `/project`) — stored operator plans for coordinated issue batches
+
+Epics are not persisted yet. For now, Epic-level context lives in Playbook
+descriptions or linked documentation; the model boundary is documented in
+[Epics and Playbooks](docs/epics-and-playbooks.md).
 
 Runtime pod auth via the `infra-shared-identity` workload identity, which has `Cosmos DB Built-in Data Contributor` at the account scope (granted in [`infra-bootstrap/tofu/cosmos-serverless.tf`](https://github.com/nelsong6/infra-bootstrap/blob/main/tofu/cosmos-serverless.tf)). Container clients are obtained via `get_*_client` (no API call); reads/writes use the data-plane permissions. CREATE DATABASE / CREATE CONTAINER is control-plane and runs only via tofu under the app SP.
 
