@@ -151,6 +151,45 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         return client.get("/v1/workflows")
 
     @mcp.tool()
+    def create_playbook(
+        project: str,
+        title: str,
+        description: str = "",
+        entries: list[dict[str, Any]] | None = None,
+        concurrency_limit: int | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Create a draft Glimmung Playbook for coordinating multiple issues.
+
+        Storage-only surface for preserving operator intent across a batch
+        of related issues. Entries are not enqueued or dispatched by this
+        v1 call; future playbook run semantics will consume the stored
+        entry specs. Each entry should include `id` and an `issue` object
+        with `title`, optional `body`, `labels`, `workflow`, and metadata.
+        """
+        payload: dict[str, Any] = {
+            "project": project,
+            "title": title,
+            "description": description,
+            "entries": entries or [],
+            "metadata": metadata or {},
+        }
+        if concurrency_limit is not None:
+            payload["concurrency_limit"] = concurrency_limit
+        return client.post("/v1/playbooks", json=payload)
+
+    @mcp.tool()
+    def list_playbooks(project: str | None = None) -> list[dict[str, Any]]:
+        """List Glimmung Playbooks, optionally scoped to one project."""
+        params = {"project": project} if project is not None else None
+        return client.get("/v1/playbooks", params=params)
+
+    @mcp.tool()
+    def get_playbook(project: str, playbook_id: str) -> dict[str, Any]:
+        """Get one Glimmung Playbook by project and playbook id."""
+        return client.get(f"/v1/playbooks/{project}/{playbook_id}")
+
+    @mcp.tool()
     def register_workflow(
         project: str,
         name: str,

@@ -376,6 +376,69 @@ class StateSnapshot(BaseModel):
     workflows: list[Workflow] = Field(default_factory=list)
 
 
+class PlaybookEntryState(str, Enum):
+    PENDING = "pending"
+    CREATED = "created"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class PlaybookState(str, Enum):
+    DRAFT = "draft"
+    READY = "ready"
+    RUNNING = "running"
+    PAUSED = "paused"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class PlaybookIssueSpec(BaseModel):
+    title: str
+    body: str = ""
+    labels: list[str] = Field(default_factory=list)
+    workflow: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PlaybookEntry(BaseModel):
+    id: str
+    title: str | None = None
+    issue: PlaybookIssueSpec
+    depends_on: list[str] = Field(default_factory=list)
+    manual_gate: bool = False
+    state: PlaybookEntryState = PlaybookEntryState.PENDING
+    created_issue_id: str | None = None
+    run_id: str | None = None
+    completed_at: datetime | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class Playbook(BaseModel):
+    schema_version: int = 1
+    id: str
+    project: str
+    title: str
+    description: str = ""
+    entries: list[PlaybookEntry] = Field(default_factory=list)
+    concurrency_limit: int | None = None
+    state: PlaybookState = PlaybookState.DRAFT
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
+class PlaybookCreate(BaseModel):
+    project: str
+    title: str
+    description: str = ""
+    entries: list[PlaybookEntry] = Field(default_factory=list)
+    concurrency_limit: int | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 # ─── Verify-loop substrate (#18) ───────────────────────────────────────
 #
 # A `Run` is the orchestrator's per-issue record. It is created when the

@@ -23,6 +23,7 @@ from glimmung import leases as lease_ops
 from glimmung import locks as lock_ops
 from glimmung import native_events as native_event_ops
 from glimmung import native_k8s as native_k8s_ops
+from glimmung import playbooks as playbook_ops
 from glimmung import reports as report_ops
 from glimmung import runs as run_ops
 from glimmung import signals as signal_ops
@@ -60,6 +61,8 @@ from glimmung.models import (
     NativeRunEventType,
     NativeStepSpec,
     PhaseSpec,
+    Playbook,
+    PlaybookCreate,
     ReportState,
     PrPrimitiveSpec,
     Project,
@@ -2921,6 +2924,59 @@ async def register_workflow(w: WorkflowRegister) -> Workflow:
 async def list_workflows() -> list[Workflow]:
     docs = await query_all(app.state.cosmos.workflows, "SELECT * FROM c")
     return [_doc_to_workflow(d) for d in docs]
+
+
+@app.post(
+    "/v1/playbooks",
+    response_model=Playbook,
+    dependencies=[Depends(require_admin_user)],
+)
+async def create_playbook_endpoint(req: PlaybookCreate) -> Playbook:
+    """Persist a draft Playbook. Execution is intentionally not part of
+    this endpoint; this slice only stores the coordinated issue set."""
+    cosmos: Cosmos = app.state.cosmos
+    project_doc = await _read_project(cosmos, req.project)
+    if not project_doc:
+        raise HTTPException(400, f"project {req.project!r} not registered")
+    if not req.title.strip():
+        raise HTTPException(400, "title required")
+    entry_ids = [entry.id for entry in req.entries]
+    if len(set(entry_ids)) != len(entry_ids):
+        raise HTTPException(422, f"playbook entry ids must be unique; got {entry_ids}")
+    known_entry_ids = set(entry_ids)
+    for entry in req.entries:
+        missing = [dep for dep in entry.depends_on if dep not in known_entry_ids]
+        if missing:
+            raise HTTPException(
+                422,
+                f"entry {entry.id!r} depends on unknown entries: {missing}",
+            )
+    if req.concurrency_limit is not None and req.concurrency_limit < 1:
+        raise HTTPException(422, "concurrency_limit must be >= 1")
+    return await playbook_ops.create_playbook(cosmos, req)
+
+
+@app.get("/v1/playbooks", response_model=list[Playbook])
+async def list_playbooks_endpoint(
+    project: str | None = Query(None),
+) -> list[Playbook]:
+    return await playbook_ops.list_playbooks(app.state.cosmos, project=project)
+
+
+@app.get("/v1/playbooks/{project}/{playbook_id}", response_model=Playbook)
+async def get_playbook_endpoint(
+    project: str = Path(...),
+    playbook_id: str = Path(...),
+) -> Playbook:
+    found = await playbook_ops.read_playbook(
+        app.state.cosmos,
+        project=project,
+        playbook_id=playbook_id,
+    )
+    if found is None:
+        raise HTTPException(404, f"no playbook {project}/{playbook_id}")
+    playbook, _etag = found
+    return playbook
 
 
 class WorkflowUpdateRequest(BaseModel):

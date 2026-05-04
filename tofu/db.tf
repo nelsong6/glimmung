@@ -1,6 +1,6 @@
 # Cosmos DB NoSQL Database. Containers: projects, hosts, workflows, leases,
-# runs, run_events, locks, signals, issues, reports, report_versions, and
-# legacy prs.
+# runs, run_events, locks, signals, issues, playbooks, reports,
+# report_versions, and legacy prs.
 # Created here at the control plane; the runtime pod uses glimmung-identity
 # with Cosmos data-plane scope limited to this database.
 
@@ -164,6 +164,24 @@ resource "azurerm_cosmosdb_sql_container" "signals" {
 # open issues for a project stays single-partition.
 resource "azurerm_cosmosdb_sql_container" "issues" {
   name                = "issues"
+  resource_group_name = local.infra.resource_group_name
+  account_name        = data.azurerm_cosmosdb_account.infra.name
+  database_name       = azurerm_cosmosdb_sql_database.glimmung.name
+  partition_key_paths = ["/project"]
+
+  indexing_policy {
+    indexing_mode = "consistent"
+    included_path {
+      path = "/*"
+    }
+  }
+}
+
+# Playbooks (#189). Operator-authored batches of issue specs used to
+# coordinate staged work. The first slice is storage-only; execution state
+# stays in this document when runnable semantics land.
+resource "azurerm_cosmosdb_sql_container" "playbooks" {
+  name                = "playbooks"
   resource_group_name = local.infra.resource_group_name
   account_name        = data.azurerm_cosmosdb_account.infra.name
   database_name       = azurerm_cosmosdb_sql_database.glimmung.name
