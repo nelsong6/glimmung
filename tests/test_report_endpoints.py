@@ -19,8 +19,10 @@ from glimmung import reports as report_ops
 from glimmung.app import (
     ReportCreateRequest,
     ReportUpdateRequest,
+    ReportVersionCreateRequest,
     _build_report_detail,
     _list_reports_from_cosmos,
+    _list_report_versions_from_cosmos,
 )
 from glimmung.models import ReportState
 
@@ -31,6 +33,7 @@ from tests.cosmos_fake import FakeContainer
 def cosmos():
     return SimpleNamespace(
         reports=FakeContainer("reports", "/project"),
+        report_versions=FakeContainer("report_versions", "/project"),
         runs=FakeContainer("runs", "/project"),
         issues=FakeContainer("issues", "/project"),
         locks=FakeContainer("locks", "/scope"),
@@ -257,6 +260,62 @@ async def test_build_report_detail_surfaces_warm_session_launch_url(cosmos):
     assert "glimmung_issue_id=01JISSUEZZZ" in detail.session_launch_url
     assert f"glimmung_pr_id={pr.id}" in detail.session_launch_url
     assert "validation_url=https%3A%2F%2Fpreview.example.test" in detail.session_launch_url
+
+
+# ─── Report versions ────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_report_versions_are_listed_newest_first(cosmos):
+    pr = await report_ops.create_report(
+        cosmos, project="ambience", repo="nelsong6/ambience",
+        number=14, title="draft", branch="b",
+    )
+
+    v1 = await report_ops.create_report_version(
+        cosmos,
+        project="ambience",
+        report_id=pr.id,
+        title="draft",
+        body="first body",
+        linked_run_id="01JRUNAAAA",
+        github_repo="nelsong6/ambience",
+        github_pr_number=14,
+        github_html_url="https://github.com/nelsong6/ambience/pull/14",
+    )
+    v2 = await report_ops.create_report_version(
+        cosmos,
+        project="ambience",
+        report_id=pr.id,
+        title="updated",
+        body="second body",
+    )
+
+    versions = await _list_report_versions_from_cosmos(
+        cosmos, project="ambience", report_id=pr.id,
+    )
+
+    assert [v.version for v in versions] == [2, 1]
+    assert versions[0].id == v2.id
+    assert versions[1].id == v1.id
+    assert versions[1].linked_run_id == "01JRUNAAAA"
+    assert versions[1].github_html_url == "https://github.com/nelsong6/ambience/pull/14"
+
+
+@pytest.mark.asyncio
+async def test_report_versions_require_parent_report(cosmos):
+    with pytest.raises(HTTPException) as exc:
+        await _list_report_versions_from_cosmos(
+            cosmos, project="ambience", report_id="missing-report",
+        )
+    assert exc.value.status_code == 404
+
+
+def test_report_version_create_request_defaults():
+    req = ReportVersionCreateRequest(title="snapshot")
+    assert req.body == ""
+    assert req.state == "ready"
+    assert req.version is None
 
 
 # ─── POST /v1/reports idempotence ───────────────────────────────────────────────
