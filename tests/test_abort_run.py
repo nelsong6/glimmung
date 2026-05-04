@@ -44,6 +44,24 @@ class _StubMinter:
     pass
 
 
+class _RecordingNativeLauncher:
+    def __init__(self) -> None:
+        self.deleted_jobs: list[dict[str, int | str]] = []
+
+    async def delete_attempt_job(
+        self,
+        *,
+        run_id: str,
+        attempt_index: int,
+        grace_period_seconds: int = 60,
+    ) -> None:
+        self.deleted_jobs.append({
+            "run_id": run_id,
+            "attempt_index": attempt_index,
+            "grace_period_seconds": grace_period_seconds,
+        })
+
+
 async def _put_run(
     cosmos, *,
     run_id: str, project: str, issue_repo: str, issue_number: int,
@@ -268,6 +286,53 @@ async def test_abort_releases_native_leases_by_run_id_not_attempt_index(cosmos, 
     pending_doc = await cosmos.leases.read_item(item="queued", partition_key="p")
     assert active_doc["state"] == LeaseState.RELEASED.value
     assert pending_doc["state"] == LeaseState.RELEASED.value
+
+
+@pytest.mark.asyncio
+async def test_abort_deletes_native_jobs_with_grace_period(cosmos, minter, monkeypatch):
+    now = datetime.now(UTC)
+    launcher = _RecordingNativeLauncher()
+    monkeypatch.setattr(
+        "glimmung.app.app",
+        SimpleNamespace(state=SimpleNamespace(native_k8s_launcher=launcher)),
+    )
+    run = Run(
+        id="run-1",
+        project="p",
+        workflow="agent-run",
+        issue_repo="r/n",
+        issue_number=42,
+        state=RunState.IN_PROGRESS,
+        budget=BudgetConfig(),
+        attempts=[
+            PhaseAttempt(
+                attempt_index=0,
+                phase="env-prep",
+                phase_kind="k8s_job",
+                workflow_filename="",
+                dispatched_at=now,
+            ),
+            PhaseAttempt(
+                attempt_index=1,
+                phase="agent-execute",
+                phase_kind="k8s_job",
+                workflow_filename="",
+                dispatched_at=now,
+            ),
+        ],
+        created_at=now,
+        updated_at=now,
+    )
+    await cosmos.runs.create_item(run.model_dump(mode="json"))
+
+    result = await _abort_run(
+        cosmos, minter, run_id="run-1", project="p", reason="cleanup",
+    )
+
+    assert result.state == "aborted"
+    assert launcher.deleted_jobs == [
+        {"run_id": "run-1", "attempt_index": 0, "grace_period_seconds": 60},
+    ]
 
 
 # ─── aborted (with GH cancel) ─────────────────────────────────────────
