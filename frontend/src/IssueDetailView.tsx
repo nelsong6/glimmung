@@ -23,7 +23,7 @@
  * `/issues/<project>/<issueId>` (native). Target is derived from the
  * URL params so deep-link reloads land directly here.
  */
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { authedFetch } from "./auth";
 
@@ -107,6 +107,37 @@ type NativeRunEventsResponse = {
   job_id: string | null;
   events: NativeRunEvent[];
   archive_url: string | null;
+};
+
+type WorkflowGraphMeta = {
+  phases: string[];
+  default_entry: { target: string; active: boolean; kind: string } | null;
+  recycle_arrows: RecycleArrow[];
+  terminal: { kind: string; enabled: boolean };
+};
+
+type RecycleArrow = {
+  source: string;
+  target: string;
+  trigger: string;
+  max_attempts: number;
+  active: boolean;
+  kind: "phase_recycle" | "report_recycle";
+};
+
+type NativeAttemptJob = {
+  job_id: string;
+  name?: string | null;
+  state?: string | null;
+  steps: NativeAttemptStep[];
+};
+
+type NativeAttemptStep = {
+  slug: string;
+  title?: string | null;
+  state?: string | null;
+  message?: string | null;
+  exit_code?: number | null;
 };
 
 type DispatchState =
@@ -937,36 +968,70 @@ function PipelineDag({
 }) {
   const phases = useMemo(() => phaseNodesForRun(graph, run), [graph, run]);
   const meta = run.metadata;
+  const workflowGraph = workflowGraphMeta(meta.workflow_graph);
+  const activeEntry = stringOrNull(meta.entrypoint_phase)
+    ?? workflowGraph?.default_entry?.target
+    ?? phases[0]?.phaseName
+    ?? null;
   const reportId = stringOrNull(meta.report_id);
   const reportState = stringOrNull(meta.report_state);
   const reportTitle = stringOrNull(meta.report_title);
   const prNumber = numberOrNull(meta.pr_number);
   const prBranch = stringOrNull(meta.pr_branch);
   return (
-    <div className="dag" aria-label="pipeline">
-      {phases.map((p) => (
-        <DagPhaseNode
-          key={p.phaseName}
-          phase={p}
-          selected={selectedNodeId === `phase:${p.phaseName}`}
-          onSelect={() =>
-            onSelectNode(selectedNodeId === `phase:${p.phaseName}` ? null : `phase:${p.phaseName}`)
-          }
-        />
-      ))}
-      <div className="dag-edge" aria-hidden="true">→</div>
-      <button
-        type="button"
-        className={`dag-node dag-node-pr${reportId || prNumber ? " opened" : " pending"}${selectedNodeId === "pr" ? " selected" : ""}`}
-        onClick={() => onSelectNode(selectedNodeId === "pr" ? null : "pr")}
-        aria-pressed={selectedNodeId === "pr"}
-      >
-        <div className="dag-node-label">report</div>
-        <div className="dag-node-state mono">
-          {reportState ?? (prNumber ? `#${prNumber}` : prBranch ? prBranch : "pending")}
+    <div className="dag-wrap">
+      <div className="dag" aria-label="pipeline">
+        {activeEntry && (
+          <>
+            <div className="dag-entry active">
+              <span className="mono">entry</span>
+              <span className="dim mono">{activeEntry}</span>
+            </div>
+            <div className="dag-edge" aria-hidden="true">→</div>
+          </>
+        )}
+        {phases.map((p, index) => (
+          <Fragment key={p.phaseName}>
+            {index > 0 && <div className="dag-edge" aria-hidden="true">→</div>}
+            <DagPhaseNode
+              phase={p}
+              selected={selectedNodeId === `phase:${p.phaseName}`}
+              onSelect={() =>
+                onSelectNode(selectedNodeId === `phase:${p.phaseName}` ? null : `phase:${p.phaseName}`)
+              }
+            />
+          </Fragment>
+        ))}
+        <div className="dag-edge" aria-hidden="true">→</div>
+        <button
+          type="button"
+          className={`dag-node dag-node-pr${reportId || prNumber ? " opened" : " pending"}${selectedNodeId === "pr" ? " selected" : ""}`}
+          onClick={() => onSelectNode(selectedNodeId === "pr" ? null : "pr")}
+          aria-pressed={selectedNodeId === "pr"}
+        >
+          <div className="dag-node-label">report</div>
+          <div className="dag-node-state mono">
+            {reportState ?? (prNumber ? `#${prNumber}` : prBranch ? prBranch : "pending")}
+          </div>
+          {reportTitle && <div className="dag-node-meta dim mono">{reportTitle}</div>}
+        </button>
+      </div>
+      {workflowGraph && workflowGraph.recycle_arrows.length > 0 && (
+        <div className="dag-policy-rail" aria-label="recycle policies">
+          {workflowGraph.recycle_arrows.map((arrow) => (
+            <span
+              key={`${arrow.kind}:${arrow.source}:${arrow.target}:${arrow.trigger}`}
+              className={`dag-policy ${arrow.active ? "active" : "inactive"}`}
+              title={`${arrow.trigger || "recycle"}; max ${arrow.max_attempts}`}
+            >
+              <span className="mono">{arrow.source}</span>
+              <span className="dim mono">↻</span>
+              <span className="mono">{arrow.target}</span>
+              {arrow.trigger && <span className="dim mono">{arrow.trigger}</span>}
+            </span>
+          ))}
         </div>
-        {reportTitle && <div className="dag-node-meta dim mono">{reportTitle}</div>}
-      </button>
+      )}
     </div>
   );
 }
@@ -1012,6 +1077,8 @@ function phaseStatus(attempt: GraphNode): { cls: string; text: string } {
   const verification = isRecord(meta.verification) ? meta.verification : null;
   const verStatus = verification ? stringOrNull(verification.status) : null;
   const workflowRunId = meta.workflow_run_id != null ? String(meta.workflow_run_id) : null;
+  const nativeJobs = nativeAttemptJobs(meta.jobs);
+  const nativeRunning = nativeJobs.some((j) => j.state === "active" || j.steps.some((s) => s.state === "active"));
   // Resume primitive (#111) — synthesized skip-marks render as "skipped"
   // ahead of any other state since they're never dispatched. No pill
   // (skipped isn't one of {free, busy, drain, info}); the caller renders
@@ -1021,7 +1088,7 @@ function phaseStatus(attempt: GraphNode): { cls: string; text: string } {
     return { cls: "", text: "skipped" };
   }
   if (!completed) {
-    return workflowRunId
+    return workflowRunId || nativeRunning
       ? { cls: "busy", text: "running" }
       : { cls: "info", text: "dispatching" };
   }
@@ -1370,6 +1437,7 @@ function AttemptCard({
   const phaseKind = stringOrNull(meta.phase_kind);
   const attemptIndex = numberOrNull(meta.attempt_index);
   const logArchiveUrl = stringOrNull(meta.log_archive_url);
+  const nativeJobs = nativeAttemptJobs(meta.jobs);
 
   // Pre-webhook progression (#83):
   //   no workflow_run_id, no completed_at  → dispatching
@@ -1382,7 +1450,8 @@ function AttemptCard({
   // into `dispatching`. Stuck-in-dispatching past STUCK_DISPATCHING_MS
   // is visually flagged so the orphan-dispatch shape is obvious.
   const running = !completedAt;
-  const dispatching = running && !workflowRunId;
+  const nativeRunning = nativeJobs.some((j) => j.state === "active" || j.steps.some((s) => s.state === "active"));
+  const dispatching = running && !workflowRunId && !nativeRunning;
   const elapsedMs = dispatchedAt && running ? now() - parseTs(dispatchedAt) : null;
   const stuckDispatching =
     dispatching && elapsedMs !== null && elapsedMs > STUCK_DISPATCHING_MS;
@@ -1528,6 +1597,34 @@ function AttemptCard({
           ))}
         </ul>
       )}
+      {nativeJobs.length > 0 && (
+        <div className="native-job-list">
+          {nativeJobs.map((job) => (
+            <div className="native-job" key={job.job_id}>
+              <div className="native-job-head">
+                <span className="mono">{job.name || job.job_id}</span>
+                <span className={`pill ${nativeStatePill(job.state ?? "")}`}>
+                  {job.state || "pending"}
+                </span>
+              </div>
+              <div className="native-step-list">
+                {job.steps.map((step) => (
+                  <div className="native-step" key={step.slug}>
+                    <span className={`native-step-rail ${nativeStatePill(step.state ?? "")}`} />
+                    <span className="mono">{step.slug}</span>
+                    {step.title && <span>{step.title}</span>}
+                    <span className="dim mono">{step.state || "pending"}</span>
+                    {step.exit_code !== null && step.exit_code !== undefined && (
+                      <span className="dim mono">exit {step.exit_code}</span>
+                    )}
+                    {step.message && <span className="native-step-message">{step.message}</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
       {phaseKind === "k8s_job" && runIdFromAttempt && attemptIndex !== null && (
         <NativeAttemptEvents
           project={project}
@@ -1657,6 +1754,79 @@ function runIdFromNode(n: GraphNode): string {
 
 function isRecord(x: unknown): x is Record<string, unknown> {
   return typeof x === "object" && x !== null && !Array.isArray(x);
+}
+
+function workflowGraphMeta(x: unknown): WorkflowGraphMeta | null {
+  if (!isRecord(x)) return null;
+  const phases = Array.isArray(x.phases)
+    ? x.phases.filter((p): p is string => typeof p === "string")
+    : [];
+  const defaultEntry = isRecord(x.default_entry)
+    && typeof x.default_entry.target === "string"
+    ? {
+        target: x.default_entry.target,
+        active: Boolean(x.default_entry.active),
+        kind: String(x.default_entry.kind ?? "default"),
+      }
+    : null;
+  const terminal = isRecord(x.terminal)
+    ? {
+        kind: String(x.terminal.kind ?? "report"),
+        enabled: Boolean(x.terminal.enabled),
+      }
+    : { kind: "report", enabled: false };
+  const recycle_arrows = Array.isArray(x.recycle_arrows)
+    ? x.recycle_arrows.flatMap((raw): RecycleArrow[] => {
+        if (!isRecord(raw)) return [];
+        const kind = raw.kind === "report_recycle" ? "report_recycle" : "phase_recycle";
+        return [{
+          source: String(raw.source ?? ""),
+          target: String(raw.target ?? ""),
+          trigger: String(raw.trigger ?? ""),
+          max_attempts: numberOrNull(raw.max_attempts) ?? 0,
+          active: Boolean(raw.active),
+          kind,
+        }];
+      }).filter((a) => a.source && a.target)
+    : [];
+  return { phases, default_entry: defaultEntry, recycle_arrows, terminal };
+}
+
+function nativeAttemptJobs(x: unknown): NativeAttemptJob[] {
+  if (!Array.isArray(x)) return [];
+  return x.flatMap((raw): NativeAttemptJob[] => {
+    if (!isRecord(raw)) return [];
+    const jobId = stringOrNull(raw.job_id) ?? stringOrNull(raw.id);
+    if (!jobId) return [];
+    const steps = Array.isArray(raw.steps)
+      ? raw.steps.flatMap((s): NativeAttemptStep[] => {
+          if (!isRecord(s)) return [];
+          const slug = stringOrNull(s.slug);
+          if (!slug) return [];
+          return [{
+            slug,
+            title: stringOrNull(s.title),
+            state: stringOrNull(s.state),
+            message: stringOrNull(s.message),
+            exit_code: numberOrNull(s.exit_code),
+          }];
+        })
+      : [];
+    return [{
+      job_id: jobId,
+      name: stringOrNull(raw.name),
+      state: stringOrNull(raw.state),
+      steps,
+    }];
+  });
+}
+
+function nativeStatePill(state: string): string {
+  if (state === "succeeded") return "free";
+  if (state === "active") return "busy";
+  if (state === "failed") return "drain";
+  if (state === "skipped") return "info";
+  return "";
 }
 
 function numberOrNull(x: unknown): number | null {

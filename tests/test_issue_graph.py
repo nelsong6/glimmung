@@ -86,6 +86,60 @@ async def _seed_issue(
     return issue_id
 
 
+async def _seed_native_workflow(cosmos) -> None:
+    now = datetime.now(UTC).isoformat()
+    await cosmos.workflows.create_item({
+        "id": "agent-run",
+        "project": "ambience",
+        "name": "agent-run",
+        "phases": [
+            {
+                "name": "env-prep",
+                "kind": "k8s_job",
+                "workflowFilename": "",
+                "workflowRef": "main",
+                "requirements": None,
+                "verify": True,
+                "recyclePolicy": {
+                    "maxAttempts": 2,
+                    "on": ["verify_fail"],
+                    "landsAt": "self",
+                },
+                "inputs": {},
+                "outputs": ["validation_url"],
+                "jobs": [],
+            },
+            {
+                "name": "agent-execute",
+                "kind": "k8s_job",
+                "workflowFilename": "",
+                "workflowRef": "main",
+                "requirements": None,
+                "verify": True,
+                "recyclePolicy": None,
+                "inputs": {
+                    "validation_url": "${{ phases.env-prep.outputs.validation_url }}",
+                },
+                "outputs": [],
+                "jobs": [],
+            },
+        ],
+        "pr": {
+            "enabled": True,
+            "recyclePolicy": {
+                "maxAttempts": 1,
+                "on": ["pr_review_changes_requested"],
+                "landsAt": "agent-execute",
+            },
+        },
+        "budget": {"total": 25.0},
+        "triggerLabel": "agent-run",
+        "defaultRequirements": {},
+        "metadata": {},
+        "createdAt": now,
+    })
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
@@ -251,6 +305,7 @@ async def test_graph_renders_issue_run_attempts(cosmos, app_state):
     """Smoke-test of the basic shape: one issue, one run with two
     attempts, edges issue→run→attempt0→attempt1."""
     issue_id = await _seed_issue(cosmos)
+    await _seed_native_workflow(cosmos)
     now = _now()
     run = Run(
         id="01KQGRAPH_RUN_AAA",
@@ -296,6 +351,32 @@ async def test_graph_renders_issue_run_attempts(cosmos, app_state):
     # branches on these to decide whether to render the lineage arrow.
     assert run_node.metadata["cloned_from_run_id"] is None
     assert run_node.metadata["entrypoint_phase"] is None
+    workflow_graph = run_node.metadata["workflow_graph"]
+    assert workflow_graph["phases"] == ["env-prep", "agent-execute"]
+    assert workflow_graph["default_entry"] == {
+        "target": "env-prep",
+        "active": True,
+        "kind": "default",
+    }
+    assert workflow_graph["terminal"] == {"kind": "report", "enabled": True}
+    assert workflow_graph["recycle_arrows"] == [
+        {
+            "source": "env-prep",
+            "target": "env-prep",
+            "trigger": "verify_fail",
+            "max_attempts": 2,
+            "active": False,
+            "kind": "phase_recycle",
+        },
+        {
+            "source": "report",
+            "target": "agent-execute",
+            "trigger": "pr_review_changes_requested",
+            "max_attempts": 1,
+            "active": False,
+            "kind": "report_recycle",
+        },
+    ]
 
     native_attempt = next(n for n in graph.nodes if n.id == f"attempt:{run.id}:1")
     assert native_attempt.metadata["phase_kind"] == "k8s_job"
