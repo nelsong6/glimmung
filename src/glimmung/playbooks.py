@@ -70,18 +70,24 @@ async def list_playbooks(
     cosmos: Cosmos,
     *,
     project: str | None = None,
+    state: str | None = None,
+    limit: int | None = None,
 ) -> list[Playbook]:
+    predicates: list[str] = []
+    parameters: list[dict[str, Any]] = []
     if project:
-        docs = await query_all(
-            cosmos.playbooks,
-            "SELECT * FROM c WHERE c.project = @p ORDER BY c.created_at DESC",
-            parameters=[{"name": "@p", "value": project}],
-        )
-    else:
-        docs = await query_all(
-            cosmos.playbooks,
-            "SELECT * FROM c ORDER BY c.created_at DESC",
-        )
+        predicates.append("c.project = @p")
+        parameters.append({"name": "@p", "value": project})
+    if state:
+        predicates.append("c.state = @s")
+        parameters.append({"name": "@s", "value": state})
+    where = f" WHERE {' AND '.join(predicates)}" if predicates else ""
+    top = f"TOP {limit} " if limit is not None else ""
+    docs = await query_all(
+        cosmos.playbooks,
+        f"SELECT {top}* FROM c{where} ORDER BY c.created_at DESC",
+        parameters=parameters or None,
+    )
     return [Playbook.model_validate(_strip_meta(d)) for d in docs]
 
 

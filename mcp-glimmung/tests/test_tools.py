@@ -184,9 +184,26 @@ def test_report_version_tools_call_http_surface() -> None:
         "version": 2,
     }
     assert client.calls[-3:] == [
-        ("GET", "/v1/reports/by-id/glimmung/report-1/versions", None, None),
+        ("GET", "/v1/reports/by-id/glimmung/report-1/versions", {"limit": 50}, None),
         ("GET", "/v1/reports/by-id/glimmung/report-1/versions/2", None, None),
         ("POST", "/v1/reports/by-id/glimmung/report-1/versions", None, created["json"]),
+    ]
+
+
+def test_project_and_workflow_list_tools_pass_filters_and_default_limits() -> None:
+    tools, client = _registered_tools()
+
+    tools["list_projects"](name="glim", github_repo="nelsong6/glimmung")
+    tools["list_workflows"](project="glimmung", name="agent", trigger_label="issue-agent")
+
+    assert client.calls[-2:] == [
+        ("GET", "/v1/projects", {"name": "glim", "github_repo": "nelsong6/glimmung", "limit": 50}, None),
+        (
+            "GET",
+            "/v1/workflows",
+            {"project": "glimmung", "name": "agent", "trigger_label": "issue-agent", "limit": 50},
+            None,
+        ),
     ]
 
 
@@ -259,7 +276,7 @@ def test_playbook_tools_call_http_surface() -> None:
         concurrency_limit=1,
         metadata={"source": "mcp-test"},
     )
-    tools["list_playbooks"](project="glimmung")
+    tools["list_playbooks"](project="glimmung", state="draft")
     tools["get_playbook"]("glimmung", "pb-1")
     tools["run_playbook"]("glimmung", "pb-1")
 
@@ -281,7 +298,7 @@ def test_playbook_tools_call_http_surface() -> None:
     }
     assert client.calls[-4:] == [
         ("POST", "/v1/playbooks", None, created["json"]),
-        ("GET", "/v1/playbooks", {"project": "glimmung"}, None),
+        ("GET", "/v1/playbooks", {"project": "glimmung", "state": "draft", "limit": 50}, None),
         ("GET", "/v1/playbooks/glimmung/pb-1", None, None),
         ("POST", "/v1/playbooks/glimmung/pb-1/run", None, None),
     ]

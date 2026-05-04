@@ -322,11 +322,13 @@ async def list_report_versions(
     *,
     project: str,
     report_id: str,
+    limit: int | None = None,
 ) -> list[ReportVersion]:
     """Return immutable ReportVersion snapshots for a Report, newest first."""
+    top = f"TOP {limit} " if limit is not None else ""
     docs = await query_all(
         cosmos.report_versions,
-        "SELECT * FROM c WHERE c.project = @p AND c.report_id = @r ORDER BY c.version DESC",
+        f"SELECT {top}* FROM c WHERE c.project = @p AND c.report_id = @r ORDER BY c.version DESC",
         parameters=[
             {"name": "@p", "value": project},
             {"name": "@r", "value": report_id},
