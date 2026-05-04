@@ -12,6 +12,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
+from azure.core import MatchConditions
 from azure.cosmos.exceptions import CosmosResourceNotFoundError
 from ulid import ULID
 
@@ -82,3 +83,19 @@ async def list_playbooks(
             "SELECT * FROM c ORDER BY c.created_at DESC",
         )
     return [Playbook.model_validate(_strip_meta(d)) for d in docs]
+
+
+async def replace_playbook(
+    cosmos: Cosmos,
+    *,
+    playbook: Playbook,
+    etag: str,
+) -> tuple[Playbook, str]:
+    playbook.updated_at = _now()
+    response = await cosmos.playbooks.replace_item(
+        item=playbook.id,
+        body=playbook.model_dump(mode="json"),
+        etag=etag,
+        match_condition=MatchConditions.IfNotModified,
+    )
+    return playbook, response.get("_etag", etag)
