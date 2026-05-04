@@ -84,6 +84,31 @@ type IssueGraph = {
   }>;
 };
 
+type NativeRunEvent = {
+  id: string;
+  project: string;
+  run_id: string;
+  attempt_index: number;
+  phase: string;
+  job_id: string;
+  seq: number;
+  event: "step_started" | "log" | "step_completed" | "step_skipped" | "step_failed";
+  step_slug: string;
+  message: string;
+  exit_code: number | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+};
+
+type NativeRunEventsResponse = {
+  project: string;
+  run_id: string;
+  attempt_index: number | null;
+  job_id: string | null;
+  events: NativeRunEvent[];
+  archive_url: string | null;
+};
+
 type DispatchState =
   | { kind: "idle" }
   | { kind: "dispatching" }
@@ -317,6 +342,7 @@ export function IssueDetailView() {
                 graph={graph}
                 graphAvailable={!!graphUrl}
                 signedIn={signedIn}
+                project={detail.project}
                 repo={repoForLinks}
                 inFlight={isInFlight}
                 dispatchState={dispatchState}
@@ -681,6 +707,7 @@ function TheRunTab({
   graph,
   graphAvailable,
   signedIn,
+  project,
   repo,
   inFlight,
   dispatchState,
@@ -695,6 +722,7 @@ function TheRunTab({
   graph: IssueGraph | null;
   graphAvailable: boolean;
   signedIn: boolean;
+  project: string;
   repo: string | null;
   inFlight: boolean;
   dispatchState: DispatchState;
@@ -861,6 +889,7 @@ function TheRunTab({
         nodeId={drillNodeId}
         run={focused}
         graph={graph}
+        project={project}
         repo={repo}
         onClose={() => setDrillNodeId(null)}
       />
@@ -1031,12 +1060,14 @@ function DrillIn({
   nodeId,
   run,
   graph,
+  project,
   repo,
   onClose,
 }: {
   nodeId: string | null;
   run: GraphNode;
   graph: IssueGraph;
+  project: string;
   repo: string | null;
   onClose: () => void;
 }) {
@@ -1104,7 +1135,7 @@ function DrillIn({
         ) : (
           <div className="attempt-list">
             {rollup.attempts.map((a) => (
-              <AttemptCard key={a.id} attempt={a} repo={repo} />
+              <AttemptCard key={a.id} attempt={a} project={project} repo={repo} />
             ))}
           </div>
         )}
@@ -1284,7 +1315,15 @@ function RunsTab({
   );
 }
 
-function AttemptCard({ attempt, repo }: { attempt: GraphNode; repo: string | null }) {
+function AttemptCard({
+  attempt,
+  project,
+  repo,
+}: {
+  attempt: GraphNode;
+  project: string;
+  repo: string | null;
+}) {
   const meta = attempt.metadata;
   const phase = stringOrNull(meta.phase) ?? "attempt";
   const dispatchedAt = attempt.timestamp;
@@ -1309,6 +1348,9 @@ function AttemptCard({ attempt, repo }: { attempt: GraphNode; repo: string | nul
   const verificationReasons = verification && Array.isArray(verification.reasons)
     ? verification.reasons.filter((r): r is string => typeof r === "string")
     : [];
+  const phaseKind = stringOrNull(meta.phase_kind);
+  const attemptIndex = numberOrNull(meta.attempt_index);
+  const logArchiveUrl = stringOrNull(meta.log_archive_url);
 
   // Pre-webhook progression (#83):
   //   no workflow_run_id, no completed_at  → dispatching
@@ -1467,6 +1509,99 @@ function AttemptCard({ attempt, repo }: { attempt: GraphNode; repo: string | nul
           ))}
         </ul>
       )}
+      {phaseKind === "k8s_job" && runIdFromAttempt && attemptIndex !== null && (
+        <NativeAttemptEvents
+          project={project}
+          runId={runIdFromAttempt}
+          attemptIndex={attemptIndex}
+          archiveUrl={logArchiveUrl}
+        />
+      )}
+    </div>
+  );
+}
+
+function NativeAttemptEvents({
+  project,
+  runId,
+  attemptIndex,
+  archiveUrl,
+}: {
+  project: string;
+  runId: string;
+  attemptIndex: number;
+  archiveUrl: string | null;
+}) {
+  const [logs, setLogs] = useState<NativeRunEventsResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLogs(null);
+    setError(null);
+    const url =
+      `/v1/runs/${encodeURIComponent(project)}/${encodeURIComponent(runId)}` +
+      `/native/events?attempt_index=${attemptIndex}&limit=200`;
+    fetch(url)
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`events ${res.status}`);
+        const body = await res.json() as NativeRunEventsResponse;
+        if (!cancelled) setLogs(body);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [project, runId, attemptIndex]);
+
+  if (error) {
+    return (
+      <div className="native-log-panel">
+        <span className="pill drain">log error</span>{" "}
+        <span className="mono dim">{error}</span>
+      </div>
+    );
+  }
+  if (!logs) {
+    return <div className="native-log-panel dim mono">loading native events…</div>;
+  }
+  const events = logs.events;
+  return (
+    <div className="native-log-panel">
+      <div className="native-log-head">
+        <span className="key">native events</span>
+        <span className="mono dim">{events.length} hot</span>
+        {(logs.archive_url || archiveUrl) && (
+          <a
+            className="mono"
+            href={`/v1/artifacts/${artifactPathFromUrl(logs.archive_url || archiveUrl || "")}`}
+            target="_blank"
+            rel="noreferrer"
+          >
+            archive
+          </a>
+        )}
+      </div>
+      {events.length === 0 ? (
+        <div className="dim mono">No hot native events recorded for this attempt.</div>
+      ) : (
+        <div className="native-log-lines">
+          {events.map((event) => (
+            <div key={event.id} className={`native-log-line ${event.event}`}>
+              <span className="mono dim">{event.seq}</span>
+              <span className="mono">{event.job_id}</span>
+              <span className="mono">{event.step_slug || "—"}</span>
+              <span className="mono">{event.event}</span>
+              {event.message && <span className="native-log-message">{event.message}</span>}
+              {event.exit_code !== null && (
+                <span className="mono dim">exit {event.exit_code}</span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1511,6 +1646,12 @@ function numberOrNull(x: unknown): number | null {
 
 function stringOrNull(x: unknown): string | null {
   return typeof x === "string" && x.length > 0 ? x : null;
+}
+
+function artifactPathFromUrl(url: string): string {
+  const prefix = "blob://artifacts/";
+  if (url.startsWith(prefix)) return url.slice(prefix.length);
+  return url.replace(/^\/v1\/artifacts\//, "");
 }
 
 function parseTs(s: string): number {

@@ -318,3 +318,23 @@ def test_resume_run_posts_native_step_boundary_payload() -> None:
             "actor": "codex",
         },
     }
+
+
+def test_get_native_run_events_calls_hot_log_surface() -> None:
+    tools, client = _registered_tools()
+
+    result = tools["get_native_run_events"](
+        project="ambience",
+        run_id="run-1",
+        attempt_index=2,
+        job_id="agent",
+        limit=25,
+    )
+
+    assert result["path"] == "/v1/runs/ambience/run-1/native/events"
+    assert client.calls[-1] == (
+        "GET",
+        "/v1/runs/ambience/run-1/native/events",
+        {"attempt_index": 2, "job_id": "agent", "limit": 25},
+        None,
+    )

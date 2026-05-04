@@ -217,6 +217,51 @@ async def assert_native_completion_ready(cosmos: Cosmos, *, run: Run) -> None:
             )
 
 
+async def list_native_events(
+    cosmos: Cosmos,
+    *,
+    project: str,
+    run_id: str,
+    attempt_index: int | None = None,
+    job_id: str | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Return hot native event/log rows in execution order.
+
+    Cosmos keeps these rows only for the hot-retention window. Archived
+    attempts expose their blob URL on the PhaseAttempt; rehydrating old
+    archives is a separate read path.
+    """
+    where = ["c.project = @p", "c.run_id = @r"]
+    parameters: list[dict[str, Any]] = [
+        {"name": "@p", "value": project},
+        {"name": "@r", "value": run_id},
+    ]
+    if attempt_index is not None:
+        where.append("c.attempt_index = @a")
+        parameters.append({"name": "@a", "value": attempt_index})
+    if job_id is not None:
+        where.append("c.job_id = @j")
+        parameters.append({"name": "@j", "value": job_id})
+
+    docs = await query_all(
+        cosmos.run_events,
+        f"SELECT * FROM c WHERE {' AND '.join(where)}",
+        parameters=parameters,
+    )
+    docs.sort(key=lambda d: (
+        int(d.get("attempt_index") or 0),
+        str(d.get("job_id") or ""),
+        int(d.get("seq") or 0),
+    ))
+    if limit is not None:
+        docs = docs[:limit]
+    return [
+        {k: v for k, v in doc.items() if not k.startswith("_")}
+        for doc in docs
+    ]
+
+
 def _validate_target(
     run: Run,
     *,
