@@ -378,6 +378,11 @@ async def dispatch_resumed_run(
     project: str,
     prior_run_id: str,
     entrypoint_phase: str,
+    entrypoint_job_id: str | None = None,
+    entrypoint_step_slug: str | None = None,
+    input_overrides: dict[str, str] | None = None,
+    artifact_refs: dict[str, str] | None = None,
+    context: dict[str, Any] | None = None,
     trigger_source: dict[str, Any],
 ) -> ResumeResult:
     """Spawn a new Run from a prior Run with phases preceding
@@ -458,6 +463,47 @@ async def dispatch_resumed_run(
                 f"(phases: {[p.name for p in workflow_model.phases]})"
             ),
         )
+    if entrypoint_job_id is not None or entrypoint_step_slug is not None:
+        if next_phase.kind != "k8s_job":
+            return ResumeResult(
+                state="phase_invalid",
+                prior_run_id=prior_run_id,
+                detail="step-boundary resume is only valid for k8s_job phases",
+            )
+        jobs = list(next_phase.jobs)
+        target_job_id = entrypoint_job_id
+        if target_job_id is None:
+            if len(jobs) != 1:
+                return ResumeResult(
+                    state="phase_invalid",
+                    prior_run_id=prior_run_id,
+                    detail=(
+                        "entrypoint_job_id is required when a k8s_job phase "
+                        "declares more than one job"
+                    ),
+                )
+            target_job_id = jobs[0].id
+        target_job = next((job for job in jobs if job.id == target_job_id), None)
+        if target_job is None:
+            return ResumeResult(
+                state="phase_invalid",
+                prior_run_id=prior_run_id,
+                detail=(
+                    f"entrypoint_job_id {target_job_id!r} not on phase "
+                    f"{entrypoint_phase!r} (jobs: {[job.id for job in jobs]})"
+                ),
+            )
+        if entrypoint_step_slug is not None and not any(
+            step.slug == entrypoint_step_slug for step in target_job.steps
+        ):
+            return ResumeResult(
+                state="phase_invalid",
+                prior_run_id=prior_run_id,
+                detail=(
+                    f"entrypoint_step_slug {entrypoint_step_slug!r} not on job "
+                    f"{target_job_id!r} (steps: {[step.slug for step in target_job.steps]})"
+                ),
+            )
 
     # 4. Claim a fresh issue lock. Resume always claims with a new
     # holder_id — the prior run's lock was either released on its
@@ -531,6 +577,13 @@ async def dispatch_resumed_run(
         repo=prior_run.issue_repo,
         workflow_model=workflow_model,
         next_phase=next_phase,
+        resume_context={
+            "entrypoint_job_id": entrypoint_job_id,
+            "entrypoint_step_slug": entrypoint_step_slug,
+            "input_overrides": input_overrides or {},
+            "artifact_refs": artifact_refs or {},
+            "context": context or {},
+        },
     )
 
     # Re-read for the freshest state (post-dispatch the lease + new

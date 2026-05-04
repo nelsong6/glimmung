@@ -59,7 +59,9 @@ from glimmung.models import (
     LeaseResponse,
     LeaseState,
     NativeJobSpec,
+    NativeJobAttempt,
     NativeRunEventType,
+    NativeStepState,
     NativeStepSpec,
     PhaseSpec,
     Playbook,
@@ -1165,6 +1167,7 @@ async def _dispatch_next_phase(
     repo: str,
     workflow_model: Workflow,
     next_phase,
+    resume_context: dict[str, Any] | None = None,
 ) -> None:
     """Forward dispatch (#101): fire `next_phase` for `run` after the
     prior phase ADVANCEd. Substitutes inputs from prior phases'
@@ -1195,15 +1198,26 @@ async def _dispatch_next_phase(
             ),
         )
         return
+    resume_context = resume_context or {}
+    input_overrides = resume_context.get("input_overrides")
+    if isinstance(input_overrides, dict):
+        substituted.update({str(k): str(v) for k, v in input_overrides.items()})
 
     # Append the next attempt before dispatching so a webhook redelivery
     # of the previous completion doesn't re-trigger forward dispatch.
+    jobs = native_job_attempts_from_specs(next_phase.jobs)
+    if next_phase.kind == "k8s_job":
+        jobs = _native_jobs_with_resume_boundary(
+            jobs,
+            entrypoint_job_id=resume_context.get("entrypoint_job_id"),
+            entrypoint_step_slug=resume_context.get("entrypoint_step_slug"),
+        )
     run, etag = await run_ops.append_attempt(
         cosmos, run=run, etag=etag,
         phase_name=next_phase.name,
         workflow_filename=_phase_runner_label(next_phase),
         phase_kind=next_phase.kind,
-        jobs=native_job_attempts_from_specs(next_phase.jobs),
+        jobs=jobs,
     )
     attempt_index = run.attempts[-1].attempt_index
 
@@ -1221,6 +1235,15 @@ async def _dispatch_next_phase(
         # str] cleanly.
         "phase_inputs": dict(substituted),
     }
+    for key in (
+        "entrypoint_job_id",
+        "entrypoint_step_slug",
+        "artifact_refs",
+        "context",
+    ):
+        value = resume_context.get(key)
+        if value:
+            metadata[key] = value
     lease, host = await _acquire_phase_lease(
         cosmos=cosmos,
         settings=settings,
@@ -1285,6 +1308,48 @@ async def _dispatch_next_phase(
         )
     except Exception:
         log.exception("forward workflow_dispatch failed for run %s", run.id)
+
+
+def _native_jobs_with_resume_boundary(
+    jobs: list[NativeJobAttempt],
+    *,
+    entrypoint_job_id: Any,
+    entrypoint_step_slug: Any,
+) -> list[NativeJobAttempt]:
+    """Mark native steps before a resume boundary as skipped."""
+    job_id = str(entrypoint_job_id or "") or None
+    step_slug = str(entrypoint_step_slug or "") or None
+    if job_id is None and step_slug is None:
+        return jobs
+    if job_id is None and step_slug is not None and len(jobs) == 1:
+        job_id = jobs[0].job_id
+    now = datetime.now(UTC)
+    before_target_job = True
+    for job in jobs:
+        if job_id is not None and job.job_id != job_id and before_target_job:
+            job.state = NativeStepState.SKIPPED
+            job.started_at = now
+            job.completed_at = now
+            for step in job.steps:
+                step.state = NativeStepState.SKIPPED
+                step.started_at = now
+                step.completed_at = now
+                step.message = "skipped by resume-from-step"
+            continue
+        before_target_job = False
+        if job_id is not None and job.job_id != job_id:
+            continue
+        if step_slug is None:
+            break
+        for step in job.steps:
+            if step.slug == step_slug:
+                break
+            step.state = NativeStepState.SKIPPED
+            step.started_at = now
+            step.completed_at = now
+            step.message = "skipped by resume-from-step"
+        break
+    return jobs
 
 
 async def _dispatch_triage(
@@ -2778,6 +2843,11 @@ class RunResumeRequest(BaseModel):
     `"resume_via_mcp"`) and any audit-relevant context.
     """
     entrypoint_phase: str
+    entrypoint_job_id: str | None = None
+    entrypoint_step_slug: str | None = None
+    input_overrides: dict[str, str] = Field(default_factory=dict)
+    artifact_refs: dict[str, str] = Field(default_factory=dict)
+    context: dict[str, Any] = Field(default_factory=dict)
     trigger_source: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -2812,6 +2882,11 @@ async def resume_run(
         project=project,
         prior_run_id=run_id,
         entrypoint_phase=req.entrypoint_phase,
+        entrypoint_job_id=req.entrypoint_job_id,
+        entrypoint_step_slug=req.entrypoint_step_slug,
+        input_overrides=req.input_overrides,
+        artifact_refs=req.artifact_refs,
+        context=req.context,
         trigger_source=trigger_source,
     )
 

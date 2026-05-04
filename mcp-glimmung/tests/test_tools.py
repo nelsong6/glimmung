@@ -285,3 +285,34 @@ def test_browser_inspector_tool_uses_shared_inspector(monkeypatch) -> None:
         "max_elements": 80,
         "body_text_limit": 4000,
     }]
+
+
+def test_resume_run_posts_native_step_boundary_payload() -> None:
+    tools, client = _registered_tools()
+
+    result = tools["resume_run"](
+        project="glimmung",
+        run_id="run-1",
+        entrypoint_phase="agent-execute",
+        entrypoint_job_id="agent",
+        entrypoint_step_slug="run-agent",
+        input_overrides={"namespace": "preview-override"},
+        artifact_refs={"repo": "blob://artifacts/source.tgz"},
+        context={"operator_note": "resume at agent step"},
+        trigger_source={"actor": "codex"},
+    )
+
+    assert result["path"] == "/v1/runs/glimmung/run-1/resume"
+    assert result["json"] == {
+        "entrypoint_phase": "agent-execute",
+        "entrypoint_job_id": "agent",
+        "entrypoint_step_slug": "run-agent",
+        "input_overrides": {"namespace": "preview-override"},
+        "artifact_refs": {"repo": "blob://artifacts/source.tgz"},
+        "context": {"operator_note": "resume at agent step"},
+        "trigger_source": {
+            "kind": "resume_via_mcp",
+            "resumed_from_run_id": "run-1",
+            "actor": "codex",
+        },
+    }

@@ -436,6 +436,11 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         project: str,
         run_id: str,
         entrypoint_phase: str,
+        entrypoint_job_id: str | None = None,
+        entrypoint_step_slug: str | None = None,
+        input_overrides: dict[str, str] | None = None,
+        artifact_refs: dict[str, str] | None = None,
+        context: dict[str, Any] | None = None,
         trigger_source: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Resume a Glimmung run by spawning a new run from a terminal prior run at a chosen phase.
@@ -461,6 +466,13 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         currently held by a different Run (caller must abort the
         conflicting run first).
 
+        For native `k8s_job` phases, set `entrypoint_job_id` and
+        `entrypoint_step_slug` to restart at a specific app-owned step
+        boundary. Earlier jobs/steps are pre-marked skipped on the new
+        run, and the boundary plus `artifact_refs` / `context` are exposed
+        to the native pod via GLIMMUNG_* env vars. `input_overrides`
+        replaces substituted phase input values for the resumed attempt.
+
         `trigger_source` is recorded on the new Run for observability;
         the server adds `kind: resume_via_mcp` and `resumed_from_run_id`
         if not provided.
@@ -479,6 +491,15 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
             "entrypoint_phase": entrypoint_phase,
             "trigger_source": ts,
         }
+        for k, v in {
+            "entrypoint_job_id": entrypoint_job_id,
+            "entrypoint_step_slug": entrypoint_step_slug,
+            "input_overrides": input_overrides,
+            "artifact_refs": artifact_refs,
+            "context": context,
+        }.items():
+            if v:
+                payload[k] = v
         return client.post(
             f"/v1/runs/{project}/{run_id}/resume",
             json=payload,
