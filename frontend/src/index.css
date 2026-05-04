@@ -881,13 +881,17 @@ h2 .inline-action,
    trailing PR node. v1 phases-v1 ships single-phase, so this is
    `[phase] → [pr]` — boring but honest. Layout extends cleanly when
    multi-phase orchestration lands. */
+.dag-wrap {
+  margin: 12px 0;
+}
 .dag {
   display: flex;
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
-  margin: 12px 0;
+  margin: 0;
 }
+.dag-entry,
 .dag-node {
   display: inline-flex;
   flex-direction: column;
@@ -902,6 +906,11 @@ h2 .inline-action,
   font-family: inherit;
   cursor: pointer;
   text-align: left;
+}
+.dag-entry {
+  min-width: 96px;
+  cursor: default;
+  border-left: 2px solid var(--state-success-fg);
 }
 .dag-node:hover {
   background: var(--surface-hover);
@@ -940,6 +949,27 @@ h2 .inline-action,
   font-family: var(--font-mono);
   font-size: 1.1rem;
   user-select: none;
+}
+.dag-policy-rail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.dag-policy {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--state-info-fg);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--fg);
+  padding: 5px 8px;
+  font-size: 0.75rem;
+}
+.dag-policy.inactive {
+  opacity: 0.62;
 }
 .run-actions {
   display: flex;
@@ -1031,6 +1061,47 @@ h2 .inline-action,
 }
 .attempt-card-reasons li {
   margin-bottom: 2px;
+}
+.native-job-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+.native-job {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+.native-job-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.native-step-list {
+  display: grid;
+  gap: 4px;
+}
+.native-step {
+  display: grid;
+  grid-template-columns: 2px minmax(96px, 0.8fr) minmax(0, 1.1fr) minmax(72px, auto) auto minmax(0, 1.4fr);
+  align-items: start;
+  gap: 8px;
+  padding: 4px 6px;
+  background: var(--bg);
+  font-size: 0.78rem;
+}
+.native-step-rail {
+  width: 2px;
+  align-self: stretch;
+  background: var(--border);
+}
+.native-step-rail.free { background: var(--state-success-fg); }
+.native-step-rail.busy { background: var(--state-busy-fg); }
+.native-step-rail.drain { background: var(--state-danger-fg); }
+.native-step-rail.info { background: var(--state-info-fg); }
+.native-step-message {
+  overflow-wrap: anywhere;
+  color: var(--fg-muted);
 }
 .native-log-panel {
   margin-top: 10px;

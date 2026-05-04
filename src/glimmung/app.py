@@ -3872,6 +3872,64 @@ def _attempt_graph_metadata(attempt: Any) -> dict[str, Any]:
     }
 
 
+def _workflow_graph_metadata(workflow_doc: dict[str, Any] | None) -> dict[str, Any]:
+    """Small, stable graph contract for workflow shape/policy.
+
+    Runs are immutable visual graphs once started. This metadata lets the
+    dashboard render the definition arrows that exist before execution:
+    the default entry into phase 1, phase recycle arrows, and the terminal
+    Report primitive's PR-feedback recycle arrow.
+    """
+    if workflow_doc is None:
+        return {
+            "phases": [],
+            "default_entry": None,
+            "recycle_arrows": [],
+            "terminal": {"kind": "report", "enabled": False},
+        }
+    phases = list(workflow_doc.get("phases") or [])
+    phase_names = [str(p.get("name") or "") for p in phases if p.get("name")]
+    recycle_arrows: list[dict[str, Any]] = []
+    for phase in phases:
+        source = str(phase.get("name") or "")
+        policy = phase.get("recyclePolicy") or None
+        if not source or not isinstance(policy, dict):
+            continue
+        lands_at = str(policy.get("landsAt") or "self")
+        recycle_arrows.append({
+            "source": source,
+            "target": source if lands_at == "self" else lands_at,
+            "trigger": " / ".join(str(t) for t in (policy.get("on") or [])),
+            "max_attempts": int(policy.get("maxAttempts") or 3),
+            "active": False,
+            "kind": "phase_recycle",
+        })
+    pr_doc = workflow_doc.get("pr") or {}
+    pr_policy = pr_doc.get("recyclePolicy") or None
+    if isinstance(pr_policy, dict):
+        recycle_arrows.append({
+            "source": "report",
+            "target": str(pr_policy.get("landsAt") or ""),
+            "trigger": " / ".join(str(t) for t in (pr_policy.get("on") or [])),
+            "max_attempts": int(pr_policy.get("maxAttempts") or 3),
+            "active": False,
+            "kind": "report_recycle",
+        })
+    return {
+        "phases": phase_names,
+        "default_entry": {
+            "target": phase_names[0],
+            "active": True,
+            "kind": "default",
+        } if phase_names else None,
+        "recycle_arrows": recycle_arrows,
+        "terminal": {
+            "kind": "report",
+            "enabled": bool(pr_doc.get("enabled", False)),
+        },
+    }
+
+
 @app.get(
     "/v1/issues",
     response_model=list[IssueRow],
@@ -4317,12 +4375,18 @@ async def _build_system_graph(
         parameters=[{"name": "@s", "value": RunState.IN_PROGRESS.value}],
     )
     runs: list[Run] = []
+    workflow_meta_cache: dict[tuple[str, str], dict[str, Any]] = {}
     for doc in run_docs:
         run = Run.model_validate({k: v for k, v in doc.items() if not k.startswith("_")})
         if run.issue_id not in issue_ids:
             continue
         if project is not None and run.project != project:
             continue
+        workflow_key = (run.project, run.workflow)
+        if workflow_key not in workflow_meta_cache:
+            workflow_meta_cache[workflow_key] = _workflow_graph_metadata(
+                await _read_workflow(cosmos, run.project, run.workflow)
+            )
         runs.append(run)
         run_node_id = f"run:{run.id}"
         nodes.append(GraphNode(
@@ -4340,6 +4404,7 @@ async def _build_system_graph(
                 "cumulative_cost_usd": run.cumulative_cost_usd,
                 "cloned_from_run_id": run.cloned_from_run_id,
                 "entrypoint_phase": run.entrypoint_phase,
+                "workflow_graph": workflow_meta_cache[workflow_key],
             },
         ))
         edges.append(GraphEdge(
@@ -4507,6 +4572,7 @@ async def _build_issue_graph(
         if d.get("pr_number") is not None
     }
     run_ids = {d["id"] for d in run_docs}
+    workflow_meta_cache: dict[tuple[str, str], dict[str, Any]] = {}
 
     report_docs = await query_all(
         cosmos.reports,
@@ -4634,6 +4700,12 @@ async def _build_issue_graph(
         linked_report = report_by_run_id.get(run_id)
         if linked_report is None and d.get("pr_number") is not None:
             linked_report = report_by_number.get(int(d["pr_number"]))
+        workflow_name = str(d.get("workflow") or "")
+        workflow_key = (issue.project, workflow_name)
+        if workflow_key not in workflow_meta_cache:
+            workflow_meta_cache[workflow_key] = _workflow_graph_metadata(
+                await _read_workflow(cosmos, issue.project, workflow_name)
+            )
         nodes.append(GraphNode(
             id=run_node_id,
             kind="run",
@@ -4658,6 +4730,7 @@ async def _build_issue_graph(
                 # entrypoint-arrow highlight on resumed Runs.
                 "cloned_from_run_id": d.get("cloned_from_run_id"),
                 "entrypoint_phase": d.get("entrypoint_phase"),
+                "workflow_graph": workflow_meta_cache[workflow_key],
             },
         ))
         edges.append(GraphEdge(
