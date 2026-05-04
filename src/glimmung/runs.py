@@ -672,6 +672,22 @@ async def mark_passed(cosmos: Cosmos, *, run: Run, etag: str) -> tuple[Run, str]
     return await _retry_on_conflict(cosmos, run, etag, apply)
 
 
+async def mark_review_required(
+    cosmos: Cosmos,
+    *,
+    run: Run,
+    etag: str,
+    reason: str,
+) -> tuple[Run, str]:
+    def apply(r: Run) -> Run:
+        return r.model_copy(update={
+            "state": RunState.REVIEW_REQUIRED,
+            "abort_reason": reason,
+            "updated_at": _now(),
+        })
+    return await _retry_on_conflict(cosmos, run, etag, apply)
+
+
 async def mark_aborted(
     cosmos: Cosmos,
     *,

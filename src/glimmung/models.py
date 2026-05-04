@@ -571,6 +571,7 @@ class PhaseAttempt(BaseModel):
 class RunState(str, Enum):
     IN_PROGRESS = "in_progress"
     PASSED = "passed"
+    REVIEW_REQUIRED = "review_required"
     ABORTED = "aborted"
 
 
@@ -622,9 +623,9 @@ class Run(BaseModel):
     cumulative_cost_usd: float = 0.0
     abort_reason: str | None = None
     # Set when dispatch_run claimed an issue-scope Lock for serialization.
-    # On terminal transition (PASSED / ABORTED), the workflow_run.completed
-    # handler releases the lock with this holder id. Optional because pre-#20
-    # runs predate the issue-lock primitive.
+    # On terminal transition (PASSED / REVIEW_REQUIRED / ABORTED), the
+    # workflow_run.completed handler releases the lock with this holder id.
+    # Optional because pre-#20 runs predate the issue-lock primitive.
     issue_lock_holder_id: str | None = None
     # Where the dispatch came from. Free-form so future trigger sources
     # (scheduled re-runs, CLI, Slack, signal-drain) can plug in without a
