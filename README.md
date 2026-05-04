@@ -213,6 +213,24 @@ every partition-key value with a per-session `test-...:` namespace and sweeps
 that namespace on first use. Set `GLIMMUNG_TEST_PREFIX=test-my-run:` to reuse
 or inspect a specific namespace.
 
+## Browser inspection
+
+`mcp-glimmung` includes a generic Playwright-backed inspector for validation
+URLs. Use the MCP `inspect_browser_url` tool, or run the same implementation
+locally/in workflows:
+
+```sh
+cd mcp-glimmung
+uv run glimmung-browser-inspect https://example.romaine.life \
+  --width 1440 --height 900 --wait-ms 2000 --screenshot
+```
+
+The JSON result includes final URL/status, title/body summary, interesting
+elements with selectors/roles/bounds/styles, console and page errors, failed
+requests and HTTP >= 400 responses, optional accessibility data, optional
+screenshot path, and canvas nonblank sampling. Use it when rendered browser
+state matters more than a static screenshot alone.
+
 First-time setup grants your `az login` principal data-plane access on the
 glimmung Cosmos database (without it the first read fails with `readMetadata`
 denied). Add your Entra object id to `dev_test_principal_ids` in
