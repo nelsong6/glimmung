@@ -33,8 +33,8 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
-def _event_id(*, run_id: str, job_id: str, seq: int) -> str:
-    return f"{run_id}::{job_id}::{seq:012d}"
+def _event_id(*, run_id: str, attempt_index: int, job_id: str, seq: int) -> str:
+    return f"{run_id}::{attempt_index:04d}::{job_id}::{seq:012d}"
 
 
 async def record_native_event(
@@ -62,11 +62,17 @@ async def record_native_event(
         raise NativeEventError(f"run {run.id} has no attempts")
     _validate_target(run, job_id=job_id, event=event, step_slug=step_slug)
 
+    attempt_index = run.attempts[-1].attempt_index
     doc = {
-        "id": _event_id(run_id=run.id, job_id=job_id, seq=seq),
+        "id": _event_id(
+            run_id=run.id,
+            attempt_index=attempt_index,
+            job_id=job_id,
+            seq=seq,
+        ),
         "project": run.project,
         "run_id": run.id,
-        "attempt_index": run.attempts[-1].attempt_index,
+        "attempt_index": attempt_index,
         "phase": run.attempts[-1].phase,
         "job_id": job_id,
         "seq": seq,
@@ -189,11 +195,12 @@ async def assert_native_completion_ready(cosmos: Cosmos, *, run: Run) -> None:
             cosmos.run_events,
             (
                 "SELECT * FROM c WHERE c.project = @p AND c.run_id = @r "
-                "AND c.job_id = @j ORDER BY c.seq ASC"
+                "AND c.attempt_index = @a AND c.job_id = @j ORDER BY c.seq ASC"
             ),
             parameters=[
                 {"name": "@p", "value": run.project},
                 {"name": "@r", "value": run.id},
+                {"name": "@a", "value": attempt.attempt_index},
                 {"name": "@j", "value": job.job_id},
             ],
         )

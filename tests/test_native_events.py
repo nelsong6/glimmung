@@ -225,10 +225,98 @@ async def test_native_step_events_update_run_and_persist_ordered_logs(cosmos, mo
     assert attempt["jobs"][0]["last_seq"] == 3
     assert attempt["jobs"][0]["steps"][0]["state"] == "succeeded"
     log_doc = await cosmos.run_events.read_item(
-        item=f"{run.id}::agent::000000000002",
+        item=f"{run.id}::0000::agent::000000000002",
         partition_key=run.project,
     )
     assert log_doc["message"] == "cloned main"
+
+
+@pytest.mark.asyncio
+async def test_native_events_are_scoped_by_attempt_index(cosmos, monkeypatch):
+    run = await _seed_native_run(cosmos)
+    monkeypatch.setattr("glimmung.app.app", _app_with(cosmos))
+
+    await native_run_event(
+        NativeRunEventRequest(
+            job_id="agent",
+            seq=1,
+            event=NativeRunEventType.STEP_STARTED,
+            step_slug="clone-repo",
+        ),
+        request=_request(),
+        project=run.project,
+        run_id=run.id,
+    )
+
+    doc = await cosmos.runs.read_item(item=run.id, partition_key=run.project)
+    now = datetime.now(UTC)
+    doc["attempts"].append(
+        PhaseAttempt(
+            attempt_index=1,
+            phase="agent-execute",
+            phase_kind="k8s_job",
+            workflow_filename="k8s_job:agent-execute",
+            dispatched_at=now,
+            jobs=_native_jobs(),
+        ).model_dump(mode="json")
+    )
+    await cosmos.runs.replace_item(item=run.id, body=doc)
+
+    await native_run_event(
+        NativeRunEventRequest(
+            job_id="agent",
+            seq=1,
+            event=NativeRunEventType.STEP_STARTED,
+            step_slug="clone-repo",
+        ),
+        request=_request(),
+        project=run.project,
+        run_id=run.id,
+    )
+    for seq, event, step in (
+        (2, NativeRunEventType.STEP_COMPLETED, "clone-repo"),
+        (3, NativeRunEventType.STEP_STARTED, "run-agent"),
+        (4, NativeRunEventType.STEP_COMPLETED, "run-agent"),
+    ):
+        await native_run_event(
+            NativeRunEventRequest(
+                job_id="agent",
+                seq=seq,
+                event=event,
+                step_slug=step,
+                exit_code=0 if event == NativeRunEventType.STEP_COMPLETED else None,
+            ),
+            request=_request(),
+            project=run.project,
+            run_id=run.id,
+        )
+
+    first = await cosmos.run_events.read_item(
+        item=f"{run.id}::0000::agent::000000000001",
+        partition_key=run.project,
+    )
+    second = await cosmos.run_events.read_item(
+        item=f"{run.id}::0001::agent::000000000001",
+        partition_key=run.project,
+    )
+    assert first["attempt_index"] == 0
+    assert second["attempt_index"] == 1
+
+    result = await native_run_completed(
+        NativeRunCompletedRequest(
+            verification={
+                "schema_version": 1,
+                "status": VerificationStatus.PASS.value,
+                "reasons": [],
+                "evidence_refs": [],
+                "cost_usd": 0.01,
+            },
+        ),
+        request=_request(),
+        project=run.project,
+        run_id=run.id,
+    )
+    assert result.decision == "advance"
 
 
 @pytest.mark.asyncio
