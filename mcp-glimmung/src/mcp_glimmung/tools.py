@@ -8,6 +8,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from .browser_inspector import inspect_url
 from .glimmung_client import GlimmungClient
 
 
@@ -188,6 +189,43 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
     def get_playbook(project: str, playbook_id: str) -> dict[str, Any]:
         """Get one Glimmung Playbook by project and playbook id."""
         return client.get(f"/v1/playbooks/{project}/{playbook_id}")
+
+    @mcp.tool()
+    def inspect_browser_url(
+        url: str,
+        viewport: dict[str, int] | None = None,
+        wait_ms: int = 2000,
+        timeout_ms: int = 30000,
+        screenshot: bool = True,
+        full_page: bool = True,
+        capture_accessibility: bool = False,
+        capture_console: bool = True,
+        capture_network: bool = True,
+        max_elements: int = 80,
+        body_text_limit: int = 4000,
+    ) -> dict[str, Any]:
+        """Inspect a live URL with Chromium and return browser-state JSON.
+
+        Use for validation URLs when a static screenshot is not enough:
+        the tool waits for the rendered page, captures final URL/status,
+        title/body summary, interesting DOM elements with selectors and
+        bounds, console/page errors, failed requests and HTTP >= 400
+        responses, optional accessibility tree, optional screenshot path,
+        and canvas nonblank sampling data.
+        """
+        return inspect_url(
+            url=url,
+            viewport=viewport,
+            wait_ms=wait_ms,
+            timeout_ms=timeout_ms,
+            screenshot=screenshot,
+            full_page=full_page,
+            capture_accessibility=capture_accessibility,
+            capture_console=capture_console,
+            capture_network=capture_network,
+            max_elements=max_elements,
+            body_text_limit=body_text_limit,
+        )
 
     @mcp.tool()
     def register_workflow(

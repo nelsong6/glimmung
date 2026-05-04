@@ -214,3 +214,36 @@ def test_playbook_tools_call_http_surface() -> None:
         ("GET", "/v1/playbooks", {"project": "glimmung"}, None),
         ("GET", "/v1/playbooks/glimmung/pb-1", None, None),
     ]
+
+
+def test_browser_inspector_tool_uses_shared_inspector(monkeypatch) -> None:
+    tools, _client = _registered_tools()
+    calls: list[dict[str, Any]] = []
+
+    def fake_inspect_url(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {"final_url": kwargs["url"], "elements": []}
+
+    monkeypatch.setattr("mcp_glimmung.tools.inspect_url", fake_inspect_url)
+
+    result = tools["inspect_browser_url"](
+        "https://example.test/app",
+        viewport={"width": 390, "height": 844},
+        wait_ms=100,
+        screenshot=False,
+    )
+
+    assert result == {"final_url": "https://example.test/app", "elements": []}
+    assert calls == [{
+        "url": "https://example.test/app",
+        "viewport": {"width": 390, "height": 844},
+        "wait_ms": 100,
+        "timeout_ms": 30000,
+        "screenshot": False,
+        "full_page": True,
+        "capture_accessibility": False,
+        "capture_console": True,
+        "capture_network": True,
+        "max_elements": 80,
+        "body_text_limit": 4000,
+    }]
