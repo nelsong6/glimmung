@@ -221,6 +221,19 @@ async def test_list_prs_includes_closed_prs(cosmos):
 
 
 @pytest.mark.asyncio
+async def test_list_prs_filters_by_repo_and_state(cosmos):
+    ready = await create_report(cosmos, project="a", repo="r/n", number=1, title="a", branch="b1")
+    closed = await create_report(cosmos, project="a", repo="r/n", number=2, title="b", branch="b2")
+    await create_report(cosmos, project="a", repo="other/r", number=3, title="c", branch="b3")
+    fetched, etag = await read_report(cosmos, project="a", report_id=closed.id)
+    await close_report(cosmos, pr=fetched, etag=etag)
+
+    ready_prs = await list_reports(cosmos, repo="r/n", state=ReportState.READY)
+
+    assert [p.id for p in ready_prs] == [ready.id]
+
+
+@pytest.mark.asyncio
 async def test_list_open_prs_filters_by_state(cosmos):
     a = await create_report(cosmos, project="a", repo="r/n", number=1, title="a", branch="b1")
     b = await create_report(cosmos, project="a", repo="r/n", number=2, title="b", branch="b2")

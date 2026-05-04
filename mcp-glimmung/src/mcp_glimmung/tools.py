@@ -114,13 +114,30 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         return client.get(f"/v1/reports/by-id/{project}/{report_id}/versions/{version}")
 
     @mcp.tool()
-    def list_reports() -> list[dict[str, Any]]:
-        """List all Glimmung reports across projects.
+    def list_reports(
+        project: str | None = None,
+        repo: str | None = None,
+        state: str | None = None,
+        limit: int | None = 50,
+    ) -> list[dict[str, Any]]:
+        """List Glimmung reports across projects, optionally filtered.
 
         Use to find reports associated with GitHub pull requests, branches,
-        issues, or runs.
+        issues, or runs. `project` filters by Glimmung project name, `repo`
+        filters by GitHub owner/name, `state` filters by report state
+        (ready, needs_review, failed, closed, merged), and `limit` caps
+        returned rows.
         """
-        return client.get("/v1/reports")
+        params = {
+            "project": project,
+            "repo": repo,
+            "state": state,
+            "limit": limit,
+        }
+        return client.get(
+            "/v1/reports",
+            params={k: v for k, v in params.items() if v is not None},
+        )
 
     @mcp.tool()
     def get_state() -> dict[str, Any]:

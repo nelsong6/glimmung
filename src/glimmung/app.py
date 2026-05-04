@@ -4990,14 +4990,37 @@ class ReportVersionCreateRequest(BaseModel):
     "/v1/reports",
     response_model=list[ReportRow],
 )
-async def list_reports() -> list[ReportRow]:
-    """All Reports across registered projects."""
-    return await _list_reports_from_cosmos(app.state.cosmos)
+async def list_reports(
+    project: str | None = Query(None),
+    repo: str | None = Query(None),
+    state: ReportState | None = Query(None),
+    limit: int | None = Query(None, ge=1, le=500),
+) -> list[ReportRow]:
+    """All Reports across registered projects, optionally filtered."""
+    return await _list_reports_from_cosmos(
+        app.state.cosmos,
+        project=project,
+        repo=repo,
+        state=state,
+        limit=limit,
+    )
 
 
-async def _list_reports_from_cosmos(cosmos: Cosmos) -> list[ReportRow]:
+async def _list_reports_from_cosmos(
+    cosmos: Cosmos,
+    *,
+    project: str | None = None,
+    repo: str | None = None,
+    state: ReportState | None = None,
+    limit: int | None = None,
+) -> list[ReportRow]:
     """Read path for `/v1/reports`, lifted out for focused tests."""
-    reports = await report_ops.list_reports(cosmos)
+    reports = await report_ops.list_reports(
+        cosmos,
+        project=project,
+        repo=repo,
+        state=state,
+    )
     if not reports:
         return []
 
@@ -5073,6 +5096,8 @@ async def _list_reports_from_cosmos(cosmos: Cosmos) -> list[ReportRow]:
         rows.append(row)
 
     rows.sort(key=lambda r: (r.project, -r.pr_number))
+    if limit is not None:
+        rows = rows[:limit]
     return rows
 
 
