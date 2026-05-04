@@ -90,6 +90,35 @@ async def test_list_omits_closed_issues(cosmos):
     assert rows == []
 
 
+@pytest.mark.asyncio
+async def test_list_filters_by_project_repo_and_limit(cosmos):
+    await issue_ops.create_issue(
+        cosmos, project="ambience", title="ambience native",
+    )
+    await issue_ops.create_issue(
+        cosmos, project="ambience", title="ambience gh 8",
+        github_issue_url="https://github.com/nelsong6/ambience/issues/8",
+        github_issue_repo="nelsong6/ambience",
+        github_issue_number=8,
+    )
+    await issue_ops.create_issue(
+        cosmos, project="glimmung", title="glimmung gh 3",
+        github_issue_url="https://github.com/nelsong6/glimmung/issues/3",
+        github_issue_repo="nelsong6/glimmung",
+        github_issue_number=3,
+    )
+
+    rows = await _list_issues_from_cosmos(cosmos, project="ambience")
+    assert [r.project for r in rows] == ["ambience", "ambience"]
+
+    rows = await _list_issues_from_cosmos(cosmos, repo="nelsong6/glimmung")
+    assert len(rows) == 1
+    assert rows[0].repo == "nelsong6/glimmung"
+
+    rows = await _list_issues_from_cosmos(cosmos, limit=1)
+    assert len(rows) == 1
+
+
 # ─── _build_issue_detail: shared rendering ──────────────────────────────
 
 
