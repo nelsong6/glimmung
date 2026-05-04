@@ -66,6 +66,9 @@ from glimmung.models import (
     PhaseSpec,
     Playbook,
     PlaybookCreate,
+    PlaybookEntry,
+    PlaybookEntryState,
+    PlaybookState,
     ReportState,
     PrPrimitiveSpec,
     Project,
@@ -3053,6 +3056,174 @@ async def get_playbook_endpoint(
         raise HTTPException(404, f"no playbook {project}/{playbook_id}")
     playbook, _etag = found
     return playbook
+
+
+@app.post(
+    "/v1/playbooks/{project}/{playbook_id}/run",
+    response_model=Playbook,
+    dependencies=[Depends(require_admin_user)],
+)
+async def run_playbook_endpoint(
+    project: str = Path(...),
+    playbook_id: str = Path(...),
+) -> Playbook:
+    found = await playbook_ops.read_playbook(
+        app.state.cosmos,
+        project=project,
+        playbook_id=playbook_id,
+    )
+    if found is None:
+        raise HTTPException(404, f"no playbook {project}/{playbook_id}")
+    playbook, etag = found
+    playbook = await _advance_playbook(app, playbook=playbook)
+    playbook, _ = await playbook_ops.replace_playbook(
+        app.state.cosmos,
+        playbook=playbook,
+        etag=etag,
+    )
+    return playbook
+
+
+async def _advance_playbook(app: FastAPI, *, playbook: Playbook) -> Playbook:
+    cosmos: Cosmos = app.state.cosmos
+    await _refresh_playbook_entries(cosmos, playbook)
+    if playbook.state == PlaybookState.CANCELLED:
+        return playbook
+    if _playbook_all_succeeded(playbook):
+        playbook.state = PlaybookState.SUCCEEDED
+        return playbook
+    if _playbook_has_blocking_failure(playbook):
+        playbook.state = PlaybookState.FAILED
+        return playbook
+
+    limit = playbook.concurrency_limit or 1
+    active = sum(1 for entry in playbook.entries if entry.state == PlaybookEntryState.RUNNING)
+    started = 0
+    for entry in playbook.entries:
+        if active >= limit:
+            break
+        if not _playbook_entry_ready(playbook, entry):
+            continue
+        await _start_playbook_entry(app, playbook=playbook, entry=entry)
+        if entry.state == PlaybookEntryState.RUNNING:
+            active += 1
+            started += 1
+
+    if _playbook_all_succeeded(playbook):
+        playbook.state = PlaybookState.SUCCEEDED
+    elif _playbook_has_blocking_failure(playbook):
+        playbook.state = PlaybookState.FAILED
+    elif any(entry.manual_gate and _playbook_entry_dependencies_met(playbook, entry)
+             and entry.state == PlaybookEntryState.PENDING for entry in playbook.entries):
+        playbook.state = PlaybookState.PAUSED
+    elif active or started:
+        playbook.state = PlaybookState.RUNNING
+    else:
+        playbook.state = PlaybookState.READY
+    return playbook
+
+
+async def _refresh_playbook_entries(cosmos: Cosmos, playbook: Playbook) -> None:
+    for entry in playbook.entries:
+        if not entry.run_id:
+            continue
+        found = await run_ops.read_run(cosmos, project=playbook.project, run_id=entry.run_id)
+        if found is None:
+            continue
+        run, _ = found
+        if run.state == RunState.PASSED:
+            entry.state = PlaybookEntryState.SUCCEEDED
+            entry.completed_at = run.updated_at
+        elif run.state == RunState.ABORTED:
+            entry.state = PlaybookEntryState.FAILED
+            entry.completed_at = run.updated_at
+            entry.metadata = {
+                **entry.metadata,
+                "run_state": run.state.value,
+                "abort_reason": run.abort_reason,
+            }
+        elif entry.state in (PlaybookEntryState.CREATED, PlaybookEntryState.PENDING):
+            entry.state = PlaybookEntryState.RUNNING
+
+
+async def _start_playbook_entry(
+    app: FastAPI,
+    *,
+    playbook: Playbook,
+    entry: PlaybookEntry,
+) -> None:
+    cosmos: Cosmos = app.state.cosmos
+    if not entry.created_issue_id:
+        issue = await issue_ops.create_issue(
+            cosmos,
+            project=playbook.project,
+            title=entry.issue.title,
+            body=entry.issue.body,
+            labels=entry.issue.labels,
+        )
+        entry.created_issue_id = issue.id
+        entry.state = PlaybookEntryState.CREATED
+    result = await dispatch_run(
+        app,
+        issue_id=entry.created_issue_id,
+        project=playbook.project,
+        workflow_name=entry.issue.workflow,
+        trigger_source={
+            "kind": "playbook",
+            "playbook_id": playbook.id,
+            "entry_id": entry.id,
+        },
+        extra_metadata={
+            "playbook_id": playbook.id,
+            "playbook_entry_id": entry.id,
+            **entry.issue.metadata,
+        },
+    )
+    entry.metadata = {
+        **entry.metadata,
+        "dispatch_state": result.state,
+        "dispatch_detail": result.detail,
+    }
+    if result.run_id:
+        entry.run_id = result.run_id
+    if result.state in ("dispatched", "pending"):
+        entry.state = PlaybookEntryState.RUNNING
+    elif result.state == "already_running":
+        latest = await run_ops.find_run_by_issue_id(cosmos, issue_id=entry.created_issue_id)
+        if latest is not None:
+            entry.run_id = latest.id
+            entry.state = PlaybookEntryState.RUNNING
+    else:
+        entry.state = PlaybookEntryState.FAILED
+        entry.completed_at = datetime.now(UTC)
+
+
+def _playbook_entry_dependencies_met(playbook: Playbook, entry: PlaybookEntry) -> bool:
+    by_id = {candidate.id: candidate for candidate in playbook.entries}
+    return all(
+        by_id[dep].state == PlaybookEntryState.SUCCEEDED
+        for dep in entry.depends_on
+        if dep in by_id
+    )
+
+
+def _playbook_entry_ready(playbook: Playbook, entry: PlaybookEntry) -> bool:
+    return (
+        entry.state in (PlaybookEntryState.PENDING, PlaybookEntryState.CREATED)
+        and not entry.manual_gate
+        and _playbook_entry_dependencies_met(playbook, entry)
+    )
+
+
+def _playbook_all_succeeded(playbook: Playbook) -> bool:
+    return bool(playbook.entries) and all(
+        entry.state in (PlaybookEntryState.SUCCEEDED, PlaybookEntryState.SKIPPED)
+        for entry in playbook.entries
+    )
+
+
+def _playbook_has_blocking_failure(playbook: Playbook) -> bool:
+    return any(entry.state == PlaybookEntryState.FAILED for entry in playbook.entries)
 
 
 class WorkflowUpdateRequest(BaseModel):

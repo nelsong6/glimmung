@@ -201,6 +201,17 @@ def register_tools(mcp: FastMCP, client: GlimmungClient) -> None:
         return client.get(f"/v1/playbooks/{project}/{playbook_id}")
 
     @mcp.tool()
+    def run_playbook(project: str, playbook_id: str) -> dict[str, Any]:
+        """Start or advance a Glimmung Playbook.
+
+        The server mints and dispatches ready entries up to the playbook's
+        concurrency limit, refreshes linked run outcomes, and records created
+        issue/run ids. Re-run this after entries complete to advance
+        dependency-gated work.
+        """
+        return client.post(f"/v1/playbooks/{project}/{playbook_id}/run")
+
+    @mcp.tool()
     def inspect_browser_url(
         url: str,
         viewport: dict[str, int] | None = None,

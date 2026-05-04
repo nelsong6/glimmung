@@ -230,6 +230,7 @@ def test_playbook_tools_call_http_surface() -> None:
     )
     tools["list_playbooks"](project="glimmung")
     tools["get_playbook"]("glimmung", "pb-1")
+    tools["run_playbook"]("glimmung", "pb-1")
 
     assert created["path"] == "/v1/playbooks"
     assert created["json"] == {
@@ -247,10 +248,11 @@ def test_playbook_tools_call_http_surface() -> None:
         "metadata": {"source": "mcp-test"},
         "concurrency_limit": 1,
     }
-    assert client.calls[-3:] == [
+    assert client.calls[-4:] == [
         ("POST", "/v1/playbooks", None, created["json"]),
         ("GET", "/v1/playbooks", {"project": "glimmung"}, None),
         ("GET", "/v1/playbooks/glimmung/pb-1", None, None),
+        ("POST", "/v1/playbooks/glimmung/pb-1/run", None, None),
     ]
 
 
