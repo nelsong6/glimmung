@@ -146,6 +146,10 @@ def test_job_manifest_maps_phase_jobs_to_sequential_pod_containers():
         "http://glimmung.glimmung.svc.cluster.local"
         "/v1/runs/ambience/01KRNATIVE0000000000000000/native/github-token"
     )
+    assert env["GLIMMUNG_STATUS_URL"]["value"] == (
+        "http://glimmung.glimmung.svc.cluster.local"
+        "/v1/runs/ambience/01KRNATIVE0000000000000000/native/status"
+    )
     assert env["GLIMMUNG_ATTEMPT_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == (
         "glim-01krnative-2-token"
     )
