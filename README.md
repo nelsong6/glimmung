@@ -232,11 +232,13 @@ or inspect a specific namespace.
 
 ## Browser inspection
 
-`mcp-glimmung` includes a generic Playwright-backed inspector for validation
+The sibling [mcp-glimmung](https://github.com/nelsong6/mcp-glimmung) repo
+includes a generic Playwright-backed inspector for validation
 URLs. Use the MCP `inspect_browser_url` tool, or run the same implementation
 locally/in workflows:
 
 ```sh
+git clone https://github.com/nelsong6/mcp-glimmung.git
 cd mcp-glimmung
 uv run glimmung-browser-inspect https://example.romaine.life \
   --width 1440 --height 900 --wait-ms 2000 --screenshot

@@ -49,8 +49,7 @@ class Settings(BaseSettings):
     #     Claude runs; needed for in-conversation registration of new
     #     projects/workflows/hosts (the original CLI flow requires Entra
     #     login on a workstation, which session pods don't have).
-    #   - mcp-glimmung/mcp-glimmung: the mcp-glimmung MCP server (sibling
-    #     to mcp-k8s/mcp-github/etc. in tank-operator's monorepo). Calls
+    #   - mcp-glimmung/mcp-glimmung: the mcp-glimmung MCP server. Calls
     #     us as itself; the session-pod identity stops at its kube-rbac-
     #     proxy gate, so the MCP server's own SA is what reaches us.
     # Empty disables the path; Entra remains the only admin auth.
