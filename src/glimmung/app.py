@@ -3478,6 +3478,44 @@ class DispatchRequest(BaseModel):
     workflow: str | None = None
 
 
+def _attempt_graph_metadata(attempt: Any) -> dict[str, Any]:
+    """Stable graph metadata for one PhaseAttempt.
+
+    Accepts either a Pydantic PhaseAttempt or the JSON dict shape read from
+    Cosmos so both system and issue graph builders expose the same native
+    job/step/log surface.
+    """
+    if hasattr(attempt, "model_dump"):
+        data = attempt.model_dump(mode="json")
+    else:
+        data = dict(attempt or {})
+    jobs = list(data.get("jobs") or [])
+    step_count = 0
+    for job in jobs:
+        if isinstance(job, dict):
+            step_count += len(job.get("steps") or [])
+    return {
+        "run_id": data.get("run_id"),
+        "attempt_index": data.get("attempt_index"),
+        "phase": data.get("phase"),
+        "phase_kind": data.get("phase_kind"),
+        "workflow_filename": data.get("workflow_filename"),
+        "workflow_run_id": data.get("workflow_run_id"),
+        "completed_at": data.get("completed_at"),
+        "decision": data.get("decision"),
+        "skipped_from_run_id": data.get("skipped_from_run_id"),
+        "verification": data.get("verification"),
+        "cost_usd": data.get("cost_usd"),
+        "conclusion": data.get("conclusion"),
+        "artifact_url": data.get("artifact_url"),
+        "phase_outputs": data.get("phase_outputs"),
+        "log_archive_url": data.get("log_archive_url"),
+        "jobs": jobs,
+        "jobs_count": len(jobs),
+        "steps_count": step_count,
+    }
+
+
 @app.get(
     "/v1/issues",
     response_model=list[IssueRow],
@@ -3956,6 +3994,8 @@ async def _build_system_graph(
         previous_attempt_node: str | None = None
         for attempt in run.attempts:
             attempt_node_id = f"attempt:{run.id}:{attempt.attempt_index}"
+            metadata = _attempt_graph_metadata(attempt)
+            metadata["run_id"] = run.id
             nodes.append(GraphNode(
                 id=attempt_node_id,
                 kind="attempt",
@@ -3965,17 +4005,7 @@ async def _build_system_graph(
                     else attempt.conclusion or "in_progress"
                 ),
                 timestamp=attempt.dispatched_at.isoformat(),
-                metadata={
-                    "run_id": run.id,
-                    "attempt_index": attempt.attempt_index,
-                    "phase": attempt.phase,
-                    "workflow_filename": attempt.workflow_filename,
-                    "workflow_run_id": attempt.workflow_run_id,
-                    "completed_at": attempt.completed_at.isoformat()
-                    if attempt.completed_at else None,
-                    "decision": attempt.decision,
-                    "skipped_from_run_id": attempt.skipped_from_run_id,
-                },
+                metadata=metadata,
             ))
             edges.append(GraphEdge(
                 source=run_node_id if previous_attempt_node is None else previous_attempt_node,
@@ -4253,18 +4283,13 @@ async def _build_issue_graph(
                 state=attempt_state,
                 timestamp=a.get("dispatched_at"),
                 metadata={
-                    "phase": a.get("phase"),
-                    "workflow_filename": a.get("workflow_filename"),
-                    "workflow_run_id": a.get("workflow_run_id"),
-                    "verification": verification or None,
-                    "cost_usd": a.get("cost_usd"),
-                    "decision": a.get("decision"),
-                    "completed_at": a.get("completed_at"),
-                    "conclusion": a.get("conclusion"),
+                    **_attempt_graph_metadata(a),
+                    "run_id": run_id,
                     # Resume primitive (#111) — set on synthesized
                     # skip-marks so the dashboard can render "satisfied
                     # by Run X" tooltips and grey out skipped attempts.
                     "skipped_from_run_id": skipped_from,
+                    "verification": verification or None,
                 },
             ))
             edges.append(GraphEdge(

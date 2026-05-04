@@ -19,6 +19,9 @@ from fastapi import HTTPException
 from glimmung.app import _build_issue_graph, _build_system_graph, issue_graph
 from glimmung.models import (
     BudgetConfig,
+    NativeJobAttempt,
+    NativeStepAttempt,
+    NativeStepState,
     PhaseAttempt,
     Report,
     ReportState,
@@ -87,6 +90,27 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _native_job() -> NativeJobAttempt:
+    return NativeJobAttempt(
+        job_id="agent",
+        name="Agent",
+        state=NativeStepState.ACTIVE,
+        steps=[
+            NativeStepAttempt(
+                slug="clone",
+                title="Clone repo",
+                state=NativeStepState.SUCCEEDED,
+                exit_code=0,
+            ),
+            NativeStepAttempt(
+                slug="edit",
+                title="Edit files",
+                state=NativeStepState.ACTIVE,
+            ),
+        ],
+    )
+
+
 async def _seed_run(cosmos, run: Run) -> None:
     await cosmos.runs.create_item(run.model_dump(mode="json"))
 
@@ -135,8 +159,11 @@ async def test_system_graph_renders_open_issues_inflight_runs_prs_and_signals(co
             PhaseAttempt(
                 attempt_index=1,
                 phase="agent-execute",
+                phase_kind="k8s_job",
                 workflow_filename="agent-execute.yml",
                 dispatched_at=now,
+                jobs=[_native_job()],
+                log_archive_url="blob://artifacts/runs/ambience/01KQSYSTEM_RUN/attempts/1/native-events.json",
             ),
         ],
         created_at=now,
@@ -179,6 +206,12 @@ async def test_system_graph_renders_open_issues_inflight_runs_prs_and_signals(co
     assert any(e.kind == "spawned" and e.source == f"issue:{issue_id}" for e in graph.edges)
     assert any(e.kind == "opened" and e.source == f"run:{run.id}" for e in graph.edges)
     assert any(e.kind == "feedback" and e.source == f"run:{run.id}" for e in graph.edges)
+    native_attempt = next(n for n in graph.nodes if n.id == f"attempt:{run.id}:1")
+    assert native_attempt.metadata["phase_kind"] == "k8s_job"
+    assert native_attempt.metadata["jobs_count"] == 1
+    assert native_attempt.metadata["steps_count"] == 2
+    assert native_attempt.metadata["jobs"][0]["steps"][0]["slug"] == "clone"
+    assert native_attempt.metadata["log_archive_url"].endswith("/native-events.json")
 
 
 @pytest.mark.asyncio
@@ -239,8 +272,11 @@ async def test_graph_renders_issue_run_attempts(cosmos, app_state):
             PhaseAttempt(
                 attempt_index=1,
                 phase="agent-execute",
+                phase_kind="k8s_job",
                 workflow_filename="agent-execute.yml",
                 dispatched_at=now,
+                jobs=[_native_job()],
+                log_archive_url="blob://artifacts/runs/ambience/01KQGRAPH_RUN_AAA/attempts/1/native-events.json",
             ),
         ],
         created_at=now, updated_at=now,
@@ -260,6 +296,13 @@ async def test_graph_renders_issue_run_attempts(cosmos, app_state):
     # branches on these to decide whether to render the lineage arrow.
     assert run_node.metadata["cloned_from_run_id"] is None
     assert run_node.metadata["entrypoint_phase"] is None
+
+    native_attempt = next(n for n in graph.nodes if n.id == f"attempt:{run.id}:1")
+    assert native_attempt.metadata["phase_kind"] == "k8s_job"
+    assert native_attempt.metadata["jobs_count"] == 1
+    assert native_attempt.metadata["steps_count"] == 2
+    assert native_attempt.metadata["jobs"][0]["state"] == "active"
+    assert native_attempt.metadata["log_archive_url"].endswith("/native-events.json")
 
 
 # ─── Resume case ──────────────────────────────────────────────────────────

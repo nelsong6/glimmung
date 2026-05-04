@@ -157,6 +157,9 @@ export function GraphView({
                     >
                       <span className="graph-kind mono">{node.kind}</span>
                       <span className="graph-label">{node.label}</span>
+                      {attemptSummary(node) && (
+                        <span className="graph-meta mono">{attemptSummary(node)}</span>
+                      )}
                       {node.state && <span className="graph-state mono">{node.state}</span>}
                       {isStale(node) && <span className="graph-state mono stale-label">stale</span>}
                     </button>
@@ -187,6 +190,21 @@ function isStale(node: GraphNode): boolean {
   if (node.kind === "run" && node.state === "in_progress") return age > STALE_RUN_MS;
   if (node.kind === "signal" && node.state === "pending") return age > STALE_SIGNAL_MS;
   return false;
+}
+
+function attemptSummary(node: GraphNode): string {
+  if (node.kind !== "attempt") return "";
+  const phaseKind = String(node.metadata.phase_kind ?? "");
+  const jobs = Number(node.metadata.jobs_count ?? 0);
+  const steps = Number(node.metadata.steps_count ?? 0);
+  const hasLogs = Boolean(node.metadata.log_archive_url);
+  const parts = [
+    phaseKind || "phase",
+    jobs > 0 ? `${jobs} job${jobs === 1 ? "" : "s"}` : "",
+    steps > 0 ? `${steps} step${steps === 1 ? "" : "s"}` : "",
+    hasLogs ? "logs" : "",
+  ].filter(Boolean);
+  return parts.join(" / ");
 }
 
 function staleTitle(node: GraphNode): string {
