@@ -400,17 +400,10 @@
   max-width: 720px;
 }
 .frontpage-frame {
-  display: grid;
-  grid-template-columns: 220px minmax(0, 1fr);
   min-height: 620px;
   border: 1px solid var(--border);
   background: var(--bg);
   overflow: hidden;
-}
-.frontpage-sidebar {
-  border-right: 1px solid var(--border);
-  background: var(--bg-deep);
-  padding: 24px 0;
 }
 .frontpage-main {
   min-width: 0;

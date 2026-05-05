@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, Navigate, NavLink, Outlet, Route, Routes, useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
+import { Link, Navigate, NavLink, Outlet, Route, Routes, useLocation, useOutletContext, useParams } from "react-router-dom";
 import { AdminPanel } from "./AdminPanel";
 import { GraphView } from "./GraphView";
 import { IssueDetailView } from "./IssueDetailView";
@@ -140,12 +140,11 @@ function MockModeRedirect() {
 }
 
 function Layout() {
-  const navigate = useNavigate();
   const location = useLocation();
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [conn, setConn] = useState<Connection>("dead");
   const [lastUpdate, setLastUpdate] = useState<number>(0);
-  const [selected, setSelected] = useState<Selection>(ALL);
+  const selected = ALL;
   const [account, setAccount] = useState<AccountInfo | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [showAdmin, setShowAdmin] = useState(false);
@@ -286,90 +285,9 @@ function Layout() {
     `tab ${isActive ? "selected" : ""}`;
   const dashboardWorkspace =
     location.pathname === "/" || location.pathname === "/issues" || location.pathname === "/graph" || location.pathname === "/projects";
-  const routeProjectName = projectNameFromPath(location.pathname);
 
   return (
     <div className="layout">
-      <aside className="sidebar">
-        <Link className="sidebar-title sidebar-title-link" to="/projects">
-          Projects
-        </Link>
-        <button
-          type="button"
-          className={`project-row ${selected.kind === "all" && !routeProjectName ? "selected" : ""}`}
-          onClick={() => {
-            setSelected(ALL);
-            navigate("/");
-          }}
-        >
-          <span className="name">All</span>
-          <span className="count">
-            {(snap?.pending_leases.length ?? 0) + (snap?.active_leases.length ?? 0)}
-          </span>
-        </button>
-        {snap?.projects
-          .slice()
-          .sort((a, b) => a.name.localeCompare(b.name))
-          .map((p) => {
-            const projWorkflows = snap.workflows.filter((w) => w.project === p.name);
-            const isProjectSelected =
-              (selected.kind === "project" && selected.project === p.name)
-              || routeProjectName === p.name;
-            const isWorkflowOfProjectSelected =
-              (selected.kind === "workflow" && selected.project === p.name)
-              || routeProjectName === p.name;
-            const projActive = snap.active_leases.filter((l) => l.project === p.name).length;
-            const projPending = snap.pending_leases.filter((l) => l.project === p.name).length;
-            return (
-              <div key={p.name} className="project-group">
-                <button
-                  type="button"
-                  className={`project-row ${isProjectSelected ? "selected" : ""}`}
-                  onClick={() => {
-                    setSelected({ kind: "project", project: p.name });
-                    navigate(`/projects/${encodeURIComponent(p.name)}`);
-                  }}
-                >
-                  <span className="name">{p.name}</span>
-                  <span className="count">{projActive + projPending}</span>
-                </button>
-                {(isProjectSelected || isWorkflowOfProjectSelected) &&
-                  projWorkflows
-                    .slice()
-                    .sort((a, b) => a.name.localeCompare(b.name))
-                    .map((w) => {
-                      const wActive = snap.active_leases.filter(
-                        (l) => l.project === p.name && l.workflow === w.name
-                      ).length;
-                      const wPending = snap.pending_leases.filter(
-                        (l) => l.project === p.name && l.workflow === w.name
-                      ).length;
-                      const isSel =
-                        selected.kind === "workflow" &&
-                        selected.project === p.name &&
-                        selected.workflow === w.name;
-                      return (
-                        <button
-                          type="button"
-                          key={w.name}
-                          className={`workflow-row ${isSel ? "selected" : ""}`}
-                          onClick={() =>
-                            setSelected({ kind: "workflow", project: p.name, workflow: w.name })
-                          }
-                        >
-                          <span className="name">{w.name}</span>
-                          <span className="count">{wActive + wPending}</span>
-                        </button>
-                      );
-                    })}
-                {(isProjectSelected || isWorkflowOfProjectSelected) && projWorkflows.length === 0 && (
-                  <div className="workflow-empty">no workflows</div>
-                )}
-              </div>
-            );
-          })}
-      </aside>
-
       <main className="content">
         <header>
           <div className="header-left">
@@ -458,11 +376,6 @@ function Layout() {
       </main>
     </div>
   );
-}
-
-function projectNameFromPath(pathname: string): string | null {
-  const match = pathname.match(/^\/projects\/([^/]+)/);
-  return match ? decodeURIComponent(match[1]) : null;
 }
 
 function CapacityRoute() {

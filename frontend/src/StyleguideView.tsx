@@ -190,24 +190,6 @@ const DESIGN_SYSTEM_ITEMS: PortfolioItem[] = [
     ),
   },
   {
-    id: "sidebar",
-    title: "Sidebar",
-    caption: "Project and workflow tree with selected rails",
-    render: () => (
-      <Specimen title="sidebar">
-        <aside className="sidebar portfolio-sidebar">
-          <div className="sidebar-title">Projects</div>
-          <button type="button" className="project-row"><span className="name">All</span><span className="count">12</span></button>
-          <div className="project-group">
-            <button type="button" className="project-row selected"><span className="name">glimmung</span><span className="count">7</span></button>
-            <button type="button" className="workflow-row selected"><span className="name">agent-run</span><span className="count">3</span></button>
-            <button type="button" className="workflow-row"><span className="name">verify</span><span className="count">1</span></button>
-          </div>
-        </aside>
-      </Specimen>
-    ),
-  },
-  {
     id: "spacing-radius",
     title: "Spacing & radius",
     caption: "Dense rhythm, small radius, and chamfered fixed-format pieces",
@@ -301,18 +283,6 @@ const DESIGN_FILE_ITEMS: PortfolioItem[] = [
     render: () => (
       <Specimen title="front page - capacity">
         <div className="frontpage-frame">
-          <aside className="frontpage-sidebar">
-            <div className="sidebar-title">Projects</div>
-            <button type="button" className="project-row"><span className="name">All</span><span className="count">12</span></button>
-            <div className="project-group">
-              <button type="button" className="project-row selected"><span className="name">glimmung</span><span className="count">7</span></button>
-              <button type="button" className="workflow-row selected"><span className="name">agent-run</span><span className="count">3</span></button>
-              <button type="button" className="workflow-row"><span className="name">verify</span><span className="count">1</span></button>
-            </div>
-            <div className="project-group">
-              <button type="button" className="project-row"><span className="name">ambience</span><span className="count">3</span></button>
-            </div>
-          </aside>
           <div className="frontpage-main">
             <header className="frontpage-header">
               <div className="header-left">
