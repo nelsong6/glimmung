@@ -5,7 +5,7 @@
 import { useState } from "react";
 import "./index.css";
 
-type ReviewState = "unset" | "good" | "needs-work";
+type ReviewState = "unset" | "reviewed" | "needs-review";
 type PortfolioTab = "system" | "files";
 
 type PortfolioItem = {
@@ -464,21 +464,21 @@ function PortfolioRow({
             <>
               <button
                 type="button"
-                className={`review good ${review === "good" ? "selected" : ""}`}
-                onClick={() => onReview(item.id, "good")}
+                className={`review reviewed ${review === "reviewed" ? "selected" : ""}`}
+                onClick={() => onReview(item.id, "reviewed")}
               >
-                ✓ Looks good
+                ✓ Reviewed
               </button>
               <button
                 type="button"
-                className={`review needs-work ${review === "needs-work" ? "selected" : ""}`}
-                onClick={() => onReview(item.id, "needs-work")}
+                className={`review needs-review ${review === "needs-review" ? "selected" : ""}`}
+                onClick={() => onReview(item.id, "needs-review")}
               >
-                Needs work...
+                Needs review
               </button>
             </>
           )}
-          {!isOpen && <span className={`review-mark ${review}`}>{review === "needs-work" ? "!" : "✓"}</span>}
+          {!isOpen && <span className={`review-mark ${review}`}>{review === "needs-review" ? "!" : "✓"}</span>}
         </div>
       </div>
       {isOpen && <div className="portfolio-row-body">{item.render()}</div>}

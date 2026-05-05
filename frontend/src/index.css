@@ -261,25 +261,25 @@
   letter-spacing: 0;
   cursor: pointer;
 }
-.review.good {
+.review.reviewed {
   color: #4d7d14;
   background: #f5faec;
   border: 1px solid #c7dda5;
 }
-.review.good.selected {
+.review.reviewed.selected {
   color: #315a08;
   background: #e9f6d8;
   border-color: #8dbd51;
 }
-.review.needs-work {
-  color: #c14646;
-  background: #fff5f4;
-  border: 1px solid #f0b9b8;
+.review.needs-review {
+  color: #8a5d12;
+  background: #fff9eb;
+  border: 1px solid #efd596;
 }
-.review.needs-work.selected {
-  color: #a12626;
-  background: #ffe6e4;
-  border-color: #db7774;
+.review.needs-review.selected {
+  color: #6f4700;
+  background: #fff0c7;
+  border-color: #d6ad4b;
 }
 .review-mark {
   display: inline-flex;
@@ -290,8 +290,8 @@
   color: #7d7971;
   font-size: 1.1rem;
 }
-.review-mark.needs-work {
-  color: #c14646;
+.review-mark.needs-review {
+  color: #8a5d12;
   font-weight: 800;
 }
 .portfolio-row-body {
