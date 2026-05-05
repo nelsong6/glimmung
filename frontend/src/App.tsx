@@ -487,7 +487,7 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
       crumbs.push({ label: "Needs attention" });
     } else if (parts[2] === "runs") {
       crumbs.push({ label: "Runs", to: `/projects/${encodeURIComponent(parts[1] ?? "")}/runs` });
-      if (parts[3]) crumbs.push({ label: parts[3] });
+      if (parts[3]) crumbs.push({ label: runSlugDisplay(parts[3]) });
     }
     return crumbs;
   }
@@ -1241,12 +1241,13 @@ function ProjectRunsTable({ runs, project }: { runs: ProjectRun[]; project: Proj
         <tbody>
           {runs.map((run, index) => {
             const runLabel = projectRunLabel(run, runs, index);
+            const runSlug = projectRunSlug(run, runs, index);
             return (
               <tr key={run.id}>
                 <td>
                   <Link
                     className="link mono"
-                    to={`/projects/${encodeURIComponent(run.project)}/runs/${encodeURIComponent(run.id)}`}
+                    to={`/projects/${encodeURIComponent(run.project)}/runs/${encodeURIComponent(runSlug)}`}
                     state={{ returnTo: runsPath, returnLabel: "runs" }}
                     title={run.id}
                   >
@@ -1294,6 +1295,20 @@ function projectRunLabel(run: ProjectRun, runs: ProjectRun[], index: number): st
   const sameIssue = runs.filter((candidate) => candidate.issue_number === run.issue_number);
   const ordinal = sameIssue.findIndex((candidate) => candidate.id === run.id) + 1;
   return `#${run.issue_number}-${Math.max(ordinal, 1)}`;
+}
+
+function projectRunSlug(run: ProjectRun, runs: ProjectRun[], index: number): string {
+  return projectRunLabel(run, runs, index).replace(/^#/, "");
+}
+
+function runSlugDisplay(slug: string): string {
+  return /^\d+-\d+$/.test(slug) ? `#${slug}` : slug;
+}
+
+function resolveProjectRun(runs: ProjectRun[], runIdOrSlug: string): ProjectRun | null {
+  return runs.find((candidate, index) => (
+    candidate.id === runIdOrSlug || projectRunSlug(candidate, runs, index) === runIdOrSlug
+  )) ?? null;
 }
 
 const RUN_VIEWER_IDLE_DISPATCH: DispatchState = { kind: "idle" };
@@ -1398,12 +1413,10 @@ function ProjectRunView({
     return <div className="empty">Project {projectName || "(missing)"} was not found.</div>;
   }
 
-  const run = isMockMode()
-    ? mockRuns.find((candidate) => candidate.project === project.name && candidate.id === runId)
-    : null;
   const runs = isMockMode()
     ? mockRuns.filter((candidate) => candidate.project === project.name)
     : [];
+  const run = isMockMode() ? resolveProjectRun(runs, runId) : null;
   const workflow = snap.workflows.find((w) => w.project === (run?.project ?? project.name) && w.name === run?.workflow);
   const graph = run ? projectRunGraph(run, workflow, project) : null;
 
