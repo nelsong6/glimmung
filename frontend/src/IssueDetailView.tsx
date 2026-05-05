@@ -20,9 +20,8 @@
  * Backwards-compat: old slugs (description / in-progress / lineage)
  * still resolve so deep links from before #81 don't 404.
  *
- * Routed via `/issues/<owner>/<repo>/<n>` (GH-anchored) or
- * `/issues/<project>/<issueId>` (native). Target is derived from the
- * URL params so deep-link reloads land directly here.
+ * Routed canonically via `/projects/<project>/issues/<number>`. Legacy
+ * GitHub-shaped and id-shaped URLs still load so old links can redirect.
  */
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
@@ -54,6 +53,7 @@ type IssueComment = {
 
 export type IssueDetailTarget =
   | { kind: "gh"; repo: string; issue_number: number }
+  | { kind: "number"; project: string; issue_number: number }
   | { kind: "native"; project: string; issue_id: string };
 
 export type GraphNode = {
@@ -203,21 +203,15 @@ export function IssueDetailView() {
   const { signedIn, snap } = useOutletContext<AuthContext>();
 
   const projectRouteIssueNumber = params.issueNumber ? parseInt(params.issueNumber, 10) : null;
-  const projectRouteProject = projectRouteIssueNumber !== null
-    ? snap?.projects.find((project) => project.name === params.project)
-    : null;
-
   // Three route shapes land here. Project-shaped issue URLs are
-  // canonical for the UI; GitHub-shaped and native `/issues/...` URLs
+  // canonical for the UI; GitHub-shaped and id-shaped `/issues/...` URLs
   // remain accepted as compatibility entry points.
   const target: IssueDetailTarget | null = projectRouteIssueNumber !== null
-    ? projectRouteProject
-      ? {
-          kind: "gh",
-          repo: projectRouteProject.github_repo,
-          issue_number: projectRouteIssueNumber,
-        }
-      : null
+    ? {
+        kind: "number",
+        project: params.project ?? "",
+        issue_number: projectRouteIssueNumber,
+      }
     : params.n
     ? {
         kind: "gh",
@@ -235,6 +229,8 @@ export function IssueDetailView() {
       ? `/projects/${encodeURIComponent(params.project ?? "")}/issues/${projectRouteIssueNumber}`
       : target?.kind === "gh"
       ? `/issues/${target.repo}/${target.issue_number}`
+      : target?.kind === "number"
+      ? `/projects/${encodeURIComponent(target.project)}/issues/${target.issue_number}`
       : target
       ? `/issues/${encodeURIComponent(target.project)}/${encodeURIComponent(target.issue_id)}`
       : "/issues";
@@ -254,20 +250,26 @@ export function IssueDetailView() {
   const detailUrl =
     target?.kind === "gh"
       ? `/v1/issues/${target.repo}/${target.issue_number}`
+      : target?.kind === "number"
+      ? `/v1/issues/by-number/${encodeURIComponent(target.project)}/${target.issue_number}`
       : target
       ? `/v1/issues/by-id/${encodeURIComponent(target.project)}/${encodeURIComponent(target.issue_id)}`
       : null;
   const graphUrl =
     target?.kind === "gh"
       ? `/v1/issues/${target.repo}/${target.issue_number}/graph`
+      : target?.kind === "number"
+      ? `/v1/issues/by-number/${encodeURIComponent(target.project)}/${target.issue_number}/graph`
       : null;
   const heading =
     target?.kind === "gh"
-      ? `${target.repo}#${target.issue_number}`
+      ? `#${target.issue_number}`
+      : target?.kind === "number"
+      ? `#${target.issue_number}`
       : target
       ? `${target.project} (native)`
       : "";
-  const repoForLinks = target?.kind === "gh" ? target.repo : null;
+  const repoForLinks = null;
 
   const onBack = () => {
     const projectName = detail?.project ?? (target?.kind === "native" ? target.project : null);
@@ -289,6 +291,16 @@ export function IssueDetailView() {
       { replace: true },
     );
   }, [baseUrl, lastSeg, navigate, projectRouteIssueNumber, snap?.projects, tab, target]);
+
+  useEffect(() => {
+    if (!detail?.number) return;
+    if (projectRouteIssueNumber !== null) return;
+    const canonicalSlug = TAB_SLUGS[tab];
+    navigate(
+      `/projects/${encodeURIComponent(detail.project)}/issues/${detail.number}/${canonicalSlug}`,
+      { replace: true },
+    );
+  }, [detail, navigate, projectRouteIssueNumber, tab]);
 
   useEffect(() => {
     let cancelled = false;
@@ -403,15 +415,7 @@ function IssueHeader({ detail, heading }: { detail: IssueDetail; heading: string
       <div className="project-hero-main">
         <div className="project-kicker mono">issue</div>
         <h2>{detail.title}</h2>
-        <div className="project-repo mono">
-          {detail.html_url ? (
-            <a className="link" href={detail.html_url} target="_blank" rel="noreferrer">
-              {heading}
-            </a>
-          ) : (
-            heading
-          )}
-        </div>
+        <div className="project-repo mono">{heading}</div>
       </div>
       <div className="project-facts">
         <div className="project-fact">

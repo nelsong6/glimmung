@@ -1220,6 +1220,22 @@ header {
   width: auto;
   flex: none;
 }
+.admin-form .checkbox-row {
+  justify-content: flex-start;
+}
+.admin-form .checkbox-row input[type="checkbox"] {
+  flex: 0 0 auto;
+}
+.help-dot {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--border);
+  color: var(--fg-dimmer);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
 .admin-form button[type="submit"] {
   align-self: flex-start;
   background: #14532d;
@@ -1447,6 +1463,10 @@ h2 .inline-action,
 .project-workspace {
   display: grid;
   gap: 18px;
+}
+.section-actions {
+  display: flex;
+  justify-content: flex-end;
 }
 .workspace-breadcrumb {
   display: flex;

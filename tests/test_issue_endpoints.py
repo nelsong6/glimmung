@@ -46,7 +46,8 @@ def cosmos():
 async def test_list_surfaces_both_native_and_gh_issues(cosmos):
     """Pre-#50 the listing skipped issues without a GH url. Post-#50
     glimmung-native ones surface too — the row carries `id` always and
-    `repo`/`number`/`html_url` only when GH-anchored."""
+    `repo`/`html_url` only when GH-anchored. `number` is always the
+    Glimmung project-scoped issue number."""
     await issue_ops.create_issue(
         cosmos, project="ambience", title="native one",
     )
@@ -60,13 +61,14 @@ async def test_list_surfaces_both_native_and_gh_issues(cosmos):
     rows = await _list_issues_from_cosmos(cosmos)
     assert len(rows) == 2
 
-    # GH issue lands first (number-bearing rows sort before native ones).
+    # GH issue preserves its imported number during migration; native
+    # issue still has a Glimmung number.
     gh, native = rows
     assert gh.number == 7
     assert gh.repo == "nelsong6/ambience"
     assert gh.html_url and gh.html_url.endswith("/issues/7")
 
-    assert native.number is None
+    assert native.number == 1
     assert native.repo is None
     assert native.html_url is None
     assert native.id  # ULID always present
@@ -192,10 +194,26 @@ async def test_build_detail_for_native_issue_omits_gh_fields(cosmos):
     assert detail.comments == []
     assert detail.state == "open"
     assert detail.repo is None
-    assert detail.number is None
+    assert detail.number == 1
     assert detail.html_url is None
     assert detail.last_run_id is None
     assert detail.issue_lock_held is False
+
+
+@pytest.mark.asyncio
+async def test_read_issue_by_number_reads_project_scoped_number(cosmos):
+    issue = await issue_ops.create_issue(
+        cosmos, project="ambience", title="native numbered",
+    )
+
+    found = await issue_ops.read_issue_by_number(
+        cosmos, project="ambience", number=issue.number or 0,
+    )
+
+    assert found is not None
+    fetched, _ = found
+    assert fetched.id == issue.id
+    assert fetched.number == issue.number
 
 
 @pytest.mark.asyncio
