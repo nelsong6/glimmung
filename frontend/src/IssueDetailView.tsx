@@ -25,7 +25,7 @@
  * URL params so deep-link reloads land directly here.
  */
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { Link, useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { authedFetch } from "./auth";
 
 type IssueDetail = {
@@ -184,6 +184,8 @@ const SLUG_TO_TAB: Record<string, Tab> = {
 };
 
 const POLL_INTERVAL_MS = 3000;
+const RUN_VIEWER_IDLE_DISPATCH: DispatchState = { kind: "idle" };
+const RUN_VIEWER_IDLE_ABORT: AbortState = { kind: "idle" };
 
 type IssueDetailRouteParams = {
   owner?: string;
@@ -382,6 +384,7 @@ export function IssueDetailView() {
                 graph={graph}
                 graphAvailable={!!graphUrl}
                 project={detail.project}
+                repo={repoForLinks}
               />
             )}
             {tab === "touchpoint" && (
@@ -1311,12 +1314,14 @@ function RunsPane({
   graph,
   graphAvailable,
   project,
+  repo,
 }: {
   graph: IssueGraph | null;
   graphAvailable: boolean;
   project: string;
+  repo: string | null;
 }) {
-  const location = useLocation();
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
 
   if (!graphAvailable) {
     return (
@@ -1334,6 +1339,32 @@ function RunsPane({
     .sort((a, b) => (b.timestamp ?? "").localeCompare(a.timestamp ?? ""));
   if (runs.length === 0) {
     return <div className="empty">No runs yet on this issue.</div>;
+  }
+  if (selectedRunId) {
+    return (
+      <>
+        <button type="button" className="link" onClick={() => setSelectedRunId(null)}>
+          ← runs
+        </button>
+        <RunViewer
+          graph={graph}
+          graphAvailable={graphAvailable}
+          signedIn={false}
+          project={project}
+          repo={repo}
+          inFlight={runs.some((run) => run.state === "in_progress")}
+          dispatchState={RUN_VIEWER_IDLE_DISPATCH}
+          onRedispatch={() => undefined}
+          abortState={RUN_VIEWER_IDLE_ABORT}
+          onArmAbort={() => undefined}
+          onCancelAbort={() => undefined}
+          onConfirmAbort={() => undefined}
+          selectedRunId={selectedRunId}
+          onBackToRuns={() => setSelectedRunId(null)}
+          actionsVisible={false}
+        />
+      </>
+    );
   }
   return (
     <table>
@@ -1367,14 +1398,14 @@ function RunsPane({
           return (
             <tr key={r.id}>
               <td className="mono">
-                <Link
+                <button
+                  type="button"
                   className="link mono"
-                  to={`/projects/${encodeURIComponent(project)}/issues/${issueNumberFromRunSlug(slug)}/runs/${encodeURIComponent(slug)}`}
-                  state={{ returnTo: location.pathname, returnLabel: "issue runs" }}
                   title={id}
+                  onClick={() => setSelectedRunId(id)}
                 >
                   {runSlugDisplay(slug)}
-                </Link>
+                </button>
                 {clonedFrom && (
                   <span
                     className="dim mono"
@@ -1396,13 +1427,13 @@ function RunsPane({
               <td className="mono">{cost !== null ? `$${cost.toFixed(4)}` : "—"}</td>
               <td className="mono dim">{prNumber !== null ? `#${prNumber}` : "—"}</td>
               <td>
-                <Link
+                <button
+                  type="button"
                   className="link"
-                  to={`/projects/${encodeURIComponent(project)}/issues/${issueNumberFromRunSlug(slug)}/runs/${encodeURIComponent(slug)}`}
-                  state={{ returnTo: location.pathname, returnLabel: "issue runs" }}
+                  onClick={() => setSelectedRunId(id)}
                 >
                   view
-                </Link>
+                </button>
               </td>
             </tr>
           );
@@ -1868,10 +1899,6 @@ function issueRunSlug(graph: IssueGraph, run: GraphNode): string {
 
 function runSlugDisplay(slug: string): string {
   return /^\d+-\d+$/.test(slug) ? `#${slug}` : `${slug.slice(0, 8)}…`;
-}
-
-function issueNumberFromRunSlug(slug: string): string {
-  return slug.split("-")[0] || "unknown";
 }
 
 function isRecord(x: unknown): x is Record<string, unknown> {
