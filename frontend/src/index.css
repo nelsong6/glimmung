@@ -1525,7 +1525,7 @@ h2 .inline-action,
 
 .app-breadcrumb {
   margin-top: 14px;
-  padding-bottom: 12px;
+  padding: 0 14px 12px;
   border-bottom: 1px solid var(--border);
 }
 .breadcrumb-segment {
