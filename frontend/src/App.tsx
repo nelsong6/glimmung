@@ -893,12 +893,14 @@ function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
       }];
   const policies = [
     ...phases.flatMap((phase) => phase.recycle_policy ? [{
-      label: `${phase.name} -> ${phase.recycle_policy.lands_at}`,
+      source: phase.name,
+      target: phase.recycle_policy.lands_at,
       trigger: phase.recycle_policy.on.join(" / ") || "recycle",
       max: phase.recycle_policy.max_attempts,
     }] : []),
     ...(workflow.pr.recycle_policy ? [{
-      label: `report -> ${workflow.pr.recycle_policy.lands_at}`,
+      source: "touchpoint",
+      target: workflow.pr.recycle_policy.lands_at,
       trigger: workflow.pr.recycle_policy.on.join(" / ") || "feedback",
       max: workflow.pr.recycle_policy.max_attempts,
     }] : []),
@@ -908,37 +910,56 @@ function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
     <section>
       <h2>Workflow graph</h2>
       <div className="dag-wrap">
-        <div className="dag" aria-label={`${workflow.name} workflow graph`}>
-          <div className="dag-entry">
-            <span className="dag-node-label">trigger</span>
-            <span className="dag-node-meta">{workflow.trigger_label}</span>
+        <div className="dag dag-definition" aria-label={`${workflow.name} workflow graph`}>
+          <div className="dag-entry active">
+            <span className="mono">entry</span>
+            <span className="dim mono">{workflow.trigger_label}</span>
           </div>
-          <span className="dag-edge">{"->"}</span>
+          <span className="dag-edge" aria-hidden="true">→</span>
           {phases.map((phase, index) => (
             <Fragment key={phase.name}>
-              <div className="dag-node dag-node-definition">
-                <span className="dag-node-label">{phase.name}</span>
-                <span className="dag-node-state">{phase.kind}</span>
-                <span className="dag-node-meta">
-                  {phase.verify ? "verify" : "run"} / {phase.workflow_filename || "native"}
-                </span>
-              </div>
-              {(index < phases.length - 1 || workflow.pr.enabled) && <span className="dag-edge">{"->"}</span>}
+              <button
+                type="button"
+                className="dag-node dag-node-phase dag-node-definition"
+                aria-disabled="true"
+              >
+                <div className="dag-node-label">{phase.name}</div>
+                <div className="dag-node-state">
+                  <span className="pill info">not run</span>
+                </div>
+                <div className="dag-node-meta dim mono">
+                  {phase.verify ? "verify" : phase.kind}
+                </div>
+              </button>
+              {(index < phases.length - 1 || workflow.pr.enabled) && (
+                <span className="dag-edge" aria-hidden="true">→</span>
+              )}
             </Fragment>
           ))}
           {workflow.pr.enabled && (
-            <div className="dag-node dag-node-definition dag-node-pr">
-              <span className="dag-node-label">report</span>
-              <span className="dag-node-state">terminal</span>
-              <span className="dag-node-meta">PR primitive</span>
-            </div>
+            <button
+              type="button"
+              className="dag-node dag-node-definition dag-node-pr pending"
+              aria-disabled="true"
+            >
+              <div className="dag-node-label">touchpoint</div>
+              <div className="dag-node-state mono">pending</div>
+              <div className="dag-node-meta dim mono">PR primitive</div>
+            </button>
           )}
         </div>
         {policies.length > 0 && (
           <div className="dag-policy-rail" aria-label="recycle policies">
             {policies.map((policy) => (
-              <span className="dag-policy inactive" key={`${policy.label}:${policy.trigger}`}>
-                {policy.label} / {policy.trigger} / max {policy.max}
+              <span
+                className="dag-policy inactive"
+                key={`${policy.source}:${policy.target}:${policy.trigger}`}
+                title={`${policy.trigger}; max ${policy.max}`}
+              >
+                <span className="mono">{policy.source}</span>
+                <span className="dim mono">↻</span>
+                <span className="mono">{policy.target}</span>
+                <span className="dim mono">{policy.trigger}</span>
               </span>
             ))}
           </div>
