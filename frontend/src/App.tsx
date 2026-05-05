@@ -285,7 +285,7 @@ function Layout() {
     `dashboard-nav-link ${isActive ? "selected" : ""}`;
   const dashboardWorkspace =
     location.pathname === "/" || location.pathname === "/issues" || location.pathname === "/graph" || location.pathname === "/projects";
-  const breadcrumbs = buildBreadcrumbs(location.pathname);
+  const breadcrumbs = buildBreadcrumbs(location.pathname, snap?.projects ?? []);
 
   return (
     <div className="layout">
@@ -397,7 +397,7 @@ type Breadcrumb = {
   to?: string;
 };
 
-function buildBreadcrumbs(pathname: string): Breadcrumb[] {
+function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
   const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
   if (parts.length === 0) return [{ label: "Dashboard" }];
   if (parts[0] === "projects") {
@@ -414,8 +414,14 @@ function buildBreadcrumbs(pathname: string): Breadcrumb[] {
       const owner = parts[1];
       const repo = parts[2];
       const issue = parts[3];
+      const githubRepo = `${owner}/${repo}`;
+      const project = projects.find((p) => p.github_repo === githubRepo);
       crumbs.push({ label: "Issues", to: "/issues" });
-      crumbs.push({ label: `${owner}/${repo}` });
+      crumbs.push(
+        project
+          ? { label: project.name, to: `/projects/${encodeURIComponent(project.name)}` }
+          : { label: githubRepo, to: `/issues?repo=${encodeURIComponent(githubRepo)}` },
+      );
       crumbs.push({ label: `#${issue}` });
       return crumbs;
     }
