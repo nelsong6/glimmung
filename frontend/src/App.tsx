@@ -283,8 +283,7 @@ function Layout() {
 
   const dashboardLinkClass = ({ isActive }: { isActive: boolean }) =>
     `dashboard-nav-link ${isActive ? "selected" : ""}`;
-  const dashboardWorkspace =
-    location.pathname === "/" || location.pathname === "/issues" || location.pathname === "/graph" || location.pathname === "/projects";
+  const homeRoute = location.pathname === "/";
   const breadcrumbs = buildBreadcrumbs(location.pathname, snap?.projects ?? []);
 
   return (
@@ -364,7 +363,7 @@ function Layout() {
           ))}
         </nav>
 
-        {dashboardWorkspace && (
+        {homeRoute && (
             <nav className="dashboard-nav" aria-label="dashboard views">
               <NavLink to="/" end className={dashboardLinkClass}>
                 capacity
