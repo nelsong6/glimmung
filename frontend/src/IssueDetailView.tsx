@@ -1,8 +1,8 @@
 /**
  * Issue detail view (#42, #81) — issue meta + tabbed content.
  *
- * Tabs: issue / run / runs / touchpoint.
- *   - issue: title link, body, edit form (was "description")
+ * Tabs: summary / runs / touchpoint.
+ *   - summary: title link, body, edit form (was "description")
  *   - run: workflow's DAG painted with active run state. Phases
  *     as nodes, PR primitive as the trailing node. Cool-toned
  *     definition view when no run is in flight; nodes color in by
@@ -154,12 +154,18 @@ export type AbortState =
 
 type AuthContext = {
   signedIn: boolean;
+  snap?: {
+    projects: Array<{
+      name: string;
+      github_repo: string;
+    }>;
+  } | null;
 };
 
-type Tab = "issue" | "runs" | "touchpoint";
+type Tab = "summary" | "runs" | "touchpoint";
 
 const TAB_SLUGS: Record<Tab, string> = {
-  issue: "issue",
+  summary: "summary",
   runs: "runs",
   touchpoint: "touchpoint",
 };
@@ -167,8 +173,9 @@ const TAB_SLUGS: Record<Tab, string> = {
 // Backwards-compat: old description / in-progress / lineage slugs still
 // resolve so links and bookmarks from before #81 keep working.
 const SLUG_TO_TAB: Record<string, Tab> = {
-  issue: "issue",
-  description: "issue",
+  summary: "summary",
+  issue: "summary",
+  description: "summary",
   "the-run": "runs",
   "in-progress": "runs",
   runs: "runs",
@@ -184,19 +191,32 @@ type IssueDetailRouteParams = {
   n?: string;
   project?: string;
   issueId?: string;
+  issueNumber?: string;
 };
 
 export function IssueDetailView() {
   const navigate = useNavigate();
   const location = useLocation();
   const params = useParams<IssueDetailRouteParams>();
-  const { signedIn } = useOutletContext<AuthContext>();
+  const { signedIn, snap } = useOutletContext<AuthContext>();
 
-  // Two route shapes land here. GH-anchored has 3 segments after /issues
-  // (`:owner/:repo/:n`); native has 2 (`:project/:issueId`). React-router
-  // only fills params for the matched route, so `params.n` being set
-  // disambiguates.
-  const target: IssueDetailTarget = params.n
+  const projectRouteIssueNumber = params.issueNumber ? parseInt(params.issueNumber, 10) : null;
+  const projectRouteProject = projectRouteIssueNumber !== null
+    ? snap?.projects.find((project) => project.name === params.project)
+    : null;
+
+  // Three route shapes land here. Project-shaped issue URLs are
+  // canonical for the UI; GitHub-shaped and native `/issues/...` URLs
+  // remain accepted as compatibility entry points.
+  const target: IssueDetailTarget | null = projectRouteIssueNumber !== null
+    ? projectRouteProject
+      ? {
+          kind: "gh",
+          repo: projectRouteProject.github_repo,
+          issue_number: projectRouteIssueNumber,
+        }
+      : null
+    : params.n
     ? {
         kind: "gh",
         repo: `${params.owner ?? ""}/${params.repo ?? ""}`,
@@ -209,14 +229,19 @@ export function IssueDetailView() {
       };
 
   const baseUrl =
-    target.kind === "gh"
+    projectRouteIssueNumber !== null
+      ? `/projects/${encodeURIComponent(params.project ?? "")}/issues/${projectRouteIssueNumber}`
+      : target?.kind === "gh"
       ? `/issues/${target.repo}/${target.issue_number}`
-      : `/issues/${encodeURIComponent(target.project)}/${encodeURIComponent(target.issue_id)}`;
+      : target
+      ? `/issues/${encodeURIComponent(target.project)}/${encodeURIComponent(target.issue_id)}`
+      : "/issues";
 
-  // Tab is URL-driven so each tab is deep-linkable. Bare `/issues/...`
-  // (no tab segment) falls back to the issue tab.
+  // Tab is URL-driven so each tab is deep-linkable. Bare issue URLs and
+  // legacy slugs are normalized to `/summary` so the breadcrumb leaf
+  // and address bar stay aligned.
   const lastSeg = location.pathname.split("/").filter(Boolean).pop() ?? "";
-  const tab: Tab = SLUG_TO_TAB[lastSeg] ?? "issue";
+  const tab: Tab = SLUG_TO_TAB[lastSeg] ?? "summary";
   const setTab = (t: Tab) => navigate(`${baseUrl}/${TAB_SLUGS[t]}`);
 
   const [detail, setDetail] = useState<IssueDetail | null>(null);
@@ -225,27 +250,48 @@ export function IssueDetailView() {
   const [editing, setEditing] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
   const detailUrl =
-    target.kind === "gh"
+    target?.kind === "gh"
       ? `/v1/issues/${target.repo}/${target.issue_number}`
-      : `/v1/issues/by-id/${encodeURIComponent(target.project)}/${encodeURIComponent(target.issue_id)}`;
+      : target
+      ? `/v1/issues/by-id/${encodeURIComponent(target.project)}/${encodeURIComponent(target.issue_id)}`
+      : null;
   const graphUrl =
-    target.kind === "gh"
+    target?.kind === "gh"
       ? `/v1/issues/${target.repo}/${target.issue_number}/graph`
       : null;
   const heading =
-    target.kind === "gh"
+    target?.kind === "gh"
       ? `${target.repo}#${target.issue_number}`
-      : `${target.project} (native)`;
-  const repoForLinks = target.kind === "gh" ? target.repo : null;
+      : target
+      ? `${target.project} (native)`
+      : "";
+  const repoForLinks = target?.kind === "gh" ? target.repo : null;
 
   const onBack = () => {
-    const projectName = detail?.project ?? (target.kind === "native" ? target.project : null);
+    const projectName = detail?.project ?? (target?.kind === "native" ? target.project : null);
     navigate(projectName ? `/projects/${encodeURIComponent(projectName)}` : "/needs-attention");
   };
 
   useEffect(() => {
+    const canonicalSlug = TAB_SLUGS[tab];
+    if (lastSeg !== canonicalSlug) {
+      navigate(`${baseUrl}/${canonicalSlug}`, { replace: true });
+      return;
+    }
+    if (target?.kind !== "gh") return;
+    if (projectRouteIssueNumber !== null) return;
+    const project = snap?.projects.find((candidate) => candidate.github_repo === target.repo);
+    if (!project) return;
+    navigate(
+      `/projects/${encodeURIComponent(project.name)}/issues/${target.issue_number}/${canonicalSlug}`,
+      { replace: true },
+    );
+  }, [baseUrl, lastSeg, navigate, projectRouteIssueNumber, snap?.projects, tab, target]);
+
+  useEffect(() => {
     let cancelled = false;
     const load = async () => {
+      if (!detailUrl) return;
       setError(null);
       try {
         const requests: Promise<Response>[] = [fetch(detailUrl)];
@@ -284,6 +330,13 @@ export function IssueDetailView() {
     return () => clearInterval(id);
   }, [tab, isInFlight]);
 
+  if (!target && projectRouteIssueNumber !== null && snap) {
+    return <div className="empty">Project {params.project || "(missing)"} was not found.</div>;
+  }
+  if (!target) {
+    return <div className="empty">Loading issue…</div>;
+  }
+
   return (
     <>
       <button type="button" className="link" onClick={onBack}>
@@ -297,8 +350,8 @@ export function IssueDetailView() {
           <IssueHeader detail={detail} heading={heading} />
 
           <div className="dashboard-nav" aria-label="issue sections">
-            <TabButton current={tab} value="issue" onSelect={setTab}>
-              issue
+            <TabButton current={tab} value="summary" onSelect={setTab}>
+              summary
             </TabButton>
             <TabButton current={tab} value="runs" onSelect={setTab}>
               runs
@@ -310,7 +363,7 @@ export function IssueDetailView() {
           </div>
 
           <div className="tab-panel">
-            {tab === "issue" && (
+            {tab === "summary" && (
               <DescriptionTab
                 detail={detail}
                 signedIn={signedIn}

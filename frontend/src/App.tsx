@@ -146,9 +146,17 @@ export function App() {
         <Route path="projects/:project/workflows" element={<ProjectWorkflowsRoute />} />
         <Route path="projects/:project/workflows/:workflow" element={<ProjectWorkflowRoute />} />
         <Route path="projects/:project/issues" element={<ProjectIssuesRoute />} />
-        <Route path="projects/:project/issues/:issueNumber" element={<ProjectIssueRedirectRoute />} />
-        <Route path="projects/:project/issues/:issueNumber/runs" element={<ProjectIssueRunsRedirectRoute />} />
         <Route path="projects/:project/issues/:issueNumber/runs/:runId" element={<ProjectRunRoute />} />
+        <Route path="projects/:project/issues/:issueNumber" element={<IssueDetailView />}>
+          <Route path="summary" element={null} />
+          <Route path="issue" element={null} />
+          <Route path="runs" element={null} />
+          <Route path="touchpoint" element={null} />
+          <Route path="description" element={null} />
+          <Route path="the-run" element={null} />
+          <Route path="in-progress" element={null} />
+          <Route path="lineage" element={null} />
+        </Route>
         <Route path="projects/:project/needs-attention" element={<ProjectNeedsAttentionRoute />} />
         <Route path="projects/:project/runs" element={<ProjectRunsRoute />} />
         <Route path="projects/:project/runs/:runId" element={<ProjectRunRedirectRoute />} />
@@ -156,6 +164,7 @@ export function App() {
         <Route path="issues/:owner/:repo/:n" element={<IssueDetailView />}>
           {/* Issue workspace tabs. Old slugs are still accepted by
               IssueDetailView so existing links keep working. */}
+          <Route path="summary" element={null} />
           <Route path="issue" element={null} />
           <Route path="the-run" element={null} />
           <Route path="runs" element={null} />
@@ -168,6 +177,7 @@ export function App() {
           <Route path="lineage" element={null} />
         </Route>
         <Route path="issues/:project/:issueId" element={<IssueDetailView />}>
+          <Route path="summary" element={null} />
           <Route path="issue" element={null} />
           <Route path="the-run" element={null} />
           <Route path="runs" element={null} />
@@ -498,6 +508,8 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
           to: `/projects/${encodeURIComponent(parts[1] ?? "")}/issues/${encodeURIComponent(parts[3] ?? "")}/runs`,
         });
         if (parts[5]) crumbs.push({ label: runSlugDisplay(parts[5]) });
+      } else if (parts[4]) {
+        crumbs.push({ label: titleCase(parts[4]) });
       }
     } else if (parts[2] === "needs-attention") {
       crumbs.push({ label: "Needs attention" });
@@ -589,51 +601,6 @@ function ProjectIssuesRoute() {
   const params = useParams<{ project?: string }>();
   const ctx = useOutletContext<LayoutContext>();
   return <ProjectIssuesView {...ctx} projectName={decodeURIComponent(params.project ?? "")} />;
-}
-
-function ProjectIssueRedirectRoute() {
-  const params = useParams<{ project?: string; issueNumber?: string }>();
-  const ctx = useOutletContext<LayoutContext>();
-  return (
-    <ProjectIssueRedirect
-      {...ctx}
-      projectName={decodeURIComponent(params.project ?? "")}
-      issueNumber={params.issueNumber ?? ""}
-      tab="issue"
-    />
-  );
-}
-
-function ProjectIssueRunsRedirectRoute() {
-  const params = useParams<{ project?: string; issueNumber?: string }>();
-  const ctx = useOutletContext<LayoutContext>();
-  return (
-    <ProjectIssueRedirect
-      {...ctx}
-      projectName={decodeURIComponent(params.project ?? "")}
-      issueNumber={params.issueNumber ?? ""}
-      tab="runs"
-    />
-  );
-}
-
-function ProjectIssueRedirect({
-  snap,
-  projectName,
-  issueNumber,
-  tab,
-}: LayoutContext & { projectName: string; issueNumber: string; tab: "issue" | "runs" }) {
-  if (snap === null) return <div className="empty">Connecting…</div>;
-  const project = snap.projects.find((p) => p.name === projectName);
-  if (!project) {
-    return <div className="empty">Project {projectName || "(missing)"} was not found.</div>;
-  }
-  return (
-    <Navigate
-      to={`/issues/${project.github_repo}/${issueNumber}/${tab}`}
-      replace
-    />
-  );
 }
 
 function ProjectNeedsAttentionRoute() {
@@ -1355,7 +1322,7 @@ function ProjectRunsTable({ runs, project }: { runs: ProjectRun[]; project: Proj
                 {run.issue_number ? (
                   <Link
                     className="link mono"
-                    to={`/issues/${project.github_repo}/${run.issue_number}`}
+                    to={`/projects/${encodeURIComponent(project.name)}/issues/${run.issue_number}/summary`}
                     state={{ returnTo: runsPath, returnLabel: "runs" }}
                   >
                     #{run.issue_number}
@@ -1597,7 +1564,7 @@ function ProjectRunView({
           <span className="key">issue</span>
           <span className="mono">
             {run.issue_number ? (
-              <Link className="link mono" to={`/issues/${project.github_repo}/${run.issue_number}`}>
+              <Link className="link mono" to={`/projects/${encodeURIComponent(project.name)}/issues/${run.issue_number}/summary`}>
                 #{run.issue_number}
               </Link>
             ) : (
