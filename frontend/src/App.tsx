@@ -1182,7 +1182,7 @@ function ProjectRunsView({
       </section>
 
       {runs.length > 0 ? (
-        <ProjectRunsTable runs={runs} />
+        <ProjectRunsTable runs={runs} project={project} />
       ) : (
         <>
           <h2>Work in flight</h2>
@@ -1196,7 +1196,7 @@ function ProjectRunsView({
   );
 }
 
-function ProjectRunsTable({ runs }: { runs: ProjectRun[] }) {
+function ProjectRunsTable({ runs, project }: { runs: ProjectRun[]; project: Project }) {
   return (
     <>
       <h2>Run history</h2>
@@ -1225,8 +1225,26 @@ function ProjectRunsTable({ runs }: { runs: ProjectRun[] }) {
                 </Link>
                 <div className="dim">{run.title}</div>
               </td>
-              <td className="mono dim">{run.workflow}</td>
-              <td className="mono dim">{run.issue_number ? `#${run.issue_number}` : "-"}</td>
+              <td className="mono dim">
+                <Link
+                  className="link mono"
+                  to={`/projects/${encodeURIComponent(run.project)}/workflows/${encodeURIComponent(run.workflow)}`}
+                >
+                  {run.workflow}
+                </Link>
+              </td>
+              <td className="mono dim">
+                {run.issue_number ? (
+                  <Link
+                    className="link mono"
+                    to={`/issues/${project.github_repo}/${run.issue_number}`}
+                  >
+                    #{run.issue_number}
+                  </Link>
+                ) : (
+                  "-"
+                )}
+              </td>
               <td><span className={`pill ${runStatePill(run.state)}`}>{run.state}</span></td>
               <td className="mono">{run.cycles}</td>
               <td className="mono dim">{run.current_phase}</td>
