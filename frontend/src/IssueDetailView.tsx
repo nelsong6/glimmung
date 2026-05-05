@@ -56,7 +56,7 @@ export type IssueDetailTarget =
   | { kind: "gh"; repo: string; issue_number: number }
   | { kind: "native"; project: string; issue_id: string };
 
-type GraphNode = {
+export type GraphNode = {
   id: string;
   kind: "issue" | "run" | "attempt" | "pr" | "signal";
   label: string;
@@ -65,7 +65,7 @@ type GraphNode = {
   metadata: Record<string, unknown>;
 };
 
-type IssueGraph = {
+export type IssueGraph = {
   issue_id: string;
   nodes: GraphNode[];
   edges: Array<{
@@ -141,12 +141,12 @@ type NativeAttemptStep = {
   exit_code?: number | null;
 };
 
-type DispatchState =
+export type DispatchState =
   | { kind: "idle" }
   | { kind: "dispatching" }
   | { kind: "error"; message: string };
 
-type AbortState =
+export type AbortState =
   | { kind: "idle" }
   | { kind: "armed" }       // first click on `abort` — show `abort?` / `keep`
   | { kind: "aborting" }
@@ -386,9 +386,6 @@ export function IssueDetailView() {
                 onConfirmAbort={(runId) => void onAbort(runId)}
                 selectedRunId={selectedRunId}
                 onBackToRuns={() => setSelectedRunId(null)}
-                onPickRun={(runId) => {
-                  setSelectedRunId(runId);
-                }}
               />
             )}
             {tab === "touchpoint" && (
@@ -727,7 +724,7 @@ function IssueComments({
   );
 }
 
-function RunViewer({
+export function RunViewer({
   graph,
   graphAvailable,
   signedIn,
@@ -742,6 +739,7 @@ function RunViewer({
   onConfirmAbort,
   selectedRunId,
   onBackToRuns,
+  actionsVisible = true,
 }: {
   graph: IssueGraph | null;
   graphAvailable: boolean;
@@ -757,6 +755,7 @@ function RunViewer({
   onConfirmAbort: (runId: string) => void;
   selectedRunId: string | null;
   onBackToRuns: () => void;
+  actionsVisible?: boolean;
 }) {
   // Pick the run we're painting. Caller-selected wins; fall back to
   // active, then most recent. `null` only when there are no runs at
@@ -801,7 +800,7 @@ function RunViewer({
   const abortableRunId = activeRun ? runIdFromNode(activeRun) : null;
   const aborting = abortState.kind === "aborting";
   const armed = abortState.kind === "armed";
-  const actions = (
+  const actions = actionsVisible ? (
     <div
       className="run-actions"
       style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}
@@ -870,7 +869,7 @@ function RunViewer({
         </span>
       )}
     </div>
-  );
+  ) : null;
 
   if (!focused) {
     if (inFlight) {
@@ -898,9 +897,11 @@ function RunViewer({
   return (
     <>
       {actions}
-      <button type="button" className="link" onClick={onBackToRuns}>
-        ← runs
-      </button>
+      {actionsVisible && (
+        <button type="button" className="link" onClick={onBackToRuns}>
+          ← runs
+        </button>
+      )}
       {!isActive && !selectedRunId && (
         <div className="run-status-banner">
           No run in flight. Showing the last completed run.
@@ -1325,7 +1326,6 @@ function RunsPane({
   onConfirmAbort,
   selectedRunId,
   onBackToRuns,
-  onPickRun,
 }: {
   graph: IssueGraph | null;
   graphAvailable: boolean;
@@ -1341,8 +1341,9 @@ function RunsPane({
   onConfirmAbort: (runId: string) => void;
   selectedRunId: string | null;
   onBackToRuns: () => void;
-  onPickRun: (runId: string) => void;
 }) {
+  const location = useLocation();
+
   if (selectedRunId) {
     return (
       <RunViewer
@@ -1415,6 +1416,7 @@ function RunsPane({
                 <Link
                   className="link mono"
                   to={`/projects/${encodeURIComponent(project)}/runs/${encodeURIComponent(id)}`}
+                  state={{ returnTo: location.pathname, returnLabel: "issue runs" }}
                 >
                   {id.slice(0, 8)}…
                 </Link>
@@ -1439,9 +1441,13 @@ function RunsPane({
               <td className="mono">{cost !== null ? `$${cost.toFixed(4)}` : "—"}</td>
               <td className="mono dim">{prNumber !== null ? `#${prNumber}` : "—"}</td>
               <td>
-                <button type="button" className="link" onClick={() => onPickRun(id)}>
-                  preview here
-                </button>
+                <Link
+                  className="link"
+                  to={`/projects/${encodeURIComponent(project)}/runs/${encodeURIComponent(id)}`}
+                  state={{ returnTo: location.pathname, returnLabel: "issue runs" }}
+                >
+                  view
+                </Link>
               </td>
             </tr>
           );

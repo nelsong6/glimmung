@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { Link, Navigate, NavLink, Outlet, Route, Routes, useLocation, useOutletContext, useParams } from "react-router-dom";
 import { AdminPanel } from "./AdminPanel";
-import { IssueDetailView } from "./IssueDetailView";
+import { IssueDetailView, RunViewer, type AbortState, type DispatchState, type IssueGraph } from "./IssueDetailView";
 import { IssuesView } from "./IssuesView";
 import { ReportDetailView } from "./ReportDetailView";
 import { ReportsView } from "./ReportsView";
@@ -331,6 +331,7 @@ function Layout() {
     `dashboard-nav-link ${isActive ? "selected" : ""}`;
   const homeRoute = location.pathname === "/";
   const breadcrumbs = buildBreadcrumbs(location.pathname, snap?.projects ?? []);
+  const returnTarget = returnTargetFromState(location.state, location.pathname);
 
   return (
     <div className="layout">
@@ -397,16 +398,23 @@ function Layout() {
         </header>
 
         <nav className="workspace-breadcrumb app-breadcrumb" aria-label="breadcrumb">
-          {breadcrumbs.map((crumb, index) => (
-            <span className="breadcrumb-segment" key={`${crumb.label}:${index}`}>
-              {index > 0 && <span className="breadcrumb-sep">/</span>}
-              {crumb.to && index < breadcrumbs.length - 1 ? (
-                <Link to={crumb.to}>{crumb.label}</Link>
-              ) : (
-                <strong>{crumb.label}</strong>
-              )}
-            </span>
-          ))}
+          <div className="breadcrumb-trail">
+            {breadcrumbs.map((crumb, index) => (
+              <span className="breadcrumb-segment" key={`${crumb.label}:${index}`}>
+                {index > 0 && <span className="breadcrumb-sep">/</span>}
+                {crumb.to && index < breadcrumbs.length - 1 ? (
+                  <Link to={crumb.to}>{crumb.label}</Link>
+                ) : (
+                  <strong>{crumb.label}</strong>
+                )}
+              </span>
+            ))}
+          </div>
+          {returnTarget && (
+            <Link className="breadcrumb-return" to={returnTarget.to}>
+              ← return to {returnTarget.label}
+            </Link>
+          )}
         </nav>
 
         {homeRoute && (
@@ -438,6 +446,22 @@ type Breadcrumb = {
   label: string;
   to?: string;
 };
+
+type ReturnNavigationState = {
+  returnTo?: unknown;
+  returnLabel?: unknown;
+};
+
+function returnTargetFromState(state: unknown, currentPath: string): { to: string; label: string } | null {
+  if (typeof state !== "object" || state === null) return null;
+  const candidate = state as ReturnNavigationState;
+  if (typeof candidate.returnTo !== "string" || !candidate.returnTo.startsWith("/")) return null;
+  if (candidate.returnTo === currentPath) return null;
+  const label = typeof candidate.returnLabel === "string" && candidate.returnLabel.trim()
+    ? candidate.returnLabel
+    : "previous view";
+  return { to: candidate.returnTo, label };
+}
 
 function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
   const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
@@ -1197,6 +1221,7 @@ function ProjectRunsView({
 }
 
 function ProjectRunsTable({ runs, project }: { runs: ProjectRun[]; project: Project }) {
+  const runsPath = `/projects/${encodeURIComponent(project.name)}/runs`;
   return (
     <>
       <h2>Run history</h2>
@@ -1222,6 +1247,7 @@ function ProjectRunsTable({ runs, project }: { runs: ProjectRun[]; project: Proj
                   <Link
                     className="link mono"
                     to={`/projects/${encodeURIComponent(run.project)}/runs/${encodeURIComponent(run.id)}`}
+                    state={{ returnTo: runsPath, returnLabel: "runs" }}
                     title={run.id}
                   >
                     {runLabel}
@@ -1241,6 +1267,7 @@ function ProjectRunsTable({ runs, project }: { runs: ProjectRun[]; project: Proj
                   <Link
                     className="link mono"
                     to={`/issues/${project.github_repo}/${run.issue_number}`}
+                    state={{ returnTo: runsPath, returnLabel: "runs" }}
                   >
                     #{run.issue_number}
                   </Link>
@@ -1269,8 +1296,99 @@ function projectRunLabel(run: ProjectRun, runs: ProjectRun[], index: number): st
   return `#${run.issue_number}-${Math.max(ordinal, 1)}`;
 }
 
+const RUN_VIEWER_IDLE_DISPATCH: DispatchState = { kind: "idle" };
+const RUN_VIEWER_IDLE_ABORT: AbortState = { kind: "idle" };
+
+function projectRunGraph(run: ProjectRun, workflow: Workflow | undefined, project: Project): IssueGraph {
+  const issueNode = run.issue_number
+    ? {
+        id: `issue:${project.name}-${run.issue_number}`,
+        kind: "issue" as const,
+        label: `#${run.issue_number}`,
+        state: "open",
+        timestamp: run.started_at,
+        metadata: {
+          project: project.name,
+          repo: project.github_repo,
+          number: run.issue_number,
+          issue_id: `${project.name}-${run.issue_number}`,
+        },
+      }
+    : null;
+  const phaseNames = workflow?.phases.map((phase) => phase.name) ?? [run.current_phase];
+  const recycleArrows = workflow?.phases.flatMap((phase) => {
+    if (!phase.recycle_policy) return [];
+    return phase.recycle_policy.on.map((trigger) => ({
+      source: phase.name,
+      target: phase.recycle_policy?.lands_at ?? phase.name,
+      trigger,
+      max_attempts: phase.recycle_policy?.max_attempts ?? 1,
+      active: false,
+      kind: "phase_recycle" as const,
+    }));
+  }) ?? [];
+  const runNode = {
+    id: `run:${run.id}`,
+    kind: "run" as const,
+    label: run.id,
+    state: run.state,
+    timestamp: run.started_at,
+    metadata: {
+      workflow: run.workflow,
+      cycles_count: run.cycles,
+      cumulative_cost_usd: run.cost_usd,
+      entrypoint_phase: phaseNames[0] ?? run.current_phase,
+      workflow_graph: {
+        phases: phaseNames,
+        default_entry: { target: phaseNames[0] ?? run.current_phase, active: true, kind: "phase" },
+        recycle_arrows: recycleArrows,
+        terminal: { kind: "report", enabled: workflow?.pr.enabled ?? true },
+      },
+    },
+  };
+  const attempts = phaseNames
+    .slice(0, Math.max(run.cycles, run.state === "pending" ? 0 : 1))
+    .map((phase, index) => ({
+      id: `attempt:${run.id}:${index}`,
+      kind: "attempt" as const,
+      label: phase,
+      state: index === phaseNames.indexOf(run.current_phase) ? run.state : "completed",
+      timestamp: run.started_at,
+      metadata: {
+        attempt_index: index,
+        phase,
+        phase_kind: workflow?.phases.find((candidate) => candidate.name === phase)?.kind ?? "agent",
+        completed_at: run.state === "pending" || run.state === "in_progress" ? null : run.updated_at,
+        verification_status: run.state === "passed" ? "pass" : null,
+        steps: [
+          {
+            slug: `${phase}-start`,
+            title: `${phase} started`,
+            state: run.state === "pending" ? "pending" : "completed",
+            message: `Mock ${phase} execution for ${run.title}.`,
+            exit_code: run.state === "aborted" ? 1 : 0,
+          },
+        ],
+      },
+    }));
+  const nodes = [
+    ...(issueNode ? [issueNode] : []),
+    runNode,
+    ...attempts,
+  ];
+  return {
+    issue_id: issueNode?.metadata.issue_id ?? run.id,
+    nodes,
+    edges: [
+      ...(issueNode ? [{ source: issueNode.id, target: runNode.id, kind: "spawned" as const }] : []),
+      ...attempts.map((attempt) => ({ source: runNode.id, target: attempt.id, kind: "attempted" as const })),
+    ],
+  };
+}
+
 function ProjectRunView({
   snap,
+  signedIn,
   projectName,
   runId,
 }: LayoutContext & { projectName: string; runId: string }) {
@@ -1283,6 +1401,11 @@ function ProjectRunView({
   const run = isMockMode()
     ? mockRuns.find((candidate) => candidate.project === project.name && candidate.id === runId)
     : null;
+  const runs = isMockMode()
+    ? mockRuns.filter((candidate) => candidate.project === project.name)
+    : [];
+  const workflow = snap.workflows.find((w) => w.project === (run?.project ?? project.name) && w.name === run?.workflow);
+  const graph = run ? projectRunGraph(run, workflow, project) : null;
 
   if (!run) {
     return (
@@ -1301,14 +1424,15 @@ function ProjectRunView({
     );
   }
 
-  const workflow = snap.workflows.find((w) => w.project === run.project && w.name === run.workflow);
+  const runIndex = runs.findIndex((candidate) => candidate.id === run.id);
+  const runLabel = projectRunLabel(run, runs, runIndex >= 0 ? runIndex : 0);
 
   return (
     <div className="project-workspace">
       <section className="project-hero">
         <div className="project-hero-main">
           <div className="project-kicker mono">run</div>
-          <h2>{run.id}</h2>
+          <h2 title={run.id}>{runLabel}</h2>
           <div className="project-repo mono">{run.title}</div>
         </div>
         <div className="project-facts">
@@ -1334,11 +1458,26 @@ function ProjectRunView({
       <section className="project-focus">
         <div>
           <span className="key">workflow</span>
-          <strong>{run.workflow}</strong>
+          <strong>
+            <Link
+              className="link"
+              to={`/projects/${encodeURIComponent(project.name)}/workflows/${encodeURIComponent(run.workflow)}`}
+            >
+              {run.workflow}
+            </Link>
+          </strong>
         </div>
         <div>
           <span className="key">issue</span>
-          <span className="mono">{run.issue_number ? `#${run.issue_number}` : "none"}</span>
+          <span className="mono">
+            {run.issue_number ? (
+              <Link className="link mono" to={`/issues/${project.github_repo}/${run.issue_number}`}>
+                #{run.issue_number}
+              </Link>
+            ) : (
+              "none"
+            )}
+          </span>
         </div>
         <div>
           <span className="key">updated</span>
@@ -1346,11 +1485,23 @@ function ProjectRunView({
         </div>
       </section>
 
-      {workflow ? (
-        <WorkflowDefinitionGraph workflow={workflow} />
-      ) : (
-        <div className="empty">Workflow {run.workflow} is not registered.</div>
-      )}
+      <RunViewer
+        graph={graph}
+        graphAvailable={true}
+        signedIn={signedIn}
+        project={project.name}
+        repo={project.github_repo}
+        inFlight={run.state === "in_progress"}
+        dispatchState={RUN_VIEWER_IDLE_DISPATCH}
+        onRedispatch={() => undefined}
+        abortState={RUN_VIEWER_IDLE_ABORT}
+        onArmAbort={() => undefined}
+        onCancelAbort={() => undefined}
+        onConfirmAbort={() => undefined}
+        selectedRunId={run.id}
+        onBackToRuns={() => undefined}
+        actionsVisible={false}
+      />
     </div>
   );
 }

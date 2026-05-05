@@ -1451,6 +1451,7 @@ h2 .inline-action,
 .workspace-breadcrumb {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
   color: var(--fg-dimmer);
   font-family: var(--font-mono);
@@ -1467,6 +1468,16 @@ h2 .inline-action,
 .workspace-breadcrumb strong {
   color: var(--fg-muted);
   font-weight: 500;
+}
+.breadcrumb-trail {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+.breadcrumb-return {
+  flex: 0 0 auto;
 }
 .project-hero {
   display: grid;
