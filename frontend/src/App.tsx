@@ -7,7 +7,7 @@ import { ReportDetailView } from "./ReportDetailView";
 import { ReportsView } from "./ReportsView";
 import { StyleguideView } from "./StyleguideView";
 import { authedFetch, currentAccount, initAuth, signIn, signOut } from "./auth";
-import { isMockMode, mockSnapshot } from "./mockApi";
+import { isMockMode, mockRuns, mockSnapshot } from "./mockApi";
 import type { AccountInfo } from "@azure/msal-browser";
 
 type Host = {
@@ -77,6 +77,20 @@ type RecyclePolicy = {
   max_attempts: number;
   on: string[];
   lands_at: string;
+};
+
+type ProjectRun = {
+  id: string;
+  project: string;
+  workflow: string;
+  issue_number: number | null;
+  title: string;
+  state: string;
+  cycles: number;
+  current_phase: string;
+  cost_usd: number;
+  started_at: string;
+  updated_at: string;
 };
 
 type Snapshot = {
@@ -1123,6 +1137,9 @@ function ProjectRunsView({
   const active = snap.active_leases.filter((l) => l.project === project.name);
   const pending = snap.pending_leases.filter((l) => l.project === project.name);
   const currentWork = [...active, ...pending];
+  const runs = isMockMode()
+    ? mockRuns.filter((run) => run.project === project.name)
+    : [];
 
   return (
     <div className="project-workspace">
@@ -1141,16 +1158,74 @@ function ProjectRunsView({
             <span>pending</span>
             <strong>{pending.length}</strong>
           </div>
+          {runs.length > 0 && (
+            <div className="project-fact">
+              <span>runs</span>
+              <strong>{runs.length}</strong>
+            </div>
+          )}
         </div>
       </section>
 
-      <h2>Work in flight</h2>
-      <CurrentWorkTable
-        leases={currentWork}
-        emptyText={`No active or pending runs for ${project.name}.`}
-      />
+      {runs.length > 0 ? (
+        <ProjectRunsTable runs={runs} />
+      ) : (
+        <>
+          <h2>Work in flight</h2>
+          <CurrentWorkTable
+            leases={currentWork}
+            emptyText={`No active or pending runs for ${project.name}.`}
+          />
+        </>
+      )}
     </div>
   );
+}
+
+function ProjectRunsTable({ runs }: { runs: ProjectRun[] }) {
+  return (
+    <>
+      <h2>Run history</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Run</th>
+            <th>Workflow</th>
+            <th>Issue</th>
+            <th>State</th>
+            <th>Cycle</th>
+            <th>Phase</th>
+            <th>Cost</th>
+            <th>Updated</th>
+          </tr>
+        </thead>
+        <tbody>
+          {runs.map((run) => (
+            <tr key={run.id}>
+              <td>
+                <span className="mono">{run.id}</span>
+                <div className="dim">{run.title}</div>
+              </td>
+              <td className="mono dim">{run.workflow}</td>
+              <td className="mono dim">{run.issue_number ? `#${run.issue_number}` : "-"}</td>
+              <td><span className={`pill ${runStatePill(run.state)}`}>{run.state}</span></td>
+              <td className="mono">{run.cycles}</td>
+              <td className="mono dim">{run.current_phase}</td>
+              <td className="mono dim">${run.cost_usd.toFixed(2)}</td>
+              <td className="mono dim">{relTime(run.updated_at)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </>
+  );
+}
+
+function runStatePill(state: string): string {
+  if (state === "passed") return "free";
+  if (state === "in_progress" || state === "pending" || state === "needs_review") return "busy";
+  if (state === "aborted" || state === "failed") return "drain";
+  return "info";
 }
 
 function CurrentWorkTable({ leases, emptyText }: { leases: Lease[]; emptyText: string }) {
