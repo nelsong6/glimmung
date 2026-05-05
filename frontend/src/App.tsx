@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { Link, Navigate, NavLink, Outlet, Route, Routes, useLocation, useOutletContext, useParams } from "react-router-dom";
 import { AdminPanel } from "./AdminPanel";
 import { IssueDetailView } from "./IssueDetailView";
@@ -46,12 +46,37 @@ type Workflow = {
   id: string;
   project: string;
   name: string;
+  phases: PhaseSpec[];
+  pr: PrPrimitiveSpec;
   workflow_filename: string;
   workflow_ref: string;
   trigger_label: string;
   default_requirements: Record<string, unknown>;
   metadata: Record<string, unknown>;
   created_at: string;
+};
+
+type PhaseSpec = {
+  name: string;
+  kind: string;
+  workflow_filename: string;
+  workflow_ref: string;
+  inputs: Record<string, string>;
+  outputs: string[];
+  requirements: Record<string, unknown> | null;
+  verify: boolean;
+  recycle_policy: RecyclePolicy | null;
+};
+
+type PrPrimitiveSpec = {
+  enabled: boolean;
+  recycle_policy: RecyclePolicy | null;
+};
+
+type RecyclePolicy = {
+  max_attempts: number;
+  on: string[];
+  lands_at: string;
 };
 
 type Snapshot = {
@@ -852,6 +877,77 @@ function RequirementPills({ requirements }: { requirements: Record<string, unkno
   );
 }
 
+function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
+  const phases = workflow.phases.length > 0
+    ? workflow.phases
+    : [{
+        name: workflow.name,
+        kind: "gha_dispatch",
+        workflow_filename: workflow.workflow_filename,
+        workflow_ref: workflow.workflow_ref,
+        inputs: {},
+        outputs: [],
+        requirements: workflow.default_requirements,
+        verify: false,
+        recycle_policy: null,
+      }];
+  const policies = [
+    ...phases.flatMap((phase) => phase.recycle_policy ? [{
+      label: `${phase.name} -> ${phase.recycle_policy.lands_at}`,
+      trigger: phase.recycle_policy.on.join(" / ") || "recycle",
+      max: phase.recycle_policy.max_attempts,
+    }] : []),
+    ...(workflow.pr.recycle_policy ? [{
+      label: `report -> ${workflow.pr.recycle_policy.lands_at}`,
+      trigger: workflow.pr.recycle_policy.on.join(" / ") || "feedback",
+      max: workflow.pr.recycle_policy.max_attempts,
+    }] : []),
+  ];
+
+  return (
+    <section>
+      <h2>Workflow graph</h2>
+      <div className="dag-wrap">
+        <div className="dag" aria-label={`${workflow.name} workflow graph`}>
+          <div className="dag-entry">
+            <span className="dag-node-label">trigger</span>
+            <span className="dag-node-meta">{workflow.trigger_label}</span>
+          </div>
+          <span className="dag-edge">{"->"}</span>
+          {phases.map((phase, index) => (
+            <Fragment key={phase.name}>
+              <div className="dag-node dag-node-definition">
+                <span className="dag-node-label">{phase.name}</span>
+                <span className="dag-node-state">{phase.kind}</span>
+                <span className="dag-node-meta">
+                  {phase.verify ? "verify" : "run"} / {phase.workflow_filename || "native"}
+                </span>
+              </div>
+              {(index < phases.length - 1 || workflow.pr.enabled) && <span className="dag-edge">{"->"}</span>}
+            </Fragment>
+          ))}
+          {workflow.pr.enabled && (
+            <div className="dag-node dag-node-definition dag-node-pr">
+              <span className="dag-node-label">report</span>
+              <span className="dag-node-state">terminal</span>
+              <span className="dag-node-meta">PR primitive</span>
+            </div>
+          )}
+        </div>
+        {policies.length > 0 && (
+          <div className="dag-policy-rail" aria-label="recycle policies">
+            {policies.map((policy) => (
+              <span className="dag-policy inactive" key={`${policy.label}:${policy.trigger}`}>
+                {policy.label} / {policy.trigger} / max {policy.max}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function ProjectWorkflowView({
   snap,
   signedIn,
@@ -908,6 +1004,8 @@ function ProjectWorkflowView({
           <span className="mono">{project.name}</span>
         </div>
       </section>
+
+      <WorkflowDefinitionGraph workflow={workflow} />
 
       <h2>Current work</h2>
       <CurrentWorkTable leases={currentWork} emptyText={`No active or pending work for ${workflow.name}.`} />
