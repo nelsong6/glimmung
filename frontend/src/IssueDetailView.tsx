@@ -156,11 +156,10 @@ type AuthContext = {
   signedIn: boolean;
 };
 
-type Tab = "issue" | "the_run" | "runs" | "touchpoint";
+type Tab = "issue" | "runs" | "touchpoint";
 
 const TAB_SLUGS: Record<Tab, string> = {
   issue: "issue",
-  the_run: "the-run",
   runs: "runs",
   touchpoint: "touchpoint",
 };
@@ -170,8 +169,8 @@ const TAB_SLUGS: Record<Tab, string> = {
 const SLUG_TO_TAB: Record<string, Tab> = {
   issue: "issue",
   description: "issue",
-  "the-run": "the_run",
-  "in-progress": "the_run",
+  "the-run": "runs",
+  "in-progress": "runs",
   runs: "runs",
   lineage: "runs",
   touchpoint: "touchpoint",
@@ -325,7 +324,7 @@ export function IssueDetailView() {
     }
   };
   useEffect(() => {
-    if (tab !== "the_run") return;
+    if (tab !== "runs") return;
     if (!isInFlight) return;
     const id = setInterval(() => setRefreshTick((t) => t + 1), POLL_INTERVAL_MS);
     return () => clearInterval(id);
@@ -347,12 +346,9 @@ export function IssueDetailView() {
             <TabButton current={tab} value="issue" onSelect={setTab}>
               issue
             </TabButton>
-            <TabButton current={tab} value="the_run" onSelect={setTab}>
-              run
-              {isInFlight && <span className="tab-dot" aria-label="active" />}
-            </TabButton>
             <TabButton current={tab} value="runs" onSelect={setTab}>
               runs
+              {isInFlight && <span className="tab-dot" aria-label="active" />}
             </TabButton>
             <TabButton current={tab} value="touchpoint" onSelect={setTab}>
               touchpoint
@@ -374,8 +370,8 @@ export function IssueDetailView() {
                 onCommentChanged={() => setRefreshTick((t) => t + 1)}
               />
             )}
-            {tab === "the_run" && (
-              <TheRunTab
+            {tab === "runs" && (
+              <RunsPane
                 graph={graph}
                 graphAvailable={!!graphUrl}
                 signedIn={signedIn}
@@ -389,17 +385,9 @@ export function IssueDetailView() {
                 onCancelAbort={() => setAbortState({ kind: "idle" })}
                 onConfirmAbort={(runId) => void onAbort(runId)}
                 selectedRunId={selectedRunId}
-                onSelectRun={setSelectedRunId}
-              />
-            )}
-            {tab === "runs" && (
-              <RunsTab
-                graph={graph}
-                graphAvailable={!!graphUrl}
-                project={detail.project}
+                onBackToRuns={() => setSelectedRunId(null)}
                 onPickRun={(runId) => {
                   setSelectedRunId(runId);
-                  setTab("the_run");
                 }}
               />
             )}
@@ -739,7 +727,7 @@ function IssueComments({
   );
 }
 
-function TheRunTab({
+function RunViewer({
   graph,
   graphAvailable,
   signedIn,
@@ -753,7 +741,7 @@ function TheRunTab({
   onCancelAbort,
   onConfirmAbort,
   selectedRunId,
-  onSelectRun,
+  onBackToRuns,
 }: {
   graph: IssueGraph | null;
   graphAvailable: boolean;
@@ -768,7 +756,7 @@ function TheRunTab({
   onCancelAbort: () => void;
   onConfirmAbort: (runId: string) => void;
   selectedRunId: string | null;
-  onSelectRun: (runId: string | null) => void;
+  onBackToRuns: () => void;
 }) {
   // Pick the run we're painting. Caller-selected wins; fall back to
   // active, then most recent. `null` only when there are no runs at
@@ -876,8 +864,8 @@ function TheRunTab({
       {selectedRunId && focused && (
         <span className="dim mono">
           showing run {selectedRunId.slice(0, 8)}…{" "}
-          <button type="button" className="link" onClick={() => onSelectRun(null)}>
-            (clear)
+          <button type="button" className="link" onClick={onBackToRuns}>
+            back to runs
           </button>
         </span>
       )}
@@ -910,6 +898,9 @@ function TheRunTab({
   return (
     <>
       {actions}
+      <button type="button" className="link" onClick={onBackToRuns}>
+        ← runs
+      </button>
       {!isActive && !selectedRunId && (
         <div className="run-status-banner">
           No run in flight. Showing the last completed run.
@@ -1319,17 +1310,60 @@ function RunMetaSummary({
 // dispatch failures (the orphan-webhook bug surfaced as exactly this).
 const STUCK_DISPATCHING_MS = 30_000;
 
-function RunsTab({
+function RunsPane({
   graph,
   graphAvailable,
+  signedIn,
   project,
+  repo,
+  inFlight,
+  dispatchState,
+  onRedispatch,
+  abortState,
+  onArmAbort,
+  onCancelAbort,
+  onConfirmAbort,
+  selectedRunId,
+  onBackToRuns,
   onPickRun,
 }: {
   graph: IssueGraph | null;
   graphAvailable: boolean;
+  signedIn: boolean;
   project: string;
+  repo: string | null;
+  inFlight: boolean;
+  dispatchState: DispatchState;
+  onRedispatch: () => void;
+  abortState: AbortState;
+  onArmAbort: () => void;
+  onCancelAbort: () => void;
+  onConfirmAbort: (runId: string) => void;
+  selectedRunId: string | null;
+  onBackToRuns: () => void;
   onPickRun: (runId: string) => void;
 }) {
+  if (selectedRunId) {
+    return (
+      <RunViewer
+        graph={graph}
+        graphAvailable={graphAvailable}
+        signedIn={signedIn}
+        project={project}
+        repo={repo}
+        inFlight={inFlight}
+        dispatchState={dispatchState}
+        onRedispatch={onRedispatch}
+        abortState={abortState}
+        onArmAbort={onArmAbort}
+        onCancelAbort={onCancelAbort}
+        onConfirmAbort={onConfirmAbort}
+        selectedRunId={selectedRunId}
+        onBackToRuns={onBackToRuns}
+      />
+    );
+  }
+
   if (!graphAvailable) {
     return (
       <div className="empty">
