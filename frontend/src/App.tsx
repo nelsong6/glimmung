@@ -595,7 +595,14 @@ function ProjectsView({ snap }: LayoutContext) {
                       {project.name}
                     </Link>
                   </td>
-                  <td className="mono dim">{project.github_repo}</td>
+                  <td className="mono dim">
+                    <a
+                      className="link"
+                      href={`https://github.com/${project.github_repo}`}
+                    >
+                      {project.github_repo}
+                    </a>
+                  </td>
                   <td className="mono">{workflows.length}</td>
                   <td className="mono dim">{active.length} active / {pending.length} pending</td>
                   <td className="mono dim">
