@@ -1214,17 +1214,20 @@ function ProjectRunsTable({ runs, project }: { runs: ProjectRun[]; project: Proj
           </tr>
         </thead>
         <tbody>
-          {runs.map((run) => (
-            <tr key={run.id}>
-              <td>
-                <Link
-                  className="link mono"
-                  to={`/projects/${encodeURIComponent(run.project)}/runs/${encodeURIComponent(run.id)}`}
-                >
-                  {run.id}
-                </Link>
-                <div className="dim">{run.title}</div>
-              </td>
+          {runs.map((run, index) => {
+            const runLabel = projectRunLabel(run, runs, index);
+            return (
+              <tr key={run.id}>
+                <td>
+                  <Link
+                    className="link mono"
+                    to={`/projects/${encodeURIComponent(run.project)}/runs/${encodeURIComponent(run.id)}`}
+                    title={run.id}
+                  >
+                    {runLabel}
+                  </Link>
+                  <div className="dim">{run.title}</div>
+                </td>
               <td className="mono dim">
                 <Link
                   className="link mono"
@@ -1251,11 +1254,19 @@ function ProjectRunsTable({ runs, project }: { runs: ProjectRun[]; project: Proj
               <td className="mono dim">${run.cost_usd.toFixed(2)}</td>
               <td className="mono dim">{relTime(run.updated_at)}</td>
             </tr>
-          ))}
+            );
+          })}
         </tbody>
       </table>
     </>
   );
+}
+
+function projectRunLabel(run: ProjectRun, runs: ProjectRun[], index: number): string {
+  if (run.issue_number === null) return `run-${index + 1}`;
+  const sameIssue = runs.filter((candidate) => candidate.issue_number === run.issue_number);
+  const ordinal = sameIssue.findIndex((candidate) => candidate.id === run.id) + 1;
+  return `#${run.issue_number}-${Math.max(ordinal, 1)}`;
 }
 
 function ProjectRunView({
