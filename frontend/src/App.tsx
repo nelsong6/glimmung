@@ -399,29 +399,30 @@ type Breadcrumb = {
 
 function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
   const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
-  if (parts.length === 0) return [{ label: "Dashboard" }];
+  if (parts.length === 0) return [{ label: "Home" }];
   if (parts[0] === "projects") {
     const crumbs: Breadcrumb[] = [
-      { label: "Dashboard", to: "/" },
+      { label: "Home", to: "/" },
       { label: "Projects", to: "/projects" },
     ];
     if (parts[1]) crumbs.push({ label: parts[1] });
     return crumbs;
   }
   if (parts[0] === "issues") {
-    const crumbs: Breadcrumb[] = [{ label: "Dashboard", to: "/" }];
+    const crumbs: Breadcrumb[] = [{ label: "Home", to: "/" }];
     if (parts.length >= 4) {
       const owner = parts[1];
       const repo = parts[2];
       const issue = parts[3];
       const githubRepo = `${owner}/${repo}`;
       const project = projects.find((p) => p.github_repo === githubRepo);
-      crumbs.push({ label: "Issues", to: "/issues" });
-      crumbs.push(
-        project
-          ? { label: project.name, to: `/projects/${encodeURIComponent(project.name)}` }
-          : { label: githubRepo, to: `/issues?repo=${encodeURIComponent(githubRepo)}` },
-      );
+      if (project) {
+        crumbs.push({ label: "Projects", to: "/projects" });
+        crumbs.push({ label: project.name, to: `/projects/${encodeURIComponent(project.name)}` });
+      } else {
+        crumbs.push({ label: "Issues", to: "/issues" });
+        crumbs.push({ label: githubRepo, to: `/issues?repo=${encodeURIComponent(githubRepo)}` });
+      }
       crumbs.push({ label: `#${issue}` });
       return crumbs;
     }
@@ -431,11 +432,11 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
       crumbs.push({ label: parts[2] });
       return crumbs;
     }
-    return [{ label: "Dashboard", to: "/" }, { label: "Issues" }];
+    return [{ label: "Home", to: "/" }, { label: "Issues" }];
   }
-  if (parts[0] === "graph") return [{ label: "Dashboard", to: "/" }, { label: "Graph" }];
-  if (parts[0] === "reports") return [{ label: "Dashboard", to: "/" }, { label: "Touchpoint evidence" }];
-  return [{ label: "Dashboard", to: "/" }, { label: parts[0] }];
+  if (parts[0] === "graph") return [{ label: "Home", to: "/" }, { label: "Graph" }];
+  if (parts[0] === "reports") return [{ label: "Home", to: "/" }, { label: "Touchpoint evidence" }];
+  return [{ label: "Home", to: "/" }, { label: parts[0] }];
 }
 
 function CapacityRoute() {
