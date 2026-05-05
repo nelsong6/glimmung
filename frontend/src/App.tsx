@@ -101,6 +101,7 @@ export function App() {
       <Route path="/" element={<Layout />}>
         <Route index element={<CapacityRoute />} />
         <Route path="graph" element={<GraphRoute />} />
+        <Route path="projects" element={<ProjectsRoute />} />
         <Route path="projects/:project" element={<ProjectRoute />} />
         <Route path="issues" element={<IssuesRoute />} />
         <Route path="issues/:owner/:repo/:n" element={<IssueDetailView />}>
@@ -284,13 +285,15 @@ function Layout() {
   const tabLinkClass = ({ isActive }: { isActive: boolean }) =>
     `tab ${isActive ? "selected" : ""}`;
   const dashboardWorkspace =
-    location.pathname === "/" || location.pathname === "/issues" || location.pathname === "/graph";
+    location.pathname === "/" || location.pathname === "/issues" || location.pathname === "/graph" || location.pathname === "/projects";
   const routeProjectName = projectNameFromPath(location.pathname);
 
   return (
     <div className="layout">
       <aside className="sidebar">
-        <div className="sidebar-title">Projects</div>
+        <Link className="sidebar-title sidebar-title-link" to="/projects">
+          Projects
+        </Link>
         <button
           type="button"
           className={`project-row ${selected.kind === "all" && !routeProjectName ? "selected" : ""}`}
@@ -441,6 +444,9 @@ function Layout() {
             <NavLink to="/graph" className={tabLinkClass}>
               graph
             </NavLink>
+            <NavLink to="/projects" className={tabLinkClass}>
+              projects
+            </NavLink>
           </div>
         )}
 
@@ -483,6 +489,11 @@ function GraphRoute() {
   );
 }
 
+function ProjectsRoute() {
+  const ctx = useOutletContext<LayoutContext>();
+  return <ProjectsView {...ctx} />;
+}
+
 function ProjectRoute() {
   const params = useParams<{ project?: string }>();
   const ctx = useOutletContext<LayoutContext>();
@@ -495,6 +506,83 @@ function ReportsRoute() {
     <ReportsView
       projectFilter={selected.kind === "all" ? null : selected.project}
     />
+  );
+}
+
+function ProjectsView({ snap }: LayoutContext) {
+  if (snap === null) return <div className="empty">Connecting…</div>;
+
+  const projects = snap.projects
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  return (
+    <div className="project-workspace">
+      <section className="project-hero">
+        <div className="project-hero-main">
+          <div className="project-kicker mono">dashboard</div>
+          <h2>Projects</h2>
+          <div className="project-repo mono">registered repos and project-scoped workspaces</div>
+        </div>
+        <div className="project-facts">
+          <div className="project-fact">
+            <span>projects</span>
+            <strong>{projects.length}</strong>
+          </div>
+          <div className="project-fact">
+            <span>workflows</span>
+            <strong>{snap.workflows.length}</strong>
+          </div>
+          <div className="project-fact">
+            <span>active</span>
+            <strong>{snap.active_leases.length}</strong>
+          </div>
+          <div className="project-fact">
+            <span>pending</span>
+            <strong>{snap.pending_leases.length}</strong>
+          </div>
+        </div>
+      </section>
+
+      {projects.length === 0 ? (
+        <div className="empty">No projects registered.</div>
+      ) : (
+        <table>
+          <thead>
+            <tr>
+              <th>Project</th>
+              <th>GitHub</th>
+              <th>Workflows</th>
+              <th>Work</th>
+              <th>Hosts</th>
+            </tr>
+          </thead>
+          <tbody>
+            {projects.map((project) => {
+              const workflows = snap.workflows.filter((w) => w.project === project.name);
+              const pending = snap.pending_leases.filter((l) => l.project === project.name);
+              const active = snap.active_leases.filter((l) => l.project === project.name);
+              const activeHosts = new Set(active.flatMap((l) => (l.host ? [l.host] : [])));
+              return (
+                <tr key={project.id}>
+                  <td>
+                    <Link className="link" to={`/projects/${encodeURIComponent(project.name)}`}>
+                      {project.name}
+                    </Link>
+                  </td>
+                  <td className="mono dim">{project.github_repo}</td>
+                  <td className="mono">{workflows.length}</td>
+                  <td className="mono dim">{active.length} active / {pending.length} pending</td>
+                  <td className="mono dim">
+                    {activeHosts.size > 0 ? Array.from(activeHosts).join(", ") : "—"}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </div>
   );
 }
 

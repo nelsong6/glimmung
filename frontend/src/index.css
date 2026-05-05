@@ -802,6 +802,7 @@
   background: #0a0a0c;
 }
 .sidebar-title {
+  display: block;
   font-size: 0.75rem;
   font-weight: 600;
   color: #666;
@@ -810,6 +811,12 @@
   padding: 0 20px 12px 20px;
   border-bottom: 1px solid #2a2a2e;
   margin-bottom: 8px;
+}
+.sidebar-title-link {
+  text-decoration: none;
+}
+.sidebar-title-link:hover {
+  color: #b8b8b8;
 }
 .project-row {
   display: flex;
