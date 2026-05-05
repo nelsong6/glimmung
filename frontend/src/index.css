@@ -1523,6 +1523,43 @@ h2 .inline-action,
   margin-top: 8px;
 }
 
+.dashboard-breadcrumb {
+  margin-top: 14px;
+}
+.dashboard-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 6px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.dashboard-nav-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 0 12px;
+  background: var(--surface);
+  color: var(--fg-muted);
+  border-left: 2px solid transparent;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  text-decoration: none;
+  text-transform: lowercase;
+}
+.dashboard-nav-link:hover {
+  color: var(--fg);
+  background: var(--surface-hover);
+  text-decoration: none;
+}
+.dashboard-nav-link.selected {
+  color: var(--state-success-fg);
+  border-left-color: var(--state-success-fg);
+  background: color-mix(in srgb, var(--state-success-bg) 42%, var(--surface));
+}
+
 /* Tabs — bottom-rail accent matches the leading-rail vocabulary on
    buttons & pills. Mono lowercase labels keep the console-plate language. */
 .tabs {

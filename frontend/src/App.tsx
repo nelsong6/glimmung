@@ -281,8 +281,8 @@ function Layout() {
     matchesRequirements,
   };
 
-  const tabLinkClass = ({ isActive }: { isActive: boolean }) =>
-    `tab ${isActive ? "selected" : ""}`;
+  const dashboardLinkClass = ({ isActive }: { isActive: boolean }) =>
+    `dashboard-nav-link ${isActive ? "selected" : ""}`;
   const dashboardWorkspace =
     location.pathname === "/" || location.pathname === "/issues" || location.pathname === "/graph" || location.pathname === "/projects";
 
@@ -351,21 +351,26 @@ function Layout() {
         </header>
 
         {dashboardWorkspace && (
-          <div className="tabs">
-            <NavLink to="/" end className={tabLinkClass}>
-              capacity
-            </NavLink>
-            <NavLink to="/issues" className={tabLinkClass}>
-              issues
-              {inflight.issues && <span className="tab-dot" />}
-            </NavLink>
-            <NavLink to="/graph" className={tabLinkClass}>
-              graph
-            </NavLink>
-            <NavLink to="/projects" className={tabLinkClass}>
-              projects
-            </NavLink>
-          </div>
+          <>
+            <nav className="workspace-breadcrumb dashboard-breadcrumb" aria-label="breadcrumb">
+              <strong>Dashboard</strong>
+            </nav>
+            <nav className="dashboard-nav" aria-label="dashboard views">
+              <NavLink to="/" end className={dashboardLinkClass}>
+                capacity
+              </NavLink>
+              <NavLink to="/issues" className={dashboardLinkClass}>
+                issues
+                {inflight.issues && <span className="tab-dot" />}
+              </NavLink>
+              <NavLink to="/graph" className={dashboardLinkClass}>
+                graph
+              </NavLink>
+              <NavLink to="/projects" className={dashboardLinkClass}>
+                projects
+              </NavLink>
+            </nav>
+          </>
         )}
 
         {account && showAdmin && (

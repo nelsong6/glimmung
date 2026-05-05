@@ -243,10 +243,10 @@ const DESIGN_SYSTEM_ITEMS: PortfolioItem[] = [
   },
   {
     id: "tabs-header",
-    title: "Tabs & header",
-    caption: "Page header, connection chip, tabs, and user identity cluster",
+    title: "Header & local tabs",
+    caption: "Page header, connection chip, issue-local tabs, and user identity cluster",
     render: () => (
-      <Specimen title="tabs & header">
+      <Specimen title="header & local tabs">
         <header className="portfolio-inner-header">
           <div className="header-left">
             <div className="header-title">
