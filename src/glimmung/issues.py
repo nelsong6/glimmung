@@ -67,6 +67,7 @@ async def create_issue(
     body: str = "",
     labels: list[str] | None = None,
     source: IssueSource = IssueSource.MANUAL,
+    workflow: str | None = None,
     github_issue_url: str | None = None,
     github_issue_repo: str | None = None,
     github_issue_number: int | None = None,
@@ -87,6 +88,7 @@ async def create_issue(
         state=IssueState.OPEN,
         metadata=IssueMetadata(
             source=source,
+            workflow=workflow,
             github_issue_url=github_issue_url,
             github_issue_repo=github_issue_repo,
             github_issue_number=github_issue_number,

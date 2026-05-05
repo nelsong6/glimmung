@@ -1,15 +1,16 @@
 /**
  * Issue detail view (#42, #81) — issue meta + tabbed content.
  *
- * Tabs (#81): issue / the run / runs.
- *   - issue: title link, body, edit form (was "description")
- *   - the run: workflow's DAG painted with active run state. Phases
+ * Tabs: summary / runs / touchpoint.
+ *   - summary: title link, body, edit form (was "description")
+ *   - run: workflow's DAG painted with active run state. Phases
  *     as nodes, PR primitive as the trailing node. Cool-toned
  *     definition view when no run is in flight; nodes color in by
  *     state when one is. Click a node to drill into the latest
  *     attempt that exercised it.
  *   - runs: list/timeline of every run on this issue. Click a row
- *     to load that run in the run tab. Replaces the old SVG lineage.
+ *     to load that run in the run tab.
+ *   - touchpoint: issue-level decision surface and evidence summary.
  *
  * Conceptual move per #81: "list of steps that ran" → "graph that
  * runs". Today the DAG is `[phase] → [pr]` (single-phase v1, per
@@ -55,7 +56,7 @@ export type IssueDetailTarget =
   | { kind: "gh"; repo: string; issue_number: number }
   | { kind: "native"; project: string; issue_id: string };
 
-type GraphNode = {
+export type GraphNode = {
   id: string;
   kind: "issue" | "run" | "attempt" | "pr" | "signal";
   label: string;
@@ -64,7 +65,7 @@ type GraphNode = {
   metadata: Record<string, unknown>;
 };
 
-type IssueGraph = {
+export type IssueGraph = {
   issue_id: string;
   nodes: GraphNode[];
   edges: Array<{
@@ -140,12 +141,12 @@ type NativeAttemptStep = {
   exit_code?: number | null;
 };
 
-type DispatchState =
+export type DispatchState =
   | { kind: "idle" }
   | { kind: "dispatching" }
   | { kind: "error"; message: string };
 
-type AbortState =
+export type AbortState =
   | { kind: "idle" }
   | { kind: "armed" }       // first click on `abort` — show `abort?` / `keep`
   | { kind: "aborting" }
@@ -153,28 +154,38 @@ type AbortState =
 
 type AuthContext = {
   signedIn: boolean;
+  snap?: {
+    projects: Array<{
+      name: string;
+      github_repo: string;
+    }>;
+  } | null;
 };
 
-type Tab = "issue" | "the_run" | "runs";
+type Tab = "summary" | "runs" | "touchpoint";
 
 const TAB_SLUGS: Record<Tab, string> = {
-  issue: "issue",
-  the_run: "the-run",
+  summary: "summary",
   runs: "runs",
+  touchpoint: "touchpoint",
 };
 
 // Backwards-compat: old description / in-progress / lineage slugs still
 // resolve so links and bookmarks from before #81 keep working.
 const SLUG_TO_TAB: Record<string, Tab> = {
-  issue: "issue",
-  description: "issue",
-  "the-run": "the_run",
-  "in-progress": "the_run",
+  summary: "summary",
+  issue: "summary",
+  description: "summary",
+  "the-run": "runs",
+  "in-progress": "runs",
   runs: "runs",
   lineage: "runs",
+  touchpoint: "touchpoint",
 };
 
 const POLL_INTERVAL_MS = 3000;
+const RUN_VIEWER_IDLE_DISPATCH: DispatchState = { kind: "idle" };
+const RUN_VIEWER_IDLE_ABORT: AbortState = { kind: "idle" };
 
 type IssueDetailRouteParams = {
   owner?: string;
@@ -182,19 +193,32 @@ type IssueDetailRouteParams = {
   n?: string;
   project?: string;
   issueId?: string;
+  issueNumber?: string;
 };
 
 export function IssueDetailView() {
   const navigate = useNavigate();
   const location = useLocation();
   const params = useParams<IssueDetailRouteParams>();
-  const { signedIn } = useOutletContext<AuthContext>();
+  const { signedIn, snap } = useOutletContext<AuthContext>();
 
-  // Two route shapes land here. GH-anchored has 3 segments after /issues
-  // (`:owner/:repo/:n`); native has 2 (`:project/:issueId`). React-router
-  // only fills params for the matched route, so `params.n` being set
-  // disambiguates.
-  const target: IssueDetailTarget = params.n
+  const projectRouteIssueNumber = params.issueNumber ? parseInt(params.issueNumber, 10) : null;
+  const projectRouteProject = projectRouteIssueNumber !== null
+    ? snap?.projects.find((project) => project.name === params.project)
+    : null;
+
+  // Three route shapes land here. Project-shaped issue URLs are
+  // canonical for the UI; GitHub-shaped and native `/issues/...` URLs
+  // remain accepted as compatibility entry points.
+  const target: IssueDetailTarget | null = projectRouteIssueNumber !== null
+    ? projectRouteProject
+      ? {
+          kind: "gh",
+          repo: projectRouteProject.github_repo,
+          issue_number: projectRouteIssueNumber,
+        }
+      : null
+    : params.n
     ? {
         kind: "gh",
         repo: `${params.owner ?? ""}/${params.repo ?? ""}`,
@@ -207,14 +231,19 @@ export function IssueDetailView() {
       };
 
   const baseUrl =
-    target.kind === "gh"
+    projectRouteIssueNumber !== null
+      ? `/projects/${encodeURIComponent(params.project ?? "")}/issues/${projectRouteIssueNumber}`
+      : target?.kind === "gh"
       ? `/issues/${target.repo}/${target.issue_number}`
-      : `/issues/${encodeURIComponent(target.project)}/${encodeURIComponent(target.issue_id)}`;
+      : target
+      ? `/issues/${encodeURIComponent(target.project)}/${encodeURIComponent(target.issue_id)}`
+      : "/issues";
 
-  // Tab is URL-driven so each tab is deep-linkable. Bare `/issues/...`
-  // (no tab segment) falls back to the issue tab.
+  // Tab is URL-driven so each tab is deep-linkable. Bare issue URLs and
+  // legacy slugs are normalized to `/summary` so the breadcrumb leaf
+  // and address bar stay aligned.
   const lastSeg = location.pathname.split("/").filter(Boolean).pop() ?? "";
-  const tab: Tab = SLUG_TO_TAB[lastSeg] ?? "issue";
+  const tab: Tab = SLUG_TO_TAB[lastSeg] ?? "summary";
   const setTab = (t: Tab) => navigate(`${baseUrl}/${TAB_SLUGS[t]}`);
 
   const [detail, setDetail] = useState<IssueDetail | null>(null);
@@ -222,33 +251,49 @@ export function IssueDetailView() {
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
-  const [dispatchState, setDispatchState] = useState<DispatchState>({ kind: "idle" });
-  const [abortState, setAbortState] = useState<AbortState>({ kind: "idle" });
-  // Which Run the "the run" tab paints. null → fall back to active or
-  // most recent. The Runs tab sets this when a row is clicked, then
-  // jumps to the run tab. Not URL-encoded yet; deep-linking a specific
-  // run gets a follow-up.
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
-
   const detailUrl =
-    target.kind === "gh"
+    target?.kind === "gh"
       ? `/v1/issues/${target.repo}/${target.issue_number}`
-      : `/v1/issues/by-id/${encodeURIComponent(target.project)}/${encodeURIComponent(target.issue_id)}`;
+      : target
+      ? `/v1/issues/by-id/${encodeURIComponent(target.project)}/${encodeURIComponent(target.issue_id)}`
+      : null;
   const graphUrl =
-    target.kind === "gh"
+    target?.kind === "gh"
       ? `/v1/issues/${target.repo}/${target.issue_number}/graph`
       : null;
   const heading =
-    target.kind === "gh"
+    target?.kind === "gh"
       ? `${target.repo}#${target.issue_number}`
-      : `${target.project} (native)`;
-  const repoForLinks = target.kind === "gh" ? target.repo : null;
+      : target
+      ? `${target.project} (native)`
+      : "";
+  const repoForLinks = target?.kind === "gh" ? target.repo : null;
 
-  const onBack = () => navigate("/issues");
+  const onBack = () => {
+    const projectName = detail?.project ?? (target?.kind === "native" ? target.project : null);
+    navigate(projectName ? `/projects/${encodeURIComponent(projectName)}` : "/needs-attention");
+  };
+
+  useEffect(() => {
+    const canonicalSlug = TAB_SLUGS[tab];
+    if (lastSeg !== canonicalSlug) {
+      navigate(`${baseUrl}/${canonicalSlug}`, { replace: true });
+      return;
+    }
+    if (target?.kind !== "gh") return;
+    if (projectRouteIssueNumber !== null) return;
+    const project = snap?.projects.find((candidate) => candidate.github_repo === target.repo);
+    if (!project) return;
+    navigate(
+      `/projects/${encodeURIComponent(project.name)}/issues/${target.issue_number}/${canonicalSlug}`,
+      { replace: true },
+    );
+  }, [baseUrl, lastSeg, navigate, projectRouteIssueNumber, snap?.projects, tab, target]);
 
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
+      if (!detailUrl) return;
       setError(null);
       try {
         const requests: Promise<Response>[] = [fetch(detailUrl)];
@@ -280,81 +325,47 @@ export function IssueDetailView() {
   // decisions land server-side.
   const isInFlight = !!(detail && (detail.issue_lock_held || detail.last_run_state === "in_progress"));
 
-  const onRedispatch = async () => {
-    if (!detail) return;
-    setDispatchState({ kind: "dispatching" });
-    try {
-      const r = await authedFetch("/v1/runs/dispatch", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ issue_id: detail.id, project: detail.project }),
-      });
-      if (!r.ok) {
-        const text = await r.text();
-        throw new Error(`/v1/runs/dispatch -> ${r.status}: ${text}`);
-      }
-      setDispatchState({ kind: "idle" });
-      setRefreshTick((t) => t + 1);
-    } catch (e) {
-      setDispatchState({ kind: "error", message: String(e) });
-    }
-  };
-
-  const onAbort = async (runId: string) => {
-    if (!detail) return;
-    setAbortState({ kind: "aborting" });
-    try {
-      const url = `/v1/runs/${encodeURIComponent(detail.project)}/${encodeURIComponent(runId)}/abort?reason=aborted_via_dashboard`;
-      const r = await authedFetch(url, { method: "POST" });
-      if (!r.ok) {
-        const text = await r.text();
-        throw new Error(`${url} -> ${r.status}: ${text}`);
-      }
-      setAbortState({ kind: "idle" });
-      // Refresh immediately so the in-flight pill flips to aborted and
-      // the abort button drops out before the next poll tick lands.
-      setRefreshTick((t) => t + 1);
-    } catch (e) {
-      setAbortState({ kind: "error", message: String(e) });
-    }
-  };
   useEffect(() => {
-    if (tab !== "the_run") return;
+    if (tab !== "runs") return;
     if (!isInFlight) return;
     const id = setInterval(() => setRefreshTick((t) => t + 1), POLL_INTERVAL_MS);
     return () => clearInterval(id);
   }, [tab, isInFlight]);
 
+  if (!target && projectRouteIssueNumber !== null && snap) {
+    return <div className="empty">Project {params.project || "(missing)"} was not found.</div>;
+  }
+  if (!target) {
+    return <div className="empty">Loading issue…</div>;
+  }
+
   return (
     <>
-      <h2>
-        <button type="button" className="link" onClick={onBack} style={{ marginRight: "1rem" }}>
-          ← back
-        </button>
-        {heading}
-      </h2>
+      <button type="button" className="link" onClick={onBack}>
+        ← back
+      </button>
       {error && <div className="empty error">{error}</div>}
       {detail === null && !error ? (
         <div className="empty">Loading…</div>
       ) : detail ? (
         <>
-          <IssueHeader detail={detail} />
+          <IssueHeader detail={detail} heading={heading} />
 
-          <div className="tabs" role="tablist">
-            <TabButton current={tab} value="issue" onSelect={setTab}>
-              issue
-            </TabButton>
-            <TabButton current={tab} value="the_run" onSelect={setTab}>
-              the run
-              {isInFlight && <span className="tab-dot" aria-label="active" />}
+          <div className="dashboard-nav" aria-label="issue sections">
+            <TabButton current={tab} value="summary" onSelect={setTab}>
+              summary
             </TabButton>
             <TabButton current={tab} value="runs" onSelect={setTab}>
               runs
+              {isInFlight && <span className="tab-dot" aria-label="active" />}
+            </TabButton>
+            <TabButton current={tab} value="touchpoint" onSelect={setTab}>
+              touchpoint
             </TabButton>
           </div>
 
           <div className="tab-panel">
-            {tab === "issue" && (
+            {tab === "summary" && (
               <DescriptionTab
                 detail={detail}
                 signedIn={signedIn}
@@ -368,33 +379,16 @@ export function IssueDetailView() {
                 onCommentChanged={() => setRefreshTick((t) => t + 1)}
               />
             )}
-            {tab === "the_run" && (
-              <TheRunTab
+            {tab === "runs" && (
+              <RunsPane
                 graph={graph}
                 graphAvailable={!!graphUrl}
-                signedIn={signedIn}
                 project={detail.project}
                 repo={repoForLinks}
-                inFlight={isInFlight}
-                dispatchState={dispatchState}
-                onRedispatch={() => void onRedispatch()}
-                abortState={abortState}
-                onArmAbort={() => setAbortState({ kind: "armed" })}
-                onCancelAbort={() => setAbortState({ kind: "idle" })}
-                onConfirmAbort={(runId) => void onAbort(runId)}
-                selectedRunId={selectedRunId}
-                onSelectRun={setSelectedRunId}
               />
             )}
-            {tab === "runs" && (
-              <RunsTab
-                graph={graph}
-                graphAvailable={!!graphUrl}
-                onPickRun={(runId) => {
-                  setSelectedRunId(runId);
-                  setTab("the_run");
-                }}
-              />
+            {tab === "touchpoint" && (
+              <TouchpointTab graph={graph} graphAvailable={!!graphUrl} repo={repoForLinks} />
             )}
           </div>
         </>
@@ -403,53 +397,49 @@ export function IssueDetailView() {
   );
 }
 
-function IssueHeader({ detail }: { detail: IssueDetail }) {
+function IssueHeader({ detail, heading }: { detail: IssueDetail; heading: string }) {
   return (
-    <div className="project-info">
-      <div className="row">
-        <span className="key">title</span>
-        <span className="val">
+    <section className="project-hero">
+      <div className="project-hero-main">
+        <div className="project-kicker mono">issue</div>
+        <h2>{detail.title}</h2>
+        <div className="project-repo mono">
           {detail.html_url ? (
-            <a href={detail.html_url} target="_blank" rel="noreferrer">
-              {detail.title}
+            <a className="link" href={detail.html_url} target="_blank" rel="noreferrer">
+              {heading}
             </a>
           ) : (
-            detail.title
+            heading
           )}
-        </span>
+        </div>
       </div>
-      <div className="row">
-        <span className="key">project</span>
-        <span className="val mono">{detail.project}</span>
+      <div className="project-facts">
+        <div className="project-fact">
+          <span>project</span>
+          <strong>{detail.project}</strong>
+        </div>
+        <div className="project-fact">
+          <span>state</span>
+          <strong>{detail.state}</strong>
+        </div>
+        <div className="project-fact">
+          <span>labels</span>
+          <strong>{detail.labels.length}</strong>
+        </div>
+        <div className="project-fact">
+          <span>last run</span>
+          <strong>{detail.last_run_state ?? "none"}</strong>
+        </div>
       </div>
-      <div className="row">
-        <span className="key">state</span>
-        <span className="val mono">{detail.state}</span>
-      </div>
-      <div className="row">
-        <span className="key">labels</span>
-        <span className="val mono dim">
-          {detail.labels.length === 0 ? "—" : detail.labels.join(", ")}
-        </span>
-      </div>
-      <div className="row">
-        <span className="key">last run</span>
-        <span className="val">
-          {detail.last_run_state ? (
-            <span className={`pill ${runStatePill(detail.last_run_state)}`}>
-              {detail.last_run_state}
-            </span>
-          ) : (
-            "—"
-          )}
-          {detail.issue_lock_held && (
-            <span className="pill busy" style={{ marginLeft: "0.5rem" }}>
-              in flight
-            </span>
-          )}
-        </span>
-      </div>
-    </div>
+      {(detail.labels.length > 0 || detail.issue_lock_held) && (
+        <div className="dag-policy-rail" aria-label="issue labels">
+          {detail.labels.map((label) => (
+            <span className="pill info" key={label}>{label}</span>
+          ))}
+          {detail.issue_lock_held && <span className="pill busy">in flight</span>}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -468,9 +458,8 @@ function TabButton({
   return (
     <button
       type="button"
-      role="tab"
-      aria-selected={selected}
-      className={`tab${selected ? " selected" : ""}`}
+      aria-pressed={selected}
+      className={`dashboard-nav-link${selected ? " selected" : ""}`}
       onClick={() => onSelect(value)}
     >
       {children}
@@ -734,7 +723,7 @@ function IssueComments({
   );
 }
 
-function TheRunTab({
+export function RunViewer({
   graph,
   graphAvailable,
   signedIn,
@@ -748,7 +737,8 @@ function TheRunTab({
   onCancelAbort,
   onConfirmAbort,
   selectedRunId,
-  onSelectRun,
+  onBackToRuns,
+  actionsVisible = true,
 }: {
   graph: IssueGraph | null;
   graphAvailable: boolean;
@@ -763,7 +753,8 @@ function TheRunTab({
   onCancelAbort: () => void;
   onConfirmAbort: (runId: string) => void;
   selectedRunId: string | null;
-  onSelectRun: (runId: string | null) => void;
+  onBackToRuns: () => void;
+  actionsVisible?: boolean;
 }) {
   // Pick the run we're painting. Caller-selected wins; fall back to
   // active, then most recent. `null` only when there are no runs at
@@ -808,7 +799,7 @@ function TheRunTab({
   const abortableRunId = activeRun ? runIdFromNode(activeRun) : null;
   const aborting = abortState.kind === "aborting";
   const armed = abortState.kind === "armed";
-  const actions = (
+  const actions = actionsVisible ? (
     <div
       className="run-actions"
       style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}
@@ -871,13 +862,13 @@ function TheRunTab({
       {selectedRunId && focused && (
         <span className="dim mono">
           showing run {selectedRunId.slice(0, 8)}…{" "}
-          <button type="button" className="link" onClick={() => onSelectRun(null)}>
-            (clear)
+          <button type="button" className="link" onClick={onBackToRuns}>
+            back to runs
           </button>
         </span>
       )}
     </div>
-  );
+  ) : null;
 
   if (!focused) {
     if (inFlight) {
@@ -905,6 +896,11 @@ function TheRunTab({
   return (
     <>
       {actions}
+      {actionsVisible && (
+        <button type="button" className="link" onClick={onBackToRuns}>
+          ← runs
+        </button>
+      )}
       {!isActive && !selectedRunId && (
         <div className="run-status-banner">
           No run in flight. Showing the last completed run.
@@ -973,9 +969,9 @@ function PipelineDag({
     ?? workflowGraph?.default_entry?.target
     ?? phases[0]?.phaseName
     ?? null;
-  const reportId = stringOrNull(meta.report_id);
-  const reportState = stringOrNull(meta.report_state);
-  const reportTitle = stringOrNull(meta.report_title);
+  const touchpointId = stringOrNull(meta.report_id);
+  const touchpointState = stringOrNull(meta.report_state);
+  const touchpointTitle = stringOrNull(meta.report_title);
   const prNumber = numberOrNull(meta.pr_number);
   const prBranch = stringOrNull(meta.pr_branch);
   return (
@@ -1005,15 +1001,15 @@ function PipelineDag({
         <div className="dag-edge" aria-hidden="true">→</div>
         <button
           type="button"
-          className={`dag-node dag-node-pr${reportId || prNumber ? " opened" : " pending"}${selectedNodeId === "pr" ? " selected" : ""}`}
+          className={`dag-node dag-node-pr${touchpointId || prNumber ? " opened" : " pending"}${selectedNodeId === "pr" ? " selected" : ""}`}
           onClick={() => onSelectNode(selectedNodeId === "pr" ? null : "pr")}
           aria-pressed={selectedNodeId === "pr"}
         >
-          <div className="dag-node-label">report</div>
+          <div className="dag-node-label">touchpoint</div>
           <div className="dag-node-state mono">
-            {reportState ?? (prNumber ? `#${prNumber}` : prBranch ? prBranch : "pending")}
+            {touchpointState ?? (prNumber ? `#${prNumber}` : prBranch ? prBranch : "pending")}
           </div>
-          {reportTitle && <div className="dag-node-meta dim mono">{reportTitle}</div>}
+          {touchpointTitle && <div className="dag-node-meta dim mono">{touchpointTitle}</div>}
         </button>
       </div>
       {workflowGraph && workflowGraph.recycle_arrows.length > 0 && (
@@ -1145,19 +1141,19 @@ function DrillIn({
   if (nodeId === null) return null;
   const meta = run.metadata;
   if (nodeId === "pr") {
-    const reportId = stringOrNull(meta.report_id);
-    const reportState = stringOrNull(meta.report_state);
-    const reportTitle = stringOrNull(meta.report_title);
-    const reportUrl = stringOrNull(meta.report_url);
+    const touchpointId = stringOrNull(meta.report_id);
+    const touchpointState = stringOrNull(meta.report_state);
+    const touchpointTitle = stringOrNull(meta.report_title);
+    const touchpointUrl = stringOrNull(meta.report_url);
     const prNumber = numberOrNull(meta.pr_number);
     const prBranch = stringOrNull(meta.pr_branch);
     return (
       <div className="run-panel">
         <div className="run-panel-header">
           <div>
-            <strong>report</strong>
-            <span className={`pill ${reportId || prNumber ? "free" : ""}`} style={{ marginLeft: "0.5rem" }}>
-              {reportState ?? (prNumber ? "opened" : "pending")}
+            <strong>touchpoint</strong>
+            <span className={`pill ${touchpointId || prNumber ? "free" : ""}`} style={{ marginLeft: "0.5rem" }}>
+              {touchpointState ?? (prNumber ? "opened" : "pending")}
             </span>
           </div>
           <button type="button" className="link" onClick={onClose}>
@@ -1165,26 +1161,26 @@ function DrillIn({
           </button>
         </div>
         <div className="run-panel-meta">
-          {reportId && (
+          {touchpointId && (
             <div>
-              <span className="key">report</span>{" "}
-              <span className="mono" title={reportId}>{reportId.slice(0, 8)}…</span>
+              <span className="key">touchpoint</span>{" "}
+              <span className="mono" title={touchpointId}>{touchpointId.slice(0, 8)}…</span>
             </div>
           )}
-          {reportTitle && (
+          {touchpointTitle && (
             <div>
-              <span className="key">title</span> <span>{reportTitle}</span>
+              <span className="key">title</span> <span>{touchpointTitle}</span>
             </div>
           )}
           {prNumber !== null && repo ? (
             <div>
               <span className="key">PR</span>{" "}
-              <a className="mono" href={reportUrl || `https://github.com/${repo}/pull/${prNumber}`} target="_blank" rel="noreferrer">
+              <a className="mono" href={touchpointUrl || `https://github.com/${repo}/pull/${prNumber}`} target="_blank" rel="noreferrer">
                 #{prNumber}
               </a>
             </div>
           ) : (
-            <div className="dim mono">No report opened yet for this run.</div>
+            <div className="dim mono">No touchpoint evidence opened yet for this run.</div>
           )}
           {prBranch && (
             <div>
@@ -1314,15 +1310,19 @@ function RunMetaSummary({
 // dispatch failures (the orphan-webhook bug surfaced as exactly this).
 const STUCK_DISPATCHING_MS = 30_000;
 
-function RunsTab({
+function RunsPane({
   graph,
   graphAvailable,
-  onPickRun,
+  project,
+  repo,
 }: {
   graph: IssueGraph | null;
   graphAvailable: boolean;
-  onPickRun: (runId: string) => void;
+  project: string;
+  repo: string | null;
 }) {
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+
   if (!graphAvailable) {
     return (
       <div className="empty">
@@ -1340,6 +1340,32 @@ function RunsTab({
   if (runs.length === 0) {
     return <div className="empty">No runs yet on this issue.</div>;
   }
+  if (selectedRunId) {
+    return (
+      <>
+        <button type="button" className="link" onClick={() => setSelectedRunId(null)}>
+          ← runs
+        </button>
+        <RunViewer
+          graph={graph}
+          graphAvailable={graphAvailable}
+          signedIn={false}
+          project={project}
+          repo={repo}
+          inFlight={runs.some((run) => run.state === "in_progress")}
+          dispatchState={RUN_VIEWER_IDLE_DISPATCH}
+          onRedispatch={() => undefined}
+          abortState={RUN_VIEWER_IDLE_ABORT}
+          onArmAbort={() => undefined}
+          onCancelAbort={() => undefined}
+          onConfirmAbort={() => undefined}
+          selectedRunId={selectedRunId}
+          onBackToRuns={() => setSelectedRunId(null)}
+          actionsVisible={false}
+        />
+      </>
+    );
+  }
   return (
     <table>
       <thead>
@@ -1347,16 +1373,18 @@ function RunsTab({
           <th>Run</th>
           <th>State</th>
           <th>Started</th>
-          <th>Attempts</th>
+          <th>Cycles</th>
           <th>Cost</th>
-          <th>PR</th>
+          <th>Touchpoint</th>
           <th></th>
         </tr>
       </thead>
       <tbody>
         {runs.map((r) => {
           const id = runIdFromNode(r);
+          const slug = issueRunSlug(graph, r);
           const meta = r.metadata;
+          const cycleCount = numberOrNull(meta.cycles_count) ?? 1;
           const attemptCount = graph.nodes.filter(
             (n) => n.kind === "attempt" && n.id.startsWith(`attempt:${id}:`),
           ).length;
@@ -1370,7 +1398,14 @@ function RunsTab({
           return (
             <tr key={r.id}>
               <td className="mono">
-                {id.slice(0, 8)}…
+                <button
+                  type="button"
+                  className="link mono"
+                  title={id}
+                  onClick={() => setSelectedRunId(id)}
+                >
+                  {runSlugDisplay(slug)}
+                </button>
                 {clonedFrom && (
                   <span
                     className="dim mono"
@@ -1385,12 +1420,19 @@ function RunsTab({
                 <span className={`pill ${runStatePill(r.state ?? "")}`}>{r.state ?? "—"}</span>
               </td>
               <td className="mono dim">{r.timestamp ? formatTime(r.timestamp) : "—"}</td>
-              <td className="mono">{attemptCount}</td>
+              <td className="mono">
+                {cycleCount}
+                <span className="dim"> / {attemptCount} stage attempts</span>
+              </td>
               <td className="mono">{cost !== null ? `$${cost.toFixed(4)}` : "—"}</td>
               <td className="mono dim">{prNumber !== null ? `#${prNumber}` : "—"}</td>
               <td>
-                <button type="button" className="link" onClick={() => onPickRun(id)}>
-                  open
+                <button
+                  type="button"
+                  className="link"
+                  onClick={() => setSelectedRunId(id)}
+                >
+                  view
                 </button>
               </td>
             </tr>
@@ -1398,6 +1440,97 @@ function RunsTab({
         })}
       </tbody>
     </table>
+  );
+}
+
+function TouchpointTab({
+  graph,
+  graphAvailable,
+  repo,
+}: {
+  graph: IssueGraph | null;
+  graphAvailable: boolean;
+  repo: string | null;
+}) {
+  if (!graphAvailable) {
+    return (
+      <div className="empty">
+        Touchpoint evidence isn't available for native issues yet.
+      </div>
+    );
+  }
+  if (!graph) {
+    return <div className="empty">Loading touchpoint…</div>;
+  }
+
+  const runs = graph.nodes.filter((n) => n.kind === "run");
+  const touchpointNodes = graph.nodes.filter((n) => n.kind === "pr" || n.kind === "signal");
+  const latestRun = findActiveRun(graph) ?? findLastCompletedRun(graph);
+  const latestMeta = latestRun?.metadata ?? {};
+  const prNumber = numberOrNull(latestMeta.pr_number);
+  const reportTitle = stringOrNull(latestMeta.report_title);
+  const reportState = stringOrNull(latestMeta.report_state);
+  const reportUrl = stringOrNull(latestMeta.report_url);
+
+  return (
+    <>
+      <div className="project-info">
+        <div className="row">
+          <span className="key">state</span>
+          <span className="val">
+            <span className={`pill ${reportState === "open" || reportState === "ready" ? "busy" : reportState ? "free" : ""}`}>
+              {reportState ?? "pending evidence"}
+            </span>
+          </span>
+        </div>
+        <div className="row">
+          <span className="key">scope</span>
+          <span className="val mono">issue-level, {runs.length} run{runs.length === 1 ? "" : "s"}</span>
+        </div>
+        <div className="row">
+          <span className="key">current run</span>
+          <span className="val mono">{latestRun ? runIdFromNode(latestRun) : "—"}</span>
+        </div>
+        <div className="row">
+          <span className="key">PR evidence</span>
+          <span className="val">
+            {prNumber !== null && repo ? (
+              <a className="mono" href={reportUrl || `https://github.com/${repo}/pull/${prNumber}`} target="_blank" rel="noreferrer">
+                #{prNumber}{reportTitle ? ` — ${reportTitle}` : ""}
+              </a>
+            ) : (
+              <span className="dim">No PR evidence yet.</span>
+            )}
+          </span>
+        </div>
+      </div>
+
+      <h2>Evidence</h2>
+      {touchpointNodes.length === 0 ? (
+        <div className="empty">No touchpoint evidence has landed yet.</div>
+      ) : (
+        <table>
+          <thead>
+            <tr>
+              <th>Kind</th>
+              <th>Label</th>
+              <th>State</th>
+              <th>Created</th>
+            </tr>
+          </thead>
+          <tbody>
+            {touchpointNodes.map((node) => (
+              <tr key={node.id}>
+                <td className="mono">{node.kind === "pr" ? "PR" : "signal"}</td>
+                <td>{node.label}</td>
+                <td className="mono dim">{node.state ?? "—"}</td>
+                <td className="mono dim">{node.timestamp ? formatTime(node.timestamp) : "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </>
   );
 }
 
@@ -1750,6 +1883,22 @@ function attemptsForRun(graph: IssueGraph, runNodeId: string): GraphNode[] {
 // endpoint and selection state both take the bare ULID.
 function runIdFromNode(n: GraphNode): string {
   return n.id.startsWith("run:") ? n.id.slice(4) : n.id;
+}
+
+function issueRunSlug(graph: IssueGraph, run: GraphNode): string {
+  const issue = graph.nodes.find((node) => node.kind === "issue");
+  const issueNumber = issue ? numberOrNull(issue.metadata.number) : null;
+  if (issueNumber === null) return runIdFromNode(run);
+  const issueRuns = graph.nodes
+    .filter((node) => node.kind === "run")
+    .slice()
+    .sort((a, b) => (a.timestamp ?? "").localeCompare(b.timestamp ?? ""));
+  const ordinal = issueRuns.findIndex((node) => node.id === run.id) + 1;
+  return `${issueNumber}-${Math.max(ordinal, 1)}`;
+}
+
+function runSlugDisplay(slug: string): string {
+  return /^\d+-\d+$/.test(slug) ? `#${slug}` : `${slug.slice(0, 8)}…`;
 }
 
 function isRecord(x: unknown): x is Record<string, unknown> {

@@ -3424,6 +3424,7 @@ async def _start_playbook_entry(
             title=entry.issue.title,
             body=entry.issue.body,
             labels=entry.issue.labels,
+            workflow=entry.issue.workflow,
         )
         entry.created_issue_id = issue.id
         entry.state = PlaybookEntryState.CREATED
@@ -3900,6 +3901,7 @@ class IssueRow(BaseModel):
     `repo` to pick the dispatch payload shape."""
     id: str
     project: str
+    workflow: str | None = None
     repo: str | None = None
     number: int | None = None
     title: str
@@ -3934,6 +3936,7 @@ class IssueCreateRequest(BaseModel):
     title: str
     body: str = ""
     labels: list[str] = Field(default_factory=list)
+    workflow: str | None = None
 
 
 class IssueUpdateRequest(BaseModel):
@@ -4092,6 +4095,7 @@ def _workflow_graph_metadata(workflow_doc: dict[str, Any] | None) -> dict[str, A
 async def list_issues(
     project: str | None = Query(None),
     repo: str | None = Query(None),
+    workflow: str | None = Query(None),
     limit: int | None = Query(None, ge=1, le=500),
 ) -> list[IssueRow]:
     """All open glimmung Issues, across registered projects. Sourced
@@ -4107,6 +4111,7 @@ async def list_issues(
         app.state.cosmos,
         project=project,
         repo=repo,
+        workflow=workflow,
         limit=limit,
     )
 
@@ -4116,6 +4121,7 @@ async def _list_issues_from_cosmos(
     *,
     project: str | None = None,
     repo: str | None = None,
+    workflow: str | None = None,
     limit: int | None = None,
 ) -> list[IssueRow]:
     """Read-path for `/v1/issues`; lifted out so tests can drive it
@@ -4167,16 +4173,6 @@ async def _list_issues_from_cosmos(
         url = issue.metadata.github_issue_url
         repo = issue.metadata.github_issue_repo
         number = issue.metadata.github_issue_number
-        row = IssueRow(
-            id=issue.id,
-            project=issue.project,
-            repo=repo,
-            number=number,
-            title=issue.title,
-            state=issue.state.value,
-            labels=list(issue.labels),
-            html_url=url,
-        )
         # Pre-#33 Runs predate `Run.issue_id`; the (project, number)
         # fallback covers them so the Issues view keeps showing last-
         # run state. Cleanup-PR drops the fallback once those Runs are
@@ -4185,6 +4181,22 @@ async def _list_issues_from_cosmos(
         run_doc = runs_by_issue_id.get(issue.id)
         if run_doc is None and number is not None:
             run_doc = runs_by_project_number.get((issue.project, number))
+        issue_workflow = issue.metadata.workflow or (
+            str(run_doc.get("workflow")) if run_doc and run_doc.get("workflow") else None
+        )
+        if workflow is not None and issue_workflow != workflow:
+            continue
+        row = IssueRow(
+            id=issue.id,
+            project=issue.project,
+            workflow=issue_workflow,
+            repo=repo,
+            number=number,
+            title=issue.title,
+            state=issue.state.value,
+            labels=list(issue.labels),
+            html_url=url,
+        )
         if run_doc is not None:
             row.last_run_id = run_doc["id"]
             row.last_run_state = run_doc["state"]
@@ -4331,12 +4343,17 @@ async def create_issue_endpoint(req: IssueCreateRequest) -> IssueDetail:
         raise HTTPException(400, f"project {req.project!r} not registered")
     if not req.title.strip():
         raise HTTPException(400, "title required")
+    if req.workflow is not None:
+        workflow_doc = await _read_workflow(cosmos, req.project, req.workflow)
+        if workflow_doc is None:
+            raise HTTPException(400, f"workflow {req.project}/{req.workflow!r} not registered")
     issue = await issue_ops.create_issue(
         cosmos,
         project=req.project,
         title=req.title,
         body=req.body,
         labels=req.labels,
+        workflow=req.workflow,
     )
     return await _build_issue_detail(cosmos, issue=issue)
 

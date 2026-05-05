@@ -18,6 +18,7 @@ import { authedFetch } from "./auth";
 type IssueRow = {
   id: string;
   project: string;
+  workflow: string | null;
   repo: string | null;
   number: number | null;
   title: string;
@@ -49,9 +50,17 @@ type DispatchStatus =
 export function IssuesView({
   signedIn,
   projectFilter,
+  workflowFilter = null,
+  headingLabel = "Open issues",
+  maxRows = null,
+  showProjectColumn = true,
 }: {
   signedIn: boolean;
   projectFilter: string | null;
+  workflowFilter?: string | null;
+  headingLabel?: string;
+  maxRows?: number | null;
+  showProjectColumn?: boolean;
 }) {
   const navigate = useNavigate();
   const [rows, setRows] = useState<IssueRow[] | null>(null);
@@ -63,8 +72,12 @@ export function IssuesView({
     setLoading(true);
     setError(null);
     try {
-      const r = await fetch("/v1/issues");
-      if (!r.ok) throw new Error(`/v1/issues -> ${r.status}`);
+      const params = new URLSearchParams();
+      if (projectFilter) params.set("project", projectFilter);
+      if (workflowFilter) params.set("workflow", workflowFilter);
+      const url = params.size > 0 ? `/v1/issues?${params.toString()}` : "/v1/issues";
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(`${url} -> ${r.status}`);
       setRows((await r.json()) as IssueRow[]);
     } catch (e) {
       setError(String(e));
@@ -77,7 +90,7 @@ export function IssuesView({
   useEffect(() => {
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [signedIn]);
+  }, [signedIn, projectFilter, workflowFilter]);
 
   const dispatch = async (row: IssueRow) => {
     const key = rowKey(row);
@@ -86,7 +99,11 @@ export function IssuesView({
       const r = await authedFetch("/v1/runs/dispatch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ issue_id: row.id, project: row.project }),
+        body: JSON.stringify({
+          issue_id: row.id,
+          project: row.project,
+          workflow: workflowFilter ?? row.workflow ?? undefined,
+        }),
       });
       if (!r.ok) {
         const text = await r.text();
@@ -111,16 +128,15 @@ export function IssuesView({
     }
   };
 
-  const visibleRows = rows
-    ? projectFilter
-      ? rows.filter((r) => r.project === projectFilter)
-      : rows
-    : null;
+  const visibleRows = rows;
+  const displayRows = maxRows !== null && visibleRows
+    ? visibleRows.slice(0, maxRows)
+    : visibleRows;
 
   return (
     <>
       <h2>
-        Open issues{visibleRows ? ` (${visibleRows.length})` : ""}
+        {headingLabel}{visibleRows ? ` (${visibleRows.length})` : ""}
         {projectFilter && (
           <span className="filter-hint"> — filtered to {projectFilter}</span>
         )}
@@ -142,11 +158,11 @@ export function IssuesView({
             ? `No open issues for ${projectFilter}.`
             : "No open issues across registered repos."}
         </div>
-      ) : visibleRows ? (
+      ) : displayRows ? (
         <table>
           <thead>
             <tr>
-              <th>Project</th>
+              {showProjectColumn && <th>Project</th>}
               <th>#</th>
               <th>Title</th>
               <th>Labels</th>
@@ -155,14 +171,14 @@ export function IssuesView({
             </tr>
           </thead>
           <tbody>
-            {visibleRows.map((row) => {
+            {displayRows.map((row) => {
               const key = rowKey(row);
               const status = dispatchStatus.kind !== "idle" && dispatchStatus.key === key
                 ? dispatchStatus
                 : null;
               return (
                 <tr key={key}>
-                  <td>{row.project}</td>
+                  {showProjectColumn && <td>{row.project}</td>}
                   <td className="mono dim">
                     {row.number !== null ? row.number : "—"}
                   </td>

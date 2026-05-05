@@ -1,13 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
-import { NavLink, Outlet, Route, Routes, useOutletContext } from "react-router-dom";
+import { Fragment, useEffect, useMemo, useState } from "react";
+import { Link, Navigate, NavLink, Outlet, Route, Routes, useLocation, useOutletContext, useParams } from "react-router-dom";
 import { AdminPanel } from "./AdminPanel";
-import { GraphView } from "./GraphView";
-import { IssueDetailView } from "./IssueDetailView";
+import { IssueDetailView, RunViewer, type AbortState, type DispatchState, type IssueGraph } from "./IssueDetailView";
 import { IssuesView } from "./IssuesView";
 import { ReportDetailView } from "./ReportDetailView";
 import { ReportsView } from "./ReportsView";
 import { StyleguideView } from "./StyleguideView";
 import { authedFetch, currentAccount, initAuth, signIn, signOut } from "./auth";
+import { isMockMode, mockRuns, mockSnapshot } from "./mockApi";
 import type { AccountInfo } from "@azure/msal-browser";
 
 type Host = {
@@ -46,12 +46,51 @@ type Workflow = {
   id: string;
   project: string;
   name: string;
+  phases: PhaseSpec[];
+  pr: PrPrimitiveSpec;
   workflow_filename: string;
   workflow_ref: string;
   trigger_label: string;
   default_requirements: Record<string, unknown>;
   metadata: Record<string, unknown>;
   created_at: string;
+};
+
+type PhaseSpec = {
+  name: string;
+  kind: string;
+  workflow_filename: string;
+  workflow_ref: string;
+  inputs: Record<string, string>;
+  outputs: string[];
+  requirements: Record<string, unknown> | null;
+  verify: boolean;
+  recycle_policy: RecyclePolicy | null;
+};
+
+type PrPrimitiveSpec = {
+  enabled: boolean;
+  recycle_policy: RecyclePolicy | null;
+};
+
+type RecyclePolicy = {
+  max_attempts: number;
+  on: string[];
+  lands_at: string;
+};
+
+type ProjectRun = {
+  id: string;
+  project: string;
+  workflow: string;
+  issue_number: number | null;
+  title: string;
+  state: string;
+  cycles: number;
+  current_phase: string;
+  cost_usd: number;
+  started_at: string;
+  updated_at: string;
 };
 
 type Snapshot = {
@@ -64,7 +103,7 @@ type Snapshot = {
 
 type Connection = "live" | "stale" | "dead";
 
-type Inflight = { issues: boolean; reports: boolean };
+type Inflight = { issues: boolean };
 
 type Selection =
   | { kind: "all" }
@@ -95,15 +134,41 @@ export function App() {
           Layout so the validation-step curl check (#86) doesn't need
           auth or SSE. Contract: docs/styleguide-contract.md. */}
       <Route path="/_styleguide" element={<StyleguideView />} />
+      <Route path="/_design-portfolio" element={<StyleguideView />} />
+      <Route path="/_mock/*" element={<MockModeRedirect />} />
       <Route path="/" element={<Layout />}>
-        <Route index element={<CapacityRoute />} />
-        <Route path="graph" element={<GraphRoute />} />
-        <Route path="issues" element={<IssuesRoute />} />
+        <Route index element={<HomeRoute />} />
+        <Route path="dashboard" element={<DashboardRoute />} />
+        <Route path="needs-attention" element={<NeedsAttentionRoute />} />
+        <Route path="graph" element={<Navigate to="/dashboard" replace />} />
+        <Route path="projects" element={<ProjectsRoute />} />
+        <Route path="projects/:project" element={<ProjectRoute />} />
+        <Route path="projects/:project/workflows" element={<ProjectWorkflowsRoute />} />
+        <Route path="projects/:project/workflows/:workflow" element={<ProjectWorkflowRoute />} />
+        <Route path="projects/:project/issues" element={<ProjectIssuesRoute />} />
+        <Route path="projects/:project/issues/:issueNumber/runs/:runId" element={<ProjectRunRoute />} />
+        <Route path="projects/:project/issues/:issueNumber" element={<IssueDetailView />}>
+          <Route path="summary" element={null} />
+          <Route path="issue" element={null} />
+          <Route path="runs" element={null} />
+          <Route path="touchpoint" element={null} />
+          <Route path="description" element={null} />
+          <Route path="the-run" element={null} />
+          <Route path="in-progress" element={null} />
+          <Route path="lineage" element={null} />
+        </Route>
+        <Route path="projects/:project/needs-attention" element={<ProjectNeedsAttentionRoute />} />
+        <Route path="projects/:project/runs" element={<ProjectRunsRoute />} />
+        <Route path="projects/:project/runs/:runId" element={<ProjectRunRedirectRoute />} />
+        <Route path="issues" element={<Navigate to="/needs-attention" replace />} />
         <Route path="issues/:owner/:repo/:n" element={<IssueDetailView />}>
-          {/* New tabs (#81): issue / the run / runs. */}
+          {/* Issue workspace tabs. Old slugs are still accepted by
+              IssueDetailView so existing links keep working. */}
+          <Route path="summary" element={null} />
           <Route path="issue" element={null} />
           <Route path="the-run" element={null} />
           <Route path="runs" element={null} />
+          <Route path="touchpoint" element={null} />
           {/* Backwards-compat: pre-#81 tab slugs. SLUG_TO_TAB in
               IssueDetailView maps these to the new tabs so deep links
               from before the rename keep working. */}
@@ -112,9 +177,11 @@ export function App() {
           <Route path="lineage" element={null} />
         </Route>
         <Route path="issues/:project/:issueId" element={<IssueDetailView />}>
+          <Route path="summary" element={null} />
           <Route path="issue" element={null} />
           <Route path="the-run" element={null} />
           <Route path="runs" element={null} />
+          <Route path="touchpoint" element={null} />
           <Route path="description" element={null} />
           <Route path="in-progress" element={null} />
           <Route path="lineage" element={null} />
@@ -126,15 +193,21 @@ export function App() {
   );
 }
 
+function MockModeRedirect() {
+  isMockMode();
+  return <Navigate to="/" replace />;
+}
+
 function Layout() {
+  const location = useLocation();
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [conn, setConn] = useState<Connection>("dead");
   const [lastUpdate, setLastUpdate] = useState<number>(0);
-  const [selected, setSelected] = useState<Selection>(ALL);
+  const selected = ALL;
   const [account, setAccount] = useState<AccountInfo | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [showAdmin, setShowAdmin] = useState(false);
-  const [inflight, setInflight] = useState<Inflight>({ issues: false, reports: false });
+  const [inflight, setInflight] = useState<Inflight>({ issues: false });
 
   useEffect(() => {
     initAuth()
@@ -149,6 +222,13 @@ function Layout() {
   }, []);
 
   useEffect(() => {
+    if (isMockMode()) {
+      setSnap(mockSnapshot as Snapshot);
+      setLastUpdate(Date.now());
+      setConn("live");
+      return;
+    }
+
     let es: EventSource | null = null;
     let staleTimer: number | null = null;
 
@@ -177,9 +257,9 @@ function Layout() {
     };
   }, [lastUpdate]);
 
-  // Poll /v1/issues + /v1/reports to drive the pulsing dot on the issues/reports
-  // tabs when something has a lock held. Cheap public reads; 20s feels
-  // live enough without hammering the API.
+  // Poll /v1/issues + /v1/reports to drive the issue-workspace pulse
+  // when issue work or touchpoint review is in flight. Reports are no
+  // longer primary navigation, but their locks still matter to issues.
   useEffect(() => {
     let cancelled = false;
     const check = async () => {
@@ -192,8 +272,9 @@ function Layout() {
         const reports = pRes.ok ? ((await pRes.json()) as Array<{ pr_lock_held?: boolean }>) : [];
         if (cancelled) return;
         setInflight({
-          issues: Array.isArray(issues) && issues.some((x) => x.issue_lock_held),
-          reports: Array.isArray(reports) && reports.some((x) => x.pr_lock_held),
+          issues:
+            (Array.isArray(issues) && issues.some((x) => x.issue_lock_held))
+            || (Array.isArray(reports) && reports.some((x) => x.pr_lock_held)),
         });
       } catch {
         // keep last value on transient failures
@@ -259,86 +340,20 @@ function Layout() {
     matchesRequirements,
   };
 
-  const tabLinkClass = ({ isActive }: { isActive: boolean }) =>
-    `tab ${isActive ? "selected" : ""}`;
+  const dashboardLinkClass = ({ isActive }: { isActive: boolean }) =>
+    `dashboard-nav-link ${isActive ? "selected" : ""}`;
+  const homeRoute = location.pathname === "/";
+  const breadcrumbs = buildBreadcrumbs(location.pathname, snap?.projects ?? []);
+  const returnTarget = returnTargetFromState(location.state, location.pathname);
 
   return (
     <div className="layout">
-      <aside className="sidebar">
-        <div className="sidebar-title">Projects</div>
-        <button
-          type="button"
-          className={`project-row ${selected.kind === "all" ? "selected" : ""}`}
-          onClick={() => setSelected(ALL)}
-        >
-          <span className="name">All</span>
-          <span className="count">
-            {(snap?.pending_leases.length ?? 0) + (snap?.active_leases.length ?? 0)}
-          </span>
-        </button>
-        {snap?.projects
-          .slice()
-          .sort((a, b) => a.name.localeCompare(b.name))
-          .map((p) => {
-            const projWorkflows = snap.workflows.filter((w) => w.project === p.name);
-            const isProjectSelected =
-              selected.kind === "project" && selected.project === p.name;
-            const isWorkflowOfProjectSelected =
-              selected.kind === "workflow" && selected.project === p.name;
-            const projActive = snap.active_leases.filter((l) => l.project === p.name).length;
-            const projPending = snap.pending_leases.filter((l) => l.project === p.name).length;
-            return (
-              <div key={p.name} className="project-group">
-                <button
-                  type="button"
-                  className={`project-row ${isProjectSelected ? "selected" : ""}`}
-                  onClick={() => setSelected({ kind: "project", project: p.name })}
-                >
-                  <span className="name">{p.name}</span>
-                  <span className="count">{projActive + projPending}</span>
-                </button>
-                {(isProjectSelected || isWorkflowOfProjectSelected) &&
-                  projWorkflows
-                    .slice()
-                    .sort((a, b) => a.name.localeCompare(b.name))
-                    .map((w) => {
-                      const wActive = snap.active_leases.filter(
-                        (l) => l.project === p.name && l.workflow === w.name
-                      ).length;
-                      const wPending = snap.pending_leases.filter(
-                        (l) => l.project === p.name && l.workflow === w.name
-                      ).length;
-                      const isSel =
-                        selected.kind === "workflow" &&
-                        selected.project === p.name &&
-                        selected.workflow === w.name;
-                      return (
-                        <button
-                          type="button"
-                          key={w.name}
-                          className={`workflow-row ${isSel ? "selected" : ""}`}
-                          onClick={() =>
-                            setSelected({ kind: "workflow", project: p.name, workflow: w.name })
-                          }
-                        >
-                          <span className="name">{w.name}</span>
-                          <span className="count">{wActive + wPending}</span>
-                        </button>
-                      );
-                    })}
-                {(isProjectSelected || isWorkflowOfProjectSelected) && projWorkflows.length === 0 && (
-                  <div className="workflow-empty">no workflows</div>
-                )}
-              </div>
-            );
-          })}
-      </aside>
-
       <main className="content">
         <header>
           <div className="header-left">
             <div className="header-title">
               <h1>glimmung</h1>
+              {isMockMode() && <span className="connection info">mock</span>}
               <span className={`connection ${conn}`}>{conn}</span>
             </div>
             <div className="epigraph">
@@ -395,22 +410,40 @@ function Layout() {
           </div>
         </header>
 
-        <div className="tabs">
-          <NavLink to="/" end className={tabLinkClass}>
-            capacity
-          </NavLink>
-          <NavLink to="/issues" className={tabLinkClass}>
-            issues
-            {inflight.issues && <span className="tab-dot" />}
-          </NavLink>
-          <NavLink to="/graph" className={tabLinkClass}>
-            graph
-          </NavLink>
-          <NavLink to="/reports" className={tabLinkClass}>
-            reports
-            {inflight.reports && <span className="tab-dot" />}
-          </NavLink>
-        </div>
+        <nav className="workspace-breadcrumb app-breadcrumb" aria-label="breadcrumb">
+          <div className="breadcrumb-trail">
+            {breadcrumbs.map((crumb, index) => (
+              <span className="breadcrumb-segment" key={`${crumb.label}:${index}`}>
+                {index > 0 && <span className="breadcrumb-sep">/</span>}
+                {crumb.to && index < breadcrumbs.length - 1 ? (
+                  <Link to={crumb.to}>{crumb.label}</Link>
+                ) : (
+                  <strong>{crumb.label}</strong>
+                )}
+              </span>
+            ))}
+          </div>
+          {returnTarget && (
+            <Link className="breadcrumb-return" to={returnTarget.to}>
+              ← return to {returnTarget.label}
+            </Link>
+          )}
+        </nav>
+
+        {homeRoute && (
+            <nav className="dashboard-nav" aria-label="dashboard views">
+              <NavLink to="/dashboard" className={dashboardLinkClass}>
+                dashboard
+              </NavLink>
+              <NavLink to="/needs-attention" className={dashboardLinkClass}>
+                needs attention
+                {inflight.issues && <span className="tab-dot" />}
+              </NavLink>
+              <NavLink to="/projects" className={dashboardLinkClass}>
+                projects
+              </NavLink>
+            </nav>
+        )}
 
         {account && showAdmin && (
           <AdminPanel projects={snap?.projects ?? []} onSuccess={() => setShowAdmin(false)} />
@@ -422,26 +455,205 @@ function Layout() {
   );
 }
 
-function CapacityRoute() {
+type Breadcrumb = {
+  label: string;
+  to?: string;
+};
+
+type ReturnNavigationState = {
+  returnTo?: unknown;
+  returnLabel?: unknown;
+};
+
+function returnTargetFromState(state: unknown, currentPath: string): { to: string; label: string } | null {
+  if (typeof state !== "object" || state === null) return null;
+  const candidate = state as ReturnNavigationState;
+  if (typeof candidate.returnTo !== "string" || !candidate.returnTo.startsWith("/")) return null;
+  if (candidate.returnTo === currentPath) return null;
+  const label = typeof candidate.returnLabel === "string" && candidate.returnLabel.trim()
+    ? candidate.returnLabel
+    : "previous view";
+  return { to: candidate.returnTo, label };
+}
+
+function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
+  const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
+  if (parts.length === 0) return [{ label: "Home" }];
+  if (parts[0] === "dashboard") {
+    return [{ label: "Home", to: "/" }, { label: "Dashboard" }];
+  }
+  if (parts[0] === "needs-attention") {
+    return [{ label: "Home", to: "/" }, { label: "Needs attention" }];
+  }
+  if (parts[0] === "projects") {
+    const crumbs: Breadcrumb[] = [
+      { label: "Home", to: "/" },
+      { label: "Projects", to: "/projects" },
+    ];
+    if (parts[1]) crumbs.push({ label: parts[1], to: `/projects/${encodeURIComponent(parts[1])}` });
+    if (parts[2] === "workflows") {
+      crumbs.push({ label: "Workflows", to: `/projects/${encodeURIComponent(parts[1] ?? "")}/workflows` });
+      if (parts[3]) crumbs.push({ label: parts[3] });
+    } else if (parts[2] === "issues") {
+      crumbs.push({ label: "Issues", to: `/projects/${encodeURIComponent(parts[1] ?? "")}/issues` });
+      if (parts[3]) {
+        crumbs.push({
+          label: `#${parts[3]}`,
+          to: parts[4] ? `/projects/${encodeURIComponent(parts[1] ?? "")}/issues/${encodeURIComponent(parts[3])}` : undefined,
+        });
+      }
+      if (parts[4] === "runs") {
+        crumbs.push({
+          label: "Runs",
+          to: `/projects/${encodeURIComponent(parts[1] ?? "")}/issues/${encodeURIComponent(parts[3] ?? "")}/runs`,
+        });
+        if (parts[5]) crumbs.push({ label: runSlugDisplay(parts[5]) });
+      } else if (parts[4]) {
+        crumbs.push({ label: titleCase(parts[4]) });
+      }
+    } else if (parts[2] === "needs-attention") {
+      crumbs.push({ label: "Needs attention" });
+    } else if (parts[2] === "runs") {
+      crumbs.push({ label: "Runs", to: `/projects/${encodeURIComponent(parts[1] ?? "")}/runs` });
+      if (parts[3]) crumbs.push({ label: runSlugDisplay(parts[3]) });
+    }
+    return crumbs;
+  }
+  if (parts[0] === "issues") {
+    const crumbs: Breadcrumb[] = [{ label: "Home", to: "/" }];
+    if (parts.length >= 4) {
+      const owner = parts[1];
+      const repo = parts[2];
+      const issue = parts[3];
+      const githubRepo = `${owner}/${repo}`;
+      const project = projects.find((p) => p.github_repo === githubRepo);
+      if (project) {
+        crumbs.push({ label: "Projects", to: "/projects" });
+        crumbs.push({ label: project.name, to: `/projects/${encodeURIComponent(project.name)}` });
+        crumbs.push({ label: "Issues", to: `/projects/${encodeURIComponent(project.name)}/issues` });
+      } else {
+        crumbs.push({ label: "Needs attention", to: "/needs-attention" });
+        crumbs.push({ label: githubRepo });
+      }
+      crumbs.push({ label: `#${issue}` });
+      if (parts[4]) crumbs.push({ label: titleCase(parts[4]) });
+      return crumbs;
+    }
+    if (parts.length >= 3) {
+      crumbs.push({ label: "Projects", to: "/projects" });
+      crumbs.push({ label: parts[1], to: `/projects/${encodeURIComponent(parts[1])}` });
+      crumbs.push({ label: "Issues", to: `/projects/${encodeURIComponent(parts[1])}/issues` });
+      crumbs.push({ label: parts[2] });
+      if (parts[3]) crumbs.push({ label: titleCase(parts[3]) });
+      return crumbs;
+    }
+    return [{ label: "Home", to: "/" }, { label: "Needs attention" }];
+  }
+  if (parts[0] === "reports") return [{ label: "Home", to: "/" }, { label: "Touchpoint evidence" }];
+  return [{ label: "Home", to: "/" }, { label: parts[0] }];
+}
+
+function HomeRoute() {
+  const ctx = useOutletContext<LayoutContext>();
+  return <HomeView {...ctx} />;
+}
+
+function DashboardRoute() {
   const ctx = useOutletContext<LayoutContext>();
   return <CapacityView {...ctx} />;
 }
 
-function IssuesRoute() {
-  const { signedIn, selected } = useOutletContext<LayoutContext>();
+function NeedsAttentionRoute() {
+  const { signedIn } = useOutletContext<LayoutContext>();
+  return <IssuesView signedIn={signedIn} projectFilter={null} headingLabel="Needs attention" />;
+}
+
+function ProjectsRoute() {
+  const ctx = useOutletContext<LayoutContext>();
+  return <ProjectsView {...ctx} />;
+}
+
+function ProjectRoute() {
+  const params = useParams<{ project?: string }>();
+  const ctx = useOutletContext<LayoutContext>();
+  return <ProjectView {...ctx} projectName={decodeURIComponent(params.project ?? "")} />;
+}
+
+function ProjectWorkflowsRoute() {
+  const params = useParams<{ project?: string }>();
+  const ctx = useOutletContext<LayoutContext>();
+  return <ProjectWorkflowsView {...ctx} projectName={decodeURIComponent(params.project ?? "")} />;
+}
+
+function ProjectWorkflowRoute() {
+  const params = useParams<{ project?: string; workflow?: string }>();
+  const ctx = useOutletContext<LayoutContext>();
   return (
-    <IssuesView
-      signedIn={signedIn}
-      projectFilter={selected.kind === "all" ? null : selected.project}
+    <ProjectWorkflowView
+      {...ctx}
+      projectName={decodeURIComponent(params.project ?? "")}
+      workflowName={decodeURIComponent(params.workflow ?? "")}
     />
   );
 }
 
-function GraphRoute() {
-  const { selected } = useOutletContext<LayoutContext>();
+function ProjectIssuesRoute() {
+  const params = useParams<{ project?: string }>();
+  const ctx = useOutletContext<LayoutContext>();
+  return <ProjectIssuesView {...ctx} projectName={decodeURIComponent(params.project ?? "")} />;
+}
+
+function ProjectNeedsAttentionRoute() {
+  const params = useParams<{ project?: string }>();
+  const ctx = useOutletContext<LayoutContext>();
+  return <ProjectNeedsAttentionView {...ctx} projectName={decodeURIComponent(params.project ?? "")} />;
+}
+
+function ProjectRunsRoute() {
+  const params = useParams<{ project?: string }>();
+  const ctx = useOutletContext<LayoutContext>();
+  return <ProjectRunsView {...ctx} projectName={decodeURIComponent(params.project ?? "")} />;
+}
+
+function ProjectRunRoute() {
+  const params = useParams<{ project?: string; issueNumber?: string; runId?: string }>();
+  const ctx = useOutletContext<LayoutContext>();
   return (
-    <GraphView
-      projectFilter={selected.kind === "all" ? null : selected.project}
+    <ProjectRunView
+      {...ctx}
+      projectName={decodeURIComponent(params.project ?? "")}
+      issueNumber={params.issueNumber ? parseInt(params.issueNumber, 10) : null}
+      runId={decodeURIComponent(params.runId ?? "")}
+    />
+  );
+}
+
+function ProjectRunRedirectRoute() {
+  const params = useParams<{ project?: string; runId?: string }>();
+  const ctx = useOutletContext<LayoutContext>();
+  const projectName = decodeURIComponent(params.project ?? "");
+  const runId = decodeURIComponent(params.runId ?? "");
+  if (ctx.snap === null) return <div className="empty">Connecting…</div>;
+  const runs = isMockMode()
+    ? mockRuns.filter((candidate) => candidate.project === projectName)
+    : [];
+  const run = isMockMode() ? resolveProjectRun(runs, runId) : null;
+  const index = run ? runs.findIndex((candidate) => candidate.id === run.id) : -1;
+  if (run?.issue_number !== null && run?.issue_number !== undefined) {
+    const slug = projectRunSlug(run, runs, index >= 0 ? index : 0);
+    return (
+      <Navigate
+        to={`/projects/${encodeURIComponent(projectName)}/issues/${run.issue_number}/runs/${encodeURIComponent(slug)}`}
+        replace
+      />
+    );
+  }
+  return (
+    <ProjectRunView
+      {...ctx}
+      projectName={projectName}
+      issueNumber={null}
+      runId={runId}
     />
   );
 }
@@ -455,6 +667,977 @@ function ReportsRoute() {
   );
 }
 
+function HomeView({ snap }: LayoutContext) {
+  const projects = snap?.projects.length ?? 0;
+  const workflows = snap?.workflows.length ?? 0;
+  const active = snap?.active_leases.length ?? 0;
+  const pending = snap?.pending_leases.length ?? 0;
+
+  return (
+    <div className="project-workspace">
+      <section className="project-hero">
+        <div className="project-hero-main">
+          <div className="project-kicker mono">home</div>
+          <h2>Glimmung coordinates agent work across projects</h2>
+          <div className="project-repo mono">
+            capacity, issue runs, touchpoints, and project-scoped workflow state
+          </div>
+        </div>
+        <div className="project-facts">
+          <div className="project-fact">
+            <span>projects</span>
+            <strong>{projects}</strong>
+          </div>
+          <div className="project-fact">
+            <span>workflows</span>
+            <strong>{workflows}</strong>
+          </div>
+          <div className="project-fact">
+            <span>active</span>
+            <strong>{active}</strong>
+          </div>
+          <div className="project-fact">
+            <span>pending</span>
+            <strong>{pending}</strong>
+          </div>
+        </div>
+      </section>
+
+      <section className="home-links" aria-label="primary destinations">
+        <Link to="/dashboard" className="home-link">
+          <span className="key">Dashboard</span>
+          <strong>System health, hosts, and queue state</strong>
+        </Link>
+        <Link to="/needs-attention" className="home-link">
+          <span className="key">Needs attention</span>
+          <strong>Open work that needs a decision or follow-up</strong>
+        </Link>
+        <Link to="/projects" className="home-link">
+          <span className="key">Projects</span>
+          <strong>Project workspaces, workflows, and scoped issues</strong>
+        </Link>
+      </section>
+    </div>
+  );
+}
+
+function ProjectsView({ snap }: LayoutContext) {
+  if (snap === null) return <div className="empty">Connecting…</div>;
+
+  const projects = snap.projects
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  return (
+    <div className="project-workspace">
+      <section className="project-hero">
+        <div className="project-hero-main">
+          <div className="project-kicker mono">dashboard</div>
+          <h2>Projects</h2>
+          <div className="project-repo mono">registered repos and project-scoped workspaces</div>
+        </div>
+        <div className="project-facts">
+          <div className="project-fact">
+            <span>projects</span>
+            <strong>{projects.length}</strong>
+          </div>
+          <div className="project-fact">
+            <span>workflows</span>
+            <strong>{snap.workflows.length}</strong>
+          </div>
+          <div className="project-fact">
+            <span>active</span>
+            <strong>{snap.active_leases.length}</strong>
+          </div>
+          <div className="project-fact">
+            <span>pending</span>
+            <strong>{snap.pending_leases.length}</strong>
+          </div>
+        </div>
+      </section>
+
+      {projects.length === 0 ? (
+        <div className="empty">No projects registered.</div>
+      ) : (
+        <table>
+          <thead>
+            <tr>
+              <th>Project</th>
+              <th>GitHub</th>
+              <th>Workflows</th>
+              <th>Work</th>
+              <th>Hosts</th>
+            </tr>
+          </thead>
+          <tbody>
+            {projects.map((project) => {
+              const workflows = snap.workflows.filter((w) => w.project === project.name);
+              const pending = snap.pending_leases.filter((l) => l.project === project.name);
+              const active = snap.active_leases.filter((l) => l.project === project.name);
+              const activeHosts = new Set(active.flatMap((l) => (l.host ? [l.host] : [])));
+              return (
+                <tr key={project.id}>
+                  <td>
+                    <Link className="link" to={`/projects/${encodeURIComponent(project.name)}`}>
+                      {project.name}
+                    </Link>
+                  </td>
+                  <td className="mono dim">
+                    <a
+                      className="link"
+                      href={`https://github.com/${project.github_repo}`}
+                    >
+                      {project.github_repo}
+                    </a>
+                  </td>
+                  <td className="mono">{workflows.length}</td>
+                  <td className="mono dim">{active.length} active / {pending.length} pending</td>
+                  <td className="mono dim">
+                    {activeHosts.size > 0 ? Array.from(activeHosts).join(", ") : "—"}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function ProjectView({
+  snap,
+  signedIn,
+  projectName,
+}: LayoutContext & { projectName: string }) {
+  if (snap === null) return <div className="empty">Connecting…</div>;
+
+  const project = snap.projects.find((p) => p.name === projectName);
+  if (!project) {
+    return <div className="empty">Project {projectName || "(missing)"} was not found.</div>;
+  }
+
+  const workflows = snap.workflows
+    .filter((w) => w.project === project.name)
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const pending = snap.pending_leases.filter((l) => l.project === project.name);
+  const active = snap.active_leases.filter((l) => l.project === project.name);
+  const activeHosts = new Set(active.flatMap((l) => (l.host ? [l.host] : [])));
+  const projectPath = `/projects/${encodeURIComponent(project.name)}`;
+
+  return (
+    <div className="project-workspace">
+      <section className="project-hero">
+        <div className="project-hero-main">
+          <div className="project-kicker mono">project</div>
+          <h2>{project.name}</h2>
+          <div className="project-repo mono">
+            <a className="link" href={`https://github.com/${project.github_repo}`}>
+              {project.github_repo}
+            </a>
+          </div>
+        </div>
+        <div className="project-facts">
+          <div className="project-fact">
+            <span>workflows</span>
+            <strong>{workflows.length}</strong>
+          </div>
+          <div className="project-fact">
+            <span>active</span>
+            <strong>{active.length}</strong>
+          </div>
+          <div className="project-fact">
+            <span>pending</span>
+            <strong>{pending.length}</strong>
+          </div>
+          <div className="project-fact">
+            <span>hosts</span>
+            <strong>{activeHosts.size}</strong>
+          </div>
+        </div>
+      </section>
+
+      <section className="home-links" aria-label={`${project.name} destinations`}>
+        <Link to={`${projectPath}/workflows`} className="home-link">
+          <span className="key">Workflows</span>
+          <strong>Definitions, triggers, requirements, and workflow-scoped work</strong>
+        </Link>
+        <Link to={`${projectPath}/issues`} className="home-link">
+          <span className="key">Issues</span>
+          <strong>All open issues for {project.name}</strong>
+        </Link>
+        <Link to={`${projectPath}/needs-attention`} className="home-link">
+          <span className="key">Needs attention</span>
+          <strong>Project work that needs a decision or follow-up</strong>
+        </Link>
+        <Link to={`${projectPath}/runs`} className="home-link">
+          <span className="key">Runs</span>
+          <strong>Run and cycle history for project work</strong>
+        </Link>
+      </section>
+
+      <IssuesView
+        signedIn={signedIn}
+        projectFilter={project.name}
+        headingLabel="Issue preview"
+        maxRows={3}
+        showProjectColumn={false}
+      />
+    </div>
+  );
+}
+
+function ProjectWorkflowsView({
+  snap,
+  projectName,
+}: LayoutContext & { projectName: string }) {
+  if (snap === null) return <div className="empty">Connecting…</div>;
+
+  const project = snap.projects.find((p) => p.name === projectName);
+  if (!project) {
+    return <div className="empty">Project {projectName || "(missing)"} was not found.</div>;
+  }
+
+  const workflows = snap.workflows
+    .filter((w) => w.project === project.name)
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const pending = snap.pending_leases.filter((l) => l.project === project.name);
+  const active = snap.active_leases.filter((l) => l.project === project.name);
+
+  return (
+    <div className="project-workspace">
+      <section className="project-hero">
+        <div className="project-hero-main">
+          <div className="project-kicker mono">project workflows</div>
+          <h2>{project.name} workflows</h2>
+          <div className="project-repo mono">{project.github_repo}</div>
+        </div>
+        <div className="project-facts">
+          <div className="project-fact">
+            <span>workflows</span>
+            <strong>{workflows.length}</strong>
+          </div>
+          <div className="project-fact">
+            <span>active</span>
+            <strong>{active.length}</strong>
+          </div>
+          <div className="project-fact">
+            <span>pending</span>
+            <strong>{pending.length}</strong>
+          </div>
+        </div>
+      </section>
+
+      {workflows.length === 0 ? (
+        <div className="empty">No workflows registered for {project.name}.</div>
+      ) : (
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>File</th>
+              <th>Trigger</th>
+              <th>Requires</th>
+              <th>Work</th>
+            </tr>
+          </thead>
+          <tbody>
+            {workflows.map((w) => {
+              const wPending = pending.filter((l) => l.workflow === w.name).length;
+              const wActive = active.filter((l) => l.workflow === w.name).length;
+              const fileUrl = githubFileUrl(project.github_repo, w.workflow_ref, w.workflow_filename);
+              return (
+                <tr key={w.id}>
+                  <td>
+                    <Link className="link" to={`/projects/${encodeURIComponent(project.name)}/workflows/${encodeURIComponent(w.name)}`}>
+                      {w.name}
+                    </Link>
+                  </td>
+                  <td className="mono dim">
+                    <a className="link" href={fileUrl}>
+                      {w.workflow_filename}@{w.workflow_ref}
+                    </a>
+                  </td>
+                  <td className="mono dim">{w.trigger_label}</td>
+                  <td><RequirementPills requirements={w.default_requirements} /></td>
+                  <td className="mono dim">{wActive} active / {wPending} pending</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function githubFileUrl(repo: string, ref: string, path: string): string {
+  return `https://github.com/${repo}/blob/${encodeURIComponent(ref)}/${path.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+function RequirementPills({ requirements }: { requirements: Record<string, unknown> }) {
+  const entries = Object.entries(requirements);
+  if (entries.length === 0) {
+    return <span className="mono dim">none</span>;
+  }
+
+  return (
+    <span className="requirement-pills">
+      {entries.flatMap(([key, value]) => {
+        const values = Array.isArray(value) ? value : [value];
+        return values.map((item, index) => (
+          <span className="pill info" key={`${key}:${index}:${String(item)}`}>
+            {key}:{String(item)}
+          </span>
+        ));
+      })}
+    </span>
+  );
+}
+
+function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
+  const phases = workflow.phases.length > 0
+    ? workflow.phases
+    : [{
+        name: workflow.name,
+        kind: "gha_dispatch",
+        workflow_filename: workflow.workflow_filename,
+        workflow_ref: workflow.workflow_ref,
+        inputs: {},
+        outputs: [],
+        requirements: workflow.default_requirements,
+        verify: false,
+        recycle_policy: null,
+      }];
+  const policies = [
+    ...phases.flatMap((phase) => phase.recycle_policy ? [{
+      source: phase.name,
+      target: phase.recycle_policy.lands_at,
+      trigger: phase.recycle_policy.on.join(" / ") || "recycle",
+      max: phase.recycle_policy.max_attempts,
+    }] : []),
+    ...(workflow.pr.recycle_policy ? [{
+      source: "touchpoint",
+      target: workflow.pr.recycle_policy.lands_at,
+      trigger: workflow.pr.recycle_policy.on.join(" / ") || "feedback",
+      max: workflow.pr.recycle_policy.max_attempts,
+    }] : []),
+  ];
+
+  return (
+    <section>
+      <h2>Workflow graph</h2>
+      <div className="dag-wrap">
+        <div className="dag dag-definition" aria-label={`${workflow.name} workflow graph`}>
+          <div className="dag-entry active">
+            <span className="mono">entry</span>
+            <span className="dim mono">{workflow.trigger_label}</span>
+          </div>
+          <span className="dag-edge" aria-hidden="true">→</span>
+          {phases.map((phase, index) => (
+            <Fragment key={phase.name}>
+              <button
+                type="button"
+                className="dag-node dag-node-phase dag-node-definition"
+                aria-disabled="true"
+              >
+                <div className="dag-node-label">{phase.name}</div>
+                <div className="dag-node-state">
+                  <span className="pill info">not run</span>
+                </div>
+                <div className="dag-node-meta dim mono">
+                  {phase.verify ? "verify" : phase.kind}
+                </div>
+              </button>
+              {(index < phases.length - 1 || workflow.pr.enabled) && (
+                <span className="dag-edge" aria-hidden="true">→</span>
+              )}
+            </Fragment>
+          ))}
+          {workflow.pr.enabled && (
+            <button
+              type="button"
+              className="dag-node dag-node-definition dag-node-pr pending"
+              aria-disabled="true"
+            >
+              <div className="dag-node-label">touchpoint</div>
+              <div className="dag-node-state mono">pending</div>
+              <div className="dag-node-meta dim mono">PR primitive</div>
+            </button>
+          )}
+        </div>
+        {policies.length > 0 && (
+          <div className="dag-policy-rail" aria-label="recycle policies">
+            {policies.map((policy) => (
+              <span
+                className="dag-policy inactive"
+                key={`${policy.source}:${policy.target}:${policy.trigger}`}
+                title={`${policy.trigger}; max ${policy.max}`}
+              >
+                <span className="mono">{policy.source}</span>
+                <span className="dim mono">↻</span>
+                <span className="mono">{policy.target}</span>
+                <span className="dim mono">{policy.trigger}</span>
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ProjectWorkflowView({
+  snap,
+  signedIn,
+  projectName,
+  workflowName,
+}: LayoutContext & { projectName: string; workflowName: string }) {
+  if (snap === null) return <div className="empty">Connecting…</div>;
+
+  const project = snap.projects.find((p) => p.name === projectName);
+  if (!project) {
+    return <div className="empty">Project {projectName || "(missing)"} was not found.</div>;
+  }
+
+  const workflow = snap.workflows.find((w) => w.project === project.name && w.name === workflowName);
+  if (!workflow) {
+    return <div className="empty">Workflow {workflowName || "(missing)"} was not found.</div>;
+  }
+
+  const pending = snap.pending_leases.filter((l) => l.project === project.name && l.workflow === workflow.name);
+  const active = snap.active_leases.filter((l) => l.project === project.name && l.workflow === workflow.name);
+  const currentWork = [...active, ...pending];
+
+  return (
+    <div className="project-workspace">
+      <section className="project-hero">
+        <div className="project-hero-main">
+          <div className="project-kicker mono">workflow</div>
+          <h2>{workflow.name}</h2>
+          <div className="project-repo mono">{workflow.workflow_filename}@{workflow.workflow_ref}</div>
+        </div>
+        <div className="project-facts">
+          <div className="project-fact">
+            <span>active</span>
+            <strong>{active.length}</strong>
+          </div>
+          <div className="project-fact">
+            <span>pending</span>
+            <strong>{pending.length}</strong>
+          </div>
+          <div className="project-fact">
+            <span>trigger</span>
+            <strong>{workflow.trigger_label}</strong>
+          </div>
+        </div>
+      </section>
+
+      <section className="project-focus">
+        <div>
+          <span className="key">requires</span>
+          <RequirementPills requirements={workflow.default_requirements} />
+        </div>
+        <div>
+          <span className="key">project</span>
+          <span className="mono">{project.name}</span>
+        </div>
+      </section>
+
+      <WorkflowDefinitionGraph workflow={workflow} />
+
+      <h2>Current work</h2>
+      <CurrentWorkTable leases={currentWork} emptyText={`No active or pending work for ${workflow.name}.`} />
+
+      <IssuesView
+        signedIn={signedIn}
+        projectFilter={project.name}
+        workflowFilter={workflow.name}
+        headingLabel="Workflow issues"
+        showProjectColumn={false}
+      />
+    </div>
+  );
+}
+
+function ProjectIssuesView({
+  snap,
+  signedIn,
+  projectName,
+}: LayoutContext & { projectName: string }) {
+  if (snap === null) return <div className="empty">Connecting…</div>;
+  const project = snap.projects.find((p) => p.name === projectName);
+  if (!project) {
+    return <div className="empty">Project {projectName || "(missing)"} was not found.</div>;
+  }
+
+  return (
+    <div className="project-workspace">
+      <section className="project-hero">
+        <div className="project-hero-main">
+          <div className="project-kicker mono">project issues</div>
+          <h2>{project.name} issues</h2>
+          <div className="project-repo mono">{project.github_repo}</div>
+        </div>
+      </section>
+      <IssuesView signedIn={signedIn} projectFilter={project.name} showProjectColumn={false} />
+    </div>
+  );
+}
+
+function ProjectNeedsAttentionView({
+  snap,
+  signedIn,
+  projectName,
+}: LayoutContext & { projectName: string }) {
+  if (snap === null) return <div className="empty">Connecting…</div>;
+  const project = snap.projects.find((p) => p.name === projectName);
+  if (!project) {
+    return <div className="empty">Project {projectName || "(missing)"} was not found.</div>;
+  }
+
+  return (
+    <div className="project-workspace">
+      <section className="project-hero">
+        <div className="project-hero-main">
+          <div className="project-kicker mono">project attention</div>
+          <h2>{project.name} needs attention</h2>
+          <div className="project-repo mono">{project.github_repo}</div>
+        </div>
+      </section>
+      <IssuesView
+        signedIn={signedIn}
+        projectFilter={project.name}
+        headingLabel="Needs attention"
+        showProjectColumn={false}
+      />
+    </div>
+  );
+}
+
+function ProjectRunsView({
+  snap,
+  projectName,
+}: LayoutContext & { projectName: string }) {
+  if (snap === null) return <div className="empty">Connecting…</div>;
+  const project = snap.projects.find((p) => p.name === projectName);
+  if (!project) {
+    return <div className="empty">Project {projectName || "(missing)"} was not found.</div>;
+  }
+
+  const active = snap.active_leases.filter((l) => l.project === project.name);
+  const pending = snap.pending_leases.filter((l) => l.project === project.name);
+  const currentWork = [...active, ...pending];
+  const runs = isMockMode()
+    ? mockRuns.filter((run) => run.project === project.name)
+    : [];
+
+  return (
+    <div className="project-workspace">
+      <section className="project-hero">
+        <div className="project-hero-main">
+          <div className="project-kicker mono">project runs</div>
+          <h2>{project.name} runs</h2>
+          <div className="project-repo mono">{project.github_repo}</div>
+        </div>
+        <div className="project-facts">
+          <div className="project-fact">
+            <span>active</span>
+            <strong>{active.length}</strong>
+          </div>
+          <div className="project-fact">
+            <span>pending</span>
+            <strong>{pending.length}</strong>
+          </div>
+          {runs.length > 0 && (
+            <div className="project-fact">
+              <span>runs</span>
+              <strong>{runs.length}</strong>
+            </div>
+          )}
+        </div>
+      </section>
+
+      {runs.length > 0 ? (
+        <ProjectRunsTable runs={runs} project={project} />
+      ) : (
+        <>
+          <h2>Work in flight</h2>
+          <CurrentWorkTable
+            leases={currentWork}
+            emptyText={`No active or pending runs for ${project.name}.`}
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
+function ProjectRunsTable({ runs, project }: { runs: ProjectRun[]; project: Project }) {
+  const runsPath = `/projects/${encodeURIComponent(project.name)}/runs`;
+  return (
+    <>
+      <h2>Run history</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Run</th>
+            <th>Workflow</th>
+            <th>Issue</th>
+            <th>State</th>
+            <th>Cycle</th>
+            <th>Phase</th>
+            <th>Cost</th>
+            <th>Updated</th>
+          </tr>
+        </thead>
+        <tbody>
+          {runs.map((run, index) => {
+            const runLabel = projectRunLabel(run, runs, index);
+            const runSlug = projectRunSlug(run, runs, index);
+            return (
+              <tr key={run.id}>
+                <td>
+                  <Link
+                    className="link mono"
+                    to={`/projects/${encodeURIComponent(run.project)}/issues/${run.issue_number}/runs/${encodeURIComponent(runSlug)}`}
+                    state={{ returnTo: runsPath, returnLabel: "runs" }}
+                    title={run.id}
+                  >
+                    {runLabel}
+                  </Link>
+                  <div className="dim">{run.title}</div>
+                </td>
+              <td className="mono dim">
+                <Link
+                  className="link mono"
+                  to={`/projects/${encodeURIComponent(run.project)}/workflows/${encodeURIComponent(run.workflow)}`}
+                >
+                  {run.workflow}
+                </Link>
+              </td>
+              <td className="mono dim">
+                {run.issue_number ? (
+                  <Link
+                    className="link mono"
+                    to={`/projects/${encodeURIComponent(project.name)}/issues/${run.issue_number}/summary`}
+                    state={{ returnTo: runsPath, returnLabel: "runs" }}
+                  >
+                    #{run.issue_number}
+                  </Link>
+                ) : (
+                  "-"
+                )}
+              </td>
+              <td><span className={`pill ${runStatePill(run.state)}`}>{run.state}</span></td>
+              <td className="mono">{run.cycles}</td>
+              <td className="mono dim">{run.current_phase}</td>
+              <td className="mono dim">${run.cost_usd.toFixed(2)}</td>
+              <td className="mono dim">{relTime(run.updated_at)}</td>
+            </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </>
+  );
+}
+
+function projectRunLabel(run: ProjectRun, runs: ProjectRun[], index: number): string {
+  if (run.issue_number === null) return `run-${index + 1}`;
+  const sameIssue = runs.filter((candidate) => candidate.issue_number === run.issue_number);
+  const ordinal = sameIssue.findIndex((candidate) => candidate.id === run.id) + 1;
+  return `#${run.issue_number}-${Math.max(ordinal, 1)}`;
+}
+
+function projectRunSlug(run: ProjectRun, runs: ProjectRun[], index: number): string {
+  return projectRunLabel(run, runs, index).replace(/^#/, "");
+}
+
+function runSlugDisplay(slug: string): string {
+  return /^\d+-\d+$/.test(slug) ? `#${slug}` : slug;
+}
+
+function titleCase(value: string): string {
+  return value
+    .split("-")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function resolveProjectRun(runs: ProjectRun[], runIdOrSlug: string): ProjectRun | null {
+  return runs.find((candidate, index) => (
+    candidate.id === runIdOrSlug || projectRunSlug(candidate, runs, index) === runIdOrSlug
+  )) ?? null;
+}
+
+const RUN_VIEWER_IDLE_DISPATCH: DispatchState = { kind: "idle" };
+const RUN_VIEWER_IDLE_ABORT: AbortState = { kind: "idle" };
+
+function projectRunGraph(run: ProjectRun, workflow: Workflow | undefined, project: Project): IssueGraph {
+  const issueNode = run.issue_number
+    ? {
+        id: `issue:${project.name}-${run.issue_number}`,
+        kind: "issue" as const,
+        label: `#${run.issue_number}`,
+        state: "open",
+        timestamp: run.started_at,
+        metadata: {
+          project: project.name,
+          repo: project.github_repo,
+          number: run.issue_number,
+          issue_id: `${project.name}-${run.issue_number}`,
+        },
+      }
+    : null;
+  const phaseNames = workflow?.phases.map((phase) => phase.name) ?? [run.current_phase];
+  const recycleArrows = workflow?.phases.flatMap((phase) => {
+    if (!phase.recycle_policy) return [];
+    return phase.recycle_policy.on.map((trigger) => ({
+      source: phase.name,
+      target: phase.recycle_policy?.lands_at ?? phase.name,
+      trigger,
+      max_attempts: phase.recycle_policy?.max_attempts ?? 1,
+      active: false,
+      kind: "phase_recycle" as const,
+    }));
+  }) ?? [];
+  const runNode = {
+    id: `run:${run.id}`,
+    kind: "run" as const,
+    label: run.id,
+    state: run.state,
+    timestamp: run.started_at,
+    metadata: {
+      workflow: run.workflow,
+      cycles_count: run.cycles,
+      cumulative_cost_usd: run.cost_usd,
+      entrypoint_phase: phaseNames[0] ?? run.current_phase,
+      workflow_graph: {
+        phases: phaseNames,
+        default_entry: { target: phaseNames[0] ?? run.current_phase, active: true, kind: "phase" },
+        recycle_arrows: recycleArrows,
+        terminal: { kind: "report", enabled: workflow?.pr.enabled ?? true },
+      },
+    },
+  };
+  const attempts = phaseNames
+    .slice(0, Math.max(run.cycles, run.state === "pending" ? 0 : 1))
+    .map((phase, index) => ({
+      id: `attempt:${run.id}:${index}`,
+      kind: "attempt" as const,
+      label: phase,
+      state: index === phaseNames.indexOf(run.current_phase) ? run.state : "completed",
+      timestamp: run.started_at,
+      metadata: {
+        attempt_index: index,
+        phase,
+        phase_kind: workflow?.phases.find((candidate) => candidate.name === phase)?.kind ?? "agent",
+        completed_at: run.state === "pending" || run.state === "in_progress" ? null : run.updated_at,
+        verification_status: run.state === "passed" ? "pass" : null,
+        steps: [
+          {
+            slug: `${phase}-start`,
+            title: `${phase} started`,
+            state: run.state === "pending" ? "pending" : "completed",
+            message: `Mock ${phase} execution for ${run.title}.`,
+            exit_code: run.state === "aborted" ? 1 : 0,
+          },
+        ],
+      },
+    }));
+  const nodes = [
+    ...(issueNode ? [issueNode] : []),
+    runNode,
+    ...attempts,
+  ];
+  return {
+    issue_id: issueNode?.metadata.issue_id ?? run.id,
+    nodes,
+    edges: [
+      ...(issueNode ? [{ source: issueNode.id, target: runNode.id, kind: "spawned" as const }] : []),
+      ...attempts.map((attempt) => ({ source: runNode.id, target: attempt.id, kind: "attempted" as const })),
+    ],
+  };
+}
+
+function ProjectRunView({
+  snap,
+  signedIn,
+  projectName,
+  issueNumber,
+  runId,
+}: LayoutContext & { projectName: string; issueNumber: number | null; runId: string }) {
+  if (snap === null) return <div className="empty">Connecting…</div>;
+  const project = snap.projects.find((p) => p.name === projectName);
+  if (!project) {
+    return <div className="empty">Project {projectName || "(missing)"} was not found.</div>;
+  }
+
+  const runs = isMockMode()
+    ? mockRuns.filter((candidate) => candidate.project === project.name)
+    : [];
+  const run = isMockMode() ? resolveProjectRun(runs, runId) : null;
+  const workflow = snap.workflows.find((w) => w.project === (run?.project ?? project.name) && w.name === run?.workflow);
+  const graph = run ? projectRunGraph(run, workflow, project) : null;
+
+  if (!run) {
+    return (
+      <div className="project-workspace">
+        <section className="project-hero">
+          <div className="project-hero-main">
+            <div className="project-kicker mono">run</div>
+            <h2>{runId || "(missing)"}</h2>
+            <div className="project-repo mono">{project.github_repo}</div>
+          </div>
+        </section>
+        <div className="empty">
+          Run detail is not available yet for live runs.
+        </div>
+      </div>
+    );
+  }
+  if (issueNumber !== null && run.issue_number !== issueNumber) {
+    return (
+      <div className="project-workspace">
+        <section className="project-hero">
+          <div className="project-hero-main">
+            <div className="project-kicker mono">run</div>
+            <h2>{runSlugDisplay(runId)}</h2>
+            <div className="project-repo mono">{project.github_repo}</div>
+          </div>
+        </section>
+        <div className="empty">
+          Run {runSlugDisplay(runId)} does not belong to issue #{issueNumber}.
+        </div>
+      </div>
+    );
+  }
+
+  const runIndex = runs.findIndex((candidate) => candidate.id === run.id);
+  const runLabel = projectRunLabel(run, runs, runIndex >= 0 ? runIndex : 0);
+
+  return (
+    <div className="project-workspace">
+      <section className="project-hero">
+        <div className="project-hero-main">
+          <div className="project-kicker mono">run</div>
+          <h2 title={run.id}>{runLabel}</h2>
+          <div className="project-repo mono">{run.title}</div>
+        </div>
+        <div className="project-facts">
+          <div className="project-fact">
+            <span>state</span>
+            <strong>{run.state}</strong>
+          </div>
+          <div className="project-fact">
+            <span>cycles</span>
+            <strong>{run.cycles}</strong>
+          </div>
+          <div className="project-fact">
+            <span>phase</span>
+            <strong>{run.current_phase}</strong>
+          </div>
+          <div className="project-fact">
+            <span>cost</span>
+            <strong>${run.cost_usd.toFixed(2)}</strong>
+          </div>
+        </div>
+      </section>
+
+      <section className="project-focus">
+        <div>
+          <span className="key">workflow</span>
+          <strong>
+            <Link
+              className="link"
+              to={`/projects/${encodeURIComponent(project.name)}/workflows/${encodeURIComponent(run.workflow)}`}
+            >
+              {run.workflow}
+            </Link>
+          </strong>
+        </div>
+        <div>
+          <span className="key">issue</span>
+          <span className="mono">
+            {run.issue_number ? (
+              <Link className="link mono" to={`/projects/${encodeURIComponent(project.name)}/issues/${run.issue_number}/summary`}>
+                #{run.issue_number}
+              </Link>
+            ) : (
+              "none"
+            )}
+          </span>
+        </div>
+        <div>
+          <span className="key">updated</span>
+          <span className="mono">{relTime(run.updated_at)}</span>
+        </div>
+      </section>
+
+      <RunViewer
+        graph={graph}
+        graphAvailable={true}
+        signedIn={signedIn}
+        project={project.name}
+        repo={project.github_repo}
+        inFlight={run.state === "in_progress"}
+        dispatchState={RUN_VIEWER_IDLE_DISPATCH}
+        onRedispatch={() => undefined}
+        abortState={RUN_VIEWER_IDLE_ABORT}
+        onArmAbort={() => undefined}
+        onCancelAbort={() => undefined}
+        onConfirmAbort={() => undefined}
+        selectedRunId={run.id}
+        onBackToRuns={() => undefined}
+        actionsVisible={false}
+      />
+    </div>
+  );
+}
+
+function runStatePill(state: string): string {
+  if (state === "passed") return "free";
+  if (state === "in_progress" || state === "pending" || state === "needs_review") return "busy";
+  if (state === "aborted" || state === "failed") return "drain";
+  return "info";
+}
+
+function CurrentWorkTable({ leases, emptyText }: { leases: Lease[]; emptyText: string }) {
+  if (leases.length === 0) {
+    return <div className="empty">{emptyText}</div>;
+  }
+
+  return (
+    <table>
+      <thead>
+        <tr>
+          <th>Lease</th>
+          <th>Workflow</th>
+          <th>State</th>
+          <th>Host</th>
+          <th>Metadata</th>
+          <th>Requested</th>
+        </tr>
+      </thead>
+      <tbody>
+        {leases.map((l) => (
+          <tr key={l.id}>
+            <td className="mono">{l.id.slice(0, 8)}…</td>
+            <td className="mono dim">{l.workflow ?? "—"}</td>
+            <td><span className={`pill ${l.state === "active" ? "busy" : "info"}`}>{l.state}</span></td>
+            <td className="mono">{l.host ?? "—"}</td>
+            <td className="mono dim">{JSON.stringify(l.metadata)}</td>
+            <td className="mono dim">{relTime(l.requested_at)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
 type CapacityViewProps = {
   snap: Snapshot | null;
   signedIn: boolean;
@@ -520,6 +1703,7 @@ function CapacityView({
           <div className="kpi"><span className="k">active</span><span className="v">{snap.active_leases.length}</span></div>
         </div>
       )}
+
       <h2>Hosts</h2>
         {snap === null ? (
           <div className="empty">Connecting…</div>
@@ -694,9 +1878,7 @@ function CapacityView({
               </div>
               <div className="row">
                 <span className="key">requires</span>
-                <span className="val mono">
-                  {JSON.stringify(selectedWorkflow.default_requirements)}
-                </span>
+                <span className="val"><RequirementPills requirements={selectedWorkflow.default_requirements} /></span>
               </div>
             </div>
           </>
