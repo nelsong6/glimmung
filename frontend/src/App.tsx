@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, Navigate, NavLink, Outlet, Route, Routes, useLocation, useOutletContext, useParams } from "react-router-dom";
 import { AdminPanel } from "./AdminPanel";
-import { GraphView } from "./GraphView";
 import { IssueDetailView } from "./IssueDetailView";
 import { IssuesView } from "./IssuesView";
 import { ReportDetailView } from "./ReportDetailView";
@@ -100,7 +99,7 @@ export function App() {
       <Route path="/_mock/*" element={<MockModeRedirect />} />
       <Route path="/" element={<Layout />}>
         <Route index element={<CapacityRoute />} />
-        <Route path="graph" element={<GraphRoute />} />
+        <Route path="graph" element={<Navigate to="/" replace />} />
         <Route path="projects" element={<ProjectsRoute />} />
         <Route path="projects/:project" element={<ProjectRoute />} />
         <Route path="issues" element={<Navigate to="/" replace />} />
@@ -369,9 +368,6 @@ function Layout() {
                 attention
                 {inflight.issues && <span className="tab-dot" />}
               </NavLink>
-              <NavLink to="/graph" className={dashboardLinkClass}>
-                graph
-              </NavLink>
               <NavLink to="/projects" className={dashboardLinkClass}>
                 projects
               </NavLink>
@@ -430,7 +426,6 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
     }
     return [{ label: "Home", to: "/" }, { label: "Attention" }];
   }
-  if (parts[0] === "graph") return [{ label: "Home", to: "/" }, { label: "Graph" }];
   if (parts[0] === "reports") return [{ label: "Home", to: "/" }, { label: "Touchpoint evidence" }];
   return [{ label: "Home", to: "/" }, { label: parts[0] }];
 }
@@ -438,15 +433,6 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
 function CapacityRoute() {
   const ctx = useOutletContext<LayoutContext>();
   return <CapacityView {...ctx} />;
-}
-
-function GraphRoute() {
-  const { selected } = useOutletContext<LayoutContext>();
-  return (
-    <GraphView
-      projectFilter={selected.kind === "all" ? null : selected.project}
-    />
-  );
 }
 
 function ProjectsRoute() {
