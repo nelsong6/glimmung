@@ -247,7 +247,10 @@ export function IssueDetailView() {
       : `${target.project} (native)`;
   const repoForLinks = target.kind === "gh" ? target.repo : null;
 
-  const onBack = () => navigate("/issues");
+  const onBack = () => {
+    const projectName = detail?.project ?? (target.kind === "native" ? target.project : null);
+    navigate(projectName ? `/projects/${encodeURIComponent(projectName)}` : "/");
+  };
 
   useEffect(() => {
     let cancelled = false;

@@ -49,9 +49,11 @@ type DispatchStatus =
 export function IssuesView({
   signedIn,
   projectFilter,
+  headingLabel = "Open issues",
 }: {
   signedIn: boolean;
   projectFilter: string | null;
+  headingLabel?: string;
 }) {
   const navigate = useNavigate();
   const [rows, setRows] = useState<IssueRow[] | null>(null);
@@ -120,7 +122,7 @@ export function IssuesView({
   return (
     <>
       <h2>
-        Open issues{visibleRows ? ` (${visibleRows.length})` : ""}
+        {headingLabel}{visibleRows ? ` (${visibleRows.length})` : ""}
         {projectFilter && (
           <span className="filter-hint"> — filtered to {projectFilter}</span>
         )}

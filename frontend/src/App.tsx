@@ -103,7 +103,7 @@ export function App() {
         <Route path="graph" element={<GraphRoute />} />
         <Route path="projects" element={<ProjectsRoute />} />
         <Route path="projects/:project" element={<ProjectRoute />} />
-        <Route path="issues" element={<IssuesRoute />} />
+        <Route path="issues" element={<Navigate to="/" replace />} />
         <Route path="issues/:owner/:repo/:n" element={<IssueDetailView />}>
           {/* Issue workspace tabs. Old slugs are still accepted by
               IssueDetailView so existing links keep working. */}
@@ -366,10 +366,7 @@ function Layout() {
         {homeRoute && (
             <nav className="dashboard-nav" aria-label="dashboard views">
               <NavLink to="/" end className={dashboardLinkClass}>
-                capacity
-              </NavLink>
-              <NavLink to="/issues" className={dashboardLinkClass}>
-                issues
+                attention
                 {inflight.issues && <span className="tab-dot" />}
               </NavLink>
               <NavLink to="/graph" className={dashboardLinkClass}>
@@ -419,8 +416,8 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
         crumbs.push({ label: "Projects", to: "/projects" });
         crumbs.push({ label: project.name, to: `/projects/${encodeURIComponent(project.name)}` });
       } else {
-        crumbs.push({ label: "Issues", to: "/issues" });
-        crumbs.push({ label: githubRepo, to: `/issues?repo=${encodeURIComponent(githubRepo)}` });
+        crumbs.push({ label: "Attention", to: "/" });
+        crumbs.push({ label: githubRepo });
       }
       crumbs.push({ label: `#${issue}` });
       return crumbs;
@@ -431,7 +428,7 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
       crumbs.push({ label: parts[2] });
       return crumbs;
     }
-    return [{ label: "Home", to: "/" }, { label: "Issues" }];
+    return [{ label: "Home", to: "/" }, { label: "Attention" }];
   }
   if (parts[0] === "graph") return [{ label: "Home", to: "/" }, { label: "Graph" }];
   if (parts[0] === "reports") return [{ label: "Home", to: "/" }, { label: "Touchpoint evidence" }];
@@ -441,16 +438,6 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
 function CapacityRoute() {
   const ctx = useOutletContext<LayoutContext>();
   return <CapacityView {...ctx} />;
-}
-
-function IssuesRoute() {
-  const { signedIn, selected } = useOutletContext<LayoutContext>();
-  return (
-    <IssuesView
-      signedIn={signedIn}
-      projectFilter={selected.kind === "all" ? null : selected.project}
-    />
-  );
 }
 
 function GraphRoute() {
@@ -756,6 +743,9 @@ function CapacityView({
           <div className="kpi"><span className="k">active</span><span className="v">{snap.active_leases.length}</span></div>
         </div>
       )}
+
+      <IssuesView signedIn={signedIn} projectFilter={null} headingLabel="What needs attention" />
+
       <h2>Hosts</h2>
         {snap === null ? (
           <div className="empty">Connecting…</div>
