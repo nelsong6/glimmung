@@ -1,4 +1,5 @@
 import { PublicClientApplication, type AccountInfo, type Configuration } from "@azure/msal-browser";
+import { isMockMode, mockAccount } from "./mockApi";
 
 type GlimmungConfig = {
   entra_client_id: string;
@@ -16,6 +17,14 @@ let _initPromise: Promise<void> | null = null;
 const SCOPES = ["openid", "profile", "email"];
 
 export function initAuth(): Promise<void> {
+  if (isMockMode()) {
+    _config = {
+      entra_client_id: "mock",
+      authority: "https://login.microsoftonline.com/mock",
+      tank_operator_base_url: "https://tank.mock.local",
+    };
+    return Promise.resolve();
+  }
   if (_initPromise) return _initPromise;
   _initPromise = (async () => {
     const cfgRes = await fetch("/v1/config");
@@ -39,12 +48,14 @@ export function initAuth(): Promise<void> {
 }
 
 export function currentAccount(): AccountInfo | null {
+  if (isMockMode()) return mockAccount();
   if (!_msal) return null;
   const accs = _msal.getAllAccounts();
   return accs[0] ?? null;
 }
 
 export async function signIn(): Promise<AccountInfo> {
+  if (isMockMode()) return mockAccount();
   if (!_msal) throw new Error("auth not initialized");
   const result = await _msal.loginPopup({ scopes: SCOPES });
   _msal.setActiveAccount(result.account);
@@ -52,6 +63,7 @@ export async function signIn(): Promise<AccountInfo> {
 }
 
 export async function signOut(): Promise<void> {
+  if (isMockMode()) return;
   if (!_msal) return;
   const account = currentAccount();
   if (!account) return;
@@ -61,6 +73,7 @@ export async function signOut(): Promise<void> {
 /** Get a fresh ID token. Backend validates with audience=entra_client_id;
  *  matches the tank-operator pattern. */
 export async function getIdToken(): Promise<string> {
+  if (isMockMode()) return "mock-token";
   if (!_msal) throw new Error("auth not initialized");
   const account = currentAccount();
   if (!account) throw new Error("not signed in");
@@ -69,6 +82,13 @@ export async function getIdToken(): Promise<string> {
 }
 
 export async function publicConfig(): Promise<GlimmungConfig> {
+  if (isMockMode()) {
+    return {
+      entra_client_id: "mock",
+      authority: "https://login.microsoftonline.com/mock",
+      tank_operator_base_url: "https://tank.mock.local",
+    };
+  }
   if (!_config) {
     const cfgRes = await fetch("/v1/config");
     if (!cfgRes.ok) throw new Error(`config fetch failed: ${cfgRes.status}`);

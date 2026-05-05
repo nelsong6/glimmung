@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { NavLink, Outlet, Route, Routes, useOutletContext } from "react-router-dom";
+import { Navigate, NavLink, Outlet, Route, Routes, useOutletContext } from "react-router-dom";
 import { AdminPanel } from "./AdminPanel";
 import { GraphView } from "./GraphView";
 import { IssueDetailView } from "./IssueDetailView";
@@ -8,6 +8,7 @@ import { ReportDetailView } from "./ReportDetailView";
 import { ReportsView } from "./ReportsView";
 import { StyleguideView } from "./StyleguideView";
 import { authedFetch, currentAccount, initAuth, signIn, signOut } from "./auth";
+import { isMockMode, mockSnapshot } from "./mockApi";
 import type { AccountInfo } from "@azure/msal-browser";
 
 type Host = {
@@ -96,6 +97,7 @@ export function App() {
           auth or SSE. Contract: docs/styleguide-contract.md. */}
       <Route path="/_styleguide" element={<StyleguideView />} />
       <Route path="/_design-portfolio" element={<StyleguideView />} />
+      <Route path="/_mock/*" element={<MockModeRedirect />} />
       <Route path="/" element={<Layout />}>
         <Route index element={<CapacityRoute />} />
         <Route path="graph" element={<GraphRoute />} />
@@ -127,6 +129,11 @@ export function App() {
   );
 }
 
+function MockModeRedirect() {
+  isMockMode();
+  return <Navigate to="/" replace />;
+}
+
 function Layout() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [conn, setConn] = useState<Connection>("dead");
@@ -150,6 +157,13 @@ function Layout() {
   }, []);
 
   useEffect(() => {
+    if (isMockMode()) {
+      setSnap(mockSnapshot as Snapshot);
+      setLastUpdate(Date.now());
+      setConn("live");
+      return;
+    }
+
     let es: EventSource | null = null;
     let staleTimer: number | null = null;
 
@@ -340,6 +354,7 @@ function Layout() {
           <div className="header-left">
             <div className="header-title">
               <h1>glimmung</h1>
+              {isMockMode() && <span className="connection info">mock</span>}
               <span className={`connection ${conn}`}>{conn}</span>
             </div>
             <div className="epigraph">
