@@ -679,8 +679,6 @@ function ProjectView({
   const pending = snap.pending_leases.filter((l) => l.project === project.name);
   const active = snap.active_leases.filter((l) => l.project === project.name);
   const activeHosts = new Set(active.flatMap((l) => (l.host ? [l.host] : [])));
-  const currentWork = [...active, ...pending];
-  const nextWork = currentWork[0] ?? null;
   const projectPath = `/projects/${encodeURIComponent(project.name)}`;
 
   return (
@@ -712,21 +710,6 @@ function ProjectView({
             <span>hosts</span>
             <strong>{activeHosts.size}</strong>
           </div>
-        </div>
-      </section>
-
-      <section className="project-focus">
-        <div>
-          <span className="key">current focus</span>
-          {nextWork ? (
-            <strong>{String(nextWork.metadata.title ?? nextWork.metadata.issue ?? nextWork.workflow ?? nextWork.id)}</strong>
-          ) : (
-            <strong>No active project work</strong>
-          )}
-        </div>
-        <div>
-          <span className="key">assigned hosts</span>
-          <span className="mono">{activeHosts.size > 0 ? Array.from(activeHosts).join(", ") : "none assigned"}</span>
         </div>
       </section>
 
@@ -819,6 +802,7 @@ function ProjectWorkflowsView({
             {workflows.map((w) => {
               const wPending = pending.filter((l) => l.workflow === w.name).length;
               const wActive = active.filter((l) => l.workflow === w.name).length;
+              const fileUrl = githubFileUrl(project.github_repo, w.workflow_ref, w.workflow_filename);
               return (
                 <tr key={w.id}>
                   <td>
@@ -826,7 +810,11 @@ function ProjectWorkflowsView({
                       {w.name}
                     </Link>
                   </td>
-                  <td className="mono dim">{w.workflow_filename}@{w.workflow_ref}</td>
+                  <td className="mono dim">
+                    <a className="link" href={fileUrl}>
+                      {w.workflow_filename}@{w.workflow_ref}
+                    </a>
+                  </td>
                   <td className="mono dim">{w.trigger_label}</td>
                   <td className="mono">{JSON.stringify(w.default_requirements)}</td>
                   <td className="mono dim">{wActive} active / {wPending} pending</td>
@@ -838,6 +826,10 @@ function ProjectWorkflowsView({
       )}
     </div>
   );
+}
+
+function githubFileUrl(repo: string, ref: string, path: string): string {
+  return `https://github.com/${repo}/blob/${encodeURIComponent(ref)}/${path.split("/").map(encodeURIComponent).join("/")}`;
 }
 
 function ProjectWorkflowView({
