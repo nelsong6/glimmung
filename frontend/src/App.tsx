@@ -148,6 +148,7 @@ export function App() {
         <Route path="projects/:project/issues" element={<ProjectIssuesRoute />} />
         <Route path="projects/:project/needs-attention" element={<ProjectNeedsAttentionRoute />} />
         <Route path="projects/:project/runs" element={<ProjectRunsRoute />} />
+        <Route path="projects/:project/runs/:runId" element={<ProjectRunRoute />} />
         <Route path="issues" element={<Navigate to="/needs-attention" replace />} />
         <Route path="issues/:owner/:repo/:n" element={<IssueDetailView />}>
           {/* Issue workspace tabs. Old slugs are still accepted by
@@ -461,7 +462,8 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
     } else if (parts[2] === "needs-attention") {
       crumbs.push({ label: "Needs attention" });
     } else if (parts[2] === "runs") {
-      crumbs.push({ label: "Runs" });
+      crumbs.push({ label: "Runs", to: `/projects/${encodeURIComponent(parts[1] ?? "")}/runs` });
+      if (parts[3]) crumbs.push({ label: parts[3] });
     }
     return crumbs;
   }
@@ -555,6 +557,18 @@ function ProjectRunsRoute() {
   const params = useParams<{ project?: string }>();
   const ctx = useOutletContext<LayoutContext>();
   return <ProjectRunsView {...ctx} projectName={decodeURIComponent(params.project ?? "")} />;
+}
+
+function ProjectRunRoute() {
+  const params = useParams<{ project?: string; runId?: string }>();
+  const ctx = useOutletContext<LayoutContext>();
+  return (
+    <ProjectRunView
+      {...ctx}
+      projectName={decodeURIComponent(params.project ?? "")}
+      runId={decodeURIComponent(params.runId ?? "")}
+    />
+  );
 }
 
 function ReportsRoute() {
@@ -1203,7 +1217,12 @@ function ProjectRunsTable({ runs }: { runs: ProjectRun[] }) {
           {runs.map((run) => (
             <tr key={run.id}>
               <td>
-                <span className="mono">{run.id}</span>
+                <Link
+                  className="link mono"
+                  to={`/projects/${encodeURIComponent(run.project)}/runs/${encodeURIComponent(run.id)}`}
+                >
+                  {run.id}
+                </Link>
                 <div className="dim">{run.title}</div>
               </td>
               <td className="mono dim">{run.workflow}</td>
@@ -1218,6 +1237,92 @@ function ProjectRunsTable({ runs }: { runs: ProjectRun[] }) {
         </tbody>
       </table>
     </>
+  );
+}
+
+function ProjectRunView({
+  snap,
+  projectName,
+  runId,
+}: LayoutContext & { projectName: string; runId: string }) {
+  if (snap === null) return <div className="empty">Connecting…</div>;
+  const project = snap.projects.find((p) => p.name === projectName);
+  if (!project) {
+    return <div className="empty">Project {projectName || "(missing)"} was not found.</div>;
+  }
+
+  const run = isMockMode()
+    ? mockRuns.find((candidate) => candidate.project === project.name && candidate.id === runId)
+    : null;
+
+  if (!run) {
+    return (
+      <div className="project-workspace">
+        <section className="project-hero">
+          <div className="project-hero-main">
+            <div className="project-kicker mono">run</div>
+            <h2>{runId || "(missing)"}</h2>
+            <div className="project-repo mono">{project.github_repo}</div>
+          </div>
+        </section>
+        <div className="empty">
+          Run detail is not available yet for live runs.
+        </div>
+      </div>
+    );
+  }
+
+  const workflow = snap.workflows.find((w) => w.project === run.project && w.name === run.workflow);
+
+  return (
+    <div className="project-workspace">
+      <section className="project-hero">
+        <div className="project-hero-main">
+          <div className="project-kicker mono">run</div>
+          <h2>{run.id}</h2>
+          <div className="project-repo mono">{run.title}</div>
+        </div>
+        <div className="project-facts">
+          <div className="project-fact">
+            <span>state</span>
+            <strong>{run.state}</strong>
+          </div>
+          <div className="project-fact">
+            <span>cycles</span>
+            <strong>{run.cycles}</strong>
+          </div>
+          <div className="project-fact">
+            <span>phase</span>
+            <strong>{run.current_phase}</strong>
+          </div>
+          <div className="project-fact">
+            <span>cost</span>
+            <strong>${run.cost_usd.toFixed(2)}</strong>
+          </div>
+        </div>
+      </section>
+
+      <section className="project-focus">
+        <div>
+          <span className="key">workflow</span>
+          <strong>{run.workflow}</strong>
+        </div>
+        <div>
+          <span className="key">issue</span>
+          <span className="mono">{run.issue_number ? `#${run.issue_number}` : "none"}</span>
+        </div>
+        <div>
+          <span className="key">updated</span>
+          <span className="mono">{relTime(run.updated_at)}</span>
+        </div>
+      </section>
+
+      {workflow ? (
+        <WorkflowDefinitionGraph workflow={workflow} />
+      ) : (
+        <div className="empty">Workflow {run.workflow} is not registered.</div>
+      )}
+    </div>
   );
 }
 
