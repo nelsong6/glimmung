@@ -95,6 +95,7 @@ export function App() {
           Layout so the validation-step curl check (#86) doesn't need
           auth or SSE. Contract: docs/styleguide-contract.md. */}
       <Route path="/_styleguide" element={<StyleguideView />} />
+      <Route path="/_design-portfolio" element={<StyleguideView />} />
       <Route path="/" element={<Layout />}>
         <Route index element={<CapacityRoute />} />
         <Route path="graph" element={<GraphRoute />} />

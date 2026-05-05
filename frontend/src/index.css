@@ -129,6 +129,307 @@
 .confirm { display: inline-flex; align-items: center; gap: 8px; }
 .confirm .sep { color: var(--fg-faintest); font-family: var(--font-mono); font-size: 0.85rem; }
 
+/* Design portfolio — reviewable styleguide shell inspired by Claude Design's
+   portfolio list, but using Glimmung's dark specimen vocabulary inside rows. */
+.portfolio-shell {
+  min-height: 100vh;
+  background: #f5f4f1;
+  color: #242321;
+  font-family: var(--font-sans);
+}
+.portfolio-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 76px;
+  padding: 0 24px;
+  background: #f5f4f1;
+  border-bottom: 1px solid #dedbd5;
+}
+.portfolio-tabs {
+  display: inline-flex;
+  align-self: stretch;
+  align-items: stretch;
+}
+.portfolio-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 210px;
+  padding: 0 20px;
+  background: transparent;
+  border: 0;
+  border-right: 1px solid transparent;
+  border-left: 1px solid transparent;
+  color: #6d6961;
+  font: inherit;
+  font-size: 1.05rem;
+  font-weight: 650;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+.portfolio-tabs button.selected {
+  color: #25231f;
+  background: #faf9f6;
+  border-color: #dedbd5;
+  border-bottom-color: #faf9f6;
+  border-top-left-radius: 22px;
+  border-top-right-radius: 22px;
+}
+.portfolio-tab-icon {
+  display: inline-flex;
+  width: 18px;
+  justify-content: center;
+  color: #8b867d;
+  font-family: var(--font-mono);
+}
+.portfolio-share {
+  height: 42px;
+  padding: 0 18px;
+  border: 1px solid #111;
+  border-radius: 8px;
+  background: #171714;
+  color: #fff;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.2);
+}
+.portfolio-list {
+  border-top: 1px solid #e5e2dd;
+  border-bottom: 1px solid #e5e2dd;
+}
+.portfolio-row {
+  background: #fbfaf8;
+  border-bottom: 1px solid #e5e2dd;
+}
+.portfolio-row-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 20px;
+  align-items: center;
+  min-height: 74px;
+  padding: 0 28px;
+}
+.portfolio-disclosure {
+  display: inline-flex;
+  align-items: center;
+  gap: 20px;
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.portfolio-disclosure > span:first-child {
+  width: 22px;
+  color: #827d75;
+  font-family: var(--font-mono);
+  font-size: 1.45rem;
+  line-height: 1;
+}
+.portfolio-disclosure strong {
+  display: block;
+  color: #242321;
+  font-size: 1.25rem;
+  line-height: 1.2;
+  letter-spacing: 0;
+}
+.portfolio-disclosure small {
+  display: block;
+  margin-top: 4px;
+  color: #77736d;
+  font-size: 0.92rem;
+  line-height: 1.25;
+}
+.portfolio-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.review {
+  height: 38px;
+  padding: 0 14px;
+  border-radius: 8px;
+  font: inherit;
+  font-weight: 700;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+.review.good {
+  color: #4d7d14;
+  background: #f5faec;
+  border: 1px solid #c7dda5;
+}
+.review.good.selected {
+  color: #315a08;
+  background: #e9f6d8;
+  border-color: #8dbd51;
+}
+.review.needs-work {
+  color: #c14646;
+  background: #fff5f4;
+  border: 1px solid #f0b9b8;
+}
+.review.needs-work.selected {
+  color: #a12626;
+  background: #ffe6e4;
+  border-color: #db7774;
+}
+.review-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  color: #7d7971;
+  font-size: 1.1rem;
+}
+.review-mark.needs-work {
+  color: #c14646;
+  font-weight: 800;
+}
+.portfolio-row-body {
+  background: #0a0a0c;
+  color: var(--fg);
+  overflow-x: auto;
+}
+.portfolio-specimen {
+  min-width: min(920px, 100vw);
+  padding: 44px 56px;
+}
+.portfolio-specimen h2 {
+  margin: 0 0 28px;
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.portfolio-specimen-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px 18px;
+  margin: 14px 0;
+}
+.tag-matrix {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr);
+  gap: 26px 24px;
+  align-items: center;
+}
+.tag-matrix .portfolio-specimen-row {
+  margin: 0;
+}
+.matrix-key {
+  color: var(--fg-dimmer);
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.portfolio-swatch-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+}
+.portfolio-swatch {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 2px 12px;
+  align-items: center;
+  padding: 12px;
+  background: var(--surface);
+}
+.portfolio-swatch span {
+  grid-row: span 2;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--border);
+}
+.portfolio-swatch strong {
+  color: var(--fg);
+  font-size: 0.9rem;
+}
+.portfolio-swatch code {
+  color: var(--fg-dimmer);
+  font-size: 0.78rem;
+}
+.portfolio-surface-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 12px;
+}
+.portfolio-surface {
+  min-height: 88px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  color: var(--fg);
+  font-family: var(--font-mono);
+}
+.portfolio-surface.bg { background: var(--bg); }
+.portfolio-surface.deep { background: var(--bg-deep); }
+.portfolio-surface.panel { background: var(--surface); }
+.portfolio-surface.hover { background: var(--surface-hover); }
+.portfolio-form {
+  max-width: 760px;
+  padding: 0;
+}
+.portfolio-sidebar {
+  position: static;
+  height: auto;
+  max-width: 260px;
+}
+.portfolio-spacing-demo {
+  display: grid;
+  gap: 18px;
+  max-width: 560px;
+}
+.portfolio-inner-header {
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+}
+.portfolio-type-stack {
+  max-width: 720px;
+}
+
+@media (max-width: 760px) {
+  .portfolio-topbar {
+    height: auto;
+    min-height: 70px;
+    padding: 12px;
+    gap: 12px;
+  }
+  .portfolio-tabs button {
+    min-width: 0;
+    padding: 0 12px;
+    font-size: 0.92rem;
+  }
+  .portfolio-row-summary {
+    grid-template-columns: 1fr;
+    gap: 10px;
+    padding: 16px;
+  }
+  .portfolio-row-actions {
+    padding-left: 42px;
+  }
+  .portfolio-specimen {
+    min-width: 0;
+    padding: 32px 20px;
+  }
+  .tag-matrix {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+}
+
 .layout {
   display: flex;
   min-height: 100vh;
