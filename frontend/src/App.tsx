@@ -395,20 +395,20 @@ type Breadcrumb = {
 
 function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
   const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
-  if (parts.length === 0) return [{ label: "Dashboard" }];
+  if (parts.length === 0) return [{ label: "Home" }];
   if (parts[0] === "needs-attention") {
-    return [{ label: "Dashboard", to: "/" }, { label: "Needs attention" }];
+    return [{ label: "Home", to: "/" }, { label: "Needs attention" }];
   }
   if (parts[0] === "projects") {
     const crumbs: Breadcrumb[] = [
-      { label: "Dashboard", to: "/" },
+      { label: "Home", to: "/" },
       { label: "Projects", to: "/projects" },
     ];
     if (parts[1]) crumbs.push({ label: parts[1] });
     return crumbs;
   }
   if (parts[0] === "issues") {
-    const crumbs: Breadcrumb[] = [{ label: "Dashboard", to: "/" }];
+    const crumbs: Breadcrumb[] = [{ label: "Home", to: "/" }];
     if (parts.length >= 4) {
       const owner = parts[1];
       const repo = parts[2];
@@ -431,10 +431,10 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
       crumbs.push({ label: parts[2] });
       return crumbs;
     }
-    return [{ label: "Dashboard", to: "/" }, { label: "Needs attention" }];
+    return [{ label: "Home", to: "/" }, { label: "Needs attention" }];
   }
-  if (parts[0] === "reports") return [{ label: "Dashboard", to: "/" }, { label: "Touchpoint evidence" }];
-  return [{ label: "Dashboard", to: "/" }, { label: parts[0] }];
+  if (parts[0] === "reports") return [{ label: "Home", to: "/" }, { label: "Touchpoint evidence" }];
+  return [{ label: "Home", to: "/" }, { label: parts[0] }];
 }
 
 function DashboardRoute() {
