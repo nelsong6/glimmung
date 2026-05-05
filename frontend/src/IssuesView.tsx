@@ -50,10 +50,14 @@ export function IssuesView({
   signedIn,
   projectFilter,
   headingLabel = "Open issues",
+  maxRows = null,
+  showProjectColumn = true,
 }: {
   signedIn: boolean;
   projectFilter: string | null;
   headingLabel?: string;
+  maxRows?: number | null;
+  showProjectColumn?: boolean;
 }) {
   const navigate = useNavigate();
   const [rows, setRows] = useState<IssueRow[] | null>(null);
@@ -118,6 +122,9 @@ export function IssuesView({
       ? rows.filter((r) => r.project === projectFilter)
       : rows
     : null;
+  const displayRows = maxRows !== null && visibleRows
+    ? visibleRows.slice(0, maxRows)
+    : visibleRows;
 
   return (
     <>
@@ -144,11 +151,11 @@ export function IssuesView({
             ? `No open issues for ${projectFilter}.`
             : "No open issues across registered repos."}
         </div>
-      ) : visibleRows ? (
+      ) : displayRows ? (
         <table>
           <thead>
             <tr>
-              <th>Project</th>
+              {showProjectColumn && <th>Project</th>}
               <th>#</th>
               <th>Title</th>
               <th>Labels</th>
@@ -157,14 +164,14 @@ export function IssuesView({
             </tr>
           </thead>
           <tbody>
-            {visibleRows.map((row) => {
+            {displayRows.map((row) => {
               const key = rowKey(row);
               const status = dispatchStatus.kind !== "idle" && dispatchStatus.key === key
                 ? dispatchStatus
                 : null;
               return (
                 <tr key={key}>
-                  <td>{row.project}</td>
+                  {showProjectColumn && <td>{row.project}</td>}
                   <td className="mono dim">
                     {row.number !== null ? row.number : "—"}
                   </td>

@@ -104,6 +104,10 @@ export function App() {
         <Route path="graph" element={<Navigate to="/dashboard" replace />} />
         <Route path="projects" element={<ProjectsRoute />} />
         <Route path="projects/:project" element={<ProjectRoute />} />
+        <Route path="projects/:project/workflows" element={<ProjectWorkflowsRoute />} />
+        <Route path="projects/:project/workflows/:workflow" element={<ProjectWorkflowRoute />} />
+        <Route path="projects/:project/issues" element={<ProjectIssuesRoute />} />
+        <Route path="projects/:project/needs-attention" element={<ProjectNeedsAttentionRoute />} />
         <Route path="issues" element={<Navigate to="/needs-attention" replace />} />
         <Route path="issues/:owner/:repo/:n" element={<IssueDetailView />}>
           {/* Issue workspace tabs. Old slugs are still accepted by
@@ -408,7 +412,15 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
       { label: "Home", to: "/" },
       { label: "Projects", to: "/projects" },
     ];
-    if (parts[1]) crumbs.push({ label: parts[1] });
+    if (parts[1]) crumbs.push({ label: parts[1], to: `/projects/${encodeURIComponent(parts[1])}` });
+    if (parts[2] === "workflows") {
+      crumbs.push({ label: "Workflows", to: `/projects/${encodeURIComponent(parts[1] ?? "")}/workflows` });
+      if (parts[3]) crumbs.push({ label: parts[3] });
+    } else if (parts[2] === "issues") {
+      crumbs.push({ label: "Issues" });
+    } else if (parts[2] === "needs-attention") {
+      crumbs.push({ label: "Needs attention" });
+    }
     return crumbs;
   }
   if (parts[0] === "issues") {
@@ -465,6 +477,36 @@ function ProjectRoute() {
   const params = useParams<{ project?: string }>();
   const ctx = useOutletContext<LayoutContext>();
   return <ProjectView {...ctx} projectName={decodeURIComponent(params.project ?? "")} />;
+}
+
+function ProjectWorkflowsRoute() {
+  const params = useParams<{ project?: string }>();
+  const ctx = useOutletContext<LayoutContext>();
+  return <ProjectWorkflowsView {...ctx} projectName={decodeURIComponent(params.project ?? "")} />;
+}
+
+function ProjectWorkflowRoute() {
+  const params = useParams<{ project?: string; workflow?: string }>();
+  const ctx = useOutletContext<LayoutContext>();
+  return (
+    <ProjectWorkflowView
+      {...ctx}
+      projectName={decodeURIComponent(params.project ?? "")}
+      workflowName={decodeURIComponent(params.workflow ?? "")}
+    />
+  );
+}
+
+function ProjectIssuesRoute() {
+  const params = useParams<{ project?: string }>();
+  const ctx = useOutletContext<LayoutContext>();
+  return <ProjectIssuesView {...ctx} projectName={decodeURIComponent(params.project ?? "")} />;
+}
+
+function ProjectNeedsAttentionRoute() {
+  const params = useParams<{ project?: string }>();
+  const ctx = useOutletContext<LayoutContext>();
+  return <ProjectNeedsAttentionView {...ctx} projectName={decodeURIComponent(params.project ?? "")} />;
 }
 
 function ReportsRoute() {
@@ -639,6 +681,7 @@ function ProjectView({
   const activeHosts = new Set(active.flatMap((l) => (l.host ? [l.host] : [])));
   const currentWork = [...active, ...pending];
   const nextWork = currentWork[0] ?? null;
+  const projectPath = `/projects/${encodeURIComponent(project.name)}`;
 
   return (
     <div className="project-workspace">
@@ -646,7 +689,11 @@ function ProjectView({
         <div className="project-hero-main">
           <div className="project-kicker mono">project</div>
           <h2>{project.name}</h2>
-          <div className="project-repo mono">{project.github_repo}</div>
+          <div className="project-repo mono">
+            <a className="link" href={`https://github.com/${project.github_repo}`}>
+              {project.github_repo}
+            </a>
+          </div>
         </div>
         <div className="project-facts">
           <div className="project-fact">
@@ -683,7 +730,78 @@ function ProjectView({
         </div>
       </section>
 
-      <h2>Workflows</h2>
+      <section className="home-links" aria-label={`${project.name} destinations`}>
+        <Link to={`${projectPath}/workflows`} className="home-link">
+          <span className="key">Workflows</span>
+          <strong>Definitions, triggers, requirements, and workflow-scoped work</strong>
+        </Link>
+        <Link to={`${projectPath}/issues`} className="home-link">
+          <span className="key">Issues</span>
+          <strong>All open issues for {project.name}</strong>
+        </Link>
+        <Link to={`${projectPath}/needs-attention`} className="home-link">
+          <span className="key">Needs attention</span>
+          <strong>Project work that needs a decision or follow-up</strong>
+        </Link>
+        <a href={`https://github.com/${project.github_repo}`} className="home-link">
+          <span className="key">GitHub</span>
+          <strong>Repository, pull requests, and source history</strong>
+        </a>
+      </section>
+
+      <IssuesView
+        signedIn={signedIn}
+        projectFilter={project.name}
+        headingLabel="Issue preview"
+        maxRows={3}
+        showProjectColumn={false}
+      />
+    </div>
+  );
+}
+
+function ProjectWorkflowsView({
+  snap,
+  projectName,
+}: LayoutContext & { projectName: string }) {
+  if (snap === null) return <div className="empty">Connecting…</div>;
+
+  const project = snap.projects.find((p) => p.name === projectName);
+  if (!project) {
+    return <div className="empty">Project {projectName || "(missing)"} was not found.</div>;
+  }
+
+  const workflows = snap.workflows
+    .filter((w) => w.project === project.name)
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const pending = snap.pending_leases.filter((l) => l.project === project.name);
+  const active = snap.active_leases.filter((l) => l.project === project.name);
+
+  return (
+    <div className="project-workspace">
+      <section className="project-hero">
+        <div className="project-hero-main">
+          <div className="project-kicker mono">project workflows</div>
+          <h2>{project.name} workflows</h2>
+          <div className="project-repo mono">{project.github_repo}</div>
+        </div>
+        <div className="project-facts">
+          <div className="project-fact">
+            <span>workflows</span>
+            <strong>{workflows.length}</strong>
+          </div>
+          <div className="project-fact">
+            <span>active</span>
+            <strong>{active.length}</strong>
+          </div>
+          <div className="project-fact">
+            <span>pending</span>
+            <strong>{pending.length}</strong>
+          </div>
+        </div>
+      </section>
+
       {workflows.length === 0 ? (
         <div className="empty">No workflows registered for {project.name}.</div>
       ) : (
@@ -703,7 +821,11 @@ function ProjectView({
               const wActive = active.filter((l) => l.workflow === w.name).length;
               return (
                 <tr key={w.id}>
-                  <td>{w.name}</td>
+                  <td>
+                    <Link className="link" to={`/projects/${encodeURIComponent(project.name)}/workflows/${encodeURIComponent(w.name)}`}>
+                      {w.name}
+                    </Link>
+                  </td>
                   <td className="mono dim">{w.workflow_filename}@{w.workflow_ref}</td>
                   <td className="mono dim">{w.trigger_label}</td>
                   <td className="mono">{JSON.stringify(w.default_requirements)}</td>
@@ -714,42 +836,167 @@ function ProjectView({
           </tbody>
         </table>
       )}
-
-      <h2>Current work</h2>
-      {currentWork.length === 0 ? (
-        <div className="empty">No active or pending work for {project.name}.</div>
-      ) : (
-        <table>
-          <thead>
-            <tr>
-              <th>Lease</th>
-              <th>Workflow</th>
-              <th>State</th>
-              <th>Host</th>
-              <th>Metadata</th>
-              <th>Requested</th>
-            </tr>
-          </thead>
-          <tbody>
-            {currentWork.map((l) => (
-              <tr key={l.id}>
-                <td className="mono">{l.id.slice(0, 8)}…</td>
-                <td className="mono dim">{l.workflow ?? "—"}</td>
-                <td><span className={`pill ${l.state === "active" ? "busy" : "info"}`}>{l.state}</span></td>
-                <td className="mono">{l.host ?? "—"}</td>
-                <td className="mono dim">{JSON.stringify(l.metadata)}</td>
-                <td className="mono dim">{relTime(l.requested_at)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-
-      <IssuesView signedIn={signedIn} projectFilter={project.name} />
     </div>
   );
 }
 
+function ProjectWorkflowView({
+  snap,
+  signedIn,
+  projectName,
+  workflowName,
+}: LayoutContext & { projectName: string; workflowName: string }) {
+  if (snap === null) return <div className="empty">Connecting…</div>;
+
+  const project = snap.projects.find((p) => p.name === projectName);
+  if (!project) {
+    return <div className="empty">Project {projectName || "(missing)"} was not found.</div>;
+  }
+
+  const workflow = snap.workflows.find((w) => w.project === project.name && w.name === workflowName);
+  if (!workflow) {
+    return <div className="empty">Workflow {workflowName || "(missing)"} was not found.</div>;
+  }
+
+  const pending = snap.pending_leases.filter((l) => l.project === project.name && l.workflow === workflow.name);
+  const active = snap.active_leases.filter((l) => l.project === project.name && l.workflow === workflow.name);
+  const currentWork = [...active, ...pending];
+
+  return (
+    <div className="project-workspace">
+      <section className="project-hero">
+        <div className="project-hero-main">
+          <div className="project-kicker mono">workflow</div>
+          <h2>{workflow.name}</h2>
+          <div className="project-repo mono">{workflow.workflow_filename}@{workflow.workflow_ref}</div>
+        </div>
+        <div className="project-facts">
+          <div className="project-fact">
+            <span>active</span>
+            <strong>{active.length}</strong>
+          </div>
+          <div className="project-fact">
+            <span>pending</span>
+            <strong>{pending.length}</strong>
+          </div>
+          <div className="project-fact">
+            <span>trigger</span>
+            <strong>{workflow.trigger_label}</strong>
+          </div>
+        </div>
+      </section>
+
+      <section className="project-focus">
+        <div>
+          <span className="key">requires</span>
+          <strong className="mono">{JSON.stringify(workflow.default_requirements)}</strong>
+        </div>
+        <div>
+          <span className="key">project</span>
+          <span className="mono">{project.name}</span>
+        </div>
+      </section>
+
+      <h2>Current work</h2>
+      <CurrentWorkTable leases={currentWork} emptyText={`No active or pending work for ${workflow.name}.`} />
+
+      <IssuesView
+        signedIn={signedIn}
+        projectFilter={project.name}
+        headingLabel="Workflow issues"
+        showProjectColumn={false}
+      />
+    </div>
+  );
+}
+
+function ProjectIssuesView({
+  snap,
+  signedIn,
+  projectName,
+}: LayoutContext & { projectName: string }) {
+  if (snap === null) return <div className="empty">Connecting…</div>;
+  const project = snap.projects.find((p) => p.name === projectName);
+  if (!project) {
+    return <div className="empty">Project {projectName || "(missing)"} was not found.</div>;
+  }
+
+  return (
+    <div className="project-workspace">
+      <section className="project-hero">
+        <div className="project-hero-main">
+          <div className="project-kicker mono">project issues</div>
+          <h2>{project.name} issues</h2>
+          <div className="project-repo mono">{project.github_repo}</div>
+        </div>
+      </section>
+      <IssuesView signedIn={signedIn} projectFilter={project.name} showProjectColumn={false} />
+    </div>
+  );
+}
+
+function ProjectNeedsAttentionView({
+  snap,
+  signedIn,
+  projectName,
+}: LayoutContext & { projectName: string }) {
+  if (snap === null) return <div className="empty">Connecting…</div>;
+  const project = snap.projects.find((p) => p.name === projectName);
+  if (!project) {
+    return <div className="empty">Project {projectName || "(missing)"} was not found.</div>;
+  }
+
+  return (
+    <div className="project-workspace">
+      <section className="project-hero">
+        <div className="project-hero-main">
+          <div className="project-kicker mono">project attention</div>
+          <h2>{project.name} needs attention</h2>
+          <div className="project-repo mono">{project.github_repo}</div>
+        </div>
+      </section>
+      <IssuesView
+        signedIn={signedIn}
+        projectFilter={project.name}
+        headingLabel="Needs attention"
+        showProjectColumn={false}
+      />
+    </div>
+  );
+}
+
+function CurrentWorkTable({ leases, emptyText }: { leases: Lease[]; emptyText: string }) {
+  if (leases.length === 0) {
+    return <div className="empty">{emptyText}</div>;
+  }
+
+  return (
+    <table>
+      <thead>
+        <tr>
+          <th>Lease</th>
+          <th>Workflow</th>
+          <th>State</th>
+          <th>Host</th>
+          <th>Metadata</th>
+          <th>Requested</th>
+        </tr>
+      </thead>
+      <tbody>
+        {leases.map((l) => (
+          <tr key={l.id}>
+            <td className="mono">{l.id.slice(0, 8)}…</td>
+            <td className="mono dim">{l.workflow ?? "—"}</td>
+            <td><span className={`pill ${l.state === "active" ? "busy" : "info"}`}>{l.state}</span></td>
+            <td className="mono">{l.host ?? "—"}</td>
+            <td className="mono dim">{JSON.stringify(l.metadata)}</td>
+            <td className="mono dim">{relTime(l.requested_at)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
 type CapacityViewProps = {
   snap: Snapshot | null;
   signedIn: boolean;
