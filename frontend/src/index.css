@@ -1438,6 +1438,26 @@ h2 .inline-action,
   display: grid;
   gap: 18px;
 }
+.workspace-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg-dimmer);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+.workspace-breadcrumb a {
+  color: var(--state-success-fg);
+  text-decoration: none;
+}
+.workspace-breadcrumb a:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.workspace-breadcrumb strong {
+  color: var(--fg-muted);
+  font-weight: 500;
+}
 .project-hero {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

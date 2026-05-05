@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Navigate, NavLink, Outlet, Route, Routes, useNavigate, useOutletContext, useParams } from "react-router-dom";
+import { Link, Navigate, NavLink, Outlet, Route, Routes, useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { AdminPanel } from "./AdminPanel";
 import { GraphView } from "./GraphView";
 import { IssueDetailView } from "./IssueDetailView";
@@ -140,6 +140,7 @@ function MockModeRedirect() {
 
 function Layout() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [conn, setConn] = useState<Connection>("dead");
   const [lastUpdate, setLastUpdate] = useState<number>(0);
@@ -282,6 +283,9 @@ function Layout() {
 
   const tabLinkClass = ({ isActive }: { isActive: boolean }) =>
     `tab ${isActive ? "selected" : ""}`;
+  const dashboardWorkspace =
+    location.pathname === "/" || location.pathname === "/issues" || location.pathname === "/graph";
+  const routeProjectName = projectNameFromPath(location.pathname);
 
   return (
     <div className="layout">
@@ -289,7 +293,7 @@ function Layout() {
         <div className="sidebar-title">Projects</div>
         <button
           type="button"
-          className={`project-row ${selected.kind === "all" ? "selected" : ""}`}
+          className={`project-row ${selected.kind === "all" && !routeProjectName ? "selected" : ""}`}
           onClick={() => {
             setSelected(ALL);
             navigate("/");
@@ -306,9 +310,11 @@ function Layout() {
           .map((p) => {
             const projWorkflows = snap.workflows.filter((w) => w.project === p.name);
             const isProjectSelected =
-              selected.kind === "project" && selected.project === p.name;
+              (selected.kind === "project" && selected.project === p.name)
+              || routeProjectName === p.name;
             const isWorkflowOfProjectSelected =
-              selected.kind === "workflow" && selected.project === p.name;
+              (selected.kind === "workflow" && selected.project === p.name)
+              || routeProjectName === p.name;
             const projActive = snap.active_leases.filter((l) => l.project === p.name).length;
             const projPending = snap.pending_leases.filter((l) => l.project === p.name).length;
             return (
@@ -423,18 +429,20 @@ function Layout() {
           </div>
         </header>
 
-        <div className="tabs">
-          <NavLink to="/" end className={tabLinkClass}>
-            capacity
-          </NavLink>
-          <NavLink to="/issues" className={tabLinkClass}>
-            issues
-            {inflight.issues && <span className="tab-dot" />}
-          </NavLink>
-          <NavLink to="/graph" className={tabLinkClass}>
-            graph
-          </NavLink>
-        </div>
+        {dashboardWorkspace && (
+          <div className="tabs">
+            <NavLink to="/" end className={tabLinkClass}>
+              capacity
+            </NavLink>
+            <NavLink to="/issues" className={tabLinkClass}>
+              issues
+              {inflight.issues && <span className="tab-dot" />}
+            </NavLink>
+            <NavLink to="/graph" className={tabLinkClass}>
+              graph
+            </NavLink>
+          </div>
+        )}
 
         {account && showAdmin && (
           <AdminPanel projects={snap?.projects ?? []} onSuccess={() => setShowAdmin(false)} />
@@ -444,6 +452,11 @@ function Layout() {
       </main>
     </div>
   );
+}
+
+function projectNameFromPath(pathname: string): string | null {
+  const match = pathname.match(/^\/projects\/([^/]+)/);
+  return match ? decodeURIComponent(match[1]) : null;
 }
 
 function CapacityRoute() {
@@ -509,6 +522,14 @@ function ProjectView({
 
   return (
     <div className="project-workspace">
+      <nav className="workspace-breadcrumb" aria-label="breadcrumb">
+        <Link to="/">Dashboard</Link>
+        <span>/</span>
+        <span>Projects</span>
+        <span>/</span>
+        <strong>{project.name}</strong>
+      </nav>
+
       <section className="project-hero">
         <div className="project-hero-main">
           <div className="project-kicker mono">project</div>
