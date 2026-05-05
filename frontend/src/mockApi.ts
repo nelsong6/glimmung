@@ -309,6 +309,7 @@ const issueGraph = {
       timestamp: ago(24),
       metadata: {
         workflow: "issue-agent",
+        cycles_count: 2,
         cumulative_cost_usd: 8.91,
         entrypoint_phase: "design",
         report_id: "report-glimmung-206",
@@ -377,7 +378,7 @@ const systemGraph = {
       label: "portfolio review",
       state: "review_required",
       timestamp: ago(88),
-      metadata: { workflow: "portfolio-agent", cumulative_cost_usd: 3.42, pr_number: 216 },
+      metadata: { workflow: "portfolio-agent", cycles_count: 1, cumulative_cost_usd: 3.42, pr_number: 216 },
     },
     {
       id: "pr:report-glimmung-216",

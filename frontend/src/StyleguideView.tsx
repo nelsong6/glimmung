@@ -282,9 +282,10 @@ const DESIGN_SYSTEM_ITEMS: PortfolioItem[] = [
           </div>
         </header>
         <div className="tabs" role="tablist">
-          <button type="button" role="tab" className="tab selected">description</button>
-          <button type="button" role="tab" className="tab">in progress<span className="tab-dot" aria-label="active" /></button>
-          <button type="button" role="tab" className="tab">lineage</button>
+          <button type="button" role="tab" className="tab selected">issue</button>
+          <button type="button" role="tab" className="tab">run<span className="tab-dot" aria-label="active" /></button>
+          <button type="button" role="tab" className="tab">runs</button>
+          <button type="button" role="tab" className="tab">touchpoint</button>
         </div>
       </Specimen>
     ),
@@ -374,7 +375,7 @@ const DESIGN_FILE_ITEMS: PortfolioItem[] = [
                 <div className="run-panel-meta">
                   <div><span className="key">workflow</span> <span className="mono">agent-run</span></div>
                   <div><span className="key">trigger</span> <span className="mono">issues.opened</span></div>
-                  <div><span className="key">attempts</span> <span className="mono">2</span></div>
+                  <div><span className="key">cycles</span> <span className="mono">2</span></div>
                   <div><span className="key">cost</span> <span className="mono">$0.0504</span></div>
                 </div>
               </div>
@@ -434,7 +435,7 @@ const DESIGN_FILE_ITEMS: PortfolioItem[] = [
             <span>/</span>
             <span>Add design portfolio</span>
             <span>/</span>
-            <strong>Run 01KQ...</strong>
+            <strong>Run 01KQ... / cycle 2</strong>
           </nav>
           <div className="run-graph-board">
             <div className="run-graph" aria-label="run graph">
@@ -466,11 +467,11 @@ const DESIGN_FILE_ITEMS: PortfolioItem[] = [
               <div className="run-graph-edge horizontal" style={{ gridColumn: "4", gridRow: "2" }} />
               <div className="stage-column" style={{ gridColumn: "5" }}>
                 <div className="stage-heading">
-                  <strong>pr</strong>
+                  <strong>touchpoint</strong>
                   <span>waiting</span>
                 </div>
                 <button type="button" className="run-graph-node pending">
-                  <strong>open report</strong>
+                  <strong>collect evidence</strong>
                   <span>blocked</span>
                 </button>
                 <button type="button" className="run-graph-node recycle">

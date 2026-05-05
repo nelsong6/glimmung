@@ -1,15 +1,16 @@
 /**
  * Issue detail view (#42, #81) — issue meta + tabbed content.
  *
- * Tabs (#81): issue / the run / runs.
+ * Tabs: issue / run / runs / touchpoint.
  *   - issue: title link, body, edit form (was "description")
- *   - the run: workflow's DAG painted with active run state. Phases
+ *   - run: workflow's DAG painted with active run state. Phases
  *     as nodes, PR primitive as the trailing node. Cool-toned
  *     definition view when no run is in flight; nodes color in by
  *     state when one is. Click a node to drill into the latest
  *     attempt that exercised it.
  *   - runs: list/timeline of every run on this issue. Click a row
- *     to load that run in the run tab. Replaces the old SVG lineage.
+ *     to load that run in the run tab.
+ *   - touchpoint: issue-level decision surface and evidence summary.
  *
  * Conceptual move per #81: "list of steps that ran" → "graph that
  * runs". Today the DAG is `[phase] → [pr]` (single-phase v1, per
@@ -155,12 +156,13 @@ type AuthContext = {
   signedIn: boolean;
 };
 
-type Tab = "issue" | "the_run" | "runs";
+type Tab = "issue" | "the_run" | "runs" | "touchpoint";
 
 const TAB_SLUGS: Record<Tab, string> = {
   issue: "issue",
   the_run: "the-run",
   runs: "runs",
+  touchpoint: "touchpoint",
 };
 
 // Backwards-compat: old description / in-progress / lineage slugs still
@@ -172,6 +174,7 @@ const SLUG_TO_TAB: Record<string, Tab> = {
   "in-progress": "the_run",
   runs: "runs",
   lineage: "runs",
+  touchpoint: "touchpoint",
 };
 
 const POLL_INTERVAL_MS = 3000;
@@ -345,11 +348,14 @@ export function IssueDetailView() {
               issue
             </TabButton>
             <TabButton current={tab} value="the_run" onSelect={setTab}>
-              the run
+              run
               {isInFlight && <span className="tab-dot" aria-label="active" />}
             </TabButton>
             <TabButton current={tab} value="runs" onSelect={setTab}>
               runs
+            </TabButton>
+            <TabButton current={tab} value="touchpoint" onSelect={setTab}>
+              touchpoint
             </TabButton>
           </div>
 
@@ -395,6 +401,9 @@ export function IssueDetailView() {
                   setTab("the_run");
                 }}
               />
+            )}
+            {tab === "touchpoint" && (
+              <TouchpointTab graph={graph} graphAvailable={!!graphUrl} repo={repoForLinks} />
             )}
           </div>
         </>
@@ -973,9 +982,9 @@ function PipelineDag({
     ?? workflowGraph?.default_entry?.target
     ?? phases[0]?.phaseName
     ?? null;
-  const reportId = stringOrNull(meta.report_id);
-  const reportState = stringOrNull(meta.report_state);
-  const reportTitle = stringOrNull(meta.report_title);
+  const touchpointId = stringOrNull(meta.report_id);
+  const touchpointState = stringOrNull(meta.report_state);
+  const touchpointTitle = stringOrNull(meta.report_title);
   const prNumber = numberOrNull(meta.pr_number);
   const prBranch = stringOrNull(meta.pr_branch);
   return (
@@ -1005,15 +1014,15 @@ function PipelineDag({
         <div className="dag-edge" aria-hidden="true">→</div>
         <button
           type="button"
-          className={`dag-node dag-node-pr${reportId || prNumber ? " opened" : " pending"}${selectedNodeId === "pr" ? " selected" : ""}`}
+          className={`dag-node dag-node-pr${touchpointId || prNumber ? " opened" : " pending"}${selectedNodeId === "pr" ? " selected" : ""}`}
           onClick={() => onSelectNode(selectedNodeId === "pr" ? null : "pr")}
           aria-pressed={selectedNodeId === "pr"}
         >
-          <div className="dag-node-label">report</div>
+          <div className="dag-node-label">touchpoint</div>
           <div className="dag-node-state mono">
-            {reportState ?? (prNumber ? `#${prNumber}` : prBranch ? prBranch : "pending")}
+            {touchpointState ?? (prNumber ? `#${prNumber}` : prBranch ? prBranch : "pending")}
           </div>
-          {reportTitle && <div className="dag-node-meta dim mono">{reportTitle}</div>}
+          {touchpointTitle && <div className="dag-node-meta dim mono">{touchpointTitle}</div>}
         </button>
       </div>
       {workflowGraph && workflowGraph.recycle_arrows.length > 0 && (
@@ -1145,19 +1154,19 @@ function DrillIn({
   if (nodeId === null) return null;
   const meta = run.metadata;
   if (nodeId === "pr") {
-    const reportId = stringOrNull(meta.report_id);
-    const reportState = stringOrNull(meta.report_state);
-    const reportTitle = stringOrNull(meta.report_title);
-    const reportUrl = stringOrNull(meta.report_url);
+    const touchpointId = stringOrNull(meta.report_id);
+    const touchpointState = stringOrNull(meta.report_state);
+    const touchpointTitle = stringOrNull(meta.report_title);
+    const touchpointUrl = stringOrNull(meta.report_url);
     const prNumber = numberOrNull(meta.pr_number);
     const prBranch = stringOrNull(meta.pr_branch);
     return (
       <div className="run-panel">
         <div className="run-panel-header">
           <div>
-            <strong>report</strong>
-            <span className={`pill ${reportId || prNumber ? "free" : ""}`} style={{ marginLeft: "0.5rem" }}>
-              {reportState ?? (prNumber ? "opened" : "pending")}
+            <strong>touchpoint</strong>
+            <span className={`pill ${touchpointId || prNumber ? "free" : ""}`} style={{ marginLeft: "0.5rem" }}>
+              {touchpointState ?? (prNumber ? "opened" : "pending")}
             </span>
           </div>
           <button type="button" className="link" onClick={onClose}>
@@ -1165,26 +1174,26 @@ function DrillIn({
           </button>
         </div>
         <div className="run-panel-meta">
-          {reportId && (
+          {touchpointId && (
             <div>
-              <span className="key">report</span>{" "}
-              <span className="mono" title={reportId}>{reportId.slice(0, 8)}…</span>
+              <span className="key">touchpoint</span>{" "}
+              <span className="mono" title={touchpointId}>{touchpointId.slice(0, 8)}…</span>
             </div>
           )}
-          {reportTitle && (
+          {touchpointTitle && (
             <div>
-              <span className="key">title</span> <span>{reportTitle}</span>
+              <span className="key">title</span> <span>{touchpointTitle}</span>
             </div>
           )}
           {prNumber !== null && repo ? (
             <div>
               <span className="key">PR</span>{" "}
-              <a className="mono" href={reportUrl || `https://github.com/${repo}/pull/${prNumber}`} target="_blank" rel="noreferrer">
+              <a className="mono" href={touchpointUrl || `https://github.com/${repo}/pull/${prNumber}`} target="_blank" rel="noreferrer">
                 #{prNumber}
               </a>
             </div>
           ) : (
-            <div className="dim mono">No report opened yet for this run.</div>
+            <div className="dim mono">No touchpoint evidence opened yet for this run.</div>
           )}
           {prBranch && (
             <div>
@@ -1347,9 +1356,9 @@ function RunsTab({
           <th>Run</th>
           <th>State</th>
           <th>Started</th>
-          <th>Attempts</th>
+          <th>Cycles</th>
           <th>Cost</th>
-          <th>PR</th>
+          <th>Touchpoint</th>
           <th></th>
         </tr>
       </thead>
@@ -1357,6 +1366,7 @@ function RunsTab({
         {runs.map((r) => {
           const id = runIdFromNode(r);
           const meta = r.metadata;
+          const cycleCount = numberOrNull(meta.cycles_count) ?? 1;
           const attemptCount = graph.nodes.filter(
             (n) => n.kind === "attempt" && n.id.startsWith(`attempt:${id}:`),
           ).length;
@@ -1385,7 +1395,10 @@ function RunsTab({
                 <span className={`pill ${runStatePill(r.state ?? "")}`}>{r.state ?? "—"}</span>
               </td>
               <td className="mono dim">{r.timestamp ? formatTime(r.timestamp) : "—"}</td>
-              <td className="mono">{attemptCount}</td>
+              <td className="mono">
+                {cycleCount}
+                <span className="dim"> / {attemptCount} stage attempts</span>
+              </td>
               <td className="mono">{cost !== null ? `$${cost.toFixed(4)}` : "—"}</td>
               <td className="mono dim">{prNumber !== null ? `#${prNumber}` : "—"}</td>
               <td>
@@ -1398,6 +1411,97 @@ function RunsTab({
         })}
       </tbody>
     </table>
+  );
+}
+
+function TouchpointTab({
+  graph,
+  graphAvailable,
+  repo,
+}: {
+  graph: IssueGraph | null;
+  graphAvailable: boolean;
+  repo: string | null;
+}) {
+  if (!graphAvailable) {
+    return (
+      <div className="empty">
+        Touchpoint evidence isn't available for native issues yet.
+      </div>
+    );
+  }
+  if (!graph) {
+    return <div className="empty">Loading touchpoint…</div>;
+  }
+
+  const runs = graph.nodes.filter((n) => n.kind === "run");
+  const touchpointNodes = graph.nodes.filter((n) => n.kind === "pr" || n.kind === "signal");
+  const latestRun = findActiveRun(graph) ?? findLastCompletedRun(graph);
+  const latestMeta = latestRun?.metadata ?? {};
+  const prNumber = numberOrNull(latestMeta.pr_number);
+  const reportTitle = stringOrNull(latestMeta.report_title);
+  const reportState = stringOrNull(latestMeta.report_state);
+  const reportUrl = stringOrNull(latestMeta.report_url);
+
+  return (
+    <>
+      <div className="project-info">
+        <div className="row">
+          <span className="key">state</span>
+          <span className="val">
+            <span className={`pill ${reportState === "open" || reportState === "ready" ? "busy" : reportState ? "free" : ""}`}>
+              {reportState ?? "pending evidence"}
+            </span>
+          </span>
+        </div>
+        <div className="row">
+          <span className="key">scope</span>
+          <span className="val mono">issue-level, {runs.length} run{runs.length === 1 ? "" : "s"}</span>
+        </div>
+        <div className="row">
+          <span className="key">current run</span>
+          <span className="val mono">{latestRun ? runIdFromNode(latestRun) : "—"}</span>
+        </div>
+        <div className="row">
+          <span className="key">PR evidence</span>
+          <span className="val">
+            {prNumber !== null && repo ? (
+              <a className="mono" href={reportUrl || `https://github.com/${repo}/pull/${prNumber}`} target="_blank" rel="noreferrer">
+                #{prNumber}{reportTitle ? ` — ${reportTitle}` : ""}
+              </a>
+            ) : (
+              <span className="dim">No PR evidence yet.</span>
+            )}
+          </span>
+        </div>
+      </div>
+
+      <h2>Evidence</h2>
+      {touchpointNodes.length === 0 ? (
+        <div className="empty">No touchpoint evidence has landed yet.</div>
+      ) : (
+        <table>
+          <thead>
+            <tr>
+              <th>Kind</th>
+              <th>Label</th>
+              <th>State</th>
+              <th>Created</th>
+            </tr>
+          </thead>
+          <tbody>
+            {touchpointNodes.map((node) => (
+              <tr key={node.id}>
+                <td className="mono">{node.kind === "pr" ? "PR" : "signal"}</td>
+                <td>{node.label}</td>
+                <td className="mono dim">{node.state ?? "—"}</td>
+                <td className="mono dim">{node.timestamp ? formatTime(node.timestamp) : "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </>
   );
 }
 

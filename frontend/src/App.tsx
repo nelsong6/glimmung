@@ -65,7 +65,7 @@ type Snapshot = {
 
 type Connection = "live" | "stale" | "dead";
 
-type Inflight = { issues: boolean; reports: boolean };
+type Inflight = { issues: boolean };
 
 type Selection =
   | { kind: "all" }
@@ -103,10 +103,12 @@ export function App() {
         <Route path="graph" element={<GraphRoute />} />
         <Route path="issues" element={<IssuesRoute />} />
         <Route path="issues/:owner/:repo/:n" element={<IssueDetailView />}>
-          {/* New tabs (#81): issue / the run / runs. */}
+          {/* Issue workspace tabs. Old slugs are still accepted by
+              IssueDetailView so existing links keep working. */}
           <Route path="issue" element={null} />
           <Route path="the-run" element={null} />
           <Route path="runs" element={null} />
+          <Route path="touchpoint" element={null} />
           {/* Backwards-compat: pre-#81 tab slugs. SLUG_TO_TAB in
               IssueDetailView maps these to the new tabs so deep links
               from before the rename keep working. */}
@@ -118,6 +120,7 @@ export function App() {
           <Route path="issue" element={null} />
           <Route path="the-run" element={null} />
           <Route path="runs" element={null} />
+          <Route path="touchpoint" element={null} />
           <Route path="description" element={null} />
           <Route path="in-progress" element={null} />
           <Route path="lineage" element={null} />
@@ -142,7 +145,7 @@ function Layout() {
   const [account, setAccount] = useState<AccountInfo | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [showAdmin, setShowAdmin] = useState(false);
-  const [inflight, setInflight] = useState<Inflight>({ issues: false, reports: false });
+  const [inflight, setInflight] = useState<Inflight>({ issues: false });
 
   useEffect(() => {
     initAuth()
@@ -192,9 +195,9 @@ function Layout() {
     };
   }, [lastUpdate]);
 
-  // Poll /v1/issues + /v1/reports to drive the pulsing dot on the issues/reports
-  // tabs when something has a lock held. Cheap public reads; 20s feels
-  // live enough without hammering the API.
+  // Poll /v1/issues + /v1/reports to drive the issue-workspace pulse
+  // when issue work or touchpoint review is in flight. Reports are no
+  // longer primary navigation, but their locks still matter to issues.
   useEffect(() => {
     let cancelled = false;
     const check = async () => {
@@ -207,8 +210,9 @@ function Layout() {
         const reports = pRes.ok ? ((await pRes.json()) as Array<{ pr_lock_held?: boolean }>) : [];
         if (cancelled) return;
         setInflight({
-          issues: Array.isArray(issues) && issues.some((x) => x.issue_lock_held),
-          reports: Array.isArray(reports) && reports.some((x) => x.pr_lock_held),
+          issues:
+            (Array.isArray(issues) && issues.some((x) => x.issue_lock_held))
+            || (Array.isArray(reports) && reports.some((x) => x.pr_lock_held)),
         });
       } catch {
         // keep last value on transient failures
@@ -421,10 +425,6 @@ function Layout() {
           </NavLink>
           <NavLink to="/graph" className={tabLinkClass}>
             graph
-          </NavLink>
-          <NavLink to="/reports" className={tabLinkClass}>
-            reports
-            {inflight.reports && <span className="tab-dot" />}
           </NavLink>
         </div>
 

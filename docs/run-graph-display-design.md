@@ -329,7 +329,7 @@ StepNode
 ```
 
 The projection should normalize GitHub Actions phases, native Kubernetes
-jobs, the PR primitive, reports, and future executor kinds into one
+jobs, PR evidence, touchpoint state, and future executor kinds into one
 display vocabulary.
 
 ## Refactor Sequence
