@@ -119,6 +119,59 @@ async def test_list_filters_by_project_repo_and_limit(cosmos):
     assert len(rows) == 1
 
 
+@pytest.mark.asyncio
+async def test_list_surfaces_and_filters_issue_workflow(cosmos):
+    issue_agent = await issue_ops.create_issue(
+        cosmos, project="ambience", title="workflow issue",
+        workflow="issue-agent",
+    )
+    await issue_ops.create_issue(
+        cosmos, project="ambience", title="other workflow",
+        workflow="other-agent",
+    )
+
+    rows = await _list_issues_from_cosmos(
+        cosmos, project="ambience", workflow="issue-agent",
+    )
+
+    assert len(rows) == 1
+    assert rows[0].id == issue_agent.id
+    assert rows[0].workflow == "issue-agent"
+
+
+@pytest.mark.asyncio
+async def test_list_derives_issue_workflow_from_latest_run(cosmos):
+    issue = await issue_ops.create_issue(
+        cosmos, project="ambience", title="ran once",
+    )
+    await cosmos.runs.create_item({
+        "id": "run-old",
+        "project": "ambience",
+        "workflow": "old-agent",
+        "issue_id": issue.id,
+        "issue_number": 0,
+        "state": "aborted",
+        "created_at": "2026-01-01T00:00:00+00:00",
+    })
+    await cosmos.runs.create_item({
+        "id": "run-new",
+        "project": "ambience",
+        "workflow": "issue-agent",
+        "issue_id": issue.id,
+        "issue_number": 0,
+        "state": "passed",
+        "created_at": "2026-01-02T00:00:00+00:00",
+    })
+
+    rows = await _list_issues_from_cosmos(
+        cosmos, project="ambience", workflow="issue-agent",
+    )
+
+    assert len(rows) == 1
+    assert rows[0].workflow == "issue-agent"
+    assert rows[0].last_run_id == "run-new"
+
+
 # ─── _build_issue_detail: shared rendering ──────────────────────────────
 
 

@@ -183,6 +183,7 @@ const mockIssues = [
   {
     id: "issue-glimmung-206",
     project: "glimmung",
+    workflow: "issue-agent",
     repo: "nelsong6/glimmung",
     number: 206,
     title: "Display native run graph and step-level execution",
@@ -197,6 +198,7 @@ const mockIssues = [
   {
     id: "issue-glimmung-217",
     project: "glimmung",
+    workflow: "portfolio-agent",
     repo: "nelsong6/glimmung",
     number: 217,
     title: "Generate reusable design portfolio from an existing repo",
@@ -211,6 +213,7 @@ const mockIssues = [
   {
     id: "issue-ambience-44",
     project: "ambience",
+    workflow: "checkout-agent",
     repo: "nelsong6/ambience",
     number: 44,
     title: "Mock checkout flow before wiring real payment data",
@@ -427,7 +430,14 @@ function handleMockRequest(url: URL, init?: RequestInit): Response {
   if (path === "/v1/config") {
     return json({ entra_client_id: "mock", authority: "https://login.microsoftonline.com/mock", tank_operator_base_url: "https://tank.mock.local" });
   }
-  if (path === "/v1/issues" && method === "GET") return json(mockIssues);
+  if (path === "/v1/issues" && method === "GET") {
+    const project = url.searchParams.get("project");
+    const workflow = url.searchParams.get("workflow");
+    return json(mockIssues.filter((issue) => (
+      (!project || issue.project === project)
+      && (!workflow || issue.workflow === workflow)
+    )));
+  }
   if (path === "/v1/reports" && method === "GET") return json(mockReports);
   if (path === "/v1/graph" && method === "GET") return json(filterGraph(url.searchParams.get("project")));
   if (path === "/v1/runs/dispatch" && method === "POST") {

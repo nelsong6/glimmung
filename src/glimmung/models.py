@@ -812,6 +812,7 @@ class IssueSource(str, Enum):
 
 class IssueMetadata(BaseModel):
     source: IssueSource = IssueSource.MANUAL
+    workflow: str | None = None
     # GH-issue link-out. `github_issue_url` is the canonical handle for
     # `find_issue_by_github_url`; `github_issue_repo` and
     # `github_issue_number` are denormalized so dispatch / completion /

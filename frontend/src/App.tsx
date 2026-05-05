@@ -903,6 +903,7 @@ function ProjectWorkflowView({
       <IssuesView
         signedIn={signedIn}
         projectFilter={project.name}
+        workflowFilter={workflow.name}
         headingLabel="Workflow issues"
         showProjectColumn={false}
       />
