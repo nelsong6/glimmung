@@ -6,6 +6,7 @@ import { useState } from "react";
 import "./index.css";
 
 type ReviewState = "unset" | "good" | "needs-work";
+type PortfolioTab = "system" | "files";
 
 type PortfolioItem = {
   id: string;
@@ -362,23 +363,28 @@ const DESIGN_FILE_ITEMS: PortfolioItem[] = [
 ];
 
 export function StyleguideView() {
-  const [activeTab, setActiveTab] = useState<"system" | "files">("system");
+  const [activeTab, setActiveTab] = useState<PortfolioTab>("system");
   const items = activeTab === "system" ? DESIGN_SYSTEM_ITEMS : DESIGN_FILE_ITEMS;
-  const [openIds, setOpenIds] = useState<Set<string>>(() => new Set(DESIGN_SYSTEM_ITEMS.filter((item) => item.initialOpen).map((item) => item.id)));
+  const [openIdsByTab, setOpenIdsByTab] = useState<Record<PortfolioTab, Set<string>>>(() => ({
+    system: new Set(DESIGN_SYSTEM_ITEMS.filter((item) => item.initialOpen).map((item) => item.id)),
+    files: new Set(DESIGN_FILE_ITEMS.filter((item) => item.initialOpen).map((item) => item.id)),
+  }));
   const [reviews, setReviews] = useState<Record<string, ReviewState>>({});
+  const openIds = openIdsByTab[activeTab];
 
-  const switchTab = (tab: "system" | "files") => {
+  const switchTab = (tab: PortfolioTab) => {
     setActiveTab(tab);
-    const nextItems = tab === "system" ? DESIGN_SYSTEM_ITEMS : DESIGN_FILE_ITEMS;
-    setOpenIds(new Set(nextItems.filter((item) => item.initialOpen).map((item) => item.id)));
   };
 
   const toggleOpen = (id: string) => {
-    setOpenIds((current) => {
-      const next = new Set(current);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
+    setOpenIdsByTab((current) => {
+      const nextTabOpenIds = new Set(current[activeTab]);
+      if (nextTabOpenIds.has(id)) nextTabOpenIds.delete(id);
+      else nextTabOpenIds.add(id);
+      return {
+        ...current,
+        [activeTab]: nextTabOpenIds,
+      };
     });
   };
 
