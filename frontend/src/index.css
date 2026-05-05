@@ -1525,6 +1525,8 @@ h2 .inline-action,
 
 .app-breadcrumb {
   margin-top: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
 }
 .breadcrumb-segment {
   display: inline-flex;
@@ -1540,7 +1542,6 @@ h2 .inline-action,
   gap: 8px;
   margin: 12px 0 6px;
   padding-bottom: 12px;
-  border-bottom: 1px solid var(--border);
 }
 .dashboard-nav-link {
   display: inline-flex;
