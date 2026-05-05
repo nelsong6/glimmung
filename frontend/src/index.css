@@ -1523,8 +1523,16 @@ h2 .inline-action,
   margin-top: 8px;
 }
 
-.dashboard-breadcrumb {
+.app-breadcrumb {
   margin-top: 14px;
+}
+.breadcrumb-segment {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.breadcrumb-sep {
+  color: var(--fg-faintest);
 }
 .dashboard-nav {
   display: flex;

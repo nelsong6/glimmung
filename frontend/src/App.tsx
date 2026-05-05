@@ -285,6 +285,7 @@ function Layout() {
     `dashboard-nav-link ${isActive ? "selected" : ""}`;
   const dashboardWorkspace =
     location.pathname === "/" || location.pathname === "/issues" || location.pathname === "/graph" || location.pathname === "/projects";
+  const breadcrumbs = buildBreadcrumbs(location.pathname);
 
   return (
     <div className="layout">
@@ -350,11 +351,20 @@ function Layout() {
           </div>
         </header>
 
+        <nav className="workspace-breadcrumb app-breadcrumb" aria-label="breadcrumb">
+          {breadcrumbs.map((crumb, index) => (
+            <span className="breadcrumb-segment" key={`${crumb.label}:${index}`}>
+              {index > 0 && <span className="breadcrumb-sep">/</span>}
+              {crumb.to && index < breadcrumbs.length - 1 ? (
+                <Link to={crumb.to}>{crumb.label}</Link>
+              ) : (
+                <strong>{crumb.label}</strong>
+              )}
+            </span>
+          ))}
+        </nav>
+
         {dashboardWorkspace && (
-          <>
-            <nav className="workspace-breadcrumb dashboard-breadcrumb" aria-label="breadcrumb">
-              <strong>Dashboard</strong>
-            </nav>
             <nav className="dashboard-nav" aria-label="dashboard views">
               <NavLink to="/" end className={dashboardLinkClass}>
                 capacity
@@ -370,7 +380,6 @@ function Layout() {
                 projects
               </NavLink>
             </nav>
-          </>
         )}
 
         {account && showAdmin && (
@@ -381,6 +390,46 @@ function Layout() {
       </main>
     </div>
   );
+}
+
+type Breadcrumb = {
+  label: string;
+  to?: string;
+};
+
+function buildBreadcrumbs(pathname: string): Breadcrumb[] {
+  const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
+  if (parts.length === 0) return [{ label: "Dashboard" }];
+  if (parts[0] === "projects") {
+    const crumbs: Breadcrumb[] = [
+      { label: "Dashboard", to: "/" },
+      { label: "Projects", to: "/projects" },
+    ];
+    if (parts[1]) crumbs.push({ label: parts[1] });
+    return crumbs;
+  }
+  if (parts[0] === "issues") {
+    const crumbs: Breadcrumb[] = [{ label: "Dashboard", to: "/" }];
+    if (parts.length >= 4) {
+      const owner = parts[1];
+      const repo = parts[2];
+      const issue = parts[3];
+      crumbs.push({ label: "Issues", to: "/issues" });
+      crumbs.push({ label: `${owner}/${repo}` });
+      crumbs.push({ label: `#${issue}` });
+      return crumbs;
+    }
+    if (parts.length >= 3) {
+      crumbs.push({ label: "Projects", to: "/projects" });
+      crumbs.push({ label: parts[1], to: `/projects/${encodeURIComponent(parts[1])}` });
+      crumbs.push({ label: parts[2] });
+      return crumbs;
+    }
+    return [{ label: "Dashboard", to: "/" }, { label: "Issues" }];
+  }
+  if (parts[0] === "graph") return [{ label: "Dashboard", to: "/" }, { label: "Graph" }];
+  if (parts[0] === "reports") return [{ label: "Dashboard", to: "/" }, { label: "Touchpoint evidence" }];
+  return [{ label: "Dashboard", to: "/" }, { label: parts[0] }];
 }
 
 function CapacityRoute() {
@@ -528,14 +577,6 @@ function ProjectView({
 
   return (
     <div className="project-workspace">
-      <nav className="workspace-breadcrumb" aria-label="breadcrumb">
-        <Link to="/">Dashboard</Link>
-        <span>/</span>
-        <span>Projects</span>
-        <span>/</span>
-        <strong>{project.name}</strong>
-      </nav>
-
       <section className="project-hero">
         <div className="project-hero-main">
           <div className="project-kicker mono">project</div>
