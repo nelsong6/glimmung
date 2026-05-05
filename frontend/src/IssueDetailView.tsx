@@ -249,7 +249,7 @@ export function IssueDetailView() {
 
   const onBack = () => {
     const projectName = detail?.project ?? (target.kind === "native" ? target.project : null);
-    navigate(projectName ? `/projects/${encodeURIComponent(projectName)}` : "/");
+    navigate(projectName ? `/projects/${encodeURIComponent(projectName)}` : "/needs-attention");
   };
 
   useEffect(() => {

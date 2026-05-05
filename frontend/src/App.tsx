@@ -98,11 +98,12 @@ export function App() {
       <Route path="/_design-portfolio" element={<StyleguideView />} />
       <Route path="/_mock/*" element={<MockModeRedirect />} />
       <Route path="/" element={<Layout />}>
-        <Route index element={<CapacityRoute />} />
+        <Route index element={<DashboardRoute />} />
+        <Route path="needs-attention" element={<NeedsAttentionRoute />} />
         <Route path="graph" element={<Navigate to="/" replace />} />
         <Route path="projects" element={<ProjectsRoute />} />
         <Route path="projects/:project" element={<ProjectRoute />} />
-        <Route path="issues" element={<Navigate to="/" replace />} />
+        <Route path="issues" element={<Navigate to="/needs-attention" replace />} />
         <Route path="issues/:owner/:repo/:n" element={<IssueDetailView />}>
           {/* Issue workspace tabs. Old slugs are still accepted by
               IssueDetailView so existing links keep working. */}
@@ -282,7 +283,7 @@ function Layout() {
 
   const dashboardLinkClass = ({ isActive }: { isActive: boolean }) =>
     `dashboard-nav-link ${isActive ? "selected" : ""}`;
-  const homeRoute = location.pathname === "/";
+  const topLevelRoute = ["/", "/needs-attention", "/projects"].includes(location.pathname);
   const breadcrumbs = buildBreadcrumbs(location.pathname, snap?.projects ?? []);
 
   return (
@@ -362,10 +363,13 @@ function Layout() {
           ))}
         </nav>
 
-        {homeRoute && (
+        {topLevelRoute && (
             <nav className="dashboard-nav" aria-label="dashboard views">
               <NavLink to="/" end className={dashboardLinkClass}>
-                attention
+                dashboard
+              </NavLink>
+              <NavLink to="/needs-attention" className={dashboardLinkClass}>
+                needs attention
                 {inflight.issues && <span className="tab-dot" />}
               </NavLink>
               <NavLink to="/projects" className={dashboardLinkClass}>
@@ -391,17 +395,20 @@ type Breadcrumb = {
 
 function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
   const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
-  if (parts.length === 0) return [{ label: "Home" }];
+  if (parts.length === 0) return [{ label: "Dashboard" }];
+  if (parts[0] === "needs-attention") {
+    return [{ label: "Dashboard", to: "/" }, { label: "Needs attention" }];
+  }
   if (parts[0] === "projects") {
     const crumbs: Breadcrumb[] = [
-      { label: "Home", to: "/" },
+      { label: "Dashboard", to: "/" },
       { label: "Projects", to: "/projects" },
     ];
     if (parts[1]) crumbs.push({ label: parts[1] });
     return crumbs;
   }
   if (parts[0] === "issues") {
-    const crumbs: Breadcrumb[] = [{ label: "Home", to: "/" }];
+    const crumbs: Breadcrumb[] = [{ label: "Dashboard", to: "/" }];
     if (parts.length >= 4) {
       const owner = parts[1];
       const repo = parts[2];
@@ -412,7 +419,7 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
         crumbs.push({ label: "Projects", to: "/projects" });
         crumbs.push({ label: project.name, to: `/projects/${encodeURIComponent(project.name)}` });
       } else {
-        crumbs.push({ label: "Attention", to: "/" });
+        crumbs.push({ label: "Needs attention", to: "/needs-attention" });
         crumbs.push({ label: githubRepo });
       }
       crumbs.push({ label: `#${issue}` });
@@ -424,15 +431,20 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
       crumbs.push({ label: parts[2] });
       return crumbs;
     }
-    return [{ label: "Home", to: "/" }, { label: "Attention" }];
+    return [{ label: "Dashboard", to: "/" }, { label: "Needs attention" }];
   }
-  if (parts[0] === "reports") return [{ label: "Home", to: "/" }, { label: "Touchpoint evidence" }];
-  return [{ label: "Home", to: "/" }, { label: parts[0] }];
+  if (parts[0] === "reports") return [{ label: "Dashboard", to: "/" }, { label: "Touchpoint evidence" }];
+  return [{ label: "Dashboard", to: "/" }, { label: parts[0] }];
 }
 
-function CapacityRoute() {
+function DashboardRoute() {
   const ctx = useOutletContext<LayoutContext>();
   return <CapacityView {...ctx} />;
+}
+
+function NeedsAttentionRoute() {
+  const { signedIn } = useOutletContext<LayoutContext>();
+  return <IssuesView signedIn={signedIn} projectFilter={null} headingLabel="Needs attention" />;
 }
 
 function ProjectsRoute() {
@@ -729,8 +741,6 @@ function CapacityView({
           <div className="kpi"><span className="k">active</span><span className="v">{snap.active_leases.length}</span></div>
         </div>
       )}
-
-      <IssuesView signedIn={signedIn} projectFilter={null} headingLabel="What needs attention" />
 
       <h2>Hosts</h2>
         {snap === null ? (
