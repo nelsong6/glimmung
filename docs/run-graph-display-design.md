@@ -111,11 +111,21 @@ branching/recycle/resume relationships. The graph should answer:
 - What can the user inspect or decide next?
 
 The overview should read as a graph, not as a strip of unrelated cards.
-Nodes can keep Glimmung's chamfered block vocabulary, but they need
-directional connectors, selected-node state, and room for non-linear
-relationships such as recycle/request-changes paths. The graph should
-let the user select a stage or job and then inspect the details
-below/alongside the graph.
+Nodes can keep Glimmung's chamfered block vocabulary, but the boxes
+themselves should stay sparse. The graph should use hierarchy and
+position to explain structure:
+
+- stages own columns or lanes,
+- stage names sit at the column/header tier,
+- jobs are boxes inside the stage column,
+- parallel jobs stack inside the same stage,
+- directional connectors show flow between stages/jobs,
+- recycle/request-changes paths use secondary/dashed connectors.
+
+Clicking a node should pin an inspector panel that explains what is in
+the box. Hover previews can be added later, but click selection is the
+more durable interaction for debugging, sharing, and review. The graph
+should not depend on hover-only state for important information.
 
 ## Stage Detail
 
@@ -136,6 +146,11 @@ Stage detail should show:
 Stages may be skipped during resume. Skipped stages should remain
 visible because they explain why a resumed run started later in the
 workflow.
+
+In the overview, stage information should usually appear as a lane or
+column heading rather than as a full graph box. The full stage detail can
+appear in the inspector when the user selects the stage heading or a
+stage-level summary affordance.
 
 ## Job and Step Detail
 

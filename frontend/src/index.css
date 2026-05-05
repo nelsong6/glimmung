@@ -416,12 +416,17 @@
   color: var(--fg);
   font-weight: 600;
 }
+.run-graph-board {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 300px);
+  gap: 14px;
+}
 .run-graph {
   display: grid;
-  grid-template-columns: minmax(150px, 1fr) 42px minmax(170px, 1.15fr) 42px minmax(150px, 1fr);
-  grid-template-rows: minmax(76px, auto) 34px minmax(76px, auto);
-  align-items: center;
-  min-height: 204px;
+  grid-template-columns: minmax(150px, 1fr) 44px minmax(170px, 1.15fr) 44px minmax(150px, 1fr);
+  grid-template-rows: auto minmax(86px, auto) minmax(86px, auto);
+  align-items: stretch;
+  min-height: 250px;
   padding: 18px;
   border: 1px solid var(--border);
   background:
@@ -430,14 +435,45 @@
     var(--bg-deep);
   background-size: 28px 28px;
 }
+.stage-column {
+  display: grid;
+  grid-template-rows: auto minmax(62px, auto) minmax(62px, auto);
+  gap: 12px;
+}
+.stage-heading {
+  min-height: 34px;
+  border-bottom: 1px solid var(--border);
+}
+.stage-heading strong,
+.stage-heading span {
+  display: block;
+}
+.stage-heading strong {
+  color: var(--fg);
+  font-size: 0.9rem;
+}
+.stage-heading span {
+  margin-top: 2px;
+  color: var(--fg-dimmer);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+.stage-column.active .stage-heading {
+  border-bottom-color: color-mix(in srgb, var(--state-busy-fg) 45%, var(--border));
+}
 .run-graph-node {
   position: relative;
   display: grid;
   gap: 4px;
   align-content: center;
-  min-height: 70px;
-  padding: 12px 14px;
+  min-height: 62px;
+  padding: 10px 12px;
   background: var(--surface);
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
   clip-path: polygon(10px 0, 100% 0, 100% 100%, 0 100%, 0 10px);
   isolation: isolate;
 }
@@ -475,12 +511,8 @@
   --graph-rail: var(--state-info-fg);
   --graph-edge: color-mix(in srgb, var(--state-info-fg) 32%, var(--border));
 }
-.run-graph-node.job {
-  margin: 0 16px;
-}
 .run-graph-node strong,
-.run-graph-node small,
-.graph-kind {
+.run-graph-node span {
   display: block;
   min-width: 0;
 }
@@ -488,22 +520,16 @@
   color: var(--fg);
   font-size: 0.9rem;
 }
-.run-graph-node small {
+.run-graph-node span {
   color: var(--fg-dimmer);
   margin-top: 3px;
   font-family: var(--font-mono);
   font-size: 0.72rem;
 }
-.graph-kind {
-  color: var(--fg-dimmer);
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
 .run-graph-edge {
   position: relative;
   min-height: 2px;
+  align-self: center;
 }
 .run-graph-edge.horizontal::before {
   content: "";
@@ -545,7 +571,7 @@
 .run-graph-edge.recycle::before {
   content: "";
   position: absolute;
-  top: 50%;
+  top: 26px;
   left: 0;
   right: 0;
   height: 1px;
@@ -554,13 +580,33 @@
 .run-graph-edge.recycle::after {
   content: "";
   position: absolute;
-  top: calc(50% - 4px);
+  top: 22px;
   right: 0;
   width: 8px;
   height: 8px;
   border-top: 1px solid color-mix(in srgb, var(--state-info-fg) 60%, var(--border));
   border-right: 1px solid color-mix(in srgb, var(--state-info-fg) 60%, var(--border));
   transform: rotate(45deg);
+}
+.graph-inspector {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  min-height: 250px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+.graph-inspector-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.graph-inspector-head strong {
+  color: var(--fg);
+  font-size: 0.95rem;
 }
 .step-log-layout {
   display: grid;
@@ -658,6 +704,7 @@
     gap: 10px;
   }
   .run-graph,
+  .run-graph-board,
   .step-log-layout {
     grid-template-columns: 1fr;
   }
@@ -667,6 +714,7 @@
     min-height: 0;
   }
   .run-graph-node,
+  .stage-column,
   .run-graph-edge {
     grid-column: 1 !important;
     grid-row: auto !important;

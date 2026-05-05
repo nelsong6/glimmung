@@ -376,35 +376,65 @@ const DESIGN_FILE_ITEMS: PortfolioItem[] = [
             <span>/</span>
             <strong>Run 01KQ...</strong>
           </nav>
-          <div className="run-graph" aria-label="run graph">
-            <div className="run-graph-node stage done" style={{ gridColumn: "1", gridRow: "1" }}>
-              <span className="graph-kind">stage</span>
-              <strong>env-prep</strong>
-              <small>passed · 3m 12s</small>
+          <div className="run-graph-board">
+            <div className="run-graph" aria-label="run graph">
+              <div className="stage-column" style={{ gridColumn: "1" }}>
+                <div className="stage-heading">
+                  <strong>env-prep</strong>
+                  <span>passed</span>
+                </div>
+                <button type="button" className="run-graph-node done">
+                  <strong>prepare env</strong>
+                  <span>3m 12s</span>
+                </button>
+              </div>
+              <div className="run-graph-edge horizontal" style={{ gridColumn: "2", gridRow: "2" }} />
+              <div className="stage-column active" style={{ gridColumn: "3" }}>
+                <div className="stage-heading">
+                  <strong>agent-execute</strong>
+                  <span>running</span>
+                </div>
+                <button type="button" className="run-graph-node selected">
+                  <strong>portfolio-build</strong>
+                  <span>5 steps</span>
+                </button>
+                <button type="button" className="run-graph-node pending">
+                  <strong>screenshot</strong>
+                  <span>queued</span>
+                </button>
+              </div>
+              <div className="run-graph-edge horizontal" style={{ gridColumn: "4", gridRow: "2" }} />
+              <div className="stage-column" style={{ gridColumn: "5" }}>
+                <div className="stage-heading">
+                  <strong>pr</strong>
+                  <span>waiting</span>
+                </div>
+                <button type="button" className="run-graph-node pending">
+                  <strong>open report</strong>
+                  <span>blocked</span>
+                </button>
+                <button type="button" className="run-graph-node recycle">
+                  <strong>request changes</strong>
+                  <span>recycle</span>
+                </button>
+              </div>
+              <div className="run-graph-edge recycle" style={{ gridColumn: "4", gridRow: "3" }} />
             </div>
-            <div className="run-graph-edge horizontal" style={{ gridColumn: "2", gridRow: "1" }} />
-            <div className="run-graph-node stage active" style={{ gridColumn: "3", gridRow: "1" }}>
-              <span className="graph-kind">stage</span>
-              <strong>agent-execute</strong>
-              <small>running · native job</small>
-            </div>
-            <div className="run-graph-edge vertical" style={{ gridColumn: "3", gridRow: "2" }} />
-            <div className="run-graph-node job selected" style={{ gridColumn: "3", gridRow: "3" }}>
-              <span className="graph-kind">job</span>
-              <strong>portfolio-build</strong>
-              <small>selected · 5 steps</small>
-            </div>
-            <div className="run-graph-edge horizontal" style={{ gridColumn: "4", gridRow: "1" }} />
-            <div className="run-graph-node stage pending" style={{ gridColumn: "5", gridRow: "1" }}>
-              <span className="graph-kind">stage</span>
-              <strong>pr</strong>
-              <small>waiting</small>
-            </div>
-            <div className="run-graph-edge recycle" style={{ gridColumn: "4", gridRow: "3" }} />
-            <div className="run-graph-node stage recycle" style={{ gridColumn: "5", gridRow: "3" }}>
-              <span className="graph-kind">recycle</span>
-              <strong>request changes</strong>
-              <small>returns to job</small>
+            <div className="graph-inspector" aria-label="selected node details">
+              <div className="graph-inspector-head">
+                <span className="pill busy">running</span>
+                <strong>portfolio-build</strong>
+              </div>
+              <div className="project-info">
+                <div className="row"><span className="key">stage</span><span className="val mono">agent-execute</span></div>
+                <div className="row"><span className="key">kind</span><span className="val mono">native k8s job</span></div>
+                <div className="row"><span className="key">steps</span><span className="val mono">5</span></div>
+                <div className="row"><span className="key">elapsed</span><span className="val mono">1m 18s</span></div>
+              </div>
+              <p className="dim">
+                Selecting a node pins this inspector. Hover can preview later,
+                but click selection is the durable review/debugging path.
+              </p>
             </div>
           </div>
           <div className="step-log-layout">
