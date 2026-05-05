@@ -1519,6 +1519,32 @@ h2 .inline-action,
   margin-top: 3px;
   color: var(--fg);
 }
+.home-links {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.home-link {
+  display: grid;
+  gap: 4px;
+  min-height: 96px;
+  padding: 14px 16px;
+  background: var(--surface);
+  border-left: 2px solid var(--border-strong);
+  color: var(--fg-muted);
+  text-decoration: none;
+}
+.home-link:hover {
+  background: var(--surface-hover);
+  border-left-color: var(--state-success-fg);
+  color: var(--fg);
+  text-decoration: none;
+}
+.home-link strong {
+  color: var(--fg);
+  font-size: 1rem;
+  font-weight: 500;
+}
 .project-workspace > h2 {
   margin-top: 8px;
 }

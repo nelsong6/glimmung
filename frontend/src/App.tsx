@@ -98,9 +98,10 @@ export function App() {
       <Route path="/_design-portfolio" element={<StyleguideView />} />
       <Route path="/_mock/*" element={<MockModeRedirect />} />
       <Route path="/" element={<Layout />}>
-        <Route index element={<DashboardRoute />} />
+        <Route index element={<HomeRoute />} />
+        <Route path="dashboard" element={<DashboardRoute />} />
         <Route path="needs-attention" element={<NeedsAttentionRoute />} />
-        <Route path="graph" element={<Navigate to="/" replace />} />
+        <Route path="graph" element={<Navigate to="/dashboard" replace />} />
         <Route path="projects" element={<ProjectsRoute />} />
         <Route path="projects/:project" element={<ProjectRoute />} />
         <Route path="issues" element={<Navigate to="/needs-attention" replace />} />
@@ -283,7 +284,7 @@ function Layout() {
 
   const dashboardLinkClass = ({ isActive }: { isActive: boolean }) =>
     `dashboard-nav-link ${isActive ? "selected" : ""}`;
-  const topLevelRoute = ["/", "/needs-attention", "/projects"].includes(location.pathname);
+  const homeRoute = location.pathname === "/";
   const breadcrumbs = buildBreadcrumbs(location.pathname, snap?.projects ?? []);
 
   return (
@@ -363,9 +364,9 @@ function Layout() {
           ))}
         </nav>
 
-        {topLevelRoute && (
+        {homeRoute && (
             <nav className="dashboard-nav" aria-label="dashboard views">
-              <NavLink to="/" end className={dashboardLinkClass}>
+              <NavLink to="/dashboard" className={dashboardLinkClass}>
                 dashboard
               </NavLink>
               <NavLink to="/needs-attention" className={dashboardLinkClass}>
@@ -396,6 +397,9 @@ type Breadcrumb = {
 function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
   const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
   if (parts.length === 0) return [{ label: "Home" }];
+  if (parts[0] === "dashboard") {
+    return [{ label: "Home", to: "/" }, { label: "Dashboard" }];
+  }
   if (parts[0] === "needs-attention") {
     return [{ label: "Home", to: "/" }, { label: "Needs attention" }];
   }
@@ -437,6 +441,11 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
   return [{ label: "Home", to: "/" }, { label: parts[0] }];
 }
 
+function HomeRoute() {
+  const ctx = useOutletContext<LayoutContext>();
+  return <HomeView {...ctx} />;
+}
+
 function DashboardRoute() {
   const ctx = useOutletContext<LayoutContext>();
   return <CapacityView {...ctx} />;
@@ -464,6 +473,64 @@ function ReportsRoute() {
     <ReportsView
       projectFilter={selected.kind === "all" ? null : selected.project}
     />
+  );
+}
+
+function HomeView({ snap }: LayoutContext) {
+  const projects = snap?.projects.length ?? 0;
+  const workflows = snap?.workflows.length ?? 0;
+  const active = snap?.active_leases.length ?? 0;
+  const pending = snap?.pending_leases.length ?? 0;
+
+  return (
+    <div className="project-workspace">
+      <section className="project-hero">
+        <div className="project-hero-main">
+          <div className="project-kicker mono">home</div>
+          <h2>Glimmung coordinates agent work across projects</h2>
+          <div className="project-repo mono">
+            capacity, issue runs, touchpoints, and project-scoped workflow state
+          </div>
+        </div>
+        <div className="project-facts">
+          <div className="project-fact">
+            <span>projects</span>
+            <strong>{projects}</strong>
+          </div>
+          <div className="project-fact">
+            <span>workflows</span>
+            <strong>{workflows}</strong>
+          </div>
+          <div className="project-fact">
+            <span>active</span>
+            <strong>{active}</strong>
+          </div>
+          <div className="project-fact">
+            <span>pending</span>
+            <strong>{pending}</strong>
+          </div>
+        </div>
+      </section>
+
+      <section className="home-links" aria-label="primary destinations">
+        <Link to="/dashboard" className="home-link">
+          <span className="key">Dashboard</span>
+          <strong>System health, hosts, and queue state</strong>
+        </Link>
+        <Link to="/needs-attention" className="home-link">
+          <span className="key">Needs attention</span>
+          <strong>Open work that needs a decision or follow-up</strong>
+        </Link>
+        <Link to="/projects" className="home-link">
+          <span className="key">Projects</span>
+          <strong>Project workspaces, workflows, and scoped issues</strong>
+        </Link>
+        <a href="https://github.com/nelsong6/glimmung" className="home-link">
+          <span className="key">GitHub</span>
+          <strong>Repository, pull requests, and source history</strong>
+        </a>
+      </section>
+    </div>
   );
 }
 
