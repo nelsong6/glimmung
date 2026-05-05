@@ -133,6 +133,7 @@ export function App() {
         <Route path="projects/:project/workflows/:workflow" element={<ProjectWorkflowRoute />} />
         <Route path="projects/:project/issues" element={<ProjectIssuesRoute />} />
         <Route path="projects/:project/needs-attention" element={<ProjectNeedsAttentionRoute />} />
+        <Route path="projects/:project/runs" element={<ProjectRunsRoute />} />
         <Route path="issues" element={<Navigate to="/needs-attention" replace />} />
         <Route path="issues/:owner/:repo/:n" element={<IssueDetailView />}>
           {/* Issue workspace tabs. Old slugs are still accepted by
@@ -445,6 +446,8 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
       crumbs.push({ label: "Issues" });
     } else if (parts[2] === "needs-attention") {
       crumbs.push({ label: "Needs attention" });
+    } else if (parts[2] === "runs") {
+      crumbs.push({ label: "Runs" });
     }
     return crumbs;
   }
@@ -532,6 +535,12 @@ function ProjectNeedsAttentionRoute() {
   const params = useParams<{ project?: string }>();
   const ctx = useOutletContext<LayoutContext>();
   return <ProjectNeedsAttentionView {...ctx} projectName={decodeURIComponent(params.project ?? "")} />;
+}
+
+function ProjectRunsRoute() {
+  const params = useParams<{ project?: string }>();
+  const ctx = useOutletContext<LayoutContext>();
+  return <ProjectRunsView {...ctx} projectName={decodeURIComponent(params.project ?? "")} />;
 }
 
 function ReportsRoute() {
@@ -750,6 +759,10 @@ function ProjectView({
         <Link to={`${projectPath}/needs-attention`} className="home-link">
           <span className="key">Needs attention</span>
           <strong>Project work that needs a decision or follow-up</strong>
+        </Link>
+        <Link to={`${projectPath}/runs`} className="home-link">
+          <span className="key">Runs</span>
+          <strong>Run and cycle history for project work</strong>
         </Link>
         <a href={`https://github.com/${project.github_repo}`} className="home-link">
           <span className="key">GitHub</span>
@@ -1092,6 +1105,49 @@ function ProjectNeedsAttentionView({
         projectFilter={project.name}
         headingLabel="Needs attention"
         showProjectColumn={false}
+      />
+    </div>
+  );
+}
+
+function ProjectRunsView({
+  snap,
+  projectName,
+}: LayoutContext & { projectName: string }) {
+  if (snap === null) return <div className="empty">Connecting…</div>;
+  const project = snap.projects.find((p) => p.name === projectName);
+  if (!project) {
+    return <div className="empty">Project {projectName || "(missing)"} was not found.</div>;
+  }
+
+  const active = snap.active_leases.filter((l) => l.project === project.name);
+  const pending = snap.pending_leases.filter((l) => l.project === project.name);
+  const currentWork = [...active, ...pending];
+
+  return (
+    <div className="project-workspace">
+      <section className="project-hero">
+        <div className="project-hero-main">
+          <div className="project-kicker mono">project runs</div>
+          <h2>{project.name} runs</h2>
+          <div className="project-repo mono">{project.github_repo}</div>
+        </div>
+        <div className="project-facts">
+          <div className="project-fact">
+            <span>active</span>
+            <strong>{active.length}</strong>
+          </div>
+          <div className="project-fact">
+            <span>pending</span>
+            <strong>{pending.length}</strong>
+          </div>
+        </div>
+      </section>
+
+      <h2>Work in flight</h2>
+      <CurrentWorkTable
+        leases={currentWork}
+        emptyText={`No active or pending runs for ${project.name}.`}
       />
     </div>
   );

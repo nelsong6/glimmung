@@ -1037,7 +1037,7 @@ tr.eligible td.mono:first-child {
 
 header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 24px;
   margin-bottom: 0;
   padding-bottom: 16px;
@@ -1047,13 +1047,14 @@ header {
   flex: 1;
   min-width: 0;
   display: flex;
-  flex-direction: column;
-  gap: 6px;
+  align-items: baseline;
+  gap: 16px;
 }
 .header-title {
   display: flex;
   align-items: baseline;
   gap: 12px;
+  flex-shrink: 0;
 }
 .title-link {
   color: inherit;
@@ -1067,11 +1068,14 @@ header {
   padding-top: 4px;
 }
 .epigraph {
+  min-width: 0;
   font-style: italic;
   color: var(--fg-dimmest);
   font-size: 0.8rem;
-  line-height: 1.4;
-  max-width: 60ch;
+  line-height: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* User cluster — three console plates side-by-side: admin button (.gb),
