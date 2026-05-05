@@ -399,6 +399,43 @@
 .portfolio-type-stack {
   max-width: 720px;
 }
+.frontpage-frame {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  min-height: 620px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  overflow: hidden;
+}
+.frontpage-sidebar {
+  border-right: 1px solid var(--border);
+  background: var(--bg-deep);
+  padding: 24px 0;
+}
+.frontpage-main {
+  min-width: 0;
+  padding: 22px 24px 26px;
+}
+.frontpage-header {
+  margin-bottom: 16px;
+}
+.frontpage-kpis {
+  margin-bottom: 16px;
+}
+.frontpage-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+  gap: 18px;
+  margin-bottom: 20px;
+}
+.frontpage-grid section,
+.frontpage-main > section {
+  min-width: 0;
+}
+.frontpage-grid h2,
+.frontpage-main > section h2 {
+  margin-top: 0;
+}
 .run-workbench {
   display: grid;
   gap: 18px;
@@ -702,6 +739,14 @@
   .tag-matrix {
     grid-template-columns: 1fr;
     gap: 10px;
+  }
+  .frontpage-frame,
+  .frontpage-grid {
+    grid-template-columns: 1fr;
+  }
+  .frontpage-sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
   }
   .run-graph,
   .run-graph-board,

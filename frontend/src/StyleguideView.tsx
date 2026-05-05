@@ -294,31 +294,91 @@ const DESIGN_SYSTEM_ITEMS: PortfolioItem[] = [
 const DESIGN_FILE_ITEMS: PortfolioItem[] = [
   {
     id: "capacity-view",
-    title: "Capacity dashboard",
-    caption: "Host availability, queue, workflow eligibility, and admin entry points",
+    title: "Front page - Capacity",
+    caption: "The dashboard landing surface: project scope, host capacity, queue, and active work",
     initialOpen: true,
     render: () => (
-      <Specimen title="capacity dashboard">
-        <div className="kpi-strip">
-          <div className="kpi"><span className="k">hosts</span><span className="v">8</span></div>
-          <div className="kpi"><span className="k">free</span><span className="v green">5</span></div>
-          <div className="kpi"><span className="k">busy</span><span className="v amber">2</span></div>
-          <div className="kpi"><span className="k">drained</span><span className="v red">1</span></div>
-        </div>
-        <div className="run-panel">
-          <div className="run-panel-header">
-            <div>
-              <span className="pill busy">in_progress</span>
-              <span className="mono dim" style={{ marginLeft: "0.5rem" }}>run 01HXAZ...</span>
-              <span className="live-dot" aria-label="live" />
+      <Specimen title="front page - capacity">
+        <div className="frontpage-frame">
+          <aside className="frontpage-sidebar">
+            <div className="sidebar-title">Projects</div>
+            <button type="button" className="project-row"><span className="name">All</span><span className="count">12</span></button>
+            <div className="project-group">
+              <button type="button" className="project-row selected"><span className="name">glimmung</span><span className="count">7</span></button>
+              <button type="button" className="workflow-row selected"><span className="name">agent-run</span><span className="count">3</span></button>
+              <button type="button" className="workflow-row"><span className="name">verify</span><span className="count">1</span></button>
             </div>
-            <span className="dim mono">started 5/2/2026, 14:01</span>
-          </div>
-          <div className="run-panel-meta">
-            <div><span className="key">workflow</span> <span className="mono">agent-run</span></div>
-            <div><span className="key">trigger</span> <span className="mono">issues.opened</span></div>
-            <div><span className="key">attempts</span> <span className="mono">2</span></div>
-            <div><span className="key">cost</span> <span className="mono">$0.0504</span></div>
+            <div className="project-group">
+              <button type="button" className="project-row"><span className="name">ambience</span><span className="count">3</span></button>
+            </div>
+          </aside>
+          <div className="frontpage-main">
+            <header className="frontpage-header">
+              <div className="header-left">
+                <div className="header-title">
+                  <h1>glimmung</h1>
+                  <span className="connection live">live</span>
+                </div>
+                <div className="epigraph">glimmung / agent-run capacity and work queue</div>
+              </div>
+              <div className="user-cluster">
+                <button type="button" className="gb sm"><span className="sigil">∷</span><span className="label">admin</span></button>
+                <span className="user-id"><span className="user-dot" /><span className="user-handle">curator@example.com</span></span>
+              </div>
+            </header>
+            <div className="kpi-strip frontpage-kpis">
+              <div className="kpi"><span className="k">hosts</span><span className="v">8</span></div>
+              <div className="kpi"><span className="k">free</span><span className="v green">5</span></div>
+              <div className="kpi"><span className="k">busy</span><span className="v amber">2</span></div>
+              <div className="kpi"><span className="k">drained</span><span className="v red">1</span></div>
+              <div className="kpi"><span className="k">pending</span><span className="v">3</span></div>
+            </div>
+            <div className="frontpage-grid">
+              <section>
+                <h2>Hosts</h2>
+                <table>
+                  <thead>
+                    <tr><th>Name</th><th>State</th><th>Lease</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr className="eligible"><td className="mono">glimmung-slot-1</td><td><span className="pill free">free</span></td><td className="mono dim">-</td></tr>
+                    <tr><td className="mono">glimmung-slot-2</td><td><span className="pill busy">busy</span></td><td className="mono dim">01KQWF...</td></tr>
+                    <tr><td className="mono">glimmung-slot-3</td><td><span className="pill drain">drained</span></td><td className="mono dim">-</td></tr>
+                  </tbody>
+                </table>
+              </section>
+              <section>
+                <h2>Pending queue</h2>
+                <table>
+                  <thead>
+                    <tr><th>Lease</th><th>Issue</th><th>Requested</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr><td className="mono">01KQWX...</td><td>design portfolio bootstrap</td><td className="mono dim">14s ago</td></tr>
+                    <tr><td className="mono">01KQWY...</td><td>frontman bridge</td><td className="mono dim">2m ago</td></tr>
+                  </tbody>
+                </table>
+              </section>
+            </div>
+            <section>
+              <h2>Active work</h2>
+              <div className="run-panel">
+                <div className="run-panel-header">
+                  <div>
+                    <span className="pill busy">in_progress</span>
+                    <span className="mono dim" style={{ marginLeft: "0.5rem" }}>run 01HXAZ...</span>
+                    <span className="live-dot" aria-label="live" />
+                  </div>
+                  <span className="dim mono">started 5/2/2026, 14:01</span>
+                </div>
+                <div className="run-panel-meta">
+                  <div><span className="key">workflow</span> <span className="mono">agent-run</span></div>
+                  <div><span className="key">trigger</span> <span className="mono">issues.opened</span></div>
+                  <div><span className="key">attempts</span> <span className="mono">2</span></div>
+                  <div><span className="key">cost</span> <span className="mono">$0.0504</span></div>
+                </div>
+              </div>
+            </section>
           </div>
         </div>
       </Specimen>
