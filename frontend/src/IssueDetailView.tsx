@@ -224,14 +224,6 @@ export function IssueDetailView() {
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
-  const [dispatchState, setDispatchState] = useState<DispatchState>({ kind: "idle" });
-  const [abortState, setAbortState] = useState<AbortState>({ kind: "idle" });
-  // Which Run the "the run" tab paints. null → fall back to active or
-  // most recent. The Runs tab sets this when a row is clicked, then
-  // jumps to the run tab. Not URL-encoded yet; deep-linking a specific
-  // run gets a follow-up.
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
-
   const detailUrl =
     target.kind === "gh"
       ? `/v1/issues/${target.repo}/${target.issue_number}`
@@ -285,44 +277,6 @@ export function IssueDetailView() {
   // decisions land server-side.
   const isInFlight = !!(detail && (detail.issue_lock_held || detail.last_run_state === "in_progress"));
 
-  const onRedispatch = async () => {
-    if (!detail) return;
-    setDispatchState({ kind: "dispatching" });
-    try {
-      const r = await authedFetch("/v1/runs/dispatch", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ issue_id: detail.id, project: detail.project }),
-      });
-      if (!r.ok) {
-        const text = await r.text();
-        throw new Error(`/v1/runs/dispatch -> ${r.status}: ${text}`);
-      }
-      setDispatchState({ kind: "idle" });
-      setRefreshTick((t) => t + 1);
-    } catch (e) {
-      setDispatchState({ kind: "error", message: String(e) });
-    }
-  };
-
-  const onAbort = async (runId: string) => {
-    if (!detail) return;
-    setAbortState({ kind: "aborting" });
-    try {
-      const url = `/v1/runs/${encodeURIComponent(detail.project)}/${encodeURIComponent(runId)}/abort?reason=aborted_via_dashboard`;
-      const r = await authedFetch(url, { method: "POST" });
-      if (!r.ok) {
-        const text = await r.text();
-        throw new Error(`${url} -> ${r.status}: ${text}`);
-      }
-      setAbortState({ kind: "idle" });
-      // Refresh immediately so the in-flight pill flips to aborted and
-      // the abort button drops out before the next poll tick lands.
-      setRefreshTick((t) => t + 1);
-    } catch (e) {
-      setAbortState({ kind: "error", message: String(e) });
-    }
-  };
   useEffect(() => {
     if (tab !== "runs") return;
     if (!isInFlight) return;
@@ -374,18 +328,7 @@ export function IssueDetailView() {
               <RunsPane
                 graph={graph}
                 graphAvailable={!!graphUrl}
-                signedIn={signedIn}
                 project={detail.project}
-                repo={repoForLinks}
-                inFlight={isInFlight}
-                dispatchState={dispatchState}
-                onRedispatch={() => void onRedispatch()}
-                abortState={abortState}
-                onArmAbort={() => setAbortState({ kind: "armed" })}
-                onCancelAbort={() => setAbortState({ kind: "idle" })}
-                onConfirmAbort={(runId) => void onAbort(runId)}
-                selectedRunId={selectedRunId}
-                onBackToRuns={() => setSelectedRunId(null)}
               />
             )}
             {tab === "touchpoint" && (
@@ -1314,56 +1257,13 @@ const STUCK_DISPATCHING_MS = 30_000;
 function RunsPane({
   graph,
   graphAvailable,
-  signedIn,
   project,
-  repo,
-  inFlight,
-  dispatchState,
-  onRedispatch,
-  abortState,
-  onArmAbort,
-  onCancelAbort,
-  onConfirmAbort,
-  selectedRunId,
-  onBackToRuns,
 }: {
   graph: IssueGraph | null;
   graphAvailable: boolean;
-  signedIn: boolean;
   project: string;
-  repo: string | null;
-  inFlight: boolean;
-  dispatchState: DispatchState;
-  onRedispatch: () => void;
-  abortState: AbortState;
-  onArmAbort: () => void;
-  onCancelAbort: () => void;
-  onConfirmAbort: (runId: string) => void;
-  selectedRunId: string | null;
-  onBackToRuns: () => void;
 }) {
   const location = useLocation();
-
-  if (selectedRunId) {
-    return (
-      <RunViewer
-        graph={graph}
-        graphAvailable={graphAvailable}
-        signedIn={signedIn}
-        project={project}
-        repo={repo}
-        inFlight={inFlight}
-        dispatchState={dispatchState}
-        onRedispatch={onRedispatch}
-        abortState={abortState}
-        onArmAbort={onArmAbort}
-        onCancelAbort={onCancelAbort}
-        onConfirmAbort={onConfirmAbort}
-        selectedRunId={selectedRunId}
-        onBackToRuns={onBackToRuns}
-      />
-    );
-  }
 
   if (!graphAvailable) {
     return (
@@ -1398,6 +1298,7 @@ function RunsPane({
       <tbody>
         {runs.map((r) => {
           const id = runIdFromNode(r);
+          const slug = issueRunSlug(graph, r);
           const meta = r.metadata;
           const cycleCount = numberOrNull(meta.cycles_count) ?? 1;
           const attemptCount = graph.nodes.filter(
@@ -1415,10 +1316,11 @@ function RunsPane({
               <td className="mono">
                 <Link
                   className="link mono"
-                  to={`/projects/${encodeURIComponent(project)}/runs/${encodeURIComponent(id)}`}
+                  to={`/projects/${encodeURIComponent(project)}/runs/${encodeURIComponent(slug)}`}
                   state={{ returnTo: location.pathname, returnLabel: "issue runs" }}
+                  title={id}
                 >
-                  {id.slice(0, 8)}…
+                  {runSlugDisplay(slug)}
                 </Link>
                 {clonedFrom && (
                   <span
@@ -1443,7 +1345,7 @@ function RunsPane({
               <td>
                 <Link
                   className="link"
-                  to={`/projects/${encodeURIComponent(project)}/runs/${encodeURIComponent(id)}`}
+                  to={`/projects/${encodeURIComponent(project)}/runs/${encodeURIComponent(slug)}`}
                   state={{ returnTo: location.pathname, returnLabel: "issue runs" }}
                 >
                   view
@@ -1897,6 +1799,22 @@ function attemptsForRun(graph: IssueGraph, runNodeId: string): GraphNode[] {
 // endpoint and selection state both take the bare ULID.
 function runIdFromNode(n: GraphNode): string {
   return n.id.startsWith("run:") ? n.id.slice(4) : n.id;
+}
+
+function issueRunSlug(graph: IssueGraph, run: GraphNode): string {
+  const issue = graph.nodes.find((node) => node.kind === "issue");
+  const issueNumber = issue ? numberOrNull(issue.metadata.number) : null;
+  if (issueNumber === null) return runIdFromNode(run);
+  const issueRuns = graph.nodes
+    .filter((node) => node.kind === "run")
+    .slice()
+    .sort((a, b) => (a.timestamp ?? "").localeCompare(b.timestamp ?? ""));
+  const ordinal = issueRuns.findIndex((node) => node.id === run.id) + 1;
+  return `${issueNumber}-${Math.max(ordinal, 1)}`;
+}
+
+function runSlugDisplay(slug: string): string {
+  return /^\d+-\d+$/.test(slug) ? `#${slug}` : `${slug.slice(0, 8)}…`;
 }
 
 function isRecord(x: unknown): x is Record<string, unknown> {

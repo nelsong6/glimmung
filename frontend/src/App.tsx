@@ -502,17 +502,21 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
       if (project) {
         crumbs.push({ label: "Projects", to: "/projects" });
         crumbs.push({ label: project.name, to: `/projects/${encodeURIComponent(project.name)}` });
+        crumbs.push({ label: "Issues", to: `/projects/${encodeURIComponent(project.name)}/issues` });
       } else {
         crumbs.push({ label: "Needs attention", to: "/needs-attention" });
         crumbs.push({ label: githubRepo });
       }
       crumbs.push({ label: `#${issue}` });
+      if (parts[4]) crumbs.push({ label: titleCase(parts[4]) });
       return crumbs;
     }
     if (parts.length >= 3) {
       crumbs.push({ label: "Projects", to: "/projects" });
       crumbs.push({ label: parts[1], to: `/projects/${encodeURIComponent(parts[1])}` });
+      crumbs.push({ label: "Issues", to: `/projects/${encodeURIComponent(parts[1])}/issues` });
       crumbs.push({ label: parts[2] });
+      if (parts[3]) crumbs.push({ label: titleCase(parts[3]) });
       return crumbs;
     }
     return [{ label: "Home", to: "/" }, { label: "Needs attention" }];
@@ -653,10 +657,6 @@ function HomeView({ snap }: LayoutContext) {
           <span className="key">Projects</span>
           <strong>Project workspaces, workflows, and scoped issues</strong>
         </Link>
-        <a href="https://github.com/nelsong6/glimmung" className="home-link">
-          <span className="key">GitHub</span>
-          <strong>Repository, pull requests, and source history</strong>
-        </a>
       </section>
     </div>
   );
@@ -816,10 +816,6 @@ function ProjectView({
           <span className="key">Runs</span>
           <strong>Run and cycle history for project work</strong>
         </Link>
-        <a href={`https://github.com/${project.github_repo}`} className="home-link">
-          <span className="key">GitHub</span>
-          <strong>Repository, pull requests, and source history</strong>
-        </a>
       </section>
 
       <IssuesView
@@ -1303,6 +1299,14 @@ function projectRunSlug(run: ProjectRun, runs: ProjectRun[], index: number): str
 
 function runSlugDisplay(slug: string): string {
   return /^\d+-\d+$/.test(slug) ? `#${slug}` : slug;
+}
+
+function titleCase(value: string): string {
+  return value
+    .split("-")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 function resolveProjectRun(runs: ProjectRun[], runIdOrSlug: string): ProjectRun | null {
