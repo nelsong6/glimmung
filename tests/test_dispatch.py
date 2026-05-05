@@ -221,7 +221,7 @@ async def test_dispatch_creates_lock_lease_and_run_when_workflow_opts_in(app):
 
     # Lock is held
     lock_doc = await app.state.cosmos.locks.read_item(
-        item="issue::nelsong6%2Fambience%2342", partition_key="issue",
+        item="issue::ambience%2342", partition_key="issue",
     )
     assert lock_doc["state"] == "held"
     assert lock_doc["held_by"] == result.issue_lock_holder_id
@@ -338,7 +338,7 @@ async def test_dispatch_creates_run_even_for_non_verify_phase(app):
 
     # Lock held; no Run created.
     lock = await app.state.cosmos.locks.read_item(
-        item="issue::nelsong6%2Fambience%237", partition_key="issue",
+        item="issue::ambience%237", partition_key="issue",
     )
     assert lock["held_by"] == result.issue_lock_holder_id
 
@@ -488,7 +488,7 @@ async def test_dispatch_succeeds_after_lock_release(app):
     # Simulate Run completion: release the lease + the issue lock.
     await lease_ops.release(app.state.cosmos, first.lease_id, "ambience")
     await lock_ops.release_lock(
-        app.state.cosmos, scope="issue", key="nelsong6/ambience#42",
+        app.state.cosmos, scope="issue", key="ambience#42",
         holder_id=first.issue_lock_holder_id,
     )
 
@@ -772,7 +772,7 @@ async def test_find_run_by_issue_id_returns_most_recent_run_cross_partition(app)
     # Release the lock so a second dispatch can land on the same issue.
     await lock_ops.release_lock(
         app.state.cosmos, scope="issue",
-        key="nelsong6/ambience#42", holder_id=first.issue_lock_holder_id,
+        key="ambience#42", holder_id=first.issue_lock_holder_id,
     )
     second = await dispatch_run(
         app, repo="nelsong6/ambience", issue_number=42,
@@ -871,12 +871,12 @@ async def test_dispatch_by_issue_id_dispatches_native_issue(app):
     assert result.state == "dispatched"
     assert result.run_id is not None
 
-    # Lock keyed on glimmung/{id}, not repo#N.
+    # Lock keyed on the project-scoped Glimmung issue number, not repo#N.
     lock_docs = [d async for d in app.state.cosmos.locks.query_items(
         "SELECT * FROM c WHERE c.scope = @s",
         parameters=[{"name": "@s", "value": "issue"}],
     )]
-    assert any(d["key"] == f"glimmung/{issue.id}" for d in lock_docs)
+    assert any(d["key"] == f"ambience#{issue.number}" for d in lock_docs)
 
     runs = [d async for d in app.state.cosmos.runs.query_items(
         "SELECT * FROM c WHERE c.id = @id",
@@ -884,7 +884,7 @@ async def test_dispatch_by_issue_id_dispatches_native_issue(app):
     )]
     assert runs[0]["issue_id"] == issue.id
     assert runs[0]["issue_repo"] == "nelsong6/ambience"
-    assert runs[0]["issue_number"] == 0
+    assert runs[0]["issue_number"] == issue.number
 
     lease_docs = [d async for d in app.state.cosmos.leases.query_items(
         "SELECT * FROM c WHERE c.id = @id",
@@ -894,7 +894,7 @@ async def test_dispatch_by_issue_id_dispatches_native_issue(app):
     assert metadata["issue_id"] == issue.id
     assert metadata["issue_title"] == "native-only issue"
     assert metadata["issue_body"] == "Make the preview show the requested native change."
-    assert "issue_number" not in metadata
+    assert metadata["issue_number"] == str(issue.number)
     assert "issue_repo" not in metadata
 
 

@@ -154,7 +154,7 @@ async def dispatch_run(
     project_repo = str((project_doc or {}).get("githubRepo") or "")
     github_issue_repo = issue.metadata.github_issue_repo
     repo = github_issue_repo or project_repo
-    issue_number = issue.metadata.github_issue_number
+    issue_number = issue.number if issue.number is not None else issue.metadata.github_issue_number
 
     # 2. Resolve workflow.
     workflow_doc, picker_detail = await _resolve_workflow(cosmos, project_name, workflow_name)
@@ -163,12 +163,11 @@ async def dispatch_run(
     workflow_actual_name: str = workflow_doc["name"]
     effective_issue_labels = issue_labels if issue_labels is not None else list(issue.labels)
 
-    # 3. Claim the per-issue lock. GH-anchored issues lock on the
-    # repo#N key (so webhook-driven dispatches collide with UI-driven
-    # ones); native issues with no GH coords lock on their glimmung id.
+    # 3. Claim the per-issue lock. Numbered Glimmung issues lock on
+    # project#N; older unnumbered issues fall back to their glimmung id.
     holder_id = str(ULID())
     lock_key = (
-        f"{repo}#{issue_number}" if (repo and issue_number is not None)
+        f"{project_name}#{issue_number}" if issue_number is not None
         else f"glimmung/{issue.id}"
     )
     try:
@@ -241,11 +240,13 @@ async def dispatch_run(
         metadata["attempt_index"] = "0"
         if initial_phase is not None:
             metadata["phase_name"] = initial_phase["name"]
-    if github_issue_repo and issue_number is not None:
+    if issue_number is not None:
         metadata["issue_number"] = str(issue_number)
-        metadata["issue_repo"] = github_issue_repo
+        metadata["issue_id"] = issue.id
     else:
         metadata["issue_id"] = issue.id
+    if github_issue_repo and issue_number is not None:
+        metadata["issue_repo"] = github_issue_repo
     requirements = (
         (initial_phase or {}).get("requirements")
         or workflow_doc.get("defaultRequirements", {})

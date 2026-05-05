@@ -813,6 +813,7 @@ class IssueSource(str, Enum):
 class IssueMetadata(BaseModel):
     source: IssueSource = IssueSource.MANUAL
     workflow: str | None = None
+    ui_validation_requested: bool = False
     # GH-issue link-out. `github_issue_url` is the canonical handle for
     # `find_issue_by_github_url`; `github_issue_repo` and
     # `github_issue_number` are denormalized so dispatch / completion /
@@ -839,6 +840,7 @@ class IssueComment(BaseModel):
 class Issue(BaseModel):
     schema_version: int = 1
     id: str                                  # ULID; canonical glimmung-issue-id
+    number: int | None = None                # Glimmung-native issue number, scoped to project
     project: str                             # partition key
     title: str
     body: str = ""

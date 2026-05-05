@@ -63,11 +63,13 @@ async def create_issue(
     cosmos: Cosmos,
     *,
     project: str,
+    number: int | None = None,
     title: str,
     body: str = "",
     labels: list[str] | None = None,
     source: IssueSource = IssueSource.MANUAL,
     workflow: str | None = None,
+    ui_validation_requested: bool = False,
     github_issue_url: str | None = None,
     github_issue_repo: str | None = None,
     github_issue_number: int | None = None,
@@ -79,8 +81,16 @@ async def create_issue(
     so the denormalized coords land on the Issue at creation. Issues
     minted from non-GH sources (Slack, scheduled) leave them None."""
     now = _now()
+    issue_number = number
+    if issue_number is None:
+        # Preserve imported GH issue numbers as the first native display
+        # number so existing project URLs remain familiar during migration.
+        issue_number = github_issue_number
+    if issue_number is None:
+        issue_number = await next_issue_number(cosmos, project=project)
     issue = Issue(
         id=str(ULID()),
+        number=issue_number,
         project=project,
         title=title,
         body=body,
@@ -89,6 +99,7 @@ async def create_issue(
         metadata=IssueMetadata(
             source=source,
             workflow=workflow,
+            ui_validation_requested=ui_validation_requested,
             github_issue_url=github_issue_url,
             github_issue_repo=github_issue_repo,
             github_issue_number=github_issue_number,
@@ -104,6 +115,26 @@ async def create_issue(
     return issue
 
 
+async def next_issue_number(cosmos: Cosmos, *, project: str) -> int:
+    """Return the next project-scoped Glimmung issue number."""
+    docs = await query_all(
+        cosmos.issues,
+        "SELECT * FROM c WHERE c.project = @p",
+        parameters=[{"name": "@p", "value": project}],
+    )
+    highest = 0
+    for doc in docs:
+        candidate = doc.get("number")
+        if candidate is None:
+            candidate = (doc.get("metadata") or {}).get("github_issue_number")
+        try:
+            n = int(candidate)
+        except (TypeError, ValueError):
+            continue
+        highest = max(highest, n)
+    return highest + 1
+
+
 async def read_issue(
     cosmos: Cosmos,
     *,
@@ -116,6 +147,43 @@ async def read_issue(
         doc = await cosmos.issues.read_item(item=issue_id, partition_key=project)
     except CosmosResourceNotFoundError:
         return None
+    return Issue.model_validate(_strip_meta(doc)), doc["_etag"]
+
+
+async def read_issue_by_number(
+    cosmos: Cosmos,
+    *,
+    project: str,
+    number: int,
+) -> tuple[Issue, str] | None:
+    """Read an Issue by its project-scoped Glimmung issue number."""
+    docs = await query_all(
+        cosmos.issues,
+        "SELECT * FROM c WHERE c.project = @p AND c.number = @n",
+        parameters=[
+            {"name": "@p", "value": project},
+            {"name": "@n", "value": number},
+        ],
+    )
+    if not docs:
+        # Migration fallback: existing issues may not have `number` yet.
+        docs = await query_all(
+            cosmos.issues,
+            "SELECT * FROM c WHERE c.project = @p AND c.metadata.github_issue_number = @n",
+            parameters=[
+                {"name": "@p", "value": project},
+                {"name": "@n", "value": number},
+            ],
+        )
+    if not docs:
+        return None
+    if len(docs) > 1:
+        log.warning(
+            "multiple glimmung issues have project=%s number=%s: %s",
+            project, number, [d["id"] for d in docs],
+        )
+        docs.sort(key=lambda d: d.get("created_at", ""))
+    doc = docs[0]
     return Issue.model_validate(_strip_meta(doc)), doc["_etag"]
 
 

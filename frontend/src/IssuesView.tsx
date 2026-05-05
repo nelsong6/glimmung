@@ -8,8 +8,8 @@
  * not used to gate dispatch. The dispatch button on each row is the
  * primitive trigger.
  *
- * Clicking an issue title navigates to the detail route — `/issues/<owner>/
- * <repo>/<n>` for GH-anchored issues, `/issues/<project>/<id>` for native.
+ * Clicking an issue title navigates to the project-scoped Glimmung issue
+ * route: `/projects/<project>/issues/<number>/summary`.
  */
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -119,13 +119,10 @@ export function IssuesView({
   };
 
   const openDetail = (row: IssueRow) => {
-    if (row.repo && row.number !== null) {
-      navigate(`/issues/${row.repo}/${row.number}`);
-    } else {
-      navigate(
-        `/issues/${encodeURIComponent(row.project)}/${encodeURIComponent(row.id)}`
-      );
-    }
+    if (row.number === null) return;
+    navigate(
+      `/projects/${encodeURIComponent(row.project)}/issues/${row.number}/summary`
+    );
   };
 
   const visibleRows = rows;
@@ -239,9 +236,7 @@ export function IssuesView({
 }
 
 function rowKey(row: IssueRow): string {
-  return row.repo && row.number !== null
-    ? `${row.repo}#${row.number}`
-    : `glimmung/${row.id}`;
+  return row.number !== null ? `${row.project}#${row.number}` : `glimmung/${row.id}`;
 }
 
 function renderLastRun(row: IssueRow): string {

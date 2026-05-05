@@ -3894,11 +3894,10 @@ async def _handle_pull_request_review(payload: dict[str, Any]) -> dict[str, Any]
 
 
 class IssueRow(BaseModel):
-    """One row in the Issues view. After #50, issues live in glimmung's
-    `issues` container; rows can be either GH-anchored (carry `repo` +
-    `number` + `html_url` from `metadata.github_issue_*`) or glimmung-
-    native (those three are None). The dashboard discriminates on
-    `repo` to pick the dispatch payload shape."""
+    """One row in the Issues view. Issues live in glimmung's `issues`
+    container; `number` is the project-scoped Glimmung issue number.
+    GitHub coordinates are kept as legacy metadata, not the navigation
+    or issue-tracking identity."""
     id: str
     project: str
     workflow: str | None = None
@@ -3937,6 +3936,7 @@ class IssueCreateRequest(BaseModel):
     body: str = ""
     labels: list[str] = Field(default_factory=list)
     workflow: str | None = None
+    ui_validation_requested: bool = False
 
 
 class IssueUpdateRequest(BaseModel):
@@ -4172,12 +4172,7 @@ async def _list_issues_from_cosmos(
     for issue in issues:
         url = issue.metadata.github_issue_url
         repo = issue.metadata.github_issue_repo
-        number = issue.metadata.github_issue_number
-        # Pre-#33 Runs predate `Run.issue_id`; the (project, number)
-        # fallback covers them so the Issues view keeps showing last-
-        # run state. Cleanup-PR drops the fallback once those Runs are
-        # migrated. Native issues have no number — `issue_id` is the
-        # only joining key.
+        number = _issue_display_number(issue)
         run_doc = runs_by_issue_id.get(issue.id)
         if run_doc is None and number is not None:
             run_doc = runs_by_project_number.get((issue.project, number))
@@ -4202,7 +4197,7 @@ async def _list_issues_from_cosmos(
             row.last_run_state = run_doc["state"]
             row.last_run_abort_reason = run_doc.get("abort_reason")
         lock_key = (
-            f"{repo}#{number}" if (repo and number is not None)
+            f"{issue.project}#{number}" if number is not None
             else f"glimmung/{issue.id}"
         )
         lock_doc = locks_by_key.get(lock_key)
@@ -4212,17 +4207,19 @@ async def _list_issues_from_cosmos(
                 row.issue_lock_held = True
         rows.append(row)
 
-    # Sort: project asc, then GH issues by descending number, then native
-    # issues last (alphabetic by ulid suffix is fine — recency-ish).
+    # Sort by project, then newest Glimmung issue number first.
     rows.sort(key=lambda r: (
         r.project,
-        0 if r.number is not None else 1,
         -(r.number or 0),
         r.id,
     ))
     if limit is not None:
         rows = rows[:limit]
     return rows
+
+
+def _issue_display_number(issue: Issue) -> int | None:
+    return issue.number if issue.number is not None else issue.metadata.github_issue_number
 
 
 @app.get(
@@ -4246,6 +4243,25 @@ async def issue_detail_by_id(
     found = await issue_ops.read_issue(cosmos, project=project, issue_id=issue_id)
     if found is None:
         raise HTTPException(404, f"no glimmung issue {project}/{issue_id}")
+    issue, _ = found
+    return await _build_issue_detail(cosmos, issue=issue)
+
+
+@app.get(
+    "/v1/issues/by-number/{project}/{issue_number}",
+    response_model=IssueDetail,
+)
+async def issue_detail_by_number(
+    project: str = Path(...),
+    issue_number: int = Path(...),
+) -> IssueDetail:
+    """Detail view keyed by the project-scoped Glimmung issue number."""
+    cosmos: Cosmos = app.state.cosmos
+    found = await issue_ops.read_issue_by_number(
+        cosmos, project=project, number=issue_number,
+    )
+    if found is None:
+        raise HTTPException(404, f"no glimmung issue {project}#{issue_number}")
     issue, _ = found
     return await _build_issue_detail(cosmos, issue=issue)
 
@@ -4288,7 +4304,7 @@ async def _build_issue_detail(cosmos: Cosmos, *, issue: Issue) -> IssueDetail:
     (`/v1/issues/{owner}/{repo}/{n}`) and id-keyed (`/v1/issues/by-id/
     {project}/{id}`) detail endpoints."""
     repo = issue.metadata.github_issue_repo
-    number = issue.metadata.github_issue_number
+    number = _issue_display_number(issue)
     detail = IssueDetail(
         id=issue.id,
         project=issue.project,
@@ -4310,7 +4326,7 @@ async def _build_issue_detail(cosmos: Cosmos, *, issue: Issue) -> IssueDetail:
         detail.last_run_id = latest_run.id
         detail.last_run_state = latest_run.state.value
     lock_key = (
-        f"{repo}#{number}" if (repo and number is not None)
+        f"{issue.project}#{number}" if number is not None
         else f"glimmung/{issue.id}"
     )
     existing_lock = await lock_ops.read_lock(
@@ -4334,9 +4350,8 @@ async def create_issue_endpoint(req: IssueCreateRequest) -> IssueDetail:
     (#50) is the primary caller; CLI / scheduled paths can hit it too.
 
     No GH counterpart is created — glimmung is the source of truth.
-    Source is `MANUAL`; the resulting Issue has no `metadata.github_*`
-    fields set, so the URL-keyed detail endpoint can't find it. Use
-    `/v1/issues/by-id/{project}/{id}` instead."""
+    Source is `MANUAL`; the resulting Issue has a project-scoped
+    Glimmung issue number and no `metadata.github_*` identity."""
     cosmos: Cosmos = app.state.cosmos
     project_doc = await _read_project(cosmos, req.project)
     if not project_doc:
@@ -4354,6 +4369,7 @@ async def create_issue_endpoint(req: IssueCreateRequest) -> IssueDetail:
         body=req.body,
         labels=req.labels,
         workflow=req.workflow,
+        ui_validation_requested=req.ui_validation_requested,
     )
     return await _build_issue_detail(cosmos, issue=issue)
 
@@ -4506,6 +4522,25 @@ async def issue_graph(
 
 
 @app.get(
+    "/v1/issues/by-number/{project}/{issue_number}/graph",
+    response_model=IssueGraph,
+)
+async def issue_graph_by_number(
+    project: str = Path(...),
+    issue_number: int = Path(...),
+) -> IssueGraph:
+    found = await issue_ops.read_issue_by_number(
+        app.state.cosmos, project=project, number=issue_number,
+    )
+    if found is None:
+        raise HTTPException(404, f"no glimmung issue {project}#{issue_number}")
+    issue, _ = found
+    return await _build_issue_graph_for_issue(
+        app.state.cosmos, issue=issue, issue_number=issue_number,
+    )
+
+
+@app.get(
     "/v1/graph",
     response_model=IssueGraph,
 )
@@ -4535,7 +4570,7 @@ async def _build_system_graph(
                 "issue_id": issue.id,
                 "project": issue.project,
                 "repo": issue.metadata.github_issue_repo,
-                "number": issue.metadata.github_issue_number,
+                "number": _issue_display_number(issue),
                 "html_url": issue.metadata.github_issue_url,
                 "labels": issue.labels,
             },
@@ -4714,7 +4749,19 @@ async def _build_issue_graph(
     if found is None:
         raise HTTPException(404, f"no glimmung issue mirrors {url}")
     issue, _ = found
+    return await _build_issue_graph_for_issue(
+        cosmos, issue=issue, issue_number=issue_number, repo=repo,
+    )
 
+
+async def _build_issue_graph_for_issue(
+    cosmos: Cosmos,
+    *,
+    issue: Issue,
+    issue_number: int,
+    repo: str | None = None,
+) -> IssueGraph:
+    repo = repo or issue.metadata.github_issue_repo or ""
     # All Runs targeting this Issue. Cover both #33's canonical
     # `issue_id` linkage and the legacy `(project, issue_number)` shape
     # for pre-#33 Runs; dedupe by id.
@@ -4771,11 +4818,18 @@ async def _build_issue_graph(
     # All signals on this repo; filter in-memory to those targeting the
     # issue / one of its PRs / one of its Runs. Cross-partition but
     # signals is small so this is cheap.
-    all_signals = await query_all(
-        cosmos.signals,
-        "SELECT * FROM c WHERE c.target_repo = @r",
-        parameters=[{"name": "@r", "value": repo}],
-    )
+    if repo:
+        all_signals = await query_all(
+            cosmos.signals,
+            "SELECT * FROM c WHERE c.target_repo = @r",
+            parameters=[{"name": "@r", "value": repo}],
+        )
+    else:
+        all_signals = await query_all(
+            cosmos.signals,
+            "SELECT * FROM c WHERE c.target_id = @i",
+            parameters=[{"name": "@i", "value": issue.id}],
+        )
     relevant_signals: list[dict[str, Any]] = []
     for s in all_signals:
         target_type = s.get("target_type")
@@ -4808,7 +4862,9 @@ async def _build_issue_graph(
         state=issue.state.value,
         timestamp=issue.created_at.isoformat(),
         metadata={
-            "github_issue_url": issue.metadata.github_issue_url,
+            "issue_id": issue.id,
+            "project": issue.project,
+            "number": issue_number,
             "labels": list(issue.labels),
         },
     ))

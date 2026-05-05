@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { Link, Navigate, NavLink, Outlet, Route, Routes, useLocation, useOutletContext, useParams } from "react-router-dom";
+import { Link, Navigate, NavLink, Outlet, Route, Routes, useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { AdminPanel } from "./AdminPanel";
 import { IssueDetailView, RunViewer, type AbortState, type DispatchState, type IssueGraph } from "./IssueDetailView";
 import { IssuesView } from "./IssuesView";
@@ -142,10 +142,12 @@ export function App() {
         <Route path="needs-attention" element={<NeedsAttentionRoute />} />
         <Route path="graph" element={<Navigate to="/dashboard" replace />} />
         <Route path="projects" element={<ProjectsRoute />} />
+        <Route path="projects/new" element={<ProjectOnboardingRoute />} />
         <Route path="projects/:project" element={<ProjectRoute />} />
         <Route path="projects/:project/workflows" element={<ProjectWorkflowsRoute />} />
         <Route path="projects/:project/workflows/:workflow" element={<ProjectWorkflowRoute />} />
         <Route path="projects/:project/issues" element={<ProjectIssuesRoute />} />
+        <Route path="projects/:project/issues/new" element={<IssueOnboardingRoute />} />
         <Route path="projects/:project/issues/:issueNumber/runs/:runId" element={<ProjectRunRoute />} />
         <Route path="projects/:project/issues/:issueNumber" element={<IssueDetailView />}>
           <Route path="summary" element={null} />
@@ -491,12 +493,16 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
       { label: "Projects", to: "/projects" },
     ];
     if (parts[1]) crumbs.push({ label: parts[1], to: `/projects/${encodeURIComponent(parts[1])}` });
-    if (parts[2] === "workflows") {
+    if (parts[1] === "new") {
+      crumbs[crumbs.length - 1] = { label: "New project" };
+    } else if (parts[2] === "workflows") {
       crumbs.push({ label: "Workflows", to: `/projects/${encodeURIComponent(parts[1] ?? "")}/workflows` });
       if (parts[3]) crumbs.push({ label: parts[3] });
     } else if (parts[2] === "issues") {
       crumbs.push({ label: "Issues", to: `/projects/${encodeURIComponent(parts[1] ?? "")}/issues` });
-      if (parts[3]) {
+      if (parts[3] === "new") {
+        crumbs.push({ label: "New issue" });
+      } else if (parts[3]) {
         crumbs.push({
           label: `#${parts[3]}`,
           to: parts[4] ? `/projects/${encodeURIComponent(parts[1] ?? "")}/issues/${encodeURIComponent(parts[3])}` : undefined,
@@ -573,6 +579,11 @@ function ProjectsRoute() {
   return <ProjectsView {...ctx} />;
 }
 
+function ProjectOnboardingRoute() {
+  const ctx = useOutletContext<LayoutContext>();
+  return <ProjectOnboardingView {...ctx} />;
+}
+
 function ProjectRoute() {
   const params = useParams<{ project?: string }>();
   const ctx = useOutletContext<LayoutContext>();
@@ -601,6 +612,12 @@ function ProjectIssuesRoute() {
   const params = useParams<{ project?: string }>();
   const ctx = useOutletContext<LayoutContext>();
   return <ProjectIssuesView {...ctx} projectName={decodeURIComponent(params.project ?? "")} />;
+}
+
+function IssueOnboardingRoute() {
+  const params = useParams<{ project?: string }>();
+  const ctx = useOutletContext<LayoutContext>();
+  return <IssueOnboardingView {...ctx} projectName={decodeURIComponent(params.project ?? "")} />;
 }
 
 function ProjectNeedsAttentionRoute() {
@@ -755,6 +772,10 @@ function ProjectsView({ snap }: LayoutContext) {
           </div>
         </div>
       </section>
+
+      <div className="section-actions">
+        <Link className="link" to="/projects/new">new project</Link>
+      </div>
 
       {projects.length === 0 ? (
         <div className="empty">No projects registered.</div>
@@ -1182,7 +1203,227 @@ function ProjectIssuesView({
           <div className="project-repo mono">{project.github_repo}</div>
         </div>
       </section>
+      <div className="section-actions">
+        <Link className="link" to={`/projects/${encodeURIComponent(project.name)}/issues/new`}>
+          new issue
+        </Link>
+      </div>
       <IssuesView signedIn={signedIn} projectFilter={project.name} showProjectColumn={false} />
+    </div>
+  );
+}
+
+function ProjectOnboardingView({ signedIn }: LayoutContext) {
+  const navigate = useNavigate();
+  const [name, setName] = useState("");
+  const [githubRepo, setGithubRepo] = useState("");
+  const [appType, setAppType] = useState<"native_web_app" | "non_web">("native_web_app");
+  const [uiValidation, setUiValidation] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const uiValidationEnabled = appType === "native_web_app";
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await authedFetch("/v1/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name,
+          github_repo: githubRepo,
+          metadata: {
+            app_type: appType,
+            ui_validation_default: uiValidationEnabled && uiValidation,
+          },
+        }),
+      });
+      if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+      navigate(`/projects/${encodeURIComponent(name)}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="project-workspace">
+      <section className="project-hero">
+        <div className="project-hero-main">
+          <div className="project-kicker mono">project onboarding</div>
+          <h2>New project</h2>
+          <div className="project-repo mono">register the workspace Glimmung will track</div>
+        </div>
+      </section>
+      {!signedIn ? (
+        <div className="empty error">Sign in to register projects.</div>
+      ) : (
+        <form className="admin-form" onSubmit={submit}>
+          <label>
+            <span>Name</span>
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="ambience" required />
+          </label>
+          <label>
+            <span>Repository</span>
+            <input value={githubRepo} onChange={(e) => setGithubRepo(e.target.value)} placeholder="nelsong6/ambience" required />
+          </label>
+          <label>
+            <span>App type</span>
+            <select
+              value={appType}
+              onChange={(e) => {
+                const value = e.target.value as "native_web_app" | "non_web";
+                setAppType(value);
+                if (value === "non_web") setUiValidation(false);
+              }}
+            >
+              <option value="native_web_app">Native web app</option>
+              <option value="non_web">Non-web</option>
+            </select>
+          </label>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={uiValidationEnabled && uiValidation}
+              disabled={!uiValidationEnabled}
+              onChange={(e) => setUiValidation(e.target.checked)}
+            />
+            <span>UI validation</span>
+            {!uiValidationEnabled && (
+              <span className="help-dot" title="Disabled because this project is not marked as a native web app.">?</span>
+            )}
+          </label>
+          {error && <div className="error">{error}</div>}
+          <button type="submit" disabled={busy}>{busy ? "Creating..." : "Create project"}</button>
+        </form>
+      )}
+    </div>
+  );
+}
+
+function IssueOnboardingView({
+  snap,
+  signedIn,
+  projectName,
+}: LayoutContext & { projectName: string }) {
+  const navigate = useNavigate();
+  const project = snap?.projects.find((p) => p.name === projectName) ?? null;
+  const workflows = useMemo(
+    () => project ? snap?.workflows.filter((w) => w.project === project.name) ?? [] : [],
+    [project, snap?.workflows],
+  );
+  const isWeb = project
+    ? (project.metadata?.app_type ?? (project.name === "spirelens" ? "non_web" : "native_web_app")) === "native_web_app"
+    : true;
+  const defaultUiValidation = isWeb && project?.metadata?.ui_validation_default !== false;
+  const [workflow, setWorkflow] = useState("");
+  const [title, setTitle] = useState("");
+  const [objective, setObjective] = useState("");
+  const [context, setContext] = useState("");
+  const [acceptance, setAcceptance] = useState("");
+  const [constraints, setConstraints] = useState("");
+  const [labels, setLabels] = useState("");
+  const [uiValidation, setUiValidation] = useState(defaultUiValidation);
+  const [startRun, setStartRun] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!project) return;
+    setWorkflow((current) => current || workflows[0]?.name || "");
+    setUiValidation(defaultUiValidation);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [defaultUiValidation, project?.name]);
+
+  if (snap === null) return <div className="empty">Connecting…</div>;
+  if (!project) return <div className="empty">Project {projectName || "(missing)"} was not found.</div>;
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const body = [
+        ["Objective", objective],
+        ["Context", context],
+        ["Acceptance criteria", acceptance],
+        ["Constraints / links", constraints],
+      ]
+        .filter(([, value]) => value.trim())
+        .map(([label, value]) => `${label}\n${value.trim()}`)
+        .join("\n\n");
+      const labelList = labels.split(",").map((s) => s.trim()).filter(Boolean);
+      const r = await authedFetch("/v1/issues", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          project: project.name,
+          workflow: workflow || null,
+          title,
+          body,
+          labels: labelList,
+          ui_validation_requested: isWeb && uiValidation,
+        }),
+      });
+      if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+      const detail = (await r.json()) as { id: string; number: number | null };
+      if (startRun) {
+        await authedFetch("/v1/runs/dispatch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ issue_id: detail.id, project: project.name, workflow: workflow || undefined }),
+        });
+      }
+      navigate(`/projects/${encodeURIComponent(project.name)}/issues/${detail.number ?? detail.id}/summary`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="project-workspace">
+      <section className="project-hero">
+        <div className="project-hero-main">
+          <div className="project-kicker mono">issue onboarding</div>
+          <h2>New issue</h2>
+          <div className="project-repo mono">{project.name}</div>
+        </div>
+      </section>
+      {!signedIn ? (
+        <div className="empty error">Sign in to create issues.</div>
+      ) : (
+        <form className="admin-form" onSubmit={submit}>
+          <label>
+            <span>Workflow</span>
+            <select value={workflow} onChange={(e) => setWorkflow(e.target.value)}>
+              <option value="">Decide later</option>
+              {workflows.map((w) => <option key={w.id} value={w.name}>{w.name}</option>)}
+            </select>
+          </label>
+          <label><span>Title</span><input value={title} onChange={(e) => setTitle(e.target.value)} required /></label>
+          <label><span>Objective</span><textarea value={objective} onChange={(e) => setObjective(e.target.value)} rows={4} /></label>
+          <label><span>Context</span><textarea value={context} onChange={(e) => setContext(e.target.value)} rows={4} /></label>
+          <label><span>Acceptance criteria</span><textarea value={acceptance} onChange={(e) => setAcceptance(e.target.value)} rows={4} /></label>
+          <label><span>Constraints / links</span><textarea value={constraints} onChange={(e) => setConstraints(e.target.value)} rows={3} /></label>
+          <label><span>Labels</span><input value={labels} onChange={(e) => setLabels(e.target.value)} placeholder="design, ui" /></label>
+          <label className="checkbox-row">
+            <input type="checkbox" checked={isWeb && uiValidation} disabled={!isWeb} onChange={(e) => setUiValidation(e.target.checked)} />
+            <span>UI validation</span>
+            {!isWeb && <span className="help-dot" title="Disabled because this project is not marked as a native web app.">?</span>}
+          </label>
+          <label className="checkbox-row">
+            <input type="checkbox" checked={startRun} onChange={(e) => setStartRun(e.target.checked)} />
+            <span>Start run now</span>
+          </label>
+          {error && <div className="error">{error}</div>}
+          <button type="submit" disabled={busy}>{busy ? "Creating..." : "Create issue"}</button>
+        </form>
+      )}
     </div>
   );
 }

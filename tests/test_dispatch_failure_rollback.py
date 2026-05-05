@@ -159,7 +159,7 @@ async def test_dispatch_failure_rolls_back_lease_lock_and_aborts_run(
 
     # Issue lock released.
     lock_doc = await app.state.cosmos.locks.read_item(
-        item="issue::nelsong6%2Fambience%23124", partition_key="issue",
+        item="issue::ambience%23124", partition_key="issue",
     )
     assert lock_doc["state"] == "released"
 
@@ -256,6 +256,6 @@ async def test_successful_dispatch_creates_run_and_keeps_lock_held(
     assert result.run_id is not None
 
     lock_doc = await app.state.cosmos.locks.read_item(
-        item="issue::nelsong6%2Fambience%23124", partition_key="issue",
+        item="issue::ambience%23124", partition_key="issue",
     )
     assert lock_doc["state"] == "held"

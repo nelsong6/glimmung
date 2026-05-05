@@ -83,13 +83,12 @@ export function GraphView({
   }, [graph]);
 
   const openIssue = (issue: GraphNode) => {
-    const repo = issue.metadata.repo;
     const number = issue.metadata.number;
-    if (typeof repo === "string" && typeof number === "number") {
-      navigate(`/issues/${repo}/${number}`);
+    const project = String(issue.metadata.project ?? "");
+    if (project && typeof number === "number") {
+      navigate(`/projects/${encodeURIComponent(project)}/issues/${number}/summary`);
       return;
     }
-    const project = String(issue.metadata.project ?? "");
     const issueId = String(issue.metadata.issue_id ?? "");
     navigate(`/issues/${encodeURIComponent(project)}/${encodeURIComponent(issueId)}`);
   };
