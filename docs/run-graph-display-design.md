@@ -9,10 +9,11 @@ shown to the user must follow Glimmung's product model:
 ```text
 Issue
   -> Run
-    -> Stage
-      -> Job
-        -> Step
-    -> RunReport
+    -> Cycle
+      -> Stage
+        -> Job
+          -> Step
+      -> Evidence
   -> Touchpoint
 ```
 
@@ -30,15 +31,38 @@ term and maps better to how people read pipelines.
 Suggested mapping:
 
 ```text
+Issue          -> Issue / origin
+Run            -> Continuous lifecycle from one trigger
+Cycle          -> One pass through the graph inside a Run
 Workflow phase -> Stage
 Native/GHA job -> Job
 Native/GHA step -> Step
-Attempt        -> Attempt
-Run            -> Run
+Attempt        -> Executor-level attempt, not the main UI container
+Report         -> Touchpoint / evidence, depending on context
 ```
 
 The API can expose either raw names or display labels, but the UI should
 prefer stage/job/step language unless it is showing raw backend metadata.
+
+The key distinction is **Run vs Cycle**:
+
+- A **Run** starts from one continuous trigger or origin event and ends
+  when the issue is accepted, abandoned, or otherwise closed out.
+- A **Cycle** is one traversal through the run graph. Requesting changes,
+  recycling a stage, or resuming from a later point may create another
+  cycle under the same run.
+- A **Stage attempt** remains a lower-level executor fact. Do not use
+  attempt as the user-facing name for the whole graph pass.
+
+This lets Glimmung show "the run" as the complete story while still
+showing each pass through the graph as a distinct cycle.
+
+**Touchpoint** replaces the old user-facing `Report` concept. A
+Touchpoint is the issue-level decision surface: what the human needs to
+inspect, approve, reject, or discuss. A GitHub PR, validation URL,
+screenshots, generated design portfolio rows, logs, or artifacts are
+evidence inside the Touchpoint; they are not separate primary navigation
+surfaces.
 
 ## Why Not Argo First
 
@@ -53,7 +77,7 @@ Glimmung needs to explain things Argo does not own:
 - Stage attempts and resume/recycle paths.
 - Validation environments.
 - Screenshots and UI review evidence.
-- PR/report/touchpoint state.
+- PR/evidence/touchpoint state.
 - Budgets and cost.
 - Human approval, request-changes, and attended-mode decisions.
 - Playbook integration strategy such as shared feature branches.
@@ -86,17 +110,19 @@ Issues / glimmung / Add design portfolio / Run 01KQ...
 The run page should support deep links to:
 
 - the current run overview,
+- a cycle,
 - a stage,
 - a job,
 - a specific step log,
-- the related Touchpoint or RunReport.
+- the related Touchpoint.
 
 ## Run Overview
 
 The overview should show the high-level execution shape:
 
 ```text
-env-prep -> agent-execute -> pr
+Cycle 1: env-prep -> agent-execute -> touchpoint
+Cycle 2: agent-execute -> verify -> touchpoint
 ```
 
 For more complex runs, the overview should show stage ordering and
@@ -228,6 +254,12 @@ should aggregate the things that need human attention:
 - design portfolio rows marked `Needs review`,
 - run summary and recommendation,
 - approve/request changes/rerun actions.
+
+Touchpoints are one-to-one with issues in the primary UI. They should
+not need their own top-level tab. The issue workspace should surface the
+current Touchpoint alongside issue context and the run/cycle graph. A
+historical list of touchpoint evidence may exist as part of issue
+history, but it should not become a separate "Reports" area.
 
 ## Design Portfolio Implications
 
