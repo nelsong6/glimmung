@@ -961,6 +961,12 @@ tr.eligible td.mono:first-child {
 }
 
 /* .pill (free / busy / drain / info) lives in design-system/colors_and_type.css. */
+.requirement-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
 
 .empty {
   padding: 16px;

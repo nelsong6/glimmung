@@ -816,7 +816,7 @@ function ProjectWorkflowsView({
                     </a>
                   </td>
                   <td className="mono dim">{w.trigger_label}</td>
-                  <td className="mono">{JSON.stringify(w.default_requirements)}</td>
+                  <td><RequirementPills requirements={w.default_requirements} /></td>
                   <td className="mono dim">{wActive} active / {wPending} pending</td>
                 </tr>
               );
@@ -830,6 +830,26 @@ function ProjectWorkflowsView({
 
 function githubFileUrl(repo: string, ref: string, path: string): string {
   return `https://github.com/${repo}/blob/${encodeURIComponent(ref)}/${path.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+function RequirementPills({ requirements }: { requirements: Record<string, unknown> }) {
+  const entries = Object.entries(requirements);
+  if (entries.length === 0) {
+    return <span className="mono dim">none</span>;
+  }
+
+  return (
+    <span className="requirement-pills">
+      {entries.flatMap(([key, value]) => {
+        const values = Array.isArray(value) ? value : [value];
+        return values.map((item, index) => (
+          <span className="pill info" key={`${key}:${index}:${String(item)}`}>
+            {key}:{String(item)}
+          </span>
+        ));
+      })}
+    </span>
+  );
 }
 
 function ProjectWorkflowView({
@@ -881,7 +901,7 @@ function ProjectWorkflowView({
       <section className="project-focus">
         <div>
           <span className="key">requires</span>
-          <strong className="mono">{JSON.stringify(workflow.default_requirements)}</strong>
+          <RequirementPills requirements={workflow.default_requirements} />
         </div>
         <div>
           <span className="key">project</span>
@@ -1230,9 +1250,7 @@ function CapacityView({
               </div>
               <div className="row">
                 <span className="key">requires</span>
-                <span className="val mono">
-                  {JSON.stringify(selectedWorkflow.default_requirements)}
-                </span>
+                <span className="val"><RequirementPills requirements={selectedWorkflow.default_requirements} /></span>
               </div>
             </div>
           </>
