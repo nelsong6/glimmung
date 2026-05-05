@@ -25,7 +25,7 @@
  * URL params so deep-link reloads land directly here.
  */
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { authedFetch } from "./auth";
 
 type IssueDetail = {
@@ -333,20 +333,17 @@ export function IssueDetailView() {
 
   return (
     <>
-      <h2>
-        <button type="button" className="link" onClick={onBack} style={{ marginRight: "1rem" }}>
-          ← back
-        </button>
-        {heading}
-      </h2>
+      <button type="button" className="link" onClick={onBack}>
+        ← back
+      </button>
       {error && <div className="empty error">{error}</div>}
       {detail === null && !error ? (
         <div className="empty">Loading…</div>
       ) : detail ? (
         <>
-          <IssueHeader detail={detail} />
+          <IssueHeader detail={detail} heading={heading} />
 
-          <div className="tabs" role="tablist">
+          <div className="dashboard-nav" aria-label="issue sections">
             <TabButton current={tab} value="issue" onSelect={setTab}>
               issue
             </TabButton>
@@ -399,6 +396,7 @@ export function IssueDetailView() {
               <RunsTab
                 graph={graph}
                 graphAvailable={!!graphUrl}
+                project={detail.project}
                 onPickRun={(runId) => {
                   setSelectedRunId(runId);
                   setTab("the_run");
@@ -415,53 +413,49 @@ export function IssueDetailView() {
   );
 }
 
-function IssueHeader({ detail }: { detail: IssueDetail }) {
+function IssueHeader({ detail, heading }: { detail: IssueDetail; heading: string }) {
   return (
-    <div className="project-info">
-      <div className="row">
-        <span className="key">title</span>
-        <span className="val">
+    <section className="project-hero">
+      <div className="project-hero-main">
+        <div className="project-kicker mono">issue</div>
+        <h2>{detail.title}</h2>
+        <div className="project-repo mono">
           {detail.html_url ? (
-            <a href={detail.html_url} target="_blank" rel="noreferrer">
-              {detail.title}
+            <a className="link" href={detail.html_url} target="_blank" rel="noreferrer">
+              {heading}
             </a>
           ) : (
-            detail.title
+            heading
           )}
-        </span>
+        </div>
       </div>
-      <div className="row">
-        <span className="key">project</span>
-        <span className="val mono">{detail.project}</span>
+      <div className="project-facts">
+        <div className="project-fact">
+          <span>project</span>
+          <strong>{detail.project}</strong>
+        </div>
+        <div className="project-fact">
+          <span>state</span>
+          <strong>{detail.state}</strong>
+        </div>
+        <div className="project-fact">
+          <span>labels</span>
+          <strong>{detail.labels.length}</strong>
+        </div>
+        <div className="project-fact">
+          <span>last run</span>
+          <strong>{detail.last_run_state ?? "none"}</strong>
+        </div>
       </div>
-      <div className="row">
-        <span className="key">state</span>
-        <span className="val mono">{detail.state}</span>
-      </div>
-      <div className="row">
-        <span className="key">labels</span>
-        <span className="val mono dim">
-          {detail.labels.length === 0 ? "—" : detail.labels.join(", ")}
-        </span>
-      </div>
-      <div className="row">
-        <span className="key">last run</span>
-        <span className="val">
-          {detail.last_run_state ? (
-            <span className={`pill ${runStatePill(detail.last_run_state)}`}>
-              {detail.last_run_state}
-            </span>
-          ) : (
-            "—"
-          )}
-          {detail.issue_lock_held && (
-            <span className="pill busy" style={{ marginLeft: "0.5rem" }}>
-              in flight
-            </span>
-          )}
-        </span>
-      </div>
-    </div>
+      {(detail.labels.length > 0 || detail.issue_lock_held) && (
+        <div className="dag-policy-rail" aria-label="issue labels">
+          {detail.labels.map((label) => (
+            <span className="pill info" key={label}>{label}</span>
+          ))}
+          {detail.issue_lock_held && <span className="pill busy">in flight</span>}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -480,9 +474,8 @@ function TabButton({
   return (
     <button
       type="button"
-      role="tab"
-      aria-selected={selected}
-      className={`tab${selected ? " selected" : ""}`}
+      aria-pressed={selected}
+      className={`dashboard-nav-link${selected ? " selected" : ""}`}
       onClick={() => onSelect(value)}
     >
       {children}
@@ -1329,10 +1322,12 @@ const STUCK_DISPATCHING_MS = 30_000;
 function RunsTab({
   graph,
   graphAvailable,
+  project,
   onPickRun,
 }: {
   graph: IssueGraph | null;
   graphAvailable: boolean;
+  project: string;
   onPickRun: (runId: string) => void;
 }) {
   if (!graphAvailable) {
@@ -1383,7 +1378,12 @@ function RunsTab({
           return (
             <tr key={r.id}>
               <td className="mono">
-                {id.slice(0, 8)}…
+                <Link
+                  className="link mono"
+                  to={`/projects/${encodeURIComponent(project)}/runs/${encodeURIComponent(id)}`}
+                >
+                  {id.slice(0, 8)}…
+                </Link>
                 {clonedFrom && (
                   <span
                     className="dim mono"
@@ -1406,7 +1406,7 @@ function RunsTab({
               <td className="mono dim">{prNumber !== null ? `#${prNumber}` : "—"}</td>
               <td>
                 <button type="button" className="link" onClick={() => onPickRun(id)}>
-                  open
+                  preview here
                 </button>
               </td>
             </tr>
