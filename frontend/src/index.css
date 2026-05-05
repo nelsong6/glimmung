@@ -416,76 +416,151 @@
   color: var(--fg);
   font-weight: 600;
 }
-.run-stage-strip {
+.run-graph {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
+  grid-template-columns: minmax(150px, 1fr) 42px minmax(170px, 1.15fr) 42px minmax(150px, 1fr);
+  grid-template-rows: minmax(76px, auto) 34px minmax(76px, auto);
+  align-items: center;
+  min-height: 204px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  background:
+    linear-gradient(to right, rgb(255 255 255 / 0.025) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(255 255 255 / 0.025) 1px, transparent 1px),
+    var(--bg-deep);
+  background-size: 28px 28px;
 }
-.run-stage {
+.run-graph-node {
   position: relative;
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr);
-  gap: 10px;
-  align-items: center;
-  min-height: 58px;
-  padding: 10px 12px;
+  gap: 4px;
+  align-content: center;
+  min-height: 70px;
+  padding: 12px 14px;
   background: var(--surface);
   clip-path: polygon(10px 0, 100% 0, 100% 100%, 0 100%, 0 10px);
   isolation: isolate;
 }
-.run-stage::before {
+.run-graph-node::before {
   content: "";
   position: absolute;
   inset: 0;
   background:
-    linear-gradient(to right, var(--stage-rail, var(--border)) 0 2px, transparent 2px),
-    linear-gradient(to top, var(--stage-edge, var(--border)) 0 1px, transparent 1px),
-    linear-gradient(to bottom, var(--stage-edge, var(--border)) 0 1px, transparent 1px),
-    linear-gradient(to left, var(--stage-edge, var(--border)) 0 1px, transparent 1px),
-    linear-gradient(135deg, transparent 0 calc(14.14px - 1px), var(--stage-edge, var(--border)) calc(14.14px - 1px) 14.14px, transparent 14.14px);
+    linear-gradient(to right, var(--graph-rail, var(--border)) 0 2px, transparent 2px),
+    linear-gradient(to top, var(--graph-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(to bottom, var(--graph-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(to left, var(--graph-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(135deg, transparent 0 calc(14.14px - 1px), var(--graph-edge, var(--border)) calc(14.14px - 1px) 14.14px, transparent 14.14px);
   background-repeat: no-repeat;
   pointer-events: none;
 }
-.run-stage > * {
+.run-graph-node > * {
   position: relative;
   z-index: 1;
 }
-.run-stage.done {
-  --stage-rail: var(--state-success-fg);
-  --stage-edge: color-mix(in srgb, var(--state-success-fg) 30%, var(--border));
+.run-graph-node.done {
+  --graph-rail: var(--state-success-fg);
+  --graph-edge: color-mix(in srgb, var(--state-success-fg) 30%, var(--border));
 }
-.run-stage.active {
-  --stage-rail: var(--state-busy-fg);
-  --stage-edge: color-mix(in srgb, var(--state-busy-fg) 35%, var(--border));
+.run-graph-node.active,
+.run-graph-node.selected {
+  --graph-rail: var(--state-busy-fg);
+  --graph-edge: color-mix(in srgb, var(--state-busy-fg) 35%, var(--border));
+  background: color-mix(in srgb, var(--state-busy-bg) 34%, var(--surface));
 }
-.run-stage.pending {
-  --stage-rail: var(--border-strong);
+.run-graph-node.pending {
+  --graph-rail: var(--border-strong);
 }
-.stage-index {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  color: var(--fg-dim);
-  border: 1px solid var(--border);
-  font-family: var(--font-mono);
-  font-size: 0.78rem;
+.run-graph-node.recycle {
+  --graph-rail: var(--state-info-fg);
+  --graph-edge: color-mix(in srgb, var(--state-info-fg) 32%, var(--border));
 }
-.run-stage strong,
-.run-stage small {
+.run-graph-node.job {
+  margin: 0 16px;
+}
+.run-graph-node strong,
+.run-graph-node small,
+.graph-kind {
   display: block;
   min-width: 0;
 }
-.run-stage strong {
+.run-graph-node strong {
   color: var(--fg);
   font-size: 0.9rem;
 }
-.run-stage small {
+.run-graph-node small {
   color: var(--fg-dimmer);
   margin-top: 3px;
   font-family: var(--font-mono);
   font-size: 0.72rem;
+}
+.graph-kind {
+  color: var(--fg-dimmer);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.run-graph-edge {
+  position: relative;
+  min-height: 2px;
+}
+.run-graph-edge.horizontal::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--border-strong);
+}
+.run-graph-edge.horizontal::after {
+  content: "";
+  position: absolute;
+  top: calc(50% - 4px);
+  right: 0;
+  width: 8px;
+  height: 8px;
+  border-top: 1px solid var(--border-strong);
+  border-right: 1px solid var(--border-strong);
+  transform: rotate(45deg);
+}
+.run-graph-edge.vertical {
+  justify-self: center;
+  width: 1px;
+  min-height: 34px;
+  background: var(--border-strong);
+}
+.run-graph-edge.vertical::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: -4px;
+  width: 8px;
+  height: 8px;
+  border-right: 1px solid var(--border-strong);
+  border-bottom: 1px solid var(--border-strong);
+  transform: rotate(45deg);
+}
+.run-graph-edge.recycle::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+  border-top: 1px dashed color-mix(in srgb, var(--state-info-fg) 60%, var(--border));
+}
+.run-graph-edge.recycle::after {
+  content: "";
+  position: absolute;
+  top: calc(50% - 4px);
+  right: 0;
+  width: 8px;
+  height: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--state-info-fg) 60%, var(--border));
+  border-right: 1px solid color-mix(in srgb, var(--state-info-fg) 60%, var(--border));
+  transform: rotate(45deg);
 }
 .step-log-layout {
   display: grid;
@@ -582,9 +657,39 @@
     grid-template-columns: 1fr;
     gap: 10px;
   }
-  .run-stage-strip,
+  .run-graph,
   .step-log-layout {
     grid-template-columns: 1fr;
+  }
+  .run-graph {
+    grid-template-rows: none;
+    gap: 12px;
+    min-height: 0;
+  }
+  .run-graph-node,
+  .run-graph-edge {
+    grid-column: 1 !important;
+    grid-row: auto !important;
+  }
+  .run-graph-edge.horizontal,
+  .run-graph-edge.recycle {
+    min-height: 22px;
+  }
+  .run-graph-edge.horizontal::before,
+  .run-graph-edge.recycle::before {
+    left: 50%;
+    right: auto;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    height: auto;
+  }
+  .run-graph-edge.horizontal::after,
+  .run-graph-edge.recycle::after {
+    top: auto;
+    bottom: 0;
+    right: calc(50% - 4px);
+    transform: rotate(135deg);
   }
   .step-list {
     border-right: 0;

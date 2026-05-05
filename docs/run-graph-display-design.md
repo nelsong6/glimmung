@@ -110,9 +110,12 @@ branching/recycle/resume relationships. The graph should answer:
 - What produced evidence?
 - What can the user inspect or decide next?
 
-The overview is not the place to show every step line. It should let the
-user select a stage or job and then inspect the details below/alongside
-the graph.
+The overview should read as a graph, not as a strip of unrelated cards.
+Nodes can keep Glimmung's chamfered block vocabulary, but they need
+directional connectors, selected-node state, and room for non-linear
+relationships such as recycle/request-changes paths. The graph should
+let the user select a stage or job and then inspect the details
+below/alongside the graph.
 
 ## Stage Detail
 
@@ -153,10 +156,11 @@ Azure DevOps:
 The left side is a compact list of steps for the selected job. The right
 side is a terminal-style log surface for the selected step.
 
-This solves the step visibility problem without turning the main graph
-into an unreadable nested tree. Steps are always available, but they are
-shown in the detail pane, not as first-class global graph nodes by
-default.
+This solves the step visibility problem without forcing every step into
+the global graph. Stages and jobs are graph nodes; steps are usually
+shown in the selected job's detail pane. A future view may promote steps
+into graph nodes for very small jobs or debugging, but that should not be
+the default run overview.
 
 Step list requirements:
 

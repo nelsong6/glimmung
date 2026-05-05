@@ -376,27 +376,35 @@ const DESIGN_FILE_ITEMS: PortfolioItem[] = [
             <span>/</span>
             <strong>Run 01KQ...</strong>
           </nav>
-          <div className="run-stage-strip" aria-label="run stages">
-            <div className="run-stage done">
-              <span className="stage-index">1</span>
-              <span>
-                <strong>env-prep</strong>
-                <small>passed · 3m 12s</small>
-              </span>
+          <div className="run-graph" aria-label="run graph">
+            <div className="run-graph-node stage done" style={{ gridColumn: "1", gridRow: "1" }}>
+              <span className="graph-kind">stage</span>
+              <strong>env-prep</strong>
+              <small>passed · 3m 12s</small>
             </div>
-            <div className="run-stage active">
-              <span className="stage-index">2</span>
-              <span>
-                <strong>agent-execute</strong>
-                <small>running · native job</small>
-              </span>
+            <div className="run-graph-edge horizontal" style={{ gridColumn: "2", gridRow: "1" }} />
+            <div className="run-graph-node stage active" style={{ gridColumn: "3", gridRow: "1" }}>
+              <span className="graph-kind">stage</span>
+              <strong>agent-execute</strong>
+              <small>running · native job</small>
             </div>
-            <div className="run-stage pending">
-              <span className="stage-index">3</span>
-              <span>
-                <strong>pr</strong>
-                <small>waiting</small>
-              </span>
+            <div className="run-graph-edge vertical" style={{ gridColumn: "3", gridRow: "2" }} />
+            <div className="run-graph-node job selected" style={{ gridColumn: "3", gridRow: "3" }}>
+              <span className="graph-kind">job</span>
+              <strong>portfolio-build</strong>
+              <small>selected · 5 steps</small>
+            </div>
+            <div className="run-graph-edge horizontal" style={{ gridColumn: "4", gridRow: "1" }} />
+            <div className="run-graph-node stage pending" style={{ gridColumn: "5", gridRow: "1" }}>
+              <span className="graph-kind">stage</span>
+              <strong>pr</strong>
+              <small>waiting</small>
+            </div>
+            <div className="run-graph-edge recycle" style={{ gridColumn: "4", gridRow: "3" }} />
+            <div className="run-graph-node stage recycle" style={{ gridColumn: "5", gridRow: "3" }}>
+              <span className="graph-kind">recycle</span>
+              <strong>request changes</strong>
+              <small>returns to job</small>
             </div>
           </div>
           <div className="step-log-layout">
