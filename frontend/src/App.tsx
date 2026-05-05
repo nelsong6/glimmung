@@ -146,9 +146,12 @@ export function App() {
         <Route path="projects/:project/workflows" element={<ProjectWorkflowsRoute />} />
         <Route path="projects/:project/workflows/:workflow" element={<ProjectWorkflowRoute />} />
         <Route path="projects/:project/issues" element={<ProjectIssuesRoute />} />
+        <Route path="projects/:project/issues/:issueNumber" element={<ProjectIssueRedirectRoute />} />
+        <Route path="projects/:project/issues/:issueNumber/runs" element={<ProjectIssueRunsRedirectRoute />} />
+        <Route path="projects/:project/issues/:issueNumber/runs/:runId" element={<ProjectRunRoute />} />
         <Route path="projects/:project/needs-attention" element={<ProjectNeedsAttentionRoute />} />
         <Route path="projects/:project/runs" element={<ProjectRunsRoute />} />
-        <Route path="projects/:project/runs/:runId" element={<ProjectRunRoute />} />
+        <Route path="projects/:project/runs/:runId" element={<ProjectRunRedirectRoute />} />
         <Route path="issues" element={<Navigate to="/needs-attention" replace />} />
         <Route path="issues/:owner/:repo/:n" element={<IssueDetailView />}>
           {/* Issue workspace tabs. Old slugs are still accepted by
@@ -482,7 +485,20 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
       crumbs.push({ label: "Workflows", to: `/projects/${encodeURIComponent(parts[1] ?? "")}/workflows` });
       if (parts[3]) crumbs.push({ label: parts[3] });
     } else if (parts[2] === "issues") {
-      crumbs.push({ label: "Issues" });
+      crumbs.push({ label: "Issues", to: `/projects/${encodeURIComponent(parts[1] ?? "")}/issues` });
+      if (parts[3]) {
+        crumbs.push({
+          label: `#${parts[3]}`,
+          to: parts[4] ? `/projects/${encodeURIComponent(parts[1] ?? "")}/issues/${encodeURIComponent(parts[3])}` : undefined,
+        });
+      }
+      if (parts[4] === "runs") {
+        crumbs.push({
+          label: "Runs",
+          to: `/projects/${encodeURIComponent(parts[1] ?? "")}/issues/${encodeURIComponent(parts[3] ?? "")}/runs`,
+        });
+        if (parts[5]) crumbs.push({ label: runSlugDisplay(parts[5]) });
+      }
     } else if (parts[2] === "needs-attention") {
       crumbs.push({ label: "Needs attention" });
     } else if (parts[2] === "runs") {
@@ -575,6 +591,51 @@ function ProjectIssuesRoute() {
   return <ProjectIssuesView {...ctx} projectName={decodeURIComponent(params.project ?? "")} />;
 }
 
+function ProjectIssueRedirectRoute() {
+  const params = useParams<{ project?: string; issueNumber?: string }>();
+  const ctx = useOutletContext<LayoutContext>();
+  return (
+    <ProjectIssueRedirect
+      {...ctx}
+      projectName={decodeURIComponent(params.project ?? "")}
+      issueNumber={params.issueNumber ?? ""}
+      tab="issue"
+    />
+  );
+}
+
+function ProjectIssueRunsRedirectRoute() {
+  const params = useParams<{ project?: string; issueNumber?: string }>();
+  const ctx = useOutletContext<LayoutContext>();
+  return (
+    <ProjectIssueRedirect
+      {...ctx}
+      projectName={decodeURIComponent(params.project ?? "")}
+      issueNumber={params.issueNumber ?? ""}
+      tab="runs"
+    />
+  );
+}
+
+function ProjectIssueRedirect({
+  snap,
+  projectName,
+  issueNumber,
+  tab,
+}: LayoutContext & { projectName: string; issueNumber: string; tab: "issue" | "runs" }) {
+  if (snap === null) return <div className="empty">Connecting…</div>;
+  const project = snap.projects.find((p) => p.name === projectName);
+  if (!project) {
+    return <div className="empty">Project {projectName || "(missing)"} was not found.</div>;
+  }
+  return (
+    <Navigate
+      to={`/issues/${project.github_repo}/${issueNumber}/${tab}`}
+      replace
+    />
+  );
+}
+
 function ProjectNeedsAttentionRoute() {
   const params = useParams<{ project?: string }>();
   const ctx = useOutletContext<LayoutContext>();
@@ -588,13 +649,44 @@ function ProjectRunsRoute() {
 }
 
 function ProjectRunRoute() {
-  const params = useParams<{ project?: string; runId?: string }>();
+  const params = useParams<{ project?: string; issueNumber?: string; runId?: string }>();
   const ctx = useOutletContext<LayoutContext>();
   return (
     <ProjectRunView
       {...ctx}
       projectName={decodeURIComponent(params.project ?? "")}
+      issueNumber={params.issueNumber ? parseInt(params.issueNumber, 10) : null}
       runId={decodeURIComponent(params.runId ?? "")}
+    />
+  );
+}
+
+function ProjectRunRedirectRoute() {
+  const params = useParams<{ project?: string; runId?: string }>();
+  const ctx = useOutletContext<LayoutContext>();
+  const projectName = decodeURIComponent(params.project ?? "");
+  const runId = decodeURIComponent(params.runId ?? "");
+  if (ctx.snap === null) return <div className="empty">Connecting…</div>;
+  const runs = isMockMode()
+    ? mockRuns.filter((candidate) => candidate.project === projectName)
+    : [];
+  const run = isMockMode() ? resolveProjectRun(runs, runId) : null;
+  const index = run ? runs.findIndex((candidate) => candidate.id === run.id) : -1;
+  if (run?.issue_number !== null && run?.issue_number !== undefined) {
+    const slug = projectRunSlug(run, runs, index >= 0 ? index : 0);
+    return (
+      <Navigate
+        to={`/projects/${encodeURIComponent(projectName)}/issues/${run.issue_number}/runs/${encodeURIComponent(slug)}`}
+        replace
+      />
+    );
+  }
+  return (
+    <ProjectRunView
+      {...ctx}
+      projectName={projectName}
+      issueNumber={null}
+      runId={runId}
     />
   );
 }
@@ -1243,7 +1335,7 @@ function ProjectRunsTable({ runs, project }: { runs: ProjectRun[]; project: Proj
                 <td>
                   <Link
                     className="link mono"
-                    to={`/projects/${encodeURIComponent(run.project)}/runs/${encodeURIComponent(runSlug)}`}
+                    to={`/projects/${encodeURIComponent(run.project)}/issues/${run.issue_number}/runs/${encodeURIComponent(runSlug)}`}
                     state={{ returnTo: runsPath, returnLabel: "runs" }}
                     title={run.id}
                   >
@@ -1409,8 +1501,9 @@ function ProjectRunView({
   snap,
   signedIn,
   projectName,
+  issueNumber,
   runId,
-}: LayoutContext & { projectName: string; runId: string }) {
+}: LayoutContext & { projectName: string; issueNumber: number | null; runId: string }) {
   if (snap === null) return <div className="empty">Connecting…</div>;
   const project = snap.projects.find((p) => p.name === projectName);
   if (!project) {
@@ -1436,6 +1529,22 @@ function ProjectRunView({
         </section>
         <div className="empty">
           Run detail is not available yet for live runs.
+        </div>
+      </div>
+    );
+  }
+  if (issueNumber !== null && run.issue_number !== issueNumber) {
+    return (
+      <div className="project-workspace">
+        <section className="project-hero">
+          <div className="project-hero-main">
+            <div className="project-kicker mono">run</div>
+            <h2>{runSlugDisplay(runId)}</h2>
+            <div className="project-repo mono">{project.github_repo}</div>
+          </div>
+        </section>
+        <div className="empty">
+          Run {runSlugDisplay(runId)} does not belong to issue #{issueNumber}.
         </div>
       </div>
     );

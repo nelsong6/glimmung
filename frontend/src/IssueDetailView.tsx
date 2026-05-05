@@ -1316,7 +1316,7 @@ function RunsPane({
               <td className="mono">
                 <Link
                   className="link mono"
-                  to={`/projects/${encodeURIComponent(project)}/runs/${encodeURIComponent(slug)}`}
+                  to={`/projects/${encodeURIComponent(project)}/issues/${issueNumberFromRunSlug(slug)}/runs/${encodeURIComponent(slug)}`}
                   state={{ returnTo: location.pathname, returnLabel: "issue runs" }}
                   title={id}
                 >
@@ -1345,7 +1345,7 @@ function RunsPane({
               <td>
                 <Link
                   className="link"
-                  to={`/projects/${encodeURIComponent(project)}/runs/${encodeURIComponent(slug)}`}
+                  to={`/projects/${encodeURIComponent(project)}/issues/${issueNumberFromRunSlug(slug)}/runs/${encodeURIComponent(slug)}`}
                   state={{ returnTo: location.pathname, returnLabel: "issue runs" }}
                 >
                   view
@@ -1815,6 +1815,10 @@ function issueRunSlug(graph: IssueGraph, run: GraphNode): string {
 
 function runSlugDisplay(slug: string): string {
   return /^\d+-\d+$/.test(slug) ? `#${slug}` : `${slug.slice(0, 8)}…`;
+}
+
+function issueNumberFromRunSlug(slug: string): string {
+  return slug.split("-")[0] || "unknown";
 }
 
 function isRecord(x: unknown): x is Record<string, unknown> {
