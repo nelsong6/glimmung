@@ -504,32 +504,51 @@ function ProjectView({
   const pending = snap.pending_leases.filter((l) => l.project === project.name);
   const active = snap.active_leases.filter((l) => l.project === project.name);
   const activeHosts = new Set(active.flatMap((l) => (l.host ? [l.host] : [])));
+  const currentWork = [...active, ...pending];
+  const nextWork = currentWork[0] ?? null;
 
   return (
-    <>
-      <h2>{project.name}</h2>
-      <div className="project-info">
-        <div className="row">
-          <span className="key">github</span>
-          <span className="val mono">{project.github_repo}</span>
+    <div className="project-workspace">
+      <section className="project-hero">
+        <div className="project-hero-main">
+          <div className="project-kicker mono">project</div>
+          <h2>{project.name}</h2>
+          <div className="project-repo mono">{project.github_repo}</div>
         </div>
-        <div className="row">
-          <span className="key">workflows</span>
-          <span className="val mono">{workflows.length}</span>
+        <div className="project-facts">
+          <div className="project-fact">
+            <span>workflows</span>
+            <strong>{workflows.length}</strong>
+          </div>
+          <div className="project-fact">
+            <span>active</span>
+            <strong>{active.length}</strong>
+          </div>
+          <div className="project-fact">
+            <span>pending</span>
+            <strong>{pending.length}</strong>
+          </div>
+          <div className="project-fact">
+            <span>hosts</span>
+            <strong>{activeHosts.size}</strong>
+          </div>
         </div>
-        <div className="row">
-          <span className="key">work</span>
-          <span className="val mono">
-            {active.length} active / {pending.length} pending
-          </span>
+      </section>
+
+      <section className="project-focus">
+        <div>
+          <span className="key">current focus</span>
+          {nextWork ? (
+            <strong>{String(nextWork.metadata.title ?? nextWork.metadata.issue ?? nextWork.workflow ?? nextWork.id)}</strong>
+          ) : (
+            <strong>No active project work</strong>
+          )}
         </div>
-        <div className="row">
-          <span className="key">hosts</span>
-          <span className="val mono">
-            {activeHosts.size > 0 ? Array.from(activeHosts).join(", ") : "none assigned"}
-          </span>
+        <div>
+          <span className="key">assigned hosts</span>
+          <span className="mono">{activeHosts.size > 0 ? Array.from(activeHosts).join(", ") : "none assigned"}</span>
         </div>
-      </div>
+      </section>
 
       <h2>Workflows</h2>
       {workflows.length === 0 ? (
@@ -564,7 +583,7 @@ function ProjectView({
       )}
 
       <h2>Current work</h2>
-      {active.length + pending.length === 0 ? (
+      {currentWork.length === 0 ? (
         <div className="empty">No active or pending work for {project.name}.</div>
       ) : (
         <table>
@@ -579,7 +598,7 @@ function ProjectView({
             </tr>
           </thead>
           <tbody>
-            {[...active, ...pending].map((l) => (
+            {currentWork.map((l) => (
               <tr key={l.id}>
                 <td className="mono">{l.id.slice(0, 8)}…</td>
                 <td className="mono dim">{l.workflow ?? "—"}</td>
@@ -594,7 +613,7 @@ function ProjectView({
       )}
 
       <IssuesView signedIn={signedIn} projectFilter={project.name} />
-    </>
+    </div>
   );
 }
 

@@ -1434,6 +1434,75 @@ h2 .inline-action,
   color: #d4d4d4;
 }
 
+.project-workspace {
+  display: grid;
+  gap: 18px;
+}
+.project-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 24px;
+  align-items: end;
+  padding: 18px 0 4px;
+  border-bottom: 1px solid var(--border);
+}
+.project-hero h2 {
+  margin: 0;
+}
+.project-kicker {
+  color: var(--fg-dimmer);
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.project-repo {
+  margin-top: 4px;
+  color: var(--fg-muted);
+}
+.project-facts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(72px, auto));
+  gap: 10px;
+}
+.project-fact {
+  min-width: 72px;
+  padding: 8px 10px;
+  background: var(--surface);
+  border-left: 2px solid var(--state-info-fg);
+}
+.project-fact span,
+.project-focus .key {
+  display: block;
+  color: var(--fg-dimmer);
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.project-fact strong {
+  display: block;
+  margin-top: 2px;
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 1rem;
+}
+.project-focus {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 0.35fr);
+  gap: 16px;
+  align-items: start;
+  padding: 12px 14px;
+  background: color-mix(in srgb, var(--surface) 76%, transparent);
+  border-left: 2px solid var(--state-success-fg);
+}
+.project-focus strong {
+  display: block;
+  margin-top: 3px;
+  color: var(--fg);
+}
+.project-workspace > h2 {
+  margin-top: 8px;
+}
+
 /* Tabs — bottom-rail accent matches the leading-rail vocabulary on
    buttons & pills. Mono lowercase labels keep the console-plate language. */
 .tabs {
