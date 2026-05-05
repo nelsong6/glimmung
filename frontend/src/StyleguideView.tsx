@@ -386,6 +386,41 @@ const DESIGN_FILE_ITEMS: PortfolioItem[] = [
     ),
   },
   {
+    id: "project-workspace",
+    title: "Project workspace",
+    caption: "A project-specific page: repo context, workflows, current work, and scoped issues",
+    render: () => (
+      <Specimen title="project workspace">
+        <div className="project-info">
+          <div className="row"><span className="key">project</span><span className="val mono">glimmung</span></div>
+          <div className="row"><span className="key">github</span><span className="val mono">nelsong6/glimmung</span></div>
+          <div className="row"><span className="key">work</span><span className="val mono">1 active / 2 pending</span></div>
+          <div className="row"><span className="key">hosts</span><span className="val mono">nelsonpc</span></div>
+        </div>
+        <h2>Workflows</h2>
+        <table>
+          <thead>
+            <tr><th>Name</th><th>File</th><th>Trigger</th><th>Work</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>issue-agent</td><td className="mono dim">issue-agent.yaml@main</td><td className="mono dim">issue-agent</td><td className="mono dim">1 active / 1 pending</td></tr>
+            <tr><td>portfolio-agent</td><td className="mono dim">design-portfolio.yaml@main</td><td className="mono dim">design-portfolio</td><td className="mono dim">0 active / 1 pending</td></tr>
+          </tbody>
+        </table>
+        <h2>Issues</h2>
+        <table>
+          <thead>
+            <tr><th>#</th><th>Title</th><th>Run</th><th>Touchpoint</th></tr>
+          </thead>
+          <tbody>
+            <tr><td className="mono">206</td><td>Display native run graph and step-level execution</td><td><span className="pill busy">in_progress</span></td><td className="mono dim">PR #218</td></tr>
+            <tr><td className="mono">217</td><td>Generate reusable design portfolio from an existing repo</td><td><span className="pill info">review_required</span></td><td className="mono dim">PR #216</td></tr>
+          </tbody>
+        </table>
+      </Specimen>
+    ),
+  },
+  {
     id: "attempt-cards",
     title: "Issue run details",
     caption: "Attempt cards, state transitions, cost, and verification reasons",

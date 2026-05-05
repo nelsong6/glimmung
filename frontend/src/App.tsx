@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Navigate, NavLink, Outlet, Route, Routes, useOutletContext } from "react-router-dom";
+import { Navigate, NavLink, Outlet, Route, Routes, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { AdminPanel } from "./AdminPanel";
 import { GraphView } from "./GraphView";
 import { IssueDetailView } from "./IssueDetailView";
@@ -101,6 +101,7 @@ export function App() {
       <Route path="/" element={<Layout />}>
         <Route index element={<CapacityRoute />} />
         <Route path="graph" element={<GraphRoute />} />
+        <Route path="projects/:project" element={<ProjectRoute />} />
         <Route path="issues" element={<IssuesRoute />} />
         <Route path="issues/:owner/:repo/:n" element={<IssueDetailView />}>
           {/* Issue workspace tabs. Old slugs are still accepted by
@@ -138,6 +139,7 @@ function MockModeRedirect() {
 }
 
 function Layout() {
+  const navigate = useNavigate();
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [conn, setConn] = useState<Connection>("dead");
   const [lastUpdate, setLastUpdate] = useState<number>(0);
@@ -288,7 +290,10 @@ function Layout() {
         <button
           type="button"
           className={`project-row ${selected.kind === "all" ? "selected" : ""}`}
-          onClick={() => setSelected(ALL)}
+          onClick={() => {
+            setSelected(ALL);
+            navigate("/");
+          }}
         >
           <span className="name">All</span>
           <span className="count">
@@ -311,7 +316,10 @@ function Layout() {
                 <button
                   type="button"
                   className={`project-row ${isProjectSelected ? "selected" : ""}`}
-                  onClick={() => setSelected({ kind: "project", project: p.name })}
+                  onClick={() => {
+                    setSelected({ kind: "project", project: p.name });
+                    navigate(`/projects/${encodeURIComponent(p.name)}`);
+                  }}
                 >
                   <span className="name">{p.name}</span>
                   <span className="count">{projActive + projPending}</span>
@@ -462,12 +470,131 @@ function GraphRoute() {
   );
 }
 
+function ProjectRoute() {
+  const params = useParams<{ project?: string }>();
+  const ctx = useOutletContext<LayoutContext>();
+  return <ProjectView {...ctx} projectName={decodeURIComponent(params.project ?? "")} />;
+}
+
 function ReportsRoute() {
   const { selected } = useOutletContext<LayoutContext>();
   return (
     <ReportsView
       projectFilter={selected.kind === "all" ? null : selected.project}
     />
+  );
+}
+
+function ProjectView({
+  snap,
+  signedIn,
+  projectName,
+}: LayoutContext & { projectName: string }) {
+  if (snap === null) return <div className="empty">Connecting…</div>;
+
+  const project = snap.projects.find((p) => p.name === projectName);
+  if (!project) {
+    return <div className="empty">Project {projectName || "(missing)"} was not found.</div>;
+  }
+
+  const workflows = snap.workflows
+    .filter((w) => w.project === project.name)
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const pending = snap.pending_leases.filter((l) => l.project === project.name);
+  const active = snap.active_leases.filter((l) => l.project === project.name);
+  const activeHosts = new Set(active.flatMap((l) => (l.host ? [l.host] : [])));
+
+  return (
+    <>
+      <h2>{project.name}</h2>
+      <div className="project-info">
+        <div className="row">
+          <span className="key">github</span>
+          <span className="val mono">{project.github_repo}</span>
+        </div>
+        <div className="row">
+          <span className="key">workflows</span>
+          <span className="val mono">{workflows.length}</span>
+        </div>
+        <div className="row">
+          <span className="key">work</span>
+          <span className="val mono">
+            {active.length} active / {pending.length} pending
+          </span>
+        </div>
+        <div className="row">
+          <span className="key">hosts</span>
+          <span className="val mono">
+            {activeHosts.size > 0 ? Array.from(activeHosts).join(", ") : "none assigned"}
+          </span>
+        </div>
+      </div>
+
+      <h2>Workflows</h2>
+      {workflows.length === 0 ? (
+        <div className="empty">No workflows registered for {project.name}.</div>
+      ) : (
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>File</th>
+              <th>Trigger</th>
+              <th>Requires</th>
+              <th>Work</th>
+            </tr>
+          </thead>
+          <tbody>
+            {workflows.map((w) => {
+              const wPending = pending.filter((l) => l.workflow === w.name).length;
+              const wActive = active.filter((l) => l.workflow === w.name).length;
+              return (
+                <tr key={w.id}>
+                  <td>{w.name}</td>
+                  <td className="mono dim">{w.workflow_filename}@{w.workflow_ref}</td>
+                  <td className="mono dim">{w.trigger_label}</td>
+                  <td className="mono">{JSON.stringify(w.default_requirements)}</td>
+                  <td className="mono dim">{wActive} active / {wPending} pending</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+
+      <h2>Current work</h2>
+      {active.length + pending.length === 0 ? (
+        <div className="empty">No active or pending work for {project.name}.</div>
+      ) : (
+        <table>
+          <thead>
+            <tr>
+              <th>Lease</th>
+              <th>Workflow</th>
+              <th>State</th>
+              <th>Host</th>
+              <th>Metadata</th>
+              <th>Requested</th>
+            </tr>
+          </thead>
+          <tbody>
+            {[...active, ...pending].map((l) => (
+              <tr key={l.id}>
+                <td className="mono">{l.id.slice(0, 8)}…</td>
+                <td className="mono dim">{l.workflow ?? "—"}</td>
+                <td><span className={`pill ${l.state === "active" ? "busy" : "info"}`}>{l.state}</span></td>
+                <td className="mono">{l.host ?? "—"}</td>
+                <td className="mono dim">{JSON.stringify(l.metadata)}</td>
+                <td className="mono dim">{relTime(l.requested_at)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <IssuesView signedIn={signedIn} projectFilter={project.name} />
+    </>
   );
 }
 
