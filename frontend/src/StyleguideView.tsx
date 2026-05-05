@@ -360,6 +360,92 @@ const DESIGN_FILE_ITEMS: PortfolioItem[] = [
       </Specimen>
     ),
   },
+  {
+    id: "job-step-log",
+    title: "Job step log inspector",
+    caption: "Selected job steps on the left, terminal output for the selected step",
+    render: () => (
+      <Specimen title="job step log inspector">
+        <div className="run-workbench">
+          <nav className="run-breadcrumb" aria-label="breadcrumb">
+            <span>Issues</span>
+            <span>/</span>
+            <span>glimmung</span>
+            <span>/</span>
+            <span>Add design portfolio</span>
+            <span>/</span>
+            <strong>Run 01KQ...</strong>
+          </nav>
+          <div className="run-stage-strip" aria-label="run stages">
+            <div className="run-stage done">
+              <span className="stage-index">1</span>
+              <span>
+                <strong>env-prep</strong>
+                <small>passed · 3m 12s</small>
+              </span>
+            </div>
+            <div className="run-stage active">
+              <span className="stage-index">2</span>
+              <span>
+                <strong>agent-execute</strong>
+                <small>running · native job</small>
+              </span>
+            </div>
+            <div className="run-stage pending">
+              <span className="stage-index">3</span>
+              <span>
+                <strong>pr</strong>
+                <small>waiting</small>
+              </span>
+            </div>
+          </div>
+          <div className="step-log-layout">
+            <aside className="step-list" aria-label="job steps">
+              <button type="button" className="step-row done">
+                <span>✓</span>
+                <strong>checkout</strong>
+                <small>8s</small>
+              </button>
+              <button type="button" className="step-row done">
+                <span>✓</span>
+                <strong>install</strong>
+                <small>44s</small>
+              </button>
+              <button type="button" className="step-row active">
+                <span>▶</span>
+                <strong>build portfolio</strong>
+                <small>1m 18s</small>
+              </button>
+              <button type="button" className="step-row pending">
+                <span>·</span>
+                <strong>screenshot</strong>
+                <small>queued</small>
+              </button>
+              <button type="button" className="step-row pending">
+                <span>·</span>
+                <strong>summarize</strong>
+                <small>queued</small>
+              </button>
+            </aside>
+            <pre className="step-terminal">{`$ npm run build
+
+> glimmung-frontend@0.1.0 build
+> tsc && vite build
+
+vite v5.4.21 building for production...
+✓ 181 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                  0.47 kB
+dist/assets/index.css           35.34 kB
+dist/assets/index.js           530.47 kB
+
+✓ built in 3.90s`}</pre>
+          </div>
+        </div>
+      </Specimen>
+    ),
+  },
 ];
 
 export function StyleguideView() {

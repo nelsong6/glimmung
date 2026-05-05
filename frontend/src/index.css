@@ -399,6 +399,160 @@
 .portfolio-type-stack {
   max-width: 720px;
 }
+.run-workbench {
+  display: grid;
+  gap: 18px;
+  max-width: 1100px;
+}
+.run-breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  color: var(--fg-dimmer);
+  font-size: 0.85rem;
+}
+.run-breadcrumb strong {
+  color: var(--fg);
+  font-weight: 600;
+}
+.run-stage-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.run-stage {
+  position: relative;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-height: 58px;
+  padding: 10px 12px;
+  background: var(--surface);
+  clip-path: polygon(10px 0, 100% 0, 100% 100%, 0 100%, 0 10px);
+  isolation: isolate;
+}
+.run-stage::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(to right, var(--stage-rail, var(--border)) 0 2px, transparent 2px),
+    linear-gradient(to top, var(--stage-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(to bottom, var(--stage-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(to left, var(--stage-edge, var(--border)) 0 1px, transparent 1px),
+    linear-gradient(135deg, transparent 0 calc(14.14px - 1px), var(--stage-edge, var(--border)) calc(14.14px - 1px) 14.14px, transparent 14.14px);
+  background-repeat: no-repeat;
+  pointer-events: none;
+}
+.run-stage > * {
+  position: relative;
+  z-index: 1;
+}
+.run-stage.done {
+  --stage-rail: var(--state-success-fg);
+  --stage-edge: color-mix(in srgb, var(--state-success-fg) 30%, var(--border));
+}
+.run-stage.active {
+  --stage-rail: var(--state-busy-fg);
+  --stage-edge: color-mix(in srgb, var(--state-busy-fg) 35%, var(--border));
+}
+.run-stage.pending {
+  --stage-rail: var(--border-strong);
+}
+.stage-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  color: var(--fg-dim);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+.run-stage strong,
+.run-stage small {
+  display: block;
+  min-width: 0;
+}
+.run-stage strong {
+  color: var(--fg);
+  font-size: 0.9rem;
+}
+.run-stage small {
+  color: var(--fg-dimmer);
+  margin-top: 3px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+.step-log-layout {
+  display: grid;
+  grid-template-columns: minmax(210px, 260px) minmax(0, 1fr);
+  min-height: 360px;
+  border: 1px solid var(--border);
+  background: var(--bg-deep);
+}
+.step-list {
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+}
+.step-row {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 46px;
+  padding: 8px 12px;
+  background: transparent;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.step-row.done {
+  border-left-color: var(--state-success-fg);
+}
+.step-row.active {
+  border-left-color: var(--state-busy-fg);
+  background: var(--surface-hover);
+  color: var(--fg);
+}
+.step-row.pending {
+  color: var(--fg-dimmer);
+}
+.step-row span,
+.step-row small {
+  font-family: var(--font-mono);
+  color: var(--fg-dimmer);
+  font-size: 0.72rem;
+}
+.step-row strong {
+  min-width: 0;
+  font-size: 0.86rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.step-terminal {
+  min-height: 100%;
+  margin: 0;
+  padding: 18px 20px;
+  overflow: auto;
+  background: #050507;
+  color: #b8b8b8;
+  border: 0;
+  border-radius: 0;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
 
 @media (max-width: 760px) {
   .portfolio-topbar {
@@ -427,6 +581,14 @@
   .tag-matrix {
     grid-template-columns: 1fr;
     gap: 10px;
+  }
+  .run-stage-strip,
+  .step-log-layout {
+    grid-template-columns: 1fr;
+  }
+  .step-list {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
   }
 }
 
