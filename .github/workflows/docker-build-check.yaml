@@ -27,9 +27,6 @@ jobs:
           - name: app
             file: Dockerfile
             context: .
-          - name: mcp-glimmung
-            file: mcp-glimmung/Dockerfile
-            context: mcp-glimmung
     steps:
       - name: Checkout
         uses: actions/checkout@v4

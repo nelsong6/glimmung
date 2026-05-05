@@ -5,9 +5,6 @@ on:
     branches: [main]
     paths-ignore:
       - 'k8s/**'
-      - 'k8s-mcp-glimmung/**'
-      - 'mcp-glimmung/**'
-      - '.github/workflows/mcp-glimmung-build.yaml'
       - 'README.md'
   workflow_dispatch:
 

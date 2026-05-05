@@ -61,8 +61,9 @@ matching surface in the same PR:
 
 - Add or update the frontend affordance when the action belongs in the
   dashboard.
-- Add or update the matching `mcp-glimmung` tool when the action should be
-  available to LLM/session callers.
+- Add or update the matching tool in
+  [`nelsong6/mcp-glimmung`](https://github.com/nelsong6/mcp-glimmung) when the
+  action should be available to LLM/session callers.
 - If the endpoint is intentionally system-only (webhooks, lease lifecycle,
   run callbacks, health/config/events), call that out in the PR so the HTTP
   API and MCP surface do not drift silently.
@@ -234,9 +235,10 @@ or inspect a specific namespace.
 
 `mcp-glimmung` includes a generic Playwright-backed inspector for validation
 URLs. Use the MCP `inspect_browser_url` tool, or run the same implementation
-locally/in workflows:
+from the standalone repo:
 
 ```sh
+git clone https://github.com/nelsong6/mcp-glimmung.git
 cd mcp-glimmung
 uv run glimmung-browser-inspect https://example.romaine.life \
   --width 1440 --height 900 --wait-ms 2000 --screenshot
