@@ -28,14 +28,14 @@ def _settings(**kwargs):
 
 
 @pytest.mark.asyncio
-async def test_public_config_uses_test_client_for_frontman_hosts(monkeypatch):
+async def test_public_config_uses_test_client_for_disposable_frontend_hosts(monkeypatch):
     settings = _settings()
     monkeypatch.setattr("glimmung.app.app", SimpleNamespace(state=SimpleNamespace(
         settings=settings,
     )))
 
     result = await public_config(_request(
-        "frontman-1.glimmung.dev.romaine.life",
+        "portfolio-1.glimmung.dev.romaine.life",
     ))
 
     assert result["entra_client_id"] == "test-client"
@@ -63,10 +63,10 @@ async def test_forwarded_host_is_used_for_client_selection(monkeypatch):
 
     request = _request(
         "internal-service:8000",
-        forwarded_host="frontman.glimmung.dev.romaine.life",
+        forwarded_host="portfolio.glimmung.dev.romaine.life",
     )
 
-    assert _request_host(request) == "frontman.glimmung.dev.romaine.life"
+    assert _request_host(request) == "portfolio.glimmung.dev.romaine.life"
     assert (await public_config(request))["entra_client_id"] == "test-client"
 
 
@@ -75,7 +75,7 @@ def test_frontend_client_selection_falls_back_without_test_client():
 
     assert _frontend_entra_client_id(
         settings,
-        "frontman.glimmung.dev.romaine.life",
+        "portfolio.glimmung.dev.romaine.life",
     ) == "prod-client"
 
 
