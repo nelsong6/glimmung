@@ -51,6 +51,10 @@ For frontend repos that need a review surface after the app already exists,
 use the reusable [Design Portfolio Bootstrap](docs/design-portfolio-bootstrap.md)
 process and Playbook template.
 
+For Frontman-style visual editing with cluster-native tools, use the
+[Frontman Cluster Agent Prototype](docs/frontman-cluster-agent-prototype.md)
+contract.
+
 ## Layout
 
 ```
