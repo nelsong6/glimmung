@@ -103,8 +103,12 @@ type RunReportAttempt = {
   dispatched_at: string;
   completed_at: string | null;
   conclusion: string | null;
+  verification_status: string | null;
+  evidence_refs: string[];
+  summary_markdown: string | null;
   decision: string | null;
   cost_usd: number | null;
+  log_archive_url: string | null;
   skipped_from_run_id: string | null;
 };
 
@@ -1877,8 +1881,12 @@ function projectRunReportGraph(report: RunReport, workflow: Workflow | undefined
       workflow_run_id: attempt.workflow_run_id,
       completed_at: attempt.completed_at,
       conclusion: attempt.conclusion,
+      verification_status: attempt.verification_status,
+      evidence_refs: attempt.evidence_refs,
+      summary_markdown: attempt.summary_markdown,
       decision: attempt.decision,
       cost_usd: attempt.cost_usd,
+      log_archive_url: attempt.log_archive_url,
       skipped_from_run_id: attempt.skipped_from_run_id,
     },
   }));

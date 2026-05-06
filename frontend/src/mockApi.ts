@@ -648,8 +648,8 @@ function handleMockRequest(url: URL, init?: RequestInit): Response {
       session_launch_intent: row.pr_lock_held ? "warm" : "cold",
       session_launch_url: null,
       run_attempt_history: [
-        { attempt_index: 0, phase: "design", workflow_filename: "issue-agent.yaml", workflow_run_id: 9123401, dispatched_at: ago(88), completed_at: ago(75), verification_status: "pass", decision: "continue" },
-        { attempt_index: 1, phase: "implement", workflow_filename: "issue-agent.yaml", workflow_run_id: 9123448, dispatched_at: ago(70), completed_at: row.pr_lock_held ? null : ago(42), verification_status: row.pr_lock_held ? null : "pass", decision: row.pr_lock_held ? null : "report" },
+        { attempt_index: 0, phase: "design", workflow_filename: "issue-agent.yaml", workflow_run_id: 9123401, dispatched_at: ago(88), completed_at: ago(75), conclusion: "success", verification_status: "pass", evidence_refs: [], summary_markdown: "Mapped the requested interaction and identified the dashboard route to update.", log_archive_url: null, decision: "continue" },
+        { attempt_index: 1, phase: "implement", workflow_filename: "issue-agent.yaml", workflow_run_id: 9123448, dispatched_at: ago(70), completed_at: row.pr_lock_held ? null : ago(42), conclusion: row.pr_lock_held ? null : "success", verification_status: row.pr_lock_held ? null : "pass", evidence_refs: [], summary_markdown: row.pr_lock_held ? null : "Implemented the touchpoint change, rebuilt the preview, and captured review evidence.", log_archive_url: null, decision: row.pr_lock_held ? null : "report" },
       ],
       comments: [],
       reviews: [],

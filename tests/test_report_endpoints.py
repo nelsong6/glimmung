@@ -266,6 +266,7 @@ async def test_build_report_detail_surfaces_warm_session_launch_url(cosmos):
         "cumulative_cost_usd": 0.0,
         "trigger_source": {"kind": "glimmung_ui"},
         "validation_url": "https://preview.example.test",
+        "screenshots_markdown": "![home](https://preview.example.test/shot.png)",
         "session_launch_intent": "warm",
         "created_at": datetime.now(UTC).isoformat(),
         "updated_at": datetime.now(UTC).isoformat(),
@@ -281,11 +282,81 @@ async def test_build_report_detail_surfaces_warm_session_launch_url(cosmos):
 
     assert detail.session_launch_intent == "warm"
     assert detail.validation_url == "https://preview.example.test"
+    assert detail.screenshots_markdown == "![home](https://preview.example.test/shot.png)"
     assert detail.session_launch_url is not None
     assert "glimmung_run_id=01JRUNWARM" in detail.session_launch_url
     assert "glimmung_issue_id=01JISSUEZZZ" in detail.session_launch_url
     assert f"glimmung_pr_id={pr.id}" in detail.session_launch_url
     assert "validation_url=https%3A%2F%2Fpreview.example.test" in detail.session_launch_url
+
+
+@pytest.mark.asyncio
+async def test_build_report_detail_surfaces_attempt_evidence(cosmos):
+    now = datetime.now(UTC).isoformat()
+    await cosmos.runs.create_item({
+        "id": "01JRUNEVIDENCE",
+        "project": "ambience",
+        "workflow": "issue-agent",
+        "issue_id": "01JISSUEZZZ",
+        "issue_repo": "nelsong6/ambience",
+        "issue_number": 42,
+        "state": "passed",
+        "budget": {"total": 25.0},
+        "attempts": [{
+            "attempt_index": 0,
+            "phase": "agent-execute",
+            "phase_kind": "k8s_job",
+            "workflow_filename": "k8s_job:agent-execute",
+            "workflow_run_id": None,
+            "dispatched_at": now,
+            "completed_at": now,
+            "conclusion": "success",
+            "verification": {
+                "schema_version": 1,
+                "status": "pass",
+                "reasons": [],
+                "evidence_refs": ["blob://artifacts/runs/ambience/01JRUNEVIDENCE/shot.png"],
+                "cost_usd": 0.0,
+            },
+            "summary_markdown": "Changed the touchpoint page and exposed evidence links.",
+            "decision": "advance",
+            "log_archive_url": (
+                "blob://artifacts/runs/ambience/01JRUNEVIDENCE/attempts/0/"
+                "native-events.json"
+            ),
+        }],
+        "cumulative_cost_usd": 0.0,
+        "trigger_source": {"kind": "glimmung_ui"},
+        "session_launch_intent": "cold",
+        "created_at": now,
+        "updated_at": now,
+    })
+    pr = await report_ops.create_report(
+        cosmos, project="ambience", repo="nelsong6/ambience",
+        number=14, title="t", branch="b",
+        linked_issue_id="01JISSUEZZZ", linked_run_id="01JRUNEVIDENCE",
+    )
+
+    detail = await _build_report_detail(cosmos, pr=pr)
+
+    assert detail.run_attempt_history == [{
+        "attempt_index": 0,
+        "phase": "agent-execute",
+        "workflow_filename": "k8s_job:agent-execute",
+        "workflow_run_id": None,
+        "dispatched_at": now,
+        "completed_at": now,
+        "conclusion": "success",
+        "verification_status": "pass",
+        "evidence_refs": ["blob://artifacts/runs/ambience/01JRUNEVIDENCE/shot.png"],
+        "summary_markdown": "Changed the touchpoint page and exposed evidence links.",
+        "cost_usd": None,
+        "decision": "advance",
+        "log_archive_url": (
+            "blob://artifacts/runs/ambience/01JRUNEVIDENCE/attempts/0/"
+            "native-events.json"
+        ),
+    }]
 
 
 # ─── Report versions ────────────────────────────────────────────────────────

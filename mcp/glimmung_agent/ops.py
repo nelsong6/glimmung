@@ -320,6 +320,54 @@ cat /tmp/agent-input.md | claude \
   --dangerously-skip-permissions \
   2>&1 | tee /tmp/claude-stream.log
 
+{
+  echo "# Agent summary input"
+  echo
+  echo "## Git status"
+  git status --short
+  echo
+  echo "## Changed files"
+  git diff --name-only
+  echo
+  echo "## Diff stat"
+  git diff --stat
+  echo
+  echo "## Evidence files"
+  find /workspace/evidence -type f | sort || true
+  echo
+  echo "## Interaction log"
+  tail -n 400 /tmp/claude-stream.log
+} > /tmp/summary-input.md
+
+cat > /tmp/summary-prompt.md <<'EOF'
+Summarize this agent run for a human reviewer.
+
+Return concise markdown with:
+- What changed
+- Verification performed or attempted
+- Evidence artifacts produced
+- Blockers, caveats, or residual risk
+
+Stick to facts supported by the input. Do not decide whether the change
+should merge.
+EOF
+
+if cat /tmp/summary-prompt.md /tmp/summary-input.md | claude \
+    --print \
+    --output-format text \
+    --dangerously-skip-permissions \
+    > /workspace/evidence/summary.md 2>/tmp/summary-stderr.log; then
+  :
+else
+  {
+    echo "## Run summary"
+    echo
+    echo "_Summary generation failed; see raw agent logs._"
+    echo
+    sed 's/^/> /' /tmp/summary-stderr.log | head -80
+  } > /workspace/evidence/summary.md
+fi
+
 # Refuse to publish runner-local config files. The prompt tells the
 # agent not to touch these; this is the second line of defense.
 BLOCKED=$(git status --porcelain -- .github/workflows .github/agent .mcp.json 2>/dev/null || true)
