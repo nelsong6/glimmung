@@ -853,6 +853,32 @@ class Issue(BaseModel):
     closed_at: datetime | None = None
 
 
+# ─── Design portfolio review elements (#225) ────────────────────────────────
+
+
+class PortfolioReviewState(str, Enum):
+    UNREVIEWED = "unreviewed"
+    NEEDS_REVIEW = "needs_review"
+    APPROVED = "approved"
+    NEEDS_WORK = "needs_work"
+
+
+class PortfolioElement(BaseModel):
+    id: str
+    project: str
+    route: str
+    element_id: str
+    title: str = ""
+    screenshot_url: str | None = None
+    preview_url: str | None = None
+    status: PortfolioReviewState = PortfolioReviewState.UNREVIEWED
+    notes: str = ""
+    last_touched_run_id: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
 # ─── Glimmung Reports ──────────────────────────────────────────────────────
 #
 # Report is the canonical Glimmung review object. GitHub pull requests are
