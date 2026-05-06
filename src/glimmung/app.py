@@ -3651,6 +3651,7 @@ async def _refresh_playbook_entries(cosmos: Cosmos, playbook: Playbook) -> None:
         if run.state == RunState.PASSED:
             entry.state = PlaybookEntryState.SUCCEEDED
             entry.completed_at = run.updated_at
+            await _release_playbook_work_context_lock(cosmos, playbook=playbook, entry=entry)
         elif run.state in (RunState.REVIEW_REQUIRED, RunState.ABORTED):
             entry.state = PlaybookEntryState.FAILED
             entry.completed_at = run.updated_at
@@ -3659,6 +3660,7 @@ async def _refresh_playbook_entries(cosmos: Cosmos, playbook: Playbook) -> None:
                 "run_state": run.state.value,
                 "abort_reason": run.abort_reason,
             }
+            await _release_playbook_work_context_lock(cosmos, playbook=playbook, entry=entry)
         elif entry.state in (PlaybookEntryState.CREATED, PlaybookEntryState.PENDING):
             entry.state = PlaybookEntryState.RUNNING
 
@@ -3671,6 +3673,37 @@ async def _start_playbook_entry(
 ) -> None:
     cosmos: Cosmos = app.state.cosmos
     work_context = _playbook_work_context_for_entry(playbook, entry)
+    holder_id = _playbook_work_context_holder_id(playbook, entry)
+    try:
+        lock = await lock_ops.claim_lock(
+            cosmos,
+            scope="work_context",
+            key=work_context["id"],
+            holder_id=holder_id,
+            ttl_seconds=_playbook_work_context_ttl_seconds(app),
+            metadata={
+                "playbook_id": playbook.id,
+                "playbook_entry_id": entry.id,
+                "strategy": playbook.integration_strategy.value,
+                "branch": work_context["branch"],
+                "base_ref": work_context["base_ref"],
+            },
+        )
+    except LockBusy as busy:
+        entry.metadata = {
+            **entry.metadata,
+            "work_context": work_context,
+            "work_context_lock_state": "busy",
+            "work_context_lock_holder_id": busy.lock.held_by,
+            "work_context_lock_expires_at": busy.lock.expires_at.isoformat(),
+            "dispatch_state": "work_context_busy",
+            "dispatch_detail": (
+                f"work context {work_context['id']} is held by {busy.lock.held_by} "
+                f"until {busy.lock.expires_at.isoformat()}"
+            ),
+        }
+        return
+
     if not entry.created_issue_id:
         issue = await issue_ops.create_issue(
             cosmos,
@@ -3692,6 +3725,13 @@ async def _start_playbook_entry(
             **entry.metadata,
             "work_context": work_context,
         }
+    entry.metadata = {
+        **entry.metadata,
+        "work_context": work_context,
+        "work_context_lock_state": "held",
+        "work_context_lock_holder_id": holder_id,
+        "work_context_lock_expires_at": lock.expires_at.isoformat(),
+    }
     result = await dispatch_run(
         app,
         issue_id=entry.created_issue_id,
@@ -3728,9 +3768,66 @@ async def _start_playbook_entry(
         if latest is not None:
             entry.run_id = latest.id
             entry.state = PlaybookEntryState.RUNNING
+        else:
+            await _release_playbook_work_context_lock(cosmos, playbook=playbook, entry=entry)
     else:
+        await _release_playbook_work_context_lock(cosmos, playbook=playbook, entry=entry)
         entry.state = PlaybookEntryState.FAILED
         entry.completed_at = datetime.now(UTC)
+
+
+async def _release_playbook_work_context_lock(
+    cosmos: Cosmos,
+    *,
+    playbook: Playbook,
+    entry: PlaybookEntry,
+) -> bool:
+    if entry.metadata.get("work_context_lock_state") == "released":
+        return False
+    context = entry.metadata.get("work_context")
+    if not isinstance(context, dict) or not context.get("id"):
+        return False
+    holder_id = str(
+        entry.metadata.get("work_context_lock_holder_id")
+        or _playbook_work_context_holder_id(playbook, entry)
+    )
+    released = await lock_ops.release_lock(
+        cosmos,
+        scope="work_context",
+        key=str(context["id"]),
+        holder_id=holder_id,
+    )
+    if released:
+        entry.metadata = {
+            **entry.metadata,
+            "work_context_lock_state": "released",
+            "work_context_lock_released_at": datetime.now(UTC).isoformat(),
+        }
+        playbook_context = playbook.metadata.get("work_context")
+        if (
+            isinstance(playbook_context, dict)
+            and playbook_context.get("id") == context.get("id")
+        ):
+            playbook.metadata = {
+                **playbook.metadata,
+                "work_context": {
+                    **playbook_context,
+                    "state": "available",
+                },
+            }
+    return released
+
+
+def _playbook_work_context_holder_id(playbook: Playbook, entry: PlaybookEntry) -> str:
+    return f"playbook:{playbook.id}:entry:{entry.id}"
+
+
+def _playbook_work_context_ttl_seconds(app: FastAPI) -> int:
+    settings = getattr(app.state, "settings", None)
+    ttl = getattr(settings, "lease_default_ttl_seconds", None)
+    if ttl is None:
+        return 14_400
+    return int(ttl)
 
 
 def _playbook_work_context_for_entry(
