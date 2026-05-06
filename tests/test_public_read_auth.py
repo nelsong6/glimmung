@@ -13,8 +13,11 @@ PUBLIC_READ_ROUTES = {
     ("GET", "/v1/graph"),
     ("GET", "/v1/runs/{project}/{run_id}/native/events"),
     ("GET", "/v1/reports"),
+    ("GET", "/v1/touchpoints"),
     ("GET", "/v1/reports/{repo_owner}/{repo_name}/{pr_number}"),
+    ("GET", "/v1/touchpoints/{repo_owner}/{repo_name}/{pr_number}"),
     ("GET", "/v1/reports/by-id/{project}/{report_id}"),
+    ("GET", "/v1/touchpoints/by-id/{project}/{report_id}"),
 }
 
 MUTATING_ADMIN_ROUTES = {
@@ -25,7 +28,9 @@ MUTATING_ADMIN_ROUTES = {
     ("PATCH", "/v1/issues/by-id/{project}/{issue_id}"),
     ("POST", "/v1/runs/dispatch"),
     ("POST", "/v1/reports"),
+    ("POST", "/v1/touchpoints"),
     ("PATCH", "/v1/reports/by-id/{project}/{report_id}"),
+    ("PATCH", "/v1/touchpoints/by-id/{project}/{report_id}"),
     ("POST", "/v1/signals"),
 }
 
@@ -72,4 +77,15 @@ def test_report_by_id_route_precedes_repo_number_route() -> None:
     ]
     assert pr_route_paths.index("/v1/reports/by-id/{project}/{report_id}") < (
         pr_route_paths.index("/v1/reports/{repo_owner}/{repo_name}/{pr_number}")
+    )
+
+
+def test_touchpoint_by_id_route_precedes_repo_number_route() -> None:
+    """Same route-order trap for the product-facing touchpoint aliases."""
+    pr_route_paths = [
+        route.path for route in app.routes
+        if isinstance(route, APIRoute) and "GET" in route.methods
+    ]
+    assert pr_route_paths.index("/v1/touchpoints/by-id/{project}/{report_id}") < (
+        pr_route_paths.index("/v1/touchpoints/{repo_owner}/{repo_name}/{pr_number}")
     )

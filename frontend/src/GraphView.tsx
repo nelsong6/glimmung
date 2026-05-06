@@ -105,7 +105,7 @@ export function GraphView({
     const repo = node.metadata.repo;
     const number = node.metadata.number;
     if (typeof repo === "string" && typeof number === "number") {
-      navigate(`/reports/${repo}/${number}`);
+      navigate(`/touchpoints/${repo}/${number}`);
     }
   };
 

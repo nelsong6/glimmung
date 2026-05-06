@@ -188,8 +188,10 @@ export function App() {
           <Route path="in-progress" element={null} />
           <Route path="lineage" element={null} />
         </Route>
-        <Route path="reports" element={<ReportsRoute />} />
-        <Route path="reports/:owner/:repo/:n" element={<ReportDetailView />} />
+        <Route path="touchpoints" element={<ReportsRoute />} />
+        <Route path="touchpoints/:owner/:repo/:n" element={<ReportDetailView />} />
+        <Route path="reports" element={<Navigate to="/touchpoints" replace />} />
+        <Route path="reports/:owner/:repo/:n" element={<LegacyReportRedirectRoute />} />
       </Route>
     </Routes>
   );
@@ -259,8 +261,8 @@ function Layout() {
     };
   }, [lastUpdate]);
 
-  // Poll /v1/issues + /v1/reports to drive the issue-workspace pulse
-  // when issue work or touchpoint review is in flight. Reports are no
+  // Poll /v1/issues + /v1/touchpoints to drive the issue-workspace pulse
+  // when issue work or touchpoint review is in flight. Touchpoints are no
   // longer primary navigation, but their locks still matter to issues.
   useEffect(() => {
     let cancelled = false;
@@ -268,7 +270,7 @@ function Layout() {
       try {
         const [iRes, pRes] = await Promise.all([
           fetch("/v1/issues"),
-          fetch("/v1/reports"),
+          fetch("/v1/touchpoints"),
         ]);
         const issues = iRes.ok ? ((await iRes.json()) as Array<{ issue_lock_held?: boolean }>) : [];
         const reports = pRes.ok ? ((await pRes.json()) as Array<{ pr_lock_held?: boolean }>) : [];
@@ -555,7 +557,9 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
     }
     return [{ label: "Home", to: "/" }, { label: "Needs attention" }];
   }
-  if (parts[0] === "reports") return [{ label: "Home", to: "/" }, { label: "Touchpoint evidence" }];
+  if (parts[0] === "touchpoints" || parts[0] === "reports") {
+    return [{ label: "Home", to: "/" }, { label: "Touchpoints", to: "/touchpoints" }];
+  }
   return [{ label: "Home", to: "/" }, { label: parts[0] }];
 }
 
@@ -680,6 +684,16 @@ function ReportsRoute() {
   return (
     <ReportsView
       projectFilter={selected.kind === "all" ? null : selected.project}
+    />
+  );
+}
+
+function LegacyReportRedirectRoute() {
+  const params = useParams<{ owner?: string; repo?: string; n?: string }>();
+  return (
+    <Navigate
+      to={`/touchpoints/${params.owner ?? ""}/${params.repo ?? ""}/${params.n ?? ""}`}
+      replace
     />
   );
 }

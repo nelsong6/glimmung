@@ -1,10 +1,10 @@
 /**
- * Report detail view — reject-with-feedback action lives here.
+ * Touchpoint detail view — reject-with-feedback action lives here.
  *
- * Report meta comes from Glimmung; GitHub PR coordinates are syndication
+ * Touchpoint meta comes from Glimmung; GitHub PR coordinates are syndication
  * metadata when present. Runtime fields come from the linked Run.
  *
- * Routed via `/reports/<owner>/<repo>/<n>`. Repo + PR number are derived
+ * Routed via `/touchpoints/<owner>/<repo>/<n>`. Repo + PR number are derived
  * from URL params so deep-link reloads land directly here.
  */
 import { useEffect, useState } from "react";
@@ -81,13 +81,13 @@ export function ReportDetailView() {
   const [reject, setReject] = useState<RejectStatus>({ kind: "idle" });
   const [tankBaseUrl, setTankBaseUrl] = useState("");
 
-  const onBack = () => navigate("/reports");
+  const onBack = () => navigate("/touchpoints");
 
   const refresh = async () => {
     setError(null);
     try {
-      const r = await fetch(`/v1/reports/${repo}/${prNumber}`);
-      if (!r.ok) throw new Error(`/v1/reports/${repo}/${prNumber} -> ${r.status}`);
+      const r = await fetch(`/v1/touchpoints/${repo}/${prNumber}`);
+      if (!r.ok) throw new Error(`/v1/touchpoints/${repo}/${prNumber} -> ${r.status}`);
       setDetail((await r.json()) as ReportDetail);
     } catch (e) {
       setError(String(e));
@@ -127,7 +127,7 @@ export function ReportDetailView() {
     setReject({ kind: "submitting" });
     try {
       // Post-#50 signal shape: target_repo is the project name, target_id
-      // is the Glimmung Report id. The drain accepts both shapes for
+      // is the Glimmung touchpoint id. The drain accepts both shapes for
       // backwards-compat with in-flight pre-#50 signals.
       const r = await authedFetch("/v1/signals", {
         method: "POST",
@@ -302,7 +302,7 @@ export function ReportDetailView() {
           <h2>Reject with feedback</h2>
           <p className="dim">
             Glimmung will dispatch the triage workflow with this feedback as context.
-            Subject to the run&apos;s budget. Subsequent rejects on this Report queue cleanly
+            Subject to the run&apos;s budget. Subsequent rejects on this touchpoint queue cleanly
             — they wait for any in-flight triage to complete.
           </p>
           <textarea
