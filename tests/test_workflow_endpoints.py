@@ -33,12 +33,16 @@ def cosmos():
     )
 
 
-async def _seed_project(cosmos, name: str = "ambience") -> None:
+async def _seed_project(
+    cosmos,
+    name: str = "ambience",
+    metadata: dict[str, object] | None = None,
+) -> None:
     await cosmos.projects.create_item({
         "id": name,
         "name": name,
         "githubRepo": f"nelsong6/{name}",
-        "metadata": {},
+        "metadata": metadata or {},
         "createdAt": datetime.now(UTC).isoformat(),
     })
 
@@ -337,6 +341,49 @@ async def test_register_workflow_accepts_native_k8s_job_phase(cosmos, monkeypatc
         {"slug": "clone-repo", "title": None},
         {"slug": "run-agent", "title": "run agent"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_register_workflow_rejects_gha_dispatch_for_native_webapp_project(
+    cosmos, monkeypatch,
+):
+    await _seed_project(cosmos, "glimmung", metadata={"native_webapp": True})
+    monkeypatch.setattr("glimmung.app.app", _app_with(cosmos))
+
+    with pytest.raises(HTTPException) as excinfo:
+        await register_workflow(_single_phase_register(project="glimmung"))
+
+    assert excinfo.value.status_code == 400
+    assert "native_webapp" in excinfo.value.detail
+    assert "gha_dispatch phases: agent" in excinfo.value.detail
+
+
+@pytest.mark.asyncio
+async def test_register_workflow_accepts_k8s_job_for_native_webapp_project(
+    cosmos, monkeypatch,
+):
+    await _seed_project(cosmos, "glimmung", metadata={"app_kind": "native_webapp"})
+    monkeypatch.setattr("glimmung.app.app", _app_with(cosmos))
+
+    result = await register_workflow(WorkflowRegister(
+        project="glimmung",
+        name="agent-run",
+        phases=[
+            PhaseSpec(
+                name="agent-execute",
+                kind="k8s_job",
+                jobs=[
+                    NativeJobSpec(
+                        id="agent",
+                        image="romainecr.azurecr.io/glimmung-runner:abc123",
+                        steps=[NativeStepSpec(slug="run-agent")],
+                    )
+                ],
+            ),
+        ],
+    ))
+
+    assert result.phases[0].kind == "k8s_job"
 
 
 def test_k8s_job_phase_requires_unique_steps():

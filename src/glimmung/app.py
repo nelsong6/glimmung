@@ -1799,6 +1799,36 @@ async def _read_workflow(cosmos: Cosmos, project: str, name: str) -> dict[str, A
         return None
 
 
+def _project_requires_native_workflows(project_doc: dict[str, Any]) -> bool:
+    metadata = project_doc.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        return False
+    if metadata.get("native_webapp") is True or metadata.get("nativeWebapp") is True:
+        return True
+    app_kind = str(
+        metadata.get("app_kind")
+        or metadata.get("appKind")
+        or metadata.get("kind")
+        or ""
+    ).lower()
+    return app_kind in {"native_webapp", "native-webapp", "native webapp"}
+
+
+def _assert_workflow_allowed_for_project(
+    project_doc: dict[str, Any],
+    workflow: WorkflowRegister,
+) -> None:
+    if not _project_requires_native_workflows(project_doc):
+        return
+    gha_phases = [phase.name for phase in workflow.phases if phase.kind == "gha_dispatch"]
+    if gha_phases:
+        raise HTTPException(
+            400,
+            "project is marked native_webapp; workflow phases must use kind='k8s_job' "
+            f"(gha_dispatch phases: {', '.join(gha_phases)})",
+        )
+
+
 def _project_to_doc(p: ProjectRegister) -> dict[str, Any]:
     return {
         "id": p.name,
@@ -3616,6 +3646,7 @@ async def register_workflow(w: WorkflowRegister) -> Workflow:
     project_doc = await _read_project(cosmos, w.project)
     if not project_doc:
         raise HTTPException(400, f"project {w.project!r} does not exist; register it first")
+    _assert_workflow_allowed_for_project(project_doc, w)
     doc = _workflow_to_doc(w)
     try:
         existing = await cosmos.workflows.read_item(item=w.name, partition_key=w.project)
