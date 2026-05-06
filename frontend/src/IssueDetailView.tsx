@@ -1502,7 +1502,14 @@ function RunsPane({
                   )}
                 </td>
                 <td>
-                  <span className={`pill ${runStatePill(r.state ?? "")}`}>{r.state ?? "—"}</span>
+                  <button
+                    type="button"
+                    className="link"
+                    onClick={() => setSelectedRunId(id)}
+                    title={`View ${runSlugDisplay(slug)}`}
+                  >
+                    <span className={`pill ${runStatePill(r.state ?? "")}`}>{r.state ?? "—"}</span>
+                  </button>
                 </td>
                 <td className="mono dim">{r.timestamp ? formatTime(r.timestamp) : "—"}</td>
                 <td className="mono">
