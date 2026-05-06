@@ -18,9 +18,11 @@ import pytest
 from glimmung import reports as report_ops
 from glimmung import runs as run_ops
 from glimmung.app import (
+    LinkExistingPrRequest,
     RunCompletedRequest,
     RunStartedRequest,
     _open_pr_primitive,
+    link_existing_pr_endpoint,
     run_completed,
     run_started,
 )
@@ -1128,6 +1130,88 @@ async def test_completed_pr_primitive_no_diff_marks_review_required(cosmos):
     assert final.abort_reason == (
         "PR primitive: no diff between glimmung/01KQTEST_RUN_NODIFF and base"
     )
+
+
+@pytest.mark.asyncio
+async def test_completed_pr_primitive_failure_records_actionable_reason(cosmos):
+    await _register_project(cosmos, "ambience", "nelsong6/ambience")
+    await _register_workflow_with_pr(cosmos, "ambience")
+    run = await _seed_run(
+        cosmos,
+        run_id="01KQTEST_RUN_PRFAIL",
+        project="ambience",
+        issue_repo="nelsong6/ambience",
+        issue_number=219,
+    )
+    await _seed_issue_for_run(cosmos, run)
+
+    async def fake_open_pull_request(_minter, **_kwargs):
+        raise RuntimeError("422 Validation Failed: head branch was not found")
+
+    app_state = SimpleNamespace(
+        state=SimpleNamespace(
+            cosmos=cosmos,
+            settings=SimpleNamespace(glimmung_base_url="https://glimmung.test"),
+            gh_minter=object(),
+        ),
+    )
+    body = RunCompletedRequest(
+        workflow_run_id=1001,
+        conclusion="success",
+        verification=_pass_verification(),
+    )
+    with (
+        patch("glimmung.app.app", app_state),
+        patch("glimmung.app.open_pull_request", fake_open_pull_request),
+    ):
+        result = await run_completed(body, project="ambience", run_id=run.id)
+
+    assert result.decision == "abort_pr_create_failed"
+    found = await run_ops.read_run(cosmos, project="ambience", run_id=run.id)
+    final, _ = found  # type: ignore[misc]
+    assert final.state == RunState.ABORTED
+    assert final.abort_reason == (
+        "PR primitive: gh pr create failed: "
+        "422 Validation Failed: head branch was not found"
+    )
+
+
+@pytest.mark.asyncio
+async def test_link_existing_pr_endpoint_repairs_run_and_touchpoint(cosmos):
+    run = await _seed_run(
+        cosmos,
+        run_id="01KQTEST_RUN_REPAIR",
+        project="ambience",
+        issue_repo="nelsong6/ambience",
+        issue_number=220,
+    )
+    await _seed_issue_for_run(cosmos, run, title="Repair PR primitive")
+    app_state = SimpleNamespace(state=SimpleNamespace(cosmos=cosmos))
+
+    with patch("glimmung.app.app", app_state):
+        result = await link_existing_pr_endpoint(
+            LinkExistingPrRequest(number=88),
+            project="ambience",
+            run_id=run.id,
+        )
+
+    assert result.state == "linked"
+    assert result.repo == "nelsong6/ambience"
+    assert result.pr_number == 88
+
+    found = await run_ops.read_run(cosmos, project="ambience", run_id=run.id)
+    repaired, _ = found  # type: ignore[misc]
+    assert repaired.pr_number == 88
+    assert repaired.pr_branch == f"glimmung/{run.id}"
+
+    found_pr = await report_ops.find_report_by_repo_number(
+        cosmos, repo="nelsong6/ambience", number=88,
+    )
+    assert found_pr is not None
+    pr, _ = found_pr
+    assert pr.linked_run_id == run.id
+    assert pr.linked_issue_id == run.issue_id
+    assert pr.title == "Repair PR primitive"
 
 
 @pytest.mark.asyncio
