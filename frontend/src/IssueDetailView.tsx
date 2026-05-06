@@ -1834,7 +1834,7 @@ function TouchpointTab({
 
       <h2>Evidence</h2>
       {screenshotsMarkdown && (
-        <pre className="evidence-notes">{screenshotsMarkdown}</pre>
+        <ScreenshotEvidence markdown={screenshotsMarkdown} />
       )}
       {touchpointNodes.length === 0 ? (
         <div className="empty">No touchpoint evidence has landed yet.</div>
@@ -2337,6 +2337,30 @@ function nativeEventLine(event: NativeRunEvent): string {
   if (!event.message) return `${prefix}${suffix}`;
   if (event.event === "log") return event.message;
   return `${prefix}: ${event.message}${suffix}`;
+}
+
+function ScreenshotEvidence({ markdown }: { markdown: string }) {
+  const shots = screenshotLinks(markdown);
+  if (shots.length === 0) {
+    return <pre className="evidence-notes">{markdown}</pre>;
+  }
+  return (
+    <div className="evidence-gallery">
+      {shots.map((shot) => (
+        <a key={shot.url} className="evidence-shot" href={shot.url} target="_blank" rel="noreferrer">
+          <img src={shot.url} alt={shot.label} loading="lazy" />
+          <span>{shot.label}</span>
+        </a>
+      ))}
+    </div>
+  );
+}
+
+function screenshotLinks(markdown: string): { label: string; url: string }[] {
+  return [...markdown.matchAll(/!\[([^\]]*)\]\(([^)]+)\)/g)].map((match) => ({
+    label: match[1] || "screenshot",
+    url: match[2],
+  }));
 }
 
 function nativeStepIsLlm(step: NativeAttemptStep): boolean {
