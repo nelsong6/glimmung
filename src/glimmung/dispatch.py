@@ -79,6 +79,7 @@ class DispatchResult(BaseModel):
     state: str
     lease_id: str | None = None
     run_id: str | None = None
+    run_number: int | None = None
     host: str | None = None
     workflow: str | None = None
     issue_lock_holder_id: str | None = None
@@ -195,6 +196,7 @@ async def dispatch_run(
     # branch-resolution time. Pre-#69 the Run was created post-dispatch
     # (fine because branches were agent-named); post-#69 the order matters.
     run_id: str | None = None
+    run_number: int | None = None
     phases = workflow_doc.get("phases") or []
     initial_phase = phases[0] if phases else None
     if phases:
@@ -219,6 +221,7 @@ async def dispatch_run(
             session_launch_intent=session_launch_intent_from_labels(effective_issue_labels),
         )
         run_id = run.id
+        run_number = run.run_number
 
     # 5. Lease + runner dispatch. GitHub Actions phases consume registered
     # host rows; native Kubernetes phases consume virtual native capacity.
@@ -315,6 +318,7 @@ async def dispatch_run(
                 state="dispatch_failed",
                 lease_id=lease.id,
                 run_id=run_id,
+                run_number=run_number,
                 workflow=workflow_actual_name,
                 detail="runner dispatch failed; lease + lock + run rolled back",
             )
@@ -323,6 +327,7 @@ async def dispatch_run(
         state="dispatched" if host is not None else "pending",
         lease_id=lease.id,
         run_id=run_id,
+        run_number=run_number,
         host=host.name if host is not None else None,
         workflow=workflow_actual_name,
         issue_lock_holder_id=holder_id,

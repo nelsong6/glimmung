@@ -26,6 +26,7 @@ type IssueRow = {
   labels: string[];
   html_url: string | null;
   last_run_id: string | null;
+  last_run_number: number | null;
   last_run_state: string | null;
   last_run_abort_reason: string | null;
   issue_lock_held: boolean;
@@ -241,8 +242,9 @@ function rowKey(row: IssueRow): string {
 
 function renderLastRun(row: IssueRow): string {
   if (!row.last_run_id) return "—";
-  if (row.issue_lock_held) return `${row.last_run_state ?? "?"} (in flight)`;
-  return `${row.last_run_state ?? "?"}`;
+  const label = row.last_run_number !== null ? `run ${row.last_run_number}` : row.last_run_state ?? "?";
+  if (row.issue_lock_held) return `${label} (in flight)`;
+  return label;
 }
 
 function pillClass(state: string): string {

@@ -76,10 +76,14 @@ async def create_run(
     `trigger_source` is a free-form record of why this run started — for
     W6 observability and audit. Not consumed by the decision engine."""
     now = _now()
+    run_number = await next_run_number(
+        cosmos, project=project, issue_number=issue_number, issue_id=issue_id,
+    )
     run = Run(
         id=str(ULID()),
         project=project,
         workflow=workflow,
+        run_number=run_number,
         issue_id=issue_id,
         issue_repo=issue_repo,
         issue_number=issue_number,
@@ -110,6 +114,108 @@ async def create_run(
         (trigger_source or {}).get("kind", "unspecified"),
     )
     return run
+
+
+async def issue_run_docs(
+    cosmos: Cosmos,
+    *,
+    project: str,
+    issue_number: int,
+    issue_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """All Run docs for one issue, sorted oldest-first and deduped by id.
+
+    New Runs persist `run_number`. Older rows do not; callers can use
+    `run_number_map` to derive stable ordinals from creation order for
+    display and compatibility lookup.
+    """
+    by_project_number = await query_all(
+        cosmos.runs,
+        "SELECT * FROM c WHERE c.project = @p AND c.issue_number = @n",
+        parameters=[
+            {"name": "@p", "value": project},
+            {"name": "@n", "value": issue_number},
+        ],
+    )
+    docs = list(by_project_number)
+    if issue_id:
+        by_issue_id = await query_all(
+            cosmos.runs,
+            "SELECT * FROM c WHERE c.issue_id = @i",
+            parameters=[{"name": "@i", "value": issue_id}],
+        )
+        seen = {d["id"] for d in docs}
+        docs.extend(d for d in by_issue_id if d["id"] not in seen)
+    docs.sort(key=lambda d: d.get("created_at", ""))
+    return docs
+
+
+def run_number_map(run_docs: list[dict[str, Any]]) -> dict[str, int]:
+    """Return `{run_id: issue_scoped_number}` for persisted and legacy runs."""
+    assigned: dict[str, int] = {}
+    used: set[int] = set()
+    for doc in run_docs:
+        raw = doc.get("run_number")
+        if raw is None:
+            continue
+        try:
+            number = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if number > 0 and number not in used:
+            assigned[doc["id"]] = number
+            used.add(number)
+
+    next_number = 1
+    for doc in run_docs:
+        if doc["id"] in assigned:
+            continue
+        while next_number in used:
+            next_number += 1
+        assigned[doc["id"]] = next_number
+        used.add(next_number)
+    return assigned
+
+
+async def next_run_number(
+    cosmos: Cosmos,
+    *,
+    project: str,
+    issue_number: int,
+    issue_id: str | None = None,
+) -> int:
+    """Allocate the next human-facing run number for an issue.
+
+    `dispatch_run` holds the issue lock before calling this, so the max+1
+    allocation is serialized for normal dispatch paths.
+    """
+    docs = await issue_run_docs(
+        cosmos, project=project, issue_number=issue_number, issue_id=issue_id,
+    )
+    numbers = run_number_map(docs).values()
+    return (max(numbers) + 1) if docs else 1
+
+
+async def read_run_by_number(
+    cosmos: Cosmos,
+    *,
+    project: str,
+    issue_number: int,
+    run_number: int,
+    issue_id: str | None = None,
+) -> tuple[Run, str] | None:
+    docs = await issue_run_docs(
+        cosmos, project=project, issue_number=issue_number, issue_id=issue_id,
+    )
+    numbers = run_number_map(docs)
+    selected = next((d for d in docs if numbers.get(d["id"]) == run_number), None)
+    if selected is None:
+        return None
+    doc = await cosmos.runs.read_item(item=selected["id"], partition_key=project)
+    run = Run.model_validate(_strip_meta(doc))
+    if run.run_number is None:
+        run = run.model_copy(update={"run_number": run_number})
+    return run, doc["_etag"]
 
 
 async def read_run(
