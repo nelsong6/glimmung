@@ -837,6 +837,7 @@ class IssueSource(str, Enum):
     workflow). Not consumed by the dispatch path itself."""
     MANUAL = "manual"
     GITHUB_WEBHOOK_IMPORT = "github_webhook_import"
+    PURGED_GITHUB_ISSUE_IMPORT = "purged_github_issue_import"
     SLACK = "slack"
     SCHEDULED = "scheduled"
 
