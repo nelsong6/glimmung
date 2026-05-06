@@ -336,6 +336,28 @@ async def test_build_detail_for_native_issue_omits_gh_fields(cosmos):
 
 
 @pytest.mark.asyncio
+async def test_build_detail_accepts_legacy_run_without_issue_repo(cosmos):
+    issue = await issue_ops.create_issue(
+        cosmos, project="ambience", title="legacy latest run",
+    )
+    await cosmos.runs.create_item({
+        "id": "run-legacy",
+        "project": "ambience",
+        "workflow": "issue-agent",
+        "issue_id": issue.id,
+        "issue_number": issue.number,
+        "state": RunState.IN_PROGRESS.value,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    })
+
+    detail = await _build_issue_detail(cosmos, issue=issue)
+
+    assert detail.last_run_id == "run-legacy"
+    assert detail.last_run_state == RunState.IN_PROGRESS.value
+
+
+@pytest.mark.asyncio
 async def test_read_issue_by_number_reads_project_scoped_number(cosmos):
     issue = await issue_ops.create_issue(
         cosmos, project="ambience", title="native numbered",
