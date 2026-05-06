@@ -384,6 +384,10 @@ jobs:
           if [ -s /tmp/evidence/notes.md ]; then
             have_notes=true
           fi
+          have_summary=false
+          if [ -s /tmp/evidence/summary.md ]; then
+            have_summary=true
+          fi
           deep_validation_url=""
           if [ -s /tmp/evidence/validation-path.txt ]; then
             path=$(head -1 /tmp/evidence/validation-path.txt | tr -d '[:space:]')
@@ -395,6 +399,7 @@ jobs:
           fi
           echo "have_screenshots=${have_screenshots}" >> "$GITHUB_OUTPUT"
           echo "have_notes=${have_notes}" >> "$GITHUB_OUTPUT"
+          echo "have_summary=${have_summary}" >> "$GITHUB_OUTPUT"
           echo "deep_validation_url=${deep_validation_url}" >> "$GITHUB_OUTPUT"
 
       - name: Fetch agent branch onto runner
@@ -545,12 +550,18 @@ jobs:
           SCREENSHOTS_MD: ${{ steps.upload.outputs.markdown }}
         run: |
           set -euo pipefail
+          summary_md=""
+          if [ -s /tmp/evidence/summary.md ]; then
+            summary_md="$(cat /tmp/evidence/summary.md)"
+          fi
           payload=$(jq -nc \
             --argjson rid "${GITHUB_RUN_ID}" \
             --arg conclusion "success" \
             --arg shots "${SCREENSHOTS_MD}" \
+            --arg summary "${summary_md}" \
             '{workflow_run_id: $rid, conclusion: $conclusion}
-              + (if ($shots | length) > 0 then {screenshots_markdown: $shots} else {} end)')
+              + (if ($shots | length) > 0 then {screenshots_markdown: $shots} else {} end)
+              + (if ($summary | length) > 0 then {summary_markdown: $summary} else {} end)')
           curl -fsS -X POST \
             -H "Content-Type: application/json" \
             -d "${payload}" \
@@ -621,6 +632,12 @@ jobs:
                 echo "### Tool calls"
                 echo ""
                 printf '%s\n' "${tool_breakdown}"
+              fi
+              if [ -s /tmp/evidence/summary.md ]; then
+                echo ""
+                echo "### Review summary"
+                echo ""
+                cat /tmp/evidence/summary.md
               fi
             } > "${body_file}"
           else

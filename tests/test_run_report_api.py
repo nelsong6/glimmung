@@ -44,6 +44,7 @@ async def test_run_report_is_derived_from_one_run(app_state, cosmos, monkeypatch
                 dispatched_at=now,
                 completed_at=now + timedelta(minutes=4),
                 conclusion="success",
+                summary_markdown="Implemented the change and captured review evidence.",
                 decision="advance",
                 cost_usd=1.25,
             ),
@@ -83,6 +84,9 @@ async def test_run_report_is_derived_from_one_run(app_state, cosmos, monkeypatch
     assert report.completed_at == now + timedelta(minutes=7)
     assert [a.phase for a in report.attempts] == ["implement", "verify"]
     assert [a.cost_usd for a in report.attempts] == [1.25, 0.75]
+    assert report.attempts[0].summary_markdown == (
+        "Implemented the change and captured review evidence."
+    )
 
 
 @pytest.mark.asyncio

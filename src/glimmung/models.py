@@ -570,6 +570,7 @@ class PhaseAttempt(BaseModel):
     completed_at: datetime | None = None
     conclusion: str | None = None              # GH workflow_run.conclusion (success/failure/cancelled/...)
     verification: VerificationResult | None = None
+    summary_markdown: str | None = None          # human-readable attempt summary for review
     cost_usd: float | None = None              # phase-reported; fallback to verification.cost_usd if null
     artifact_url: str | None = None            # prior_verification_artifact_url passed into the *next* attempt
     decision: str | None = None                # RunDecision applied after this attempt completed

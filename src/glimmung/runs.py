@@ -401,7 +401,7 @@ async def find_run_by_workflow_run(
     cosmos: Cosmos,
     *,
     project: str,
-    workflow_run_id: int,
+    workflow_run_id: int | None,
 ) -> tuple[Run, str] | None:
     """Look up the Run that owns a given GH Actions workflow_run_id.
     Used in the workflow_run.completed webhook path when the lease
@@ -539,6 +539,7 @@ async def record_completion(
     conclusion: str,
     verification: VerificationResult | None,
     artifact_url: str | None,
+    summary_markdown: str | None = None,
     screenshots_markdown: str | None = None,
     phase_outputs: dict[str, str] | None = None,
 ) -> tuple[Run, str]:
@@ -555,6 +556,11 @@ async def record_completion(
     image URLs from scratch. None means no screenshot pass ran (e.g.
     backend-only workflow).
 
+    `summary_markdown` is the human-readable attempt summary generated
+    by the runner/summarizer after the interaction and evidence capture.
+    It is stored on the attempt so review surfaces can show the gist
+    without requiring raw log inspection.
+
     `phase_outputs` (#101) is the phase's emitted output values,
     already validated against the phase's declared output names by
     the caller. Persisted on the latest attempt for the multi-phase
@@ -564,7 +570,7 @@ async def record_completion(
         cosmos, run, etag,
         lambda r: _apply_completion(
             r, workflow_run_id, conclusion, verification, artifact_url,
-            screenshots_markdown, phase_outputs,
+            summary_markdown, screenshots_markdown, phase_outputs,
         ),
     )
 
@@ -575,6 +581,7 @@ def _apply_completion(
     conclusion: str,
     verification: VerificationResult | None,
     artifact_url: str | None,
+    summary_markdown: str | None,
     screenshots_markdown: str | None,
     phase_outputs: dict[str, str] | None,
 ) -> Run:
@@ -592,6 +599,8 @@ def _apply_completion(
     last.completed_at = _now()
     last.conclusion = conclusion
     last.verification = verification
+    if summary_markdown is not None:
+        last.summary_markdown = summary_markdown
     last.artifact_url = artifact_url
     if phase_outputs is not None:
         last.phase_outputs = phase_outputs

@@ -388,6 +388,7 @@ async def test_completed_pass_advances_run(cosmos, app_state):
             "prompt_version": "ambience-v1",
             "metadata": {},
         },
+        summary_markdown="Implemented the request, ran tests, and opened review evidence.",
     )
     with patch("glimmung.app.app", app_state):
         result = await run_completed(
@@ -401,6 +402,9 @@ async def test_completed_pass_advances_run(cosmos, app_state):
     assert final.attempts[-1].workflow_run_id == 25255513874
     assert final.attempts[-1].conclusion == "success"
     assert final.attempts[-1].verification.status == VerificationStatus.PASS
+    assert final.attempts[-1].summary_markdown == (
+        "Implemented the request, ran tests, and opened review evidence."
+    )
     assert final.cumulative_cost_usd == pytest.approx(0.42)
 
 

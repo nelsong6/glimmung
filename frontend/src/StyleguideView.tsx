@@ -89,6 +89,35 @@ const DESIGN_SYSTEM_ITEMS: PortfolioItem[] = [
     ),
   },
   {
+    id: "review-evidence",
+    title: "Review Evidence",
+    caption: "Touchpoint summary, validation links, and persisted artifact links",
+    render: () => (
+      <Specimen title="review evidence">
+        <div className="project-info">
+          <div className="row">
+            <span className="key">summary</span>
+            <span className="val">
+              <pre className="evidence-notes">Implemented the requested touchpoint behavior and captured the validation path, screenshot evidence, and native event log for review.</pre>
+            </span>
+          </div>
+          <div className="row">
+            <span className="key">test env</span>
+            <span className="val"><a href="/">https://issue-141.glimmung.dev.romaine.life</a></span>
+          </div>
+          <div className="row">
+            <span className="key">evidence</span>
+            <span className="val evidence-list">
+              <a href="/">dashboard</a>
+              <a href="/">native events</a>
+              <a href="/">summary.md</a>
+            </span>
+          </div>
+        </div>
+      </Specimen>
+    ),
+  },
+  {
     id: "colors-surfaces",
     title: "Colors - Surfaces",
     caption: "Deep page, panel, hover, and inset surfaces",

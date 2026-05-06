@@ -893,6 +893,7 @@ async def _process_run_completion(
     verification_result: VerificationResult | None,
     repo: str,
     screenshots_markdown: str | None = None,
+    summary_markdown: str | None = None,
     phase_outputs: dict[str, str] | None = None,
 ) -> str:
     """Drive a Run through one decision-engine cycle. Returns the
@@ -922,6 +923,7 @@ async def _process_run_completion(
         conclusion=conclusion,
         verification=verification_result,
         artifact_url=None,
+        summary_markdown=summary_markdown,
         screenshots_markdown=screenshots_markdown,
         phase_outputs=phase_outputs,
     )
@@ -1764,6 +1766,13 @@ async def _compose_pr_body(
             f"- styleguide: {env_url}/_styleguide",
         ]
 
+    latest_summary = next(
+        (a.summary_markdown.strip() for a in reversed(run.attempts) if a.summary_markdown),
+        "",
+    )
+    if latest_summary:
+        body_parts += ["", "## Agent summary", latest_summary]
+
     # Screenshot block from the workflow's upload step (#87 → #88).
     # Already markdown — drop in verbatim. The workflow handles the
     # "_Screenshot upload failed_" case in the same block, so we don't
@@ -2319,8 +2328,12 @@ class RunReportAttempt(BaseModel):
     dispatched_at: datetime
     completed_at: datetime | None = None
     conclusion: str | None = None
+    verification_status: str | None = None
+    evidence_refs: list[str] = Field(default_factory=list)
+    summary_markdown: str | None = None
     decision: str | None = None
     cost_usd: float | None = None
+    log_archive_url: str | None = None
     skipped_from_run_id: str | None = None
 
 
@@ -2574,8 +2587,12 @@ def _run_report_from_run(run: Run) -> RunReport:
             dispatched_at=a.dispatched_at,
             completed_at=a.completed_at,
             conclusion=a.conclusion,
+            verification_status=a.verification.status.value if a.verification else None,
+            evidence_refs=list(a.verification.evidence_refs) if a.verification else [],
+            summary_markdown=a.summary_markdown,
             decision=a.decision,
             cost_usd=_attempt_cost(a),
+            log_archive_url=a.log_archive_url,
             skipped_from_run_id=a.skipped_from_run_id,
         )
         for a in run.attempts
@@ -2736,6 +2753,7 @@ class RunCompletedRequest(BaseModel):
     conclusion: str   # GH-style: "success" | "failure" | "cancelled"
     verification: dict[str, Any] | None = None
     screenshots_markdown: str | None = None
+    summary_markdown: str | None = None
     outputs: dict[str, str] | None = None
 
 
@@ -2802,6 +2820,7 @@ class NativeRunCompletedRequest(BaseModel):
     conclusion: str = "success"
     verification: dict[str, Any] | None = None
     screenshots_markdown: str | None = None
+    summary_markdown: str | None = None
     outputs: dict[str, str] | None = None
 
 
@@ -2927,6 +2946,7 @@ async def run_completed(
         verification_result=verification_result,
         repo=run.issue_repo,
         screenshots_markdown=req.screenshots_markdown,
+        summary_markdown=req.summary_markdown,
         phase_outputs=phase_outputs,
     )
 
@@ -3158,6 +3178,7 @@ async def native_run_completed(
         verification_result=verification_result,
         repo=run.issue_repo,
         screenshots_markdown=req.screenshots_markdown,
+        summary_markdown=req.summary_markdown,
         phase_outputs=phase_outputs,
     )
 
@@ -6182,6 +6203,7 @@ class TouchpointDetail(BaseModel):
     run_id: str | None = None
     run_state: str | None = None
     validation_url: str | None = None
+    screenshots_markdown: str | None = None
     session_launch_intent: str = "cold"
     session_launch_url: str | None = None
     run_attempts: int = 0
@@ -6525,6 +6547,7 @@ async def _build_touchpoint_detail(cosmos: Cosmos, *, pr: Report) -> TouchpointD
         detail.run_id = run.id
         detail.run_state = run.state.value
         detail.validation_url = run.validation_url
+        detail.screenshots_markdown = run.screenshots_markdown
         detail.session_launch_intent = run.session_launch_intent
         detail.run_attempts = len(run.attempts)
         detail.run_cumulative_cost_usd = run.cumulative_cost_usd
@@ -6538,9 +6561,13 @@ async def _build_touchpoint_detail(cosmos: Cosmos, *, pr: Report) -> TouchpointD
                 "workflow_run_id": a.workflow_run_id,
                 "dispatched_at": a.dispatched_at.isoformat(),
                 "completed_at": a.completed_at.isoformat() if a.completed_at else None,
+                "conclusion": a.conclusion,
                 "verification_status": a.verification.status.value if a.verification else None,
+                "evidence_refs": list(a.verification.evidence_refs) if a.verification else [],
+                "summary_markdown": a.summary_markdown,
                 "cost_usd": a.cost_usd,
                 "decision": a.decision,
+                "log_archive_url": a.log_archive_url,
             })
 
     if pr.linked_issue_id:

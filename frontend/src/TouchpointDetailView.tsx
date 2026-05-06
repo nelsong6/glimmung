@@ -31,6 +31,7 @@ type TouchpointDetail = {
   run_id: string | null;
   run_state: string | null;
   validation_url: string | null;
+  screenshots_markdown: string | null;
   session_launch_intent: string;
   session_launch_url: string | null;
   run_attempts: number;
@@ -48,7 +49,11 @@ type AttemptHistoryEntry = {
   workflow_run_id: number | null;
   dispatched_at: string;
   completed_at: string | null;
+  conclusion: string | null;
   verification_status: string | null;
+  evidence_refs: string[];
+  summary_markdown: string | null;
+  log_archive_url: string | null;
   decision: string | null;
 };
 
@@ -80,6 +85,7 @@ export function TouchpointDetailView() {
   const [feedback, setFeedback] = useState("");
   const [reject, setReject] = useState<RejectStatus>({ kind: "idle" });
   const [tankBaseUrl, setTankBaseUrl] = useState("");
+  const latestSummary = latestAttemptSummary(detail);
 
   const onBack = () => navigate("/touchpoints");
 
@@ -252,6 +258,58 @@ export function TouchpointDetailView() {
             </div>
           </div>
 
+          <h2>Review evidence</h2>
+          <div className="project-info">
+            {latestSummary && (
+              <div className="row">
+                <span className="key">summary</span>
+                <span className="val">
+                  <pre className="evidence-notes">{latestSummary}</pre>
+                </span>
+              </div>
+            )}
+            <div className="row">
+              <span className="key">test env</span>
+              <span className="val">
+                {detail.validation_url ? (
+                  <a href={detail.validation_url} target="_blank" rel="noreferrer">
+                    {detail.validation_url}
+                  </a>
+                ) : (
+                  <span className="dim">No validation URL was recorded for this run.</span>
+                )}
+              </span>
+            </div>
+            <div className="row">
+              <span className="key">session URL</span>
+              <span className="val">
+                {detail.session_launch_url ? (
+                  <a href={detail.session_launch_url} target="_blank" rel="noreferrer">
+                    {detail.session_launch_url}
+                  </a>
+                ) : (
+                  <span className="dim">No session URL available.</span>
+                )}
+              </span>
+            </div>
+            {detail.screenshots_markdown?.trim() ? (
+              <div className="row">
+                <span className="key">screenshots</span>
+                <span className="val evidence-list">
+                  {screenshotLinks(detail.screenshots_markdown).length > 0 ? (
+                    screenshotLinks(detail.screenshots_markdown).map((shot) => (
+                      <a key={shot.url} href={shot.url} target="_blank" rel="noreferrer">
+                        {shot.label}
+                      </a>
+                    ))
+                  ) : (
+                    <pre className="evidence-notes">{detail.screenshots_markdown}</pre>
+                  )}
+                </span>
+              </div>
+            ) : null}
+          </div>
+
           {detail.body.trim() && (
             <>
               <h2>Body</h2>
@@ -279,7 +337,10 @@ export function TouchpointDetailView() {
                   <th>#</th>
                   <th>Phase</th>
                   <th>Workflow</th>
+                  <th>Conclusion</th>
                   <th>Verification</th>
+                  <th>Summary</th>
+                  <th>Evidence</th>
                   <th>Decision</th>
                   <th>Dispatched</th>
                 </tr>
@@ -290,7 +351,12 @@ export function TouchpointDetailView() {
                     <td className="mono">{a.attempt_index}</td>
                     <td>{a.phase}</td>
                     <td className="mono dim">{a.workflow_filename}</td>
+                    <td className="mono dim">{a.conclusion ?? "—"}</td>
                     <td className="mono dim">{a.verification_status ?? "—"}</td>
+                    <td className="mono dim">{a.summary_markdown?.trim() ? "recorded" : "—"}</td>
+                    <td className="mono dim">
+                      <EvidenceLinks attempt={a} />
+                    </td>
                     <td className="mono dim">{a.decision ?? "—"}</td>
                     <td className="mono dim">{a.dispatched_at}</td>
                   </tr>
@@ -350,4 +416,57 @@ function runStatePill(state: string): string {
   if (state === "review_required") return "info";
   if (state === "aborted") return "drain";
   return "dim";
+}
+
+function latestAttemptSummary(detail: TouchpointDetail | null): string | null {
+  if (!detail) return null;
+  for (let i = detail.run_attempt_history.length - 1; i >= 0; i -= 1) {
+    const summary = detail.run_attempt_history[i].summary_markdown?.trim();
+    if (summary) return summary;
+  }
+  return null;
+}
+
+function EvidenceLinks({ attempt }: { attempt: AttemptHistoryEntry }) {
+  const links = [
+    ...attempt.evidence_refs.map((ref) => ({
+      href: evidenceHref(ref),
+      label: evidenceLabel(ref),
+    })),
+    ...(attempt.log_archive_url
+      ? [{ href: evidenceHref(attempt.log_archive_url), label: "native events" }]
+      : []),
+  ];
+  if (links.length === 0) return <>—</>;
+  return (
+    <span className="evidence-list">
+      {links.map((link) => (
+        <a key={`${link.label}:${link.href}`} href={link.href} target="_blank" rel="noreferrer">
+          {link.label}
+        </a>
+      ))}
+    </span>
+  );
+}
+
+function screenshotLinks(markdown: string): { label: string; url: string }[] {
+  return [...markdown.matchAll(/!\[([^\]]*)\]\(([^)]+)\)/g)].map((match) => ({
+    label: match[1] || "screenshot",
+    url: match[2],
+  }));
+}
+
+function evidenceHref(ref: string): string {
+  if (ref.startsWith("blob://artifacts/")) {
+    return `/v1/artifacts/${ref.slice("blob://artifacts/".length)}`;
+  }
+  if (ref.startsWith("/v1/artifacts/") || /^https?:\/\//.test(ref)) {
+    return ref;
+  }
+  return ref;
+}
+
+function evidenceLabel(ref: string): string {
+  const clean = ref.split(/[?#]/, 1)[0].replace(/\/$/, "");
+  return clean.split("/").pop() || ref;
 }
