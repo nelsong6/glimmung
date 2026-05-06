@@ -675,6 +675,14 @@
   background: var(--surface-hover);
   color: var(--fg);
 }
+.step-row.failed {
+  border-left-color: var(--state-danger-fg);
+  color: var(--fg);
+}
+.step-row.selected {
+  background: var(--surface-hover);
+  color: var(--fg);
+}
 .step-row.pending {
   color: var(--fg-dimmer);
 }
@@ -1947,88 +1955,46 @@ h2 .inline-action,
 .attempt-card-reasons li {
   margin-bottom: 2px;
 }
-.native-job-list {
-  display: grid;
-  gap: 8px;
-  margin-top: 10px;
+.native-inspector {
+  margin-top: 12px;
 }
-.native-job {
-  border-top: 1px solid var(--border);
-  padding-top: 8px;
-}
-.native-job-head {
+.native-inspector-head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 6px;
-}
-.native-step-list {
-  display: grid;
-  gap: 4px;
-}
-.native-step {
-  display: grid;
-  grid-template-columns: 2px minmax(96px, 0.8fr) minmax(0, 1.1fr) minmax(72px, auto) auto minmax(0, 1.4fr);
-  align-items: start;
-  gap: 8px;
-  padding: 4px 6px;
-  background: var(--bg);
-  font-size: 0.78rem;
-}
-.native-step-rail {
-  width: 2px;
-  align-self: stretch;
-  background: var(--border);
-}
-.native-step-rail.free { background: var(--state-success-fg); }
-.native-step-rail.busy { background: var(--state-busy-fg); }
-.native-step-rail.drain { background: var(--state-danger-fg); }
-.native-step-rail.info { background: var(--state-info-fg); }
-.native-step-message {
-  overflow-wrap: anywhere;
-  color: var(--fg-muted);
-}
-.native-log-panel {
-  margin-top: 10px;
-  border-top: 1px solid #242428;
-  padding-top: 10px;
-  font-size: 0.8rem;
-}
-.native-log-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+  justify-content: space-between;
+  gap: 12px;
   margin-bottom: 8px;
 }
-.native-log-head .key {
+.native-inspector-head > div {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.native-inspector-head .key {
   color: #888;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   font-size: 0.7rem;
 }
-.native-log-lines {
-  display: grid;
-  gap: 3px;
-  max-height: 260px;
-  overflow: auto;
+.native-step-log-layout {
+  min-height: 300px;
 }
-.native-log-line {
-  display: grid;
-  grid-template-columns: 42px minmax(72px, 0.7fr) minmax(96px, 1fr) minmax(120px, 1fr) minmax(0, 3fr) auto;
+.native-job-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 8px;
-  align-items: start;
-  border-radius: 3px;
-  padding: 3px 6px;
-  background: #08080a;
+  min-height: 34px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: #101014;
+  color: var(--fg-muted);
+  font-size: 0.75rem;
 }
-.native-log-line.step_failed {
-  border-left: 2px solid var(--state-danger-fg);
+.native-step-empty {
+  padding: 14px;
 }
-.native-log-line.step_completed,
-.native-log-line.step_skipped {
-  border-left: 2px solid var(--state-success-fg);
-}
-.native-log-message {
+.native-step-terminal {
+  max-height: 420px;
   white-space: pre-wrap;
-  overflow-wrap: anywhere;
 }

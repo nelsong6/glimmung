@@ -1739,68 +1739,54 @@ function AttemptCard({
           ))}
         </ul>
       )}
-      {nativeJobs.length > 0 && (
-        <div className="native-job-list">
-          {nativeJobs.map((job) => (
-            <div className="native-job" key={job.job_id}>
-              <div className="native-job-head">
-                <span className="mono">{job.name || job.job_id}</span>
-                <span className={`pill ${nativeStatePill(job.state ?? "")}`}>
-                  {job.state || "pending"}
-                </span>
-              </div>
-              <div className="native-step-list">
-                {job.steps.map((step) => (
-                  <div className="native-step" key={step.slug}>
-                    <span className={`native-step-rail ${nativeStatePill(step.state ?? "")}`} />
-                    <span className="mono">{step.slug}</span>
-                    {step.title && <span>{step.title}</span>}
-                    <span className="dim mono">{step.state || "pending"}</span>
-                    {step.exit_code !== null && step.exit_code !== undefined && (
-                      <span className="dim mono">exit {step.exit_code}</span>
-                    )}
-                    {step.message && <span className="native-step-message">{step.message}</span>}
-                  </div>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
       {phaseKind === "k8s_job" && runIdFromAttempt && attemptIndex !== null && (
-        <NativeAttemptEvents
+        <NativeJobInspector
           project={project}
           runId={runIdFromAttempt}
           attemptIndex={attemptIndex}
+          jobs={nativeJobs}
           archiveUrl={logArchiveUrl}
+          live={running && nativeRunning}
         />
       )}
     </div>
   );
 }
 
-function NativeAttemptEvents({
+function NativeJobInspector({
   project,
   runId,
   attemptIndex,
+  jobs,
   archiveUrl,
+  live,
 }: {
   project: string;
   runId: string;
   attemptIndex: number;
+  jobs: NativeAttemptJob[];
   archiveUrl: string | null;
+  live: boolean;
 }) {
   const [logs, setLogs] = useState<NativeRunEventsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const stepRefs = useMemo(() => nativeStepRefs(jobs), [jobs]);
+  const defaultSelection = useMemo(
+    () => preferredNativeStepKey(stepRefs),
+    [stepRefs],
+  );
+  const [selectedKey, setSelectedKey] = useState<string | null>(defaultSelection);
 
   useEffect(() => {
     let cancelled = false;
     setLogs(null);
     setError(null);
+    setSelectedKey(defaultSelection);
     const url =
       `/v1/runs/${encodeURIComponent(project)}/${encodeURIComponent(runId)}` +
       `/native/events?attempt_index=${attemptIndex}&limit=200`;
-    fetch(url)
+    const load = () => {
+      fetch(url)
       .then(async (res) => {
         if (!res.ok) throw new Error(`events ${res.status}`);
         const body = await res.json() as NativeRunEventsResponse;
@@ -1809,10 +1795,14 @@ function NativeAttemptEvents({
       .catch((err: unknown) => {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
       });
+    };
+    load();
+    const timer = live ? window.setInterval(load, 3000) : null;
     return () => {
       cancelled = true;
+      if (timer !== null) window.clearInterval(timer);
     };
-  }, [project, runId, attemptIndex]);
+  }, [project, runId, attemptIndex, defaultSelection, live]);
 
   if (error) {
     return (
@@ -1826,11 +1816,23 @@ function NativeAttemptEvents({
     return <div className="native-log-panel dim mono">loading native events…</div>;
   }
   const events = logs.events;
+  const selected = stepRefs.find((step) => step.key === selectedKey) ?? stepRefs[0] ?? null;
+  const selectedEvents = selected
+    ? events.filter((event) => (
+        event.job_id === selected.job.job_id
+        && (event.step_slug === selected.step.slug || (event.event === "log" && !event.step_slug))
+      ))
+    : events;
   return (
-    <div className="native-log-panel">
-      <div className="native-log-head">
-        <span className="key">native events</span>
-        <span className="mono dim">{events.length} hot</span>
+    <div className="native-inspector">
+      <div className="native-inspector-head">
+        <div>
+          <span className="key">native job inspector</span>
+          <span className="mono dim">
+            {events.length} event{events.length === 1 ? "" : "s"}
+            {live ? " · live" : ""}
+          </span>
+        </div>
         {(logs.archive_url || archiveUrl) && (
           <a
             className="mono"
@@ -1842,26 +1844,124 @@ function NativeAttemptEvents({
           </a>
         )}
       </div>
-      {events.length === 0 ? (
-        <div className="dim mono">No hot native events recorded for this attempt.</div>
-      ) : (
-        <div className="native-log-lines">
-          {events.map((event) => (
-            <div key={event.id} className={`native-log-line ${event.event}`}>
-              <span className="mono dim">{event.seq}</span>
-              <span className="mono">{event.job_id}</span>
-              <span className="mono">{event.step_slug || "—"}</span>
-              <span className="mono">{event.event}</span>
-              {event.message && <span className="native-log-message">{event.message}</span>}
-              {event.exit_code !== null && (
-                <span className="mono dim">exit {event.exit_code}</span>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
+      <div className="step-log-layout native-step-log-layout">
+        <aside className="step-list" aria-label="native job steps">
+          {stepRefs.length === 0 ? (
+            <div className="native-step-empty mono dim">no native steps declared</div>
+          ) : (
+            stepRefs.map(({ key, job, step }, index) => (
+              <Fragment key={key}>
+                {(index === 0 || stepRefs[index - 1]?.job.job_id !== job.job_id) && (
+                  <div className="native-job-label">
+                    <span className="mono">{job.name || job.job_id}</span>
+                    <span className={`pill ${nativeStatePill(job.state ?? "")}`}>
+                      {job.state || "pending"}
+                    </span>
+                  </div>
+                )}
+                <button
+                  type="button"
+                  className={`step-row ${nativeStepRowClass(step.state ?? "")}${key === selected?.key ? " selected" : ""}`}
+                  onClick={() => setSelectedKey(key)}
+                >
+                  <span>{nativeStepGlyph(step.state ?? "")}</span>
+                  <strong>{step.title || step.slug}</strong>
+                  <small>
+                    {step.exit_code !== null && step.exit_code !== undefined
+                      ? `exit ${step.exit_code}`
+                      : step.state || "pending"}
+                  </small>
+                </button>
+              </Fragment>
+            ))
+          )}
+        </aside>
+        <pre className="step-terminal native-step-terminal">
+          {selected
+            ? nativeTerminalText(selected.job, selected.step, selectedEvents)
+            : nativeTerminalText(null, null, events)}
+        </pre>
+      </div>
     </div>
   );
+}
+
+function nativeStepRefs(jobs: NativeAttemptJob[]): Array<{
+  key: string;
+  job: NativeAttemptJob;
+  step: NativeAttemptStep;
+}> {
+  return jobs.flatMap((job) => (
+    job.steps.length > 0
+      ? job.steps.map((step) => ({
+          key: `${job.job_id}:${step.slug}`,
+          job,
+          step,
+        }))
+      : [{
+          key: `${job.job_id}:job`,
+          job,
+          step: {
+            slug: "job",
+            title: job.name || job.job_id,
+            state: job.state,
+          },
+        }]
+  ));
+}
+
+function preferredNativeStepKey(
+  refs: Array<{ key: string; step: NativeAttemptStep }>,
+): string | null {
+  return (
+    refs.find((ref) => ref.step.state === "active")?.key
+    ?? refs.find((ref) => ref.step.state === "failed")?.key
+    ?? refs.find((ref) => ref.step.state === "pending")?.key
+    ?? refs[0]?.key
+    ?? null
+  );
+}
+
+function nativeStepRowClass(state: string): string {
+  if (state === "succeeded" || state === "skipped") return "done";
+  if (state === "active") return "active";
+  if (state === "failed") return "failed";
+  return "pending";
+}
+
+function nativeStepGlyph(state: string): string {
+  if (state === "succeeded") return "✓";
+  if (state === "active") return "▶";
+  if (state === "failed") return "!";
+  if (state === "skipped") return "↷";
+  return "·";
+}
+
+function nativeTerminalText(
+  job: NativeAttemptJob | null,
+  step: NativeAttemptStep | null,
+  events: NativeRunEvent[],
+): string {
+  const heading = job && step
+    ? [`# ${job.name || job.job_id}`, `$ step ${step.slug}`]
+    : ["# native events"];
+  const stepMessage = step?.message ? [`# ${step.message}`] : [];
+  const lines = events.length > 0
+    ? events.map(nativeEventLine)
+    : ["No hot native events recorded for this selection."];
+  return [...heading, ...stepMessage, "", ...lines].join("\n");
+}
+
+function nativeEventLine(event: NativeRunEvent): string {
+  const prefix = [
+    `[${event.seq}]`,
+    event.step_slug || event.job_id,
+    event.event,
+  ].join(" ");
+  const suffix = event.exit_code !== null ? ` exit ${event.exit_code}` : "";
+  if (!event.message) return `${prefix}${suffix}`;
+  if (event.event === "log") return event.message;
+  return `${prefix}: ${event.message}${suffix}`;
 }
 
 function findActiveRun(graph: IssueGraph): GraphNode | null {
