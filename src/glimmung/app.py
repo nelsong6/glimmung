@@ -3838,7 +3838,7 @@ def _playbook_work_context_for_entry(
     base_ref = str(playbook.metadata.get("base_ref") or "main")
     if strategy == PlaybookIntegrationStrategy.ROLLING_MAIN:
         context = {
-            "id": f"playbook:{playbook.id}:main",
+            "id": f"project:{playbook.project}:main:{base_ref}",
             "strategy": strategy.value,
             "branch": base_ref,
             "base_ref": base_ref,
