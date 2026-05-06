@@ -287,8 +287,6 @@ export function IssueDetailView() {
       : target
       ? `${target.project} (native)`
       : "";
-  const repoForLinks = null;
-
   const selectTab = (t: Tab) => {
     if (t === "runs") setSelectedRunId(null);
     setTab(t);
@@ -442,7 +440,7 @@ export function IssueDetailView() {
                 graph={graph}
                 graphAvailable={!!graphUrl}
                 project={detail.project}
-                repo={repoForLinks}
+                repo={detail.repo}
                 detail={detail}
                 signedIn={signedIn}
                 dispatchState={dispatchState}
@@ -453,7 +451,7 @@ export function IssueDetailView() {
               />
             )}
             {tab === "touchpoint" && (
-              <TouchpointTab graph={graph} graphAvailable={!!graphUrl} repo={repoForLinks} />
+              <TouchpointTab graph={graph} graphAvailable={!!graphUrl} repo={detail.repo} />
             )}
           </div>
         </>
@@ -1618,12 +1616,21 @@ function TouchpointTab({
 
   const runs = graph.nodes.filter((n) => n.kind === "run");
   const touchpointNodes = graph.nodes.filter((n) => n.kind === "pr" || n.kind === "signal");
+  const prNodes = graph.nodes.filter((n) => n.kind === "pr");
   const latestRun = findActiveRun(graph) ?? findLastCompletedRun(graph);
   const latestMeta = latestRun?.metadata ?? {};
-  const prNumber = numberOrNull(latestMeta.pr_number);
-  const reportTitle = stringOrNull(latestMeta.report_title);
-  const reportState = stringOrNull(latestMeta.report_state);
-  const reportUrl = stringOrNull(latestMeta.report_url);
+  const latestPr = prNodes[prNodes.length - 1] ?? null;
+  const latestPrMeta = latestPr?.metadata ?? {};
+  const prNumber =
+    numberOrNull(latestMeta.pr_number)
+    ?? numberOrNull(latestPrMeta.number)
+    ?? prNumberFromNode(latestPr);
+  const reportTitle = stringOrNull(latestMeta.report_title) ?? stringOrNull(latestPrMeta.title);
+  const reportState = stringOrNull(latestMeta.report_state) ?? latestPr?.state;
+  const reportUrl = stringOrNull(latestMeta.report_url) ?? stringOrNull(latestPrMeta.html_url);
+  const evidenceRepo = repo ?? stringOrNull(latestPrMeta.repo);
+  const validationUrl = stringOrNull(latestMeta.validation_url);
+  const screenshotsMarkdown = stringOrNull(latestMeta.screenshots_markdown);
 
   return (
     <>
@@ -1647,8 +1654,8 @@ function TouchpointTab({
         <div className="row">
           <span className="key">PR evidence</span>
           <span className="val">
-            {prNumber !== null && repo ? (
-              <a className="mono" href={reportUrl || `https://github.com/${repo}/pull/${prNumber}`} target="_blank" rel="noreferrer">
+            {prNumber !== null && evidenceRepo ? (
+              <a className="mono" href={reportUrl || `https://github.com/${evidenceRepo}/pull/${prNumber}`} target="_blank" rel="noreferrer">
                 #{prNumber}{reportTitle ? ` — ${reportTitle}` : ""}
               </a>
             ) : (
@@ -1656,9 +1663,24 @@ function TouchpointTab({
             )}
           </span>
         </div>
+        <div className="row">
+          <span className="key">validation</span>
+          <span className="val">
+            {validationUrl ? (
+              <a className="mono" href={validationUrl} target="_blank" rel="noreferrer">
+                {validationUrl}
+              </a>
+            ) : (
+              <span className="dim">No validation URL recorded.</span>
+            )}
+          </span>
+        </div>
       </div>
 
       <h2>Evidence</h2>
+      {screenshotsMarkdown && (
+        <pre className="evidence-notes">{screenshotsMarkdown}</pre>
+      )}
       {touchpointNodes.length === 0 ? (
         <div className="empty">No touchpoint evidence has landed yet.</div>
       ) : (
@@ -1685,6 +1707,12 @@ function TouchpointTab({
       )}
     </>
   );
+}
+
+function prNumberFromNode(node: GraphNode | null): number | null {
+  if (!node) return null;
+  const match = node.id.match(/#(\d+)$/);
+  return match ? parseInt(match[1], 10) : null;
 }
 
 function AttemptCard({
