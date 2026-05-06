@@ -2845,6 +2845,7 @@ async def run_completed(
         await _release_locks_on_terminal(
             run=post_run, repo=run.issue_repo, result=result_dict,
         )
+        await _advance_playbooks_for_terminal_run(cosmos, post_run)
 
     return RunCallbackResult(
         run_id=run.id,
@@ -3043,6 +3044,7 @@ async def native_run_completed(
         await _release_locks_on_terminal(
             run=post_run, repo=run.issue_repo, result=result_dict,
         )
+        await _advance_playbooks_for_terminal_run(cosmos, post_run)
 
     return RunCallbackResult(
         run_id=run.id,
@@ -3050,6 +3052,34 @@ async def native_run_completed(
         issue_lock_released=result_dict.get("issue_lock_released"),
         pr_lock_released=result_dict.get("pr_lock_released"),
     )
+
+
+async def _advance_playbooks_for_terminal_run(cosmos: Cosmos, run: Run) -> None:
+    if not run.issue_id:
+        return
+    try:
+        issue_doc = await cosmos.issues.read_item(
+            item=run.issue_id,
+            partition_key=run.project,
+        )
+    except Exception:
+        return
+    metadata = issue_doc.get("metadata")
+    if not isinstance(metadata, dict):
+        return
+    playbook_id = metadata.get("playbook_id")
+    if not isinstance(playbook_id, str) or not playbook_id:
+        return
+    found = await playbook_ops.read_playbook(
+        cosmos,
+        project=run.project,
+        playbook_id=playbook_id,
+    )
+    if found is None:
+        return
+    playbook, etag = found
+    advanced = await _advance_playbook(app, playbook=playbook)
+    await playbook_ops.replace_playbook(cosmos, playbook=advanced, etag=etag)
 
 
 @app.post(

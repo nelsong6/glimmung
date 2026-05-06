@@ -15,6 +15,8 @@ from unittest.mock import patch
 
 import pytest
 
+from glimmung import locks as lock_ops
+from glimmung import playbooks as playbook_ops
 from glimmung import reports as report_ops
 from glimmung import runs as run_ops
 from glimmung.app import (
@@ -26,11 +28,17 @@ from glimmung.app import (
     run_completed,
     run_started,
 )
+from glimmung.dispatch import DispatchResult
 from glimmung.github_app import PRCreateNoDiff
 from glimmung.models import (
     BudgetConfig,
     PhaseAttempt,
     PhaseSpec,
+    PlaybookCreate,
+    PlaybookEntry,
+    PlaybookEntryState,
+    PlaybookIntegrationStrategy,
+    PlaybookIssueSpec,
     PrPrimitiveSpec,
     Run,
     RunState,
@@ -51,6 +59,7 @@ def cosmos():
         runs=FakeContainer("runs", "/project"),
         locks=FakeContainer("locks", "/scope"),
         issues=FakeContainer("issues", "/project"),
+        playbooks=FakeContainer("playbooks", "/project"),
         reports=FakeContainer("reports", "/project"),
     )
 
@@ -157,7 +166,12 @@ async def _seed_run(
     return run
 
 
-async def _seed_issue_for_run(cosmos, run: Run, title: str = "Fix the ambience picker") -> None:
+async def _seed_issue_for_run(
+    cosmos,
+    run: Run,
+    title: str = "Fix the ambience picker",
+    metadata: dict[str, object] | None = None,
+) -> None:
     await cosmos.issues.create_item({
         "id": run.issue_id,
         "number": run.issue_number,
@@ -166,6 +180,7 @@ async def _seed_issue_for_run(cosmos, run: Run, title: str = "Fix the ambience p
         "body": "",
         "state": "open",
         "labels": [],
+        "metadata": metadata or {},
         "source": {"kind": "github", "repo": run.issue_repo, "number": run.issue_number},
         "created_at": datetime.now(UTC).isoformat(),
         "updated_at": datetime.now(UTC).isoformat(),
@@ -387,6 +402,114 @@ async def test_completed_pass_advances_run(cosmos, app_state):
     assert final.attempts[-1].conclusion == "success"
     assert final.attempts[-1].verification.status == VerificationStatus.PASS
     assert final.cumulative_cost_usd == pytest.approx(0.42)
+
+
+@pytest.mark.asyncio
+async def test_completed_advances_owning_playbook(cosmos, app_state, monkeypatch):
+    await _register_project(cosmos, "ambience", "nelsong6/ambience")
+    await _register_workflow_with_recycle(cosmos, "ambience")
+    run = await _seed_run(
+        cosmos, run_id="01KQTEST_RUN_PLAYBOOK", project="ambience",
+        issue_repo="nelsong6/ambience", issue_number=144,
+    )
+    playbook = await playbook_ops.create_playbook(
+        cosmos,
+        PlaybookCreate(
+            project="ambience",
+            title="shared feature",
+            entries=[
+                PlaybookEntry(
+                    id="one",
+                    issue=PlaybookIssueSpec(title="first", body="first"),
+                ),
+                PlaybookEntry(
+                    id="two",
+                    issue=PlaybookIssueSpec(title="second", body="second"),
+                ),
+            ],
+            concurrency_limit=1,
+            integration_strategy=PlaybookIntegrationStrategy.SHARED_FEATURE_BRANCH,
+        ),
+    )
+    context = {
+        "id": f"playbook:{playbook.id}:shared",
+        "strategy": "shared_feature_branch",
+        "branch": f"glimmung/playbooks/{playbook.id[:8]}",
+        "base_ref": "main",
+        "owner_playbook_id": playbook.id,
+        "current_entry_id": "one",
+        "state": "in_use",
+    }
+    holder_id = f"playbook:{playbook.id}:entry:one"
+    await lock_ops.claim_lock(
+        cosmos,
+        scope="work_context",
+        key=context["id"],
+        holder_id=holder_id,
+        ttl_seconds=14400,
+        metadata={},
+    )
+    playbook.entries[0].state = PlaybookEntryState.RUNNING
+    playbook.entries[0].created_issue_id = run.issue_id
+    playbook.entries[0].run_id = run.id
+    playbook.entries[0].metadata = {
+        "work_context": context,
+        "work_context_lock_state": "held",
+        "work_context_lock_holder_id": holder_id,
+    }
+    found_playbook = await playbook_ops.read_playbook(
+        cosmos,
+        project="ambience",
+        playbook_id=playbook.id,
+    )
+    assert found_playbook is not None
+    _, playbook_etag = found_playbook
+    await playbook_ops.replace_playbook(cosmos, playbook=playbook, etag=playbook_etag)
+    await _seed_issue_for_run(
+        cosmos,
+        run,
+        metadata={
+            "playbook_id": playbook.id,
+            "playbook_entry_id": "one",
+        },
+    )
+    dispatches: list[str] = []
+
+    async def fake_dispatch_run(app, **kwargs):
+        dispatches.append(kwargs["issue_id"])
+        return DispatchResult(state="pending", run_id="run-two")
+
+    monkeypatch.setattr("glimmung.app.dispatch_run", fake_dispatch_run)
+
+    body = RunCompletedRequest(
+        workflow_run_id=25255513874,
+        conclusion="success",
+        verification={
+            "schema_version": 1,
+            "status": "pass",
+            "reasons": [],
+            "evidence_refs": [],
+            "cost_usd": 0.42,
+        },
+    )
+    with patch("glimmung.app.app", app_state):
+        result = await run_completed(
+            body, project="ambience", run_id=run.id,
+        )
+
+    assert result.decision == "advance"
+    found = await playbook_ops.read_playbook(
+        cosmos,
+        project="ambience",
+        playbook_id=playbook.id,
+    )
+    assert found is not None
+    advanced, _ = found
+    assert advanced.entries[0].state == PlaybookEntryState.SUCCEEDED
+    assert advanced.entries[0].metadata["work_context_lock_state"] == "released"
+    assert advanced.entries[1].state == PlaybookEntryState.RUNNING
+    assert advanced.entries[1].run_id == "run-two"
+    assert len(dispatches) == 1
 
 
 @pytest.mark.asyncio
