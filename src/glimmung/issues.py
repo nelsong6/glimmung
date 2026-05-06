@@ -78,6 +78,7 @@ async def create_issue(
     github_issue_url: str | None = None,
     github_issue_repo: str | None = None,
     github_issue_number: int | None = None,
+    metadata_overrides: dict[str, Any] | None = None,
 ) -> Issue:
     """Mint a new Issue in OPEN state. Returns the persisted Issue.
 
@@ -91,6 +92,14 @@ async def create_issue(
         issue_number = await next_issue_number(cosmos, project=project)
     else:
         await ensure_issue_number_counter_at_least(cosmos, project=project, number=issue_number)
+    metadata = IssueMetadata(
+        source=source,
+        workflow=workflow,
+        ui_validation_requested=ui_validation_requested,
+        github_issue_url=github_issue_url,
+        github_issue_repo=github_issue_repo,
+        github_issue_number=github_issue_number,
+    ).model_copy(update=metadata_overrides or {})
     issue = Issue(
         id=str(ULID()),
         number=issue_number,
@@ -99,14 +108,7 @@ async def create_issue(
         body=body,
         labels=labels or [],
         state=IssueState.OPEN,
-        metadata=IssueMetadata(
-            source=source,
-            workflow=workflow,
-            ui_validation_requested=ui_validation_requested,
-            github_issue_url=github_issue_url,
-            github_issue_repo=github_issue_repo,
-            github_issue_number=github_issue_number,
-        ),
+        metadata=metadata,
         created_at=now,
         updated_at=now,
     )
