@@ -5047,25 +5047,6 @@ async def delete_issue_comment_endpoint(
 
 
 @app.get(
-    "/v1/issues/{repo_owner}/{repo_name}/{issue_number}/graph",
-    response_model=IssueGraph,
-)
-async def issue_graph(
-    repo_owner: str = Path(...),
-    repo_name: str = Path(...),
-    issue_number: int = Path(...),
-) -> IssueGraph:
-    """Lineage graph for one Issue (#42): every Run dispatched against
-    it, every PhaseAttempt inside each Run, the PR(s) opened, and the
-    Signals that fed back. Bulk-loaded — one cross-partition runs query
-    plus a legacy fallback plus one signals query, no per-row N+1."""
-    repo = f"{repo_owner}/{repo_name}"
-    return await _build_issue_graph(
-        app.state.cosmos, repo=repo, issue_number=issue_number,
-    )
-
-
-@app.get(
     "/v1/issues/by-number/{project}/{issue_number}/graph",
     response_model=IssueGraph,
 )
@@ -5081,6 +5062,25 @@ async def issue_graph_by_number(
     issue, _ = found
     return await _build_issue_graph_for_issue(
         app.state.cosmos, issue=issue, issue_number=issue_number,
+    )
+
+
+@app.get(
+    "/v1/issues/{repo_owner}/{repo_name}/{issue_number}/graph",
+    response_model=IssueGraph,
+)
+async def issue_graph(
+    repo_owner: str = Path(...),
+    repo_name: str = Path(...),
+    issue_number: int = Path(...),
+) -> IssueGraph:
+    """Lineage graph for one Issue (#42): every Run dispatched against
+    it, every PhaseAttempt inside each Run, the PR(s) opened, and the
+    Signals that fed back. Bulk-loaded — one cross-partition runs query
+    plus a legacy fallback plus one signals query, no per-row N+1."""
+    repo = f"{repo_owner}/{repo_name}"
+    return await _build_issue_graph(
+        app.state.cosmos, repo=repo, issue_number=issue_number,
     )
 
 
