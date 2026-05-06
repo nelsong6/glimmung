@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from glimmung.app import get_run_report, get_run_report_by_number
+from glimmung.app import get_run_report, get_run_report_by_number, list_project_runs
 from glimmung.models import BudgetConfig, PhaseAttempt, Run, RunState
 
 from tests.cosmos_fake import FakeContainer
@@ -97,6 +97,58 @@ async def test_run_report_404s_for_missing_run(app_state, monkeypatch):
         await get_run_report(project="glimmung", run_id="missing")
 
     assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_list_project_runs_returns_newest_project_reports(app_state, cosmos, monkeypatch):
+    monkeypatch.setattr("glimmung.app.app", app_state)
+    now = datetime(2026, 5, 6, 2, 20, tzinfo=UTC)
+    runs = [
+        Run(
+            id="old",
+            project="glimmung",
+            workflow="issue-agent",
+            issue_id="issue-1",
+            issue_repo="nelsong6/glimmung",
+            issue_number=40,
+            state=RunState.PASSED,
+            budget=BudgetConfig(total=10),
+            created_at=now,
+            updated_at=now,
+        ),
+        Run(
+            id="new",
+            project="glimmung",
+            workflow="issue-agent",
+            issue_id="issue-2",
+            issue_repo="nelsong6/glimmung",
+            issue_number=41,
+            state=RunState.IN_PROGRESS,
+            budget=BudgetConfig(total=10),
+            created_at=now + timedelta(minutes=1),
+            updated_at=now + timedelta(minutes=2),
+        ),
+        Run(
+            id="other-project",
+            project="ambience",
+            workflow="issue-agent",
+            issue_id="issue-3",
+            issue_repo="nelsong6/ambience",
+            issue_number=42,
+            state=RunState.PASSED,
+            budget=BudgetConfig(total=10),
+            created_at=now + timedelta(minutes=3),
+            updated_at=now + timedelta(minutes=3),
+        ),
+    ]
+    for run in runs:
+        await cosmos.runs.create_item(run.model_dump(mode="json"))
+
+    reports = await list_project_runs(project="glimmung", limit=10)
+
+    assert [report.run_id for report in reports] == ["new", "old"]
+    assert reports[0].state == RunState.IN_PROGRESS
+    assert reports[1].state == RunState.PASSED
 
 
 @pytest.mark.asyncio
