@@ -5860,6 +5860,8 @@ async def _build_issue_graph_for_issue(
                 "trigger_source": d.get("trigger_source"),
                 "abort_reason": d.get("abort_reason"),
                 "cumulative_cost_usd": d.get("cumulative_cost_usd"),
+                "validation_url": d.get("validation_url"),
+                "screenshots_markdown": d.get("screenshots_markdown"),
                 "issue_lock_holder_id": d.get("issue_lock_holder_id"),
                 "pr_number": d.get("pr_number"),
                 "pr_branch": d.get("pr_branch"),

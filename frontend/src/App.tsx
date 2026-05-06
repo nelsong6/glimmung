@@ -1754,6 +1754,14 @@ function runSlugDisplay(slug: string): string {
   return /^\d+-\d+$/.test(slug) ? `#${slug}` : slug;
 }
 
+function issueScopedRunNumberFromSlug(issueNumber: number | null, slug: string): number | null {
+  if (issueNumber === null) return null;
+  if (/^\d+$/.test(slug)) return parseInt(slug, 10);
+  const match = slug.match(/^(\d+)-(\d+)$/);
+  if (!match) return null;
+  return parseInt(match[1], 10) === issueNumber ? parseInt(match[2], 10) : null;
+}
+
 function titleCase(value: string): string {
   return value
     .split("-")
@@ -1988,7 +1996,11 @@ function ProjectRunView({
     setLiveReport(null);
     setLiveError(null);
     setLiveLoading(true);
-    fetch(`/v1/runs/${encodeURIComponent(projectName)}/${encodeURIComponent(runId)}/report`)
+    const issueScopedRunNumber = issueScopedRunNumberFromSlug(issueNumber, runId);
+    const reportUrl = issueScopedRunNumber !== null
+      ? `/v1/projects/${encodeURIComponent(projectName)}/issues/${issueNumber}/runs/${issueScopedRunNumber}/report`
+      : `/v1/runs/${encodeURIComponent(projectName)}/${encodeURIComponent(runId)}/report`;
+    fetch(reportUrl)
       .then(async (res) => {
         if (!res.ok) throw new Error(`run report ${res.status}`);
         const body = await res.json() as RunReport;
@@ -2003,7 +2015,7 @@ function ProjectRunView({
     return () => {
       cancelled = true;
     };
-  }, [projectName, runId]);
+  }, [projectName, issueNumber, runId]);
 
   if (snap === null) return <div className="empty">Connecting…</div>;
   const project = snap.projects.find((p) => p.name === projectName);
