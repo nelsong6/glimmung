@@ -326,7 +326,7 @@ const DESIGN_FILE_ITEMS: PortfolioItem[] = [
                   </thead>
                   <tbody>
                     <tr><td className="mono">01KQWX...</td><td>design portfolio bootstrap</td><td className="mono dim">14s ago</td></tr>
-                    <tr><td className="mono">01KQWY...</td><td>frontman bridge</td><td className="mono dim">2m ago</td></tr>
+                    <tr><td className="mono">01KQWY...</td><td>ui package bridge</td><td className="mono dim">2m ago</td></tr>
                   </tbody>
                 </table>
               </section>

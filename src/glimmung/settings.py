@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     # capability (ULID, unguessable).
     entra_client_id: str = ""
     # Separate SPA app registration for disposable/dev frontend hosts such as
-    # Frontman live-design environments. Production keeps ENTRA_CLIENT_ID.
+    # per-repo UI package review environments. Production keeps ENTRA_CLIENT_ID.
     entra_test_client_id: str = ""
     allowed_emails: str = ""  # comma-separated; auth.py splits + lowercases
 
