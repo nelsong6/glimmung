@@ -64,6 +64,9 @@ matching surface in the same PR:
 - Add or update the matching tool in
   [`nelsong6/mcp-glimmung`](https://github.com/nelsong6/mcp-glimmung) when the
   action should be available to LLM/session callers.
+- For MCP server renames/removals, follow the rollout sequence in
+  [MCP Surface Rollout](docs/mcp-surface-rollout.md) so stale sessions have a
+  clear compatibility or restart path.
 - If the endpoint is intentionally system-only (webhooks, lease lifecycle,
   run callbacks, health/config/events), call that out in the PR so the HTTP
   API and MCP surface do not drift silently.
