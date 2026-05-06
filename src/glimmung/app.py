@@ -4983,6 +4983,7 @@ async def list_issues(
     project: str | None = Query(None),
     repo: str | None = Query(None),
     workflow: str | None = Query(None),
+    needs_attention: bool = Query(False),
     limit: int | None = Query(None, ge=1, le=500),
 ) -> list[IssueRow]:
     """All open glimmung Issues, across registered projects. Sourced
@@ -4999,6 +5000,7 @@ async def list_issues(
         project=project,
         repo=repo,
         workflow=workflow,
+        needs_attention=needs_attention,
         limit=limit,
     )
 
@@ -5009,6 +5011,7 @@ async def _list_issues_from_cosmos(
     project: str | None = None,
     repo: str | None = None,
     workflow: str | None = None,
+    needs_attention: bool = False,
     limit: int | None = None,
 ) -> list[IssueRow]:
     """Read-path for `/v1/issues`; lifted out so tests can drive it
@@ -5098,6 +5101,8 @@ async def _list_issues_from_cosmos(
             expires_at = datetime.fromisoformat(lock_doc["expires_at"])
             if expires_at > now:
                 row.issue_lock_held = True
+        if needs_attention and not _issue_row_needs_attention(row):
+            continue
         rows.append(row)
 
     # Sort by project, then newest Glimmung issue number first.
@@ -5109,6 +5114,24 @@ async def _list_issues_from_cosmos(
     if limit is not None:
         rows = rows[:limit]
     return rows
+
+
+def _issue_row_needs_attention(row: IssueRow) -> bool:
+    """Needs-attention rows are terminal run outcomes that need a human.
+
+    Issues with no run are simply runnable backlog, and in-flight rows are
+    already being handled. There is not yet an inspected/acknowledged marker,
+    so all failed terminal states stay visible for now.
+    """
+    if row.issue_lock_held or row.last_run_id is None:
+        return False
+    return row.last_run_state in {
+        RunState.ABORTED.value,
+        RunState.REVIEW_REQUIRED.value,
+        RunState.PASSED.value,
+        "failed",
+        "needs_review",
+    }
 
 
 @app.get(
