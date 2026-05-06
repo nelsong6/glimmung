@@ -1911,6 +1911,7 @@ function ProjectRunView({
   issueNumber,
   runId,
 }: LayoutContext & { projectName: string; issueNumber: number | null; runId: string }) {
+  const navigate = useNavigate();
   const [liveReport, setLiveReport] = useState<RunReport | null>(null);
   const [liveError, setLiveError] = useState<string | null>(null);
   const [liveLoading, setLiveLoading] = useState(false);
@@ -2060,6 +2061,11 @@ function ProjectRunView({
         onConfirmAbort={() => undefined}
         selectedRunId={run.id}
         onBackToRuns={() => undefined}
+        onOpenTouchpoint={() => {
+          if (run.issue_number) {
+            navigate(`/projects/${encodeURIComponent(project.name)}/issues/${run.issue_number}/touchpoint`);
+          }
+        }}
         actionsVisible={false}
       />
     </div>

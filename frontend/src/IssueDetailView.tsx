@@ -444,6 +444,7 @@ export function IssueDetailView() {
                 selectedRunId={selectedRunId}
                 onSelectRun={setSelectedRunId}
                 onDispatch={() => void dispatchRun()}
+                onOpenTouchpoint={() => setTab("touchpoint")}
               />
             )}
             {tab === "touchpoint" && (
@@ -793,6 +794,7 @@ export function RunViewer({
   onConfirmAbort,
   selectedRunId,
   onBackToRuns,
+  onOpenTouchpoint,
   actionsVisible = true,
 }: {
   graph: IssueGraph | null;
@@ -809,6 +811,7 @@ export function RunViewer({
   onConfirmAbort: (runId: string) => void;
   selectedRunId: string | null;
   onBackToRuns: () => void;
+  onOpenTouchpoint: () => void;
   actionsVisible?: boolean;
 }) {
   // Pick the run we're painting. Caller-selected wins; fall back to
@@ -966,6 +969,7 @@ export function RunViewer({
         graph={graph}
         selectedNodeId={drillNodeId}
         onSelectNode={setDrillNodeId}
+        onOpenTouchpoint={onOpenTouchpoint}
       />
       <DrillIn
         nodeId={drillNodeId}
@@ -1011,11 +1015,13 @@ function PipelineDag({
   graph,
   selectedNodeId,
   onSelectNode,
+  onOpenTouchpoint,
 }: {
   run: GraphNode;
   graph: IssueGraph;
   selectedNodeId: string | null;
   onSelectNode: (id: string | null) => void;
+  onOpenTouchpoint: () => void;
 }) {
   const phases = useMemo(() => phaseNodesForRun(graph, run), [graph, run]);
   const meta = run.metadata;
@@ -1056,9 +1062,8 @@ function PipelineDag({
         <div className="dag-edge" aria-hidden="true">→</div>
         <button
           type="button"
-          className={`dag-node dag-node-pr${touchpointId || prNumber ? " opened" : " pending"}${selectedNodeId === "pr" ? " selected" : ""}`}
-          onClick={() => onSelectNode(selectedNodeId === "pr" ? null : "pr")}
-          aria-pressed={selectedNodeId === "pr"}
+          className={`dag-node dag-node-pr${touchpointId || prNumber ? " opened" : " pending"}`}
+          onClick={onOpenTouchpoint}
         >
           <div className="dag-node-label">touchpoint</div>
           <div className="dag-node-state mono">
@@ -1194,58 +1199,6 @@ function DrillIn({
   onClose: () => void;
 }) {
   if (nodeId === null) return null;
-  const meta = run.metadata;
-  if (nodeId === "pr") {
-    const touchpointId = stringOrNull(meta.report_id);
-    const touchpointState = stringOrNull(meta.report_state);
-    const touchpointTitle = stringOrNull(meta.report_title);
-    const touchpointUrl = stringOrNull(meta.report_url);
-    const prNumber = numberOrNull(meta.pr_number);
-    const prBranch = stringOrNull(meta.pr_branch);
-    return (
-      <div className="run-panel">
-        <div className="run-panel-header">
-          <div>
-            <strong>touchpoint</strong>
-            <span className={`pill ${touchpointId || prNumber ? "free" : ""}`} style={{ marginLeft: "0.5rem" }}>
-              {touchpointState ?? (prNumber ? "opened" : "pending")}
-            </span>
-          </div>
-          <button type="button" className="link" onClick={onClose}>
-            close
-          </button>
-        </div>
-        <div className="run-panel-meta">
-          {touchpointId && (
-            <div>
-              <span className="key">touchpoint</span>{" "}
-              <span className="mono" title={touchpointId}>{touchpointId.slice(0, 8)}…</span>
-            </div>
-          )}
-          {touchpointTitle && (
-            <div>
-              <span className="key">title</span> <span>{touchpointTitle}</span>
-            </div>
-          )}
-          {prNumber !== null && repo ? (
-            <div>
-              <span className="key">PR</span>{" "}
-              <a className="mono" href={touchpointUrl || `https://github.com/${repo}/pull/${prNumber}`} target="_blank" rel="noreferrer">
-                #{prNumber}
-              </a>
-            </div>
-          ) : (
-            <div className="dim mono">No touchpoint evidence opened yet for this run.</div>
-          )}
-          {prBranch && (
-            <div>
-              <span className="key">branch</span> <span className="mono">{prBranch}</span>
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
   if (nodeId.startsWith("phase:")) {
     const phaseName = nodeId.slice("phase:".length);
     const phases = phaseNodesForRun(graph, run);
@@ -1376,6 +1329,7 @@ function RunsPane({
   selectedRunId,
   onSelectRun,
   onDispatch,
+  onOpenTouchpoint,
 }: {
   graph: IssueGraph | null;
   graphAvailable: boolean;
@@ -1387,6 +1341,7 @@ function RunsPane({
   selectedRunId: string | null;
   onSelectRun: (runId: string | null) => void;
   onDispatch: () => void;
+  onOpenTouchpoint: () => void;
 }) {
   const dispatching = dispatchState.kind === "dispatching";
   const dispatchDisabled = detail.issue_lock_held || dispatching || !signedIn;
@@ -1459,6 +1414,7 @@ function RunsPane({
           onConfirmAbort={() => undefined}
           selectedRunId={selectedRunId}
           onBackToRuns={() => onSelectRun(null)}
+          onOpenTouchpoint={onOpenTouchpoint}
           actionsVisible={false}
         />
       </>
