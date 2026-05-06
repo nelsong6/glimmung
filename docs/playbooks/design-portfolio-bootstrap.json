@@ -1,0 +1,84 @@
+{
+  "project": "glimmung",
+  "title": "Bootstrap design portfolio",
+  "description": "Reusable workflow for retrofitting a reviewable design portfolio route into an existing frontend repo. Entries are ordered so discovery happens before route generation, screenshot evidence, and passive review-state handoff.",
+  "concurrency_limit": 1,
+  "metadata": {
+    "template": "design-portfolio-bootstrap",
+    "version": 1,
+    "integration_strategy": "isolated_prs",
+    "portfolio_route_preference": "/_design-portfolio"
+  },
+  "entries": [
+    {
+      "id": "detect-frontend-shape",
+      "title": "Detect frontend shape and review inventory",
+      "issue": {
+        "title": "Detect frontend shape for design portfolio bootstrap",
+        "body": "Inspect the target repo and identify the frontend framework, router, build/check commands, screenshot capture config, existing styleguide or design portfolio route, and stable fixture-data locations. Inventory UI surfaces by review group: primitives, composites, full screens, loading/empty/error states, and danger flows. Produce a concise proposed specimen list before route implementation.",
+        "labels": [
+          "enhancement",
+          "design-portfolio"
+        ],
+        "metadata": {
+          "portfolio_bootstrap_phase": "discovery"
+        }
+      }
+    },
+    {
+      "id": "add-portfolio-route",
+      "title": "Add or extend portfolio route",
+      "depends_on": [
+        "detect-frontend-shape"
+      ],
+      "issue": {
+        "title": "Add design portfolio route with grouped specimens",
+        "body": "Add or extend /_design-portfolio, or /_styleguide if that is the repo's established platform route, inside the existing app bundle. Render real components where possible with stable fixture data. Group specimens for human review rather than mirroring the file tree. Include passive row state only: unreviewed, needs_review, approved, needs_work. Do not dispatch agent work from review-state changes.",
+        "labels": [
+          "enhancement",
+          "design-portfolio"
+        ],
+        "metadata": {
+          "portfolio_bootstrap_phase": "route"
+        }
+      }
+    },
+    {
+      "id": "add-screenshot-coverage",
+      "title": "Add screenshot coverage and checks",
+      "depends_on": [
+        "add-portfolio-route"
+      ],
+      "issue": {
+        "title": "Capture design portfolio in validation evidence",
+        "body": "Update screenshot capture config, such as frontend/screenshot-pages.json, so the generated portfolio route is captured in validation. Run the repo's relevant build/checks and capture screenshot evidence from the live validation environment.",
+        "labels": [
+          "enhancement",
+          "design-portfolio"
+        ],
+        "metadata": {
+          "portfolio_bootstrap_phase": "evidence"
+        }
+      }
+    },
+    {
+      "id": "review-handoff",
+      "title": "Document review handoff",
+      "depends_on": [
+        "add-screenshot-coverage"
+      ],
+      "manual_gate": true,
+      "issue": {
+        "title": "Prepare design portfolio review handoff",
+        "body": "Open or update the PR with the portfolio URL, screenshot evidence, specimen groups, and any rows marked needs_review. Confirm review state is passive and that follow-up agent work only starts from an explicit operator request.",
+        "labels": [
+          "enhancement",
+          "design-portfolio"
+        ],
+        "metadata": {
+          "portfolio_bootstrap_phase": "handoff"
+        }
+      }
+    }
+  ]
+}
