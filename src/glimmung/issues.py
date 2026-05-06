@@ -455,24 +455,32 @@ async def list_open_issues(
     *,
     project: str | None = None,
 ) -> list[Issue]:
-    """Return all OPEN issues, oldest-first. If `project` is set the
-    query is single-partition; otherwise it scans across partitions
-    (used by the global Issues view in the dashboard)."""
+    return await list_issues(cosmos, project=project, state=IssueState.OPEN)
+
+
+async def list_issues(
+    cosmos: Cosmos,
+    *,
+    project: str | None = None,
+    state: IssueState | None = IssueState.OPEN,
+) -> list[Issue]:
+    """Return issues, oldest-first. If `project` is set the query is
+    single-partition; otherwise it scans across partitions. `state=None`
+    returns issues in every state for audit/search surfaces."""
+    parameters: list[dict[str, Any]] = []
+    where: list[str] = ["IS_DEFINED(c.state)"]
     if project is not None:
-        docs = await query_all(
-            cosmos.issues,
-            "SELECT * FROM c WHERE c.project = @p AND c.state = @s ORDER BY c.created_at ASC",
-            parameters=[
-                {"name": "@p", "value": project},
-                {"name": "@s", "value": IssueState.OPEN.value},
-            ],
-        )
-    else:
-        docs = await query_all(
-            cosmos.issues,
-            "SELECT * FROM c WHERE c.state = @s ORDER BY c.created_at ASC",
-            parameters=[{"name": "@s", "value": IssueState.OPEN.value}],
-        )
+        where.append("c.project = @p")
+        parameters.append({"name": "@p", "value": project})
+    if state is not None:
+        where.append("c.state = @s")
+        parameters.append({"name": "@s", "value": state.value})
+    where_clause = f" WHERE {' AND '.join(where)}" if where else ""
+    docs = await query_all(
+        cosmos.issues,
+        f"SELECT * FROM c{where_clause} ORDER BY c.created_at ASC",
+        parameters=parameters,
+    )
     return [Issue.model_validate(_strip_meta(d)) for d in docs]
 
 
