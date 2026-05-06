@@ -16,7 +16,7 @@ from glimmung.reports import (
     create_report_version as create_touchpoint_version,
     ensure_report_for_github as ensure_touchpoint_for_github,
     find_report_by_repo_number as find_touchpoint_by_repo_number,
-    github_pull_request_url_for,
+    github_pull_request_url_for as github_pull_request_url_for,
     list_active_reports as list_active_touchpoints,
     list_report_versions as list_touchpoint_versions,
     list_reports as list_touchpoints,
