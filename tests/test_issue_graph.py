@@ -468,6 +468,47 @@ async def test_graph_renders_report_terminal_node_for_run(cosmos, app_state):
     )
 
 
+@pytest.mark.asyncio
+async def test_issue_graph_surfaces_pr_primitive_failure_on_run(cosmos):
+    issue_id = await _seed_issue(cosmos)
+    now = _now()
+    run = Run(
+        id="01KQGRAPH_PRFAIL",
+        project="ambience",
+        workflow="agent-run",
+        issue_id=issue_id,
+        issue_repo="nelsong6/ambience",
+        issue_number=116,
+        state=RunState.ABORTED,
+        budget=BudgetConfig(total=25.0),
+        attempts=[
+            PhaseAttempt(
+                attempt_index=0,
+                phase="agent-execute",
+                workflow_filename="agent-execute.yml",
+                dispatched_at=now,
+                completed_at=now,
+                conclusion="success",
+                decision="advance",
+            ),
+        ],
+        abort_reason="PR primitive: touchpoint prepare failed: duplicate report id",
+        created_at=now,
+        updated_at=now,
+    )
+    await _seed_run(cosmos, run)
+
+    graph = await _build_issue_graph(
+        cosmos, repo="nelsong6/ambience", issue_number=116,
+    )
+
+    run_node = next(n for n in graph.nodes if n.id == f"run:{run.id}")
+    assert run_node.metadata["pr_primitive_state"] == "failed"
+    assert run_node.metadata["pr_primitive_error"] == (
+        "PR primitive: touchpoint prepare failed: duplicate report id"
+    )
+
+
 # ─── Resume case ──────────────────────────────────────────────────────────
 
 

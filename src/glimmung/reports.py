@@ -54,7 +54,7 @@ async def create_report(
     GitHub syndication target.
     """
     now = _now()
-    report_id = linked_issue_id or str(ULID())
+    report_id = str(ULID())
     pr = Report(
         id=report_id,
         project=project,
