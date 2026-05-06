@@ -2257,6 +2257,7 @@ class AbortRunResult(BaseModel):
     """
     state: str
     run_id: str
+    run_number: int | None = None
     gh_run_cancelled: bool | None = None
     issue_lock_released: bool | None = None
     pr_lock_released: bool | None = None
@@ -2297,6 +2298,7 @@ class RunReport(BaseModel):
     id: str
     project: str
     run_id: str
+    run_number: int | None = None
     workflow: str
     issue_id: str | None = None
     issue_repo: str | None = None
@@ -2323,6 +2325,30 @@ async def get_run_report(
     found = await run_ops.read_run(app.state.cosmos, project=project, run_id=run_id)
     if found is None:
         raise HTTPException(404, f"run {run_id} not found in project {project!r}")
+    run, _etag = found
+    return _run_report_from_run(run)
+
+
+@app.get(
+    "/v1/projects/{project}/issues/{issue_number}/runs/{run_number}/report",
+    response_model=RunReport,
+)
+async def get_run_report_by_number(
+    project: str = Path(...),
+    issue_number: int = Path(...),
+    run_number: int = Path(...),
+) -> RunReport:
+    """Materialized RunReport keyed by issue-scoped run number."""
+    found = await run_ops.read_run_by_number(
+        app.state.cosmos,
+        project=project,
+        issue_number=issue_number,
+        run_number=run_number,
+    )
+    if found is None:
+        raise HTTPException(
+            404, f"run {run_number} not found for {project}#{issue_number}",
+        )
     run, _etag = found
     return _run_report_from_run(run)
 
@@ -2394,23 +2420,32 @@ async def _abort_run(
         log.exception("abort_run: native lease release failed for run %s", run.id)
 
     issue_lock_released: bool | None = None
-    issue_lock_key = _issue_lock_key(
+    issue_lock_keys = []
+    if run.issue_number is not None and run.issue_number > 0:
+        issue_lock_keys.append(f"{run.project}#{run.issue_number}")
+    legacy_issue_lock_key = _issue_lock_key(
         issue_repo=run.issue_repo,
         issue_number=run.issue_number,
         issue_id=run.issue_id,
     )
-    if run.issue_lock_holder_id and issue_lock_key:
-        try:
-            issue_lock_released = bool(await lock_ops.release_lock(
-                cosmos, scope="issue",
-                key=issue_lock_key,
-                holder_id=run.issue_lock_holder_id,
-            ))
-        except Exception:
-            log.exception(
-                "abort_run: issue lock release failed for %s holder=%s",
-                issue_lock_key, run.issue_lock_holder_id,
-            )
+    if legacy_issue_lock_key and legacy_issue_lock_key not in issue_lock_keys:
+        issue_lock_keys.append(legacy_issue_lock_key)
+    if run.issue_lock_holder_id and issue_lock_keys:
+        issue_lock_released = False
+        for issue_lock_key in issue_lock_keys:
+            try:
+                if await lock_ops.release_lock(
+                    cosmos, scope="issue",
+                    key=issue_lock_key,
+                    holder_id=run.issue_lock_holder_id,
+                ):
+                    issue_lock_released = True
+                    break
+            except Exception:
+                log.exception(
+                    "abort_run: issue lock release failed for %s holder=%s",
+                    issue_lock_key, run.issue_lock_holder_id,
+                )
 
     pr_lock_released: bool | None = None
     if run.pr_lock_holder_id and run.pr_number and run.issue_repo:
@@ -2429,6 +2464,7 @@ async def _abort_run(
     return AbortRunResult(
         state="already_terminal" if terminal else "aborted",
         run_id=run.id,
+        run_number=run.run_number,
         gh_run_cancelled=gh_cancelled,
         issue_lock_released=issue_lock_released,
         pr_lock_released=pr_lock_released,
@@ -2523,6 +2559,7 @@ def _run_report_from_run(run: Run) -> RunReport:
         id=f"{run.id}:report",
         project=run.project,
         run_id=run.id,
+        run_number=run.run_number,
         workflow=run.workflow,
         issue_id=run.issue_id or None,
         issue_repo=run.issue_repo or None,
@@ -2578,6 +2615,38 @@ async def abort_run(
         app.state.cosmos,
         getattr(app.state, "gh_minter", None),
         run_id=run_id,
+        project=project,
+        reason=reason,
+    )
+
+
+@app.post(
+    "/v1/projects/{project}/issues/{issue_number}/runs/{run_number}/abort",
+    response_model=AbortRunResult,
+    dependencies=[Depends(require_admin_user)],
+)
+async def abort_run_by_number(
+    project: str = Path(...),
+    issue_number: int = Path(...),
+    run_number: int = Path(...),
+    reason: str = "aborted_via_admin_api",
+) -> AbortRunResult:
+    """Abort a Run by the issue-scoped human run number."""
+    found = await run_ops.read_run_by_number(
+        app.state.cosmos,
+        project=project,
+        issue_number=issue_number,
+        run_number=run_number,
+    )
+    if found is None:
+        raise HTTPException(
+            404, f"run {run_number} not found for {project}#{issue_number}",
+        )
+    run, _etag = found
+    return await _abort_run(
+        app.state.cosmos,
+        getattr(app.state, "gh_minter", None),
+        run_id=run.id,
         project=project,
         reason=reason,
     )
@@ -2941,6 +3010,38 @@ async def native_run_events(
 
 
 @app.get(
+    "/v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/events",
+    response_model=NativeRunLogsResponse,
+)
+async def native_run_events_by_number(
+    project: str = Path(...),
+    issue_number: int = Path(...),
+    run_number: int = Path(...),
+    attempt_index: int | None = Query(None, ge=0),
+    job_id: str | None = Query(None),
+    limit: int | None = Query(None, ge=1, le=1000),
+) -> NativeRunLogsResponse:
+    found = await run_ops.read_run_by_number(
+        app.state.cosmos,
+        project=project,
+        issue_number=issue_number,
+        run_number=run_number,
+    )
+    if found is None:
+        raise HTTPException(
+            404, f"run {run_number} not found for {project}#{issue_number}",
+        )
+    run, _etag = found
+    return await native_run_events(
+        project=project,
+        run_id=run.id,
+        attempt_index=attempt_index,
+        job_id=job_id,
+        limit=limit,
+    )
+
+
+@app.get(
     "/v1/runs/{project}/{run_id}/native/status",
     response_model=NativeRunStatusResponse,
 )
@@ -3281,6 +3382,31 @@ async def replay_run_decision(
     )
 
 
+@app.post(
+    "/v1/projects/{project}/issues/{issue_number}/runs/{run_number}/replay",
+    response_model=ReplayResult,
+    dependencies=[Depends(require_admin_user)],
+)
+async def replay_run_decision_by_number(
+    req: RunReplayRequest,
+    project: str = Path(...),
+    issue_number: int = Path(...),
+    run_number: int = Path(...),
+) -> ReplayResult:
+    found = await run_ops.read_run_by_number(
+        app.state.cosmos,
+        project=project,
+        issue_number=issue_number,
+        run_number=run_number,
+    )
+    if found is None:
+        raise HTTPException(
+            404, f"run {run_number} not found for {project}#{issue_number}",
+        )
+    run, _etag = found
+    return await replay_run_decision(req, project=project, run_id=run.id)
+
+
 # ─── Resume primitive (#111) ───────────────────────────────────────────────
 #
 # Spawn a new Run from a prior (terminal) Run with phases preceding a
@@ -3366,6 +3492,31 @@ async def resume_run(
     if result.state == "already_running":
         raise HTTPException(409, result.detail)
     return result
+
+
+@app.post(
+    "/v1/projects/{project}/issues/{issue_number}/runs/{run_number}/resume",
+    response_model=ResumeResult,
+    dependencies=[Depends(require_admin_user)],
+)
+async def resume_run_by_number(
+    req: RunResumeRequest,
+    project: str = Path(...),
+    issue_number: int = Path(...),
+    run_number: int = Path(...),
+) -> ResumeResult:
+    found = await run_ops.read_run_by_number(
+        app.state.cosmos,
+        project=project,
+        issue_number=issue_number,
+        run_number=run_number,
+    )
+    if found is None:
+        raise HTTPException(
+            404, f"run {run_number} not found for {project}#{issue_number}",
+        )
+    run, _etag = found
+    return await resume_run(req, project=project, run_id=run.id)
 
 
 async def _compute_snapshot(cosmos: Cosmos) -> StateSnapshot:
@@ -4365,6 +4516,7 @@ class IssueRow(BaseModel):
     labels: list[str] = Field(default_factory=list)
     html_url: str | None = None
     last_run_id: str | None = None
+    last_run_number: int | None = None
     last_run_state: str | None = None  # "in_progress" | "passed" | "aborted" | None
     last_run_abort_reason: str | None = None
     issue_lock_held: bool = False  # convenience: lock currently held → in flight
@@ -4382,6 +4534,7 @@ class IssueDetail(BaseModel):
     html_url: str | None = None
     comments: list[IssueComment] = Field(default_factory=list)
     last_run_id: str | None = None
+    last_run_number: int | None = None
     last_run_state: str | None = None
     issue_lock_held: bool = False
 
@@ -4527,6 +4680,7 @@ def _run_graph_metadata(run: Any) -> dict[str, Any]:
         })
     return {
         "run_id": data.get("id"),
+        "run_number": data.get("run_number"),
         "lineage": {
             "cloned_from_run_id": data.get("cloned_from_run_id"),
             "entrypoint_phase": data.get("entrypoint_phase"),
@@ -4697,6 +4851,7 @@ async def _list_issues_from_cosmos(
     run_docs = await query_all(cosmos.runs, "SELECT * FROM c")
     runs_by_issue_id: dict[str, dict[str, Any]] = {}
     runs_by_project_number: dict[tuple[str, int], dict[str, Any]] = {}
+    runs_by_group: dict[tuple[str, int], list[dict[str, Any]]] = {}
     for doc in run_docs:
         created = doc.get("created_at", "")
         issue_id = doc.get("issue_id") or ""
@@ -4708,9 +4863,14 @@ async def _list_issues_from_cosmos(
         number = doc.get("issue_number")
         if project and number is not None:
             key = (project, int(number))
+            runs_by_group.setdefault(key, []).append(doc)
             cur = runs_by_project_number.get(key)
             if cur is None or created > cur.get("created_at", ""):
                 runs_by_project_number[key] = doc
+    run_numbers: dict[str, int] = {}
+    for grouped_docs in runs_by_group.values():
+        grouped_docs.sort(key=lambda d: d.get("created_at", ""))
+        run_numbers.update(run_ops.run_number_map(grouped_docs))
 
     lock_docs = await query_all(
         cosmos.locks,
@@ -4746,6 +4906,7 @@ async def _list_issues_from_cosmos(
         )
         if run_doc is not None:
             row.last_run_id = run_doc["id"]
+            row.last_run_number = run_numbers.get(run_doc["id"]) or run_doc.get("run_number")
             row.last_run_state = run_doc["state"]
             row.last_run_abort_reason = run_doc.get("abort_reason")
         lock_key = (
@@ -4871,6 +5032,16 @@ async def _build_issue_detail(cosmos: Cosmos, *, issue: Issue) -> IssueDetail:
         )
     if latest_run is not None:
         detail.last_run_id = latest_run.id
+        if latest_run.run_number is not None:
+            detail.last_run_number = latest_run.run_number
+        else:
+            docs = await run_ops.issue_run_docs(
+                cosmos,
+                project=issue.project,
+                issue_number=number,
+                issue_id=issue.id,
+            )
+            detail.last_run_number = run_ops.run_number_map(docs).get(latest_run.id)
         detail.last_run_state = latest_run.state.value
     lock_key = f"{issue.project}#{number}"
     existing_lock = await lock_ops.read_lock(
@@ -5138,16 +5309,28 @@ async def _build_system_graph(
             workflow_meta_cache[workflow_key] = _workflow_graph_metadata(
                 await _read_workflow(cosmos, run.project, run.workflow)
             )
+        run_number = run.run_number
+        if run_number is None:
+            issue_docs = await run_ops.issue_run_docs(
+                cosmos,
+                project=run.project,
+                issue_number=run.issue_number,
+                issue_id=run.issue_id,
+            )
+            run_number = run_ops.run_number_map(issue_docs).get(run.id)
+            if run_number is not None:
+                run = run.model_copy(update={"run_number": run_number})
         runs.append(run)
         run_node_id = f"run:{run.id}"
         nodes.append(GraphNode(
             id=run_node_id,
             kind="run",
-            label=run.workflow,
+            label=f"Run {run_number}" if run_number is not None else run.workflow,
             state=run.state.value,
             timestamp=run.created_at.isoformat(),
             metadata={
                 "run_id": run.id,
+                "run_number": run_number,
                 "project": run.project,
                 "workflow": run.workflow,
                 "issue_id": run.issue_id,
@@ -5169,6 +5352,7 @@ async def _build_system_graph(
             attempt_node_id = f"attempt:{run.id}:{attempt.attempt_index}"
             metadata = _attempt_graph_metadata(attempt)
             metadata["run_id"] = run.id
+            metadata["run_number"] = run_number
             nodes.append(GraphNode(
                 id=attempt_node_id,
                 kind="attempt",
@@ -5330,6 +5514,7 @@ async def _build_issue_graph_for_issue(
             run_docs.append(doc)
             seen_run_ids.add(doc["id"])
     run_docs.sort(key=lambda d: d.get("created_at", ""))
+    run_number_by_id = run_ops.run_number_map(run_docs)
 
     pr_numbers = {
         int(d["pr_number"]) for d in run_docs
@@ -5469,6 +5654,9 @@ async def _build_issue_graph_for_issue(
 
     for d in run_docs:
         run_id = d["id"]
+        run_number = run_number_by_id.get(run_id) or d.get("run_number")
+        if d.get("run_number") is None and run_number is not None:
+            d = {**d, "run_number": run_number}
         run_node_id = f"run:{run_id}"
         linked_report = report_by_run_id.get(run_id)
         if linked_report is None and d.get("pr_number") is not None:
@@ -5482,10 +5670,11 @@ async def _build_issue_graph_for_issue(
         nodes.append(GraphNode(
             id=run_node_id,
             kind="run",
-            label=f"Run {run_id[:8]}",
+            label=f"Run {run_number}" if run_number is not None else f"Run {run_id[:8]}",
             state=d.get("state"),
             timestamp=d.get("created_at"),
             metadata={
+                "run_number": run_number,
                 "workflow": d.get("workflow"),
                 "trigger_source": d.get("trigger_source"),
                 "abort_reason": d.get("abort_reason"),
@@ -5549,6 +5738,7 @@ async def _build_issue_graph_for_issue(
                 metadata={
                     **_attempt_graph_metadata(a),
                     "run_id": run_id,
+                    "run_number": run_number,
                     # Resume primitive (#111) — set on synthesized
                     # skip-marks so the dashboard can render "satisfied
                     # by Run X" tooltips and grey out skipped attempts.

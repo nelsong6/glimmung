@@ -39,6 +39,7 @@ type IssueDetail = {
   html_url: string | null;
   comments: IssueComment[];
   last_run_id: string | null;
+  last_run_number: number | null;
   last_run_state: string | null;
   issue_lock_held: boolean;
 };
@@ -432,7 +433,11 @@ function IssueHeader({ detail, heading }: { detail: IssueDetail; heading: string
         </div>
         <div className="project-fact">
           <span>last run</span>
-          <strong>{detail.last_run_state ?? "none"}</strong>
+          <strong>
+            {detail.last_run_number !== null
+              ? `run ${detail.last_run_number}`
+              : detail.last_run_state ?? "none"}
+          </strong>
         </div>
       </div>
       {(detail.labels.length > 0 || detail.issue_lock_held) && (
@@ -865,7 +870,7 @@ export function RunViewer({
       )}
       {selectedRunId && focused && (
         <span className="dim mono">
-          showing run {selectedRunId.slice(0, 8)}…{" "}
+          showing {runDisplayName(focused)}{" "}
           <button type="button" className="link" onClick={onBackToRuns}>
             back to runs
           </button>
@@ -1493,7 +1498,7 @@ function TouchpointTab({
         </div>
         <div className="row">
           <span className="key">current run</span>
-          <span className="val mono">{latestRun ? runIdFromNode(latestRun) : "—"}</span>
+          <span className="val mono">{latestRun ? runDisplayName(latestRun) : "—"}</span>
         </div>
         <div className="row">
           <span className="key">PR evidence</span>
@@ -1890,19 +1895,22 @@ function runIdFromNode(n: GraphNode): string {
 }
 
 function issueRunSlug(graph: IssueGraph, run: GraphNode): string {
-  const issue = graph.nodes.find((node) => node.kind === "issue");
-  const issueNumber = issue ? numberOrNull(issue.metadata.number) : null;
-  if (issueNumber === null) return runIdFromNode(run);
+  const explicit = numberOrNull(run.metadata.run_number);
+  if (explicit !== null) return String(explicit);
   const issueRuns = graph.nodes
     .filter((node) => node.kind === "run")
     .slice()
     .sort((a, b) => (a.timestamp ?? "").localeCompare(b.timestamp ?? ""));
   const ordinal = issueRuns.findIndex((node) => node.id === run.id) + 1;
-  return `${issueNumber}-${Math.max(ordinal, 1)}`;
+  return String(Math.max(ordinal, 1));
 }
 
 function runSlugDisplay(slug: string): string {
-  return /^\d+-\d+$/.test(slug) ? `#${slug}` : `${slug.slice(0, 8)}…`;
+  return /^\d+$/.test(slug) ? `run ${slug}` : `${slug.slice(0, 8)}…`;
+}
+
+function runDisplayName(run: GraphNode): string {
+  return runSlugDisplay(issueRunSlug({ issue_id: "", nodes: [run], edges: [] }, run));
 }
 
 function isRecord(x: unknown): x is Record<string, unknown> {

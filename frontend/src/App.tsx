@@ -112,6 +112,7 @@ type RunReport = {
   id: string;
   project: string;
   run_id: string;
+  run_number: number | null;
   workflow: string;
   issue_id: string | null;
   issue_repo: string | null;
@@ -1839,11 +1840,12 @@ function projectRunReportGraph(report: RunReport, workflow: Workflow | undefined
   const runNode = {
     id: `run:${report.run_id}`,
     kind: "run" as const,
-    label: report.run_id,
+    label: report.run_number !== null ? `Run ${report.run_number}` : report.run_id,
     state: report.state,
     timestamp: report.started_at,
     metadata: {
       run_id: report.run_id,
+      run_number: report.run_number,
       workflow: report.workflow,
       cost_usd: report.cumulative_cost_usd,
       issue_id: report.issue_id,

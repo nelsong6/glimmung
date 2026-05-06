@@ -636,6 +636,10 @@ class Run(BaseModel):
     id: str                                      # ULID
     project: str                                 # partition key
     workflow: str                                # workflow name (e.g. "issue-agent")
+    # Human-facing run ordinal scoped to `(project, issue_number)`.
+    # The ULID remains the storage key; users should see "run 1" in the
+    # issue context and "glimmung#141 run 1" when context is needed.
+    run_number: int | None = None
     # Canonical glimmung-issue handle (#28 consumer-PR-1). Optional
     # during transition: pre-#28-consumer Runs predate the issues
     # container and have an empty string here. New Runs always set it.

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from glimmung.app import get_run_report
+from glimmung.app import get_run_report, get_run_report_by_number
 from glimmung.models import BudgetConfig, PhaseAttempt, Run, RunState
 
 from tests.cosmos_fake import FakeContainer
@@ -93,3 +93,75 @@ async def test_run_report_404s_for_missing_run(app_state, monkeypatch):
         await get_run_report(project="glimmung", run_id="missing")
 
     assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_run_report_by_number_reads_issue_scoped_run(app_state, cosmos, monkeypatch):
+    monkeypatch.setattr("glimmung.app.app", app_state)
+    now = datetime(2026, 5, 6, 2, 20, tzinfo=UTC)
+    run = Run(
+        id="01KQTEST",
+        project="glimmung",
+        workflow="issue-agent",
+        run_number=1,
+        issue_id="issue-1",
+        issue_repo="nelsong6/glimmung",
+        issue_number=141,
+        state=RunState.IN_PROGRESS,
+        budget=BudgetConfig(total=10),
+        attempts=[
+            PhaseAttempt(
+                attempt_index=0,
+                phase="env-prep",
+                workflow_filename="",
+                dispatched_at=now,
+            ),
+        ],
+        created_at=now,
+        updated_at=now,
+    )
+    await cosmos.runs.create_item(run.model_dump(mode="json"))
+
+    report = await get_run_report_by_number(
+        project="glimmung", issue_number=141, run_number=1,
+    )
+
+    assert report.run_id == "01KQTEST"
+    assert report.run_number == 1
+    assert report.issue_number == 141
+
+
+@pytest.mark.asyncio
+async def test_run_report_by_number_derives_legacy_run_numbers(
+    app_state, cosmos, monkeypatch,
+):
+    monkeypatch.setattr("glimmung.app.app", app_state)
+    now = datetime(2026, 5, 6, 2, 20, tzinfo=UTC)
+    for run_id, offset in [("old-1", 0), ("old-2", 1)]:
+        await cosmos.runs.create_item(Run(
+            id=run_id,
+            project="glimmung",
+            workflow="issue-agent",
+            issue_id="issue-1",
+            issue_repo="nelsong6/glimmung",
+            issue_number=141,
+            state=RunState.IN_PROGRESS,
+            budget=BudgetConfig(total=10),
+            attempts=[
+                PhaseAttempt(
+                    attempt_index=0,
+                    phase="env-prep",
+                    workflow_filename="",
+                    dispatched_at=now + timedelta(minutes=offset),
+                ),
+            ],
+            created_at=now + timedelta(minutes=offset),
+            updated_at=now + timedelta(minutes=offset),
+        ).model_dump(mode="json"))
+
+    report = await get_run_report_by_number(
+        project="glimmung", issue_number=141, run_number=2,
+    )
+
+    assert report.run_id == "old-2"
+    assert report.run_number == 2
