@@ -11,6 +11,7 @@ from pathlib import Path as FsPath
 from typing import Annotated, Any
 from urllib.parse import urlencode
 
+import httpx
 from azure.core.exceptions import ResourceNotFoundError
 from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request
 from fastapi.responses import FileResponse, Response
@@ -2806,6 +2807,19 @@ class NativeRunLogsResponse(BaseModel):
     archive_url: str | None = None
 
 
+class NativePodLogsResponse(BaseModel):
+    project: str
+    run_id: str
+    attempt_index: int
+    job_id: str
+    namespace: str
+    pod_name: str
+    container: str
+    phase: str
+    tail_lines: int
+    logs: str
+
+
 class NativeRunStatusResponse(BaseModel):
     project: str
     run_id: str
@@ -3088,6 +3102,62 @@ async def native_run_events_by_number(
         attempt_index=attempt_index,
         job_id=job_id,
         limit=limit,
+    )
+
+
+@app.get(
+    "/v1/runs/{project}/{run_id}/native/pod-logs",
+    response_model=NativePodLogsResponse,
+)
+async def native_run_pod_logs(
+    project: str = Path(...),
+    run_id: str = Path(...),
+    attempt_index: int = Query(..., ge=0),
+    job_id: str = Query(...),
+    tail_lines: int = Query(200, ge=1, le=2000),
+) -> NativePodLogsResponse:
+    """Read a bounded tail of Kubernetes pod logs for a native run attempt."""
+    cosmos: Cosmos = app.state.cosmos
+    found = await run_ops.read_run(cosmos, project=project, run_id=run_id)
+    if found is None:
+        raise HTTPException(404, f"no run {project}/{run_id}")
+    run, _etag = found
+    attempt = next((a for a in run.attempts if a.attempt_index == attempt_index), None)
+    if attempt is None:
+        raise HTTPException(404, f"run {project}/{run_id} has no attempt {attempt_index}")
+    if attempt.phase_kind != "k8s_job":
+        raise HTTPException(409, f"attempt {attempt_index} is not a native k8s_job")
+    if not any(job.job_id == job_id for job in attempt.jobs):
+        raise HTTPException(404, f"attempt {attempt_index} has no native job {job_id!r}")
+
+    try:
+        result = await native_k8s_ops.NativeKubernetesLauncher(
+            get_settings(),
+        ).read_attempt_pod_logs(
+            run_id=run_id,
+            attempt_index=attempt_index,
+            job_id=job_id,
+            tail_lines=tail_lines,
+        )
+    except native_k8s_ops.NativePodLogError as exc:
+        raise HTTPException(404, str(exc))
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        if status == 404:
+            raise HTTPException(404, "native pod logs are not available")
+        raise HTTPException(status, f"kubernetes pod log read failed: {status}")
+
+    return NativePodLogsResponse(
+        project=project,
+        run_id=run_id,
+        attempt_index=attempt_index,
+        job_id=job_id,
+        namespace=str(result["namespace"]),
+        pod_name=str(result["pod_name"]),
+        container=str(result["container"]),
+        phase=str(result["phase"]),
+        tail_lines=tail_lines,
+        logs=str(result["logs"]),
     )
 
 

@@ -11,6 +11,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 
@@ -21,6 +22,10 @@ from glimmung.settings import Settings
 
 
 class NativeLaunchError(RuntimeError):
+    pass
+
+
+class NativePodLogError(RuntimeError):
     pass
 
 
@@ -186,6 +191,53 @@ class NativeKubernetesLauncher:
                 return
             raise
 
+    async def read_attempt_pod_logs(
+        self,
+        *,
+        run_id: str,
+        attempt_index: int,
+        job_id: str,
+        tail_lines: int = 200,
+    ) -> dict[str, Any]:
+        """Read the latest logs from the Kubernetes pod/container for an attempt."""
+        namespace = self._settings.native_runner_namespace
+        job_name = _resource_name("glim", run_id, attempt_index)
+        pods = await self._request(
+            "GET",
+            f"/api/v1/namespaces/{namespace}/pods?"
+            + urlencode({"labelSelector": f"job-name={job_name}"}),
+        )
+        if not pods.get("items"):
+            pods = await self._request(
+                "GET",
+                f"/api/v1/namespaces/{namespace}/pods?"
+                + urlencode({"labelSelector": f"batch.kubernetes.io/job-name={job_name}"}),
+            )
+        pod = _select_log_pod(pods.get("items") or [])
+        if pod is None:
+            raise NativePodLogError(f"no pod found for native job {namespace}/{job_name}")
+        pod_name = str((pod.get("metadata") or {}).get("name") or "")
+        if not pod_name:
+            raise NativePodLogError(f"native job {namespace}/{job_name} has a pod without a name")
+
+        container = _dns_label(job_id)
+        query = urlencode({
+            "container": container,
+            "tailLines": str(tail_lines),
+            "timestamps": "false",
+        })
+        text = await self._request_text(
+            "GET",
+            f"/api/v1/namespaces/{namespace}/pods/{pod_name}/log?{query}",
+        )
+        return {
+            "namespace": namespace,
+            "pod_name": pod_name,
+            "container": container,
+            "phase": str((pod.get("status") or {}).get("phase") or ""),
+            "logs": text,
+        }
+
     async def _ensure_run_namespace_access(
         self,
         *,
@@ -290,6 +342,19 @@ class NativeKubernetesLauncher:
             response = await client.request(method, path, json=json)
             response.raise_for_status()
             return response.json() if response.content else {}
+
+    async def _request_text(self, method: str, path: str) -> str:
+        token = Path(self._settings.k8s_sa_token_path).read_text(encoding="utf-8").strip()
+        verify: str | bool = self._settings.k8s_ca_cert_path
+        async with httpx.AsyncClient(
+            base_url=self._settings.k8s_api_host.rstrip("/"),
+            verify=verify,
+            timeout=20.0,
+            headers={"Authorization": f"Bearer {token}"},
+        ) as client:
+            response = await client.request(method, path)
+            response.raise_for_status()
+            return response.text
 
 
 def _job_manifest(
@@ -536,6 +601,21 @@ def _access_namespaces(validation_namespace: str, metadata: dict[str, Any]) -> l
 
 def _valid_namespace(value: str) -> bool:
     return bool(value and len(value) <= 63 and _K8S_NAME_RE.match(value))
+
+
+def _select_log_pod(pods: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not pods:
+        return None
+    phase_rank = {"Running": 0, "Pending": 1, "Succeeded": 2, "Failed": 3}
+
+    def key(pod: dict[str, Any]) -> tuple[int, str]:
+        status = pod.get("status") or {}
+        metadata = pod.get("metadata") or {}
+        phase = str(status.get("phase") or "")
+        started = str(status.get("startTime") or metadata.get("creationTimestamp") or "")
+        return (phase_rank.get(phase, 4), started)
+
+    return sorted(pods, key=key)[0]
 
 
 def _dns_label(value: str) -> str:

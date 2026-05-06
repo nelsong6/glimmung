@@ -56,6 +56,23 @@ class _FailingRoleBindingLauncher(_RecordingLauncher):
         return {}
 
 
+class _PodLogLauncher(_RecordingLauncher):
+    async def _request(self, method: str, path: str, *, json=None):
+        self.calls.append({"method": method, "path": path, "json": json})
+        if path.startswith("/api/v1/namespaces/glimmung-runs/pods?"):
+            return {
+                "items": [{
+                    "metadata": {"name": "glim-run-pod"},
+                    "status": {"phase": "Running", "startTime": "2026-05-06T06:00:00Z"},
+                }]
+            }
+        return {}
+
+    async def _request_text(self, method: str, path: str):
+        self.calls.append({"method": method, "path": path, "json": None})
+        return "line one\nline two\n"
+
+
 def _cosmos():
     return SimpleNamespace(
         runs=FakeContainer("runs", "/project"),
@@ -199,6 +216,44 @@ async def test_delete_attempt_job_uses_graceful_foreground_delete():
             "gracePeriodSeconds": 60,
         },
     }]
+
+
+@pytest.mark.asyncio
+async def test_read_attempt_pod_logs_selects_job_pod_and_container_tail():
+    launcher = _PodLogLauncher(_settings())
+
+    result = await launcher.read_attempt_pod_logs(
+        run_id="01KRNATIVE0000000000000000",
+        attempt_index=2,
+        job_id="codex-agent",
+        tail_lines=200,
+    )
+
+    assert result == {
+        "namespace": "glimmung-runs",
+        "pod_name": "glim-run-pod",
+        "container": "codex-agent",
+        "phase": "Running",
+        "logs": "line one\nline two\n",
+    }
+    assert launcher.calls == [
+        {
+            "method": "GET",
+            "path": (
+                "/api/v1/namespaces/glimmung-runs/pods?"
+                "labelSelector=job-name%3Dglim-01krnative0000000000000000-2"
+            ),
+            "json": None,
+        },
+        {
+            "method": "GET",
+            "path": (
+                "/api/v1/namespaces/glimmung-runs/pods/glim-run-pod/log?"
+                "container=codex-agent&tailLines=200&timestamps=false"
+            ),
+            "json": None,
+        },
+    ]
 
 
 @pytest.mark.asyncio
