@@ -648,7 +648,7 @@ class Run(BaseModel):
     # forces this to be required; callers reach for GH coords through
     # the linked Issue's metadata.
     issue_id: str = ""
-    issue_repo: str                              # "<owner>/<repo>" — for GH API calls
+    issue_repo: str = ""                         # "<owner>/<repo>" — for GH API calls
     issue_number: int
     state: RunState = RunState.IN_PROGRESS
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
