@@ -51,6 +51,21 @@ def run_command(command: list[str], *, cwd: Path | None = None) -> str:
     return result.stdout.strip()
 
 
+def acr_repository_tag(*, image_tag: str, image_repository: str = IMAGE_REPOSITORY) -> str:
+    try:
+        return run_command(
+            [
+                "az", "acr", "repository", "show-tags",
+                "--name", REGISTRY_NAME,
+                "--repository", image_repository,
+                "--query", f"[?@=='{image_tag}'] | [0]",
+                "--output", "tsv",
+            ]
+        )
+    except CommandError:
+        return ""
+
+
 # ---------------------------------------------------------------------------
 # Image build
 # ---------------------------------------------------------------------------
@@ -60,26 +75,21 @@ def build_preview_image(*, image_tag: str) -> dict:
     registry_server = f"{REGISTRY_NAME}.azurecr.io"
     image = f"{registry_server}/{IMAGE_REPOSITORY}:{image_tag}"
 
-    run_command(
-        [
-            "az", "acr", "build",
-            "--registry", REGISTRY_NAME,
-            "--image", f"{IMAGE_REPOSITORY}:{image_tag}",
-            str(repo_root()),
-        ]
-    )
-    verified = run_command(
-        [
-            "az", "acr", "repository", "show-tags",
-            "--name", REGISTRY_NAME,
-            "--repository", IMAGE_REPOSITORY,
-            "--query", f"[?@=='{image_tag}'] | [0]",
-            "--output", "tsv",
-        ]
-    )
+    existing_tag = acr_repository_tag(image_tag=image_tag)
+    if existing_tag != image_tag:
+        run_command(
+            [
+                "az", "acr", "build",
+                "--registry", REGISTRY_NAME,
+                "--image", f"{IMAGE_REPOSITORY}:{image_tag}",
+                str(repo_root()),
+            ]
+        )
+
+    verified = acr_repository_tag(image_tag=image_tag)
     if verified != image_tag:
         raise CommandError(f"image tag {image_tag!r} not present in {registry_server}/{IMAGE_REPOSITORY} after build")
-    return {"image": image, "image_tag": image_tag}
+    return {"image": image, "image_tag": image_tag, "skipped_build": existing_tag == image_tag}
 
 
 def rebuild_validation_image(
@@ -96,25 +106,37 @@ def rebuild_validation_image(
     registry_server = f"{REGISTRY_NAME}.azurecr.io"
     image = f"{registry_server}/{IMAGE_REPOSITORY}:{image_tag}"
 
+    existing_tag = acr_repository_tag(image_tag=image_tag)
+    if existing_tag != image_tag:
+        run_command(
+            [
+                "az", "acr", "build",
+                "--registry", REGISTRY_NAME,
+                "--image", f"{IMAGE_REPOSITORY}:{image_tag}",
+                f"https://github.com/{repo_slug}.git#{branch}",
+            ]
+        )
     run_command(
         [
-            "az", "acr", "build",
-            "--registry", REGISTRY_NAME,
-            "--image", f"{IMAGE_REPOSITORY}:{image_tag}",
-            f"https://github.com/{repo_slug}.git#{branch}",
+            "kubectl", "-n", namespace, "set", "image",
+            f"deployment/{release}",
+            f"glimmung={image}",
         ]
     )
     run_command(
         [
-            "helm", "upgrade", release, str(repo_root() / ISSUE_CHART_PATH),
-            "--namespace", namespace,
-            "--reuse-values",
-            "--set-string", f"image.tag={image_tag}",
-            "--wait",
-            "--timeout", "5m",
+            "kubectl", "-n", namespace, "rollout", "status",
+            f"deployment/{release}",
+            "--timeout=5m",
         ]
     )
-    return {"release": release, "namespace": namespace, "image": image, "image_tag": image_tag}
+    return {
+        "release": release,
+        "namespace": namespace,
+        "image": image,
+        "image_tag": image_tag,
+        "skipped_build": existing_tag == image_tag,
+    }
 
 
 # ---------------------------------------------------------------------------

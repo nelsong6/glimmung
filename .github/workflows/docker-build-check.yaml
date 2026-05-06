@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 concurrency:
   group: docker-build-check-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ inputs.git_ref || '' }}
@@ -27,6 +28,9 @@ jobs:
           - name: app
             file: Dockerfile
             context: .
+            cache-ref: romainecr.azurecr.io/glimmung-build-cache:app
+            image-repo: glimmung
+            fingerprint-paths: Dockerfile .dockerignore pyproject.toml src frontend/package.json frontend/index.html frontend/src frontend/tsconfig.json frontend/vite.config.ts design-system
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -56,7 +60,65 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Azure Login (OIDC)
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.ARM_CLIENT_ID }}
+          tenant-id: ${{ vars.ARM_TENANT_ID }}
+          subscription-id: ${{ vars.ARM_SUBSCRIPTION_ID }}
+
+      - name: ACR login
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        run: az acr login --name romainecr
+
+      - name: Compute image fingerprint
+        id: fingerprint
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/image-fingerprint.sh \
+            --image '${{ matrix.name }}' \
+            --dockerfile '${{ matrix.file }}' \
+            --context '${{ matrix.context }}' \
+            --paths '${{ matrix.fingerprint-paths }}'
+
+      - name: Check ACR candidate image
+        id: candidate
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.fingerprint.outputs.proof_tag }}"
+          if az acr repository show-tags \
+              --name romainecr \
+              --repository "${{ matrix.image-repo }}" \
+              --query "[?@=='${tag}'] | [0]" \
+              --output tsv | grep -qx "${tag}"; then
+            echo "hit=true" >>"${GITHUB_OUTPUT}"
+            echo "Found reusable candidate image: romainecr.azurecr.io/${{ matrix.image-repo }}:${tag}"
+          else
+            echo "hit=false" >>"${GITHUB_OUTPUT}"
+            echo "No candidate image found for ${{ matrix.name }} fingerprint ${{ steps.fingerprint.outputs.fingerprint }}"
+          fi
+
+      - name: Build and push candidate image
+        if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && steps.candidate.outputs.hit != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          push: true
+          tags: romainecr.azurecr.io/${{ matrix.image-repo }}:${{ steps.fingerprint.outputs.proof_tag }}
+          cache-from: |
+            type=registry,ref=${{ matrix.cache-ref }}
+            type=gha,scope=${{ matrix.name }}
+          cache-to: |
+            type=registry,ref=${{ matrix.cache-ref }},mode=max
+            type=gha,mode=max,scope=${{ matrix.name }}
+
       - name: Build image without pushing
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}

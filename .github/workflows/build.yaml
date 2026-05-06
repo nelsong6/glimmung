@@ -7,6 +7,11 @@ on:
       - 'k8s/**'
       - 'README.md'
   workflow_dispatch:
+    inputs:
+      git_ref:
+        description: "Git ref or commit SHA to build. Leave blank to build the dispatch revision."
+        required: false
+        type: string
 
 permissions:
   id-token: write
@@ -21,7 +26,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve requested ref
+        env:
+          INPUT_REF: ${{ inputs.git_ref }}
+        run: |
+          set -euo pipefail
+
+          git fetch --force --tags origin '+refs/heads/*:refs/remotes/origin/*'
+
+          target_ref="${INPUT_REF:-$GITHUB_SHA}"
+          if full_sha="$(git rev-parse --verify "${target_ref}^{commit}" 2>/dev/null)"; then
+            :
+          elif git show-ref --verify --quiet "refs/remotes/origin/${target_ref}"; then
+            full_sha="$(git rev-parse "refs/remotes/origin/${target_ref}^{commit}")"
+          elif git show-ref --verify --quiet "refs/tags/${target_ref}"; then
+            full_sha="$(git rev-parse "refs/tags/${target_ref}^{commit}")"
+          else
+            echo "::error::Unable to resolve git_ref '${target_ref}' to a commit."
+            exit 1
+          fi
+
+          git checkout --detach "$full_sha"
+          echo "Resolved ${target_ref} -> ${full_sha}"
 
       - name: Azure login (OIDC)
         uses: azure/login@v2
@@ -39,16 +68,73 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      - uses: docker/build-push-action@v6
+      - name: Compute image fingerprint
+        id: fingerprint
+        shell: bash
+        run: |
+          set -euo pipefail
+          fingerprint="$(scripts/image-fingerprint.sh \
+            --image app \
+            --dockerfile Dockerfile \
+            --context . \
+            --paths 'Dockerfile .dockerignore pyproject.toml src frontend/package.json frontend/index.html frontend/src frontend/tsconfig.json frontend/vite.config.ts design-system' \
+            | tee /tmp/glimmung-image-fingerprint.txt \
+            | awk -F= '$1 == "fingerprint" { print $2 }')"
+          echo "ALIAS_TAG=app-${fingerprint}" >> "$GITHUB_ENV"
+
+      - name: Check existing image aliases
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.tag }}"
+          if az acr repository show-tags \
+              --name romainecr \
+              --repository "${IMAGE}" \
+              --query "[?@=='${tag}'] | [0]" \
+              --output tsv | grep -qx "${tag}"; then
+            echo "target_exists=true" >>"${GITHUB_OUTPUT}"
+          else
+            echo "target_exists=false" >>"${GITHUB_OUTPUT}"
+          fi
+
+          if az acr repository show-tags \
+              --name romainecr \
+              --repository "${IMAGE}" \
+              --query "[?@=='${ALIAS_TAG}'] | [0]" \
+              --output tsv | grep -qx "${ALIAS_TAG}"; then
+            echo "alias_exists=true" >>"${GITHUB_OUTPUT}"
+            echo "Found reusable image ${REGISTRY}/${IMAGE}:${ALIAS_TAG}"
+          else
+            echo "alias_exists=false" >>"${GITHUB_OUTPUT}"
+            echo "No reusable image found for app fingerprint ${{ steps.fingerprint.outputs.fingerprint }}"
+          fi
+
+      - name: Retag existing fingerprint image
+        if: steps.image.outputs.target_exists != 'true' && steps.image.outputs.alias_exists == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          az acr import \
+            --name romainecr \
+            --source "${REGISTRY}/${IMAGE}:${ALIAS_TAG}" \
+            --image "${IMAGE}:${{ steps.tag.outputs.tag }}" \
+            --force
+
+      - name: Build and push image
+        if: steps.image.outputs.target_exists != 'true' && steps.image.outputs.alias_exists != 'true'
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ env.ALIAS_TAG }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE }}-build-cache:app
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE }}-build-cache:app,mode=max
 
       - name: Bump chart image tag
-        if: github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           tag="${{ steps.tag.outputs.tag }}"
           # Targeted sed: only the line beginning with two spaces + `tag:` under image.
@@ -71,7 +157,7 @@ jobs:
           # latest tag wins — re-apply our sed against the post-rebase tree
           # and continue.
           for i in 1 2 3; do
-            if git push; then exit 0; fi
+            if git push origin HEAD:main; then exit 0; fi
             git fetch origin main
             if ! git rebase origin/main; then
               git checkout --theirs k8s/values.yaml
@@ -80,4 +166,4 @@ jobs:
               git rebase --continue || git rebase --skip
             fi
           done
-          git push
+          git push origin HEAD:main

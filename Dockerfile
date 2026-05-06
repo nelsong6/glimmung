@@ -3,7 +3,7 @@
 FROM node:20-alpine AS frontend
 WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm install --no-audit --no-fund
+RUN --mount=type=cache,target=/root/.npm npm install --no-audit --no-fund
 # `frontend/src/index.css` does `@import "../../design-system/colors_and_type.css"`
 # (tokens live outside the frontend per CLAUDE.md "Frontend / design"); the
 # build context needs the sibling directory available at /design-system so
