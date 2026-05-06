@@ -94,6 +94,8 @@ class Settings(BaseSettings):
     native_runner_global_concurrency: int = 5
     native_runner_job_ttl_seconds: int = 259200
     native_runner_namespace_role: str = "admin"
+    native_runner_codex_credentials_secret: str = "codex-credentials"
+    native_runner_codex_credentials_mount_path: str = "/etc/codex-creds"
 
     # Private Blob container for native runner logs and future evidence.
     # Glimmung serves these back to users; callers should persist logical
