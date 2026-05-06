@@ -69,6 +69,8 @@ from glimmung.models import (
     PlaybookEntry,
     PlaybookEntryState,
     PlaybookState,
+    PortfolioElement,
+    PortfolioReviewState,
     ReportState,
     PrPrimitiveSpec,
     Project,
@@ -5295,6 +5297,154 @@ async def dispatch_run_endpoint(req: DispatchRequest) -> DispatchResult:
         trigger_source={"kind": "glimmung_ui"},
         workflow_name=req.workflow,
     )
+
+
+# ─── Design portfolio review surface (#225) ─────────────────────────────────
+
+
+class PortfolioElementUpsertRequest(BaseModel):
+    project: str
+    route: str
+    element_id: str
+    title: str = ""
+    screenshot_url: str | None = None
+    preview_url: str | None = None
+    status: PortfolioReviewState = PortfolioReviewState.NEEDS_REVIEW
+    notes: str = ""
+    last_touched_run_id: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PortfolioElementPatchRequest(BaseModel):
+    title: str | None = None
+    screenshot_url: str | None = None
+    preview_url: str | None = None
+    status: PortfolioReviewState | None = None
+    notes: str | None = None
+    last_touched_run_id: str | None = None
+    metadata: dict[str, Any] | None = None
+
+
+@app.get("/v1/portfolio/elements", response_model=list[PortfolioElement])
+async def list_portfolio_elements(
+    project: str | None = Query(None),
+    status: PortfolioReviewState | None = Query(None),
+    limit: Annotated[int | None, Query(ge=1, le=500)] = None,
+) -> list[PortfolioElement]:
+    clauses: list[str] = []
+    params: list[dict[str, Any]] = []
+    if project is not None:
+        clauses.append("c.project = @project")
+        params.append({"name": "@project", "value": project})
+    if status is not None:
+        clauses.append("c.status = @status")
+        params.append({"name": "@status", "value": status.value})
+    clauses.insert(0, "c.kind = @kind")
+    params.insert(0, {"name": "@kind", "value": "portfolio_element"})
+    where = f" WHERE {' AND '.join(clauses)}"
+    docs = await query_all(
+        app.state.cosmos.issues,
+        f"SELECT * FROM c{where} ORDER BY c.updated_at DESC",
+        parameters=params,
+    )
+    rows = [PortfolioElement.model_validate(run_ops._strip_meta(d)) for d in docs]
+    return rows[:limit] if limit is not None else rows
+
+
+@app.post(
+    "/v1/portfolio/elements",
+    response_model=PortfolioElement,
+    dependencies=[Depends(require_admin_user)],
+)
+async def upsert_portfolio_element(
+    req: PortfolioElementUpsertRequest,
+) -> PortfolioElement:
+    """Mark or refresh a design portfolio element for human review.
+
+    This persists review state only; it does not enqueue a signal or dispatch
+    any agent run.
+    """
+    if not req.project.strip():
+        raise HTTPException(400, "project required")
+    if not req.route.strip():
+        raise HTTPException(400, "route required")
+    if not req.element_id.strip():
+        raise HTTPException(400, "element_id required")
+    cosmos: Cosmos = app.state.cosmos
+    element_id = _portfolio_element_doc_id(req.project, req.route, req.element_id)
+    now = datetime.now(UTC)
+    try:
+        existing = await cosmos.issues.read_item(
+            item=element_id,
+            partition_key=req.project,
+        )
+        created_at = existing.get("created_at", now.isoformat())
+    except Exception:
+        created_at = now.isoformat()
+    doc = {
+        "id": element_id,
+        "kind": "portfolio_element",
+        "project": req.project,
+        "route": req.route,
+        "element_id": req.element_id,
+        "title": req.title,
+        "screenshot_url": req.screenshot_url,
+        "preview_url": req.preview_url,
+        "status": req.status.value,
+        "notes": req.notes,
+        "last_touched_run_id": req.last_touched_run_id,
+        "metadata": req.metadata,
+        "created_at": created_at,
+        "updated_at": now.isoformat(),
+    }
+    await cosmos.issues.upsert_item(doc)
+    return PortfolioElement.model_validate(doc)
+
+
+@app.patch(
+    "/v1/portfolio/elements/{project}/{element_doc_id}",
+    response_model=PortfolioElement,
+    dependencies=[Depends(require_admin_user)],
+)
+async def patch_portfolio_element(
+    req: PortfolioElementPatchRequest,
+    project: str = Path(...),
+    element_doc_id: str = Path(...),
+) -> PortfolioElement:
+    cosmos: Cosmos = app.state.cosmos
+    try:
+        doc = await cosmos.issues.read_item(
+            item=element_doc_id,
+            partition_key=project,
+        )
+    except Exception:
+        raise HTTPException(404, f"portfolio element {project}/{element_doc_id} not found")
+    if doc.get("kind") != "portfolio_element":
+        raise HTTPException(404, f"portfolio element {project}/{element_doc_id} not found")
+    for field in (
+        "title",
+        "screenshot_url",
+        "preview_url",
+        "notes",
+        "last_touched_run_id",
+        "metadata",
+    ):
+        value = getattr(req, field)
+        if value is not None:
+            doc[field] = value
+    if req.status is not None:
+        doc["status"] = req.status.value
+    doc["updated_at"] = datetime.now(UTC).isoformat()
+    response = await cosmos.issues.replace_item(
+        item=element_doc_id,
+        body=run_ops._strip_meta(doc),
+    )
+    return PortfolioElement.model_validate(run_ops._strip_meta(response))
+
+
+def _portfolio_element_doc_id(project: str, route: str, element_id: str) -> str:
+    raw = f"{project}\n{route}\n{element_id}".encode()
+    return hashlib.sha256(raw).hexdigest()[:32]
 
 
 

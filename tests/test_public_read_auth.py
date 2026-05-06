@@ -18,6 +18,7 @@ PUBLIC_READ_ROUTES = {
     ("GET", "/v1/touchpoints/{repo_owner}/{repo_name}/{pr_number}"),
     ("GET", "/v1/reports/by-id/{project}/{report_id}"),
     ("GET", "/v1/touchpoints/by-id/{project}/{report_id}"),
+    ("GET", "/v1/portfolio/elements"),
 }
 
 MUTATING_ADMIN_ROUTES = {
@@ -32,6 +33,8 @@ MUTATING_ADMIN_ROUTES = {
     ("POST", "/v1/touchpoints"),
     ("PATCH", "/v1/reports/by-id/{project}/{report_id}"),
     ("PATCH", "/v1/touchpoints/by-id/{project}/{report_id}"),
+    ("POST", "/v1/portfolio/elements"),
+    ("PATCH", "/v1/portfolio/elements/{project}/{element_doc_id}"),
     ("POST", "/v1/signals"),
 }
 
