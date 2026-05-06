@@ -164,6 +164,7 @@ export function IssuesView({
               <th>#</th>
               <th>Title</th>
               <th>Labels</th>
+              <th>Why</th>
               <th>Last run</th>
               <th>Action</th>
             </tr>
@@ -192,6 +193,9 @@ export function IssuesView({
                   </td>
                   <td className="mono dim">
                     {row.labels.length === 0 ? "—" : row.labels.join(", ")}
+                  </td>
+                  <td>
+                    <AttentionReason row={row} />
                   </td>
                   <td className="mono dim">
                     {renderLastRun(row)}
@@ -245,6 +249,66 @@ function renderLastRun(row: IssueRow): string {
   const label = row.last_run_number !== null ? `run ${row.last_run_number}` : row.last_run_state ?? "?";
   if (row.issue_lock_held) return `${label} (in flight)`;
   return label;
+}
+
+function AttentionReason({ row }: { row: IssueRow }) {
+  const reason = attentionReason(row);
+  return (
+    <div className="attention-reason" title={reason.detail ?? reason.label}>
+      <span className={`pill ${reason.kind}`}>{reason.label}</span>
+      {reason.detail && <div className="attention-detail">{reason.detail}</div>}
+    </div>
+  );
+}
+
+function attentionReason(row: IssueRow): { label: string; detail: string | null; kind: string } {
+  if (row.issue_lock_held) {
+    return {
+      label: "run in flight",
+      detail: row.last_run_number !== null ? `run ${row.last_run_number} is still holding the issue lock` : null,
+      kind: "busy",
+    };
+  }
+  if (!row.last_run_id) {
+    return {
+      label: "not dispatched",
+      detail: "open issue has not had an agent run yet",
+      kind: "info",
+    };
+  }
+  if (row.last_run_state === "aborted" || row.last_run_state === "failed") {
+    return {
+      label: "last run failed",
+      detail: row.last_run_abort_reason,
+      kind: "drain",
+    };
+  }
+  if (row.last_run_state === "in_progress" || row.last_run_state === "pending") {
+    return {
+      label: "run still active",
+      detail: row.last_run_number !== null ? `run ${row.last_run_number} is ${row.last_run_state}` : null,
+      kind: "busy",
+    };
+  }
+  if (row.last_run_state === "passed") {
+    return {
+      label: "passed, still open",
+      detail: "agent run passed but the issue has not been closed",
+      kind: "free",
+    };
+  }
+  if (row.last_run_state === "needs_review" || row.last_run_state === "review_required") {
+    return {
+      label: "review needed",
+      detail: null,
+      kind: "busy",
+    };
+  }
+  return {
+    label: row.last_run_state ? `last run ${row.last_run_state}` : "open issue",
+    detail: null,
+    kind: "info",
+  };
 }
 
 function pillClass(state: string): string {
