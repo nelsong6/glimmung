@@ -5419,6 +5419,8 @@ async def patch_portfolio_element(
         )
     except Exception:
         raise HTTPException(404, f"portfolio element {project}/{element_doc_id} not found")
+    if doc.get("kind") != "portfolio_element":
+        raise HTTPException(404, f"portfolio element {project}/{element_doc_id} not found")
     for field in (
         "title",
         "screenshot_url",

@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 from glimmung.app import (
     PortfolioElementPatchRequest,
@@ -81,3 +82,27 @@ async def test_human_review_state_persists_without_dispatch(app_state, monkeypat
         limit=None,
     )
     assert [r.id for r in approved] == [element.id]
+
+
+@pytest.mark.asyncio
+async def test_patch_does_not_mutate_issue_documents(app_state, cosmos, monkeypatch):
+    monkeypatch.setattr("glimmung.app.app", app_state)
+    await cosmos.issues.create_item(
+        {
+            "id": "issue-1",
+            "project": "glimmung",
+            "title": "Regular issue",
+            "state": "open",
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await patch_portfolio_element(
+            PortfolioElementPatchRequest(notes="Do not write this."),
+            project="glimmung",
+            element_doc_id="issue-1",
+        )
+
+    assert exc.value.status_code == 404
+    doc = await cosmos.issues.read_item(item="issue-1", partition_key="glimmung")
+    assert "notes" not in doc
