@@ -2027,6 +2027,21 @@ h2 .inline-action,
   color: var(--fg-muted);
   font-size: 0.75rem;
 }
+.native-step-llm {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 8px;
+  padding: 1px 5px;
+  border: 1px solid color-mix(in srgb, var(--state-info-fg) 42%, var(--border));
+  border-radius: 3px;
+  color: var(--state-info-fg);
+  background: var(--state-info-bg);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 400;
+  line-height: 1.2;
+  text-transform: lowercase;
+}
 .native-step-empty {
   padding: 14px;
 }
