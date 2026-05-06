@@ -2223,7 +2223,10 @@ function NativeJobInspector({
                   onClick={() => setSelectedKey(key)}
                 >
                   <span>{nativeStepGlyph(step.state ?? "")}</span>
-                  <strong>{step.title || step.slug}</strong>
+                  <strong>
+                    {step.title || step.slug}
+                    {nativeStepIsLlm(step) && <span className="native-step-llm">llm</span>}
+                  </strong>
                   <small>
                     {step.exit_code !== null && step.exit_code !== undefined
                       ? `exit ${step.exit_code}`
@@ -2305,6 +2308,9 @@ function nativeTerminalText(
   const heading = job && step
     ? [`# ${job.name || job.job_id}`, `$ step ${step.slug}`]
     : ["# native events"];
+  if (step && nativeStepIsLlm(step)) {
+    heading.push("# llm step");
+  }
   const stepMessage = step?.message ? [`# ${step.message}`] : [];
   const lines = events.length > 0
     ? events.map(nativeEventLine)
@@ -2331,6 +2337,11 @@ function nativeEventLine(event: NativeRunEvent): string {
   if (!event.message) return `${prefix}${suffix}`;
   if (event.event === "log") return event.message;
   return `${prefix}: ${event.message}${suffix}`;
+}
+
+function nativeStepIsLlm(step: NativeAttemptStep): boolean {
+  const marker = `${step.slug} ${step.title ?? ""}`.toLowerCase();
+  return marker.includes("llm") || marker.includes("run-agent") || marker.includes("claude");
 }
 
 function findActiveRun(graph: IssueGraph): GraphNode | null {
