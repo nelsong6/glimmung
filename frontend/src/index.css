@@ -1850,6 +1850,10 @@ h2 .inline-action,
 .dag-node-pr.opened {
   border-color: color-mix(in srgb, var(--state-success-fg) 40%, var(--border));
 }
+.dag-node-pr.failed {
+  border-color: color-mix(in srgb, var(--state-danger-fg) 55%, var(--border));
+  background: color-mix(in srgb, var(--state-danger-bg) 22%, var(--surface));
+}
 .dag-edge {
   color: var(--fg-dimmer);
   font-family: var(--font-mono);

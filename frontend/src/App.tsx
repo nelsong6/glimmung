@@ -49,8 +49,8 @@ type Workflow = {
   name: string;
   phases: PhaseSpec[];
   pr: PrPrimitiveSpec;
-  workflow_filename: string;
-  workflow_ref: string;
+  workflow_filename: string | null;
+  workflow_ref: string | null;
   trigger_label: string;
   default_requirements: Record<string, unknown>;
   metadata: Record<string, unknown>;
@@ -1059,6 +1059,7 @@ function ProjectWorkflowsView({
               const wPending = pending.filter((l) => l.workflow === w.name).length;
               const wActive = active.filter((l) => l.workflow === w.name).length;
               const fileUrl = githubFileUrl(project.github_repo, w.workflow_ref, w.workflow_filename);
+              const sourceLabel = workflowSourceLabel(w);
               return (
                 <tr key={w.id}>
                   <td>
@@ -1067,9 +1068,11 @@ function ProjectWorkflowsView({
                     </Link>
                   </td>
                   <td className="mono dim">
-                    <a className="link" href={fileUrl}>
-                      {w.workflow_filename}@{w.workflow_ref}
-                    </a>
+                    {fileUrl ? (
+                      <a className="link" href={fileUrl}>
+                        {sourceLabel}
+                      </a>
+                    ) : sourceLabel}
                   </td>
                   <td className="mono dim">{w.trigger_label}</td>
                   <td><RequirementPills requirements={w.default_requirements} /></td>
@@ -1084,8 +1087,17 @@ function ProjectWorkflowsView({
   );
 }
 
-function githubFileUrl(repo: string, ref: string, path: string): string {
+function githubFileUrl(repo: string, ref: string | null, path: string | null): string | null {
+  if (!repo || !ref || !path) return null;
   return `https://github.com/${repo}/blob/${encodeURIComponent(ref)}/${path.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+function workflowSourceLabel(workflow: Workflow): string {
+  if (workflow.workflow_filename) {
+    return `${workflow.workflow_filename}@${workflow.workflow_ref ?? "main"}`;
+  }
+  const nativeKinds = Array.from(new Set(workflow.phases.map((phase) => phase.kind).filter(Boolean)));
+  return nativeKinds.length > 0 ? nativeKinds.join(" + ") : "native";
 }
 
 function RequirementPills({ requirements }: { requirements: Record<string, unknown> }) {
@@ -1114,8 +1126,8 @@ function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
     : [{
         name: workflow.name,
         kind: "gha_dispatch",
-        workflow_filename: workflow.workflow_filename,
-        workflow_ref: workflow.workflow_ref,
+        workflow_filename: workflow.workflow_filename ?? "",
+        workflow_ref: workflow.workflow_ref ?? "main",
         inputs: {},
         outputs: [],
         requirements: workflow.default_requirements,
@@ -1228,7 +1240,7 @@ function ProjectWorkflowView({
         <div className="project-hero-main">
           <div className="project-kicker mono">workflow</div>
           <h2>{workflow.name}</h2>
-          <div className="project-repo mono">{workflow.workflow_filename}@{workflow.workflow_ref}</div>
+          <div className="project-repo mono">{workflowSourceLabel(workflow)}</div>
         </div>
         <div className="project-facts">
           <div className="project-fact">
@@ -1857,6 +1869,8 @@ function projectRunReportGraph(report: RunReport, workflow: Workflow | undefined
       validation_url: report.validation_url,
       screenshots_markdown: report.screenshots_markdown,
       abort_reason: report.abort_reason,
+      pr_primitive_state: report.abort_reason?.startsWith("PR primitive:") ? "failed" : "pending",
+      pr_primitive_error: report.abort_reason?.startsWith("PR primitive:") ? report.abort_reason : null,
       entrypoint_phase: uniquePhases[0] ?? report.current_phase,
       workflow_graph: {
         phases: uniquePhases,
@@ -2342,7 +2356,7 @@ function CapacityView({
               <div className="row">
                 <span className="key">file</span>
                 <span className="val mono">
-                  {selectedWorkflow.workflow_filename}@{selectedWorkflow.workflow_ref}
+                  {workflowSourceLabel(selectedWorkflow)}
                 </span>
               </div>
               <div className="row">

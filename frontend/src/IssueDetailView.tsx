@@ -1038,8 +1038,18 @@ function PipelineDag({
   const touchpointId = stringOrNull(meta.report_id);
   const touchpointState = stringOrNull(meta.report_state);
   const touchpointTitle = stringOrNull(meta.report_title);
+  const primitiveState = stringOrNull(meta.pr_primitive_state);
+  const primitiveError = stringOrNull(meta.pr_primitive_error);
   const prNumber = numberOrNull(meta.pr_number);
   const prBranch = stringOrNull(meta.pr_branch);
+  const touchpointClass = primitiveState === "failed"
+    ? "failed"
+    : touchpointId || prNumber
+      ? "opened"
+      : "pending";
+  const touchpointStatus = primitiveState === "failed"
+    ? "failed"
+    : touchpointState ?? (prNumber ? `#${prNumber}` : prBranch ? prBranch : "pending");
   return (
     <div className="dag-wrap">
       <div className="dag" aria-label="pipeline">
@@ -1067,14 +1077,24 @@ function PipelineDag({
         <div className="dag-edge" aria-hidden="true">→</div>
         <button
           type="button"
-          className={`dag-node dag-node-pr${touchpointId || prNumber ? " opened" : " pending"}`}
-          onClick={onOpenTouchpoint}
+          className={`dag-node dag-node-pr ${touchpointClass}${selectedNodeId === "pr" ? " selected" : ""}`}
+          onClick={() => {
+            if (primitiveState === "failed") {
+              onSelectNode(selectedNodeId === "pr" ? null : "pr");
+            } else {
+              onOpenTouchpoint();
+            }
+          }}
+          aria-pressed={selectedNodeId === "pr"}
         >
           <div className="dag-node-label">touchpoint</div>
           <div className="dag-node-state mono">
-            {touchpointState ?? (prNumber ? `#${prNumber}` : prBranch ? prBranch : "pending")}
+            {touchpointStatus}
           </div>
           {touchpointTitle && <div className="dag-node-meta dim mono">{touchpointTitle}</div>}
+          {!touchpointTitle && primitiveError && (
+            <div className="dag-node-meta dim mono">prepare failed</div>
+          )}
         </button>
       </div>
       {workflowGraph && workflowGraph.recycle_arrows.length > 0 && (
@@ -1204,6 +1224,70 @@ function DrillIn({
   onClose: () => void;
 }) {
   if (nodeId === null) return null;
+  const meta = run.metadata;
+  if (nodeId === "pr") {
+    const touchpointId = stringOrNull(meta.report_id);
+    const touchpointState = stringOrNull(meta.report_state);
+    const touchpointTitle = stringOrNull(meta.report_title);
+    const touchpointUrl = stringOrNull(meta.report_url);
+    const primitiveState = stringOrNull(meta.pr_primitive_state);
+    const primitiveError = stringOrNull(meta.pr_primitive_error);
+    const prNumber = numberOrNull(meta.pr_number);
+    const prBranch = stringOrNull(meta.pr_branch);
+    return (
+      <div className="run-panel">
+        <div className="run-panel-header">
+          <div>
+            <strong>touchpoint</strong>
+            <span
+              className={`pill ${
+                primitiveState === "failed" ? "drain" : touchpointId || prNumber ? "free" : ""
+              }`}
+              style={{ marginLeft: "0.5rem" }}
+            >
+              {primitiveState === "failed" ? "failed" : touchpointState ?? (prNumber ? "opened" : "pending")}
+            </span>
+          </div>
+          <button type="button" className="link" onClick={onClose}>
+            close
+          </button>
+        </div>
+        <div className="run-panel-meta">
+          {touchpointId && (
+            <div>
+              <span className="key">touchpoint</span>{" "}
+              <span className="mono" title={touchpointId}>{touchpointId.slice(0, 8)}…</span>
+            </div>
+          )}
+          {touchpointTitle && (
+            <div>
+              <span className="key">title</span> <span>{touchpointTitle}</span>
+            </div>
+          )}
+          {prNumber !== null && repo ? (
+            <div>
+              <span className="key">PR</span>{" "}
+              <a className="mono" href={touchpointUrl || `https://github.com/${repo}/pull/${prNumber}`} target="_blank" rel="noreferrer">
+                #{prNumber}
+              </a>
+            </div>
+          ) : (
+            <div className="dim mono">No touchpoint evidence opened yet for this run.</div>
+          )}
+          {prBranch && (
+            <div>
+              <span className="key">branch</span> <span className="mono">{prBranch}</span>
+            </div>
+          )}
+          {primitiveError && (
+            <div>
+              <span className="key">error</span> <span className="mono">{primitiveError}</span>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
   if (nodeId.startsWith("phase:")) {
     const phaseName = nodeId.slice("phase:".length);
     const phases = phaseNodesForRun(graph, run);

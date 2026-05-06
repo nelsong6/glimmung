@@ -1627,6 +1627,8 @@ async def _open_pr_primitive(*, run: Run, workflow: Workflow) -> None:
             title=title,
             body=initial_github_body,
         )
+    except PRCreateNoDiff:
+        raise
     except PRCreateAlreadyExists as already:
         log.info(
             "pr-primitive: PR already exists for %s head=%s; recording #%d",
@@ -1634,32 +1636,37 @@ async def _open_pr_primitive(*, run: Run, workflow: Workflow) -> None:
         )
         pr_number = already.pr_number
         html_url = already.html_url
+    except Exception as exc:
+        raise RuntimeError(f"GitHub PR create failed: {exc}") from exc
 
-    pr, etag, _created = await touchpoint_ops.ensure_touchpoint_for_github(
-        cosmos,
-        project=run.project,
-        repo=run.issue_repo,
-        number=pr_number,
-        title=title,
-        branch=head,
-        body=rich_body,
-        base_ref=base,
-        html_url=html_url,
-        linked_issue_id=run.issue_id or None,
-        linked_run_id=run.id,
-    )
-    pr, _ = await touchpoint_ops.update_touchpoint(
-        cosmos,
-        pr=pr,
-        etag=etag,
-        title=title,
-        branch=head,
-        body=rich_body,
-        base_ref=base,
-        html_url=html_url,
-        linked_issue_id=run.issue_id or "",
-        linked_run_id=run.id,
-    )
+    try:
+        pr, etag, _created = await touchpoint_ops.ensure_touchpoint_for_github(
+            cosmos,
+            project=run.project,
+            repo=run.issue_repo,
+            number=pr_number,
+            title=title,
+            branch=head,
+            body=rich_body,
+            base_ref=base,
+            html_url=html_url,
+            linked_issue_id=run.issue_id or None,
+            linked_run_id=run.id,
+        )
+        pr, _ = await touchpoint_ops.update_touchpoint(
+            cosmos,
+            pr=pr,
+            etag=etag,
+            title=title,
+            branch=head,
+            body=rich_body,
+            base_ref=base,
+            html_url=html_url,
+            linked_issue_id=run.issue_id or "",
+            linked_run_id=run.id,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"touchpoint prepare failed: {exc}") from exc
 
     glimmung_url = _glimmung_pr_detail_url(
         settings=app.state.settings if getattr(app.state, "settings", None) is not None else get_settings(),
@@ -1702,7 +1709,7 @@ def _pr_primitive_failure_reason(exc: Exception) -> str:
     detail = str(exc).strip()
     if not detail:
         detail = exc.__class__.__name__
-    return f"PR primitive: gh pr create failed: {detail}"
+    return f"PR primitive: {detail}"
 
 
 def _thin_github_pr_body(*, run: Run, glimmung_url: str | None) -> str:
@@ -4858,6 +4865,37 @@ def _run_graph_jobs(attempt: dict[str, Any]) -> list[dict[str, Any]]:
     }]
 
 
+def _pr_primitive_metadata(
+    run_doc: dict[str, Any],
+    linked_report: Report | None,
+) -> dict[str, Any]:
+    abort_reason = run_doc.get("abort_reason")
+    if linked_report is not None:
+        return {
+            "pr_primitive_state": linked_report.state.value,
+            "pr_primitive_error": None,
+        }
+    if run_doc.get("pr_number") is not None:
+        return {
+            "pr_primitive_state": "opened",
+            "pr_primitive_error": None,
+        }
+    if isinstance(abort_reason, str) and abort_reason.startswith("PR primitive:"):
+        return {
+            "pr_primitive_state": "failed",
+            "pr_primitive_error": abort_reason,
+        }
+    if run_doc.get("state") == RunState.PASSED.value:
+        return {
+            "pr_primitive_state": "skipped",
+            "pr_primitive_error": None,
+        }
+    return {
+        "pr_primitive_state": "pending",
+        "pr_primitive_error": None,
+    }
+
+
 def _workflow_graph_metadata(workflow_doc: dict[str, Any] | None) -> dict[str, Any]:
     """Small, stable graph contract for workflow shape/policy.
 
@@ -5808,6 +5846,7 @@ async def _build_issue_graph_for_issue(
                 "report_state": linked_report.state.value if linked_report else None,
                 "report_title": linked_report.title if linked_report else None,
                 "report_url": linked_report.html_url if linked_report else None,
+                **_pr_primitive_metadata(d, linked_report),
                 # Resume primitive (#111) — surface the lineage pointers
                 # so the dashboard can render the Run-lineage tree
                 # (parent-child across resume-spawned Runs) and the

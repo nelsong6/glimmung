@@ -1298,8 +1298,58 @@ async def test_completed_pr_primitive_failure_records_actionable_reason(cosmos):
     final, _ = found  # type: ignore[misc]
     assert final.state == RunState.ABORTED
     assert final.abort_reason == (
-        "PR primitive: gh pr create failed: "
+        "PR primitive: GitHub PR create failed: "
         "422 Validation Failed: head branch was not found"
+    )
+
+
+@pytest.mark.asyncio
+async def test_completed_pr_primitive_touchpoint_failure_names_prepare_step(cosmos):
+    await _register_project(cosmos, "ambience", "nelsong6/ambience")
+    await _register_workflow_with_pr(cosmos, "ambience")
+    run = await _seed_run(
+        cosmos,
+        run_id="01KQTEST_RUN_TPFAIL",
+        project="ambience",
+        issue_repo="nelsong6/ambience",
+        issue_number=221,
+    )
+    await _seed_issue_for_run(cosmos, run)
+
+    async def fake_open_pull_request(_minter, **_kwargs):
+        return 89, "https://github.com/nelsong6/ambience/pull/89"
+
+    async def fake_ensure_touchpoint_for_github(*_args, **_kwargs):
+        raise RuntimeError("duplicate report id")
+
+    app_state = SimpleNamespace(
+        state=SimpleNamespace(
+            cosmos=cosmos,
+            settings=SimpleNamespace(glimmung_base_url="https://glimmung.test"),
+            gh_minter=object(),
+        ),
+    )
+    body = RunCompletedRequest(
+        workflow_run_id=1002,
+        conclusion="success",
+        verification=_pass_verification(),
+    )
+    with (
+        patch("glimmung.app.app", app_state),
+        patch("glimmung.app.open_pull_request", fake_open_pull_request),
+        patch(
+            "glimmung.app.touchpoint_ops.ensure_touchpoint_for_github",
+            fake_ensure_touchpoint_for_github,
+        ),
+    ):
+        result = await run_completed(body, project="ambience", run_id=run.id)
+
+    assert result.decision == "abort_pr_create_failed"
+    found = await run_ops.read_run(cosmos, project="ambience", run_id=run.id)
+    final, _ = found  # type: ignore[misc]
+    assert final.state == RunState.ABORTED
+    assert final.abort_reason == (
+        "PR primitive: touchpoint prepare failed: duplicate report id"
     )
 
 

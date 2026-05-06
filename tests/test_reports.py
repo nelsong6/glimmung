@@ -94,6 +94,30 @@ async def test_create_pr_records_optional_fields(cosmos):
 
 
 @pytest.mark.asyncio
+async def test_create_pr_does_not_use_linked_issue_as_document_id(cosmos):
+    first = await create_report(
+        cosmos, project="ambience",
+        repo="nelsong6/ambience", number=42,
+        title="first",
+        branch="b1",
+        linked_issue_id="01JISSUEZZZ",
+    )
+    second = await create_report(
+        cosmos, project="ambience",
+        repo="nelsong6/ambience", number=43,
+        title="second",
+        branch="b2",
+        linked_issue_id="01JISSUEZZZ",
+    )
+
+    assert first.id != "01JISSUEZZZ"
+    assert second.id != "01JISSUEZZZ"
+    assert first.id != second.id
+    assert first.linked_issue_id == "01JISSUEZZZ"
+    assert second.linked_issue_id == "01JISSUEZZZ"
+
+
+@pytest.mark.asyncio
 async def test_read_pr_returns_none_for_missing(cosmos):
     assert await read_report(cosmos, project="ambience", report_id="01HZZZNOPE") is None
 
