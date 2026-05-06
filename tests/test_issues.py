@@ -17,6 +17,7 @@ from glimmung.issues import (
     add_comment,
     close_issue,
     create_issue,
+    ensure_issue_number_counter_at_least,
     find_issue_by_github_url,
     github_issue_url_for,
     list_open_issues,
@@ -123,6 +124,25 @@ async def test_next_issue_number_seeds_counter_from_top_level_numbers_only(cosmo
 
     assert await next_issue_number(cosmos, project="ambience") == 9
     assert await next_issue_number(cosmos, project="ambience") == 10
+
+
+@pytest.mark.asyncio
+async def test_create_issue_with_explicit_number_advances_existing_counter(cosmos):
+    first = await create_issue(cosmos, project="ambience", title="first")
+    explicit = await create_issue(cosmos, project="ambience", number=8, title="imported")
+    next_auto = await create_issue(cosmos, project="ambience", title="next")
+
+    assert first.number == 1
+    assert explicit.number == 8
+    assert next_auto.number == 9
+
+
+@pytest.mark.asyncio
+async def test_ensure_issue_number_counter_at_least_does_not_rewind(cosmos):
+    await create_issue(cosmos, project="ambience", title="first")
+    await ensure_issue_number_counter_at_least(cosmos, project="ambience", number=1)
+
+    assert await next_issue_number(cosmos, project="ambience") == 2
 
 
 @pytest.mark.asyncio

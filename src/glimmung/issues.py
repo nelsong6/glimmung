@@ -89,6 +89,8 @@ async def create_issue(
     issue_number = number
     if issue_number is None:
         issue_number = await next_issue_number(cosmos, project=project)
+    else:
+        await ensure_issue_number_counter_at_least(cosmos, project=project, number=issue_number)
     issue = Issue(
         id=str(ULID()),
         number=issue_number,
@@ -149,6 +151,58 @@ async def next_issue_number(cosmos: Cosmos, *, project: str) -> int:
                 match_condition=MatchConditions.IfNotModified,
             )
             return current_next
+        except CosmosAccessConditionFailedError:
+            if attempt == _MAX_CONFLICT_RETRIES - 1:
+                raise
+            log.info("issue-number counter conflict for project=%s; retrying", project)
+    raise RuntimeError("unreachable")
+
+
+async def ensure_issue_number_counter_at_least(
+    cosmos: Cosmos,
+    *,
+    project: str,
+    number: int,
+) -> None:
+    """Advance the project issue-number counter past an explicit number.
+
+    Most callers should let `create_issue` allocate numbers. Migration and
+    import paths sometimes pass an explicit project-scoped number; once the
+    counter exists, those writes must still move `next_issue_number` forward
+    so future auto-allocation cannot collide.
+    """
+    if number < 1:
+        raise ValueError("issue number must be >= 1")
+    counter_id = _counter_id(project)
+    desired_next = number + 1
+    for attempt in range(_MAX_CONFLICT_RETRIES):
+        try:
+            doc = await cosmos.issues.read_item(item=counter_id, partition_key=project)
+        except CosmosResourceNotFoundError:
+            try:
+                seed = await _seed_issue_number_counter(cosmos, project=project)
+                if int(seed["next_issue_number"]) >= desired_next:
+                    return
+            except CosmosResourceExistsError:
+                continue
+            continue
+
+        current_next = int(doc.get("next_issue_number") or 1)
+        if current_next >= desired_next:
+            return
+        updated = {
+            **doc,
+            "next_issue_number": desired_next,
+            "updated_at": _now().isoformat(),
+        }
+        try:
+            await cosmos.issues.replace_item(
+                item=counter_id,
+                body=_strip_meta(updated),
+                etag=doc["_etag"],
+                match_condition=MatchConditions.IfNotModified,
+            )
+            return
         except CosmosAccessConditionFailedError:
             if attempt == _MAX_CONFLICT_RETRIES - 1:
                 raise
