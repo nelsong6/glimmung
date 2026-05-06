@@ -43,6 +43,10 @@ The initial relationship is intentionally 1:1: one Epic owns one Playbook.
 See [Epics and Playbooks](docs/epics-and-playbooks.md) for the object
 boundary and follow-up implementation surface.
 
+For frontend repos that need a review surface after the app already exists,
+use the reusable [Design Portfolio Bootstrap](docs/design-portfolio-bootstrap.md)
+process and Playbook template.
+
 ## Layout
 
 ```
