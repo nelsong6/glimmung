@@ -28,9 +28,10 @@ Each portfolio row or specimen should have passive review state:
 - `approved`
 - `needs_work`
 
-Changing review state does not dispatch agent work by itself. A later operator
-request such as "inspect the rows marked needs_review" can use
-`/v1/portfolio/elements` as the queue source.
+Changing review state does not dispatch agent work by itself. Operators use
+`/portfolio` or `POST /v1/portfolio/elements/dispatch` to turn selected rows
+into a normal Glimmung issue, which then runs through the same dispatch
+lock/lease path as any other issue.
 
 ## Standard Workflow
 

@@ -53,6 +53,7 @@ from glimmung.models import (
     Host,
     Issue,
     IssueComment,
+    IssueSource,
     IssueState,
     Lease,
     LeaseRequest,
@@ -5371,6 +5372,15 @@ class PortfolioElementPatchRequest(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
+class PortfolioElementsDispatchRequest(BaseModel):
+    project: str
+    status: PortfolioReviewState = PortfolioReviewState.NEEDS_REVIEW
+    workflow: str | None = None
+    route: str | None = None
+    limit: Annotated[int, Field(ge=1, le=100)] = 25
+    title: str | None = None
+
+
 @app.get("/v1/portfolio/elements", response_model=list[PortfolioElement])
 async def list_portfolio_elements(
     project: str | None = Query(None),
@@ -5488,9 +5498,104 @@ async def patch_portfolio_element(
     return PortfolioElement.model_validate(run_ops._strip_meta(response))
 
 
+@app.post(
+    "/v1/portfolio/elements/dispatch",
+    response_model=DispatchResult,
+    dependencies=[Depends(require_admin_user)],
+)
+async def dispatch_portfolio_elements(
+    req: PortfolioElementsDispatchRequest,
+) -> DispatchResult:
+    """Create a dispatchable Issue from portfolio review rows.
+
+    Review-state changes stay passive. This endpoint is the explicit operator
+    action that turns selected rows into normal Glimmung issue work.
+    """
+    project = req.project.strip()
+    if not project:
+        raise HTTPException(400, "project required")
+
+    rows = await list_portfolio_elements(
+        project=project,
+        status=req.status,
+        limit=req.limit,
+    )
+    if req.route is not None:
+        rows = [row for row in rows if row.route == req.route]
+    if not rows:
+        route_hint = f" for route {req.route!r}" if req.route else ""
+        raise HTTPException(400, f"no {req.status.value} portfolio elements in {project}{route_hint}")
+
+    issue_title = req.title or _portfolio_review_issue_title(rows, req.status)
+    issue_body = _portfolio_review_issue_body(rows, req.status)
+    issue = await issue_ops.create_issue(
+        app.state.cosmos,
+        project=project,
+        title=issue_title,
+        body=issue_body,
+        labels=["design-portfolio", req.status.value],
+        source=IssueSource.MANUAL,
+        workflow=req.workflow,
+        ui_validation_requested=True,
+    )
+    return await dispatch_run(
+        app,
+        issue_id=issue.id,
+        project=project,
+        trigger_source={
+            "kind": "portfolio_review",
+            "status": req.status.value,
+            "route": req.route,
+            "element_count": len(rows),
+        },
+        workflow_name=req.workflow,
+        extra_metadata={
+            "portfolio_review": {
+                "status": req.status.value,
+                "route": req.route,
+                "element_ids": [row.id for row in rows],
+            },
+        },
+    )
+
+
 def _portfolio_element_doc_id(project: str, route: str, element_id: str) -> str:
     raw = f"{project}\n{route}\n{element_id}".encode()
     return hashlib.sha256(raw).hexdigest()[:32]
+
+
+def _portfolio_review_issue_title(
+    rows: list[PortfolioElement],
+    status: PortfolioReviewState,
+) -> str:
+    sample = rows[0].title or rows[0].element_id
+    if len(rows) == 1:
+        return f"Review portfolio element: {sample}"
+    return f"Review {len(rows)} portfolio elements marked {status.value}"
+
+
+def _portfolio_review_issue_body(
+    rows: list[PortfolioElement],
+    status: PortfolioReviewState,
+) -> str:
+    lines = [
+        f"Portfolio review dispatch for `{rows[0].project}`.",
+        "",
+        f"Selected status: `{status.value}`",
+        "",
+    ]
+    for row in rows:
+        label = row.title or row.element_id
+        lines.append(f"- `{row.route}` / `{row.element_id}`: {label}")
+        if row.notes:
+            lines.append(f"  Notes: {row.notes}")
+        if row.preview_url:
+            lines.append(f"  Preview: {row.preview_url}")
+        if row.screenshot_url:
+            lines.append(f"  Screenshot: {row.screenshot_url}")
+        if row.last_touched_run_id:
+            lines.append(f"  Last touched run: `{row.last_touched_run_id}`")
+    return "\n".join(lines)
 
 
 

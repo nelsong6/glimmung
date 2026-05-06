@@ -1419,6 +1419,25 @@ h2 .inline-action,
   opacity: 0.5;
   cursor: not-allowed;
 }
+.inline-select {
+  margin-left: 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--fg);
+  font: inherit;
+  font-size: 0.75rem;
+  padding: 2px 6px;
+}
+.portfolio-review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+.portfolio-review-actions .inline-action {
+  margin-left: 0;
+}
 
 .project-info {
   position: relative;
