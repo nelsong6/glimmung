@@ -17,7 +17,7 @@ from tests.cosmos_fake import FakeContainer
 @pytest.fixture
 def cosmos():
     return SimpleNamespace(
-        portfolio_elements=FakeContainer("portfolio_elements", "/project"),
+        issues=FakeContainer("issues", "/project"),
     )
 
 

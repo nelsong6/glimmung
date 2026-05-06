@@ -5339,9 +5339,11 @@ async def list_portfolio_elements(
     if status is not None:
         clauses.append("c.status = @status")
         params.append({"name": "@status", "value": status.value})
-    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    clauses.insert(0, "c.kind = @kind")
+    params.insert(0, {"name": "@kind", "value": "portfolio_element"})
+    where = f" WHERE {' AND '.join(clauses)}"
     docs = await query_all(
-        app.state.cosmos.portfolio_elements,
+        app.state.cosmos.issues,
         f"SELECT * FROM c{where} ORDER BY c.updated_at DESC",
         parameters=params,
     )
@@ -5372,7 +5374,7 @@ async def upsert_portfolio_element(
     element_id = _portfolio_element_doc_id(req.project, req.route, req.element_id)
     now = datetime.now(UTC)
     try:
-        existing = await cosmos.portfolio_elements.read_item(
+        existing = await cosmos.issues.read_item(
             item=element_id,
             partition_key=req.project,
         )
@@ -5381,6 +5383,7 @@ async def upsert_portfolio_element(
         created_at = now.isoformat()
     doc = {
         "id": element_id,
+        "kind": "portfolio_element",
         "project": req.project,
         "route": req.route,
         "element_id": req.element_id,
@@ -5394,7 +5397,7 @@ async def upsert_portfolio_element(
         "created_at": created_at,
         "updated_at": now.isoformat(),
     }
-    await cosmos.portfolio_elements.upsert_item(doc)
+    await cosmos.issues.upsert_item(doc)
     return PortfolioElement.model_validate(doc)
 
 
@@ -5410,7 +5413,7 @@ async def patch_portfolio_element(
 ) -> PortfolioElement:
     cosmos: Cosmos = app.state.cosmos
     try:
-        doc = await cosmos.portfolio_elements.read_item(
+        doc = await cosmos.issues.read_item(
             item=element_doc_id,
             partition_key=project,
         )
@@ -5430,7 +5433,7 @@ async def patch_portfolio_element(
     if req.status is not None:
         doc["status"] = req.status.value
     doc["updated_at"] = datetime.now(UTC).isoformat()
-    response = await cosmos.portfolio_elements.replace_item(
+    response = await cosmos.issues.replace_item(
         item=element_doc_id,
         body=run_ops._strip_meta(doc),
     )
