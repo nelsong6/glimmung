@@ -3361,6 +3361,11 @@ async def list_workflows(
     return rows
 
 
+class PlaybookEntryGateRequest(BaseModel):
+    manual_gate: bool = False
+    advance: bool = True
+
+
 @app.post(
     "/v1/playbooks",
     response_model=Playbook,
@@ -3441,6 +3446,47 @@ async def run_playbook_endpoint(
     playbook = await _advance_playbook(app, playbook=playbook)
     playbook, _ = await playbook_ops.replace_playbook(
         app.state.cosmos,
+        playbook=playbook,
+        etag=etag,
+    )
+    return playbook
+
+
+@app.post(
+    "/v1/playbooks/{project}/{playbook_id}/entries/{entry_id}/gate",
+    response_model=Playbook,
+    dependencies=[Depends(require_admin_user)],
+)
+async def set_playbook_entry_gate_endpoint(
+    req: PlaybookEntryGateRequest,
+    project: str = Path(...),
+    playbook_id: str = Path(...),
+    entry_id: str = Path(...),
+) -> Playbook:
+    cosmos: Cosmos = app.state.cosmos
+    found = await playbook_ops.read_playbook(
+        cosmos,
+        project=project,
+        playbook_id=playbook_id,
+    )
+    if found is None:
+        raise HTTPException(404, f"no playbook {project}/{playbook_id}")
+    playbook, etag = found
+    entry = next(
+        (candidate for candidate in playbook.entries if candidate.id == entry_id),
+        None,
+    )
+    if entry is None:
+        raise HTTPException(404, f"no playbook entry {project}/{playbook_id}/{entry_id}")
+    entry.manual_gate = req.manual_gate
+    entry.metadata = {
+        **entry.metadata,
+        "manual_gate_updated_at": datetime.now(UTC).isoformat(),
+    }
+    if req.advance:
+        playbook = await _advance_playbook(app, playbook=playbook)
+    playbook, _ = await playbook_ops.replace_playbook(
+        cosmos,
         playbook=playbook,
         etag=etag,
     )

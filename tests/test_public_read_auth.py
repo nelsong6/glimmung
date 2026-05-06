@@ -35,6 +35,7 @@ MUTATING_ADMIN_ROUTES = {
     ("PATCH", "/v1/touchpoints/by-id/{project}/{report_id}"),
     ("POST", "/v1/portfolio/elements"),
     ("PATCH", "/v1/portfolio/elements/{project}/{element_doc_id}"),
+    ("POST", "/v1/playbooks/{project}/{playbook_id}/entries/{entry_id}/gate"),
     ("POST", "/v1/signals"),
 }
 
