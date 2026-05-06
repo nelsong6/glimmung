@@ -89,6 +89,24 @@ async def test_create_issue_records_github_url_and_source(cosmos):
 
 
 @pytest.mark.asyncio
+async def test_read_issue_accepts_purged_github_issue_import_source(cosmos):
+    """Migrated GitHub-backed issues can outlive the source GH issue."""
+    issue = await create_issue(
+        cosmos, project="ambience",
+        title="imported then purged from GH",
+        source=IssueSource.PURGED_GITHUB_ISSUE_IMPORT,
+        github_issue_url="https://github.com/nelsong6/ambience/issues/124",
+        github_issue_repo="nelsong6/ambience",
+        github_issue_number=124,
+    )
+
+    fetched, _ = await read_issue_by_number(cosmos, project="ambience", number=issue.number)
+
+    assert fetched.metadata.source == IssueSource.PURGED_GITHUB_ISSUE_IMPORT
+    assert fetched.metadata.github_issue_number == 124
+
+
+@pytest.mark.asyncio
 async def test_create_issue_allocates_native_number_independent_of_github_number(cosmos):
     issue = await create_issue(
         cosmos, project="ambience",
