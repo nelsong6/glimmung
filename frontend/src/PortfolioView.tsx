@@ -22,10 +22,9 @@ type PortfolioElement = {
 type DispatchResult = {
   state: string;
   lease_id: string | null;
-  run_id: string | null;
+  run_number: number | null;
   host: string | null;
   workflow: string | null;
-  issue_lock_holder_id: string | null;
   detail: string | null;
 };
 
@@ -228,7 +227,7 @@ export function PortfolioView({
           {action.kind === "result" && (
             <div className="empty">
               Dispatch {action.result.state}
-              {action.result.run_id ? `: ${action.result.run_id}` : ""}
+              {action.result.run_number ? `: run ${action.result.run_number}` : ""}
             </div>
           )}
         </>
