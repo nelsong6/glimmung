@@ -185,6 +185,10 @@ starts. Use for bootstrap, app, and infra flows where later work depends on
 real integrated resources, Argo health, Tofu apply, or cloud-provider state.
 This strategy must be explicit and planner-selected.
 
+The typed field is `integration_strategy` on `PlaybookCreate` and `Playbook`.
+It defaults to `isolated_prs`; `rolling_main` playbooks must be serial
+(`concurrency_limit` unset or `1`).
+
 ## Work Context
 
 Branch and environment handoff should come from the Playbook integration

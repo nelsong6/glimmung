@@ -395,6 +395,12 @@ class PlaybookState(str, Enum):
     CANCELLED = "cancelled"
 
 
+class PlaybookIntegrationStrategy(str, Enum):
+    ISOLATED_PRS = "isolated_prs"
+    SHARED_FEATURE_BRANCH = "shared_feature_branch"
+    ROLLING_MAIN = "rolling_main"
+
+
 class PlaybookIssueSpec(BaseModel):
     title: str
     body: str = ""
@@ -424,10 +430,20 @@ class Playbook(BaseModel):
     description: str = ""
     entries: list[PlaybookEntry] = Field(default_factory=list)
     concurrency_limit: int | None = None
+    integration_strategy: PlaybookIntegrationStrategy = PlaybookIntegrationStrategy.ISOLATED_PRS
     state: PlaybookState = PlaybookState.DRAFT
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
+
+    @model_validator(mode="after")
+    def _validate_integration_strategy(self) -> "Playbook":
+        if (
+            self.integration_strategy == PlaybookIntegrationStrategy.ROLLING_MAIN
+            and self.concurrency_limit not in (None, 1)
+        ):
+            raise ValueError("rolling_main playbooks must be serial; set concurrency_limit to 1")
+        return self
 
 
 class PlaybookCreate(BaseModel):
@@ -436,7 +452,17 @@ class PlaybookCreate(BaseModel):
     description: str = ""
     entries: list[PlaybookEntry] = Field(default_factory=list)
     concurrency_limit: int | None = None
+    integration_strategy: PlaybookIntegrationStrategy = PlaybookIntegrationStrategy.ISOLATED_PRS
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_integration_strategy(self) -> "PlaybookCreate":
+        if (
+            self.integration_strategy == PlaybookIntegrationStrategy.ROLLING_MAIN
+            and self.concurrency_limit not in (None, 1)
+        ):
+            raise ValueError("rolling_main playbooks must be serial; set concurrency_limit to 1")
+        return self
 
 
 # ─── Verify-loop substrate (#18) ───────────────────────────────────────

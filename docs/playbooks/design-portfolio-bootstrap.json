@@ -3,10 +3,10 @@
   "title": "Bootstrap design portfolio",
   "description": "Reusable workflow for retrofitting a reviewable design portfolio route into an existing frontend repo. Entries are ordered so discovery happens before route generation, screenshot evidence, and passive review-state handoff.",
   "concurrency_limit": 1,
+  "integration_strategy": "isolated_prs",
   "metadata": {
     "template": "design-portfolio-bootstrap",
     "version": 1,
-    "integration_strategy": "isolated_prs",
     "portfolio_route_preference": "/_design-portfolio"
   },
   "entries": [
