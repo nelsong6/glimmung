@@ -3811,9 +3811,9 @@ async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
     """Mirror `pull_request.*` events into the glimmung `reports` container.
 
     Pre-#50 this parsed `Closes #N` from the PR body to link a Run to a
-    GH PR number. Report is now the canonical entity in glimmung's
-    own `reports` container and the run/issue linkage is set explicitly by
-    the agent's `POST /v1/reports` step (#50 slice 4) — the webhook's job
+    GH PR number. Touchpoint is now the product-facing entity in glimmung's
+    `reports` container and the run/issue linkage is set explicitly by
+    the agent's `POST /v1/touchpoints` step — the webhook's job
     is just to keep glimmung's PR document in sync with GH's lifecycle
     (state transitions, head sha refreshes, title/body edits).
 

@@ -879,11 +879,12 @@ class PortfolioElement(BaseModel):
     updated_at: datetime
 
 
-# ─── Glimmung Reports ──────────────────────────────────────────────────────
+# ─── Touchpoints / legacy Reports ───────────────────────────────────────────
 #
-# Report is the canonical Glimmung review object. GitHub pull requests are
-# one syndication target, so their repo/number/branch metadata stays on the
-# record when present, but Report is the object the UI/API/MCP surfaces own.
+# Touchpoint is the product-facing decision surface. The persisted model class
+# is still named Report for storage/client compatibility while `/v1/touchpoints`
+# is the primary API. New code may import the Touchpoint* aliases below; old
+# `/v1/reports` clients and stored `reports` documents remain valid.
 
 
 class ReportState(str, Enum):
@@ -964,3 +965,11 @@ class ReportVersion(BaseModel):
     github_pr_number: int | None = None
     github_html_url: str | None = None
     created_at: datetime
+
+
+TouchpointState = ReportState
+TouchpointReviewState = ReportReviewState
+TouchpointComment = ReportComment
+TouchpointReview = ReportReview
+Touchpoint = Report
+TouchpointVersion = ReportVersion

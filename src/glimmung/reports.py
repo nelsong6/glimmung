@@ -1,8 +1,9 @@
-"""Cosmos-backed CRUD for Glimmung Reports.
+"""Cosmos-backed CRUD for Glimmung Touchpoints.
 
-Report is the canonical review object. GitHub pull requests remain a
-syndication target, so this module keeps repo/number/branch metadata for
-mirrored PRs while storing the source of truth in the `reports` container.
+Touchpoint is the product-facing review object. The stored class and container
+are still named Report/`reports` for compatibility, so this module keeps
+repo/number/branch metadata for mirrored PRs while exposing the current
+Touchpoint behavior through `/v1/touchpoints`.
 """
 
 from __future__ import annotations
