@@ -4,8 +4,8 @@ import { AdminPanel } from "./AdminPanel";
 import { IssueDetailView, RunViewer, type AbortState, type DispatchState, type IssueGraph } from "./IssueDetailView";
 import { IssuesView } from "./IssuesView";
 import { PortfolioView } from "./PortfolioView";
-import { ReportDetailView } from "./ReportDetailView";
-import { ReportsView } from "./ReportsView";
+import { TouchpointDetailView } from "./TouchpointDetailView";
+import { TouchpointsView } from "./TouchpointsView";
 import { StyleguideView } from "./StyleguideView";
 import { authedFetch, currentAccount, initAuth, signIn, signOut } from "./auth";
 import { isMockMode, mockRuns, mockSnapshot } from "./mockApi";
@@ -225,11 +225,11 @@ export function App() {
           <Route path="in-progress" element={null} />
           <Route path="lineage" element={null} />
         </Route>
-        <Route path="touchpoints" element={<ReportsRoute />} />
+        <Route path="touchpoints" element={<TouchpointsRoute />} />
         <Route path="portfolio" element={<PortfolioRoute />} />
-        <Route path="touchpoints/:owner/:repo/:n" element={<ReportDetailView />} />
+        <Route path="touchpoints/:owner/:repo/:n" element={<TouchpointDetailView />} />
         <Route path="reports" element={<Navigate to="/touchpoints" replace />} />
-        <Route path="reports/:owner/:repo/:n" element={<LegacyReportRedirectRoute />} />
+        <Route path="reports/:owner/:repo/:n" element={<LegacyTouchpointRedirectRoute />} />
       </Route>
     </Routes>
   );
@@ -736,10 +736,10 @@ function ProjectRunRedirectRoute() {
   );
 }
 
-function ReportsRoute() {
+function TouchpointsRoute() {
   const { selected } = useOutletContext<LayoutContext>();
   return (
-    <ReportsView
+    <TouchpointsView
       projectFilter={selected.kind === "all" ? null : selected.project}
     />
   );
@@ -755,7 +755,7 @@ function PortfolioRoute() {
   );
 }
 
-function LegacyReportRedirectRoute() {
+function LegacyTouchpointRedirectRoute() {
   const params = useParams<{ owner?: string; repo?: string; n?: string }>();
   return (
     <Navigate

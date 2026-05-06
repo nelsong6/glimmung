@@ -10,7 +10,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-type ReportRow = {
+type TouchpointRow = {
   id: string;
   project: string;
   repo: string;
@@ -30,13 +30,13 @@ type ReportRow = {
   pr_lock_held: boolean;
 };
 
-export function ReportsView({
+export function TouchpointsView({
   projectFilter,
 }: {
   projectFilter: string | null;
 }) {
   const navigate = useNavigate();
-  const [rows, setRows] = useState<ReportRow[] | null>(null);
+  const [rows, setRows] = useState<TouchpointRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -46,7 +46,7 @@ export function ReportsView({
     try {
       const r = await fetch("/v1/touchpoints");
       if (!r.ok) throw new Error(`/v1/touchpoints -> ${r.status}`);
-      setRows((await r.json()) as ReportRow[]);
+      setRows((await r.json()) as TouchpointRow[]);
     } catch (e) {
       setError(String(e));
       setRows(null);
@@ -166,7 +166,7 @@ function runStatePill(state: string): string {
   return "dim";
 }
 
-function prStatePill(row: ReportRow): string {
+function prStatePill(row: TouchpointRow): string {
   if (row.merged) return "free";
   if (row.state === "ready" || row.state === "needs_review") return "busy";
   if (row.state === "closed") return "dim";

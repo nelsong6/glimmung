@@ -11,7 +11,7 @@ import { useEffect, useState } from "react";
 import { useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { authedFetch, publicConfig } from "./auth";
 
-type ReportDetail = {
+type TouchpointDetail = {
   id: string;
   project: string;
   repo: string;
@@ -62,20 +62,20 @@ type AuthContext = {
   signedIn: boolean;
 };
 
-type ReportDetailRouteParams = {
+type TouchpointDetailRouteParams = {
   owner?: string;
   repo?: string;
   n?: string;
 };
 
-export function ReportDetailView() {
+export function TouchpointDetailView() {
   const navigate = useNavigate();
-  const params = useParams<ReportDetailRouteParams>();
+  const params = useParams<TouchpointDetailRouteParams>();
   const { signedIn } = useOutletContext<AuthContext>();
   const repo = `${params.owner ?? ""}/${params.repo ?? ""}`;
   const prNumber = parseInt(params.n ?? "0", 10);
 
-  const [detail, setDetail] = useState<ReportDetail | null>(null);
+  const [detail, setDetail] = useState<TouchpointDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState("");
   const [reject, setReject] = useState<RejectStatus>({ kind: "idle" });
@@ -88,7 +88,7 @@ export function ReportDetailView() {
     try {
       const r = await fetch(`/v1/touchpoints/${repo}/${prNumber}`);
       if (!r.ok) throw new Error(`/v1/touchpoints/${repo}/${prNumber} -> ${r.status}`);
-      setDetail((await r.json()) as ReportDetail);
+      setDetail((await r.json()) as TouchpointDetail);
     } catch (e) {
       setError(String(e));
     }
