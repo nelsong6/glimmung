@@ -274,7 +274,7 @@ class NativeKubernetesLauncher:
             "metadata": {
                 "name": namespace,
                 "labels": labels,
-            },
+            }
         }
         try:
             await self._request("POST", "/api/v1/namespaces", json=body)
@@ -469,7 +469,7 @@ def _container_for_job(
                 "name": "codex-credentials",
                 "mountPath": settings.native_runner_codex_credentials_mount_path,
                 "readOnly": True,
-            }
+            },
         ],
     }
     if job.command:
@@ -540,6 +540,8 @@ def _universal_env(
         "issue_number",
         "issue_title",
         "issue_body",
+        "native_slot_index",
+        "native_slot_name",
         "work_context_id",
         "work_context_branch",
         "work_context_base_ref",
