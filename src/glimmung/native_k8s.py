@@ -320,7 +320,12 @@ def _job_manifest(
         secret_name=secret_name,
     )
     containers = [
-        _container_for_job(job, universal_env=universal_env, secret_name=secret_name)
+        _container_for_job(
+            job,
+            settings=settings,
+            universal_env=universal_env,
+            secret_name=secret_name,
+        )
         for job in phase.jobs
     ]
     if not containers:
@@ -334,7 +339,14 @@ def _job_manifest(
             {
                 "name": "glimmung-attempt-token",
                 "secret": {"secretName": secret_name},
-            }
+            },
+            {
+                "name": "codex-credentials",
+                "secret": {
+                    "secretName": settings.native_runner_codex_credentials_secret,
+                    "optional": False,
+                },
+            },
         ],
         "containers": [containers[-1]],
     }
@@ -371,6 +383,7 @@ def _job_manifest(
 def _container_for_job(
     job: NativeJobSpec,
     *,
+    settings: Settings,
     universal_env: list[dict[str, Any]],
     secret_name: str,
 ) -> dict[str, Any]:
@@ -385,6 +398,11 @@ def _container_for_job(
             {
                 "name": "glimmung-attempt-token",
                 "mountPath": "/var/run/glimmung",
+                "readOnly": True,
+            },
+            {
+                "name": "codex-credentials",
+                "mountPath": settings.native_runner_codex_credentials_mount_path,
                 "readOnly": True,
             }
         ],

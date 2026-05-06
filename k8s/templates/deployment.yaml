@@ -43,6 +43,10 @@ spec:
               value: {{ .Values.nativeRunner.jobTtlSeconds | quote }}
             - name: NATIVE_RUNNER_NAMESPACE_ROLE
               value: {{ .Values.nativeRunner.namespaceRole | quote }}
+            - name: NATIVE_RUNNER_CODEX_CREDENTIALS_SECRET
+              value: {{ .Values.nativeRunner.codexCredentials.secretName | quote }}
+            - name: NATIVE_RUNNER_CODEX_CREDENTIALS_MOUNT_PATH
+              value: {{ .Values.nativeRunner.codexCredentials.mountPath | quote }}
             - name: ARTIFACTS_STORAGE_ACCOUNT
               value: {{ .Values.artifacts.storageAccount | quote }}
             - name: ARTIFACTS_CONTAINER

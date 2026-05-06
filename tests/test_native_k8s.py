@@ -28,6 +28,8 @@ def _settings():
         native_runner_callback_base_url="http://glimmung.glimmung.svc.cluster.local",
         native_runner_job_ttl_seconds=259200,
         native_runner_namespace_role="admin",
+        native_runner_codex_credentials_secret="codex-credentials",
+        native_runner_codex_credentials_mount_path="/etc/codex-creds",
         k8s_sa_token_path="/var/run/token",
         k8s_ca_cert_path="/var/run/ca.crt",
         k8s_api_host="https://kubernetes.default.svc",
@@ -121,11 +123,22 @@ def test_job_manifest_maps_phase_jobs_to_sequential_pod_containers():
     spec = manifest["spec"]["template"]["spec"]
     assert manifest["spec"]["template"]["metadata"]["labels"]["azure.workload.identity/use"] == "true"
     assert spec["serviceAccountName"] == "glimmung-native-runner"
+    volumes = {item["name"]: item for item in spec["volumes"]}
+    assert volumes["codex-credentials"]["secret"] == {
+        "secretName": "codex-credentials",
+        "optional": False,
+    }
 
     assert spec["activeDeadlineSeconds"] == 90
     assert spec["initContainers"][0]["name"] == "clone"
     assert spec["containers"][0]["name"] == "agent"
     assert spec["containers"][0]["args"] == ["run"]
+    mounts = {item["name"]: item for item in spec["containers"][0]["volumeMounts"]}
+    assert mounts["codex-credentials"] == {
+        "name": "codex-credentials",
+        "mountPath": "/etc/codex-creds",
+        "readOnly": True,
+    }
     env = {item["name"]: item for item in spec["containers"][0]["env"]}
     assert env["APP_ENV"]["value"] == "test"
     assert env["GLIMMUNG_RUN_ID"]["value"] == "01KRNATIVE0000000000000000"

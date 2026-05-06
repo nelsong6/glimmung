@@ -21,6 +21,15 @@ nativeRunner:
   globalConcurrency: 5
   jobTtlSeconds: 259200
   namespaceRole: admin
+  codexCredentials:
+    enabled: true
+    secretName: codex-credentials
+    mountPath: /etc/codex-creds
+    storeName: romaine-kv
+    storeKind: ClusterSecretStore
+    refreshInterval: 1h
+    kvKey: codex-credentials
+    secretKey: auth.json
   # Dedicated native runner identity from tofu/identity.tf's
   # `glimmung_native_runner_identity_client_id` output.
   serviceAccountClientId: "a865aa27-e76e-4363-ab53-375712bd6db8"
