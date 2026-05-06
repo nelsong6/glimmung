@@ -4,6 +4,7 @@ import hmac
 import json
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path as FsPath
@@ -70,6 +71,7 @@ from glimmung.models import (
     PlaybookCreate,
     PlaybookEntry,
     PlaybookEntryState,
+    PlaybookIntegrationStrategy,
     PlaybookState,
     PortfolioElement,
     PortfolioReviewState,
@@ -3664,6 +3666,7 @@ async def _start_playbook_entry(
     entry: PlaybookEntry,
 ) -> None:
     cosmos: Cosmos = app.state.cosmos
+    work_context = _playbook_work_context_for_entry(playbook, entry)
     if not entry.created_issue_id:
         issue = await issue_ops.create_issue(
             cosmos,
@@ -3672,9 +3675,19 @@ async def _start_playbook_entry(
             body=entry.issue.body,
             labels=entry.issue.labels,
             workflow=entry.issue.workflow,
+            metadata_overrides={
+                "playbook_id": playbook.id,
+                "playbook_entry_id": entry.id,
+                "playbook_integration_strategy": playbook.integration_strategy.value,
+                "work_context": work_context,
+            },
         )
         entry.created_issue_id = issue.id
         entry.state = PlaybookEntryState.CREATED
+        entry.metadata = {
+            **entry.metadata,
+            "work_context": work_context,
+        }
     result = await dispatch_run(
         app,
         issue_id=entry.created_issue_id,
@@ -3686,9 +3699,15 @@ async def _start_playbook_entry(
             "entry_id": entry.id,
         },
         extra_metadata={
+            **entry.issue.metadata,
             "playbook_id": playbook.id,
             "playbook_entry_id": entry.id,
-            **entry.issue.metadata,
+            "playbook_integration_strategy": playbook.integration_strategy.value,
+            "work_context": json.dumps(work_context, sort_keys=True),
+            "work_context_id": work_context["id"],
+            "work_context_branch": work_context["branch"],
+            "work_context_base_ref": work_context["base_ref"],
+            "work_context_state": work_context["state"],
         },
     )
     entry.metadata = {
@@ -3708,6 +3727,66 @@ async def _start_playbook_entry(
     else:
         entry.state = PlaybookEntryState.FAILED
         entry.completed_at = datetime.now(UTC)
+
+
+def _playbook_work_context_for_entry(
+    playbook: Playbook,
+    entry: PlaybookEntry,
+) -> dict[str, str]:
+    strategy = playbook.integration_strategy
+    base_ref = str(playbook.metadata.get("base_ref") or "main")
+    if strategy == PlaybookIntegrationStrategy.ROLLING_MAIN:
+        context = {
+            "id": f"playbook:{playbook.id}:main",
+            "strategy": strategy.value,
+            "branch": base_ref,
+            "base_ref": base_ref,
+            "owner_playbook_id": playbook.id,
+            "current_entry_id": entry.id,
+            "state": "in_use",
+        }
+        playbook.metadata = {**playbook.metadata, "work_context": context}
+        return context
+
+    if strategy == PlaybookIntegrationStrategy.SHARED_FEATURE_BRANCH:
+        existing = playbook.metadata.get("work_context")
+        if isinstance(existing, dict) and existing.get("branch"):
+            context = {
+                "id": str(existing.get("id") or f"playbook:{playbook.id}:shared"),
+                "strategy": strategy.value,
+                "branch": str(existing["branch"]),
+                "base_ref": str(existing.get("base_ref") or base_ref),
+                "owner_playbook_id": playbook.id,
+                "current_entry_id": entry.id,
+                "state": "in_use",
+            }
+        else:
+            context = {
+                "id": f"playbook:{playbook.id}:shared",
+                "strategy": strategy.value,
+                "branch": f"glimmung/playbooks/{playbook.id[:8]}",
+                "base_ref": base_ref,
+                "owner_playbook_id": playbook.id,
+                "current_entry_id": entry.id,
+                "state": "in_use",
+            }
+        playbook.metadata = {**playbook.metadata, "work_context": context}
+        return context
+
+    return {
+        "id": f"playbook:{playbook.id}:{entry.id}",
+        "strategy": strategy.value,
+        "branch": f"glimmung/playbooks/{playbook.id[:8]}/{_work_context_slug(entry.id)}",
+        "base_ref": base_ref,
+        "owner_playbook_id": playbook.id,
+        "current_entry_id": entry.id,
+        "state": "in_use",
+    }
+
+
+def _work_context_slug(value: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", value.strip()).strip("-").lower()
+    return slug or "entry"
 
 
 def _playbook_entry_dependencies_met(playbook: Playbook, entry: PlaybookEntry) -> bool:

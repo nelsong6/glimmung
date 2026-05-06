@@ -840,6 +840,10 @@ class IssueMetadata(BaseModel):
     source: IssueSource = IssueSource.MANUAL
     workflow: str | None = None
     ui_validation_requested: bool = False
+    playbook_id: str | None = None
+    playbook_entry_id: str | None = None
+    playbook_integration_strategy: str | None = None
+    work_context: dict[str, Any] = Field(default_factory=dict)
     # GH-issue link-out. `github_issue_url` is the canonical handle for
     # `find_issue_by_github_url`; `github_issue_repo` and
     # `github_issue_number` are denormalized so dispatch / completion /

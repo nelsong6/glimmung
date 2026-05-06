@@ -189,6 +189,19 @@ The typed field is `integration_strategy` on `PlaybookCreate` and `Playbook`.
 It defaults to `isolated_prs`; `rolling_main` playbooks must be serial
 (`concurrency_limit` unset or `1`).
 
+When a Playbook entry is started, Glimmung derives a work context and stamps it
+onto both the generated Issue metadata and the dispatch metadata:
+
+- `isolated_prs`: one branch context per entry,
+  `glimmung/playbooks/<playbook>/<entry>`
+- `shared_feature_branch`: one branch context for the whole Playbook,
+  `glimmung/playbooks/<playbook>`
+- `rolling_main`: serial context targeting the base ref, currently `main`
+
+This gives runners a concrete `work_context_branch` and
+`work_context_base_ref` without letting individual issue specs invent their own
+branch policy.
+
 ## Work Context
 
 Branch and environment handoff should come from the Playbook integration

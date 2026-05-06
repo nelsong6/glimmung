@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -237,6 +238,83 @@ async def test_advance_playbook_dispatches_ready_entries_up_to_limit(cosmos, mon
     assert advanced.entries[0].state == PlaybookEntryState.RUNNING
     assert advanced.entries[0].run_id == "run-one"
     assert advanced.entries[1].state == PlaybookEntryState.PENDING
+
+
+@pytest.mark.asyncio
+async def test_shared_branch_playbook_stamps_work_context_on_issues_and_dispatch(cosmos, monkeypatch):
+    await _seed_project(cosmos)
+    playbook = await playbook_ops.create_playbook(
+        cosmos,
+        PlaybookCreate(
+            project="glimmung",
+            title="shared",
+            entries=[_entry("one"), _entry("two")],
+            concurrency_limit=2,
+            integration_strategy=PlaybookIntegrationStrategy.SHARED_FEATURE_BRANCH,
+        ),
+    )
+    dispatch_metadata: list[dict[str, object]] = []
+
+    async def fake_dispatch_run(app, **kwargs):
+        dispatch_metadata.append(kwargs["extra_metadata"])
+        return DispatchResult(state="pending", run_id=f"run-{len(dispatch_metadata)}")
+
+    monkeypatch.setattr("glimmung.app.dispatch_run", fake_dispatch_run)
+    app = SimpleNamespace(state=SimpleNamespace(cosmos=cosmos))
+
+    advanced = await _advance_playbook(app, playbook=playbook)
+
+    assert advanced.state == PlaybookState.RUNNING
+    assert len(dispatch_metadata) == 2
+    branch = f"glimmung/playbooks/{advanced.id[:8]}"
+    assert advanced.metadata["work_context"]["branch"] == branch
+    assert {m["work_context_branch"] for m in dispatch_metadata} == {branch}
+    assert {
+        json.loads(str(m["work_context"]))["branch"]
+        for m in dispatch_metadata
+    } == {branch}
+
+    for entry in advanced.entries:
+        assert entry.created_issue_id is not None
+        issue = await cosmos.issues.read_item(
+            item=entry.created_issue_id,
+            partition_key="glimmung",
+        )
+        assert issue["metadata"]["playbook_id"] == advanced.id
+        assert issue["metadata"]["playbook_entry_id"] == entry.id
+        assert issue["metadata"]["playbook_integration_strategy"] == "shared_feature_branch"
+        assert issue["metadata"]["work_context"]["branch"] == branch
+        assert entry.metadata["work_context"]["branch"] == branch
+
+
+@pytest.mark.asyncio
+async def test_rolling_main_playbook_stamps_main_work_context(cosmos, monkeypatch):
+    await _seed_project(cosmos)
+    playbook = await playbook_ops.create_playbook(
+        cosmos,
+        PlaybookCreate(
+            project="glimmung",
+            title="rolling",
+            entries=[_entry("one")],
+            integration_strategy=PlaybookIntegrationStrategy.ROLLING_MAIN,
+            concurrency_limit=1,
+        ),
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_dispatch_run(app, **kwargs):
+        captured.update(kwargs["extra_metadata"])
+        return DispatchResult(state="pending", run_id="run-main")
+
+    monkeypatch.setattr("glimmung.app.dispatch_run", fake_dispatch_run)
+    app = SimpleNamespace(state=SimpleNamespace(cosmos=cosmos))
+
+    advanced = await _advance_playbook(app, playbook=playbook)
+
+    assert advanced.entries[0].state == PlaybookEntryState.RUNNING
+    assert captured["work_context_branch"] == "main"
+    assert captured["work_context_base_ref"] == "main"
+    assert json.loads(str(captured["work_context"]))["strategy"] == "rolling_main"
 
 
 @pytest.mark.asyncio
