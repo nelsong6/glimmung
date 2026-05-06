@@ -1791,6 +1791,13 @@ h2 .inline-action,
   color: #888;
   margin-bottom: 8px;
 }
+.run-section-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
 
 /* Pipeline DAG (#81). Horizontal flow of phase nodes followed by a
    trailing PR node. v1 phases-v1 ships single-phase, so this is

@@ -24,7 +24,7 @@
  * GitHub-shaped and id-shaped URLs still load so old links can redirect.
  */
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { authedFetch } from "./auth";
 
 type IssueDetail = {
@@ -132,6 +132,33 @@ type WorkflowGraphMeta = {
   terminal: { kind: string; enabled: boolean };
 };
 
+type Workflow = {
+  id: string;
+  project: string;
+  name: string;
+  phases: WorkflowPhase[];
+  pr: { enabled: boolean; recycle_policy: WorkflowRecyclePolicy | null };
+  workflow_filename: string | null;
+  workflow_ref: string | null;
+  trigger_label: string;
+  default_requirements: Record<string, unknown>;
+};
+
+type WorkflowPhase = {
+  name: string;
+  kind: string;
+  workflow_filename: string;
+  workflow_ref: string;
+  verify: boolean;
+  recycle_policy: WorkflowRecyclePolicy | null;
+};
+
+type WorkflowRecyclePolicy = {
+  max_attempts: number;
+  on: string[];
+  lands_at: string;
+};
+
 type RecycleArrow = {
   source: string;
   target: string;
@@ -175,6 +202,7 @@ type AuthContext = {
       name: string;
       github_repo: string;
     }>;
+    workflows: Workflow[];
   } | null;
 };
 
@@ -442,6 +470,10 @@ export function IssueDetailView() {
                 project={detail.project}
                 repo={detail.repo}
                 detail={detail}
+                workflow={snap?.workflows.find((w) => (
+                  w.project === detail.project
+                  && w.name === (stringOrNull(detail.metadata?.workflow) ?? stringOrNull(graph?.nodes.find((n) => n.kind === "run")?.metadata.workflow))
+                )) ?? null}
                 signedIn={signedIn}
                 dispatchState={dispatchState}
                 selectedRunId={selectedRunId}
@@ -936,7 +968,7 @@ export function RunViewer({
       return (
         <>
           {actions}
-          <DefinitionDag />
+          <DefinitionDag workflow={null} project={project} />
           <div className="empty">
             Run lock held — waiting for the run record to land.
           </div>
@@ -946,7 +978,7 @@ export function RunViewer({
     return (
       <>
         {actions}
-        <DefinitionDag />
+        <DefinitionDag workflow={null} project={project} />
         <div className="empty">No runs yet — re-dispatch above to start one.</div>
       </>
     );
@@ -990,21 +1022,105 @@ export function RunViewer({
 }
 
 // Cool-toned definition view of the workflow's DAG when no run has
-// landed yet. v1 phases-v1 ships single-phase, so this is `[phase] →
-// [pr]`. Rendering richer phase metadata would need a /v1/workflows
-// fetch — out of scope for the initial DAG view; this is the floor.
-function DefinitionDag() {
+// landed yet. Falls back to a generic phase -> touchpoint shape only
+// when the snapshot has not produced the workflow definition.
+function DefinitionDag({
+  workflow,
+  project,
+}: {
+  workflow: Workflow | null;
+  project: string;
+}) {
+  const phases = workflow?.phases.length
+    ? workflow.phases
+    : [{
+        name: "phase",
+        kind: "phase",
+        workflow_filename: "",
+        workflow_ref: "main",
+        verify: false,
+        recycle_policy: null,
+      }];
+  const policies = workflow ? [
+    ...phases.flatMap((phase) => phase.recycle_policy ? [{
+      source: phase.name,
+      target: phase.recycle_policy.lands_at,
+      trigger: phase.recycle_policy.on.join(" / ") || "recycle",
+      max: phase.recycle_policy.max_attempts,
+    }] : []),
+    ...(workflow.pr.recycle_policy ? [{
+      source: "touchpoint",
+      target: workflow.pr.recycle_policy.lands_at,
+      trigger: workflow.pr.recycle_policy.on.join(" / ") || "feedback",
+      max: workflow.pr.recycle_policy.max_attempts,
+    }] : []),
+  ] : [];
   return (
-    <div className="dag dag-definition" aria-label="workflow definition">
-      <div className="dag-node dag-node-definition">
-        <div className="dag-node-label">phase</div>
-        <div className="dag-node-state dim mono">not run</div>
+    <div className="dag-wrap">
+      <div className="dag dag-definition" aria-label="workflow definition">
+        {workflow && (
+          <>
+            <div className="dag-entry active">
+              <span className="mono">entry</span>
+              <span className="dim mono">{workflow.trigger_label}</span>
+            </div>
+            <div className="dag-edge" aria-hidden="true">→</div>
+          </>
+        )}
+        {phases.map((phase, index) => (
+          <Fragment key={phase.name}>
+            {index > 0 && <div className="dag-edge" aria-hidden="true">→</div>}
+            <div className="dag-node dag-node-definition">
+              <div className="dag-node-label">{phase.name}</div>
+              <div className="dag-node-state">
+                <span className="pill info">not run</span>
+              </div>
+              <div className="dag-node-meta dim mono">{phase.verify ? "verify" : phase.kind}</div>
+            </div>
+          </Fragment>
+        ))}
+        {(!workflow || workflow.pr.enabled) && (
+          <>
+            <div className="dag-edge" aria-hidden="true">→</div>
+            <div className="dag-node dag-node-definition dag-node-pr pending">
+              <div className="dag-node-label">touchpoint</div>
+              <div className="dag-node-state mono">pending</div>
+              <div className="dag-node-meta dim mono">PR primitive</div>
+            </div>
+          </>
+        )}
       </div>
-      <div className="dag-edge" aria-hidden="true">→</div>
-      <div className="dag-node dag-node-definition">
-        <div className="dag-node-label">pr</div>
-        <div className="dag-node-state dim mono">pending</div>
-      </div>
+      {policies.length > 0 && (
+        <div className="dag-policy-rail" aria-label="recycle policies">
+          {policies.map((policy) => (
+            <span
+              className="dag-policy inactive"
+              key={`${policy.source}:${policy.target}:${policy.trigger}`}
+              title={`${policy.trigger}; max ${policy.max}`}
+            >
+              <span className="mono">{policy.source}</span>
+              <span className="dim mono">↻</span>
+              <span className="mono">{policy.target}</span>
+              <span className="dim mono">{policy.trigger}</span>
+            </span>
+          ))}
+        </div>
+      )}
+      {!workflow && (
+        <div className="dim mono" style={{ marginTop: "0.5rem" }}>
+          Workflow definition unavailable in the current snapshot.
+        </div>
+      )}
+      {workflow && (
+        <div style={{ marginTop: "0.5rem" }}>
+          <Link
+            className="link"
+            to={`/projects/${encodeURIComponent(project)}/workflows/${encodeURIComponent(workflow.name)}`}
+          >
+            view workflow definition
+          </Link>
+        </div>
+      )}
     </div>
   );
 }
@@ -1411,6 +1527,7 @@ function RunsPane({
   project,
   repo,
   detail,
+  workflow,
   signedIn,
   dispatchState,
   selectedRunId,
@@ -1423,6 +1540,7 @@ function RunsPane({
   project: string;
   repo: string | null;
   detail: IssueDetail;
+  workflow: Workflow | null;
   signedIn: boolean;
   dispatchState: DispatchState;
   selectedRunId: string | null;
@@ -1476,7 +1594,12 @@ function RunsPane({
     return (
       <>
         {newRunButton}
-        <div className="empty">No runs yet on this issue.</div>
+        <section>
+          <div className="run-section-header">
+            <h2>Template preview</h2>
+          </div>
+          <DefinitionDag workflow={workflow} project={project} />
+        </section>
       </>
     );
   }
@@ -1510,6 +1633,38 @@ function RunsPane({
   return (
     <>
       {newRunButton}
+      <section>
+        <div className="run-section-header">
+          <h2>Latest run</h2>
+          {workflow && (
+            <Link
+              className="link"
+              to={`/projects/${encodeURIComponent(project)}/workflows/${encodeURIComponent(workflow.name)}`}
+            >
+              view workflow definition
+            </Link>
+          )}
+        </div>
+        <RunViewer
+          graph={graph}
+          graphAvailable={graphAvailable}
+          signedIn={false}
+          project={project}
+          repo={repo}
+          inFlight={runs.some((run) => run.state === "in_progress")}
+          dispatchState={RUN_VIEWER_IDLE_DISPATCH}
+          onRedispatch={() => undefined}
+          abortState={RUN_VIEWER_IDLE_ABORT}
+          onArmAbort={() => undefined}
+          onCancelAbort={() => undefined}
+          onConfirmAbort={() => undefined}
+          selectedRunId={runIdFromNode(runs[0])}
+          onBackToRuns={() => undefined}
+          onOpenTouchpoint={onOpenTouchpoint}
+          actionsVisible={false}
+        />
+      </section>
+      <h2>Run history</h2>
       <table>
         <thead>
           <tr>
