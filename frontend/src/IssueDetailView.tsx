@@ -247,6 +247,7 @@ export function IssueDetailView() {
 
   const [detail, setDetail] = useState<IssueDetail | null>(null);
   const [graph, setGraph] = useState<IssueGraph | null>(null);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
@@ -280,6 +281,11 @@ export function IssueDetailView() {
     navigate(projectName ? `/projects/${encodeURIComponent(projectName)}` : "/needs-attention");
   };
 
+  const selectTab = (t: Tab) => {
+    if (t === "runs") setSelectedRunId(null);
+    setTab(t);
+  };
+
   const dispatchRun = async () => {
     if (!detail) return;
     setDispatchState({ kind: "dispatching" });
@@ -300,11 +306,16 @@ export function IssueDetailView() {
       const result = await r.json() as { state?: string };
       setDispatchState({ kind: "result", state: result.state ?? "dispatched" });
       setRefreshTick((t) => t + 1);
+      setSelectedRunId(null);
       setTab("runs");
     } catch (e) {
       setDispatchState({ kind: "error", message: String(e) });
     }
   };
+
+  useEffect(() => {
+    setSelectedRunId(null);
+  }, [detail?.id]);
 
   useEffect(() => {
     const canonicalSlug = TAB_SLUGS[tab];
@@ -394,14 +405,14 @@ export function IssueDetailView() {
           <IssueHeader detail={detail} heading={heading} />
 
           <div className="dashboard-nav" aria-label="issue sections">
-            <TabButton current={tab} value="summary" onSelect={setTab}>
+            <TabButton current={tab} value="summary" onSelect={selectTab}>
               summary
             </TabButton>
-            <TabButton current={tab} value="runs" onSelect={setTab}>
+            <TabButton current={tab} value="runs" onSelect={selectTab}>
               runs
               {isInFlight && <span className="tab-dot" aria-label="active" />}
             </TabButton>
-            <TabButton current={tab} value="touchpoint" onSelect={setTab}>
+            <TabButton current={tab} value="touchpoint" onSelect={selectTab}>
               touchpoint
             </TabButton>
           </div>
@@ -430,6 +441,8 @@ export function IssueDetailView() {
                 detail={detail}
                 signedIn={signedIn}
                 dispatchState={dispatchState}
+                selectedRunId={selectedRunId}
+                onSelectRun={setSelectedRunId}
                 onDispatch={() => void dispatchRun()}
               />
             )}
@@ -1360,6 +1373,8 @@ function RunsPane({
   detail,
   signedIn,
   dispatchState,
+  selectedRunId,
+  onSelectRun,
   onDispatch,
 }: {
   graph: IssueGraph | null;
@@ -1369,10 +1384,10 @@ function RunsPane({
   detail: IssueDetail;
   signedIn: boolean;
   dispatchState: DispatchState;
+  selectedRunId: string | null;
+  onSelectRun: (runId: string | null) => void;
   onDispatch: () => void;
 }) {
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
-
   const dispatching = dispatchState.kind === "dispatching";
   const dispatchDisabled = detail.issue_lock_held || dispatching || !signedIn;
   const newRunButton = (
@@ -1426,7 +1441,7 @@ function RunsPane({
   if (selectedRunId) {
     return (
       <>
-        <button type="button" className="link" onClick={() => setSelectedRunId(null)}>
+        <button type="button" className="link" onClick={() => onSelectRun(null)}>
           ← runs
         </button>
         <RunViewer
@@ -1443,7 +1458,7 @@ function RunsPane({
           onCancelAbort={() => undefined}
           onConfirmAbort={() => undefined}
           selectedRunId={selectedRunId}
-          onBackToRuns={() => setSelectedRunId(null)}
+          onBackToRuns={() => onSelectRun(null)}
           actionsVisible={false}
         />
       </>
@@ -1487,7 +1502,7 @@ function RunsPane({
                     type="button"
                     className="link mono"
                     title={id}
-                    onClick={() => setSelectedRunId(id)}
+                    onClick={() => onSelectRun(id)}
                   >
                     {runSlugDisplay(slug)}
                   </button>
@@ -1505,7 +1520,7 @@ function RunsPane({
                   <button
                     type="button"
                     className="link"
-                    onClick={() => setSelectedRunId(id)}
+                    onClick={() => onSelectRun(id)}
                     title={`View ${runSlugDisplay(slug)}`}
                   >
                     <span className={`pill ${runStatePill(r.state ?? "")}`}>{r.state ?? "—"}</span>
@@ -1522,7 +1537,7 @@ function RunsPane({
                   <button
                     type="button"
                     className="link"
-                    onClick={() => setSelectedRunId(id)}
+                    onClick={() => onSelectRun(id)}
                   >
                     view
                   </button>
