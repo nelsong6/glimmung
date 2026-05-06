@@ -12,7 +12,7 @@
  * route: `/projects/<project>/issues/<number>/summary`.
  */
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 import { authedFetch } from "./auth";
 
 type IssueRow = {
@@ -63,7 +63,6 @@ export function IssuesView({
   maxRows?: number | null;
   showProjectColumn?: boolean;
 }) {
-  const navigate = useNavigate();
   const [rows, setRows] = useState<IssueRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -117,13 +116,6 @@ export function IssuesView({
     } catch (e) {
       setDispatchStatus({ kind: "error", key, message: String(e) });
     }
-  };
-
-  const openDetail = (row: IssueRow) => {
-    if (row.number === null) return;
-    navigate(
-      `/projects/${encodeURIComponent(row.project)}/issues/${row.number}/summary`
-    );
   };
 
   const visibleRows = rows;
@@ -181,14 +173,17 @@ export function IssuesView({
                     {row.number !== null ? row.number : "—"}
                   </td>
                   <td>
-                    <button
-                      type="button"
-                      className="link"
-                      onClick={() => openDetail(row)}
-                      style={{ textAlign: "left" }}
-                    >
-                      {row.title}
-                    </button>
+                    {row.number !== null ? (
+                      <Link
+                        className="link"
+                        to={issueDetailPath(row)}
+                        style={{ textAlign: "left" }}
+                      >
+                        {row.title}
+                      </Link>
+                    ) : (
+                      <span className="dim">{row.title}</span>
+                    )}
                   </td>
                   <td className="mono dim">
                     {row.labels.length === 0 ? "—" : row.labels.join(", ")}
@@ -238,6 +233,10 @@ export function IssuesView({
 
 function rowKey(row: IssueRow): string {
   return row.number !== null ? `${row.project}#${row.number}` : `glimmung/${row.id}`;
+}
+
+function issueDetailPath(row: IssueRow): string {
+  return `/projects/${encodeURIComponent(row.project)}/issues/${row.number}/summary`;
 }
 
 function renderLastRun(row: IssueRow): string {
