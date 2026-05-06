@@ -9,6 +9,7 @@ PUBLIC_READ_ROUTES = {
     ("GET", "/v1/issues"),
     ("GET", "/v1/issues/{repo_owner}/{repo_name}/{issue_number}"),
     ("GET", "/v1/issues/by-id/{project}/{issue_id}"),
+    ("GET", "/v1/issues/by-number/{project}/{issue_number}/graph"),
     ("GET", "/v1/issues/{repo_owner}/{repo_name}/{issue_number}/graph"),
     ("GET", "/v1/graph"),
     ("GET", "/v1/runs/{project}/{run_id}/report"),
@@ -73,6 +74,17 @@ def test_native_issue_by_id_route_precedes_legacy_issue_route() -> None:
     ]
     assert issue_route_paths.index("/v1/issues/by-id/{project}/{issue_id}") < (
         issue_route_paths.index("/v1/issues/{repo_owner}/{repo_name}/{issue_number}")
+    )
+
+
+def test_issue_by_number_graph_route_precedes_legacy_issue_graph_route() -> None:
+    """Same route-order trap for project-scoped issue graph URLs."""
+    issue_route_paths = [
+        route.path for route in app.routes
+        if isinstance(route, APIRoute) and "GET" in route.methods
+    ]
+    assert issue_route_paths.index("/v1/issues/by-number/{project}/{issue_number}/graph") < (
+        issue_route_paths.index("/v1/issues/{repo_owner}/{repo_name}/{issue_number}/graph")
     )
 
 
