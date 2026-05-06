@@ -64,6 +64,9 @@ screenshots, generated design portfolio rows, logs, or artifacts are
 evidence inside the Touchpoint; they are not separate primary navigation
 surfaces.
 
+The fuller object-boundary and Playbook integration vocabulary lives in
+[Touchpoints, RunReports, And Playbook Integration](touchpoints-runreports-playbooks.md).
+
 ## Why Not Argo First
 
 Starting with Argo Workflows would make the implementation lighter in

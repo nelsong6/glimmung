@@ -42,6 +42,10 @@ Epic -> Playbook -> ordered Entries -> Issue -> Run -> Report/evidence -> next E
 The initial relationship is intentionally 1:1: one Epic owns one Playbook.
 See [Epics and Playbooks](docs/epics-and-playbooks.md) for the object
 boundary and follow-up implementation surface.
+See
+[Touchpoints, RunReports, And Playbook Integration](docs/touchpoints-runreports-playbooks.md)
+for the review surface, per-run audit report, and integration-strategy
+vocabulary.
 
 For frontend repos that need a review surface after the app already exists,
 use the reusable [Design Portfolio Bootstrap](docs/design-portfolio-bootstrap.md)
