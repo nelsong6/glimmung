@@ -10,7 +10,7 @@ namespace: glimmung
 serviceAccount: infra-shared
 # Dedicated Glimmung app identity from tofu/identity.tf's
 # `glimmung_dedicated_identity_client_id` output.
-serviceAccountClientId: ""
+serviceAccountClientId: "3644b9f0-2eb0-42dd-92a4-696f9a3ca090"
 replicas: 1
 
 nativeRunner:
@@ -30,79 +30,85 @@ nativeRunner:
   codexCredentials:
     enabled: true
     secretName: codex-credentials
-    sourceSecretName: codex-credentials
-    sourceNamespace: tank-operator
     mountPath: /etc/codex-creds
+    storeName: romaine-kv
+    storeKind: ClusterSecretStore
+    refreshInterval: 1h
+    kvKey: codex-credentials
+    secretKey: auth.json
+  # Dedicated native runner identity from tofu/identity.tf's
+  # `glimmung_native_runner_identity_client_id` output.
+  serviceAccountClientId: "a865aa27-e76e-4363-ab53-375712bd6db8"
 
 artifacts:
   storageAccount: romaineglimmungartifacts
   container: artifacts
 
-# Optional bootstrap bridge for local/dev installs. In prod, keep this false;
-# the source secret is managed in tank-operator and Reflector mirrors it from
-# the annotation below. The template is retained so a fresh cluster can still
-# wire the bridge declaratively if needed.
-tankOperatorSecretBridge:
-  enabled: false
+# In-cluster admin auth via Kubernetes service-account tokens. When enabled,
+# admin endpoints (/v1/projects, /v1/workflows, /v1/hosts) accept a bearer
+# token whose subject — resolved through TokenReview — matches an entry in
+# K8S_SA_ALLOWLIST (default `tank-operator/tank-operator`, set in
+# settings.py). Toggling this off removes the ClusterRoleBinding that grants
+# the pod's SA `system:auth-delegator`, leaving Entra as the only admin path.
+k8sSaAuth:
+  enabled: true
 
 # Cosmos DB — endpoint of the shared serverless account, database is glimmung's own.
 cosmos:
-  endpoint: https://romaine-cosmos-serverless.documents.azure.com:443/
+  endpoint: https://infra-cosmos-serverless.documents.azure.com:443/
   database: glimmung
 
 # Phase 2: ingress at glimmung.romaine.life. The XListenerSet adds a
 # dedicated HTTPS listener on the shared envoy-gateway with TLS
-# terminating from the cert-manager-managed Secret; HTTPRoute binds
-# the host to the Service.
+# termination from the cert-manager Certificate. ExternalDNS picks the
+# A record up off the HTTPRoute's parentRef on the main Gateway.
 ingress:
   enabled: true
   hostname: glimmung.romaine.life
   gatewayName: main
   gatewayNamespace: envoy-gateway-system
-  listenerSetName: glimmung
+  certIssuer: letsencrypt-prod
   tlsSecret: glimmung-tls
 
 # Wildcard cert + XListenerSet covering glimmung.dev.romaine.life AND
 # *.glimmung.dev.romaine.life. Provisioned once by the prod chart so
-# per-issue validation envs can attach HTTPRoutes to the listener without
-# minting certs or creating listeners for every PR.
-wildcard:
+# per-issue helm releases (k8s/issue/) can attach their HTTPRoutes to
+# this listener instead of each provisioning their own cert + listener.
+# Lives in the same namespace as prod so per-issue HTTPRoutes (also in
+# this namespace) attach without ReferenceGrants.
+wildcardCertificate:
   enabled: true
   name: glimmung-wildcard
   tlsSecret: glimmung-wildcard-tls
-  issuerRef:
-    name: letsencrypt-prod
-    kind: ClusterIssuer
+  issuer: letsencrypt-prod-dns01
+  allowedFromNamespaces: All
   hosts:
     - glimmung.dev.romaine.life
     - "*.glimmung.dev.romaine.life"
-  allowedRoutesFrom: All
 
-# Secrets from Key Vault via External Secrets Operator. The github-* keys are
-# the dedicated Glimmung App credentials, and oauth-* keys back the MSAL test
-# login flow in the frontend.
+# ExternalSecret — pulls GitHub App credentials, webhook secret, and
+# Entra config from Key Vault into a Secret the deployment envFroms.
+# The github-* keys are glimmung's *dedicated* App (a GitHub App has only
+# one webhook URL, so glimmung can't co-tenant on the shared App used by
+# mcp-github / diagrams). Created by Nelson via the GitHub UI; the four
+# `glimmung-github-*` KV secrets are set by hand.
 externalSecret:
+  storeName: romaine-kv
+  storeKind: ClusterSecretStore
+  refreshInterval: 1h
   secretName: glimmung-secrets
-  secretStoreName: infra-cluster-store
-  secrets:
-    githubAppId:
-      env: GITHUB_APP_ID
+  keys:
+    - envVar: GITHUB_APP_ID
       kvKey: glimmung-github-app-id
-    githubAppInstallationId:
-      env: GITHUB_APP_INSTALLATION_ID
+    - envVar: GITHUB_APP_INSTALLATION_ID
       kvKey: glimmung-github-app-installation-id
-    githubAppPrivateKey:
-      env: GITHUB_APP_PRIVATE_KEY
+    - envVar: GITHUB_APP_PRIVATE_KEY
       kvKey: glimmung-github-app-private-key
-    githubWebhookSecret:
-      env: GITHUB_WEBHOOK_SECRET
+    - envVar: GITHUB_WEBHOOK_SECRET
       kvKey: glimmung-github-webhook-secret
-    oauthClientId:
-      env: OAUTH_CLIENT_ID
+    - envVar: ENTRA_CLIENT_ID
       kvKey: glimmung-oauth-client-id
-    oauthTestClientId:
-      env: OAUTH_TEST_CLIENT_ID
+    - envVar: ENTRA_TEST_CLIENT_ID
       kvKey: glimmung-oauth-test-client-id
-    oauthAllowedEmails:
-      env: OAUTH_ALLOWED_EMAILS
+    - envVar: ALLOWED_EMAILS
       kvKey: glimmung-oauth-allowed-emails
