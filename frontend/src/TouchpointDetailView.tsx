@@ -295,16 +295,8 @@ export function TouchpointDetailView() {
             {detail.screenshots_markdown?.trim() ? (
               <div className="row">
                 <span className="key">screenshots</span>
-                <span className="val evidence-list">
-                  {screenshotLinks(detail.screenshots_markdown).length > 0 ? (
-                    screenshotLinks(detail.screenshots_markdown).map((shot) => (
-                      <a key={shot.url} href={shot.url} target="_blank" rel="noreferrer">
-                        {shot.label}
-                      </a>
-                    ))
-                  ) : (
-                    <pre className="evidence-notes">{detail.screenshots_markdown}</pre>
-                  )}
+                <span className="val">
+                  <ScreenshotEvidence markdown={detail.screenshots_markdown} />
                 </span>
               </div>
             ) : null}
@@ -425,6 +417,23 @@ function latestAttemptSummary(detail: TouchpointDetail | null): string | null {
     if (summary) return summary;
   }
   return null;
+}
+
+function ScreenshotEvidence({ markdown }: { markdown: string }) {
+  const shots = screenshotLinks(markdown);
+  if (shots.length === 0) {
+    return <pre className="evidence-notes">{markdown}</pre>;
+  }
+  return (
+    <div className="evidence-gallery">
+      {shots.map((shot) => (
+        <a key={shot.url} className="evidence-shot" href={shot.url} target="_blank" rel="noreferrer">
+          <img src={shot.url} alt={shot.label} loading="lazy" />
+          <span>{shot.label}</span>
+        </a>
+      ))}
+    </div>
+  );
 }
 
 function EvidenceLinks({ attempt }: { attempt: AttemptHistoryEntry }) {

@@ -1511,6 +1511,35 @@ h2 .inline-action,
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.evidence-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+  width: 100%;
+}
+.evidence-shot {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  text-decoration: none;
+}
+.evidence-shot:hover {
+  color: var(--state-success-fg);
+}
+.evidence-shot img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+.evidence-shot span {
+  overflow-wrap: anywhere;
+}
 
 .project-workspace {
   display: grid;
