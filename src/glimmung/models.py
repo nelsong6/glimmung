@@ -840,7 +840,7 @@ class IssueComment(BaseModel):
 class Issue(BaseModel):
     schema_version: int = 1
     id: str                                  # ULID; canonical glimmung-issue-id
-    number: int | None = None                # Glimmung-native issue number, scoped to project
+    number: int                              # Glimmung-native issue number, scoped to project
     project: str                             # partition key
     title: str
     body: str = ""

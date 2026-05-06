@@ -39,7 +39,11 @@ from datetime import UTC, datetime
 from typing import Any, Callable
 
 from azure.core import MatchConditions
-from azure.cosmos.exceptions import CosmosAccessConditionFailedError, CosmosResourceNotFoundError
+from azure.cosmos.exceptions import (
+    CosmosAccessConditionFailedError,
+    CosmosResourceExistsError,
+    CosmosResourceNotFoundError,
+)
 from ulid import ULID
 
 from glimmung.db import Cosmos, query_all
@@ -49,6 +53,7 @@ log = logging.getLogger(__name__)
 
 
 _MAX_CONFLICT_RETRIES = 3
+_COUNTER_PREFIX = "__counter:issue-number:"
 
 
 def _now() -> datetime:
@@ -83,10 +88,6 @@ async def create_issue(
     now = _now()
     issue_number = number
     if issue_number is None:
-        # Preserve imported GH issue numbers as the first native display
-        # number so existing project URLs remain familiar during migration.
-        issue_number = github_issue_number
-    if issue_number is None:
         issue_number = await next_issue_number(cosmos, project=project)
     issue = Issue(
         id=str(ULID()),
@@ -116,23 +117,81 @@ async def create_issue(
 
 
 async def next_issue_number(cosmos: Cosmos, *, project: str) -> int:
-    """Return the next project-scoped Glimmung issue number."""
+    """Allocate the next project-scoped Glimmung issue number.
+
+    The counter document lives in the same partition as the project issues so
+    allocation is guarded by Cosmos create/etag conflicts instead of a
+    read-max/write race. If the counter is absent, seed it from the migrated
+    top-level `Issue.number` values in that project.
+    """
+    counter_id = _counter_id(project)
+    for attempt in range(_MAX_CONFLICT_RETRIES):
+        try:
+            doc = await cosmos.issues.read_item(item=counter_id, partition_key=project)
+        except CosmosResourceNotFoundError:
+            try:
+                seed = await _seed_issue_number_counter(cosmos, project=project)
+                return int(seed["last_allocated"])
+            except CosmosResourceExistsError:
+                continue
+
+        current_next = int(doc.get("next_issue_number") or 1)
+        updated = {
+            **doc,
+            "next_issue_number": current_next + 1,
+            "updated_at": _now().isoformat(),
+        }
+        try:
+            await cosmos.issues.replace_item(
+                item=counter_id,
+                body=_strip_meta(updated),
+                etag=doc["_etag"],
+                match_condition=MatchConditions.IfNotModified,
+            )
+            return current_next
+        except CosmosAccessConditionFailedError:
+            if attempt == _MAX_CONFLICT_RETRIES - 1:
+                raise
+            log.info("issue-number counter conflict for project=%s; retrying", project)
+    raise RuntimeError("unreachable")
+
+
+def _counter_id(project: str) -> str:
+    return f"{_COUNTER_PREFIX}{project}"
+
+
+async def _seed_issue_number_counter(cosmos: Cosmos, *, project: str) -> dict[str, Any]:
+    highest = await _highest_issue_number(cosmos, project=project)
+    first = highest + 1
+    now = _now().isoformat()
+    doc = {
+        "id": _counter_id(project),
+        "project": project,
+        "kind": "issue_number_counter",
+        "last_allocated": first,
+        "next_issue_number": first + 1,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await cosmos.issues.create_item(doc)
+    return doc
+
+
+async def _highest_issue_number(cosmos: Cosmos, *, project: str) -> int:
     docs = await query_all(
         cosmos.issues,
-        "SELECT * FROM c WHERE c.project = @p",
+        "SELECT * FROM c WHERE c.project = @p AND IS_DEFINED(c.number)",
         parameters=[{"name": "@p", "value": project}],
     )
     highest = 0
     for doc in docs:
         candidate = doc.get("number")
-        if candidate is None:
-            candidate = (doc.get("metadata") or {}).get("github_issue_number")
         try:
             n = int(candidate)
         except (TypeError, ValueError):
             continue
         highest = max(highest, n)
-    return highest + 1
+    return highest
 
 
 async def read_issue(
@@ -165,16 +224,6 @@ async def read_issue_by_number(
             {"name": "@n", "value": number},
         ],
     )
-    if not docs:
-        # Migration fallback: existing issues may not have `number` yet.
-        docs = await query_all(
-            cosmos.issues,
-            "SELECT * FROM c WHERE c.project = @p AND c.metadata.github_issue_number = @n",
-            parameters=[
-                {"name": "@p", "value": project},
-                {"name": "@n", "value": number},
-            ],
-        )
     if not docs:
         return None
     if len(docs) > 1:

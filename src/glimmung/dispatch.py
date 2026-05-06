@@ -154,7 +154,7 @@ async def dispatch_run(
     project_repo = str((project_doc or {}).get("githubRepo") or "")
     github_issue_repo = issue.metadata.github_issue_repo
     repo = github_issue_repo or project_repo
-    issue_number = issue.number if issue.number is not None else issue.metadata.github_issue_number
+    issue_number = issue.number
 
     # 2. Resolve workflow.
     workflow_doc, picker_detail = await _resolve_workflow(cosmos, project_name, workflow_name)
@@ -163,13 +163,9 @@ async def dispatch_run(
     workflow_actual_name: str = workflow_doc["name"]
     effective_issue_labels = issue_labels if issue_labels is not None else list(issue.labels)
 
-    # 3. Claim the per-issue lock. Numbered Glimmung issues lock on
-    # project#N; older unnumbered issues fall back to their glimmung id.
+    # 3. Claim the per-issue lock on the project-scoped Glimmung number.
     holder_id = str(ULID())
-    lock_key = (
-        f"{project_name}#{issue_number}" if issue_number is not None
-        else f"glimmung/{issue.id}"
-    )
+    lock_key = f"{project_name}#{issue_number}"
     try:
         await lock_ops.claim_lock(
             cosmos,
@@ -212,7 +208,7 @@ async def dispatch_run(
             workflow=workflow_actual_name,
             issue_id=issue.id,
             issue_repo=repo or "",
-            issue_number=issue_number or 0,
+            issue_number=issue_number,
             budget=budget,
             initial_phase_name=initial_phase["name"],
             initial_workflow_filename=_phase_runner_label(initial_phase),
@@ -240,12 +236,9 @@ async def dispatch_run(
         metadata["attempt_index"] = "0"
         if initial_phase is not None:
             metadata["phase_name"] = initial_phase["name"]
-    if issue_number is not None:
-        metadata["issue_number"] = str(issue_number)
-        metadata["issue_id"] = issue.id
-    else:
-        metadata["issue_id"] = issue.id
-    if github_issue_repo and issue_number is not None:
+    metadata["issue_number"] = str(issue_number)
+    metadata["issue_id"] = issue.id
+    if github_issue_repo:
         metadata["issue_repo"] = github_issue_repo
     requirements = (
         (initial_phase or {}).get("requirements")
