@@ -289,11 +289,6 @@ export function IssueDetailView() {
       : "";
   const repoForLinks = null;
 
-  const onBack = () => {
-    const projectName = detail?.project ?? (target?.kind === "native" ? target.project : null);
-    navigate(projectName ? `/projects/${encodeURIComponent(projectName)}` : "/needs-attention");
-  };
-
   const selectTab = (t: Tab) => {
     if (t === "runs") setSelectedRunId(null);
     setTab(t);
@@ -407,9 +402,6 @@ export function IssueDetailView() {
 
   return (
     <>
-      <button type="button" className="link" onClick={onBack}>
-        ← back
-      </button>
       {error && <div className="empty error">{error}</div>}
       {detail === null && !error ? (
         <div className="empty">Loading…</div>
