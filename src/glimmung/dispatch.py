@@ -87,6 +87,31 @@ class DispatchResult(BaseModel):
     detail: str | None = None
 
 
+class PublicDispatchResult(BaseModel):
+    """Operator-facing dispatch result.
+
+    The Run ULID is intentionally absent here. It is an internal
+    failsafe identifier; normal UI/MCP surfaces should use `run_number`.
+    """
+    state: str
+    lease_id: str | None = None
+    run_number: int | None = None
+    host: str | None = None
+    workflow: str | None = None
+    detail: str | None = None
+
+    @classmethod
+    def from_internal(cls, result: DispatchResult) -> "PublicDispatchResult":
+        return cls(
+            state=result.state,
+            lease_id=result.lease_id,
+            run_number=result.run_number,
+            host=result.host,
+            workflow=result.workflow,
+            detail=result.detail,
+        )
+
+
 async def dispatch_run(
     app: FastAPI,
     *,

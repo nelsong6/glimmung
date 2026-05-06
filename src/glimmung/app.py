@@ -30,7 +30,13 @@ from glimmung import touchpoints as touchpoint_ops
 from glimmung import runs as run_ops
 from glimmung import signals as signal_ops
 from glimmung.artifacts import ArtifactStore
-from glimmung.dispatch import DispatchResult, ResumeResult, dispatch_resumed_run, dispatch_run
+from glimmung.dispatch import (
+    DispatchResult,
+    PublicDispatchResult,
+    ResumeResult,
+    dispatch_resumed_run,
+    dispatch_run,
+)
 from glimmung.auth import User, require_admin_user
 from glimmung.db import Cosmos, query_all
 from glimmung.decision import abort_explanation, decide
@@ -6126,19 +6132,20 @@ async def _build_issue_graph_for_issue(
 
 @app.post(
     "/v1/runs/dispatch",
-    response_model=DispatchResult,
+    response_model=PublicDispatchResult,
     dependencies=[Depends(require_admin_user)],
 )
-async def dispatch_run_endpoint(req: DispatchRequest) -> DispatchResult:
+async def dispatch_run_endpoint(req: DispatchRequest) -> PublicDispatchResult:
     """UI-initiated dispatch. The trigger source is recorded on the
     resulting Run for W6 observability."""
-    return await dispatch_run(
+    result = await dispatch_run(
         app,
         issue_id=req.issue_id,
         project=req.project,
         trigger_source={"kind": "glimmung_ui"},
         workflow_name=req.workflow,
     )
+    return PublicDispatchResult.from_internal(result)
 
 
 # ─── Design portfolio review surface (#225) ─────────────────────────────────
@@ -6295,12 +6302,12 @@ async def patch_portfolio_element(
 
 @app.post(
     "/v1/portfolio/elements/dispatch",
-    response_model=DispatchResult,
+    response_model=PublicDispatchResult,
     dependencies=[Depends(require_admin_user)],
 )
 async def dispatch_portfolio_elements(
     req: PortfolioElementsDispatchRequest,
-) -> DispatchResult:
+) -> PublicDispatchResult:
     """Create a dispatchable Issue from portfolio review rows.
 
     Review-state changes stay passive. This endpoint is the explicit operator
@@ -6333,7 +6340,7 @@ async def dispatch_portfolio_elements(
         workflow=req.workflow,
         ui_validation_requested=True,
     )
-    return await dispatch_run(
+    result = await dispatch_run(
         app,
         issue_id=issue.id,
         project=project,
@@ -6352,6 +6359,7 @@ async def dispatch_portfolio_elements(
             },
         },
     )
+    return PublicDispatchResult.from_internal(result)
 
 
 def _portfolio_element_doc_id(project: str, route: str, element_id: str) -> str:

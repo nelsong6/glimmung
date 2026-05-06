@@ -35,10 +35,9 @@ type IssueRow = {
 type DispatchResult = {
   state: string;
   lease_id: string | null;
-  run_id: string | null;
+  run_number: number | null;
   host: string | null;
   workflow: string | null;
-  issue_lock_holder_id: string | null;
   detail: string | null;
 };
 

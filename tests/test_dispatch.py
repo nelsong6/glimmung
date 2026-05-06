@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from glimmung import issues as issue_ops
-from glimmung.dispatch import dispatch_run
+from glimmung.dispatch import PublicDispatchResult, dispatch_run
 from glimmung.models import IssueSource, LeaseState, RunState
 
 from tests.cosmos_fake import FakeContainer
@@ -237,6 +237,29 @@ async def test_dispatch_creates_lock_lease_and_run_when_workflow_opts_in(app):
     assert run_docs[0]["state"] == RunState.IN_PROGRESS.value
     assert run_docs[0]["issue_lock_holder_id"] == result.issue_lock_holder_id
     assert run_docs[0]["trigger_source"] == {"kind": "glimmung_ui"}
+
+
+@pytest.mark.asyncio
+async def test_public_dispatch_result_uses_run_number_not_run_id(app):
+    await _register_project(app, "ambience", "nelsong6/ambience")
+    await _register_workflow(
+        app, project="ambience", name="issue-agent",
+        retry_workflow_filename="agent-retry.yml",
+    )
+    await _register_host(app, "runner-1")
+    await _register_issue(app, project="ambience", repo="nelsong6/ambience", issue_number=42)
+
+    result = await dispatch_run(
+        app, repo="nelsong6/ambience", issue_number=42,
+        trigger_source={"kind": "glimmung_ui"},
+    )
+
+    public = PublicDispatchResult.from_internal(result)
+    dumped = public.model_dump()
+    assert public.run_number == result.run_number
+    assert public.run_number == 1
+    assert "run_id" not in dumped
+    assert "issue_lock_holder_id" not in dumped
 
 
 @pytest.mark.asyncio
