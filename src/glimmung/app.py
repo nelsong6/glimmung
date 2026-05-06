@@ -454,6 +454,10 @@ _DISPATCH_INPUT_KEYS = frozenset({
     "feedback",
     "pr_number",
     "recent_comments",
+    "work_context_id",
+    "work_context_branch",
+    "work_context_base_ref",
+    "work_context_state",
 })
 
 

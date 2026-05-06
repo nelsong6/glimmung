@@ -92,6 +92,10 @@ def test_job_manifest_maps_phase_jobs_to_sequential_pod_containers():
             "attempt_index": "2",
             "issue_id": "01ISSUE",
             "issue_body": "Use the validation URL and make the requested change.",
+            "work_context_id": "playbook:01PB:shared",
+            "work_context_branch": "glimmung/playbooks/01pb",
+            "work_context_base_ref": "main",
+            "work_context_state": "in_use",
             "phase_inputs": {
                 "target-ref": "main",
                 "prod_namespace": "glimmung",
@@ -129,6 +133,10 @@ def test_job_manifest_maps_phase_jobs_to_sequential_pod_containers():
     assert env["GLIMMUNG_ISSUE_BODY"]["value"] == (
         "Use the validation URL and make the requested change."
     )
+    assert env["GLIMMUNG_WORK_CONTEXT_ID"]["value"] == "playbook:01PB:shared"
+    assert env["GLIMMUNG_WORK_CONTEXT_BRANCH"]["value"] == "glimmung/playbooks/01pb"
+    assert env["GLIMMUNG_WORK_CONTEXT_BASE_REF"]["value"] == "main"
+    assert env["GLIMMUNG_WORK_CONTEXT_STATE"]["value"] == "in_use"
     assert env["GLIMMUNG_INPUT_TARGET_REF"]["value"] == "main"
     assert env["GLIMMUNG_ENTRYPOINT_JOB_ID"]["value"] == "agent"
     assert env["GLIMMUNG_ENTRYPOINT_STEP_SLUG"]["value"] == "run-agent"

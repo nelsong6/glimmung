@@ -451,7 +451,17 @@ def _universal_env(
             },
         },
     ]
-    for key in ("issue_id", "issue_repo", "issue_number", "issue_title", "issue_body"):
+    for key in (
+        "issue_id",
+        "issue_repo",
+        "issue_number",
+        "issue_title",
+        "issue_body",
+        "work_context_id",
+        "work_context_branch",
+        "work_context_base_ref",
+        "work_context_state",
+    ):
         if key in metadata:
             env.append({"name": f"GLIMMUNG_{_env_name(key)}", "value": str(metadata[key])})
     for key in ("entrypoint_job_id", "entrypoint_step_slug"):
