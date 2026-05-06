@@ -39,7 +39,9 @@ export function initAuth(): Promise<void> {
         authority: _config!.authority,
         redirectUri: window.location.origin + "/",
       },
-      cache: { cacheLocation: "sessionStorage" },
+      // Keep MSAL account/token cache origin-wide so opening Glimmung in a
+      // second tab sees the same signed-in account.
+      cache: { cacheLocation: "localStorage" },
     };
     _msal = new PublicClientApplication(msalConfig);
     await _msal.initialize();
