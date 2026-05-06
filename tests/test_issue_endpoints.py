@@ -16,11 +16,15 @@ from fastapi import HTTPException
 
 from glimmung import issues as issue_ops
 from glimmung.app import (
+    IssueArchiveRequest,
     IssueCommentRequest,
     IssueUpdateRequest,
     _build_issue_detail,
+    archive_issue_endpoint,
+    app,
     create_issue_comment_endpoint,
     delete_issue_comment_endpoint,
+    discard_issue_endpoint,
     update_issue_comment_endpoint,
     _list_issues_from_cosmos,
 )
@@ -37,6 +41,17 @@ def cosmos():
         runs=FakeContainer("runs", "/project"),
         locks=FakeContainer("locks", "/scope"),
     )
+
+
+@pytest.fixture
+def app_state(cosmos):
+    old = getattr(app.state, "cosmos", None)
+    app.state.cosmos = cosmos
+    yield
+    if old is None:
+        delattr(app.state, "cosmos")
+    else:
+        app.state.cosmos = old
 
 
 # ─── list_issues: native + GH-anchored coexist ──────────────────────────────
@@ -90,6 +105,45 @@ async def test_list_omits_closed_issues(cosmos):
 
     rows = await _list_issues_from_cosmos(cosmos)
     assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_archive_issue_closes_and_comments(cosmos, app_state):
+    issue = await issue_ops.create_issue(
+        cosmos, project="ambience", title="stale idea",
+    )
+
+    detail = await archive_issue_endpoint(
+        IssueArchiveRequest(reason="superseded"),
+        project="ambience",
+        issue_id=issue.id,
+        user=User(sub="admin", email="admin@example.com", name="Admin"),
+    )
+
+    assert detail.state == IssueState.CLOSED.value
+    assert [(c.author, c.body) for c in detail.comments] == [
+        ("admin@example.com", "Archived: superseded"),
+    ]
+    assert await _list_issues_from_cosmos(cosmos) == []
+
+
+@pytest.mark.asyncio
+async def test_discard_issue_closes_and_comments(cosmos, app_state):
+    issue = await issue_ops.create_issue(
+        cosmos, project="ambience", title="not actionable",
+    )
+
+    detail = await discard_issue_endpoint(
+        IssueArchiveRequest(),
+        project="ambience",
+        issue_id=issue.id,
+        user=User(sub="admin", email="admin@example.com", name="Admin"),
+    )
+
+    assert detail.state == IssueState.CLOSED.value
+    assert [(c.author, c.body) for c in detail.comments] == [
+        ("admin@example.com", "Discarded"),
+    ]
 
 
 @pytest.mark.asyncio

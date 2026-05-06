@@ -4713,6 +4713,10 @@ class IssueCommentRequest(BaseModel):
     body: str
 
 
+class IssueArchiveRequest(BaseModel):
+    reason: str = ""
+
+
 class GraphNode(BaseModel):
     """One node in the per-issue lineage graph (#42).
 
@@ -5326,6 +5330,76 @@ async def patch_issue_endpoint(
         elif target not in ("open", "closed"):
             raise HTTPException(400, f"state must be 'open' or 'closed', not {req.state!r}")
     return await _build_issue_detail(cosmos, issue=issue)
+
+
+async def _archive_issue(
+    cosmos: Cosmos,
+    *,
+    project: str,
+    issue_id: str,
+    user: User,
+    action: str,
+    reason: str,
+) -> IssueDetail:
+    found = await issue_ops.read_issue(cosmos, project=project, issue_id=issue_id)
+    if found is None:
+        raise HTTPException(404, f"no glimmung issue {project}/{issue_id}")
+    issue, etag = found
+    note = action.capitalize()
+    if reason.strip():
+        note = f"{note}: {reason.strip()}"
+    issue, etag, _ = await issue_ops.add_comment(
+        cosmos,
+        issue=issue,
+        etag=etag,
+        author=user.email,
+        body=note,
+    )
+    if issue.state == IssueState.OPEN:
+        issue, _ = await issue_ops.close_issue(cosmos, issue=issue, etag=etag)
+    return await _build_issue_detail(cosmos, issue=issue)
+
+
+@app.post(
+    "/v1/issues/by-id/{project}/{issue_id}/archive",
+    response_model=IssueDetail,
+)
+async def archive_issue_endpoint(
+    req: IssueArchiveRequest,
+    project: str = Path(...),
+    issue_id: str = Path(...),
+    user: User = Depends(require_admin_user),
+) -> IssueDetail:
+    """Archive an issue by closing it and leaving an audit comment."""
+    return await _archive_issue(
+        app.state.cosmos,
+        project=project,
+        issue_id=issue_id,
+        user=user,
+        action="archived",
+        reason=req.reason,
+    )
+
+
+@app.post(
+    "/v1/issues/by-id/{project}/{issue_id}/discard",
+    response_model=IssueDetail,
+)
+async def discard_issue_endpoint(
+    req: IssueArchiveRequest,
+    project: str = Path(...),
+    issue_id: str = Path(...),
+    user: User = Depends(require_admin_user),
+) -> IssueDetail:
+    """Discard an issue by closing it and leaving an audit comment."""
+    return await _archive_issue(
+        app.state.cosmos,
+        project=project,
+        issue_id=issue_id,
+        user=user,
+        action="discarded",
+        reason=req.reason,
+    )
 
 
 @app.post(

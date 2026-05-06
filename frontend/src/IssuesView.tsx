@@ -48,6 +48,11 @@ type DispatchStatus =
   | { kind: "result"; key: string; result: DispatchResult }
   | { kind: "error"; key: string; message: string };
 
+type IssueActionStatus =
+  | { kind: "idle" }
+  | { kind: "discarding"; key: string }
+  | { kind: "error"; key: string; message: string };
+
 export function IssuesView({
   signedIn,
   projectFilter,
@@ -70,6 +75,7 @@ export function IssuesView({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [dispatchStatus, setDispatchStatus] = useState<DispatchStatus>({ kind: "idle" });
+  const [issueActionStatus, setIssueActionStatus] = useState<IssueActionStatus>({ kind: "idle" });
 
   const refresh = async () => {
     setLoading(true);
@@ -127,6 +133,31 @@ export function IssuesView({
     navigate(
       `/projects/${encodeURIComponent(row.project)}/issues/${row.number}/summary`
     );
+  };
+
+  const discard = async (row: IssueRow) => {
+    const key = rowKey(row);
+    const reason = window.prompt("Discard reason", "");
+    if (reason === null) return;
+    setIssueActionStatus({ kind: "discarding", key });
+    try {
+      const r = await authedFetch(
+        `/v1/issues/by-id/${encodeURIComponent(row.project)}/${encodeURIComponent(row.id)}/discard`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason }),
+        },
+      );
+      if (!r.ok) {
+        const text = await r.text();
+        throw new Error(`/v1/issues/by-id/${row.project}/${row.id}/discard -> ${r.status}: ${text}`);
+      }
+      setIssueActionStatus({ kind: "idle" });
+      void refresh();
+    } catch (e) {
+      setIssueActionStatus({ kind: "error", key, message: String(e) });
+    }
   };
 
   const visibleRows = rows;
@@ -226,6 +257,21 @@ export function IssuesView({
                         ? "dispatching…"
                         : "dispatch"}
                     </button>
+                    <button
+                      type="button"
+                      className="link"
+                      onClick={() => void discard(row)}
+                      disabled={
+                        row.issue_lock_held
+                        || !signedIn
+                        || (issueActionStatus.kind === "discarding" && issueActionStatus.key === key)
+                      }
+                      style={{ marginLeft: "0.75rem" }}
+                    >
+                      {issueActionStatus.kind === "discarding" && issueActionStatus.key === key
+                        ? "discarding…"
+                        : "discard"}
+                    </button>
                     {status?.kind === "result" && (
                       <span className={`pill ${pillClass(status.result.state)}`} style={{ marginLeft: "0.5rem" }}>
                         {status.result.state}
@@ -233,6 +279,11 @@ export function IssuesView({
                     )}
                     {status?.kind === "error" && (
                       <span className="pill drain" style={{ marginLeft: "0.5rem" }} title={status.message}>
+                        error
+                      </span>
+                    )}
+                    {issueActionStatus.kind === "error" && issueActionStatus.key === key && (
+                      <span className="pill drain" style={{ marginLeft: "0.5rem" }} title={issueActionStatus.message}>
                         error
                       </span>
                     )}

@@ -675,6 +675,11 @@ function handleMockRequest(url: URL, init?: RequestInit): Response {
     return detail ? json(detail) : json({ error: "not found" }, { status: 404 });
   }
 
+  const discardIssueMatch = path.match(/^\/v1\/issues\/by-id\/([^/]+)\/([^/]+)\/(?:archive|discard)$/);
+  if (discardIssueMatch && method === "POST") {
+    return json({ id: decodeURIComponent(discardIssueMatch[2]), state: "closed" });
+  }
+
   if (path.includes("/comments")) return json({ id: `comment-mock-${Date.now()}`, ok: true });
 
   if (path.match(/^\/v1\/runs\/[^/]+\/[^/]+\/native\/events$/)) return json(nativeEvents);
