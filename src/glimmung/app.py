@@ -4030,6 +4030,101 @@ def _attempt_graph_metadata(attempt: Any) -> dict[str, Any]:
     }
 
 
+def _run_graph_metadata(run: Any) -> dict[str, Any]:
+    """Explicit Run -> Cycle -> Stage -> Job -> Step graph contract.
+
+    Attempts remain in the graph as compatibility nodes, but UI surfaces should
+    prefer this structured object when they need to render a selected run
+    without inferring cycles/jobs/steps from logs or ad hoc attempt fields.
+    """
+    if hasattr(run, "model_dump"):
+        data = run.model_dump(mode="json")
+    else:
+        data = dict(run or {})
+    cycles: list[dict[str, Any]] = []
+    for attempt in data.get("attempts") or []:
+        if not isinstance(attempt, dict):
+            continue
+        attempt_index = int(attempt.get("attempt_index") or 0)
+        verification = attempt.get("verification") or {}
+        state = (
+            "skipped" if attempt.get("skipped_from_run_id")
+            else verification.get("status") or (
+                "completed" if attempt.get("completed_at") else "in_progress"
+            )
+        )
+        jobs = _run_graph_jobs(attempt)
+        cycles.append({
+            "cycle_index": attempt_index,
+            "attempt_index": attempt_index,
+            "state": state,
+            "started_at": attempt.get("dispatched_at"),
+            "completed_at": attempt.get("completed_at"),
+            "stages": [{
+                "stage_id": str(attempt.get("phase") or f"attempt-{attempt_index}"),
+                "name": str(attempt.get("phase") or f"attempt-{attempt_index}"),
+                "kind": str(attempt.get("phase_kind") or "gha_dispatch"),
+                "state": state,
+                "jobs": jobs,
+            }],
+        })
+    return {
+        "run_id": data.get("id"),
+        "lineage": {
+            "cloned_from_run_id": data.get("cloned_from_run_id"),
+            "entrypoint_phase": data.get("entrypoint_phase"),
+        },
+        "cycles": cycles,
+    }
+
+
+def _run_graph_jobs(attempt: dict[str, Any]) -> list[dict[str, Any]]:
+    native_jobs = [j for j in (attempt.get("jobs") or []) if isinstance(j, dict)]
+    if native_jobs:
+        return [
+            {
+                "job_id": str(job.get("job_id") or job.get("id") or ""),
+                "name": job.get("name"),
+                "state": job.get("state"),
+                "started_at": job.get("started_at"),
+                "completed_at": job.get("completed_at"),
+                "steps": [
+                    {
+                        "step_id": str(step.get("slug") or ""),
+                        "slug": step.get("slug"),
+                        "title": step.get("title"),
+                        "state": step.get("state"),
+                        "started_at": step.get("started_at"),
+                        "completed_at": step.get("completed_at"),
+                        "exit_code": step.get("exit_code"),
+                        "message": step.get("message"),
+                    }
+                    for step in (job.get("steps") or [])
+                    if isinstance(step, dict)
+                ],
+            }
+            for job in native_jobs
+        ]
+    workflow_filename = str(attempt.get("workflow_filename") or attempt.get("phase") or "phase")
+    return [{
+        "job_id": workflow_filename,
+        "name": workflow_filename,
+        "state": "completed" if attempt.get("completed_at") else "in_progress",
+        "started_at": attempt.get("dispatched_at"),
+        "completed_at": attempt.get("completed_at"),
+        "steps": [{
+            "step_id": "workflow-run",
+            "slug": "workflow-run",
+            "title": "Workflow run",
+            "state": "completed" if attempt.get("completed_at") else "in_progress",
+            "started_at": attempt.get("dispatched_at"),
+            "completed_at": attempt.get("completed_at"),
+            "exit_code": None,
+            "message": attempt.get("conclusion"),
+        }],
+    }]
+
+
 def _workflow_graph_metadata(workflow_doc: dict[str, Any] | None) -> dict[str, Any]:
     """Small, stable graph contract for workflow shape/policy.
 
@@ -4604,6 +4699,7 @@ async def _build_system_graph(
                 "cloned_from_run_id": run.cloned_from_run_id,
                 "entrypoint_phase": run.entrypoint_phase,
                 "workflow_graph": workflow_meta_cache[workflow_key],
+                "run_graph": _run_graph_metadata(run),
             },
         ))
         edges.append(GraphEdge(
@@ -4951,6 +5047,7 @@ async def _build_issue_graph_for_issue(
                 "cloned_from_run_id": d.get("cloned_from_run_id"),
                 "entrypoint_phase": d.get("entrypoint_phase"),
                 "workflow_graph": workflow_meta_cache[workflow_key],
+                "run_graph": _run_graph_metadata(d),
             },
         ))
         edges.append(GraphEdge(
