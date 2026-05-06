@@ -31,7 +31,6 @@ from glimmung import runs as run_ops
 from glimmung import signals as signal_ops
 from glimmung.artifacts import ArtifactStore
 from glimmung.dispatch import (
-    DispatchResult,
     PublicDispatchResult,
     ResumeResult,
     dispatch_resumed_run,
@@ -182,6 +181,7 @@ async def lifespan(app: FastAPI):
 
     sweep_task = asyncio.create_task(_sweep_loop(cosmos, settings))
     promote_task = asyncio.create_task(_promote_loop(app, settings))
+    standby_dns_task = asyncio.create_task(_standby_dns_loop(app, settings))
     lock_sweep_task = asyncio.create_task(_lock_sweep_loop(cosmos, settings))
     drain_task = asyncio.create_task(_signal_drain_loop(app, settings))
     try:
@@ -189,10 +189,11 @@ async def lifespan(app: FastAPI):
     finally:
         sweep_task.cancel()
         promote_task.cancel()
+        standby_dns_task.cancel()
         lock_sweep_task.cancel()
         drain_task.cancel()
         await asyncio.gather(
-            sweep_task, promote_task, lock_sweep_task, drain_task,
+            sweep_task, promote_task, standby_dns_task, lock_sweep_task, drain_task,
             return_exceptions=True,
         )
         await app.state.artifact_store.close()
@@ -438,6 +439,25 @@ async def _promote_loop(app: FastAPI, settings: Settings) -> None:
         except Exception:
             log.exception("promote_pending failed; will retry")
         await asyncio.sleep(settings.sweep_interval_seconds)
+
+
+async def _standby_dns_loop(app: FastAPI, settings: Settings) -> None:
+    """Keep project-declared native standby DNS records materialized in Kubernetes."""
+    while True:
+        try:
+            await _reconcile_standby_dns(app)
+        except Exception:
+            log.exception("standby DNS reconcile failed; will retry")
+        await asyncio.sleep(settings.sweep_interval_seconds)
+
+
+async def _reconcile_standby_dns(app: FastAPI, project_docs: list[dict[str, Any]] | None = None) -> None:
+    launcher = getattr(app.state, "native_k8s_launcher", None)
+    if launcher is None:
+        return
+    if project_docs is None:
+        project_docs = await query_all(app.state.cosmos.projects, "SELECT * FROM c")
+    await launcher.reconcile_standby_dns(project_docs)
 
 
 # Lease metadata is dual-purpose: glimmung-internal bookkeeping
@@ -3740,6 +3760,10 @@ async def register_project(p: ProjectRegister) -> Project:
         await cosmos.projects.replace_item(item=p.name, body=doc)
     except Exception:
         await cosmos.projects.create_item(doc)
+    try:
+        await _reconcile_standby_dns(app, [doc])
+    except Exception:
+        log.exception("standby DNS reconcile failed for project %s; background loop will retry", p.name)
     return Project.model_validate(lease_ops._camel_to_snake(doc))
 
 

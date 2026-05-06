@@ -27,6 +27,8 @@ from glimmung.settings import Settings
 
 NATIVE_K8S_HOST = "native-k8s"
 NATIVE_K8S_METADATA_KEY = "native_k8s"
+NATIVE_SLOT_INDEX_METADATA_KEY = "native_slot_index"
+NATIVE_SLOT_NAME_METADATA_KEY = "native_slot_name"
 
 
 def _utcnow_iso() -> str:
@@ -156,11 +158,10 @@ async def acquire_native(
     now = _utcnow_iso()
     ttl = ttl_seconds or settings.lease_default_ttl_seconds
     native_metadata = {**metadata, NATIVE_K8S_METADATA_KEY: True}
-    state = (
-        LeaseState.ACTIVE
-        if await native_capacity_available(cosmos, settings, project=project)
-        else LeaseState.PENDING
-    )
+    slot_index = await _available_native_slot(cosmos, settings, project=project, metadata=metadata)
+    if slot_index is not None:
+        _set_native_slot_metadata(native_metadata, project=project, slot_index=slot_index)
+    state = LeaseState.ACTIVE if slot_index is not None else LeaseState.PENDING
     lease = Lease(
         id=str(ULID()),
         project=project,
@@ -183,15 +184,83 @@ async def native_capacity_available(
     *,
     project: str,
 ) -> bool:
-    active = await query_all(
+    return await _available_native_slot(cosmos, settings, project=project, metadata={}) is not None
+
+
+async def _available_native_slot(
+    cosmos: Cosmos,
+    settings: Settings,
+    *,
+    project: str,
+    metadata: dict[str, Any],
+) -> int | None:
+    active = await _active_native_leases(cosmos)
+    project_cap = _native_project_cap(settings)
+    global_cap = max(1, int(getattr(settings, "native_runner_global_concurrency", 5)))
+    project_active = [doc for doc in active if doc.get("project") == project]
+    if len(project_active) >= project_cap or len(active) >= global_cap:
+        return None
+
+    used = {
+        slot
+        for doc in project_active
+        if (slot := _native_slot_index(doc.get("metadata") or {})) is not None
+    }
+    preferred = _preferred_native_slot(metadata)
+    if preferred is not None:
+        if 1 <= preferred <= project_cap and preferred not in used:
+            return preferred
+        return None
+    for slot in range(1, project_cap + 1):
+        if slot not in used:
+            return slot
+    return None
+
+
+async def _active_native_leases(cosmos: Cosmos) -> list[dict[str, Any]]:
+    return await query_all(
         cosmos.leases,
         "SELECT * FROM c WHERE c.state = @s AND c.metadata.native_k8s = true",
         parameters=[{"name": "@s", "value": LeaseState.ACTIVE.value}],
     )
-    project_cap = max(1, int(getattr(settings, "native_runner_project_concurrency", 5)))
-    global_cap = max(1, int(getattr(settings, "native_runner_global_concurrency", 5)))
-    project_active = sum(1 for doc in active if doc.get("project") == project)
-    return project_active < project_cap and len(active) < global_cap
+
+
+def _native_project_cap(settings: Settings) -> int:
+    return max(1, int(getattr(settings, "native_runner_project_concurrency", 5)))
+
+
+def _preferred_native_slot(metadata: dict[str, Any]) -> int | None:
+    for value in (
+        metadata.get(NATIVE_SLOT_INDEX_METADATA_KEY),
+        (metadata.get("phase_inputs") or {}).get("validation_slot_index")
+        if isinstance(metadata.get("phase_inputs"), dict)
+        else None,
+    ):
+        try:
+            slot = int(str(value))
+        except (TypeError, ValueError):
+            continue
+        if slot > 0:
+            return slot
+    return None
+
+
+def _native_slot_index(metadata: dict[str, Any]) -> int | None:
+    try:
+        slot = int(str(metadata.get(NATIVE_SLOT_INDEX_METADATA_KEY) or ""))
+    except ValueError:
+        return None
+    return slot if slot > 0 else None
+
+
+def _set_native_slot_metadata(
+    metadata: dict[str, Any],
+    *,
+    project: str,
+    slot_index: int,
+) -> None:
+    metadata[NATIVE_SLOT_INDEX_METADATA_KEY] = str(slot_index)
+    metadata[NATIVE_SLOT_NAME_METADATA_KEY] = f"{project}-slot-{slot_index}"
 
 
 async def heartbeat(cosmos: Cosmos, lease_id: str, project: str) -> Lease:
@@ -275,10 +344,19 @@ async def try_activate_native_pending(
         return None
     if lease_doc.get("state") != LeaseState.PENDING.value:
         return None
-    if not await native_capacity_available(cosmos, settings, project=lease_doc["project"]):
+    metadata = dict(lease_doc.get("metadata") or {})
+    slot_index = await _available_native_slot(
+        cosmos,
+        settings,
+        project=lease_doc["project"],
+        metadata=metadata,
+    )
+    if slot_index is None:
         return None
 
     now = _utcnow_iso()
+    _set_native_slot_metadata(metadata, project=lease_doc["project"], slot_index=slot_index)
+    lease_doc["metadata"] = metadata
     lease_doc["host"] = NATIVE_K8S_HOST
     lease_doc["state"] = LeaseState.ACTIVE.value
     lease_doc["assignedAt"] = now

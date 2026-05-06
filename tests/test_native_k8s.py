@@ -30,6 +30,12 @@ def _settings():
         native_runner_namespace_role="admin",
         native_runner_codex_credentials_secret="codex-credentials",
         native_runner_codex_credentials_mount_path="/etc/codex-creds",
+        native_runner_project_concurrency=5,
+        native_standby_dns_namespace="glimmung",
+        native_standby_dns_gateway_namespace="envoy-gateway-system",
+        native_standby_dns_gateway_name="main",
+        native_standby_dns_target="172.179.163.96",
+        native_standby_dns_default_ttl=300,
         k8s_sa_token_path="/var/run/token",
         k8s_ca_cert_path="/var/run/ca.crt",
         k8s_api_host="https://kubernetes.default.svc",
@@ -61,10 +67,12 @@ class _PodLogLauncher(_RecordingLauncher):
         self.calls.append({"method": method, "path": path, "json": json})
         if path.startswith("/api/v1/namespaces/glimmung-runs/pods?"):
             return {
-                "items": [{
-                    "metadata": {"name": "glim-run-pod"},
-                    "status": {"phase": "Running", "startTime": "2026-05-06T06:00:00Z"},
-                }]
+                "items": [
+                    {
+                        "metadata": {"name": "glim-run-pod"},
+                        "status": {"phase": "Running", "startTime": "2026-05-06T06:00:00Z"},
+                    }
+                ]
             }
         return {}
 
@@ -111,6 +119,8 @@ def test_job_manifest_maps_phase_jobs_to_sequential_pod_containers():
             "attempt_index": "2",
             "issue_id": "01ISSUE",
             "issue_body": "Use the validation URL and make the requested change.",
+            "native_slot_index": "3",
+            "native_slot_name": "ambience-slot-3",
             "work_context_id": "playbook:01PB:shared",
             "work_context_branch": "glimmung/playbooks/01pb",
             "work_context_base_ref": "main",
@@ -138,7 +148,9 @@ def test_job_manifest_maps_phase_jobs_to_sequential_pod_containers():
     )
 
     spec = manifest["spec"]["template"]["spec"]
-    assert manifest["spec"]["template"]["metadata"]["labels"]["azure.workload.identity/use"] == "true"
+    assert (
+        manifest["spec"]["template"]["metadata"]["labels"]["azure.workload.identity/use"] == "true"
+    )
     assert spec["serviceAccountName"] == "glimmung-native-runner"
     volumes = {item["name"]: item for item in spec["volumes"]}
     assert volumes["codex-credentials"]["secret"] == {
@@ -163,6 +175,8 @@ def test_job_manifest_maps_phase_jobs_to_sequential_pod_containers():
     assert env["GLIMMUNG_ISSUE_BODY"]["value"] == (
         "Use the validation URL and make the requested change."
     )
+    assert env["GLIMMUNG_NATIVE_SLOT_INDEX"]["value"] == "3"
+    assert env["GLIMMUNG_NATIVE_SLOT_NAME"]["value"] == "ambience-slot-3"
     assert env["GLIMMUNG_WORK_CONTEXT_ID"]["value"] == "playbook:01PB:shared"
     assert env["GLIMMUNG_WORK_CONTEXT_BRANCH"]["value"] == "glimmung/playbooks/01pb"
     assert env["GLIMMUNG_WORK_CONTEXT_BASE_REF"]["value"] == "main"
@@ -170,9 +184,7 @@ def test_job_manifest_maps_phase_jobs_to_sequential_pod_containers():
     assert env["GLIMMUNG_INPUT_TARGET_REF"]["value"] == "main"
     assert env["GLIMMUNG_ENTRYPOINT_JOB_ID"]["value"] == "agent"
     assert env["GLIMMUNG_ENTRYPOINT_STEP_SLUG"]["value"] == "run-agent"
-    assert env["GLIMMUNG_ARTIFACT_REFS"]["value"] == (
-        '{"source": "blob://artifacts/source.tgz"}'
-    )
+    assert env["GLIMMUNG_ARTIFACT_REFS"]["value"] == ('{"source": "blob://artifacts/source.tgz"}')
     assert env["GLIMMUNG_CONTEXT"]["value"] == '{"operator_note": "resume at agent step"}'
     assert env["GLIMMUNG_VALIDATION_NAMESPACE"]["value"] == (
         "glim-run-01krnative0000000000000000-2"
@@ -194,6 +206,52 @@ def test_job_manifest_maps_phase_jobs_to_sequential_pod_containers():
 
 
 @pytest.mark.asyncio
+async def test_reconcile_standby_dns_creates_project_slots():
+    launcher = _RecordingLauncher(_settings())
+
+    await launcher.reconcile_standby_dns([
+        {
+            "id": "ambience",
+            "name": "ambience",
+            "metadata": {
+                "native_standby_dns": {
+                    "enabled": True,
+                    "record_base": "ambience.dev.romaine.life",
+                    "slot_prefix": "ambience-slot",
+                    "count": 2,
+                }
+            },
+        }
+    ])
+
+    assert launcher.calls[0]["method"] == "GET"
+    assert launcher.calls[0]["path"].startswith(
+        "/apis/externaldns.k8s.io/v1alpha1/namespaces/glimmung/dnsendpoints?"
+    )
+    assert launcher.calls[1]["method"] == "POST"
+    assert launcher.calls[1]["path"] == (
+        "/apis/externaldns.k8s.io/v1alpha1/namespaces/glimmung/dnsendpoints"
+    )
+    body = launcher.calls[1]["json"]
+    assert body["metadata"]["name"] == "native-standby-ambience"
+    assert body["metadata"]["labels"]["glimmung.romaine.life/standby-dns"] == "true"
+    assert body["spec"]["endpoints"] == [
+        {
+            "dnsName": "ambience-slot-1.ambience.dev.romaine.life",
+            "recordType": "A",
+            "recordTTL": 300,
+            "targets": ["172.179.163.96"],
+        },
+        {
+            "dnsName": "ambience-slot-2.ambience.dev.romaine.life",
+            "recordType": "A",
+            "recordTTL": 300,
+            "targets": ["172.179.163.96"],
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_delete_attempt_job_uses_graceful_foreground_delete():
     launcher = _RecordingLauncher(_settings())
 
@@ -203,19 +261,20 @@ async def test_delete_attempt_job_uses_graceful_foreground_delete():
         grace_period_seconds=60,
     )
 
-    assert launcher.calls == [{
-        "method": "DELETE",
-        "path": (
-            "/apis/batch/v1/namespaces/glimmung-runs/jobs/"
-            "glim-01krnative0000000000000000-2"
-        ),
-        "json": {
-            "apiVersion": "v1",
-            "kind": "DeleteOptions",
-            "propagationPolicy": "Foreground",
-            "gracePeriodSeconds": 60,
-        },
-    }]
+    assert launcher.calls == [
+        {
+            "method": "DELETE",
+            "path": (
+                "/apis/batch/v1/namespaces/glimmung-runs/jobs/glim-01krnative0000000000000000-2"
+            ),
+            "json": {
+                "apiVersion": "v1",
+                "kind": "DeleteOptions",
+                "propagationPolicy": "Foreground",
+                "gracePeriodSeconds": 60,
+            },
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -328,10 +387,7 @@ async def test_launch_scaffolds_run_namespaces_and_rbac_before_job():
 
     paths = [call["path"] for call in launcher.calls]
     job_index = paths.index("/apis/batch/v1/namespaces/glimmung-runs/jobs")
-    rolebinding_indexes = [
-        i for i, path in enumerate(paths)
-        if path.endswith("/rolebindings")
-    ]
+    rolebinding_indexes = [i for i, path in enumerate(paths) if path.endswith("/rolebindings")]
     assert rolebinding_indexes
     assert max(rolebinding_indexes) < job_index
     rolebinding_namespaces = {
@@ -344,19 +400,20 @@ async def test_launch_scaffolds_run_namespaces_and_rbac_before_job():
         "glimmung",
     }
     rolebinding = next(
-        call["json"] for call in launcher.calls
-        if call["path"].endswith("/glimmung/rolebindings")
+        call["json"] for call in launcher.calls if call["path"].endswith("/glimmung/rolebindings")
     )
     assert rolebinding["roleRef"] == {
         "apiGroup": "rbac.authorization.k8s.io",
         "kind": "ClusterRole",
         "name": "admin",
     }
-    assert rolebinding["subjects"] == [{
-        "kind": "ServiceAccount",
-        "name": "glimmung-native-runner",
-        "namespace": "glimmung-runs",
-    }]
+    assert rolebinding["subjects"] == [
+        {
+            "kind": "ServiceAccount",
+            "name": "glimmung-native-runner",
+            "namespace": "glimmung-runs",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -428,8 +485,7 @@ async def test_launch_cleans_attempt_secret_when_scaffolding_fails():
     assert {
         "method": "DELETE",
         "path": (
-            "/api/v1/namespaces/glimmung-runs/secrets/"
-            "glim-01krnative0000000000000000-0-token"
+            "/api/v1/namespaces/glimmung-runs/secrets/glim-01krnative0000000000000000-0-token"
         ),
         "json": None,
     } in launcher.calls

@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from glimmung import issues as issue_ops
+from glimmung import leases as lease_ops
 from glimmung.dispatch import PublicDispatchResult, dispatch_run
 from glimmung.models import IssueSource, LeaseState, RunState
 
@@ -58,15 +59,20 @@ def app():
 
 
 async def _register_project(
-    app, name: str, repo: str, metadata: dict | None = None,
+    app,
+    name: str,
+    repo: str,
+    metadata: dict | None = None,
 ) -> None:
-    await app.state.cosmos.projects.create_item({
-        "id": name,
-        "name": name,
-        "githubRepo": repo,
-        "metadata": metadata or {},
-        "createdAt": datetime.now(UTC).isoformat(),
-    })
+    await app.state.cosmos.projects.create_item(
+        {
+            "id": name,
+            "name": name,
+            "githubRepo": repo,
+            "metadata": metadata or {},
+            "createdAt": datetime.now(UTC).isoformat(),
+        }
+    )
 
 
 async def _register_workflow(
@@ -95,67 +101,76 @@ async def _register_workflow(
         "requirements": None,
         "verify": has_recycle,
         "recyclePolicy": (
-            {"maxAttempts": 3, "on": ["verify_fail"], "landsAt": "self"}
-            if has_recycle else None
+            {"maxAttempts": 3, "on": ["verify_fail"], "landsAt": "self"} if has_recycle else None
         ),
     }
-    await app.state.cosmos.workflows.create_item({
-        "id": name,
-        "name": name,
-        "project": project,
-        "phases": [phase],
-        "pr": {"enabled": False, "recyclePolicy": None},
-        "budget": {"total": 25.0},
-        "triggerLabel": trigger_label,
-        "defaultRequirements": requirements or {},
-        "metadata": metadata or {},
-        "createdAt": datetime.now(UTC).isoformat(),
-    })
+    await app.state.cosmos.workflows.create_item(
+        {
+            "id": name,
+            "name": name,
+            "project": project,
+            "phases": [phase],
+            "pr": {"enabled": False, "recyclePolicy": None},
+            "budget": {"total": 25.0},
+            "triggerLabel": trigger_label,
+            "defaultRequirements": requirements or {},
+            "metadata": metadata or {},
+            "createdAt": datetime.now(UTC).isoformat(),
+        }
+    )
 
 
 async def _register_native_workflow(app, *, project: str, name: str) -> None:
-    await app.state.cosmos.workflows.create_item({
-        "id": name,
-        "name": name,
-        "project": project,
-        "phases": [{
-            "name": "agent",
-            "kind": "k8s_job",
-            "workflowFilename": "",
-            "workflowRef": "main",
-            "requirements": None,
-            "verify": True,
-            "recyclePolicy": None,
-            "inputs": {},
-            "outputs": [],
-            "jobs": [{
-                "id": "agent",
-                "name": None,
-                "image": "runner:latest",
-                "command": [],
-                "args": [],
-                "env": {},
-                "steps": [{"slug": "run-agent", "title": None}],
-                "timeoutSeconds": None,
-            }],
-        }],
-        "pr": {"enabled": False, "recyclePolicy": None},
-        "budget": {"total": 25.0},
-        "triggerLabel": "agent-run",
-        "defaultRequirements": {},
-        "metadata": {},
-        "createdAt": datetime.now(UTC).isoformat(),
-    })
+    await app.state.cosmos.workflows.create_item(
+        {
+            "id": name,
+            "name": name,
+            "project": project,
+            "phases": [
+                {
+                    "name": "agent",
+                    "kind": "k8s_job",
+                    "workflowFilename": "",
+                    "workflowRef": "main",
+                    "requirements": None,
+                    "verify": True,
+                    "recyclePolicy": None,
+                    "inputs": {},
+                    "outputs": [],
+                    "jobs": [
+                        {
+                            "id": "agent",
+                            "name": None,
+                            "image": "runner:latest",
+                            "command": [],
+                            "args": [],
+                            "env": {},
+                            "steps": [{"slug": "run-agent", "title": None}],
+                            "timeoutSeconds": None,
+                        }
+                    ],
+                }
+            ],
+            "pr": {"enabled": False, "recyclePolicy": None},
+            "budget": {"total": 25.0},
+            "triggerLabel": "agent-run",
+            "defaultRequirements": {},
+            "metadata": {},
+            "createdAt": datetime.now(UTC).isoformat(),
+        }
+    )
 
 
 async def _register_host(app, name: str, capabilities: dict | None = None) -> None:
-    await app.state.cosmos.hosts.create_item({
-        "id": name,
-        "name": name,
-        "capabilities": capabilities or {},
-        "drained": False,
-        "createdAt": datetime.now(UTC).isoformat(),
-    })
+    await app.state.cosmos.hosts.create_item(
+        {
+            "id": name,
+            "name": name,
+            "capabilities": capabilities or {},
+            "drained": False,
+            "createdAt": datetime.now(UTC).isoformat(),
+        }
+    )
 
 
 async def _register_issue(
@@ -187,10 +202,13 @@ async def _register_issue(
 
 
 async def _lease_doc_for(app, lease_id: str) -> dict:
-    docs = [d async for d in app.state.cosmos.leases.query_items(
-        "SELECT * FROM c WHERE c.id = @id",
-        parameters=[{"name": "@id", "value": lease_id}],
-    )]
+    docs = [
+        d
+        async for d in app.state.cosmos.leases.query_items(
+            "SELECT * FROM c WHERE c.id = @id",
+            parameters=[{"name": "@id", "value": lease_id}],
+        )
+    ]
     assert len(docs) == 1
     return docs[0]
 
@@ -204,14 +222,18 @@ async def test_dispatch_creates_lock_lease_and_run_when_workflow_opts_in(app):
     acquires a lease (host gets assigned), and creates a Run."""
     await _register_project(app, "ambience", "nelsong6/ambience")
     await _register_workflow(
-        app, project="ambience", name="issue-agent",
+        app,
+        project="ambience",
+        name="issue-agent",
         retry_workflow_filename="agent-retry.yml",
     )
     await _register_host(app, "runner-1")
     await _register_issue(app, project="ambience", repo="nelsong6/ambience", issue_number=42)
 
     result = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=42,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=42,
         trigger_source={"kind": "glimmung_ui"},
     )
 
@@ -223,16 +245,20 @@ async def test_dispatch_creates_lock_lease_and_run_when_workflow_opts_in(app):
 
     # Lock is held
     lock_doc = await app.state.cosmos.locks.read_item(
-        item="issue::ambience%231", partition_key="issue",
+        item="issue::ambience%231",
+        partition_key="issue",
     )
     assert lock_doc["state"] == "held"
     assert lock_doc["held_by"] == result.issue_lock_holder_id
 
     # Run is in_progress with the holder id stamped on it
-    run_docs = [d async for d in app.state.cosmos.runs.query_items(
-        "SELECT * FROM c WHERE c.id = @id",
-        parameters=[{"name": "@id", "value": result.run_id}],
-    )]
+    run_docs = [
+        d
+        async for d in app.state.cosmos.runs.query_items(
+            "SELECT * FROM c WHERE c.id = @id",
+            parameters=[{"name": "@id", "value": result.run_id}],
+        )
+    ]
     assert len(run_docs) == 1
     assert run_docs[0]["state"] == RunState.IN_PROGRESS.value
     assert run_docs[0]["issue_lock_holder_id"] == result.issue_lock_holder_id
@@ -243,14 +269,18 @@ async def test_dispatch_creates_lock_lease_and_run_when_workflow_opts_in(app):
 async def test_public_dispatch_result_uses_run_number_not_run_id(app):
     await _register_project(app, "ambience", "nelsong6/ambience")
     await _register_workflow(
-        app, project="ambience", name="issue-agent",
+        app,
+        project="ambience",
+        name="issue-agent",
         retry_workflow_filename="agent-retry.yml",
     )
     await _register_host(app, "runner-1")
     await _register_issue(app, project="ambience", repo="nelsong6/ambience", issue_number=42)
 
     result = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=42,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=42,
         trigger_source={"kind": "glimmung_ui"},
     )
 
@@ -280,7 +310,9 @@ async def test_dispatch_includes_recent_comments_when_workflow_opts_in(app):
         issue_number=42,
     )
     issue, etag = await issue_ops.read_issue(
-        app.state.cosmos, project="ambience", issue_id=issue_id,
+        app.state.cosmos,
+        project="ambience",
+        issue_id=issue_id,
     )
     for idx in range(6):
         issue, etag, _ = await issue_ops.add_comment(
@@ -292,7 +324,9 @@ async def test_dispatch_includes_recent_comments_when_workflow_opts_in(app):
         )
 
     result = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=42,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=42,
         trigger_source={"kind": "glimmung_ui"},
     )
 
@@ -308,7 +342,9 @@ async def test_dispatch_includes_recent_comments_when_workflow_opts_in(app):
 async def test_dispatch_omits_recent_comments_by_default(app):
     await _register_project(app, "ambience", "nelsong6/ambience")
     await _register_workflow(
-        app, project="ambience", name="issue-agent",
+        app,
+        project="ambience",
+        name="issue-agent",
         retry_workflow_filename="agent-retry.yml",
     )
     await _register_host(app, "runner-1")
@@ -319,7 +355,9 @@ async def test_dispatch_omits_recent_comments_by_default(app):
         issue_number=42,
     )
     issue, etag = await issue_ops.read_issue(
-        app.state.cosmos, project="ambience", issue_id=issue_id,
+        app.state.cosmos,
+        project="ambience",
+        issue_id=issue_id,
     )
     await issue_ops.add_comment(
         app.state.cosmos,
@@ -330,7 +368,9 @@ async def test_dispatch_omits_recent_comments_by_default(app):
     )
 
     result = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=42,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=42,
         trigger_source={"kind": "glimmung_ui"},
     )
 
@@ -352,7 +392,9 @@ async def test_dispatch_creates_run_even_for_non_verify_phase(app):
     await _register_issue(app, project="ambience", repo="nelsong6/ambience", issue_number=7)
 
     result = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=7,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=7,
         trigger_source={"kind": "label_webhook"},
     )
 
@@ -363,7 +405,8 @@ async def test_dispatch_creates_run_even_for_non_verify_phase(app):
 
     # Lock held; no Run created.
     lock = await app.state.cosmos.locks.read_item(
-        item="issue::ambience%231", partition_key="issue",
+        item="issue::ambience%231",
+        partition_key="issue",
     )
     assert lock["held_by"] == result.issue_lock_holder_id
 
@@ -375,14 +418,18 @@ async def test_dispatch_returns_pending_when_no_host(app):
     (dispatch_run is the source of truth for "this issue's run started")."""
     await _register_project(app, "ambience", "nelsong6/ambience")
     await _register_workflow(
-        app, project="ambience", name="issue-agent",
+        app,
+        project="ambience",
+        name="issue-agent",
         retry_workflow_filename="agent-retry.yml",
     )
     # No host registered.
     await _register_issue(app, project="ambience", repo="nelsong6/ambience", issue_number=99)
 
     result = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=99,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=99,
         trigger_source={"kind": "glimmung_ui"},
     )
 
@@ -399,7 +446,9 @@ async def test_native_dispatch_uses_virtual_capacity_without_registered_host(app
     await _register_issue(app, project="ambience", repo="nelsong6/ambience", issue_number=100)
 
     result = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=100,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=100,
         trigger_source={"kind": "glimmung_ui"},
         workflow_name="native-agent",
     )
@@ -409,10 +458,13 @@ async def test_native_dispatch_uses_virtual_capacity_without_registered_host(app
     lease_doc = await _lease_doc_for(app, result.lease_id)
     assert lease_doc["state"] == LeaseState.ACTIVE.value
     assert lease_doc["metadata"]["native_k8s"] is True
+    assert lease_doc["metadata"]["native_slot_index"] == "1"
+    assert lease_doc["metadata"]["native_slot_name"] == "ambience-slot-1"
     assert lease_doc["metadata"]["phase_name"] == "agent"
 
     run_doc = await app.state.cosmos.runs.read_item(
-        item=result.run_id, partition_key="ambience",
+        item=result.run_id,
+        partition_key="ambience",
     )
     assert run_doc["attempts"][0]["phase_kind"] == "k8s_job"
     assert run_doc["attempts"][0]["jobs"][0]["job_id"] == "agent"
@@ -428,12 +480,16 @@ async def test_native_dispatch_respects_project_capacity(app):
     await _register_issue(app, project="ambience", repo="nelsong6/ambience", issue_number=102)
 
     first = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=101,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=101,
         trigger_source={"kind": "glimmung_ui"},
         workflow_name="native-agent",
     )
     second = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=102,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=102,
         trigger_source={"kind": "glimmung_ui"},
         workflow_name="native-agent",
     )
@@ -444,6 +500,79 @@ async def test_native_dispatch_respects_project_capacity(app):
     lease_doc = await _lease_doc_for(app, second.lease_id)
     assert lease_doc["state"] == LeaseState.PENDING.value
     assert lease_doc["metadata"]["native_k8s"] is True
+    assert "native_slot_index" not in lease_doc["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_native_dispatch_assigns_lowest_available_slot(app):
+    app.state.settings.native_runner_project_concurrency = 2
+    app.state.settings.native_runner_global_concurrency = 5
+    await _register_project(app, "ambience", "nelsong6/ambience")
+    await _register_native_workflow(app, project="ambience", name="native-agent")
+    await _register_issue(app, project="ambience", repo="nelsong6/ambience", issue_number=103)
+    await _register_issue(app, project="ambience", repo="nelsong6/ambience", issue_number=104)
+
+    first = await dispatch_run(
+        app,
+        repo="nelsong6/ambience",
+        issue_number=103,
+        trigger_source={"kind": "glimmung_ui"},
+        workflow_name="native-agent",
+    )
+    second = await dispatch_run(
+        app,
+        repo="nelsong6/ambience",
+        issue_number=104,
+        trigger_source={"kind": "glimmung_ui"},
+        workflow_name="native-agent",
+    )
+
+    first_lease = await _lease_doc_for(app, first.lease_id)
+    second_lease = await _lease_doc_for(app, second.lease_id)
+    assert first_lease["metadata"]["native_slot_index"] == "1"
+    assert first_lease["metadata"]["native_slot_name"] == "ambience-slot-1"
+    assert second_lease["metadata"]["native_slot_index"] == "2"
+    assert second_lease["metadata"]["native_slot_name"] == "ambience-slot-2"
+
+
+@pytest.mark.asyncio
+async def test_native_acquire_honors_preferred_validation_slot(app):
+    app.state.settings.native_runner_project_concurrency = 2
+    app.state.settings.native_runner_global_concurrency = 5
+
+    first, _ = await lease_ops.acquire_native(
+        app.state.cosmos,
+        app.state.settings,
+        project="ambience",
+        workflow="native-agent",
+        requirements={},
+        metadata={},
+    )
+    busy_preferred, _ = await lease_ops.acquire_native(
+        app.state.cosmos,
+        app.state.settings,
+        project="ambience",
+        workflow="native-agent",
+        requirements={},
+        metadata={"phase_inputs": {"validation_slot_index": "1"}},
+    )
+
+    assert first.metadata["native_slot_index"] == "1"
+    assert busy_preferred.state == LeaseState.PENDING
+    assert "native_slot_index" not in busy_preferred.metadata
+
+    await lease_ops.release(app.state.cosmos, first.id, "ambience")
+    free_preferred, _ = await lease_ops.acquire_native(
+        app.state.cosmos,
+        app.state.settings,
+        project="ambience",
+        workflow="native-agent",
+        requirements={},
+        metadata={"phase_inputs": {"validation_slot_index": "1"}},
+    )
+
+    assert free_preferred.state == LeaseState.ACTIVE
+    assert free_preferred.metadata["native_slot_index"] == "1"
 
 
 # ─── per-issue serialization ────────────────────────────────────────────────
@@ -457,18 +586,24 @@ async def test_concurrent_dispatch_on_same_issue_returns_already_running(app):
     label-trigger path can double-dispatch on re-label)."""
     await _register_project(app, "ambience", "nelsong6/ambience")
     await _register_workflow(
-        app, project="ambience", name="issue-agent",
+        app,
+        project="ambience",
+        name="issue-agent",
         retry_workflow_filename="agent-retry.yml",
     )
     await _register_host(app, "runner-1")
     await _register_issue(app, project="ambience", repo="nelsong6/ambience", issue_number=42)
 
     first = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=42,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=42,
         trigger_source={"kind": "glimmung_ui"},
     )
     second = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=42,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=42,
         trigger_source={"kind": "label_webhook", "label": "agent-run"},
     )
 
@@ -479,10 +614,13 @@ async def test_concurrent_dispatch_on_same_issue_returns_already_running(app):
     assert "already" in (second.detail or "").lower() or "held" in (second.detail or "").lower()
 
     # Only one Run exists.
-    runs = [d async for d in app.state.cosmos.runs.query_items(
-        "SELECT * FROM c WHERE c.issue_number = @n",
-        parameters=[{"name": "@n", "value": 1}],
-    )]
+    runs = [
+        d
+        async for d in app.state.cosmos.runs.query_items(
+            "SELECT * FROM c WHERE c.issue_number = @n",
+            parameters=[{"name": "@n", "value": 1}],
+        )
+    ]
     assert len(runs) == 1
     assert runs[0]["id"] == first.run_id
 
@@ -497,7 +635,9 @@ async def test_dispatch_succeeds_after_lock_release(app):
 
     await _register_project(app, "ambience", "nelsong6/ambience")
     await _register_workflow(
-        app, project="ambience", name="issue-agent",
+        app,
+        project="ambience",
+        name="issue-agent",
         retry_workflow_filename="agent-retry.yml",
     )
     await _register_host(app, "runner-1")
@@ -505,7 +645,9 @@ async def test_dispatch_succeeds_after_lock_release(app):
     await _register_issue(app, project="ambience", repo="nelsong6/ambience", issue_number=42)
 
     first = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=42,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=42,
         trigger_source={"kind": "glimmung_ui"},
     )
     assert first.state == "dispatched"
@@ -513,12 +655,16 @@ async def test_dispatch_succeeds_after_lock_release(app):
     # Simulate Run completion: release the lease + the issue lock.
     await lease_ops.release(app.state.cosmos, first.lease_id, "ambience")
     await lock_ops.release_lock(
-        app.state.cosmos, scope="issue", key="ambience#1",
+        app.state.cosmos,
+        scope="issue",
+        key="ambience#1",
         holder_id=first.issue_lock_holder_id,
     )
 
     second = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=42,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=42,
         trigger_source={"kind": "glimmung_ui"},
     )
     assert second.state == "dispatched"
@@ -529,7 +675,9 @@ async def test_dispatch_succeeds_after_lock_release(app):
 async def test_dispatch_on_different_issues_does_not_serialize(app):
     await _register_project(app, "ambience", "nelsong6/ambience")
     await _register_workflow(
-        app, project="ambience", name="issue-agent",
+        app,
+        project="ambience",
+        name="issue-agent",
         retry_workflow_filename="agent-retry.yml",
     )
     await _register_host(app, "runner-1")
@@ -538,11 +686,15 @@ async def test_dispatch_on_different_issues_does_not_serialize(app):
     await _register_issue(app, project="ambience", repo="nelsong6/ambience", issue_number=2)
 
     a = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=1,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=1,
         trigger_source={"kind": "glimmung_ui"},
     )
     b = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=2,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=2,
         trigger_source={"kind": "glimmung_ui"},
     )
 
@@ -558,7 +710,9 @@ async def test_dispatch_on_different_issues_does_not_serialize(app):
 @pytest.mark.asyncio
 async def test_dispatch_returns_no_project_for_unregistered_repo(app):
     result = await dispatch_run(
-        app, repo="someone-else/private-repo", issue_number=1,
+        app,
+        repo="someone-else/private-repo",
+        issue_number=1,
         trigger_source={"kind": "glimmung_ui"},
     )
     assert result.state == "no_project"
@@ -572,7 +726,9 @@ async def test_dispatch_returns_no_workflow_when_project_has_none(app):
     # No workflows registered.
 
     result = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=1,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=1,
         trigger_source={"kind": "glimmung_ui"},
     )
     assert result.state == "no_workflow"
@@ -591,7 +747,9 @@ async def test_dispatch_returns_no_workflow_when_ambiguous(app):
     await _register_issue(app, project="ambience", repo="nelsong6/ambience", issue_number=1)
 
     result = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=1,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=1,
         trigger_source={"kind": "glimmung_ui"},
     )
     assert result.state == "no_workflow"
@@ -603,7 +761,9 @@ async def test_dispatch_returns_no_workflow_when_ambiguous(app):
 async def test_dispatch_with_explicit_workflow_disambiguates(app):
     await _register_project(app, "ambience", "nelsong6/ambience")
     await _register_workflow(
-        app, project="ambience", name="issue-agent",
+        app,
+        project="ambience",
+        name="issue-agent",
         retry_workflow_filename="agent-retry.yml",
     )
     await _register_workflow(app, project="ambience", name="other-agent")
@@ -611,7 +771,9 @@ async def test_dispatch_with_explicit_workflow_disambiguates(app):
     await _register_issue(app, project="ambience", repo="nelsong6/ambience", issue_number=1)
 
     result = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=1,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=1,
         trigger_source={"kind": "glimmung_ui"},
         workflow_name="issue-agent",
     )
@@ -626,7 +788,9 @@ async def test_dispatch_with_unknown_workflow_returns_no_workflow(app):
     await _register_issue(app, project="ambience", repo="nelsong6/ambience", issue_number=1)
 
     result = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=1,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=1,
         trigger_source={"kind": "glimmung_ui"},
         workflow_name="not-a-real-workflow",
     )
@@ -640,23 +804,30 @@ async def test_dispatch_with_unknown_workflow_returns_no_workflow(app):
 async def test_dispatch_honors_agent_budget_label_at_run_creation(app):
     await _register_project(app, "ambience", "nelsong6/ambience")
     await _register_workflow(
-        app, project="ambience", name="issue-agent",
+        app,
+        project="ambience",
+        name="issue-agent",
         retry_workflow_filename="agent-retry.yml",
     )
     await _register_host(app, "runner-1")
     await _register_issue(app, project="ambience", repo="nelsong6/ambience", issue_number=42)
 
     result = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=42,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=42,
         trigger_source={"kind": "glimmung_ui"},
         issue_labels=["bug", "agent-budget:5x50"],
     )
     assert result.state == "dispatched"
 
-    runs = [d async for d in app.state.cosmos.runs.query_items(
-        "SELECT * FROM c WHERE c.id = @id",
-        parameters=[{"name": "@id", "value": result.run_id}],
-    )]
+    runs = [
+        d
+        async for d in app.state.cosmos.runs.query_items(
+            "SELECT * FROM c WHERE c.id = @id",
+            parameters=[{"name": "@id", "value": result.run_id}],
+        )
+    ]
     assert len(runs) == 1
     assert runs[0]["budget"] == {"total": 50.0}
 
@@ -665,23 +836,30 @@ async def test_dispatch_honors_agent_budget_label_at_run_creation(app):
 async def test_dispatch_records_warm_session_label_on_run(app):
     await _register_project(app, "ambience", "nelsong6/ambience")
     await _register_workflow(
-        app, project="ambience", name="issue-agent",
+        app,
+        project="ambience",
+        name="issue-agent",
         retry_workflow_filename="agent-retry.yml",
     )
     await _register_host(app, "runner-1")
     await _register_issue(app, project="ambience", repo="nelsong6/ambience", issue_number=42)
 
     result = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=42,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=42,
         trigger_source={"kind": "glimmung_ui"},
         issue_labels=["bug", "agent-session:warm"],
     )
     assert result.state == "dispatched"
 
-    runs = [d async for d in app.state.cosmos.runs.query_items(
-        "SELECT * FROM c WHERE c.id = @id",
-        parameters=[{"name": "@id", "value": result.run_id}],
-    )]
+    runs = [
+        d
+        async for d in app.state.cosmos.runs.query_items(
+            "SELECT * FROM c WHERE c.id = @id",
+            parameters=[{"name": "@id", "value": result.run_id}],
+        )
+    ]
     assert len(runs) == 1
     assert runs[0]["session_launch_intent"] == "warm"
 
@@ -690,25 +868,35 @@ async def test_dispatch_records_warm_session_label_on_run(app):
 async def test_dispatch_uses_stored_issue_labels_when_no_override(app):
     await _register_project(app, "ambience", "nelsong6/ambience")
     await _register_workflow(
-        app, project="ambience", name="issue-agent",
+        app,
+        project="ambience",
+        name="issue-agent",
         retry_workflow_filename="agent-retry.yml",
     )
     await _register_host(app, "runner-1")
     await _register_issue(
-        app, project="ambience", repo="nelsong6/ambience", issue_number=42,
+        app,
+        project="ambience",
+        repo="nelsong6/ambience",
+        issue_number=42,
         labels=["bug", "agent-budget:5x50", "agent-session:warm"],
     )
 
     result = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=42,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=42,
         trigger_source={"kind": "glimmung_ui"},
     )
     assert result.state == "dispatched"
 
-    runs = [d async for d in app.state.cosmos.runs.query_items(
-        "SELECT * FROM c WHERE c.id = @id",
-        parameters=[{"name": "@id", "value": result.run_id}],
-    )]
+    runs = [
+        d
+        async for d in app.state.cosmos.runs.query_items(
+            "SELECT * FROM c WHERE c.id = @id",
+            parameters=[{"name": "@id", "value": result.run_id}],
+        )
+    ]
     assert len(runs) == 1
     assert runs[0]["budget"] == {"total": 50.0}
     assert runs[0]["session_launch_intent"] == "warm"
@@ -723,24 +911,34 @@ async def test_dispatch_stamps_issue_id_on_run(app):
     Issue's id (and denormalized GH coords) on the resulting Run."""
     await _register_project(app, "ambience", "nelsong6/ambience")
     await _register_workflow(
-        app, project="ambience", name="issue-agent",
+        app,
+        project="ambience",
+        name="issue-agent",
         retry_workflow_filename="agent-retry.yml",
     )
     await _register_host(app, "runner-1")
     issue_id = await _register_issue(
-        app, project="ambience", repo="nelsong6/ambience", issue_number=42,
+        app,
+        project="ambience",
+        repo="nelsong6/ambience",
+        issue_number=42,
     )
 
     result = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=42,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=42,
         trigger_source={"kind": "glimmung_ui"},
     )
     assert result.state == "dispatched"
 
-    run_docs = [d async for d in app.state.cosmos.runs.query_items(
-        "SELECT * FROM c WHERE c.id = @id",
-        parameters=[{"name": "@id", "value": result.run_id}],
-    )]
+    run_docs = [
+        d
+        async for d in app.state.cosmos.runs.query_items(
+            "SELECT * FROM c WHERE c.id = @id",
+            parameters=[{"name": "@id", "value": result.run_id}],
+        )
+    ]
     assert run_docs[0]["issue_id"] == issue_id
     assert run_docs[0]["issue_repo"] == "nelsong6/ambience"
     assert run_docs[0]["issue_number"] == 1
@@ -753,20 +951,28 @@ async def test_dispatch_does_not_mint_issue_when_unknown(app):
     without writing anything to the issues container."""
     await _register_project(app, "ambience", "nelsong6/ambience")
     await _register_workflow(
-        app, project="ambience", name="issue-agent",
+        app,
+        project="ambience",
+        name="issue-agent",
         retry_workflow_filename="agent-retry.yml",
     )
     await _register_host(app, "runner-1")
 
     result = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=42,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=42,
         trigger_source={"kind": "glimmung_ui"},
     )
     assert result.state == "no_project"
 
-    issue_docs = [d async for d in app.state.cosmos.issues.query_items(
-        "SELECT * FROM c", parameters=[],
-    )]
+    issue_docs = [
+        d
+        async for d in app.state.cosmos.issues.query_items(
+            "SELECT * FROM c",
+            parameters=[],
+        )
+    ]
     assert issue_docs == []
 
 
@@ -781,31 +987,43 @@ async def test_find_run_by_issue_id_returns_most_recent_run_cross_partition(app)
 
     await _register_project(app, "ambience", "nelsong6/ambience")
     await _register_workflow(
-        app, project="ambience", name="issue-agent",
+        app,
+        project="ambience",
+        name="issue-agent",
         retry_workflow_filename="agent-retry.yml",
     )
     await _register_host(app, "runner-1")
     await _register_host(app, "runner-2")
     issue_id = await _register_issue(
-        app, project="ambience", repo="nelsong6/ambience", issue_number=42,
+        app,
+        project="ambience",
+        repo="nelsong6/ambience",
+        issue_number=42,
     )
 
     first = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=42,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=42,
         trigger_source={"kind": "glimmung_ui"},
     )
     # Release the lock so a second dispatch can land on the same issue.
     await lock_ops.release_lock(
-        app.state.cosmos, scope="issue",
-        key="ambience#1", holder_id=first.issue_lock_holder_id,
+        app.state.cosmos,
+        scope="issue",
+        key="ambience#1",
+        holder_id=first.issue_lock_holder_id,
     )
     second = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=42,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=42,
         trigger_source={"kind": "glimmung_ui"},
     )
 
     found = await run_ops.find_run_by_issue_id(
-        app.state.cosmos, issue_id=issue_id,
+        app.state.cosmos,
+        issue_id=issue_id,
     )
     assert found is not None
     # Most recent first → second dispatch wins.
@@ -815,53 +1033,66 @@ async def test_find_run_by_issue_id_returns_most_recent_run_cross_partition(app)
 @pytest.mark.asyncio
 async def test_find_run_by_issue_id_returns_none_when_no_match(app):
     from glimmung import runs as run_ops
+
     found = await run_ops.find_run_by_issue_id(
-        app.state.cosmos, issue_id="01HZZZNOPE",
+        app.state.cosmos,
+        issue_id="01HZZZNOPE",
     )
     assert found is None
 
 
 @pytest.mark.asyncio
 async def test_dispatch_uses_workflow_default_budget_when_no_label(app):
-    await app.state.cosmos.projects.create_item({
-        "id": "ambience",
-        "name": "ambience",
-        "githubRepo": "nelsong6/ambience",
-        "metadata": {},
-        "createdAt": datetime.now(UTC).isoformat(),
-    })
-    await app.state.cosmos.workflows.create_item({
-        "id": "issue-agent",
-        "name": "issue-agent",
-        "project": "ambience",
-        "phases": [{
-            "name": "agent",
-            "kind": "gha_dispatch",
-            "workflowFilename": "issue-agent.yml",
-            "workflowRef": "main",
-            "requirements": None,
-            "verify": True,
-            "recyclePolicy": {"maxAttempts": 3, "on": ["verify_fail"], "landsAt": "self"},
-        }],
-        "pr": {"enabled": False, "recyclePolicy": None},
-        "budget": {"total": 100.0},
-        "triggerLabel": "agent-run",
-        "defaultRequirements": {},
-        "metadata": {},
-        "createdAt": datetime.now(UTC).isoformat(),
-    })
+    await app.state.cosmos.projects.create_item(
+        {
+            "id": "ambience",
+            "name": "ambience",
+            "githubRepo": "nelsong6/ambience",
+            "metadata": {},
+            "createdAt": datetime.now(UTC).isoformat(),
+        }
+    )
+    await app.state.cosmos.workflows.create_item(
+        {
+            "id": "issue-agent",
+            "name": "issue-agent",
+            "project": "ambience",
+            "phases": [
+                {
+                    "name": "agent",
+                    "kind": "gha_dispatch",
+                    "workflowFilename": "issue-agent.yml",
+                    "workflowRef": "main",
+                    "requirements": None,
+                    "verify": True,
+                    "recyclePolicy": {"maxAttempts": 3, "on": ["verify_fail"], "landsAt": "self"},
+                }
+            ],
+            "pr": {"enabled": False, "recyclePolicy": None},
+            "budget": {"total": 100.0},
+            "triggerLabel": "agent-run",
+            "defaultRequirements": {},
+            "metadata": {},
+            "createdAt": datetime.now(UTC).isoformat(),
+        }
+    )
     await _register_host(app, "runner-1")
     await _register_issue(app, project="ambience", repo="nelsong6/ambience", issue_number=42)
 
     result = await dispatch_run(
-        app, repo="nelsong6/ambience", issue_number=42,
+        app,
+        repo="nelsong6/ambience",
+        issue_number=42,
         trigger_source={"kind": "glimmung_ui"},
         issue_labels=["bug"],
     )
-    runs = [d async for d in app.state.cosmos.runs.query_items(
-        "SELECT * FROM c WHERE c.id = @id",
-        parameters=[{"name": "@id", "value": result.run_id}],
-    )]
+    runs = [
+        d
+        async for d in app.state.cosmos.runs.query_items(
+            "SELECT * FROM c WHERE c.id = @id",
+            parameters=[{"name": "@id", "value": result.run_id}],
+        )
+    ]
     assert runs[0]["budget"] == {"total": 100.0}
 
 
@@ -877,19 +1108,23 @@ async def test_dispatch_by_issue_id_dispatches_native_issue(app):
 
     await _register_project(app, "ambience", "nelsong6/ambience")
     await _register_workflow(
-        app, project="ambience", name="issue-agent",
+        app,
+        project="ambience",
+        name="issue-agent",
         retry_workflow_filename="agent-retry.yml",
     )
     await _register_host(app, "runner-1")
 
     issue = await issue_ops.create_issue(
-        app.state.cosmos, project="ambience",
+        app.state.cosmos,
+        project="ambience",
         title="native-only issue",
         body="Make the preview show the requested native change.",
     )
 
     result = await dispatch_run(
-        app, issue_id=issue.id,
+        app,
+        issue_id=issue.id,
         trigger_source={"kind": "glimmung_ui"},
     )
 
@@ -897,24 +1132,33 @@ async def test_dispatch_by_issue_id_dispatches_native_issue(app):
     assert result.run_id is not None
 
     # Lock keyed on the project-scoped Glimmung issue number, not repo#N.
-    lock_docs = [d async for d in app.state.cosmos.locks.query_items(
-        "SELECT * FROM c WHERE c.scope = @s",
-        parameters=[{"name": "@s", "value": "issue"}],
-    )]
+    lock_docs = [
+        d
+        async for d in app.state.cosmos.locks.query_items(
+            "SELECT * FROM c WHERE c.scope = @s",
+            parameters=[{"name": "@s", "value": "issue"}],
+        )
+    ]
     assert any(d["key"] == f"ambience#{issue.number}" for d in lock_docs)
 
-    runs = [d async for d in app.state.cosmos.runs.query_items(
-        "SELECT * FROM c WHERE c.id = @id",
-        parameters=[{"name": "@id", "value": result.run_id}],
-    )]
+    runs = [
+        d
+        async for d in app.state.cosmos.runs.query_items(
+            "SELECT * FROM c WHERE c.id = @id",
+            parameters=[{"name": "@id", "value": result.run_id}],
+        )
+    ]
     assert runs[0]["issue_id"] == issue.id
     assert runs[0]["issue_repo"] == "nelsong6/ambience"
     assert runs[0]["issue_number"] == issue.number
 
-    lease_docs = [d async for d in app.state.cosmos.leases.query_items(
-        "SELECT * FROM c WHERE c.id = @id",
-        parameters=[{"name": "@id", "value": result.lease_id}],
-    )]
+    lease_docs = [
+        d
+        async for d in app.state.cosmos.leases.query_items(
+            "SELECT * FROM c WHERE c.id = @id",
+            parameters=[{"name": "@id", "value": result.lease_id}],
+        )
+    ]
     metadata = lease_docs[0]["metadata"]
     assert metadata["issue_id"] == issue.id
     assert metadata["issue_title"] == "native-only issue"
@@ -958,10 +1202,13 @@ async def test_dispatch_refuses_gha_workflow_for_native_webapp_project(app):
     assert "native_webapp" in (result.detail or "")
     assert "gha_dispatch phases: agent" in (result.detail or "")
 
-    lock_docs = [d async for d in app.state.cosmos.locks.query_items(
-        "SELECT * FROM c WHERE c.scope = @s",
-        parameters=[{"name": "@s", "value": "issue"}],
-    )]
+    lock_docs = [
+        d
+        async for d in app.state.cosmos.locks.query_items(
+            "SELECT * FROM c WHERE c.scope = @s",
+            parameters=[{"name": "@s", "value": "issue"}],
+        )
+    ]
     assert lock_docs == []
 
 
@@ -972,12 +1219,15 @@ async def test_dispatch_by_issue_id_returns_no_project_when_id_unknown(app):
     so the failure mode is uniform across dispatch entry shapes)."""
     await _register_project(app, "ambience", "nelsong6/ambience")
     await _register_workflow(
-        app, project="ambience", name="issue-agent",
+        app,
+        project="ambience",
+        name="issue-agent",
         retry_workflow_filename="agent-retry.yml",
     )
 
     result = await dispatch_run(
-        app, issue_id="01JBOGUS0000000000000000",
+        app,
+        issue_id="01JBOGUS0000000000000000",
         trigger_source={"kind": "glimmung_ui"},
     )
     assert result.state == "no_project"
@@ -992,21 +1242,27 @@ async def test_native_dispatch_serializes_with_second_call(app):
 
     await _register_project(app, "ambience", "nelsong6/ambience")
     await _register_workflow(
-        app, project="ambience", name="issue-agent",
+        app,
+        project="ambience",
+        name="issue-agent",
         retry_workflow_filename="agent-retry.yml",
     )
     await _register_host(app, "runner-1")
 
     issue = await issue_ops.create_issue(
-        app.state.cosmos, project="ambience", title="t",
+        app.state.cosmos,
+        project="ambience",
+        title="t",
     )
 
     first = await dispatch_run(
-        app, issue_id=issue.id,
+        app,
+        issue_id=issue.id,
         trigger_source={"kind": "glimmung_ui"},
     )
     second = await dispatch_run(
-        app, issue_id=issue.id,
+        app,
+        issue_id=issue.id,
         trigger_source={"kind": "glimmung_ui"},
     )
     assert first.state == "dispatched"

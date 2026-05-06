@@ -191,6 +191,91 @@ class NativeKubernetesLauncher:
                 return
             raise
 
+    async def reconcile_standby_dns(self, project_docs: list[dict[str, Any]]) -> None:
+        """Reconcile DNSEndpoint records for projects that opt into warm native DNS."""
+        desired = {
+            config["name"]: config
+            for project_doc in project_docs
+            if (config := _standby_dns_config(project_doc, self._settings)) is not None
+        }
+        by_namespace: dict[str, dict[str, dict[str, Any]]] = {}
+        for name, config in desired.items():
+            by_namespace.setdefault(config["namespace"], {})[name] = config
+
+        namespaces = set(by_namespace) | {
+            str(getattr(self._settings, "native_standby_dns_namespace", "glimmung"))
+        }
+        for namespace in namespaces:
+            configs = by_namespace.get(namespace, {})
+            existing = await self._list_standby_dns(namespace)
+            if configs:
+                target = await self._standby_dns_target(configs.values())
+                if not target:
+                    raise NativeLaunchError("standby DNS target could not be resolved from settings or Gateway")
+                for name, config in configs.items():
+                    await self._upsert_standby_dns(namespace, name, _standby_dns_body(config, target))
+            for name in sorted(set(existing) - set(configs)):
+                await self._delete_standby_dns(namespace, name)
+
+    async def _standby_dns_target(self, configs: Any) -> str:
+        for config in configs:
+            target = str(config.get("target") or "").strip()
+            if target:
+                return target
+        target = str(getattr(self._settings, "native_standby_dns_target", "") or "").strip()
+        if target:
+            return target
+        gateway_namespace = getattr(
+            self._settings, "native_standby_dns_gateway_namespace", "envoy-gateway-system",
+        )
+        gateway_name = getattr(self._settings, "native_standby_dns_gateway_name", "main")
+        gateway = await self._request(
+            "GET",
+            f"/apis/gateway.networking.k8s.io/v1/namespaces/{gateway_namespace}/gateways/{gateway_name}",
+        )
+        for address in (gateway.get("status") or {}).get("addresses") or []:
+            value = str(address.get("value") or "").strip()
+            if value:
+                return value
+        return ""
+
+    async def _list_standby_dns(self, namespace: str) -> set[str]:
+        result = await self._request(
+            "GET",
+            f"/apis/externaldns.k8s.io/v1alpha1/namespaces/{namespace}/dnsendpoints?"
+            + urlencode({"labelSelector": "glimmung.romaine.life/standby-dns=true"}),
+        )
+        return {
+            str((item.get("metadata") or {}).get("name"))
+            for item in result.get("items") or []
+            if (item.get("metadata") or {}).get("name")
+        }
+
+    async def _upsert_standby_dns(
+        self,
+        namespace: str,
+        name: str,
+        body: dict[str, Any],
+    ) -> None:
+        path = f"/apis/externaldns.k8s.io/v1alpha1/namespaces/{namespace}/dnsendpoints"
+        try:
+            await self._request("POST", path, json=body)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 409:
+                raise
+            await self._request("PUT", f"{path}/{name}", json=body)
+
+    async def _delete_standby_dns(self, namespace: str, name: str) -> None:
+        try:
+            await self._request(
+                "DELETE",
+                f"/apis/externaldns.k8s.io/v1alpha1/namespaces/{namespace}/dnsendpoints/{name}",
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return
+            raise
+
     async def read_attempt_pod_logs(
         self,
         *,
@@ -274,7 +359,7 @@ class NativeKubernetesLauncher:
             "metadata": {
                 "name": namespace,
                 "labels": labels,
-            },
+            }
         }
         try:
             await self._request("POST", "/api/v1/namespaces", json=body)
@@ -469,7 +554,7 @@ def _container_for_job(
                 "name": "codex-credentials",
                 "mountPath": settings.native_runner_codex_credentials_mount_path,
                 "readOnly": True,
-            }
+            },
         ],
     }
     if job.command:
@@ -540,6 +625,8 @@ def _universal_env(
         "issue_number",
         "issue_title",
         "issue_body",
+        "native_slot_index",
+        "native_slot_name",
         "work_context_id",
         "work_context_branch",
         "work_context_base_ref",
@@ -575,6 +662,81 @@ def _managed_labels() -> dict[str, str]:
     return {
         "app.kubernetes.io/managed-by": "glimmung",
         "app.kubernetes.io/part-of": "glimmung-native-runner",
+    }
+
+
+def _standby_dns_config(project_doc: dict[str, Any], settings: Settings) -> dict[str, Any] | None:
+    metadata = project_doc.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        return None
+    raw = metadata.get("native_standby_dns") or metadata.get("nativeStandbyDns")
+    if not isinstance(raw, dict) or raw.get("enabled") is not True:
+        return None
+
+    project = str(project_doc.get("name") or project_doc.get("id") or "").strip()
+    record_base = str(raw.get("record_base") or raw.get("recordBase") or "").strip().strip(".")
+    if not project or not record_base:
+        return None
+
+    count_raw = raw.get("count")
+    try:
+        count = int(str(count_raw)) if count_raw is not None else int(
+            getattr(settings, "native_runner_project_concurrency", 5)
+        )
+    except (TypeError, ValueError):
+        count = 0
+    if count < 1:
+        return None
+
+    ttl_raw = raw.get("ttl") or raw.get("record_ttl") or raw.get("recordTtl")
+    try:
+        ttl = int(str(ttl_raw)) if ttl_raw is not None else int(
+            getattr(settings, "native_standby_dns_default_ttl", 300)
+        )
+    except (TypeError, ValueError):
+        ttl = 300
+
+    return {
+        "project": project,
+        "name": _dns_label(f"native-standby-{project}")[:63].rstrip("-"),
+        "namespace": str(
+            raw.get("namespace") or getattr(settings, "native_standby_dns_namespace", "glimmung")
+        ),
+        "slot_prefix": str(
+            raw.get("slot_prefix") or raw.get("slotPrefix") or f"{project}-slot"
+        ).strip().strip("."),
+        "record_base": record_base,
+        "count": count,
+        "ttl": max(1, ttl),
+        "target": str(raw.get("target") or "").strip(),
+    }
+
+
+def _standby_dns_body(config: dict[str, Any], target: str) -> dict[str, Any]:
+    project = str(config["project"])
+    return {
+        "apiVersion": "externaldns.k8s.io/v1alpha1",
+        "kind": "DNSEndpoint",
+        "metadata": {
+            "name": config["name"],
+            "namespace": config["namespace"],
+            "labels": {
+                **_managed_labels(),
+                "glimmung.romaine.life/project": _label_value(project),
+                "glimmung.romaine.life/standby-dns": "true",
+            },
+        },
+        "spec": {
+            "endpoints": [
+                {
+                    "dnsName": f"{config['slot_prefix']}-{slot}.{config['record_base']}",
+                    "recordType": "A",
+                    "recordTTL": config["ttl"],
+                    "targets": [target],
+                }
+                for slot in range(1, int(config["count"]) + 1)
+            ],
+        },
     }
 
 
