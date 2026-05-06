@@ -46,7 +46,7 @@ on:
         required: false
         type: string
       run_id:
-        description: Glimmung Run ULID (used for branch=glimmung/<run_id>)
+        description: Glimmung Run ULID.
         required: true
         type: string
       attempt_index:
@@ -63,6 +63,22 @@ on:
         type: string
       pr_number:
         description: Existing PR number on a recycle dispatch.
+        required: false
+        type: string
+      work_context_id:
+        description: Glimmung work context id, when this run belongs to a Playbook context.
+        required: false
+        type: string
+      work_context_branch:
+        description: Branch this run should mutate. Defaults to glimmung/<run_id>.
+        required: false
+        type: string
+      work_context_base_ref:
+        description: Base ref for PR/integration work. Defaults to main.
+        required: false
+        type: string
+      work_context_state:
+        description: Work context state for observability.
         required: false
         type: string
       # ── Inputs threaded from env-prep's outputs (glimmung#101) ──
@@ -133,7 +149,10 @@ jobs:
       RELEASE_NAME: ${{ inputs.release_name }}
       PROD_NAMESPACE: ${{ inputs.prod_namespace }}
       IMAGE_TAG: ${{ inputs.image_tag }}
-      BRANCH_NAME: glimmung/${{ inputs.run_id }}
+      BRANCH_NAME: ${{ inputs.work_context_branch || format('glimmung/{0}', inputs.run_id) }}
+      BASE_REF: ${{ inputs.work_context_base_ref || 'main' }}
+      WORK_CONTEXT_ID: ${{ inputs.work_context_id }}
+      WORK_CONTEXT_STATE: ${{ inputs.work_context_state }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5

@@ -126,6 +126,10 @@ async def test_internal_metadata_keys_are_filtered_out_of_inputs(
             "issue_id": "01ISSUE",
             "run_id": "01RUN",
             "attempt_index": "0",
+            "work_context_id": "playbook:01PB:shared",
+            "work_context_branch": "glimmung/playbooks/01pb",
+            "work_context_base_ref": "main",
+            "work_context_state": "in_use",
             # Internal-only — must be dropped.
             "issue_lock_holder_id": "01HOLDER",
             "issue_repo": "nelsong6/ambience",
@@ -142,6 +146,10 @@ async def test_internal_metadata_keys_are_filtered_out_of_inputs(
         "issue_title": "Cave crystals",
         "run_id": "01RUN",
         "attempt_index": "0",
+        "work_context_id": "playbook:01PB:shared",
+        "work_context_branch": "glimmung/playbooks/01pb",
+        "work_context_base_ref": "main",
+        "work_context_state": "in_use",
     }
     # Spot-check each internal key by name so a regression on any one
     # surfaces a precise failure instead of a generic dict mismatch.
@@ -314,4 +322,8 @@ def test_allowlist_is_intentional_not_accidental():
         "feedback",
         "pr_number",
         "recent_comments",
+        "work_context_id",
+        "work_context_branch",
+        "work_context_base_ref",
+        "work_context_state",
     })

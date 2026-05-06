@@ -43,11 +43,27 @@ on:
         required: false
         type: string
       run_id:
-        description: Glimmung Run ULID (used for branch=glimmung/<run_id>)
+        description: Glimmung Run ULID.
         required: true
         type: string
       attempt_index:
         description: 0-based attempt index for this phase.
+        required: false
+        type: string
+      work_context_id:
+        description: Glimmung work context id, when this run belongs to a Playbook context.
+        required: false
+        type: string
+      work_context_branch:
+        description: Branch this run should mutate. Defaults to glimmung/<run_id>.
+        required: false
+        type: string
+      work_context_base_ref:
+        description: Base ref for PR/integration work. Defaults to main.
+        required: false
+        type: string
+      work_context_state:
+        description: Work context state for observability.
         required: false
         type: string
 
