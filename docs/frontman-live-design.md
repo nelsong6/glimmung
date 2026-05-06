@@ -4,6 +4,12 @@ Frontman environments should run the real Glimmung frontend against the normal
 Glimmung API. They must not bypass authentication or grant service-account
 access to anyone who has the URL.
 
+For the cluster-native agent/tooling prototype, use
+[Frontman Cluster Agent Prototype](frontman-cluster-agent-prototype.md). This
+live-design note covers the validation host and auth wiring; the prototype
+document covers the overlay, MCP bridge, branch/PR write boundary, and Argo
+requirements.
+
 ## Auth model
 
 Production continues to use `glimmung-oauth`, whose client ID is exposed as
@@ -43,4 +49,3 @@ runtime-generated hostname unless it has been pre-registered in Entra.
 4. Confirm Microsoft login completes without a redirect URI error.
 5. Clean up the Frontman workload/route after the live-design session; leave
    the stable hostname and redirect URI in place for reuse.
-
