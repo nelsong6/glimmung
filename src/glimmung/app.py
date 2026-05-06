@@ -964,11 +964,12 @@ async def _process_run_completion(
                     reason=f"PR primitive: no diff between glimmung/{run.id} and base",
                 )
                 return "review_required_no_diff"
-            except Exception:
-                log.exception("pr-primitive: gh pr create failed for run %s", run.id)
+            except Exception as exc:
+                reason = _pr_primitive_failure_reason(exc)
+                log.exception("pr-primitive: gh pr create failed for run %s: %s", run.id, reason)
                 await run_ops.mark_aborted(
                     cosmos, run=run, etag=etag,
-                    reason="PR primitive: gh pr create failed (see glimmung logs)",
+                    reason=reason,
                 )
                 return "abort_pr_create_failed"
         await run_ops.mark_passed(cosmos, run=run, etag=etag)
@@ -1684,6 +1685,13 @@ def _glimmung_pr_detail_url(*, settings: Settings, repo: str, number: int) -> st
     return f"{base_url.rstrip('/')}/touchpoints/{repo}/{number}"
 
 
+def _pr_primitive_failure_reason(exc: Exception) -> str:
+    detail = str(exc).strip()
+    if not detail:
+        detail = exc.__class__.__name__
+    return f"PR primitive: gh pr create failed: {detail}"
+
+
 def _thin_github_pr_body(*, run: Run, glimmung_url: str | None) -> str:
     parts: list[str] = []
     if run.issue_repo and run.issue_number:
@@ -2244,6 +2252,23 @@ class AbortRunResult(BaseModel):
     pr_lock_released: bool | None = None
 
 
+class LinkExistingPrRequest(BaseModel):
+    repo: str | None = None
+    number: int
+    title: str | None = None
+    branch: str | None = None
+    base_ref: str = "main"
+    html_url: str | None = None
+
+
+class LinkExistingPrResult(BaseModel):
+    state: str
+    run_id: str
+    repo: str
+    pr_number: int
+    touchpoint_id: str
+
+
 async def _abort_run(
     cosmos: Cosmos,
     minter: GitHubAppTokenMinter | None,
@@ -2350,6 +2375,78 @@ async def _abort_run(
         issue_lock_released=issue_lock_released,
         pr_lock_released=pr_lock_released,
     )
+
+
+@app.post(
+    "/v1/runs/{project}/{run_id}/link-pr",
+    response_model=LinkExistingPrResult,
+    dependencies=[Depends(require_admin_user)],
+)
+async def link_existing_pr_endpoint(
+    req: LinkExistingPrRequest,
+    project: str = Path(...),
+    run_id: str = Path(...),
+) -> LinkExistingPrResult:
+    """Repair action for a failed PR primitive.
+
+    Operators can link an already-created GitHub PR back to the canonical Run
+    and touchpoint without rerunning completed phases.
+    """
+    cosmos: Cosmos = app.state.cosmos
+    found = await run_ops.read_run(cosmos, project=project, run_id=run_id)
+    if found is None:
+        raise HTTPException(404, f"run {run_id} not found in project {project!r}")
+    run, etag = found
+    repo = req.repo or run.issue_repo
+    if not repo:
+        raise HTTPException(400, "repo required when run has no issue_repo")
+    branch = req.branch or run.pr_branch or f"glimmung/{run.id}"
+    title = req.title or await _title_for_run(cosmos, run) or f"{repo}#{req.number}"
+    html_url = req.html_url or report_ops.github_pull_request_url_for(repo, req.number)
+    pr, pr_etag, _created = await report_ops.ensure_report_for_github(
+        cosmos,
+        project=run.project,
+        repo=repo,
+        number=req.number,
+        title=title,
+        branch=branch,
+        body=f"Linked existing PR for run `{run.id}`.",
+        base_ref=req.base_ref,
+        html_url=html_url,
+        linked_issue_id=run.issue_id or None,
+        linked_run_id=run.id,
+    )
+    pr, _ = await report_ops.update_report(
+        cosmos,
+        pr=pr,
+        etag=pr_etag,
+        title=title,
+        branch=branch,
+        base_ref=req.base_ref,
+        html_url=html_url,
+        linked_issue_id=run.issue_id or "",
+        linked_run_id=run.id,
+    )
+    await run_ops.link_pr_to_run(
+        cosmos, run=run, etag=etag, pr_number=req.number, pr_branch=branch,
+    )
+    return LinkExistingPrResult(
+        state="linked",
+        run_id=run.id,
+        repo=repo,
+        pr_number=req.number,
+        touchpoint_id=pr.id,
+    )
+
+
+async def _title_for_run(cosmos: Cosmos, run: Run) -> str:
+    if not run.issue_id:
+        return ""
+    try:
+        doc = await cosmos.issues.read_item(item=run.issue_id, partition_key=run.project)
+        return str(doc.get("title") or "")
+    except Exception:
+        return ""
 
 
 @app.post(

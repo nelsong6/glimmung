@@ -27,6 +27,7 @@ MUTATING_ADMIN_ROUTES = {
     ("POST", "/v1/issues"),
     ("PATCH", "/v1/issues/by-id/{project}/{issue_id}"),
     ("POST", "/v1/runs/dispatch"),
+    ("POST", "/v1/runs/{project}/{run_id}/link-pr"),
     ("POST", "/v1/reports"),
     ("POST", "/v1/touchpoints"),
     ("PATCH", "/v1/reports/by-id/{project}/{report_id}"),
