@@ -4986,11 +4986,14 @@ def _workflow_graph_metadata(workflow_doc: dict[str, Any] | None) -> dict[str, A
 async def list_issues(
     project: str | None = Query(None),
     repo: str | None = Query(None),
+    state: str = Query("open"),
     workflow: str | None = Query(None),
     needs_attention: bool = Query(False),
     limit: int | None = Query(None, ge=1, le=500),
 ) -> list[IssueRow]:
-    """All open glimmung Issues, across registered projects. Sourced
+    """Glimmung Issues, across registered projects. Defaults to open issues.
+
+    Sourced
     from the Cosmos `issues` container — glimmung is the source of
     truth; nothing about GH issue activity flows back. Issues are
     seeded once via the seed script (or minted via `POST /v1/issues`)
@@ -5003,6 +5006,7 @@ async def list_issues(
         app.state.cosmos,
         project=project,
         repo=repo,
+        state=state,
         workflow=workflow,
         needs_attention=needs_attention,
         limit=limit,
@@ -5014,6 +5018,7 @@ async def _list_issues_from_cosmos(
     *,
     project: str | None = None,
     repo: str | None = None,
+    state: str | None = "open",
     workflow: str | None = None,
     needs_attention: bool = False,
     limit: int | None = None,
@@ -5030,7 +5035,15 @@ async def _list_issues_from_cosmos(
     at this scale; if/when the runs container grows large enough that
     a full scan stops fitting in budget, narrow it by `issue_id IN`
     over the open-issue set."""
-    issues = await issue_ops.list_open_issues(cosmos, project=project)
+    issue_state: IssueState | None
+    if state is None or state.lower() == "all":
+        issue_state = None
+    else:
+        try:
+            issue_state = IssueState(state.lower())
+        except ValueError as exc:
+            raise HTTPException(400, f"state must be 'open', 'closed', or 'all', not {state!r}") from exc
+    issues = await issue_ops.list_issues(cosmos, project=project, state=issue_state)
     if repo is not None:
         issues = [i for i in issues if i.metadata.github_issue_repo == repo]
     if not issues:

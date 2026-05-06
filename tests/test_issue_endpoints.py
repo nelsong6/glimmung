@@ -108,6 +108,36 @@ async def test_list_omits_closed_issues(cosmos):
 
 
 @pytest.mark.asyncio
+async def test_list_can_include_closed_issues_for_audit(cosmos):
+    open_issue = await issue_ops.create_issue(
+        cosmos, project="ambience", title="active",
+    )
+    closed_issue = await issue_ops.create_issue(
+        cosmos, project="ambience", title="archived",
+    )
+    found = await issue_ops.read_issue(
+        cosmos, project="ambience", issue_id=closed_issue.id,
+    )
+    assert found is not None
+    fetched, etag = found
+    await issue_ops.close_issue(cosmos, issue=fetched, etag=etag)
+
+    closed_rows = await _list_issues_from_cosmos(cosmos, state="closed")
+    all_rows = await _list_issues_from_cosmos(cosmos, state="all")
+
+    assert [r.id for r in closed_rows] == [closed_issue.id]
+    assert {r.id for r in all_rows} == {open_issue.id, closed_issue.id}
+
+
+@pytest.mark.asyncio
+async def test_list_rejects_unknown_issue_state(cosmos):
+    with pytest.raises(HTTPException) as exc:
+        await _list_issues_from_cosmos(cosmos, state="discarded")
+
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
 async def test_archive_issue_closes_and_comments(cosmos, app_state):
     issue = await issue_ops.create_issue(
         cosmos, project="ambience", title="stale idea",
