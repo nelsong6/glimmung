@@ -25,7 +25,7 @@ from glimmung.app import (
     _list_issues_from_cosmos,
 )
 from glimmung.auth import User
-from glimmung.models import IssueState
+from glimmung.models import IssueState, RunState
 
 from tests.cosmos_fake import FakeContainer
 
@@ -172,6 +172,57 @@ async def test_list_derives_issue_workflow_from_latest_run(cosmos):
     assert len(rows) == 1
     assert rows[0].workflow == "issue-agent"
     assert rows[0].last_run_id == "run-new"
+
+
+@pytest.mark.asyncio
+async def test_needs_attention_omits_runnable_and_active_issues(cosmos):
+    runnable = await issue_ops.create_issue(
+        cosmos, project="ambience", title="not dispatched yet",
+    )
+    active = await issue_ops.create_issue(
+        cosmos, project="ambience", title="running now",
+    )
+    failed = await issue_ops.create_issue(
+        cosmos, project="ambience", title="failed run",
+    )
+    ready = await issue_ops.create_issue(
+        cosmos, project="ambience", title="touchpoint ready",
+    )
+
+    await cosmos.runs.create_item({
+        "id": "run-active",
+        "project": "ambience",
+        "workflow": "issue-agent",
+        "issue_id": active.id,
+        "issue_number": active.number,
+        "state": RunState.IN_PROGRESS.value,
+        "created_at": "2026-01-01T00:00:00+00:00",
+    })
+    await cosmos.runs.create_item({
+        "id": "run-failed",
+        "project": "ambience",
+        "workflow": "issue-agent",
+        "issue_id": failed.id,
+        "issue_number": failed.number,
+        "state": RunState.ABORTED.value,
+        "abort_reason": "verification failed",
+        "created_at": "2026-01-02T00:00:00+00:00",
+    })
+    await cosmos.runs.create_item({
+        "id": "run-ready",
+        "project": "ambience",
+        "workflow": "issue-agent",
+        "issue_id": ready.id,
+        "issue_number": ready.number,
+        "state": RunState.PASSED.value,
+        "created_at": "2026-01-03T00:00:00+00:00",
+    })
+
+    rows = await _list_issues_from_cosmos(cosmos, needs_attention=True)
+
+    assert {r.id for r in rows} == {failed.id, ready.id}
+    assert runnable.id not in [r.id for r in rows]
+    assert active.id not in [r.id for r in rows]
 
 
 # ─── _build_issue_detail: shared rendering ──────────────────────────────

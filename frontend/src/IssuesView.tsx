@@ -55,6 +55,7 @@ export function IssuesView({
   headingLabel = "Open issues",
   maxRows = null,
   showProjectColumn = true,
+  needsAttentionOnly = false,
 }: {
   signedIn: boolean;
   projectFilter: string | null;
@@ -62,6 +63,7 @@ export function IssuesView({
   headingLabel?: string;
   maxRows?: number | null;
   showProjectColumn?: boolean;
+  needsAttentionOnly?: boolean;
 }) {
   const navigate = useNavigate();
   const [rows, setRows] = useState<IssueRow[] | null>(null);
@@ -76,6 +78,7 @@ export function IssuesView({
       const params = new URLSearchParams();
       if (projectFilter) params.set("project", projectFilter);
       if (workflowFilter) params.set("workflow", workflowFilter);
+      if (needsAttentionOnly) params.set("needs_attention", "true");
       const url = params.size > 0 ? `/v1/issues?${params.toString()}` : "/v1/issues";
       const r = await fetch(url);
       if (!r.ok) throw new Error(`${url} -> ${r.status}`);
@@ -91,7 +94,7 @@ export function IssuesView({
   useEffect(() => {
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [signedIn, projectFilter, workflowFilter]);
+  }, [signedIn, projectFilter, workflowFilter, needsAttentionOnly]);
 
   const dispatch = async (row: IssueRow) => {
     const key = rowKey(row);
@@ -152,7 +155,11 @@ export function IssuesView({
         <div className="empty">{loading ? "Loading…" : ""}</div>
       ) : visibleRows && visibleRows.length === 0 ? (
         <div className="empty">
-          {projectFilter
+          {needsAttentionOnly
+            ? projectFilter
+              ? `No issues need attention for ${projectFilter}.`
+              : "No issues need attention across registered repos."
+            : projectFilter
             ? `No open issues for ${projectFilter}.`
             : "No open issues across registered repos."}
         </div>
@@ -292,8 +299,8 @@ function attentionReason(row: IssueRow): { label: string; detail: string | null;
   }
   if (row.last_run_state === "passed") {
     return {
-      label: "passed, still open",
-      detail: "agent run passed but the issue has not been closed",
+      label: "touchpoint ready",
+      detail: "agent run passed and is ready for touchpoint review",
       kind: "free",
     };
   }

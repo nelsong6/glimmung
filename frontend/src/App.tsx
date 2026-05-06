@@ -627,7 +627,14 @@ function DashboardRoute() {
 
 function NeedsAttentionRoute() {
   const { signedIn } = useOutletContext<LayoutContext>();
-  return <IssuesView signedIn={signedIn} projectFilter={null} headingLabel="Needs attention" />;
+  return (
+    <IssuesView
+      signedIn={signedIn}
+      projectFilter={null}
+      headingLabel="Needs attention"
+      needsAttentionOnly
+    />
+  );
 }
 
 function ProjectsRoute() {
@@ -1556,6 +1563,7 @@ function ProjectNeedsAttentionView({
         projectFilter={project.name}
         headingLabel="Needs attention"
         showProjectColumn={false}
+        needsAttentionOnly
       />
     </div>
   );
