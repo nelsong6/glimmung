@@ -960,6 +960,18 @@ th {
 }
 td.mono { font-family: var(--font-mono); font-size: 0.85rem; color: #b8b8b8; }
 td.dim { color: #666; }
+.attention-reason {
+  max-width: 260px;
+}
+.attention-detail {
+  margin-top: 4px;
+  color: #8a8a8a;
+  font-size: 0.82rem;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 tr.eligible td:first-child {
   border-left: 2px solid #4ade80;
