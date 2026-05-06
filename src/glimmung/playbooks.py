@@ -39,6 +39,7 @@ async def create_playbook(cosmos: Cosmos, req: PlaybookCreate) -> Playbook:
         description=req.description,
         entries=req.entries,
         concurrency_limit=req.concurrency_limit,
+        integration_strategy=req.integration_strategy,
         metadata=req.metadata,
         created_at=now,
         updated_at=now,

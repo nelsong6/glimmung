@@ -23,6 +23,7 @@ from glimmung.models import (
     PlaybookCreate,
     PlaybookEntry,
     PlaybookEntryState,
+    PlaybookIntegrationStrategy,
     PlaybookIssueSpec,
     PlaybookState,
     Run,
@@ -81,6 +82,7 @@ async def test_create_read_and_list_playbooks(cosmos):
 
     assert created.project == "glimmung"
     assert created.state.value == "draft"
+    assert created.integration_strategy == PlaybookIntegrationStrategy.ISOLATED_PRS
     assert [entry.id for entry in created.entries] == ["one", "two"]
     assert created.entries[1].depends_on == ["one"]
 
@@ -143,6 +145,41 @@ async def test_playbook_endpoints_validate_project_title_entries_and_dependencie
             PlaybookCreate(project="glimmung", title="bad limit", concurrency_limit=0),
         )
     assert exc.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_playbook_integration_strategy_is_persisted(cosmos):
+    await _seed_project(cosmos)
+    created = await playbook_ops.create_playbook(
+        cosmos,
+        PlaybookCreate(
+            project="glimmung",
+            title="shared branch feature",
+            entries=[_entry("one")],
+            integration_strategy=PlaybookIntegrationStrategy.SHARED_FEATURE_BRANCH,
+        ),
+    )
+
+    assert created.integration_strategy == PlaybookIntegrationStrategy.SHARED_FEATURE_BRANCH
+    found = await playbook_ops.read_playbook(
+        cosmos,
+        project="glimmung",
+        playbook_id=created.id,
+    )
+    assert found is not None
+    read_back, _etag = found
+    assert read_back.integration_strategy == PlaybookIntegrationStrategy.SHARED_FEATURE_BRANCH
+
+
+def test_rolling_main_playbooks_must_be_serial():
+    with pytest.raises(ValueError, match="rolling_main playbooks must be serial"):
+        PlaybookCreate(
+            project="glimmung",
+            title="parallel main writes",
+            entries=[_entry("one")],
+            integration_strategy=PlaybookIntegrationStrategy.ROLLING_MAIN,
+            concurrency_limit=2,
+        )
 
 
 @pytest.mark.asyncio
