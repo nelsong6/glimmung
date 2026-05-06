@@ -25,7 +25,7 @@ from glimmung import locks as lock_ops
 from glimmung import native_events as native_event_ops
 from glimmung import native_k8s as native_k8s_ops
 from glimmung import playbooks as playbook_ops
-from glimmung import reports as report_ops
+from glimmung import touchpoints as touchpoint_ops
 from glimmung import runs as run_ops
 from glimmung import signals as signal_ops
 from glimmung.artifacts import ArtifactStore
@@ -261,7 +261,7 @@ async def _resolve_signal_pr(
     looks_like_id = len(target_id) == 26 and target_id.isalnum() and not target_id.isdigit()
 
     if looks_like_id:
-        pr_lookup = await report_ops.read_report(
+        pr_lookup = await touchpoint_ops.read_touchpoint(
             cosmos, project=signal.target_repo, report_id=target_id,
         )
         if pr_lookup is None:
@@ -1632,7 +1632,7 @@ async def _open_pr_primitive(*, run: Run, workflow: Workflow) -> None:
         pr_number = already.pr_number
         html_url = already.html_url
 
-    pr, etag, _created = await report_ops.ensure_report_for_github(
+    pr, etag, _created = await touchpoint_ops.ensure_touchpoint_for_github(
         cosmos,
         project=run.project,
         repo=run.issue_repo,
@@ -1645,7 +1645,7 @@ async def _open_pr_primitive(*, run: Run, workflow: Workflow) -> None:
         linked_issue_id=run.issue_id or None,
         linked_run_id=run.id,
     )
-    pr, _ = await report_ops.update_report(
+    pr, _ = await touchpoint_ops.update_touchpoint(
         cosmos,
         pr=pr,
         etag=etag,
@@ -2460,8 +2460,8 @@ async def link_existing_pr_endpoint(
         raise HTTPException(400, "repo required when run has no issue_repo")
     branch = req.branch or run.pr_branch or f"glimmung/{run.id}"
     title = req.title or await _title_for_run(cosmos, run) or f"{repo}#{req.number}"
-    html_url = req.html_url or report_ops.github_pull_request_url_for(repo, req.number)
-    pr, pr_etag, _created = await report_ops.ensure_report_for_github(
+    html_url = req.html_url or touchpoint_ops.github_pull_request_url_for(repo, req.number)
+    pr, pr_etag, _created = await touchpoint_ops.ensure_touchpoint_for_github(
         cosmos,
         project=run.project,
         repo=repo,
@@ -2474,7 +2474,7 @@ async def link_existing_pr_endpoint(
         linked_issue_id=run.issue_id or None,
         linked_run_id=run.id,
     )
-    pr, _ = await report_ops.update_report(
+    pr, _ = await touchpoint_ops.update_touchpoint(
         cosmos,
         pr=pr,
         etag=pr_etag,
@@ -4175,7 +4175,7 @@ async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
     body = rich_body or raw_body
     linked_issue_id = meta.get("issue_id") if meta else None
 
-    pr, etag, created = await report_ops.ensure_report_for_github(
+    pr, etag, created = await touchpoint_ops.ensure_touchpoint_for_github(
         cosmos,
         project=project,
         repo=repo,
@@ -4200,7 +4200,7 @@ async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
     # existing PR, patch the user-editable + GH-provided fields so
     # Cosmos stays in sync with GH edits + commits.
     if not created and action in ("opened", "reopened", "edited", "synchronize"):
-        pr, etag = await report_ops.update_report(
+        pr, etag = await touchpoint_ops.update_touchpoint(
             cosmos, pr=pr, etag=etag,
             title=title or None,
             body=body if body else None,
@@ -4214,7 +4214,7 @@ async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
     # Apply linkages from the marker (idempotent — same id wins on
     # webhook redelivery).
     if linked_issue_id and pr.linked_issue_id != linked_issue_id:
-        pr, etag = await report_ops.update_report(
+        pr, etag = await touchpoint_ops.update_touchpoint(
             cosmos, pr=pr, etag=etag,
             linked_issue_id=linked_issue_id,
         )
@@ -4229,7 +4229,7 @@ async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
         )
         if run_lookup is not None:
             run_for_link, _ = run_lookup
-            pr, etag = await report_ops.update_report(
+            pr, etag = await touchpoint_ops.update_touchpoint(
                 cosmos, pr=pr, etag=etag,
                 linked_run_id=run_for_link.id,
             )
@@ -4243,18 +4243,18 @@ async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
             )
             outcome["reopen_ignored"] = "merged"
         elif pr.state == ReportState.CLOSED:
-            pr, etag = await report_ops.reopen_report(cosmos, pr=pr, etag=etag)
+            pr, etag = await touchpoint_ops.reopen_touchpoint(cosmos, pr=pr, etag=etag)
             outcome["reopened"] = True
 
     if action == "closed":
         if pr_merged:
-            pr, etag = await report_ops.merge_report(
+            pr, etag = await touchpoint_ops.merge_touchpoint(
                 cosmos, pr=pr, etag=etag,
                 merged_by=merged_by_user or "unknown",
             )
             outcome["merged"] = True
         else:
-            pr, etag = await report_ops.close_report(cosmos, pr=pr, etag=etag)
+            pr, etag = await touchpoint_ops.close_touchpoint(cosmos, pr=pr, etag=etag)
             outcome["closed"] = True
 
     return outcome
@@ -4287,7 +4287,7 @@ async def _handle_pull_request_review(payload: dict[str, Any]) -> dict[str, Any]
     target_repo = repo
     target_id = str(pr_number)
     mirrored_review = False
-    found = await report_ops.find_report_by_repo_number(
+    found = await touchpoint_ops.find_touchpoint_by_repo_number(
         cosmos, repo=repo, number=int(pr_number),
     )
     if found is not None:
@@ -4315,7 +4315,7 @@ async def _handle_pull_request_review(payload: dict[str, Any]) -> dict[str, Any]
                     "pull_request_review.submitted on %s#%d has invalid submitted_at %r; using now",
                     repo, int(pr_number), submitted_at_raw,
                 )
-        await report_ops.append_report_review(
+        await touchpoint_ops.append_touchpoint_review(
             cosmos,
             pr=pr,
             etag=etag,
@@ -5917,7 +5917,7 @@ def _portfolio_review_issue_body(
 # `/v1/reports` remains as a compatibility alias for old clients and links.
 
 
-class ReportRow(BaseModel):
+class TouchpointRow(BaseModel):
     """One row in the Touchpoints view."""
     id: str                                # glimmung Report id
     project: str
@@ -5941,7 +5941,7 @@ class ReportRow(BaseModel):
     pr_lock_held: bool = False             # triage in flight
 
 
-class ReportDetail(BaseModel):
+class TouchpointDetail(BaseModel):
     id: str
     project: str
     repo: str
@@ -5971,7 +5971,7 @@ class ReportDetail(BaseModel):
     pr_lock_held: bool = False
 
 
-class ReportCreateRequest(BaseModel):
+class TouchpointCreateRequest(BaseModel):
     """Body for registering a touchpoint backed by a GitHub PR."""
     project: str
     repo: str
@@ -5986,7 +5986,7 @@ class ReportCreateRequest(BaseModel):
     linked_run_id: str | None = None
 
 
-class ReportUpdateRequest(BaseModel):
+class TouchpointUpdateRequest(BaseModel):
     """Body for patching a touchpoint by canonical id."""
     title: str | None = None
     body: str | None = None
@@ -6000,7 +6000,7 @@ class ReportUpdateRequest(BaseModel):
     merged_by: str | None = None           # required when state="merged"
 
 
-class ReportVersionCreateRequest(BaseModel):
+class TouchpointVersionCreateRequest(BaseModel):
     """Body for appending an immutable touchpoint version."""
     title: str
     body: str = ""
@@ -6012,22 +6012,29 @@ class ReportVersionCreateRequest(BaseModel):
     version: int | None = None
 
 
+ReportRow = TouchpointRow
+ReportDetail = TouchpointDetail
+ReportCreateRequest = TouchpointCreateRequest
+ReportUpdateRequest = TouchpointUpdateRequest
+ReportVersionCreateRequest = TouchpointVersionCreateRequest
+
+
 @app.get(
     "/v1/touchpoints",
-    response_model=list[ReportRow],
+    response_model=list[TouchpointRow],
 )
 @app.get(
     "/v1/reports",
-    response_model=list[ReportRow],
+    response_model=list[TouchpointRow],
 )
-async def list_reports(
+async def list_touchpoints(
     project: str | None = Query(None),
     repo: str | None = Query(None),
     state: ReportState | None = Query(None),
     limit: int | None = Query(None, ge=1, le=500),
-) -> list[ReportRow]:
+) -> list[TouchpointRow]:
     """All touchpoints across registered projects, optionally filtered."""
-    return await _list_reports_from_cosmos(
+    return await _list_touchpoints_from_cosmos(
         app.state.cosmos,
         project=project,
         repo=repo,
@@ -6036,22 +6043,22 @@ async def list_reports(
     )
 
 
-async def _list_reports_from_cosmos(
+async def _list_touchpoints_from_cosmos(
     cosmos: Cosmos,
     *,
     project: str | None = None,
     repo: str | None = None,
     state: ReportState | None = None,
     limit: int | None = None,
-) -> list[ReportRow]:
+) -> list[TouchpointRow]:
     """Read path for `/v1/touchpoints`, lifted out for focused tests."""
-    reports = await report_ops.list_reports(
+    touchpoints = await touchpoint_ops.list_touchpoints(
         cosmos,
         project=project,
         repo=repo,
         state=state,
     )
-    if not reports:
+    if not touchpoints:
         return []
 
     run_docs = await query_all(cosmos.runs, "SELECT * FROM c")
@@ -6074,8 +6081,8 @@ async def _list_reports_from_cosmos(
     locks_by_key = {doc["key"]: doc for doc in lock_docs}
 
     now = datetime.now(UTC)
-    rows: list[ReportRow] = []
-    for pr in reports:
+    rows: list[TouchpointRow] = []
+    for pr in touchpoints:
         run_doc = None
         if pr.linked_run_id:
             run_doc = runs_by_id.get(pr.linked_run_id)
@@ -6088,7 +6095,7 @@ async def _list_reports_from_cosmos(
             expires_at = datetime.fromisoformat(lock_doc["expires_at"])
             pr_lock_held = expires_at > now
 
-        row = ReportRow(
+        row = TouchpointRow(
             id=pr.id,
             project=pr.project,
             repo=pr.repo,
@@ -6131,50 +6138,54 @@ async def _list_reports_from_cosmos(
     return rows
 
 
+list_reports = list_touchpoints
+_list_reports_from_cosmos = _list_touchpoints_from_cosmos
+
+
 @app.get(
     "/v1/touchpoints/by-id/{project}/{report_id}",
-    response_model=ReportDetail,
+    response_model=TouchpointDetail,
 )
 @app.get(
     "/v1/reports/by-id/{project}/{report_id}",
-    response_model=ReportDetail,
+    response_model=TouchpointDetail,
 )
-async def report_detail_by_id(
+async def touchpoint_detail_by_id(
     project: str = Path(...),
     report_id: str = Path(...),
-) -> ReportDetail:
+) -> TouchpointDetail:
     """Detail view keyed by canonical Glimmung touchpoint id."""
     cosmos: Cosmos = app.state.cosmos
-    found = await report_ops.read_report(cosmos, project=project, report_id=report_id)
+    found = await touchpoint_ops.read_touchpoint(cosmos, project=project, report_id=report_id)
     if found is None:
         raise HTTPException(404, f"no glimmung Report {project}/{report_id}")
     pr, _ = found
-    return await _build_report_detail(cosmos, pr=pr)
+    return await _build_touchpoint_detail(cosmos, pr=pr)
 
 
 @app.get(
     "/v1/touchpoints/{repo_owner}/{repo_name}/{pr_number}",
-    response_model=ReportDetail,
+    response_model=TouchpointDetail,
 )
 @app.get(
     "/v1/reports/{repo_owner}/{repo_name}/{pr_number}",
-    response_model=ReportDetail,
+    response_model=TouchpointDetail,
 )
-async def report_detail(
+async def touchpoint_detail(
     repo_owner: str = Path(...),
     repo_name: str = Path(...),
     pr_number: int = Path(...),
-) -> ReportDetail:
+) -> TouchpointDetail:
     """Touchpoint detail view keyed by GitHub PR coordinates."""
     repo = f"{repo_owner}/{repo_name}"
     cosmos: Cosmos = app.state.cosmos
-    found = await report_ops.find_report_by_repo_number(
+    found = await touchpoint_ops.find_touchpoint_by_repo_number(
         cosmos, repo=repo, number=pr_number,
     )
     if found is None:
         raise HTTPException(404, f"no glimmung Report for {repo}#{pr_number}")
     pr, _ = found
-    return await _build_report_detail(cosmos, pr=pr)
+    return await _build_touchpoint_detail(cosmos, pr=pr)
 
 
 @app.get(
@@ -6185,13 +6196,13 @@ async def report_detail(
     "/v1/reports/by-id/{project}/{report_id}/versions",
     response_model=list[ReportVersion],
 )
-async def list_report_versions_endpoint(
+async def list_touchpoint_versions_endpoint(
     project: str = Path(...),
     report_id: str = Path(...),
     limit: Annotated[int | None, Query(ge=1, le=500)] = None,
 ) -> list[ReportVersion]:
     """List immutable snapshots for a canonical Glimmung touchpoint."""
-    return await _list_report_versions_from_cosmos(
+    return await _list_touchpoint_versions_from_cosmos(
         app.state.cosmos,
         project=project,
         report_id=report_id,
@@ -6199,17 +6210,17 @@ async def list_report_versions_endpoint(
     )
 
 
-async def _list_report_versions_from_cosmos(
+async def _list_touchpoint_versions_from_cosmos(
     cosmos: Cosmos,
     *,
     project: str,
     report_id: str,
     limit: int | None = None,
 ) -> list[ReportVersion]:
-    found = await report_ops.read_report(cosmos, project=project, report_id=report_id)
+    found = await touchpoint_ops.read_touchpoint(cosmos, project=project, report_id=report_id)
     if found is None:
         raise HTTPException(404, f"no glimmung Report {project}/{report_id}")
-    return await report_ops.list_report_versions(
+    return await touchpoint_ops.list_touchpoint_versions(
         cosmos, project=project, report_id=report_id, limit=limit,
     )
 
@@ -6222,20 +6233,20 @@ async def _list_report_versions_from_cosmos(
     "/v1/reports/by-id/{project}/{report_id}/versions/{version}",
     response_model=ReportVersion,
 )
-async def report_version_detail_endpoint(
+async def touchpoint_version_detail_endpoint(
     project: str = Path(...),
     report_id: str = Path(...),
     version: int = Path(...),
 ) -> ReportVersion:
     """Read one immutable touchpoint-version snapshot."""
-    found = await report_ops.read_report(
+    found = await touchpoint_ops.read_touchpoint(
         cosmos=app.state.cosmos,
         project=project,
         report_id=report_id,
     )
     if found is None:
         raise HTTPException(404, f"no glimmung Report {project}/{report_id}")
-    version_doc = await report_ops.read_report_version(
+    version_doc = await touchpoint_ops.read_touchpoint_version(
         app.state.cosmos,
         project=project,
         report_id=report_id,
@@ -6249,9 +6260,9 @@ async def report_version_detail_endpoint(
     return version_doc
 
 
-async def _build_report_detail(cosmos: Cosmos, *, pr: Report) -> ReportDetail:
+async def _build_touchpoint_detail(cosmos: Cosmos, *, pr: Report) -> TouchpointDetail:
     """Render a Report plus linked Run state."""
-    detail = ReportDetail(
+    detail = TouchpointDetail(
         id=pr.id,
         project=pr.project,
         repo=pr.repo,
@@ -6367,15 +6378,15 @@ def _tank_session_launch_url_from_fields(
 
 @app.post(
     "/v1/touchpoints",
-    response_model=ReportDetail,
+    response_model=TouchpointDetail,
     dependencies=[Depends(require_admin_user)],
 )
 @app.post(
     "/v1/reports",
-    response_model=ReportDetail,
+    response_model=TouchpointDetail,
     dependencies=[Depends(require_admin_user)],
 )
-async def create_report_endpoint(req: ReportCreateRequest) -> ReportDetail:
+async def create_touchpoint_endpoint(req: TouchpointCreateRequest) -> TouchpointDetail:
     """Register a Glimmung touchpoint for an existing GitHub PR."""
     cosmos: Cosmos = app.state.cosmos
     project_doc = await _read_project(cosmos, req.project)
@@ -6387,7 +6398,7 @@ async def create_report_endpoint(req: ReportCreateRequest) -> ReportDetail:
         raise HTTPException(400, "branch required")
 
     # Idempotent ensure semantics.
-    pr, _etag, created = await report_ops.ensure_report_for_github(
+    pr, _etag, created = await touchpoint_ops.ensure_touchpoint_for_github(
         cosmos,
         project=req.project,
         repo=req.repo,
@@ -6408,24 +6419,24 @@ async def create_report_endpoint(req: ReportCreateRequest) -> ReportDetail:
         # linkages on after the fact so callers don't have to round-trip
         # through PATCH for the common "found existing PR, attach
         # linkage" case.
-        found = await report_ops.read_report(cosmos, project=req.project, report_id=pr.id)
+        found = await touchpoint_ops.read_touchpoint(cosmos, project=req.project, report_id=pr.id)
         assert found is not None
         pr, etag = found
-        pr, _ = await report_ops.update_report(
+        pr, _ = await touchpoint_ops.update_touchpoint(
             cosmos, pr=pr, etag=etag,
             linked_issue_id=req.linked_issue_id,
             linked_run_id=req.linked_run_id,
         )
     elif created and (req.linked_issue_id or req.linked_run_id):
-        found = await report_ops.read_report(cosmos, project=req.project, report_id=pr.id)
+        found = await touchpoint_ops.read_touchpoint(cosmos, project=req.project, report_id=pr.id)
         assert found is not None
         pr, etag = found
-        pr, _ = await report_ops.update_report(
+        pr, _ = await touchpoint_ops.update_touchpoint(
             cosmos, pr=pr, etag=etag,
             linked_issue_id=req.linked_issue_id,
             linked_run_id=req.linked_run_id,
         )
-    return await _build_report_detail(cosmos, pr=pr)
+    return await _build_touchpoint_detail(cosmos, pr=pr)
 
 
 @app.post(
@@ -6438,14 +6449,14 @@ async def create_report_endpoint(req: ReportCreateRequest) -> ReportDetail:
     response_model=ReportVersion,
     dependencies=[Depends(require_admin_user)],
 )
-async def create_report_version_endpoint(
-    req: ReportVersionCreateRequest,
+async def create_touchpoint_version_endpoint(
+    req: TouchpointVersionCreateRequest,
     project: str = Path(...),
     report_id: str = Path(...),
 ) -> ReportVersion:
     """Append an immutable touchpoint-version snapshot."""
     cosmos: Cosmos = app.state.cosmos
-    found = await report_ops.read_report(cosmos, project=project, report_id=report_id)
+    found = await touchpoint_ops.read_touchpoint(cosmos, project=project, report_id=report_id)
     if found is None:
         raise HTTPException(404, f"no glimmung Report {project}/{report_id}")
     if not req.title.strip():
@@ -6458,7 +6469,7 @@ async def create_report_version_endpoint(
             "state must be 'ready' | 'needs_review' | 'failed' | 'closed' | 'merged'",
         ) from None
     try:
-        return await report_ops.create_report_version(
+        return await touchpoint_ops.create_touchpoint_version(
             cosmos,
             project=project,
             report_id=report_id,
@@ -6477,22 +6488,22 @@ async def create_report_version_endpoint(
 
 @app.patch(
     "/v1/touchpoints/by-id/{project}/{report_id}",
-    response_model=ReportDetail,
+    response_model=TouchpointDetail,
     dependencies=[Depends(require_admin_user)],
 )
 @app.patch(
     "/v1/reports/by-id/{project}/{report_id}",
-    response_model=ReportDetail,
+    response_model=TouchpointDetail,
     dependencies=[Depends(require_admin_user)],
 )
-async def patch_report_endpoint(
-    req: ReportUpdateRequest,
+async def patch_touchpoint_endpoint(
+    req: TouchpointUpdateRequest,
     project: str = Path(...),
     report_id: str = Path(...),
-) -> ReportDetail:
+) -> TouchpointDetail:
     """Patch touchpoint fields + state transitions."""
     cosmos: Cosmos = app.state.cosmos
-    found = await report_ops.read_report(cosmos, project=project, report_id=report_id)
+    found = await touchpoint_ops.read_touchpoint(cosmos, project=project, report_id=report_id)
     if found is None:
         raise HTTPException(404, f"no glimmung Report {project}/{report_id}")
     pr, etag = found
@@ -6503,7 +6514,7 @@ async def patch_report_endpoint(
             req.head_sha, req.html_url, req.linked_issue_id, req.linked_run_id,
         )
     ):
-        pr, etag = await report_ops.update_report(
+        pr, etag = await touchpoint_ops.update_touchpoint(
             cosmos, pr=pr, etag=etag,
             title=req.title,
             body=req.body,
@@ -6518,28 +6529,28 @@ async def patch_report_endpoint(
     if req.state is not None:
         target = req.state.lower()
         if target == "closed" and pr.state not in (ReportState.CLOSED, ReportState.MERGED):
-            pr, etag = await report_ops.close_report(cosmos, pr=pr, etag=etag)
+            pr, etag = await touchpoint_ops.close_touchpoint(cosmos, pr=pr, etag=etag)
         elif target == "merged":
             if not req.merged_by:
                 raise HTTPException(400, "state='merged' requires merged_by")
-            pr, etag = await report_ops.merge_report(
+            pr, etag = await touchpoint_ops.merge_touchpoint(
                 cosmos, pr=pr, etag=etag, merged_by=req.merged_by,
             )
         elif target == "ready" and pr.state != ReportState.READY:
             if pr.merged_at is not None:
                 raise HTTPException(409, "merged Report cannot be reopened")
             if pr.state == ReportState.CLOSED:
-                pr, etag = await report_ops.reopen_report(cosmos, pr=pr, etag=etag)
+                pr, etag = await touchpoint_ops.reopen_touchpoint(cosmos, pr=pr, etag=etag)
             else:
-                pr, etag = await report_ops.set_report_state(
+                pr, etag = await touchpoint_ops.set_touchpoint_state(
                     cosmos, pr=pr, etag=etag, state=ReportState.READY,
                 )
         elif target == "needs_review":
-            pr, etag = await report_ops.set_report_state(
+            pr, etag = await touchpoint_ops.set_touchpoint_state(
                 cosmos, pr=pr, etag=etag, state=ReportState.NEEDS_REVIEW,
             )
         elif target == "failed":
-            pr, etag = await report_ops.set_report_state(
+            pr, etag = await touchpoint_ops.set_touchpoint_state(
                 cosmos, pr=pr, etag=etag, state=ReportState.FAILED,
             )
         elif target not in ("ready", "closed", "merged", "needs_review", "failed"):
@@ -6548,7 +6559,18 @@ async def patch_report_endpoint(
                 "state must be 'ready' | 'needs_review' | 'failed' | 'closed' | 'merged'",
             )
 
-    return await _build_report_detail(cosmos, pr=pr)
+    return await _build_touchpoint_detail(cosmos, pr=pr)
+
+
+report_detail_by_id = touchpoint_detail_by_id
+report_detail = touchpoint_detail
+list_report_versions_endpoint = list_touchpoint_versions_endpoint
+_list_report_versions_from_cosmos = _list_touchpoint_versions_from_cosmos
+report_version_detail_endpoint = touchpoint_version_detail_endpoint
+_build_report_detail = _build_touchpoint_detail
+create_report_endpoint = create_touchpoint_endpoint
+create_report_version_endpoint = create_touchpoint_version_endpoint
+patch_report_endpoint = patch_touchpoint_endpoint
 
 
 @app.post(
