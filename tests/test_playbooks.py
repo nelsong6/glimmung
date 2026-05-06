@@ -378,6 +378,51 @@ async def test_rolling_main_playbook_stamps_main_work_context(cosmos, monkeypatc
     assert captured["work_context_branch"] == "main"
     assert captured["work_context_base_ref"] == "main"
     assert json.loads(str(captured["work_context"]))["strategy"] == "rolling_main"
+    assert advanced.entries[0].metadata["work_context"]["id"] == "project:glimmung:main:main"
+
+
+@pytest.mark.asyncio
+async def test_rolling_main_playbooks_share_project_main_lock(cosmos, monkeypatch):
+    await _seed_project(cosmos)
+    first = await playbook_ops.create_playbook(
+        cosmos,
+        PlaybookCreate(
+            project="glimmung",
+            title="rolling one",
+            entries=[_entry("one")],
+            integration_strategy=PlaybookIntegrationStrategy.ROLLING_MAIN,
+            concurrency_limit=1,
+        ),
+    )
+    second = await playbook_ops.create_playbook(
+        cosmos,
+        PlaybookCreate(
+            project="glimmung",
+            title="rolling two",
+            entries=[_entry("two")],
+            integration_strategy=PlaybookIntegrationStrategy.ROLLING_MAIN,
+            concurrency_limit=1,
+        ),
+    )
+    dispatches: list[str] = []
+
+    async def fake_dispatch_run(app, **kwargs):
+        dispatches.append(kwargs["issue_id"])
+        return DispatchResult(state="pending", run_id=f"run-{len(dispatches)}")
+
+    monkeypatch.setattr("glimmung.app.dispatch_run", fake_dispatch_run)
+    app = SimpleNamespace(state=SimpleNamespace(cosmos=cosmos))
+
+    first = await _advance_playbook(app, playbook=first)
+    second = await _advance_playbook(app, playbook=second)
+
+    assert first.entries[0].state == PlaybookEntryState.RUNNING
+    assert first.entries[0].metadata["work_context"]["id"] == "project:glimmung:main:main"
+    assert second.entries[0].state == PlaybookEntryState.PENDING
+    assert second.entries[0].created_issue_id is None
+    assert second.entries[0].metadata["dispatch_state"] == "work_context_busy"
+    assert second.entries[0].metadata["work_context"]["id"] == "project:glimmung:main:main"
+    assert len(dispatches) == 1
 
 
 @pytest.mark.asyncio
