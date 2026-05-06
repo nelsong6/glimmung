@@ -94,6 +94,41 @@ type ProjectRun = {
   updated_at: string;
 };
 
+type RunReportAttempt = {
+  attempt_index: number;
+  phase: string;
+  phase_kind: string;
+  workflow_filename: string;
+  workflow_run_id: number | null;
+  dispatched_at: string;
+  completed_at: string | null;
+  conclusion: string | null;
+  decision: string | null;
+  cost_usd: number | null;
+  skipped_from_run_id: string | null;
+};
+
+type RunReport = {
+  id: string;
+  project: string;
+  run_id: string;
+  workflow: string;
+  issue_id: string | null;
+  issue_repo: string | null;
+  issue_number: number | null;
+  state: string;
+  current_phase: string | null;
+  attempts_count: number;
+  cumulative_cost_usd: number;
+  validation_url: string | null;
+  screenshots_markdown: string | null;
+  abort_reason: string | null;
+  started_at: string;
+  completed_at: string | null;
+  updated_at: string;
+  attempts: RunReportAttempt[];
+};
+
 type Snapshot = {
   hosts: Host[];
   pending_leases: Lease[];
@@ -1755,6 +1790,110 @@ function projectRunGraph(run: ProjectRun, workflow: Workflow | undefined, projec
   };
 }
 
+function projectRunFromReport(report: RunReport): ProjectRun {
+  return {
+    id: report.run_id,
+    project: report.project,
+    workflow: report.workflow,
+    issue_number: report.issue_number,
+    title: report.issue_number ? `Issue #${report.issue_number}` : report.issue_id ?? report.run_id,
+    state: report.state,
+    cycles: report.attempts_count,
+    current_phase: report.current_phase ?? "pending",
+    cost_usd: report.cumulative_cost_usd,
+    started_at: report.started_at,
+    updated_at: report.updated_at,
+  };
+}
+
+function projectRunReportGraph(report: RunReport, workflow: Workflow | undefined, project: Project): IssueGraph {
+  const run = projectRunFromReport(report);
+  const phaseNames = workflow?.phases.map((phase) => phase.name)
+    ?? report.attempts.map((attempt) => attempt.phase)
+    ?? [run.current_phase];
+  const uniquePhases = Array.from(new Set(phaseNames.length > 0 ? phaseNames : [run.current_phase]));
+  const recycleArrows = workflow?.phases.flatMap((phase) => {
+    if (!phase.recycle_policy) return [];
+    return phase.recycle_policy.on.map((trigger) => ({
+      source: phase.name,
+      target: phase.recycle_policy?.lands_at ?? phase.name,
+      trigger,
+      max_attempts: phase.recycle_policy?.max_attempts ?? 1,
+      active: true,
+      kind: "phase_recycle" as const,
+    }));
+  }) ?? [];
+  const issueNode = report.issue_id || report.issue_number ? {
+    id: `issue:${report.issue_id ?? report.issue_number}`,
+    kind: "issue" as const,
+    label: report.issue_number ? `#${report.issue_number}` : report.issue_id ?? "issue",
+    state: null,
+    timestamp: report.started_at,
+    metadata: {
+      project: project.name,
+      repo: report.issue_repo ?? project.github_repo,
+      issue_id: report.issue_id,
+      issue_number: report.issue_number,
+    },
+  } : null;
+  const runNode = {
+    id: `run:${report.run_id}`,
+    kind: "run" as const,
+    label: report.run_id,
+    state: report.state,
+    timestamp: report.started_at,
+    metadata: {
+      run_id: report.run_id,
+      workflow: report.workflow,
+      cost_usd: report.cumulative_cost_usd,
+      issue_id: report.issue_id,
+      issue_number: report.issue_number,
+      validation_url: report.validation_url,
+      screenshots_markdown: report.screenshots_markdown,
+      abort_reason: report.abort_reason,
+      entrypoint_phase: uniquePhases[0] ?? report.current_phase,
+      workflow_graph: {
+        phases: uniquePhases,
+        default_entry: { target: uniquePhases[0] ?? report.current_phase ?? "phase", active: true, kind: "phase" },
+        recycle_arrows: recycleArrows,
+        terminal: { kind: "pr", enabled: workflow?.pr.enabled ?? false },
+      },
+    },
+  };
+  const attempts = report.attempts.map((attempt) => ({
+    id: `attempt:${report.run_id}:${attempt.attempt_index}`,
+    kind: "attempt" as const,
+    label: `${attempt.phase} attempt ${attempt.attempt_index}`,
+    state: attempt.completed_at ? "completed" : report.state,
+    timestamp: attempt.dispatched_at,
+    metadata: {
+      run_id: report.run_id,
+      attempt_index: attempt.attempt_index,
+      phase: attempt.phase,
+      phase_kind: attempt.phase_kind,
+      workflow_filename: attempt.workflow_filename,
+      workflow_run_id: attempt.workflow_run_id,
+      completed_at: attempt.completed_at,
+      conclusion: attempt.conclusion,
+      decision: attempt.decision,
+      cost_usd: attempt.cost_usd,
+      skipped_from_run_id: attempt.skipped_from_run_id,
+    },
+  }));
+  return {
+    issue_id: report.issue_id ?? report.run_id,
+    nodes: [
+      ...(issueNode ? [issueNode] : []),
+      runNode,
+      ...attempts,
+    ],
+    edges: [
+      ...(issueNode ? [{ source: issueNode.id, target: runNode.id, kind: "spawned" as const }] : []),
+      ...attempts.map((attempt) => ({ source: runNode.id, target: attempt.id, kind: "attempted" as const })),
+    ],
+  };
+}
+
 function ProjectRunView({
   snap,
   signedIn,
@@ -1762,6 +1901,33 @@ function ProjectRunView({
   issueNumber,
   runId,
 }: LayoutContext & { projectName: string; issueNumber: number | null; runId: string }) {
+  const [liveReport, setLiveReport] = useState<RunReport | null>(null);
+  const [liveError, setLiveError] = useState<string | null>(null);
+  const [liveLoading, setLiveLoading] = useState(false);
+
+  useEffect(() => {
+    if (isMockMode() || !projectName || !runId) return;
+    let cancelled = false;
+    setLiveReport(null);
+    setLiveError(null);
+    setLiveLoading(true);
+    fetch(`/v1/runs/${encodeURIComponent(projectName)}/${encodeURIComponent(runId)}/report`)
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`run report ${res.status}`);
+        const body = await res.json() as RunReport;
+        if (!cancelled) setLiveReport(body);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setLiveError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        if (!cancelled) setLiveLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectName, runId]);
+
   if (snap === null) return <div className="empty">Connecting…</div>;
   const project = snap.projects.find((p) => p.name === projectName);
   if (!project) {
@@ -1771,9 +1937,9 @@ function ProjectRunView({
   const runs = isMockMode()
     ? mockRuns.filter((candidate) => candidate.project === project.name)
     : [];
-  const run = isMockMode() ? resolveProjectRun(runs, runId) : null;
+  const run = isMockMode() ? resolveProjectRun(runs, runId) : liveReport ? projectRunFromReport(liveReport) : null;
   const workflow = snap.workflows.find((w) => w.project === (run?.project ?? project.name) && w.name === run?.workflow);
-  const graph = run ? projectRunGraph(run, workflow, project) : null;
+  const graph = liveReport ? projectRunReportGraph(liveReport, workflow, project) : run ? projectRunGraph(run, workflow, project) : null;
 
   if (!run) {
     return (
@@ -1785,9 +1951,9 @@ function ProjectRunView({
             <div className="project-repo mono">{project.github_repo}</div>
           </div>
         </section>
-        <div className="empty">
-          Run detail is not available yet for live runs.
-        </div>
+        {liveLoading && <div className="empty">Loading run detail…</div>}
+        {liveError && <div className="empty">Run detail could not be loaded: {liveError}</div>}
+        {!liveLoading && !liveError && <div className="empty">Run {runSlugDisplay(runId)} was not found.</div>}
       </div>
     );
   }
