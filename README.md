@@ -109,6 +109,7 @@ matching surface in the same PR:
 | POST   | `/v1/playbooks`                   | Create a draft Playbook for a coordinated batch of issue specs. |
 | GET    | `/v1/playbooks`                   | List Playbooks, optionally filtered by project. |
 | GET    | `/v1/playbooks/{project}/{id}`    | Inspect a Playbook. |
+| POST   | `/v1/playbooks/{project}/{id}/entries/{entry_id}/gate` | Set or clear a manual Playbook entry gate; optionally advances the Playbook after clearing. |
 | POST   | `/v1/hosts`                       | Register/update a host. |
 | GET    | `/v1/issues`                      | List open issues across all registered repos (live GH API). |
 | GET    | `/v1/issues/{owner}/{repo}/{n}`   | Issue detail (title, body, labels, last-run, lock state). |

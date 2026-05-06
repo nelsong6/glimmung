@@ -9,10 +9,12 @@ from fastapi import HTTPException
 from glimmung import playbooks as playbook_ops
 from glimmung.app import (
     _advance_playbook,
+    PlaybookEntryGateRequest,
     create_playbook_endpoint,
     get_playbook_endpoint,
     list_playbooks_endpoint,
     run_playbook_endpoint,
+    set_playbook_entry_gate_endpoint,
 )
 from glimmung.dispatch import DispatchResult
 from glimmung.models import (
@@ -262,4 +264,97 @@ async def test_run_playbook_endpoint_404s_on_missing(cosmos, monkeypatch):
     )
     with pytest.raises(HTTPException) as exc:
         await run_playbook_endpoint(project="glimmung", playbook_id="missing")
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_playbook_gate_endpoint_clears_gate_and_advances(cosmos, monkeypatch):
+    await _seed_project(cosmos)
+    playbook = await playbook_ops.create_playbook(
+        cosmos,
+        PlaybookCreate(
+            project="glimmung",
+            title="gated batch",
+            entries=[
+                PlaybookEntry(
+                    id="review",
+                    issue=PlaybookIssueSpec(title="review", body="check it"),
+                    manual_gate=True,
+                )
+            ],
+        ),
+    )
+    calls: list[str] = []
+
+    async def fake_dispatch_run(app, **kwargs):
+        calls.append(kwargs["issue_id"])
+        return DispatchResult(state="dispatched", run_id="run-review")
+
+    monkeypatch.setattr("glimmung.app.dispatch_run", fake_dispatch_run)
+    monkeypatch.setattr(
+        "glimmung.app.app",
+        SimpleNamespace(state=SimpleNamespace(cosmos=cosmos)),
+    )
+
+    advanced = await set_playbook_entry_gate_endpoint(
+        PlaybookEntryGateRequest(manual_gate=False),
+        project="glimmung",
+        playbook_id=playbook.id,
+        entry_id="review",
+    )
+
+    assert advanced.state == PlaybookState.RUNNING
+    assert advanced.entries[0].manual_gate is False
+    assert advanced.entries[0].state == PlaybookEntryState.RUNNING
+    assert advanced.entries[0].run_id == "run-review"
+    assert calls == [advanced.entries[0].created_issue_id]
+
+
+@pytest.mark.asyncio
+async def test_playbook_gate_endpoint_can_set_gate_without_advancing(cosmos, monkeypatch):
+    await _seed_project(cosmos)
+    playbook = await playbook_ops.create_playbook(
+        cosmos,
+        PlaybookCreate(
+            project="glimmung",
+            title="set gate",
+            entries=[_entry("one")],
+        ),
+    )
+    monkeypatch.setattr(
+        "glimmung.app.app",
+        SimpleNamespace(state=SimpleNamespace(cosmos=cosmos)),
+    )
+
+    updated = await set_playbook_entry_gate_endpoint(
+        PlaybookEntryGateRequest(manual_gate=True, advance=False),
+        project="glimmung",
+        playbook_id=playbook.id,
+        entry_id="one",
+    )
+
+    assert updated.entries[0].manual_gate is True
+    assert updated.entries[0].state == PlaybookEntryState.PENDING
+    assert updated.state == PlaybookState.DRAFT
+
+
+@pytest.mark.asyncio
+async def test_playbook_gate_endpoint_404s_for_missing_entry(cosmos, monkeypatch):
+    await _seed_project(cosmos)
+    playbook = await playbook_ops.create_playbook(
+        cosmos,
+        PlaybookCreate(project="glimmung", title="missing entry", entries=[_entry("one")]),
+    )
+    monkeypatch.setattr(
+        "glimmung.app.app",
+        SimpleNamespace(state=SimpleNamespace(cosmos=cosmos)),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await set_playbook_entry_gate_endpoint(
+            PlaybookEntryGateRequest(),
+            project="glimmung",
+            playbook_id=playbook.id,
+            entry_id="missing",
+        )
     assert exc.value.status_code == 404
