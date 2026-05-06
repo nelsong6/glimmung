@@ -70,6 +70,7 @@ class DispatchResult(BaseModel):
       - `no_project`: repo isn't registered with glimmung.
       - `no_workflow`: project has no matching workflow (caller passed
         none and the project has 0 or 2+ workflows).
+      - `workflow_forbidden`: project policy forbids this workflow shape.
       - `dispatch_failed`: the lease was claimed and a host was assigned,
         but `dispatch_workflow` raised (typically a 422 from GH on
         undeclared workflow inputs). Lease + lock are released and no
@@ -161,6 +162,20 @@ async def dispatch_run(
     workflow_doc, picker_detail = await _resolve_workflow(cosmos, project_name, workflow_name)
     if workflow_doc is None:
         return DispatchResult(state="no_workflow", detail=picker_detail)
+    if _project_requires_native_workflows(project_doc) and _workflow_has_gha_phase(workflow_doc):
+        gha_phases = [
+            str(phase.get("name") or "<unnamed>")
+            for phase in workflow_doc.get("phases", [])
+            if phase.get("kind", "gha_dispatch") == "gha_dispatch"
+        ]
+        return DispatchResult(
+            state="workflow_forbidden",
+            workflow=str(workflow_doc.get("name") or workflow_name or ""),
+            detail=(
+                "project is marked native_webapp; refusing to dispatch "
+                f"gha_dispatch phases: {', '.join(gha_phases)}"
+            ),
+        )
     workflow_actual_name: str = workflow_doc["name"]
     effective_issue_labels = issue_labels if issue_labels is not None else list(issue.labels)
 
@@ -746,6 +761,28 @@ def _phase_runner_label(phase_doc: dict[str, Any]) -> str:
     return (
         str(phase_doc.get("workflowFilename") or "")
         or f"{phase_doc.get('kind', 'gha_dispatch')}:{phase_doc['name']}"
+    )
+
+
+def _project_requires_native_workflows(project_doc: dict[str, Any] | None) -> bool:
+    metadata = (project_doc or {}).get("metadata") or {}
+    if metadata.get("native_webapp") is True or metadata.get("nativeWebapp") is True:
+        return True
+    for key in ("app_kind", "appKind", "kind"):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip().lower() in {
+            "native_webapp",
+            "native-webapp",
+            "native webapp",
+        }:
+            return True
+    return False
+
+
+def _workflow_has_gha_phase(workflow_doc: dict[str, Any]) -> bool:
+    return any(
+        phase.get("kind", "gha_dispatch") == "gha_dispatch"
+        for phase in workflow_doc.get("phases", [])
     )
 
 

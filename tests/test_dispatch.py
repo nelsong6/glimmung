@@ -57,12 +57,14 @@ def app():
     return SimpleNamespace(state=state)
 
 
-async def _register_project(app, name: str, repo: str) -> None:
+async def _register_project(
+    app, name: str, repo: str, metadata: dict | None = None,
+) -> None:
     await app.state.cosmos.projects.create_item({
         "id": name,
         "name": name,
         "githubRepo": repo,
-        "metadata": {},
+        "metadata": metadata or {},
         "createdAt": datetime.now(UTC).isoformat(),
     })
 
@@ -896,6 +898,48 @@ async def test_dispatch_by_issue_id_dispatches_native_issue(app):
     assert metadata["issue_body"] == "Make the preview show the requested native change."
     assert metadata["issue_number"] == str(issue.number)
     assert "issue_repo" not in metadata
+
+
+@pytest.mark.asyncio
+async def test_dispatch_refuses_gha_workflow_for_native_webapp_project(app):
+    await _register_project(
+        app,
+        "glimmung",
+        "nelsong6/glimmung",
+        metadata={"native_webapp": True},
+    )
+    await _register_workflow(
+        app,
+        project="glimmung",
+        name="agent-run",
+        retry_workflow_filename="agent-retry.yml",
+    )
+    await _register_host(app, "runner-1")
+    issue_id = await _register_issue(
+        app,
+        project="glimmung",
+        repo="nelsong6/glimmung",
+        issue_number=141,
+    )
+
+    result = await dispatch_run(
+        app,
+        issue_id=issue_id,
+        project="glimmung",
+        workflow_name="agent-run",
+        trigger_source={"kind": "glimmung_ui"},
+    )
+
+    assert result.state == "workflow_forbidden"
+    assert result.workflow == "agent-run"
+    assert "native_webapp" in (result.detail or "")
+    assert "gha_dispatch phases: agent" in (result.detail or "")
+
+    lock_docs = [d async for d in app.state.cosmos.locks.query_items(
+        "SELECT * FROM c WHERE c.scope = @s",
+        parameters=[{"name": "@s", "value": "issue"}],
+    )]
+    assert lock_docs == []
 
 
 @pytest.mark.asyncio
