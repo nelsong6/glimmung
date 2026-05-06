@@ -2380,6 +2380,27 @@ async def get_run_report(
     return _run_report_from_run(run)
 
 
+@app.get("/v1/projects/{project}/runs", response_model=list[RunReport])
+async def list_project_runs(
+    project: str = Path(...),
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> list[RunReport]:
+    """Newest persisted Runs for one project.
+
+    The project runs page uses this for real run history. The snapshot only
+    carries active/pending leases, which misses terminal Runs entirely.
+    """
+    docs = await query_all(
+        app.state.cosmos.runs,
+        "SELECT * FROM c WHERE c.project = @project ORDER BY c.updated_at DESC",
+        parameters=[{"name": "@project", "value": project}],
+    )
+    reports: list[RunReport] = []
+    for doc in docs[:limit]:
+        reports.append(_run_report_from_run(Run.model_validate(run_ops._strip_meta(doc))))
+    return reports
+
+
 @app.get(
     "/v1/projects/{project}/issues/{issue_number}/runs/{run_number}/report",
     response_model=RunReport,

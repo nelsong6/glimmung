@@ -84,6 +84,7 @@ type ProjectRun = {
   id: string;
   project: string;
   workflow: string;
+  run_number?: number | null;
   issue_number: number | null;
   title: string;
   state: string;
@@ -1564,8 +1565,36 @@ function ProjectRunsView({
   snap,
   projectName,
 }: LayoutContext & { projectName: string }) {
+  const project = snap?.projects.find((p) => p.name === projectName);
+  const [liveRuns, setLiveRuns] = useState<ProjectRun[]>([]);
+  const [runsLoading, setRunsLoading] = useState(!isMockMode());
+  const [runsError, setRunsError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (isMockMode() || !project) return;
+    let cancelled = false;
+    setRunsLoading(true);
+    setRunsError(null);
+    fetch(`/v1/projects/${encodeURIComponent(project.name)}/runs?limit=200`)
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+        return await res.json() as RunReport[];
+      })
+      .then((reports) => {
+        if (!cancelled) setLiveRuns(reports.map(projectRunFromReport));
+      })
+      .catch((err) => {
+        if (!cancelled) setRunsError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        if (!cancelled) setRunsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [project?.name]);
+
   if (snap === null) return <div className="empty">Connecting…</div>;
-  const project = snap.projects.find((p) => p.name === projectName);
   if (!project) {
     return <div className="empty">Project {projectName || "(missing)"} was not found.</div>;
   }
@@ -1573,9 +1602,11 @@ function ProjectRunsView({
   const active = snap.active_leases.filter((l) => l.project === project.name);
   const pending = snap.pending_leases.filter((l) => l.project === project.name);
   const currentWork = [...active, ...pending];
+
   const runs = isMockMode()
     ? mockRuns.filter((run) => run.project === project.name)
-    : [];
+    : liveRuns;
+  const completedRuns = runs.filter((run) => run.state !== "in_progress" && run.state !== "pending");
 
   return (
     <div className="project-workspace">
@@ -1603,26 +1634,38 @@ function ProjectRunsView({
         </div>
       </section>
 
-      {runs.length > 0 ? (
-        <ProjectRunsTable runs={runs} project={project} />
-      ) : (
+      {runsLoading && <div className="empty">Loading run history…</div>}
+      {runsError && <div className="empty">Run history could not be loaded: {runsError}</div>}
+      {!runsLoading && !runsError && completedRuns.length > 0 && (
+        <ProjectRunsTable title="Completed runs" runs={completedRuns} project={project} />
+      )}
+
+      {currentWork.length > 0 && (
         <>
           <h2>Work in flight</h2>
+          <CurrentWorkTable leases={currentWork} emptyText="" />
+        </>
+      )}
+
+      {!runsLoading && !runsError && (
+        runs.length > 0 ? (
+          <ProjectRunsTable title="All runs" runs={runs} project={project} />
+        ) : currentWork.length === 0 ? (
           <CurrentWorkTable
             leases={currentWork}
-            emptyText={`No active or pending runs for ${project.name}.`}
+            emptyText={`No active, pending, or completed runs for ${project.name}.`}
           />
-        </>
+        ) : null
       )}
     </div>
   );
 }
 
-function ProjectRunsTable({ runs, project }: { runs: ProjectRun[]; project: Project }) {
+function ProjectRunsTable({ title, runs, project }: { title: string; runs: ProjectRun[]; project: Project }) {
   const runsPath = `/projects/${encodeURIComponent(project.name)}/runs`;
   return (
     <>
-      <h2>Run history</h2>
+      <h2>{title}</h2>
       <table>
         <thead>
           <tr>
@@ -1645,7 +1688,7 @@ function ProjectRunsTable({ runs, project }: { runs: ProjectRun[]; project: Proj
                 <td>
                   <Link
                     className="link mono"
-                    to={`/projects/${encodeURIComponent(run.project)}/issues/${run.issue_number}/runs/${encodeURIComponent(runSlug)}`}
+                    to={projectRunHref(run, runSlug)}
                     state={{ returnTo: runsPath, returnLabel: "runs" }}
                     title={run.id}
                   >
@@ -1689,6 +1732,7 @@ function ProjectRunsTable({ runs, project }: { runs: ProjectRun[]; project: Proj
 }
 
 function projectRunLabel(run: ProjectRun, runs: ProjectRun[], index: number): string {
+  if (run.issue_number !== null && run.run_number) return `#${run.issue_number}-${run.run_number}`;
   if (run.issue_number === null) return `run-${index + 1}`;
   const sameIssue = runs.filter((candidate) => candidate.issue_number === run.issue_number);
   const ordinal = sameIssue.findIndex((candidate) => candidate.id === run.id) + 1;
@@ -1697,6 +1741,13 @@ function projectRunLabel(run: ProjectRun, runs: ProjectRun[], index: number): st
 
 function projectRunSlug(run: ProjectRun, runs: ProjectRun[], index: number): string {
   return projectRunLabel(run, runs, index).replace(/^#/, "");
+}
+
+function projectRunHref(run: ProjectRun, runSlug: string): string {
+  if (run.issue_number !== null) {
+    return `/projects/${encodeURIComponent(run.project)}/issues/${run.issue_number}/runs/${encodeURIComponent(runSlug)}`;
+  }
+  return `/projects/${encodeURIComponent(run.project)}/runs/${encodeURIComponent(run.id)}`;
 }
 
 function runSlugDisplay(slug: string): string {
@@ -1812,6 +1863,7 @@ function projectRunFromReport(report: RunReport): ProjectRun {
     id: report.run_id,
     project: report.project,
     workflow: report.workflow,
+    run_number: report.run_number,
     issue_number: report.issue_number,
     title: report.issue_number ? `Issue #${report.issue_number}` : report.issue_id ?? report.run_id,
     state: report.state,
@@ -2106,24 +2158,49 @@ function CurrentWorkTable({ leases, emptyText }: { leases: Lease[]; emptyText: s
           <th>Workflow</th>
           <th>State</th>
           <th>Host</th>
-          <th>Metadata</th>
+          <th>Context</th>
           <th>Requested</th>
         </tr>
       </thead>
       <tbody>
-        {leases.map((l) => (
-          <tr key={l.id}>
-            <td className="mono">{l.id.slice(0, 8)}…</td>
-            <td className="mono dim">{l.workflow ?? "—"}</td>
-            <td><span className={`pill ${l.state === "active" ? "busy" : "info"}`}>{l.state}</span></td>
-            <td className="mono">{l.host ?? "—"}</td>
-            <td className="mono dim">{JSON.stringify(l.metadata)}</td>
-            <td className="mono dim">{relTime(l.requested_at)}</td>
-          </tr>
-        ))}
+        {leases.map((l) => {
+          const context = leaseContext(l);
+          return (
+            <tr key={l.id}>
+              <td className="mono">{l.id.slice(0, 8)}…</td>
+              <td className="mono dim">{l.workflow ?? "—"}</td>
+              <td><span className={`pill ${l.state === "active" ? "busy" : "info"}`}>{l.state}</span></td>
+              <td className="mono">{l.host ?? "—"}</td>
+              <td className="mono dim" title={context.title}>{context.label}</td>
+              <td className="mono dim">{relTime(l.requested_at)}</td>
+            </tr>
+          );
+        })}
       </tbody>
     </table>
   );
+}
+
+function leaseContext(lease: Lease): { label: string; title: string } {
+  const metadata = lease.metadata ?? {};
+  const issueNumber = metadata.issue_number ?? metadata.issueNumber;
+  const runId = metadata.run_id ?? metadata.runId;
+  const source = metadata.trigger_source ?? metadata.triggerSource ?? metadata.source;
+  const parts: string[] = [];
+  if (typeof issueNumber === "number" || typeof issueNumber === "string") {
+    parts.push(`#${issueNumber}`);
+  }
+  if (typeof runId === "string" && runId) {
+    parts.push(runId.slice(0, 8));
+  }
+  if (typeof source === "string" && source) {
+    parts.push(source);
+  }
+  const label = parts.length > 0 ? parts.join(" · ") : "—";
+  return {
+    label,
+    title: label === "—" ? "No concise context on this lease" : label,
+  };
 }
 type CapacityViewProps = {
   snap: Snapshot | null;
