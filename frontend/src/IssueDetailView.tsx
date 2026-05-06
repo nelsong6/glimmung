@@ -112,6 +112,19 @@ type NativeRunEventsResponse = {
   archive_url: string | null;
 };
 
+type NativePodLogsResponse = {
+  project: string;
+  run_id: string;
+  attempt_index: number;
+  job_id: string;
+  namespace: string;
+  pod_name: string;
+  container: string;
+  phase: string;
+  tail_lines: number;
+  logs: string;
+};
+
 type WorkflowGraphMeta = {
   phases: string[];
   default_entry: { target: string; active: boolean; kind: string } | null;
@@ -1846,13 +1859,16 @@ function NativeJobInspector({
   live: boolean;
 }) {
   const [logs, setLogs] = useState<NativeRunEventsResponse | null>(null);
+  const [podLogs, setPodLogs] = useState<NativePodLogsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [podLogError, setPodLogError] = useState<string | null>(null);
   const stepRefs = useMemo(() => nativeStepRefs(jobs), [jobs]);
   const defaultSelection = useMemo(
     () => preferredNativeStepKey(stepRefs),
     [stepRefs],
   );
   const [selectedKey, setSelectedKey] = useState<string | null>(defaultSelection);
+  const selected = stepRefs.find((step) => step.key === selectedKey) ?? stepRefs[0] ?? null;
 
   useEffect(() => {
     let cancelled = false;
@@ -1881,6 +1897,34 @@ function NativeJobInspector({
     };
   }, [project, runId, attemptIndex, defaultSelection, live]);
 
+  useEffect(() => {
+    let cancelled = false;
+    setPodLogs(null);
+    setPodLogError(null);
+    if (!live || !selected) return () => { cancelled = true; };
+    const url =
+      `/v1/runs/${encodeURIComponent(project)}/${encodeURIComponent(runId)}` +
+      `/native/pod-logs?attempt_index=${attemptIndex}` +
+      `&job_id=${encodeURIComponent(selected.job.job_id)}&tail_lines=200`;
+    const load = () => {
+      fetch(url)
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`pod logs ${res.status}`);
+        const body = await res.json() as NativePodLogsResponse;
+        if (!cancelled) setPodLogs(body);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setPodLogError(err instanceof Error ? err.message : String(err));
+      });
+    };
+    load();
+    const timer = window.setInterval(load, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [project, runId, attemptIndex, live, selected?.job.job_id]);
+
   if (error) {
     return (
       <div className="native-log-panel">
@@ -1893,7 +1937,6 @@ function NativeJobInspector({
     return <div className="native-log-panel dim mono">loading native events…</div>;
   }
   const events = logs.events;
-  const selected = stepRefs.find((step) => step.key === selectedKey) ?? stepRefs[0] ?? null;
   const selectedEvents = selected
     ? events.filter((event) => (
         event.job_id === selected.job.job_id
@@ -1908,6 +1951,7 @@ function NativeJobInspector({
           <span className="mono dim">
             {events.length} event{events.length === 1 ? "" : "s"}
             {live ? " · live" : ""}
+            {podLogs ? ` · ${podLogs.tail_lines} line tail` : ""}
           </span>
         </div>
         {(logs.archive_url || archiveUrl) && (
@@ -1955,8 +1999,8 @@ function NativeJobInspector({
         </aside>
         <pre className="step-terminal native-step-terminal">
           {selected
-            ? nativeTerminalText(selected.job, selected.step, selectedEvents)
-            : nativeTerminalText(null, null, events)}
+            ? nativeTerminalText(selected.job, selected.step, selectedEvents, podLogs, podLogError)
+            : nativeTerminalText(null, null, events, podLogs, podLogError)}
         </pre>
       </div>
     </div>
@@ -2018,6 +2062,8 @@ function nativeTerminalText(
   job: NativeAttemptJob | null,
   step: NativeAttemptStep | null,
   events: NativeRunEvent[],
+  podLogs: NativePodLogsResponse | null = null,
+  podLogError: string | null = null,
 ): string {
   const heading = job && step
     ? [`# ${job.name || job.job_id}`, `$ step ${step.slug}`]
@@ -2026,7 +2072,16 @@ function nativeTerminalText(
   const lines = events.length > 0
     ? events.map(nativeEventLine)
     : ["No hot native events recorded for this selection."];
-  return [...heading, ...stepMessage, "", ...lines].join("\n");
+  const podTail = podLogs
+    ? [
+        "",
+        `# live pod log tail: ${podLogs.namespace}/${podLogs.pod_name} ${podLogs.container}`,
+        podLogs.logs.trimEnd() || "No pod log output yet.",
+      ]
+    : podLogError
+      ? ["", `# live pod log unavailable: ${podLogError}`]
+      : [];
+  return [...heading, ...stepMessage, "", ...lines, ...podTail].join("\n");
 }
 
 function nativeEventLine(event: NativeRunEvent): string {
