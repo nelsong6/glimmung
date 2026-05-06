@@ -64,6 +64,7 @@ from glimmung.models import (
     NativeRunEventType,
     NativeStepState,
     NativeStepSpec,
+    PhaseAttempt,
     PhaseSpec,
     Playbook,
     PlaybookCreate,
@@ -2272,6 +2273,54 @@ class LinkExistingPrResult(BaseModel):
     touchpoint_id: str
 
 
+class RunReportAttempt(BaseModel):
+    attempt_index: int
+    phase: str
+    phase_kind: str
+    workflow_filename: str
+    workflow_run_id: int | None = None
+    dispatched_at: datetime
+    completed_at: datetime | None = None
+    conclusion: str | None = None
+    decision: str | None = None
+    cost_usd: float | None = None
+    skipped_from_run_id: str | None = None
+
+
+class RunReport(BaseModel):
+    id: str
+    project: str
+    run_id: str
+    workflow: str
+    issue_id: str | None = None
+    issue_repo: str | None = None
+    issue_number: int | None = None
+    state: RunState
+    current_phase: str | None = None
+    attempts_count: int
+    cumulative_cost_usd: float
+    validation_url: str | None = None
+    screenshots_markdown: str | None = None
+    abort_reason: str | None = None
+    started_at: datetime
+    completed_at: datetime | None = None
+    updated_at: datetime
+    attempts: list[RunReportAttempt] = Field(default_factory=list)
+
+
+@app.get("/v1/runs/{project}/{run_id}/report", response_model=RunReport)
+async def get_run_report(
+    project: str = Path(...),
+    run_id: str = Path(...),
+) -> RunReport:
+    """Materialized read model for the factual audit of one Run."""
+    found = await run_ops.read_run(app.state.cosmos, project=project, run_id=run_id)
+    if found is None:
+        raise HTTPException(404, f"run {run_id} not found in project {project!r}")
+    run, _etag = found
+    return _run_report_from_run(run)
+
+
 async def _abort_run(
     cosmos: Cosmos,
     minter: GitHubAppTokenMinter | None,
@@ -2440,6 +2489,58 @@ async def link_existing_pr_endpoint(
         pr_number=req.number,
         touchpoint_id=pr.id,
     )
+
+
+def _run_report_from_run(run: Run) -> RunReport:
+    attempts = [
+        RunReportAttempt(
+            attempt_index=a.attempt_index,
+            phase=a.phase,
+            phase_kind=a.phase_kind,
+            workflow_filename=a.workflow_filename,
+            workflow_run_id=a.workflow_run_id,
+            dispatched_at=a.dispatched_at,
+            completed_at=a.completed_at,
+            conclusion=a.conclusion,
+            decision=a.decision,
+            cost_usd=_attempt_cost(a),
+            skipped_from_run_id=a.skipped_from_run_id,
+        )
+        for a in run.attempts
+    ]
+    completed = max(
+        (a.completed_at for a in run.attempts if a.completed_at is not None),
+        default=None,
+    )
+    current_phase = run.attempts[-1].phase if run.attempts else None
+    return RunReport(
+        id=f"{run.id}:report",
+        project=run.project,
+        run_id=run.id,
+        workflow=run.workflow,
+        issue_id=run.issue_id or None,
+        issue_repo=run.issue_repo or None,
+        issue_number=run.issue_number if run.issue_number > 0 else None,
+        state=run.state,
+        current_phase=current_phase,
+        attempts_count=len(run.attempts),
+        cumulative_cost_usd=run.cumulative_cost_usd,
+        validation_url=run.validation_url,
+        screenshots_markdown=run.screenshots_markdown,
+        abort_reason=run.abort_reason,
+        started_at=run.created_at,
+        completed_at=completed if run.state != RunState.IN_PROGRESS else None,
+        updated_at=run.updated_at,
+        attempts=attempts,
+    )
+
+
+def _attempt_cost(attempt: PhaseAttempt) -> float | None:
+    if attempt.cost_usd is not None:
+        return attempt.cost_usd
+    if attempt.verification is not None:
+        return attempt.verification.cost_usd
+    return None
 
 
 async def _title_for_run(cosmos: Cosmos, run: Run) -> str:

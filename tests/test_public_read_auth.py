@@ -11,6 +11,7 @@ PUBLIC_READ_ROUTES = {
     ("GET", "/v1/issues/by-id/{project}/{issue_id}"),
     ("GET", "/v1/issues/{repo_owner}/{repo_name}/{issue_number}/graph"),
     ("GET", "/v1/graph"),
+    ("GET", "/v1/runs/{project}/{run_id}/report"),
     ("GET", "/v1/runs/{project}/{run_id}/native/events"),
     ("GET", "/v1/reports"),
     ("GET", "/v1/touchpoints"),

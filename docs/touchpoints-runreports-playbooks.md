@@ -20,6 +20,16 @@ Each RunReport is strictly scoped to one Run. Do not introduce a RunReport
 grouping object for v1. Cross-run totals can be derived by Touchpoint or
 Playbook views when needed.
 
+The materialized API is:
+
+```text
+GET /v1/runs/{project}/{run_id}/report
+```
+
+It is derived from the Run document and includes attempt summaries,
+cumulative cost, validation URL, screenshot markdown, abort reason, and the
+terminal timestamp when present.
+
 A RunReport may eventually include:
 
 - wall time and phase durations
