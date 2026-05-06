@@ -96,6 +96,11 @@ class Settings(BaseSettings):
     native_runner_namespace_role: str = "admin"
     native_runner_codex_credentials_secret: str = "codex-credentials"
     native_runner_codex_credentials_mount_path: str = "/etc/codex-creds"
+    native_standby_dns_namespace: str = "glimmung"
+    native_standby_dns_gateway_namespace: str = "envoy-gateway-system"
+    native_standby_dns_gateway_name: str = "main"
+    native_standby_dns_target: str = ""
+    native_standby_dns_default_ttl: int = 300
 
     # Private Blob container for native runner logs and future evidence.
     # Glimmung serves these back to users; callers should persist logical

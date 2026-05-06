@@ -21,6 +21,12 @@ nativeRunner:
   globalConcurrency: 5
   jobTtlSeconds: 259200
   namespaceRole: admin
+  standbyDns:
+    namespace: glimmung
+    gatewayNamespace: envoy-gateway-system
+    gatewayName: main
+    target: ""
+    defaultTtl: 300
   codexCredentials:
     enabled: true
     secretName: codex-credentials

@@ -43,6 +43,16 @@ spec:
               value: {{ .Values.nativeRunner.jobTtlSeconds | quote }}
             - name: NATIVE_RUNNER_NAMESPACE_ROLE
               value: {{ .Values.nativeRunner.namespaceRole | quote }}
+            - name: NATIVE_STANDBY_DNS_NAMESPACE
+              value: {{ .Values.nativeRunner.standbyDns.namespace | quote }}
+            - name: NATIVE_STANDBY_DNS_GATEWAY_NAMESPACE
+              value: {{ .Values.nativeRunner.standbyDns.gatewayNamespace | quote }}
+            - name: NATIVE_STANDBY_DNS_GATEWAY_NAME
+              value: {{ .Values.nativeRunner.standbyDns.gatewayName | quote }}
+            - name: NATIVE_STANDBY_DNS_TARGET
+              value: {{ .Values.nativeRunner.standbyDns.target | quote }}
+            - name: NATIVE_STANDBY_DNS_DEFAULT_TTL
+              value: {{ .Values.nativeRunner.standbyDns.defaultTtl | quote }}
             - name: NATIVE_RUNNER_CODEX_CREDENTIALS_SECRET
               value: {{ .Values.nativeRunner.codexCredentials.secretName | quote }}
             - name: NATIVE_RUNNER_CODEX_CREDENTIALS_MOUNT_PATH

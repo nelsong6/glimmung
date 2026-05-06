@@ -30,6 +30,12 @@ def _settings():
         native_runner_namespace_role="admin",
         native_runner_codex_credentials_secret="codex-credentials",
         native_runner_codex_credentials_mount_path="/etc/codex-creds",
+        native_runner_project_concurrency=5,
+        native_standby_dns_namespace="glimmung",
+        native_standby_dns_gateway_namespace="envoy-gateway-system",
+        native_standby_dns_gateway_name="main",
+        native_standby_dns_target="172.179.163.96",
+        native_standby_dns_default_ttl=300,
         k8s_sa_token_path="/var/run/token",
         k8s_ca_cert_path="/var/run/ca.crt",
         k8s_api_host="https://kubernetes.default.svc",
@@ -197,6 +203,52 @@ def test_job_manifest_maps_phase_jobs_to_sequential_pod_containers():
     assert env["GLIMMUNG_ATTEMPT_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == (
         "glim-01krnative-2-token"
     )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_standby_dns_creates_project_slots():
+    launcher = _RecordingLauncher(_settings())
+
+    await launcher.reconcile_standby_dns([
+        {
+            "id": "ambience",
+            "name": "ambience",
+            "metadata": {
+                "native_standby_dns": {
+                    "enabled": True,
+                    "record_base": "ambience.dev.romaine.life",
+                    "slot_prefix": "ambience-slot",
+                    "count": 2,
+                }
+            },
+        }
+    ])
+
+    assert launcher.calls[0]["method"] == "GET"
+    assert launcher.calls[0]["path"].startswith(
+        "/apis/externaldns.k8s.io/v1alpha1/namespaces/glimmung/dnsendpoints?"
+    )
+    assert launcher.calls[1]["method"] == "POST"
+    assert launcher.calls[1]["path"] == (
+        "/apis/externaldns.k8s.io/v1alpha1/namespaces/glimmung/dnsendpoints"
+    )
+    body = launcher.calls[1]["json"]
+    assert body["metadata"]["name"] == "native-standby-ambience"
+    assert body["metadata"]["labels"]["glimmung.romaine.life/standby-dns"] == "true"
+    assert body["spec"]["endpoints"] == [
+        {
+            "dnsName": "ambience-slot-1.ambience.dev.romaine.life",
+            "recordType": "A",
+            "recordTTL": 300,
+            "targets": ["172.179.163.96"],
+        },
+        {
+            "dnsName": "ambience-slot-2.ambience.dev.romaine.life",
+            "recordType": "A",
+            "recordTTL": 300,
+            "targets": ["172.179.163.96"],
+        },
+    ]
 
 
 @pytest.mark.asyncio
