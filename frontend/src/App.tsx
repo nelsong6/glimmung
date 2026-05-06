@@ -3,6 +3,7 @@ import { Link, Navigate, NavLink, Outlet, Route, Routes, useLocation, useNavigat
 import { AdminPanel } from "./AdminPanel";
 import { IssueDetailView, RunViewer, type AbortState, type DispatchState, type IssueGraph } from "./IssueDetailView";
 import { IssuesView } from "./IssuesView";
+import { PortfolioView } from "./PortfolioView";
 import { ReportDetailView } from "./ReportDetailView";
 import { ReportsView } from "./ReportsView";
 import { StyleguideView } from "./StyleguideView";
@@ -147,6 +148,7 @@ export function App() {
         <Route path="projects/:project/workflows" element={<ProjectWorkflowsRoute />} />
         <Route path="projects/:project/workflows/:workflow" element={<ProjectWorkflowRoute />} />
         <Route path="projects/:project/issues" element={<ProjectIssuesRoute />} />
+        <Route path="projects/:project/portfolio" element={<ProjectPortfolioRoute />} />
         <Route path="projects/:project/issues/new" element={<IssueOnboardingRoute />} />
         <Route path="projects/:project/issues/:issueNumber/runs/:runId" element={<ProjectRunRoute />} />
         <Route path="projects/:project/issues/:issueNumber" element={<IssueDetailView />}>
@@ -189,6 +191,7 @@ export function App() {
           <Route path="lineage" element={null} />
         </Route>
         <Route path="touchpoints" element={<ReportsRoute />} />
+        <Route path="portfolio" element={<PortfolioRoute />} />
         <Route path="touchpoints/:owner/:repo/:n" element={<ReportDetailView />} />
         <Route path="reports" element={<Navigate to="/touchpoints" replace />} />
         <Route path="reports/:owner/:repo/:n" element={<LegacyReportRedirectRoute />} />
@@ -446,6 +449,9 @@ function Layout() {
               <NavLink to="/projects" className={dashboardLinkClass}>
                 projects
               </NavLink>
+              <NavLink to="/portfolio" className={dashboardLinkClass}>
+                portfolio
+              </NavLink>
             </nav>
         )}
 
@@ -521,6 +527,8 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
       }
     } else if (parts[2] === "needs-attention") {
       crumbs.push({ label: "Needs attention" });
+    } else if (parts[2] === "portfolio") {
+      crumbs.push({ label: "Portfolio" });
     } else if (parts[2] === "runs") {
       crumbs.push({ label: "Runs", to: `/projects/${encodeURIComponent(parts[1] ?? "")}/runs` });
       if (parts[3]) crumbs.push({ label: runSlugDisplay(parts[3]) });
@@ -559,6 +567,9 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
   }
   if (parts[0] === "touchpoints" || parts[0] === "reports") {
     return [{ label: "Home", to: "/" }, { label: "Touchpoints", to: "/touchpoints" }];
+  }
+  if (parts[0] === "portfolio") {
+    return [{ label: "Home", to: "/" }, { label: "Portfolio", to: "/portfolio" }];
   }
   return [{ label: "Home", to: "/" }, { label: parts[0] }];
 }
@@ -616,6 +627,17 @@ function ProjectIssuesRoute() {
   const params = useParams<{ project?: string }>();
   const ctx = useOutletContext<LayoutContext>();
   return <ProjectIssuesView {...ctx} projectName={decodeURIComponent(params.project ?? "")} />;
+}
+
+function ProjectPortfolioRoute() {
+  const params = useParams<{ project?: string }>();
+  const { signedIn } = useOutletContext<LayoutContext>();
+  return (
+    <PortfolioView
+      signedIn={signedIn}
+      projectFilter={decodeURIComponent(params.project ?? "")}
+    />
+  );
 }
 
 function IssueOnboardingRoute() {
@@ -683,6 +705,16 @@ function ReportsRoute() {
   const { selected } = useOutletContext<LayoutContext>();
   return (
     <ReportsView
+      projectFilter={selected.kind === "all" ? null : selected.project}
+    />
+  );
+}
+
+function PortfolioRoute() {
+  const { signedIn, selected } = useOutletContext<LayoutContext>();
+  return (
+    <PortfolioView
+      signedIn={signedIn}
       projectFilter={selected.kind === "all" ? null : selected.project}
     />
   );
@@ -905,6 +937,10 @@ function ProjectView({
         <Link to={`${projectPath}/needs-attention`} className="home-link">
           <span className="key">Needs attention</span>
           <strong>Project work that needs a decision or follow-up</strong>
+        </Link>
+        <Link to={`${projectPath}/portfolio`} className="home-link">
+          <span className="key">Portfolio</span>
+          <strong>Review UI package rows and dispatch explicit follow-up</strong>
         </Link>
         <Link to={`${projectPath}/runs`} className="home-link">
           <span className="key">Runs</span>

@@ -294,6 +294,39 @@ const mockIssues = [
   },
 ];
 
+const mockPortfolioElements = [
+  {
+    id: "portfolio-glimmung-sidebar",
+    project: "glimmung",
+    route: "/_design-portfolio",
+    element_id: "sidebar.nav",
+    title: "Sidebar navigation",
+    screenshot_url: "/mock/portfolio/sidebar.png",
+    preview_url: "/_design-portfolio?mock=1",
+    status: "needs_review",
+    notes: "Spacing changed around the active project state.",
+    last_touched_run_id: "run-glimmung-217-review",
+    metadata: { package: "@glimmung/ui" },
+    created_at: ago(180),
+    updated_at: ago(38),
+  },
+  {
+    id: "portfolio-glimmung-toolbar",
+    project: "glimmung",
+    route: "/_design-portfolio",
+    element_id: "toolbar.actions",
+    title: "Toolbar actions",
+    screenshot_url: null,
+    preview_url: "/_design-portfolio?mock=1",
+    status: "approved",
+    notes: "Matches the review baseline.",
+    last_touched_run_id: "run-glimmung-217-review",
+    metadata: { package: "@glimmung/ui" },
+    created_at: ago(180),
+    updated_at: ago(42),
+  },
+];
+
 export const mockRuns = [
   {
     id: "run-glimmung-206-live",
@@ -576,9 +609,20 @@ function handleMockRequest(url: URL, init?: RequestInit): Response {
   if ((path === "/v1/reports" || path === "/v1/touchpoints") && method === "GET") {
     return json(mockReports);
   }
+  if (path === "/v1/portfolio/elements" && method === "GET") {
+    const project = url.searchParams.get("project");
+    const status = url.searchParams.get("status");
+    return json(mockPortfolioElements.filter((row) => (
+      (!project || row.project === project)
+      && (!status || row.status === status)
+    )));
+  }
   if (path === "/v1/graph" && method === "GET") return json(filterGraph(url.searchParams.get("project")));
   if (path === "/v1/runs/dispatch" && method === "POST") {
     return json({ state: "dispatched", lease_id: "lease-mock-dispatch", run_id: `run-mock-${Date.now()}`, host: null, workflow: "issue-agent", issue_lock_holder_id: "mock-lock", detail: null });
+  }
+  if (path === "/v1/portfolio/elements/dispatch" && method === "POST") {
+    return json({ state: "dispatched", lease_id: "lease-mock-portfolio", run_id: `run-mock-${Date.now()}`, host: null, workflow: "portfolio-agent", issue_lock_holder_id: "mock-lock", detail: null });
   }
   if (path.startsWith("/v1/lease/") && path.endsWith("/cancel") && method === "POST") return json({ ok: true });
   if (path === "/v1/signals" && method === "POST") return json({ id: `signal-mock-${Date.now()}`, state: "pending" });
