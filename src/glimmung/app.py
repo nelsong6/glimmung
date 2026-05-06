@@ -1681,7 +1681,7 @@ async def _open_pr_primitive(*, run: Run, workflow: Workflow) -> None:
 
 def _glimmung_pr_detail_url(*, settings: Settings, repo: str, number: int) -> str:
     base_url = getattr(settings, "glimmung_base_url", "https://glimmung.romaine.life")
-    return f"{base_url.rstrip('/')}/reports/{repo}/{number}"
+    return f"{base_url.rstrip('/')}/touchpoints/{repo}/{number}"
 
 
 def _thin_github_pr_body(*, run: Run, glimmung_url: str | None) -> str:
@@ -4869,7 +4869,7 @@ async def _build_issue_graph_for_issue(
         nodes.append(GraphNode(
             id=pr_id,
             kind="pr",
-            label=f"Report #{pr.number}",
+            label=f"Touchpoint #{pr.number}",
             state=pr.state.value,
             timestamp=pr.updated_at.isoformat(),
             metadata={
@@ -5104,11 +5104,15 @@ async def dispatch_run_endpoint(req: DispatchRequest) -> DispatchResult:
 
 
 
-# ─── Report view + reject signal (#19) ─────────────────────────────────────
+# ─── Touchpoint view + reject signal (#19, #222) ───────────────────────────
+#
+# The persisted object is still `Report` in the `reports` container for
+# storage compatibility. `/v1/touchpoints` is the product-facing API surface;
+# `/v1/reports` remains as a compatibility alias for old clients and links.
 
 
 class ReportRow(BaseModel):
-    """One row in the Report view."""
+    """One row in the Touchpoints view."""
     id: str                                # glimmung Report id
     project: str
     repo: str
@@ -5162,7 +5166,7 @@ class ReportDetail(BaseModel):
 
 
 class ReportCreateRequest(BaseModel):
-    """POST /v1/reports body for registering a GitHub PR syndication target."""
+    """Body for registering a touchpoint backed by a GitHub PR."""
     project: str
     repo: str
     number: int
@@ -5177,7 +5181,7 @@ class ReportCreateRequest(BaseModel):
 
 
 class ReportUpdateRequest(BaseModel):
-    """PATCH /v1/reports/by-id/{project}/{report_id} body."""
+    """Body for patching a touchpoint by canonical id."""
     title: str | None = None
     body: str | None = None
     branch: str | None = None
@@ -5191,7 +5195,7 @@ class ReportUpdateRequest(BaseModel):
 
 
 class ReportVersionCreateRequest(BaseModel):
-    """POST /v1/reports/by-id/{project}/{report_id}/versions body."""
+    """Body for appending an immutable touchpoint version."""
     title: str
     body: str = ""
     state: str = ReportState.READY.value
@@ -5203,6 +5207,10 @@ class ReportVersionCreateRequest(BaseModel):
 
 
 @app.get(
+    "/v1/touchpoints",
+    response_model=list[ReportRow],
+)
+@app.get(
     "/v1/reports",
     response_model=list[ReportRow],
 )
@@ -5212,7 +5220,7 @@ async def list_reports(
     state: ReportState | None = Query(None),
     limit: int | None = Query(None, ge=1, le=500),
 ) -> list[ReportRow]:
-    """All Reports across registered projects, optionally filtered."""
+    """All touchpoints across registered projects, optionally filtered."""
     return await _list_reports_from_cosmos(
         app.state.cosmos,
         project=project,
@@ -5230,7 +5238,7 @@ async def _list_reports_from_cosmos(
     state: ReportState | None = None,
     limit: int | None = None,
 ) -> list[ReportRow]:
-    """Read path for `/v1/reports`, lifted out for focused tests."""
+    """Read path for `/v1/touchpoints`, lifted out for focused tests."""
     reports = await report_ops.list_reports(
         cosmos,
         project=project,
@@ -5318,6 +5326,10 @@ async def _list_reports_from_cosmos(
 
 
 @app.get(
+    "/v1/touchpoints/by-id/{project}/{report_id}",
+    response_model=ReportDetail,
+)
+@app.get(
     "/v1/reports/by-id/{project}/{report_id}",
     response_model=ReportDetail,
 )
@@ -5325,7 +5337,7 @@ async def report_detail_by_id(
     project: str = Path(...),
     report_id: str = Path(...),
 ) -> ReportDetail:
-    """Detail view keyed by canonical Glimmung Report id."""
+    """Detail view keyed by canonical Glimmung touchpoint id."""
     cosmos: Cosmos = app.state.cosmos
     found = await report_ops.read_report(cosmos, project=project, report_id=report_id)
     if found is None:
@@ -5335,6 +5347,10 @@ async def report_detail_by_id(
 
 
 @app.get(
+    "/v1/touchpoints/{repo_owner}/{repo_name}/{pr_number}",
+    response_model=ReportDetail,
+)
+@app.get(
     "/v1/reports/{repo_owner}/{repo_name}/{pr_number}",
     response_model=ReportDetail,
 )
@@ -5343,7 +5359,7 @@ async def report_detail(
     repo_name: str = Path(...),
     pr_number: int = Path(...),
 ) -> ReportDetail:
-    """Report detail view keyed by GitHub PR coordinates."""
+    """Touchpoint detail view keyed by GitHub PR coordinates."""
     repo = f"{repo_owner}/{repo_name}"
     cosmos: Cosmos = app.state.cosmos
     found = await report_ops.find_report_by_repo_number(
@@ -5356,6 +5372,10 @@ async def report_detail(
 
 
 @app.get(
+    "/v1/touchpoints/by-id/{project}/{report_id}/versions",
+    response_model=list[ReportVersion],
+)
+@app.get(
     "/v1/reports/by-id/{project}/{report_id}/versions",
     response_model=list[ReportVersion],
 )
@@ -5364,7 +5384,7 @@ async def list_report_versions_endpoint(
     report_id: str = Path(...),
     limit: Annotated[int | None, Query(ge=1, le=500)] = None,
 ) -> list[ReportVersion]:
-    """List immutable snapshots for a canonical Glimmung Report."""
+    """List immutable snapshots for a canonical Glimmung touchpoint."""
     return await _list_report_versions_from_cosmos(
         app.state.cosmos,
         project=project,
@@ -5389,6 +5409,10 @@ async def _list_report_versions_from_cosmos(
 
 
 @app.get(
+    "/v1/touchpoints/by-id/{project}/{report_id}/versions/{version}",
+    response_model=ReportVersion,
+)
+@app.get(
     "/v1/reports/by-id/{project}/{report_id}/versions/{version}",
     response_model=ReportVersion,
 )
@@ -5397,7 +5421,7 @@ async def report_version_detail_endpoint(
     report_id: str = Path(...),
     version: int = Path(...),
 ) -> ReportVersion:
-    """Read one immutable ReportVersion snapshot."""
+    """Read one immutable touchpoint-version snapshot."""
     found = await report_ops.read_report(
         cosmos=app.state.cosmos,
         project=project,
@@ -5536,12 +5560,17 @@ def _tank_session_launch_url_from_fields(
 
 
 @app.post(
+    "/v1/touchpoints",
+    response_model=ReportDetail,
+    dependencies=[Depends(require_admin_user)],
+)
+@app.post(
     "/v1/reports",
     response_model=ReportDetail,
     dependencies=[Depends(require_admin_user)],
 )
 async def create_report_endpoint(req: ReportCreateRequest) -> ReportDetail:
-    """Register a Glimmung Report for an existing GitHub PR."""
+    """Register a Glimmung touchpoint for an existing GitHub PR."""
     cosmos: Cosmos = app.state.cosmos
     project_doc = await _read_project(cosmos, req.project)
     if not project_doc:
@@ -5594,6 +5623,11 @@ async def create_report_endpoint(req: ReportCreateRequest) -> ReportDetail:
 
 
 @app.post(
+    "/v1/touchpoints/by-id/{project}/{report_id}/versions",
+    response_model=ReportVersion,
+    dependencies=[Depends(require_admin_user)],
+)
+@app.post(
     "/v1/reports/by-id/{project}/{report_id}/versions",
     response_model=ReportVersion,
     dependencies=[Depends(require_admin_user)],
@@ -5603,7 +5637,7 @@ async def create_report_version_endpoint(
     project: str = Path(...),
     report_id: str = Path(...),
 ) -> ReportVersion:
-    """Append an immutable ReportVersion snapshot."""
+    """Append an immutable touchpoint-version snapshot."""
     cosmos: Cosmos = app.state.cosmos
     found = await report_ops.read_report(cosmos, project=project, report_id=report_id)
     if found is None:
@@ -5636,6 +5670,11 @@ async def create_report_version_endpoint(
 
 
 @app.patch(
+    "/v1/touchpoints/by-id/{project}/{report_id}",
+    response_model=ReportDetail,
+    dependencies=[Depends(require_admin_user)],
+)
+@app.patch(
     "/v1/reports/by-id/{project}/{report_id}",
     response_model=ReportDetail,
     dependencies=[Depends(require_admin_user)],
@@ -5645,7 +5684,7 @@ async def patch_report_endpoint(
     project: str = Path(...),
     report_id: str = Path(...),
 ) -> ReportDetail:
-    """Patch Report fields + state transitions."""
+    """Patch touchpoint fields + state transitions."""
     cosmos: Cosmos = app.state.cosmos
     found = await report_ops.read_report(cosmos, project=project, report_id=report_id)
     if found is None:

@@ -573,7 +573,9 @@ function handleMockRequest(url: URL, init?: RequestInit): Response {
       && (!workflow || issue.workflow === workflow)
     )));
   }
-  if (path === "/v1/reports" && method === "GET") return json(mockReports);
+  if ((path === "/v1/reports" || path === "/v1/touchpoints") && method === "GET") {
+    return json(mockReports);
+  }
   if (path === "/v1/graph" && method === "GET") return json(filterGraph(url.searchParams.get("project")));
   if (path === "/v1/runs/dispatch" && method === "POST") {
     return json({ state: "dispatched", lease_id: "lease-mock-dispatch", run_id: `run-mock-${Date.now()}`, host: null, workflow: "issue-agent", issue_lock_holder_id: "mock-lock", detail: null });
@@ -584,7 +586,7 @@ function handleMockRequest(url: URL, init?: RequestInit): Response {
     return json({ id: `mock-${Date.now()}`, ok: true }, { status: 201 });
   }
 
-  const reportMatch = path.match(/^\/v1\/reports\/([^/]+)\/([^/]+)\/(\d+)$/);
+  const reportMatch = path.match(/^\/v1\/(?:reports|touchpoints)\/([^/]+)\/([^/]+)\/(\d+)$/);
   if (reportMatch) {
     const repo = `${decodeURIComponent(reportMatch[1])}/${decodeURIComponent(reportMatch[2])}`;
     const pr = Number(reportMatch[3]);

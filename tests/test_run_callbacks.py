@@ -263,7 +263,7 @@ async def test_pr_primitive_registers_rich_glimmung_pr_and_thin_github_body(cosm
         "number": 77,
         "body": (
             "Closes nelsong6/ambience#117\n\n"
-            "Canonical context: https://glimmung.test/reports/nelsong6/ambience/77"
+            "Canonical context: https://glimmung.test/touchpoints/nelsong6/ambience/77"
         ),
     }]
 

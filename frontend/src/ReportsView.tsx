@@ -1,11 +1,11 @@
 /**
- * Reports view across registered repos. Each row links to the Report detail
- * view, where the reject-with-feedback action lives.
+ * Touchpoints view across registered repos. Each row links to the detail view,
+ * where the reject-with-feedback action lives.
  *
- * Sourced from `/v1/reports`. Rows include both agent-opened GitHub PR
- * reports and manually mirrored PRs with no run linkage.
+ * Sourced from `/v1/touchpoints`. Rows include both agent-opened GitHub PR
+ * touchpoints and manually mirrored PRs with no run linkage.
  *
- * Row click navigates to `/reports/<owner>/<repo>/<n>`.
+ * Row click navigates to `/touchpoints/<owner>/<repo>/<n>`.
  */
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -44,8 +44,8 @@ export function ReportsView({
     setLoading(true);
     setError(null);
     try {
-      const r = await fetch("/v1/reports");
-      if (!r.ok) throw new Error(`/v1/reports -> ${r.status}`);
+      const r = await fetch("/v1/touchpoints");
+      if (!r.ok) throw new Error(`/v1/touchpoints -> ${r.status}`);
       setRows((await r.json()) as ReportRow[]);
     } catch (e) {
       setError(String(e));
@@ -69,7 +69,7 @@ export function ReportsView({
   return (
     <>
       <h2>
-        Reports{visibleRows ? ` (${visibleRows.length})` : ""}
+        Touchpoints{visibleRows ? ` (${visibleRows.length})` : ""}
         {projectFilter && (
           <span className="filter-hint"> — filtered to {projectFilter}</span>
         )}
@@ -88,8 +88,8 @@ export function ReportsView({
       ) : visibleRows && visibleRows.length === 0 ? (
         <div className="empty">
           {projectFilter
-            ? `No reports for ${projectFilter}.`
-            : "No reports yet."}
+            ? `No touchpoints for ${projectFilter}.`
+            : "No touchpoints yet."}
         </div>
       ) : visibleRows ? (
         <table>
@@ -111,7 +111,7 @@ export function ReportsView({
               <tr
                 key={row.id}
                 className={row.pr_lock_held ? "eligible" : ""}
-                onClick={() => navigate(`/reports/${row.repo}/${row.pr_number}`)}
+                onClick={() => navigate(`/touchpoints/${row.repo}/${row.pr_number}`)}
                 style={{ cursor: "pointer" }}
               >
                 <td>{row.project}</td>

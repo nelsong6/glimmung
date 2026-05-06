@@ -439,7 +439,7 @@ async def test_graph_renders_report_terminal_node_for_run(cosmos, app_state):
 
     report_node = next(n for n in graph.nodes if n.id == "pr:01KQREPORTNODE")
     assert report_node.kind == "pr"
-    assert report_node.label == "Report #42"
+    assert report_node.label == "Touchpoint #42"
     assert report_node.metadata["report_id"] == "01KQREPORTNODE"
     run_node = next(n for n in graph.nodes if n.id == f"run:{run.id}")
     assert run_node.metadata["report_id"] == "01KQREPORTNODE"
