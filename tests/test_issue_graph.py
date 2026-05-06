@@ -267,6 +267,12 @@ async def test_system_graph_renders_open_issues_inflight_runs_prs_and_signals(co
     assert native_attempt.metadata["steps_count"] == 2
     assert native_attempt.metadata["jobs"][0]["steps"][0]["slug"] == "clone"
     assert native_attempt.metadata["log_archive_url"].endswith("/native-events.json")
+    run_node = next(n for n in graph.nodes if n.id == f"run:{run.id}")
+    run_graph = run_node.metadata["run_graph"]
+    assert run_graph["run_id"] == run.id
+    assert [c["cycle_index"] for c in run_graph["cycles"]] == [0, 1]
+    assert run_graph["cycles"][1]["stages"][0]["kind"] == "k8s_job"
+    assert run_graph["cycles"][1]["stages"][0]["jobs"][0]["steps"][0]["slug"] == "clone"
 
 
 @pytest.mark.asyncio
@@ -378,6 +384,16 @@ async def test_graph_renders_issue_run_attempts(cosmos, app_state):
             "kind": "report_recycle",
         },
     ]
+    run_graph = run_node.metadata["run_graph"]
+    assert run_graph["lineage"] == {
+        "cloned_from_run_id": None,
+        "entrypoint_phase": None,
+    }
+    assert [c["cycle_index"] for c in run_graph["cycles"]] == [0, 1]
+    assert run_graph["cycles"][0]["stages"][0]["jobs"][0]["steps"][0]["slug"] == "workflow-run"
+    assert run_graph["cycles"][1]["stages"][0]["stage_id"] == "agent-execute"
+    assert run_graph["cycles"][1]["stages"][0]["jobs"][0]["job_id"] == "agent"
+    assert run_graph["cycles"][1]["stages"][0]["jobs"][0]["steps"][1]["slug"] == "edit"
 
     native_attempt = next(n for n in graph.nodes if n.id == f"attempt:{run.id}:1")
     assert native_attempt.metadata["phase_kind"] == "k8s_job"
