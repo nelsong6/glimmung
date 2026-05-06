@@ -37,6 +37,7 @@ type IssueDetail = {
   state: string;
   labels: string[];
   html_url: string | null;
+  metadata: Record<string, unknown>;
   comments: IssueComment[];
   last_run_id: string | null;
   last_run_number: number | null;
@@ -145,6 +146,7 @@ type NativeAttemptStep = {
 export type DispatchState =
   | { kind: "idle" }
   | { kind: "dispatching" }
+  | { kind: "result"; state: string }
   | { kind: "error"; message: string };
 
 export type AbortState =
@@ -248,6 +250,7 @@ export function IssueDetailView() {
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
+  const [dispatchState, setDispatchState] = useState<DispatchState>({ kind: "idle" });
   const detailUrl =
     target?.kind === "gh"
       ? `/v1/issues/${target.repo}/${target.issue_number}`
@@ -275,6 +278,32 @@ export function IssueDetailView() {
   const onBack = () => {
     const projectName = detail?.project ?? (target?.kind === "native" ? target.project : null);
     navigate(projectName ? `/projects/${encodeURIComponent(projectName)}` : "/needs-attention");
+  };
+
+  const dispatchRun = async () => {
+    if (!detail) return;
+    setDispatchState({ kind: "dispatching" });
+    try {
+      const r = await authedFetch("/v1/runs/dispatch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          issue_id: detail.id,
+          project: detail.project,
+          workflow: stringOrNull(detail.metadata?.workflow) ?? undefined,
+        }),
+      });
+      if (!r.ok) {
+        const text = await r.text();
+        throw new Error(`/v1/runs/dispatch -> ${r.status}: ${text}`);
+      }
+      const result = await r.json() as { state?: string };
+      setDispatchState({ kind: "result", state: result.state ?? "dispatched" });
+      setRefreshTick((t) => t + 1);
+      setTab("runs");
+    } catch (e) {
+      setDispatchState({ kind: "error", message: String(e) });
+    }
   };
 
   useEffect(() => {
@@ -398,6 +427,10 @@ export function IssueDetailView() {
                 graphAvailable={!!graphUrl}
                 project={detail.project}
                 repo={repoForLinks}
+                detail={detail}
+                signedIn={signedIn}
+                dispatchState={dispatchState}
+                onDispatch={() => void dispatchRun()}
               />
             )}
             {tab === "touchpoint" && (
@@ -1324,13 +1357,49 @@ function RunsPane({
   graphAvailable,
   project,
   repo,
+  detail,
+  signedIn,
+  dispatchState,
+  onDispatch,
 }: {
   graph: IssueGraph | null;
   graphAvailable: boolean;
   project: string;
   repo: string | null;
+  detail: IssueDetail;
+  signedIn: boolean;
+  dispatchState: DispatchState;
+  onDispatch: () => void;
 }) {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+
+  const dispatching = dispatchState.kind === "dispatching";
+  const dispatchDisabled = detail.issue_lock_held || dispatching || !signedIn;
+  const newRunButton = (
+    <div
+      className="run-actions"
+      style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap", marginBottom: "1rem" }}
+    >
+      <button
+        type="button"
+        className="link"
+        onClick={onDispatch}
+        disabled={dispatchDisabled}
+      >
+        {dispatching ? "dispatching…" : detail.issue_lock_held ? "in flight" : signedIn ? "new run" : "sign in"}
+      </button>
+      {dispatchState.kind === "result" && (
+        <span className={`pill ${dispatchState.state === "dispatched" ? "free" : "info"}`}>
+          {dispatchState.state}
+        </span>
+      )}
+      {dispatchState.kind === "error" && (
+        <span className="pill drain" title={dispatchState.message}>
+          error
+        </span>
+      )}
+    </div>
+  );
 
   if (!graphAvailable) {
     return (
@@ -1347,7 +1416,12 @@ function RunsPane({
     .slice()
     .sort((a, b) => (b.timestamp ?? "").localeCompare(a.timestamp ?? ""));
   if (runs.length === 0) {
-    return <div className="empty">No runs yet on this issue.</div>;
+    return (
+      <>
+        {newRunButton}
+        <div className="empty">No runs yet on this issue.</div>
+      </>
+    );
   }
   if (selectedRunId) {
     return (
@@ -1376,79 +1450,82 @@ function RunsPane({
     );
   }
   return (
-    <table>
-      <thead>
-        <tr>
-          <th>Run</th>
-          <th>State</th>
-          <th>Started</th>
-          <th>Cycles</th>
-          <th>Cost</th>
-          <th>Touchpoint</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        {runs.map((r) => {
-          const id = runIdFromNode(r);
-          const slug = issueRunSlug(graph, r);
-          const meta = r.metadata;
-          const cycleCount = numberOrNull(meta.cycles_count) ?? 1;
-          const attemptCount = graph.nodes.filter(
-            (n) => n.kind === "attempt" && n.id.startsWith(`attempt:${id}:`),
-          ).length;
-          const cost = numberOrNull(meta.cumulative_cost_usd);
-          const prNumber = numberOrNull(meta.pr_number);
-          // Resume primitive (#111) — flag rows that started as
-          // resumed clones so the lineage is visible at a glance
-          // without drilling in. Tooltip carries the prior run id.
-          const clonedFrom = stringOrNull(meta.cloned_from_run_id);
-          const entrypointPhase = stringOrNull(meta.entrypoint_phase);
-          return (
-            <tr key={r.id}>
-              <td className="mono">
-                <button
-                  type="button"
-                  className="link mono"
-                  title={id}
-                  onClick={() => setSelectedRunId(id)}
-                >
-                  {runSlugDisplay(slug)}
-                </button>
-                {clonedFrom && (
-                  <span
-                    className="dim mono"
-                    style={{ marginLeft: "0.5rem" }}
-                    title={`resumed from ${clonedFrom}${entrypointPhase ? ` at ${entrypointPhase}` : ""}`}
+    <>
+      {newRunButton}
+      <table>
+        <thead>
+          <tr>
+            <th>Run</th>
+            <th>State</th>
+            <th>Started</th>
+            <th>Cycles</th>
+            <th>Cost</th>
+            <th>Touchpoint</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {runs.map((r) => {
+            const id = runIdFromNode(r);
+            const slug = issueRunSlug(graph, r);
+            const meta = r.metadata;
+            const cycleCount = numberOrNull(meta.cycles_count) ?? 1;
+            const attemptCount = graph.nodes.filter(
+              (n) => n.kind === "attempt" && n.id.startsWith(`attempt:${id}:`),
+            ).length;
+            const cost = numberOrNull(meta.cumulative_cost_usd);
+            const prNumber = numberOrNull(meta.pr_number);
+            // Resume primitive (#111) — flag rows that started as
+            // resumed clones so the lineage is visible at a glance
+            // without drilling in. Tooltip carries the prior run id.
+            const clonedFrom = stringOrNull(meta.cloned_from_run_id);
+            const entrypointPhase = stringOrNull(meta.entrypoint_phase);
+            return (
+              <tr key={r.id}>
+                <td className="mono">
+                  <button
+                    type="button"
+                    className="link mono"
+                    title={id}
+                    onClick={() => setSelectedRunId(id)}
                   >
-                    ↩ {clonedFrom.slice(0, 8)}…
-                  </span>
-                )}
-              </td>
-              <td>
-                <span className={`pill ${runStatePill(r.state ?? "")}`}>{r.state ?? "—"}</span>
-              </td>
-              <td className="mono dim">{r.timestamp ? formatTime(r.timestamp) : "—"}</td>
-              <td className="mono">
-                {cycleCount}
-                <span className="dim"> / {attemptCount} stage attempts</span>
-              </td>
-              <td className="mono">{cost !== null ? `$${cost.toFixed(4)}` : "—"}</td>
-              <td className="mono dim">{prNumber !== null ? `#${prNumber}` : "—"}</td>
-              <td>
-                <button
-                  type="button"
-                  className="link"
-                  onClick={() => setSelectedRunId(id)}
-                >
-                  view
-                </button>
-              </td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
+                    {runSlugDisplay(slug)}
+                  </button>
+                  {clonedFrom && (
+                    <span
+                      className="dim mono"
+                      style={{ marginLeft: "0.5rem" }}
+                      title={`resumed from ${clonedFrom}${entrypointPhase ? ` at ${entrypointPhase}` : ""}`}
+                    >
+                      ↩ {clonedFrom.slice(0, 8)}…
+                    </span>
+                  )}
+                </td>
+                <td>
+                  <span className={`pill ${runStatePill(r.state ?? "")}`}>{r.state ?? "—"}</span>
+                </td>
+                <td className="mono dim">{r.timestamp ? formatTime(r.timestamp) : "—"}</td>
+                <td className="mono">
+                  {cycleCount}
+                  <span className="dim"> / {attemptCount} stage attempts</span>
+                </td>
+                <td className="mono">{cost !== null ? `$${cost.toFixed(4)}` : "—"}</td>
+                <td className="mono dim">{prNumber !== null ? `#${prNumber}` : "—"}</td>
+                <td>
+                  <button
+                    type="button"
+                    className="link"
+                    onClick={() => setSelectedRunId(id)}
+                  >
+                    view
+                  </button>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </>
   );
 }
 

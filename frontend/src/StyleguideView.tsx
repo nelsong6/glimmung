@@ -118,6 +118,22 @@ const DESIGN_SYSTEM_ITEMS: PortfolioItem[] = [
     ),
   },
   {
+    id: "run-actions",
+    title: "Run Actions",
+    caption: "Issue detail controls for starting a fresh run from the runs tab",
+    render: () => (
+      <Specimen title="run actions">
+        <div className="run-actions" style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
+          <button type="button" className="link">new run</button>
+          <span className="pill free">dispatched</span>
+          <button type="button" className="link" disabled>in flight</button>
+          <button type="button" className="link" disabled>sign in</button>
+          <span className="pill drain">error</span>
+        </div>
+      </Specimen>
+    ),
+  },
+  {
     id: "colors-surfaces",
     title: "Colors - Surfaces",
     caption: "Deep page, panel, hover, and inset surfaces",
