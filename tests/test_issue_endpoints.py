@@ -61,10 +61,10 @@ async def test_list_surfaces_both_native_and_gh_issues(cosmos):
     rows = await _list_issues_from_cosmos(cosmos)
     assert len(rows) == 2
 
-    # GH issue preserves its imported number during migration; native
-    # issue still has a Glimmung number.
+    # GitHub issue coordinates remain metadata; row.number is the
+    # Glimmung project-scoped issue number.
     gh, native = rows
-    assert gh.number == 7
+    assert gh.number == 2
     assert gh.repo == "nelsong6/ambience"
     assert gh.html_url and gh.html_url.endswith("/issues/7")
 
@@ -207,7 +207,7 @@ async def test_read_issue_by_number_reads_project_scoped_number(cosmos):
     )
 
     found = await issue_ops.read_issue_by_number(
-        cosmos, project="ambience", number=issue.number or 0,
+        cosmos, project="ambience", number=issue.number,
     )
 
     assert found is not None
@@ -226,7 +226,7 @@ async def test_build_detail_carries_gh_coords_when_present(cosmos):
     )
     detail = await _build_issue_detail(cosmos, issue=issue)
     assert detail.repo == "nelsong6/ambience"
-    assert detail.number == 12
+    assert detail.number == 1
     assert detail.html_url == "https://github.com/nelsong6/ambience/issues/12"
 
 

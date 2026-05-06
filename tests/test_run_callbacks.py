@@ -158,6 +158,7 @@ async def _seed_run(
 async def _seed_issue_for_run(cosmos, run: Run, title: str = "Fix the ambience picker") -> None:
     await cosmos.issues.create_item({
         "id": run.issue_id,
+        "number": run.issue_number,
         "project": run.project,
         "title": title,
         "body": "",
@@ -212,6 +213,7 @@ async def test_pr_primitive_registers_rich_glimmung_pr_and_thin_github_body(cosm
     )
     await cosmos.issues.create_item({
         "id": run.issue_id,
+        "number": run.issue_number,
         "project": run.project,
         "title": "Fix the ambience picker",
         "body": "",

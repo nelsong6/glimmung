@@ -69,6 +69,7 @@ async def _seed_issue(
     now = datetime.now(UTC).isoformat()
     await cosmos.issues.create_item({
         "id": issue_id,
+        "number": issue_number,
         "project": project,
         "title": title,
         "body": "",

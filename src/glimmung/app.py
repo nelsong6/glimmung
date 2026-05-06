@@ -4172,7 +4172,7 @@ async def _list_issues_from_cosmos(
     for issue in issues:
         url = issue.metadata.github_issue_url
         repo = issue.metadata.github_issue_repo
-        number = _issue_display_number(issue)
+        number = issue.number
         run_doc = runs_by_issue_id.get(issue.id)
         if run_doc is None and number is not None:
             run_doc = runs_by_project_number.get((issue.project, number))
@@ -4197,8 +4197,7 @@ async def _list_issues_from_cosmos(
             row.last_run_state = run_doc["state"]
             row.last_run_abort_reason = run_doc.get("abort_reason")
         lock_key = (
-            f"{issue.project}#{number}" if number is not None
-            else f"glimmung/{issue.id}"
+            f"{issue.project}#{number}"
         )
         lock_doc = locks_by_key.get(lock_key)
         if lock_doc is not None and lock_doc.get("state") == "held":
@@ -4216,10 +4215,6 @@ async def _list_issues_from_cosmos(
     if limit is not None:
         rows = rows[:limit]
     return rows
-
-
-def _issue_display_number(issue: Issue) -> int | None:
-    return issue.number if issue.number is not None else issue.metadata.github_issue_number
 
 
 @app.get(
@@ -4304,7 +4299,7 @@ async def _build_issue_detail(cosmos: Cosmos, *, issue: Issue) -> IssueDetail:
     (`/v1/issues/{owner}/{repo}/{n}`) and id-keyed (`/v1/issues/by-id/
     {project}/{id}`) detail endpoints."""
     repo = issue.metadata.github_issue_repo
-    number = _issue_display_number(issue)
+    number = issue.number
     detail = IssueDetail(
         id=issue.id,
         project=issue.project,
@@ -4318,17 +4313,14 @@ async def _build_issue_detail(cosmos: Cosmos, *, issue: Issue) -> IssueDetail:
         comments=list(issue.comments),
     )
     latest_run = await run_ops.find_run_by_issue_id(cosmos, issue_id=issue.id)
-    if latest_run is None and number is not None:
+    if latest_run is None:
         latest_run = await run_ops.get_latest_run(
             cosmos, project=issue.project, issue_number=number,
         )
     if latest_run is not None:
         detail.last_run_id = latest_run.id
         detail.last_run_state = latest_run.state.value
-    lock_key = (
-        f"{issue.project}#{number}" if number is not None
-        else f"glimmung/{issue.id}"
-    )
+    lock_key = f"{issue.project}#{number}"
     existing_lock = await lock_ops.read_lock(
         cosmos, scope="issue", key=lock_key,
     )
@@ -4570,7 +4562,7 @@ async def _build_system_graph(
                 "issue_id": issue.id,
                 "project": issue.project,
                 "repo": issue.metadata.github_issue_repo,
-                "number": _issue_display_number(issue),
+                "number": issue.number,
                 "html_url": issue.metadata.github_issue_url,
                 "labels": issue.labels,
             },

@@ -8,6 +8,7 @@ to resolve `Closes #N` references back to glimmung Issues.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -19,7 +20,9 @@ from glimmung.issues import (
     find_issue_by_github_url,
     github_issue_url_for,
     list_open_issues,
+    next_issue_number,
     read_issue,
+    read_issue_by_number,
     remove_comment,
     reopen_issue,
     update_comment,
@@ -82,6 +85,66 @@ async def test_create_issue_records_github_url_and_source(cosmos):
     fetched, _ = await read_issue(cosmos, project="ambience", issue_id=issue.id)
     assert fetched.metadata.github_issue_url == issue.metadata.github_issue_url
     assert fetched.metadata.source == IssueSource.GITHUB_WEBHOOK_IMPORT
+
+
+@pytest.mark.asyncio
+async def test_create_issue_allocates_native_number_independent_of_github_number(cosmos):
+    issue = await create_issue(
+        cosmos, project="ambience",
+        title="imported from GH",
+        source=IssueSource.GITHUB_WEBHOOK_IMPORT,
+        github_issue_url="https://github.com/nelsong6/ambience/issues/42",
+        github_issue_repo="nelsong6/ambience",
+        github_issue_number=42,
+    )
+
+    assert issue.number == 1
+    assert issue.metadata.github_issue_number == 42
+
+
+@pytest.mark.asyncio
+async def test_next_issue_number_seeds_counter_from_top_level_numbers_only(cosmos):
+    await create_issue(cosmos, project="ambience", number=8, title="migrated")
+    await cosmos.issues.create_item({
+        "id": "legacy-without-number",
+        "project": "ambience",
+        "title": "legacy",
+        "body": "",
+        "labels": [],
+        "state": "open",
+        "metadata": {
+            "source": "github_webhook_import",
+            "github_issue_number": 99,
+        },
+        "comments": [],
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    })
+
+    assert await next_issue_number(cosmos, project="ambience") == 9
+    assert await next_issue_number(cosmos, project="ambience") == 10
+
+
+@pytest.mark.asyncio
+async def test_next_issue_number_allocates_unique_values_concurrently(cosmos):
+    numbers = await asyncio.gather(
+        *[next_issue_number(cosmos, project="ambience") for _ in range(10)]
+    )
+
+    assert sorted(numbers) == list(range(1, 11))
+
+
+@pytest.mark.asyncio
+async def test_read_issue_by_number_does_not_fall_back_to_github_number(cosmos):
+    await create_issue(
+        cosmos, project="ambience",
+        title="imported from GH",
+        github_issue_url="https://github.com/nelsong6/ambience/issues/42",
+        github_issue_repo="nelsong6/ambience",
+        github_issue_number=42,
+    )
+
+    assert await read_issue_by_number(cosmos, project="ambience", number=42) is None
 
 
 @pytest.mark.asyncio
