@@ -5923,7 +5923,7 @@ async def _build_issue_graph_for_issue(
         nodes.append(GraphNode(
             id=pr_id,
             kind="pr",
-            label=f"Touchpoint #{pr.number}",
+            label=f"PR #{pr.number}",
             state=pr.state.value,
             timestamp=pr.updated_at.isoformat(),
             metadata={

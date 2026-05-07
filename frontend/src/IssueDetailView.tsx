@@ -1769,8 +1769,6 @@ function TouchpointTab({
     return <div className="empty">Loading touchpoint…</div>;
   }
 
-  const runs = graph.nodes.filter((n) => n.kind === "run");
-  const touchpointNodes = graph.nodes.filter((n) => n.kind === "pr" || n.kind === "signal");
   const prNodes = graph.nodes.filter((n) => n.kind === "pr");
   const latestRun = findActiveRun(graph) ?? findLastCompletedRun(graph);
   const latestMeta = latestRun?.metadata ?? {};
@@ -1786,6 +1784,7 @@ function TouchpointTab({
   const evidenceRepo = repo ?? stringOrNull(latestPrMeta.repo);
   const validationUrl = stringOrNull(latestMeta.validation_url);
   const screenshotsMarkdown = stringOrNull(latestMeta.screenshots_markdown);
+  const hasCurrentEvidence = prNumber !== null || Boolean(validationUrl) || Boolean(screenshotsMarkdown);
 
   return (
     <>
@@ -1799,15 +1798,11 @@ function TouchpointTab({
           </span>
         </div>
         <div className="row">
-          <span className="key">scope</span>
-          <span className="val mono">issue-level, {runs.length} run{runs.length === 1 ? "" : "s"}</span>
+          <span className="key">surface</span>
+          <span className="val">live issue decision</span>
         </div>
         <div className="row">
-          <span className="key">current run</span>
-          <span className="val mono">{latestRun ? runDisplayName(latestRun) : "—"}</span>
-        </div>
-        <div className="row">
-          <span className="key">PR evidence</span>
+          <span className="key">PR</span>
           <span className="val">
             {prNumber !== null && evidenceRepo ? (
               <a className="mono" href={reportUrl || `https://github.com/${evidenceRepo}/pull/${prNumber}`} target="_blank" rel="noreferrer">
@@ -1832,33 +1827,15 @@ function TouchpointTab({
         </div>
       </div>
 
-      <h2>Evidence</h2>
-      {screenshotsMarkdown && (
-        <ScreenshotEvidence markdown={screenshotsMarkdown} />
-      )}
-      {touchpointNodes.length === 0 ? (
-        <div className="empty">No touchpoint evidence has landed yet.</div>
-      ) : (
-        <table>
-          <thead>
-            <tr>
-              <th>Kind</th>
-              <th>Label</th>
-              <th>State</th>
-              <th>Created</th>
-            </tr>
-          </thead>
-          <tbody>
-            {touchpointNodes.map((node) => (
-              <tr key={node.id}>
-                <td className="mono">{node.kind === "pr" ? "PR" : "signal"}</td>
-                <td>{node.label}</td>
-                <td className="mono dim">{node.state ?? "—"}</td>
-                <td className="mono dim">{node.timestamp ? formatTime(node.timestamp) : "—"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      {(screenshotsMarkdown || !hasCurrentEvidence) && (
+        <>
+          <h2>Evidence</h2>
+          {screenshotsMarkdown ? (
+            <ScreenshotEvidence markdown={screenshotsMarkdown} />
+          ) : (
+            <div className="empty">No current evidence has landed yet.</div>
+          )}
+        </>
       )}
     </>
   );
