@@ -101,6 +101,10 @@ class Settings(BaseSettings):
     native_standby_dns_gateway_name: str = "main"
     native_standby_dns_target: str = ""
     native_standby_dns_default_ttl: int = 300
+    native_standby_identity_mcp_url: str = "http://mcp-azure-personal.mcp-azure.svc:80/"
+    native_standby_identity_subscription: str = ""
+    native_standby_identity_resource_group: str = "infra"
+    native_standby_identity_issuer: str = ""
 
     # Private Blob container for native runner logs and future evidence.
     # Glimmung serves these back to users; callers should persist logical
