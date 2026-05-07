@@ -1952,13 +1952,6 @@ h2 .inline-action,
 .dag-recycle-band marker > path {
   fill: var(--fg-dimmer);
 }
-.dag-recycle-label {
-  fill: var(--fg-muted, var(--fg-dimmer));
-  font-family: var(--font-mono);
-  font-size: 0.7rem;
-  letter-spacing: 0.04em;
-  user-select: none;
-}
 .dag-policy-rail {
   display: flex;
   flex-wrap: wrap;

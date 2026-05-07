@@ -1132,17 +1132,13 @@ function DefinitionDag({
 type RecyclePathLayout = {
   arrow: RecycleArrow;
   d: string;
-  label: string;
-  labelX: number;
-  labelY: number;
-  labelAnchor: "start" | "middle" | "end";
   cls: string;
   title: string;
 };
 
-const RECYCLE_LANE_HEIGHT = 26;
-const RECYCLE_BAND_TOP_PAD = 14;
-const RECYCLE_BAND_BOTTOM_PAD = 12;
+const RECYCLE_LANE_HEIGHT = 18;
+const RECYCLE_BAND_TOP_PAD = 8;
+const RECYCLE_BAND_BOTTOM_PAD = 8;
 const RECYCLE_TARGET_OVERSHOOT = 14;
 
 function computeRecyclePaths(
@@ -1201,22 +1197,16 @@ function computeRecyclePaths(
       `L ${cornerX} ${tY}`,
       `L ${tX} ${tY}`,
     ].join(" ");
-    const horizMid = (sX + cornerX) / 2;
     const inactive = r.arrow.max_attempts <= 0;
     const cls = [
       "dag-recycle-path",
       r.arrow.active ? "fired" : "registered",
       inactive ? "inactive" : "active",
     ].join(" ");
-    const cap = inactive ? "disabled" : `×${r.arrow.max_attempts}`;
     const trigger = r.arrow.trigger || "recycle";
     return {
       arrow: r.arrow,
       d,
-      label: `${trigger} · ${cap}`,
-      labelX: horizMid,
-      labelY: laneY - 6,
-      labelAnchor: "middle",
       cls,
       title: `${r.arrow.source} ↻ ${r.arrow.target}: ${trigger}; ${
         inactive ? "no retries (max_attempts: 0)" : `max ${r.arrow.max_attempts}`
@@ -1387,19 +1377,14 @@ function PipelineDag({
               </marker>
             </defs>
             {paths.map((p, i) => (
-              <g key={`${p.arrow.kind}:${p.arrow.source}:${p.arrow.target}:${i}`}>
-                <path d={p.d} className={p.cls} markerEnd="url(#dag-recycle-head)">
-                  <title>{p.title}</title>
-                </path>
-                <text
-                  className="dag-recycle-label"
-                  x={p.labelX}
-                  y={p.labelY}
-                  textAnchor={p.labelAnchor}
-                >
-                  {p.label}
-                </text>
-              </g>
+              <path
+                key={`${p.arrow.kind}:${p.arrow.source}:${p.arrow.target}:${i}`}
+                d={p.d}
+                className={p.cls}
+                markerEnd="url(#dag-recycle-head)"
+              >
+                <title>{p.title}</title>
+              </path>
             ))}
           </svg>
         )}
