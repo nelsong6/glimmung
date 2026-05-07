@@ -2165,7 +2165,7 @@ def _doc_to_workflow(doc: dict[str, Any] | None):
             recycle_policy=_recycle_policy_from_doc(pr_raw.get("recyclePolicy")),
         ),
         budget=BudgetConfig(total=float(budget_raw.get("total", 25.0))),
-        trigger_label=doc.get("triggerLabel", "issue-agent"),
+        trigger_label=doc.get("triggerLabel"),
         default_requirements=doc.get("defaultRequirements") or {},
         metadata=doc.get("metadata") or {},
         created_at=datetime.now(UTC),  # not authoritative; used only for the model
@@ -3638,7 +3638,7 @@ class WorkflowReplayOverride(BaseModel):
     phases: list[PhaseSpec]
     pr: PrPrimitiveSpec = Field(default_factory=PrPrimitiveSpec)
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
-    trigger_label: str = "issue-agent"
+    trigger_label: str | None = None
     default_requirements: dict[str, Any] = Field(default_factory=dict)
 
 

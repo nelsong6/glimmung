@@ -240,7 +240,13 @@ class Workflow(BaseModel):
     phases: list[PhaseSpec] = Field(default_factory=list)
     pr: PrPrimitiveSpec = Field(default_factory=PrPrimitiveSpec)
     budget: "BudgetConfig" = Field(default_factory=lambda: BudgetConfig())
-    trigger_label: str = "issue-agent"
+    # Legacy from the GitHub `issues.labeled` webhook trigger model.
+    # Runs are now started directly via the glimmung UI/API; the field
+    # is kept nullable so callers can omit it and existing stored
+    # workflows continue to round-trip whatever value they were
+    # registered with. Empty string and None both mean "no label fires
+    # this workflow".
+    trigger_label: str | None = None
     default_requirements: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
@@ -252,7 +258,7 @@ class WorkflowRegister(BaseModel):
     phases: list[PhaseSpec]
     pr: PrPrimitiveSpec = Field(default_factory=PrPrimitiveSpec)
     budget: "BudgetConfig" = Field(default_factory=lambda: BudgetConfig())
-    trigger_label: str = "issue-agent"
+    trigger_label: str | None = None
     default_requirements: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
