@@ -617,6 +617,12 @@ def _apply_completion(
     # shouldn't blow away the captured block.
     if screenshots_markdown is not None and run.screenshots_markdown is None:
         updates["screenshots_markdown"] = screenshots_markdown
+    if (
+        phase_outputs is not None
+        and run.validation_url is None
+        and phase_outputs.get("validation_url")
+    ):
+        updates["validation_url"] = phase_outputs["validation_url"]
     return run.model_copy(update=updates)
 
 

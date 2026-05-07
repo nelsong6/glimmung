@@ -700,6 +700,7 @@ async def test_completed_persists_phase_outputs(cosmos, app_state):
         "validation_url": "https://issue-100-1234-abc.glimmung.dev.romaine.life",
         "image_tag": "issue-100-1234-abc",
     }
+    assert final.validation_url == "https://issue-100-1234-abc.glimmung.dev.romaine.life"
 
 
 @pytest.mark.asyncio
