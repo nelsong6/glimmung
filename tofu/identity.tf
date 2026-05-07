@@ -26,11 +26,6 @@ resource "azurerm_resource_group" "glimmung" {
   location = data.azurerm_resource_group.infra.location
 }
 
-data "azurerm_kubernetes_cluster" "infra" {
-  name                = "infra-aks"
-  resource_group_name = local.infra.resource_group_name
-}
-
 data "azurerm_container_registry" "romaine" {
   name                = "romainecr"
   resource_group_name = local.infra.resource_group_name
@@ -71,7 +66,7 @@ resource "azurerm_federated_identity_credential" "glimmung_dedicated" {
   resource_group_name = azurerm_resource_group.glimmung.name
   parent_id           = azurerm_user_assigned_identity.glimmung_dedicated.id
   audience            = ["api://AzureADTokenExchange"]
-  issuer              = data.azurerm_kubernetes_cluster.infra.oidc_issuer_url
+  issuer              = local.aks_oidc_issuer_url
   subject             = "system:serviceaccount:glimmung:infra-shared"
 }
 
@@ -80,7 +75,7 @@ resource "azurerm_federated_identity_credential" "native_runner" {
   resource_group_name = azurerm_resource_group.glimmung.name
   parent_id           = azurerm_user_assigned_identity.native_runner.id
   audience            = ["api://AzureADTokenExchange"]
-  issuer              = data.azurerm_kubernetes_cluster.infra.oidc_issuer_url
+  issuer              = local.aks_oidc_issuer_url
   subject             = "system:serviceaccount:glimmung-runs:glimmung-native-runner"
 }
 
