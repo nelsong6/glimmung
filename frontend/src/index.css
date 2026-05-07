@@ -1928,11 +1928,21 @@ h2 .inline-action,
   position: relative;
   width: 100%;
   margin-top: 4px;
-  pointer-events: none;
 }
 .dag-recycle-band > svg {
   display: block;
   overflow: visible;
+}
+/* Wide invisible stroke layered behind each visible path so the
+   browser-native SVG <title> tooltip has a 14px-thick hit zone
+   instead of the 1.25px visible stroke. Without this, hovering
+   reliably onto the path is nearly impossible. */
+.dag-recycle-hitarea {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 14;
+  pointer-events: stroke;
+  cursor: help;
 }
 .dag-recycle-band path {
   pointer-events: visibleStroke;

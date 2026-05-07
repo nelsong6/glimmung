@@ -1377,14 +1377,16 @@ function PipelineDag({
               </marker>
             </defs>
             {paths.map((p, i) => (
-              <path
-                key={`${p.arrow.kind}:${p.arrow.source}:${p.arrow.target}:${i}`}
-                d={p.d}
-                className={p.cls}
-                markerEnd="url(#dag-recycle-head)"
-              >
-                <title>{p.title}</title>
-              </path>
+              <g key={`${p.arrow.kind}:${p.arrow.source}:${p.arrow.target}:${i}`}>
+                <path d={p.d} className="dag-recycle-hitarea">
+                  <title>{p.title}</title>
+                </path>
+                <path
+                  d={p.d}
+                  className={p.cls}
+                  markerEnd="url(#dag-recycle-head)"
+                />
+              </g>
             ))}
           </svg>
         )}
