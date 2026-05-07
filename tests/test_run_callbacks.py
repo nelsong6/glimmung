@@ -139,6 +139,7 @@ async def _seed_run(
     issue_repo: str,
     issue_number: int,
     issue_lock_holder_id: str | None = None,
+    run_number: int | None = None,
 ) -> Run:
     """Mint a Run with a single dispatched-but-uncompleted attempt — the
     state immediately after `_maybe_dispatch_workflow` returns."""
@@ -149,6 +150,7 @@ async def _seed_run(
         issue_id="01HZZZTESTISSUE",
         issue_repo=issue_repo,
         issue_number=issue_number,
+        run_number=run_number,
         state=RunState.IN_PROGRESS,
         budget=BudgetConfig(total=25.0),
         attempts=[PhaseAttempt(
@@ -220,6 +222,7 @@ async def test_pr_primitive_registers_rich_glimmung_pr_and_thin_github_body(cosm
         project="ambience",
         issue_repo="nelsong6/ambience",
         issue_number=117,
+        run_number=1,
     )
     run.attempts[-1].workflow_run_id = 25255513874
     run.validation_url = "https://issue-117.preview.example"
@@ -267,7 +270,7 @@ async def test_pr_primitive_registers_rich_glimmung_pr_and_thin_github_body(cosm
 
     assert open_calls == [{
         "repo": "nelsong6/ambience",
-        "head": "glimmung/01KQTEST_RUN_PR1",
+        "head": "issue-117-run-1",
         "base": "main",
             "title": "Fix the ambience picker",
             "body": (
@@ -303,7 +306,7 @@ async def test_pr_primitive_registers_rich_glimmung_pr_and_thin_github_body(cosm
     assert found_run is not None
     updated_run, _ = found_run
     assert updated_run.pr_number == 77
-    assert updated_run.pr_branch == "glimmung/01KQTEST_RUN_PR1"
+    assert updated_run.pr_branch == "issue-117-run-1"
 
 
 # ─── /started ──────────────────────────────────────────────────────────────
@@ -1443,11 +1446,12 @@ async def test_completed_pr_primitive_no_diff_marks_review_required(cosmos):
         project="ambience",
         issue_repo="nelsong6/ambience",
         issue_number=218,
+        run_number=1,
     )
     await _seed_issue_for_run(cosmos, run)
 
     async def fake_open_pull_request(_minter, **_kwargs):
-        raise PRCreateNoDiff("No commits between main and glimmung/01KQTEST_RUN_NODIFF")
+        raise PRCreateNoDiff("No commits between main and issue-218-run-1")
 
     app_state = SimpleNamespace(
         state=SimpleNamespace(
@@ -1472,7 +1476,7 @@ async def test_completed_pr_primitive_no_diff_marks_review_required(cosmos):
     final, _ = found  # type: ignore[misc]
     assert final.state == RunState.REVIEW_REQUIRED
     assert final.abort_reason == (
-        "PR primitive: no diff between glimmung/01KQTEST_RUN_NODIFF and base"
+        "PR primitive: no diff between issue-218-run-1 and base"
     )
 
 
@@ -1578,6 +1582,7 @@ async def test_link_existing_pr_endpoint_repairs_run_and_touchpoint(cosmos):
         project="ambience",
         issue_repo="nelsong6/ambience",
         issue_number=220,
+        run_number=1,
     )
     await _seed_issue_for_run(cosmos, run, title="Repair PR primitive")
     app_state = SimpleNamespace(state=SimpleNamespace(cosmos=cosmos))
@@ -1596,7 +1601,7 @@ async def test_link_existing_pr_endpoint_repairs_run_and_touchpoint(cosmos):
     found = await run_ops.read_run(cosmos, project="ambience", run_id=run.id)
     repaired, _ = found  # type: ignore[misc]
     assert repaired.pr_number == 88
-    assert repaired.pr_branch == f"glimmung/{run.id}"
+    assert repaired.pr_branch == "issue-220-run-1"
 
     found_pr = await report_ops.find_report_by_repo_number(
         cosmos, repo="nelsong6/ambience", number=88,

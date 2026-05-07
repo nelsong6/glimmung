@@ -287,6 +287,55 @@ async def test_public_dispatch_result_uses_run_number_not_run_id(app):
 
 
 @pytest.mark.asyncio
+async def test_native_dispatch_sets_work_context_branch_to_issue_run_pattern(app):
+    """Native (k8s_job) dispatch stamps `work_context_branch` on the
+    lease so the runner reads `GLIMMUNG_WORK_CONTEXT_BRANCH` as
+    `issue-<N>-run-<M>` instead of falling back to an opaque ULID."""
+    await _register_project(app, "ambience", "nelsong6/ambience")
+    await _register_native_workflow(app, project="ambience", name="native-agent")
+    await _register_issue(app, project="ambience", repo="nelsong6/ambience", issue_number=42)
+
+    result = await dispatch_run(
+        app,
+        repo="nelsong6/ambience",
+        issue_number=42,
+        trigger_source={"kind": "glimmung_ui"},
+        workflow_name="native-agent",
+    )
+
+    lease_doc = await _lease_doc_for(app, result.lease_id)
+    assert lease_doc["metadata"]["work_context_branch"] == "issue-42-run-1"
+
+
+@pytest.mark.asyncio
+async def test_gha_dispatch_does_not_set_work_context_branch(app):
+    """GHA-dispatch consumers each declare their own input set; sending
+    `work_context_branch` to a workflow that doesn't declare it would
+    422 the dispatch. Until each consumer is updated, leave the
+    metadata unset and let the YAML-side `glimmung/<run_id>` fallback
+    handle it."""
+    await _register_project(app, "ambience", "nelsong6/ambience")
+    await _register_workflow(
+        app,
+        project="ambience",
+        name="issue-agent",
+        retry_workflow_filename="agent-retry.yml",
+    )
+    await _register_host(app, "runner-1")
+    await _register_issue(app, project="ambience", repo="nelsong6/ambience", issue_number=42)
+
+    result = await dispatch_run(
+        app,
+        repo="nelsong6/ambience",
+        issue_number=42,
+        trigger_source={"kind": "glimmung_ui"},
+    )
+
+    lease_doc = await _lease_doc_for(app, result.lease_id)
+    assert "work_context_branch" not in lease_doc["metadata"]
+
+
+@pytest.mark.asyncio
 async def test_dispatch_includes_recent_comments_when_workflow_opts_in(app):
     await _register_project(app, "ambience", "nelsong6/ambience")
     await _register_workflow(

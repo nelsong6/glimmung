@@ -45,6 +45,20 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def default_work_branch(run: Run) -> str:
+    """Default git branch name for a run's work context.
+
+    Format: `issue-<issue_number>-run-<run_number>` when both are set —
+    human-readable in PR lists, easy to grep, encodes provenance.
+    Falls back to `glimmung-run-<run_id>` for runs without an issue
+    mapping (rare; mostly playbook entries that override the branch
+    explicitly anyway).
+    """
+    if run.issue_number and run.run_number:
+        return f"issue-{run.issue_number}-run-{run.run_number}"
+    return f"glimmung-run-{run.id.lower()}"
+
+
 async def create_run(
     cosmos: Cosmos,
     *,

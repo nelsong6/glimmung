@@ -1022,7 +1022,10 @@ async def _process_run_completion(
                 log.info("pr-primitive: no diff for run %s; review required (%s)", run.id, e)
                 await run_ops.mark_review_required(
                     cosmos, run=run, etag=etag,
-                    reason=f"PR primitive: no diff between glimmung/{run.id} and base",
+                    reason=(
+                        "PR primitive: no diff between "
+                        f"{run.pr_branch or run_ops.default_work_branch(run)} and base"
+                    ),
                 )
                 return "review_required_no_diff"
             except Exception as exc:
@@ -1417,6 +1420,15 @@ async def _dispatch_next_phase(
         # str] cleanly.
         "phase_inputs": dict(substituted),
     }
+    # Carry the work branch forward to native phases. If a PR is
+    # already open for this run, the agent keeps pushing to that
+    # branch; otherwise fall back to the canonical default for the
+    # run. GHA phases keep their YAML-side `glimmung/<run_id>` default
+    # — see the dispatch_run comment for the rationale.
+    if next_phase.kind == "k8s_job":
+        metadata["work_context_branch"] = (
+            run.pr_branch or run_ops.default_work_branch(run)
+        )
     for key in (
         "entrypoint_job_id",
         "entrypoint_step_slug",
@@ -1685,20 +1697,22 @@ async def _dispatch_triage(
 
 async def _open_pr_primitive(*, run: Run, workflow: Workflow) -> None:
     """Open the PR for a run that just ADVANCEd. Branch is glimmung-
-    dictated (`glimmung/<run_id>`); title comes from the linked issue,
-    body summarizes the run state in Glimmung; GitHub gets a thin pointer
-    back to the canonical Glimmung PR row. On success, stamps `pr_number`
-    and `pr_branch` on the Run via `link_pr_to_run`. On `PRCreateNoDiff`, the
-    caller marks the Run review_required so a human can inspect the
-    no-diff outcome. On `PRCreateAlreadyExists`, the existing PR's number is
-    recorded and the run continues — supports rewind/recycle paths that
-    re-enter after a PR is already open."""
+    dictated — `run.pr_branch` if a prior phase already stamped it,
+    otherwise the canonical default (`issue-<N>-run-<M>`). Title comes
+    from the linked issue, body summarizes the run state in Glimmung;
+    GitHub gets a thin pointer back to the canonical Glimmung PR row.
+    On success, stamps `pr_number` and `pr_branch` on the Run via
+    `link_pr_to_run`. On `PRCreateNoDiff`, the caller marks the Run
+    review_required so a human can inspect the no-diff outcome. On
+    `PRCreateAlreadyExists`, the existing PR's number is recorded and
+    the run continues — supports rewind/recycle paths that re-enter
+    after a PR is already open."""
     cosmos: Cosmos = app.state.cosmos
     minter: GitHubAppTokenMinter | None = app.state.gh_minter
     if minter is None:
         raise RuntimeError("pr-primitive: no GH minter configured")
 
-    head = f"glimmung/{run.id}"
+    head = run.pr_branch or run_ops.default_work_branch(run)
     base = "main"  # v1: hardcoded; future PhaseSpec.pr.base extends this
     title, rich_body = await _compose_pr_body(cosmos, run=run, workflow=workflow)
     initial_github_body = _thin_github_pr_body(
@@ -2654,7 +2668,7 @@ async def link_existing_pr_endpoint(
     repo = req.repo or run.issue_repo
     if not repo:
         raise HTTPException(400, "repo required when run has no issue_repo")
-    branch = req.branch or run.pr_branch or f"glimmung/{run.id}"
+    branch = req.branch or run.pr_branch or run_ops.default_work_branch(run)
     title = req.title or await _title_for_run(cosmos, run) or f"{repo}#{req.number}"
     html_url = req.html_url or touchpoint_ops.github_pull_request_url_for(repo, req.number)
     pr, pr_etag, _created = await touchpoint_ops.ensure_touchpoint_for_github(
