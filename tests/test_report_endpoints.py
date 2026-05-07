@@ -26,8 +26,9 @@ from glimmung.app import (
     _list_report_versions_from_cosmos,
     app,
     issue_touchpoint_detail,
+    patch_touchpoint_endpoint,
 )
-from glimmung.models import ReportState
+from glimmung.models import IssueState, ReportState
 
 from tests.cosmos_fake import FakeContainer
 
@@ -553,6 +554,34 @@ async def test_patch_state_merged_stamps_merged_at_and_by(cosmos):
     assert pr.state == ReportState.MERGED
     assert pr.merged_at is not None
     assert pr.merged_by == "nelsong6"
+
+
+@pytest.mark.asyncio
+async def test_patch_state_merged_closes_linked_issue(cosmos, app_state):
+    issue = await issue_ops.create_issue(
+        cosmos, project="ambience", title="Effect: cave crystals",
+    )
+    pr = await report_ops.create_report(
+        cosmos,
+        project="ambience",
+        repo="nelsong6/ambience",
+        number=14,
+        title="t",
+        branch="b",
+        linked_issue_id=issue.id,
+    )
+
+    await patch_touchpoint_endpoint(
+        ReportUpdateRequest(state="merged", merged_by="nelsong6"),
+        project="ambience",
+        report_id=pr.id,
+    )
+
+    found = await issue_ops.read_issue(cosmos, project="ambience", issue_id=issue.id)
+    assert found is not None
+    closed_issue, _ = found
+    assert closed_issue.state == IssueState.CLOSED
+    assert closed_issue.closed_at is not None
 
 
 @pytest.mark.asyncio

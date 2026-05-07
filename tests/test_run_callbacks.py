@@ -551,6 +551,47 @@ async def test_completed_releases_issue_lock_on_terminal(cosmos, app_state):
 
 
 @pytest.mark.asyncio
+async def test_completed_releases_project_scoped_issue_lock_on_terminal(
+    cosmos, app_state,
+):
+    """Glimmung-native issues use project-scoped locks even when the Run has
+    the project's GitHub repo stamped for PR/report bookkeeping."""
+    from glimmung import locks as lock_ops
+    await _register_project(cosmos, "ambience", "nelsong6/ambience")
+    await _register_workflow_with_recycle(cosmos, "ambience")
+
+    holder = "01HZZZHOLDER000000000001"
+    run = await _seed_run(
+        cosmos, run_id="01KQTEST_RUN_PROJECT_LOCK", project="ambience",
+        issue_repo="nelsong6/ambience", issue_number=173,
+        issue_lock_holder_id=holder,
+    )
+    await lock_ops.claim_lock(
+        cosmos, scope="issue", key="ambience#173",
+        holder_id=holder, ttl_seconds=14400, metadata={},
+    )
+
+    body = RunCompletedRequest(
+        workflow_run_id=1, conclusion="success",
+        verification={
+            "schema_version": 1, "status": "pass",
+            "reasons": [], "evidence_refs": [], "cost_usd": 0.0,
+        },
+    )
+    with patch("glimmung.app.app", app_state):
+        result = await run_completed(
+            body, project="ambience", run_id=run.id,
+        )
+
+    assert result.decision == "advance"
+    assert result.issue_lock_released is True
+    lock_doc = await cosmos.locks.read_item(
+        item="issue::ambience%23173", partition_key="issue",
+    )
+    assert lock_doc["state"] == "released"
+
+
+@pytest.mark.asyncio
 async def test_completed_releases_native_issue_lock_on_terminal(cosmos, app_state):
     from glimmung import locks as lock_ops
     await _register_project(cosmos, "glimmung", "nelsong6/glimmung")
