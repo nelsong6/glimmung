@@ -11,9 +11,10 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import httpx
+from azure.identity.aio import DefaultAzureCredential
 
 from glimmung import runs as run_ops
 from glimmung.db import Cosmos
@@ -217,6 +218,20 @@ class NativeKubernetesLauncher:
             for name in sorted(set(existing) - set(configs)):
                 await self._delete_standby_dns(namespace, name)
 
+    async def reconcile_standby_workload_identity(
+        self,
+        project_docs: list[dict[str, Any]],
+    ) -> None:
+        """Reconcile Azure workload identity FICs for warm native slots."""
+        configs = [
+            config
+            for project_doc in project_docs
+            if (config := _standby_workload_identity_config(project_doc, self._settings)) is not None
+        ]
+        for config in configs:
+            for credential in _standby_workload_identity_credentials(config):
+                await self._upsert_federated_identity_credential(credential)
+
     async def _standby_dns_target(self, configs: Any) -> str:
         for config in configs:
             target = str(config.get("target") or "").strip()
@@ -275,6 +290,26 @@ class NativeKubernetesLauncher:
             if exc.response.status_code == 404:
                 return
             raise
+
+    async def _upsert_federated_identity_credential(self, credential: dict[str, Any]) -> None:
+        subscription = quote(str(credential["subscription"]), safe="")
+        resource_group = quote(str(credential["resource_group"]), safe="")
+        identity_name = quote(str(credential["identity_name"]), safe="")
+        credential_name = quote(str(credential["credential_name"]), safe="")
+        path = (
+            f"/subscriptions/{subscription}/resourceGroups/{resource_group}"
+            "/providers/Microsoft.ManagedIdentity/userAssignedIdentities"
+            f"/{identity_name}/federatedIdentityCredentials/{credential_name}"
+            "?api-version=2023-01-31"
+        )
+        body = {
+            "properties": {
+                "issuer": credential["issuer"],
+                "subject": credential["subject"],
+                "audiences": ["api://AzureADTokenExchange"],
+            }
+        }
+        await self._arm_request("PUT", path, json=body)
 
     async def read_attempt_pod_logs(
         self,
@@ -440,6 +475,30 @@ class NativeKubernetesLauncher:
             response = await client.request(method, path)
             response.raise_for_status()
             return response.text
+
+    async def _arm_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        credential = DefaultAzureCredential()
+        try:
+            token = await credential.get_token("https://management.azure.com/.default")
+            async with httpx.AsyncClient(
+                base_url="https://management.azure.com",
+                timeout=20.0,
+                headers={
+                    "Authorization": f"Bearer {token.token}",
+                    "Content-Type": "application/json",
+                },
+            ) as client:
+                response = await client.request(method, path, json=json)
+                response.raise_for_status()
+                return response.json() if response.content else {}
+        finally:
+            await credential.close()
 
 
 def _job_manifest(
@@ -738,6 +797,135 @@ def _standby_dns_body(config: dict[str, Any], target: str) -> dict[str, Any]:
             ],
         },
     }
+
+
+def _standby_workload_identity_config(
+    project_doc: dict[str, Any],
+    settings: Settings,
+) -> dict[str, Any] | None:
+    metadata = project_doc.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        return None
+    raw = (
+        metadata.get("native_standby_workload_identity")
+        or metadata.get("nativeStandbyWorkloadIdentity")
+    )
+    if not isinstance(raw, dict) or raw.get("enabled") is not True:
+        return None
+
+    project = str(project_doc.get("name") or project_doc.get("id") or "").strip()
+    if not project:
+        return None
+
+    subscription = str(
+        raw.get("subscription")
+        or raw.get("subscription_id")
+        or raw.get("subscriptionId")
+        or getattr(settings, "native_standby_identity_subscription", "")
+    ).strip()
+    resource_group = str(
+        raw.get("resource_group")
+        or raw.get("resourceGroup")
+        or getattr(settings, "native_standby_identity_resource_group", "infra")
+    ).strip()
+    issuer = str(
+        raw.get("issuer") or getattr(settings, "native_standby_identity_issuer", "")
+    ).strip()
+    if not issuer:
+        issuer = _workload_identity_issuer_from_token(settings)
+    if not subscription or not resource_group or not issuer:
+        return None
+
+    credentials = raw.get("credentials")
+    if not isinstance(credentials, list) or not credentials:
+        return None
+
+    count_raw = raw.get("count")
+    if count_raw is None:
+        dns_raw = metadata.get("native_standby_dns") or metadata.get("nativeStandbyDns") or {}
+        if isinstance(dns_raw, dict):
+            count_raw = dns_raw.get("count")
+    try:
+        count = int(str(count_raw)) if count_raw is not None else int(
+            getattr(settings, "native_runner_project_concurrency", 5)
+        )
+    except (TypeError, ValueError):
+        count = 0
+    if count < 1:
+        return None
+
+    slot_prefix = str(
+        raw.get("slot_prefix") or raw.get("slotPrefix") or f"{project}-slot"
+    ).strip()
+    if not slot_prefix:
+        return None
+
+    return {
+        "project": project,
+        "subscription": subscription,
+        "resource_group": resource_group,
+        "issuer": issuer,
+        "slot_prefix": slot_prefix,
+        "count": count,
+        "credentials": credentials,
+    }
+
+
+def _standby_workload_identity_credentials(config: dict[str, Any]) -> list[dict[str, str]]:
+    desired: list[dict[str, str]] = []
+    project = str(config["project"])
+    for slot_index in range(1, int(config["count"]) + 1):
+        slot_name = f"{config['slot_prefix']}-{slot_index}"
+        namespace = slot_name
+        values = {
+            "project": project,
+            "slot": str(slot_index),
+            "slot_index": str(slot_index),
+            "slot_name": slot_name,
+            "namespace": namespace,
+        }
+        for item in config["credentials"]:
+            if not isinstance(item, dict):
+                continue
+            identity_name = str(
+                item.get("identity_name") or item.get("identityName") or ""
+            ).strip()
+            subject_template = str(item.get("subject") or "").strip()
+            if not identity_name or not subject_template:
+                continue
+            credential_template = str(
+                item.get("credential_name")
+                or item.get("credentialName")
+                or "{slot_name}"
+            ).strip()
+            desired.append({
+                "subscription": str(config["subscription"]),
+                "resource_group": str(config["resource_group"]),
+                "identity_name": _format_standby_template(identity_name, values),
+                "credential_name": _format_standby_template(credential_template, values),
+                "issuer": str(config["issuer"]),
+                "subject": _format_standby_template(subject_template, values),
+            })
+    return desired
+
+
+def _format_standby_template(template: str, values: dict[str, str]) -> str:
+    try:
+        return template.format(**values)
+    except (KeyError, IndexError, ValueError):
+        return template
+
+
+def _workload_identity_issuer_from_token(settings: Settings) -> str:
+    with suppress(Exception):
+        token = Path(settings.k8s_sa_token_path).read_text(encoding="utf-8").strip()
+        parts = token.split(".")
+        if len(parts) < 2:
+            return ""
+        payload = parts[1] + ("=" * (-len(parts[1]) % 4))
+        data = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
+        return str(data.get("iss") or "").strip()
+    return ""
 
 
 def _resource_name(prefix: str, run_id: str, attempt_index: int) -> str:

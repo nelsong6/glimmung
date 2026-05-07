@@ -52,6 +52,12 @@ class _RecordingLauncher(NativeKubernetesLauncher):
         return {}
 
 
+class _RecordingAzureLauncher(_RecordingLauncher):
+    async def _arm_request(self, method: str, path: str, *, json=None):
+        self.calls.append({"method": method, "path": path, "json": json})
+        return {}
+
+
 class _FailingRoleBindingLauncher(_RecordingLauncher):
     async def _request(self, method: str, path: str, *, json=None):
         self.calls.append({"method": method, "path": path, "json": json})
@@ -249,6 +255,63 @@ async def test_reconcile_standby_dns_creates_project_slots():
             "targets": ["172.179.163.96"],
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_standby_workload_identity_upserts_slot_credentials():
+    launcher = _RecordingAzureLauncher(_settings())
+
+    await launcher.reconcile_standby_workload_identity([
+        {
+            "id": "tank-operator",
+            "name": "tank-operator",
+            "metadata": {
+                "native_standby_workload_identity": {
+                    "enabled": True,
+                    "subscription": "00000000-0000-0000-0000-000000000000",
+                    "resource_group": "infra",
+                    "issuer": "https://issuer.invalid/",
+                    "slot_prefix": "tank-slot",
+                    "count": 2,
+                    "credentials": [
+                        {
+                            "identity_name": "claude-credentials-refresher-identity",
+                            "credential_name": "{slot_name}-orchestrator",
+                            "subject": "system:serviceaccount:{namespace}:{slot_name}",
+                        },
+                        {
+                            "identity_name": "claude-api-proxy-identity",
+                            "credential_name": "{slot_name}-claude-api-proxy",
+                            "subject": "system:serviceaccount:{namespace}:claude-api-proxy",
+                        },
+                    ],
+                }
+            },
+        }
+    ])
+
+    assert [call["method"] for call in launcher.calls] == ["PUT", "PUT", "PUT", "PUT"]
+    first = launcher.calls[0]
+    assert first["path"] == (
+        "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/infra"
+        "/providers/Microsoft.ManagedIdentity/userAssignedIdentities"
+        "/claude-credentials-refresher-identity/federatedIdentityCredentials"
+        "/tank-slot-1-orchestrator?api-version=2023-01-31"
+    )
+    assert first["json"] == {
+        "properties": {
+            "issuer": "https://issuer.invalid/",
+            "subject": "system:serviceaccount:tank-slot-1:tank-slot-1",
+            "audiences": ["api://AzureADTokenExchange"],
+        }
+    }
+    assert launcher.calls[3]["path"].endswith(
+        "/claude-api-proxy-identity/federatedIdentityCredentials"
+        "/tank-slot-2-claude-api-proxy?api-version=2023-01-31"
+    )
+    assert launcher.calls[3]["json"]["properties"]["subject"] == (
+        "system:serviceaccount:tank-slot-2:claude-api-proxy"
+    )
 
 
 @pytest.mark.asyncio
