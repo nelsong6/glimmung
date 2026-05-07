@@ -233,7 +233,7 @@ export function App() {
         </Route>
         <Route path="touchpoints" element={<TouchpointsRoute />} />
         <Route path="portfolio" element={<PortfolioRoute />} />
-        <Route path="touchpoints/:owner/:repo/:n" element={<TouchpointDetailView />} />
+        <Route path="touchpoints/:owner/:repo/:n" element={<LegacyTouchpointRedirectRoute />} />
         <Route path="reports" element={<Navigate to="/touchpoints" replace />} />
         <Route path="reports/:owner/:repo/:n" element={<LegacyTouchpointRedirectRoute />} />
       </Route>
@@ -770,12 +770,46 @@ function PortfolioRoute() {
 
 function LegacyTouchpointRedirectRoute() {
   const params = useParams<{ owner?: string; repo?: string; n?: string }>();
-  return (
-    <Navigate
-      to={`/touchpoints/${params.owner ?? ""}/${params.repo ?? ""}/${params.n ?? ""}`}
-      replace
-    />
-  );
+  const [target, setTarget] = useState<string | null>(null);
+  const [fallback, setFallback] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const repo = `${params.owner ?? ""}/${params.repo ?? ""}`;
+  const prNumber = params.n ?? "";
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      setError(null);
+      setFallback(false);
+      try {
+        const r = await fetch(`/v1/touchpoints/${repo}/${prNumber}`);
+        if (!r.ok) throw new Error(`/v1/touchpoints/${repo}/${prNumber} -> ${r.status}`);
+        const detail = await r.json() as {
+          project?: string;
+          issue_number?: number | null;
+        };
+        if (cancelled) return;
+        if (detail.project && detail.issue_number !== null && detail.issue_number !== undefined) {
+          setTarget(
+            `/projects/${encodeURIComponent(detail.project)}/issues/${detail.issue_number}/touchpoint`,
+          );
+        } else {
+          setFallback(true);
+        }
+      } catch (e) {
+        if (!cancelled) setError(String(e));
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [repo, prNumber]);
+
+  if (target) return <Navigate to={target} replace />;
+  if (fallback) return <TouchpointDetailView />;
+  if (error) return <div className="empty error">{error}</div>;
+  return <div className="empty">Loading touchpoint…</div>;
 }
 
 function HomeView({ snap }: LayoutContext) {

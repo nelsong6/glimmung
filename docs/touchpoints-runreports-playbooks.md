@@ -45,18 +45,27 @@ and artifacts later. The invariant is the one-Run scope.
 
 ## Touchpoint
 
-A Touchpoint is the user-facing decision surface for one Issue.
+A Touchpoint is the user-facing decision surface for exactly one Issue.
 
 It answers: what should the user inspect or decide now?
 
-V1 cardinality:
+Cardinality:
 
 ```text
-Issue -> Touchpoint
+Issue <-> Touchpoint
 ```
 
-The Touchpoint is not the historical log. It updates as new Runs happen.
-History lives under Runs and RunReports.
+This is a strict one-to-one product invariant, not a pagination or v1
+implementation detail. An Issue never has multiple Touchpoints, and a
+Touchpoint should not be addressed as an independent child collection of an
+Issue. If work is retried, resumed, or rerun, the same Touchpoint updates to
+reflect the current decision surface.
+
+The Touchpoint is a live summary and navigation page for the Issue's current
+decision state. It is not the historical log and it is not the place to
+persist per-Run records. It updates as new Runs happen. Anything that is
+specific to one Run belongs in the Run and RunReport UI. History lives under
+Runs and RunReports.
 
 Potential generic actions:
 
@@ -70,8 +79,8 @@ should requeue work, not merely annotate the Touchpoint.
 
 ## UI Responsibility
 
-The Touchpoint should behave like a compact checklist/dashboard for the current
-Issue decision. It may show:
+The Touchpoint should behave like a compact checklist/dashboard and navigation
+hub for the current Issue decision. It may show:
 
 - validation URL
 - screenshots
@@ -81,8 +90,10 @@ Issue decision. It may show:
 - run summary and recommendation
 
 The Issue tab remains the primary prose/context surface. Epic and Playbook
-context belongs mostly there. The Touchpoint should focus on exact evidence and
-the decision in front of the user.
+context belongs mostly there. The Touchpoint should focus on the current exact
+evidence, links into the relevant Run UI, and the decision in front of the
+user. If evidence or state needs to be retained per Run, model and render it
+from the Run or RunReport instead of adding Touchpoint history.
 
 ## Compatibility Rename
 
@@ -228,6 +239,6 @@ applies to marking a branch or work context as in use by a running issue.
 - Break large work into discoverable, queueable segments.
 - Preserve branch and main guardrails while supporting fast iteration.
 - Keep RunReport one-to-one with Run for v1.
-- Keep Touchpoint one-to-one with Issue for v1.
+- Keep Touchpoint strictly one-to-one with Issue.
 - Put cross-run summaries in the Touchpoint or dashboard as derived data.
 - Make dangerous integration behavior like rolling merges explicit.
