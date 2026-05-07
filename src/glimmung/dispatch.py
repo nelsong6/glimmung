@@ -285,6 +285,21 @@ async def dispatch_run(
         metadata["attempt_index"] = "0"
         if initial_phase is not None:
             metadata["phase_name"] = initial_phase["name"]
+            # Default the work branch to a human-readable
+            # `issue-<N>-run-<M>` shape. Native runners read this
+            # straight from `GLIMMUNG_WORK_CONTEXT_BRANCH`; GHA-dispatch
+            # consumers need to declare `work_context_branch` as an
+            # input or they'll 422 on the unknown key, so for now we
+            # only stamp the metadata for k8s_job phases and let
+            # gha_dispatch keep the legacy `glimmung/<run_id>` default
+            # in their workflow YAML. Playbooks pass their own
+            # `work_context_branch` via `extra_metadata` (already
+            # merged above) — `setdefault` preserves that override.
+            if initial_phase.get("kind") == "k8s_job":
+                metadata.setdefault(
+                    "work_context_branch",
+                    run_ops.default_work_branch(run),
+                )
     metadata["issue_number"] = str(issue_number)
     metadata["issue_id"] = issue.id
     requirements = (
