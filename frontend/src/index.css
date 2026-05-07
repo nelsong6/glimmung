@@ -1988,6 +1988,18 @@ h2 .inline-action,
   align-items: center;
   margin-bottom: 12px;
 }
+.dispatch-error {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.dispatch-error-message {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 0.85em;
+  color: var(--state-drain, #c66);
+  word-break: break-word;
+}
 .run-panel {
   border: 1px solid #2a2a2e;
   border-radius: 6px;

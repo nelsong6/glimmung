@@ -155,6 +155,7 @@ type Selection =
 type LayoutContext = {
   snap: Snapshot | null;
   signedIn: boolean;
+  isAdmin: boolean;
   selected: Selection;
   filteredPending: Lease[];
   filteredActive: Lease[];
@@ -254,6 +255,7 @@ function Layout() {
   const selected = ALL;
   const [account, setAccount] = useState<AccountInfo | null>(null);
   const [authReady, setAuthReady] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [showAdmin, setShowAdmin] = useState(false);
   const [inflight, setInflight] = useState<Inflight>({ issues: false });
 
@@ -268,6 +270,34 @@ function Layout() {
         setAuthReady(true);
       });
   }, []);
+
+  // Admin status comes from /v1/auth/me, which is a soft check — non-allowlisted
+  // signed-in users get 200 with is_admin=false. Drives whether admin actions
+  // (dispatch / abort / etc.) render disabled or clickable.
+  useEffect(() => {
+    if (!authReady) return;
+    if (!account) {
+      setIsAdmin(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await authedFetch("/v1/auth/me");
+        if (!r.ok) {
+          if (!cancelled) setIsAdmin(false);
+          return;
+        }
+        const me = (await r.json()) as { is_admin?: boolean };
+        if (!cancelled) setIsAdmin(!!me.is_admin);
+      } catch {
+        if (!cancelled) setIsAdmin(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [authReady, account]);
 
   useEffect(() => {
     if (isMockMode()) {
@@ -379,6 +409,7 @@ function Layout() {
   const ctx: LayoutContext = {
     snap,
     signedIn: !!account,
+    isAdmin,
     selected,
     filteredPending,
     filteredActive,

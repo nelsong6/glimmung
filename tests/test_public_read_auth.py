@@ -4,6 +4,7 @@ from glimmung.app import app
 
 
 PUBLIC_READ_ROUTES = {
+    ("GET", "/v1/auth/me"),
     ("GET", "/v1/projects"),
     ("GET", "/v1/workflows"),
     ("GET", "/v1/issues"),

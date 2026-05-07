@@ -228,6 +228,48 @@ async def require_entra_user(authorization: str | None = Header(default=None)) -
     )
 
 
+async def resolve_caller_identity(
+    authorization: str | None,
+) -> tuple[User, bool] | None:
+    """Resolve the caller without raising on allowlist failure.
+
+    Returns (User, is_admin) when a valid token (Entra or K8s SA) is
+    presented, or `None` when no/invalid token is presented. Used by the
+    public `/v1/auth/me` endpoint so the dashboard can render disabled
+    admin actions instead of unconditionally hiding or 403-on-clicking.
+
+    Token validity is still enforced — an invalid Entra signature or a
+    rejected K8s SA still returns None — only the allowlist check is
+    softened from 403 to is_admin=False.
+    """
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return None
+    token = authorization[7:]
+
+    if _looks_like_k8s_sa_token(token):
+        try:
+            username = await _verify_k8s_sa_token(token)
+        except HTTPException:
+            return None
+        is_admin = username in _allowed_service_accounts()
+        return User(sub=username, email=username, name=username), is_admin
+
+    try:
+        payload = await asyncio.to_thread(_verify_entra_token, token)
+    except HTTPException:
+        return None
+    email = (payload.get("email") or payload.get("preferred_username") or "").lower()
+    is_admin = bool(email) and email in _allowed_emails()
+    return (
+        User(
+            sub=str(payload.get("sub", "")),
+            email=email,
+            name=str(payload.get("name", "")),
+        ),
+        is_admin,
+    )
+
+
 async def require_admin_user(authorization: str | None = Header(default=None)) -> User:
     """Admin auth: accept either an Entra ID token (humans + CLI) or a K8s
     service-account token whose `<ns>/<name>` is in K8S_SA_ALLOWLIST
