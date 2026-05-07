@@ -32,7 +32,7 @@ from tests.cosmos_fake import FakeContainer
 
 def test_parse_glimmung_meta_extracts_key_value_pairs():
     body = """\
-Closes #42.
+Glimmung issue: glimmung#42.
 
 Glimmung PR: https://glimmung.romaine.life/reports?issue=01JABC
 
@@ -110,7 +110,7 @@ def app_state(cosmos):
 def _agent_payload(*, issue_id: str = "01JABC0000000000000000000A") -> dict:
     notes_b64 = base64.b64encode(b"## Notes\n- thing\n").decode()
     body = (
-        f"Closes #42.\n\n"
+        f"Glimmung issue: glimmung#42.\n\n"
         f"Glimmung PR: https://glimmung.romaine.life/reports?issue={issue_id}\n\n"
         f"<!-- glimmung-meta\n"
         f"project=glimmung\n"

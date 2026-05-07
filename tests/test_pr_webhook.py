@@ -1,7 +1,6 @@
 """PR webhook + signal retargeting tests (#50 slice 3).
 
-Pre-#50 the `pull_request.*` handler parsed `Closes #N` from PR bodies
-to link Runs to PRs by GH coords. Post-#50 the handler mirrors GH's
+The `pull_request.*` handler mirrors GitHub's
 PR lifecycle into the glimmung `reports` container and the run/issue
 linkage is set explicitly by the agent (slice 4) — these tests pin
 the new mirror behavior + the post-#50 signal shape (target_repo =

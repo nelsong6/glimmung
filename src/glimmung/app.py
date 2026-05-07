@@ -46,7 +46,7 @@ from glimmung.github_app import (
     cancel_workflow_run,
     dispatch_workflow,
     open_pull_request,
-    post_issue_comment,
+    post_pr_comment,
     update_pull_request_body,
     verify_webhook_signature,
 )
@@ -414,9 +414,9 @@ async def _triage_apply(
             )
             return
         try:
-            await post_issue_comment(
+            await post_pr_comment(
                 minter, repo=pr_repo,
-                issue_number=pr_number, body=body,
+                pr_number=pr_number, body=body,
             )
         except Exception:
             log.exception(
@@ -496,7 +496,7 @@ async def _run_issue_workflow_metadata(cosmos: Cosmos, run: Run) -> dict[str, st
     metadata/env so they do not have to recover instructions from GitHub
     Issues or frontend URLs. Never send `issue_number=0`: GitHub treats
     non-empty strings as truthy in run-name expressions, and downstream
-    shell guards must not confuse native issues for GitHub issue #0.
+    shell guards must not confuse native issues for a repository issue #0.
     """
     metadata: dict[str, str] = {}
     if run.issue_number:
@@ -1025,13 +1025,6 @@ async def _process_run_completion(
     # Any abort decision.
     reason = abort_explanation(run, workflow_model, decision)
     await run_ops.mark_aborted(cosmos, run=run, etag=etag, reason=reason)
-    if minter is not None and run.issue_number:
-        try:
-            await post_issue_comment(
-                minter, repo=repo, issue_number=run.issue_number, body=reason,
-            )
-        except Exception:
-            log.exception("failed to post abort comment on %s#%d", repo, run.issue_number)
     return decision.value
 
 
@@ -1740,8 +1733,8 @@ def _pr_primitive_failure_reason(exc: Exception) -> str:
 
 def _thin_github_pr_body(*, run: Run, glimmung_url: str | None) -> str:
     parts: list[str] = []
-    if run.issue_repo and run.issue_number:
-        parts.append(f"Closes {run.issue_repo}#{run.issue_number}")
+    if run.project and run.issue_number:
+        parts.append(f"Glimmung issue: {run.project}#{run.issue_number}")
     if glimmung_url:
         parts += ["", f"Canonical context: {glimmung_url}"]
     else:
@@ -1754,7 +1747,7 @@ async def _compose_pr_body(
 ) -> tuple[str, str]:
     """Compose PR title + body from the issue + run state.
 
-    Title is the issue title; body links the issue (`Closes #N`),
+    Title is the issue title; body links the native Glimmung issue,
     surfaces the live preview env + /_styleguide URLs (#88), inlines
     the screenshot markdown the workflow uploaded (#87 → #88), and
     closes with a short run summary so reviewers see attempts + cost
@@ -1772,8 +1765,8 @@ async def _compose_pr_body(
             issue_title = str(doc.get("title") or "")
         except Exception:
             pass
-    if run.issue_repo and run.issue_number:
-        issue_body_link = f"Closes {run.issue_repo}#{run.issue_number}"
+    if run.project and run.issue_number:
+        issue_body_link = f"Glimmung issue: {run.project}#{run.issue_number}"
     title = issue_title or f"Run {run.id[:8]}"
     attempts_summary = "\n".join(
         f"- attempt {a.attempt_index} phase={a.phase} "
@@ -4452,8 +4445,8 @@ def _render_glimmung_pr_body(meta: dict[str, str]) -> str:
 async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
     """Mirror `pull_request.*` events into the glimmung `reports` container.
 
-    Pre-#50 this parsed `Closes #N` from the PR body to link a Run to a
-    GH PR number. Touchpoint is now the product-facing entity in glimmung's
+    Older versions parsed GitHub Issue closing keywords from the PR body.
+    Touchpoint is now the product-facing entity in glimmung's
     `reports` container and the run/issue linkage is set explicitly by
     the agent's `POST /v1/touchpoints` step — the webhook's job
     is just to keep glimmung's PR document in sync with GH's lifecycle
@@ -4683,9 +4676,7 @@ async def _handle_pull_request_review(payload: dict[str, Any]) -> dict[str, Any]
 
 class IssueRow(BaseModel):
     """One row in the Issues view. Issues live in glimmung's `issues`
-    container; `number` is the project-scoped Glimmung issue number.
-    GitHub coordinates are kept as legacy metadata, not the navigation
-    or issue-tracking identity."""
+    container; `number` is the project-scoped Glimmung issue number."""
     id: str
     project: str
     workflow: str | None = None
@@ -5023,8 +5014,7 @@ async def list_issues(
 ) -> list[IssueRow]:
     """Glimmung Issues, across registered projects. Defaults to open issues.
 
-    Sourced
-    from the Cosmos `issues` container — glimmung is the source of
+    Sourced from the Cosmos `issues` container — glimmung is the source of
     truth; nothing about GH issue activity flows back. Issues are
     seeded once via the seed script (or minted via `POST /v1/issues`)
     and lifecycle from there is glimmung-internal.
@@ -5075,7 +5065,7 @@ async def _list_issues_from_cosmos(
             raise HTTPException(400, f"state must be 'open', 'closed', or 'all', not {state!r}") from exc
     issues = await issue_ops.list_issues(cosmos, project=project, state=issue_state)
     if repo is not None:
-        issues = [i for i in issues if i.metadata.github_issue_repo == repo]
+        raise HTTPException(410, "GitHub Issue repo filters are disabled; filter by project")
     if not issues:
         return []
 
@@ -5113,8 +5103,6 @@ async def _list_issues_from_cosmos(
     now = datetime.now(UTC)
     rows: list[IssueRow] = []
     for issue in issues:
-        url = issue.metadata.github_issue_url
-        repo = issue.metadata.github_issue_repo
         number = issue.number
         run_doc = runs_by_issue_id.get(issue.id)
         if run_doc is None and number is not None:
@@ -5128,12 +5116,12 @@ async def _list_issues_from_cosmos(
             id=issue.id,
             project=issue.project,
             workflow=issue_workflow,
-            repo=repo,
+            repo=None,
             number=number,
             title=issue.title,
             state=issue.state.value,
             labels=list(issue.labels),
-            html_url=url,
+            html_url=None,
         )
         if run_doc is not None:
             row.last_run_id = run_doc["id"]
@@ -5234,27 +5222,17 @@ async def issue_detail(
     repo_name: str = Path(...),
     issue_number: int = Path(...),
 ) -> IssueDetail:
-    """Detail view: title + body + last-run summary + lock state.
-    Sourced from the Cosmos `issues` container (#28-consumer-2). Three-
-    segment path so the repo owner/name pair stays URL-friendly without
-    a query param. 404 if no glimmung Issue exists for the GH coords —
-    glimmung doesn't auto-mint from GH, so any GH issue without a prior
-    glimmung-side existence is invisible here."""
-    repo = f"{repo_owner}/{repo_name}"
-    return await _load_issue_detail(
-        app.state.cosmos, repo=repo, issue_number=issue_number,
+    """Legacy GitHub Issue keyed detail route."""
+    raise HTTPException(
+        410,
+        "GitHub Issue lookup is disabled; use /v1/issues/by-number/{project}/{issue_number}",
     )
 
 
 async def _load_issue_detail(
     cosmos: Cosmos, *, repo: str, issue_number: int,
 ) -> IssueDetail:
-    url = issue_ops.github_issue_url_for(repo, issue_number)
-    found = await issue_ops.find_issue_by_github_url(cosmos, github_issue_url=url)
-    if found is None:
-        raise HTTPException(404, f"no glimmung issue mirrors {url}")
-    issue, _ = found
-    return await _build_issue_detail(cosmos, issue=issue)
+    raise HTTPException(410, "GitHub Issue lookup is disabled")
 
 
 async def _build_issue_detail(cosmos: Cosmos, *, issue: Issue) -> IssueDetail:
@@ -5262,18 +5240,17 @@ async def _build_issue_detail(cosmos: Cosmos, *, issue: Issue) -> IssueDetail:
     last-run summary and issue-lock state. Shared by both the URL-keyed
     (`/v1/issues/{owner}/{repo}/{n}`) and id-keyed (`/v1/issues/by-id/
     {project}/{id}`) detail endpoints."""
-    repo = issue.metadata.github_issue_repo
     number = issue.number
     detail = IssueDetail(
         id=issue.id,
         project=issue.project,
-        repo=repo,
+        repo=None,
         number=number,
         title=issue.title,
         body=issue.body,
         state=issue.state.value,
         labels=list(issue.labels),
-        html_url=issue.metadata.github_issue_url,
+        html_url=None,
         comments=list(issue.comments),
     )
     latest_run = await run_ops.find_run_by_issue_id(cosmos, issue_id=issue.id)
@@ -5566,13 +5543,10 @@ async def issue_graph(
     repo_name: str = Path(...),
     issue_number: int = Path(...),
 ) -> IssueGraph:
-    """Lineage graph for one Issue (#42): every Run dispatched against
-    it, every PhaseAttempt inside each Run, the PR(s) opened, and the
-    Signals that fed back. Bulk-loaded — one cross-partition runs query
-    plus a legacy fallback plus one signals query, no per-row N+1."""
-    repo = f"{repo_owner}/{repo_name}"
-    return await _build_issue_graph(
-        app.state.cosmos, repo=repo, issue_number=issue_number,
+    """Legacy GitHub Issue keyed graph route."""
+    raise HTTPException(
+        410,
+        "GitHub Issue graph lookup is disabled; use /v1/issues/by-number/{project}/{issue_number}/graph",
     )
 
 
@@ -5605,9 +5579,9 @@ async def _build_system_graph(
             metadata={
                 "issue_id": issue.id,
                 "project": issue.project,
-                "repo": issue.metadata.github_issue_repo,
+                "repo": None,
                 "number": issue.number,
-                "html_url": issue.metadata.github_issue_url,
+                "html_url": None,
                 "labels": issue.labels,
             },
         ))
@@ -5794,10 +5768,31 @@ async def _build_system_graph(
 async def _build_issue_graph(
     cosmos: Cosmos, *, repo: str, issue_number: int,
 ) -> IssueGraph:
-    url = issue_ops.github_issue_url_for(repo, issue_number)
-    found = await issue_ops.find_issue_by_github_url(cosmos, github_issue_url=url)
+    projects = await query_all(
+        cosmos.projects,
+        "SELECT * FROM c WHERE c.githubRepo = @r",
+        parameters=[{"name": "@r", "value": repo}],
+    )
+    found: tuple[Issue, str] | None = None
+    if projects:
+        project = str(projects[0].get("name") or "")
+        found = await issue_ops.read_issue_by_number(
+            cosmos, project=project, number=issue_number,
+        )
+    else:
+        docs = await query_all(
+            cosmos.issues,
+            "SELECT * FROM c WHERE c.number = @n",
+            parameters=[{"name": "@n", "value": issue_number}],
+        )
+        if docs:
+            doc = docs[0]
+            found = (
+                Issue.model_validate({k: v for k, v in doc.items() if not k.startswith("_")}),
+                doc.get("_etag", ""),
+            )
     if found is None:
-        raise HTTPException(404, f"no glimmung issue mirrors {url}")
+        raise HTTPException(404, f"no glimmung issue number {issue_number}")
     issue, _ = found
     return await _build_issue_graph_for_issue(
         cosmos, issue=issue, issue_number=issue_number, repo=repo,
@@ -5811,7 +5806,7 @@ async def _build_issue_graph_for_issue(
     issue_number: int,
     repo: str | None = None,
 ) -> IssueGraph:
-    repo = repo or issue.metadata.github_issue_repo or ""
+    repo = repo or ""
     # All Runs targeting this Issue. Cover both #33's canonical
     # `issue_id` linkage and the legacy `(project, issue_number)` shape
     # for pre-#33 Runs; dedupe by id.

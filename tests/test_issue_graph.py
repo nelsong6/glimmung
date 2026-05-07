@@ -75,12 +75,7 @@ async def _seed_issue(
         "body": "",
         "labels": [],
         "state": "open",
-        "metadata": {
-            "source": "github_webhook_import",
-            "github_issue_url": f"https://github.com/{repo}/issues/{issue_number}",
-            "github_issue_repo": repo,
-            "github_issue_number": issue_number,
-        },
+        "metadata": {"source": "manual"},
         "created_at": now,
         "updated_at": now,
     })
@@ -645,12 +640,11 @@ async def test_graph_no_lineage_edge_when_prior_is_outside_graph(cosmos, app_sta
 
 
 @pytest.mark.asyncio
-async def test_graph_endpoint_404_on_unknown_issue(cosmos, app_state):
-    """Endpoint surface: missing issue → 404 (the same shape consumers
-    rely on for error handling)."""
+async def test_legacy_graph_endpoint_is_gone(cosmos, app_state):
+    """The repository-shaped issue graph route is disabled."""
     with patch("glimmung.app.app", app_state):
         with pytest.raises(HTTPException) as exc:
             await issue_graph(
                 repo_owner="nelsong6", repo_name="ambience", issue_number=999,
             )
-        assert exc.value.status_code == 404
+        assert exc.value.status_code == 410

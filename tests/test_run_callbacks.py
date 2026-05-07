@@ -269,20 +269,20 @@ async def test_pr_primitive_registers_rich_glimmung_pr_and_thin_github_body(cosm
         "repo": "nelsong6/ambience",
         "head": "glimmung/01KQTEST_RUN_PR1",
         "base": "main",
-        "title": "Fix the ambience picker",
-        "body": (
-            "Closes nelsong6/ambience#117\n\n"
-            "Canonical context is being prepared in Glimmung."
-        ),
-    }]
+            "title": "Fix the ambience picker",
+            "body": (
+                "Glimmung issue: ambience#117\n\n"
+                "Canonical context is being prepared in Glimmung."
+            ),
+        }]
     assert update_calls == [{
         "repo": "nelsong6/ambience",
-        "number": 77,
-        "body": (
-            "Closes nelsong6/ambience#117\n\n"
-            "Canonical context: https://glimmung.test/touchpoints/nelsong6/ambience/77"
-        ),
-    }]
+            "number": 77,
+            "body": (
+                "Glimmung issue: ambience#117\n\n"
+                "Canonical context: https://glimmung.test/touchpoints/nelsong6/ambience/77"
+            ),
+        }]
 
     found_pr = await report_ops.find_report_by_repo_number(
         cosmos,

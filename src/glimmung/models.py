@@ -666,9 +666,8 @@ class Run(BaseModel):
     # decision engine.
     trigger_source: dict[str, Any] | None = None
     # PR linkage (#19): set when the agent's PR-opening step lands. Auto-
-    # populated by the `pull_request.opened` webhook handler when the new
-    # PR's body references the issue (`Closes #N` / `Fixes #N`). The PR
-    # triage signal drain queries by `pr_number` to find the right Run.
+    # populated by the agent/report path. GitHub Issue closing keywords are
+    # not used for linkage.
     pr_number: int | None = None
     pr_branch: str | None = None
     pr_lock_holder_id: str | None = None     # set while a triage workflow is in flight
@@ -816,9 +815,8 @@ class SignalEnqueueRequest(BaseModel):
 #
 # A glimmung Issue is a first-class control-plane object: title, body,
 # labels, lifecycle. Stored in the `issues` Cosmos container, partitioned
-# by `/project`. GitHub is one of N possible syndication targets; an Issue
-# may carry `metadata.github_issue_url` to link out, but it exists and is
-# dispatchable whether or not a GH counterpart exists.
+# by `/project`. GitHub remains a PR/source-control backend, not an issue
+# tracker. New issues must not carry GitHub Issue identity.
 #
 # Future trigger sources (Slack message → glimmung issue, scheduled
 # re-run, glimmung-internal CLI) drop in cleanly under this model — they
@@ -836,6 +834,8 @@ class IssueSource(str, Enum):
     routing (e.g. a Slack-sourced issue might get a different default
     workflow). Not consumed by the dispatch path itself."""
     MANUAL = "manual"
+    # Legacy value kept so old rows can still be deserialized. New writes
+    # reject this source.
     GITHUB_WEBHOOK_IMPORT = "github_webhook_import"
     PURGED_GITHUB_ISSUE_IMPORT = "purged_github_issue_import"
     SLACK = "slack"
@@ -850,17 +850,6 @@ class IssueMetadata(BaseModel):
     playbook_entry_id: str | None = None
     playbook_integration_strategy: str | None = None
     work_context: dict[str, Any] = Field(default_factory=dict)
-    # GH-issue link-out. `github_issue_url` is the canonical handle for
-    # `find_issue_by_github_url`; `github_issue_repo` and
-    # `github_issue_number` are denormalized so dispatch / completion /
-    # comment-posting paths can read GH coords without parsing a URL on
-    # every call. All three move together: an Issue minted from a GH
-    # webhook or dispatch shim has all three set; one minted from
-    # Slack/CLI/scheduled has none of them.
-    github_issue_url: str | None = None
-    github_issue_repo: str | None = None
-    github_issue_number: int | None = None
-
 
 class IssueComment(BaseModel):
     """One glimmung-authored comment on an Issue. There is no GitHub id:

@@ -104,13 +104,11 @@ async def _register_issue(app, *, project: str, repo: str, number: int) -> str:
     issue = await issue_ops.create_issue(
         app.state.cosmos,
         project=project,
+        number=number,
         title=f"{repo}#{number}",
         body="",
         labels=[],
         source=IssueSource.MANUAL,
-        github_issue_url=issue_ops.github_issue_url_for(repo, number),
-        github_issue_repo=repo,
-        github_issue_number=number,
     )
     return issue.id
 
@@ -159,14 +157,14 @@ async def test_dispatch_failure_rolls_back_lease_lock_and_aborts_run(
 
     # Issue lock released.
     lock_doc = await app.state.cosmos.locks.read_item(
-        item="issue::ambience%231", partition_key="issue",
+        item="issue::ambience%23124", partition_key="issue",
     )
     assert lock_doc["state"] == "released"
 
     # Run document exists but is ABORTED — not orphaned IN_PROGRESS.
     runs = [d async for d in app.state.cosmos.runs.query_items(
         "SELECT * FROM c WHERE c.issue_number = @n",
-        parameters=[{"name": "@n", "value": 1}],
+        parameters=[{"name": "@n", "value": 124}],
     )]
     assert len(runs) == 1
     assert runs[0]["id"] == result.run_id
@@ -215,7 +213,7 @@ async def test_dispatch_failure_idempotent_under_retry(app, monkeypatch):
     runs = sorted(
         [d async for d in app.state.cosmos.runs.query_items(
             "SELECT * FROM c WHERE c.issue_number = @n",
-            parameters=[{"name": "@n", "value": 1}],
+                parameters=[{"name": "@n", "value": 124}],
         )],
         key=lambda d: d["created_at"],
     )
@@ -256,6 +254,6 @@ async def test_successful_dispatch_creates_run_and_keeps_lock_held(
     assert result.run_id is not None
 
     lock_doc = await app.state.cosmos.locks.read_item(
-        item="issue::ambience%231", partition_key="issue",
+        item="issue::ambience%23124", partition_key="issue",
     )
     assert lock_doc["state"] == "held"

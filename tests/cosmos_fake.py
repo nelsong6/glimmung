@@ -418,7 +418,7 @@ def _evaluate_where(where: str, row: dict[str, Any], params: dict[str, Any]) -> 
 
 
 def _resolve_path(row: dict[str, Any], path: str) -> Any:
-    """Walk a dotted path like `metadata.github_issue_url` through nested
+    """Walk a dotted path like `metadata.source` through nested
     dicts. Returns `None` if any segment is missing or the value isn't a
     dict, matching Cosmos's behavior of treating undefined paths as null
     in equality predicates."""
@@ -464,7 +464,7 @@ def _evaluate_cond(cond: str, row: dict[str, Any], params: dict[str, Any]) -> bo
         if _split_top_level(cond, "AND", "OR").__len__() > 1:
             return _evaluate_where(cond, row, params)
 
-    # IS_DEFINED(c.path) — supports dotted paths like c.metadata.github_issue_url
+    # IS_DEFINED(c.path) — supports dotted paths like c.metadata.source
     m = re.match(r"^IS_DEFINED\(c\.([\w.]+)\)$", cond, re.IGNORECASE)
     if m:
         return _path_defined(row, m.group(1))

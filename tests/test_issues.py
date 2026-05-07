@@ -1,9 +1,7 @@
 """Glimmung-native issues substrate tests (#28).
 
 Backed by the in-memory Cosmos fake. Covers the issue lifecycle
-(create → read → update → close → reopen) plus list-open filtering
-and the `find_issue_by_github_url` helper that the consumer PR uses
-to resolve `Closes #N` references back to glimmung Issues.
+(create → read → update → close → reopen) plus list-open filtering.
 """
 
 from __future__ import annotations
@@ -18,8 +16,6 @@ from glimmung.issues import (
     close_issue,
     create_issue,
     ensure_issue_number_counter_at_least,
-    find_issue_by_github_url,
-    github_issue_url_for,
     list_open_issues,
     next_issue_number,
     read_issue,
@@ -54,7 +50,6 @@ async def test_create_issue_persists_with_open_state_and_defaults(cosmos):
     assert issue.project == "ambience"
     assert issue.state == IssueState.OPEN
     assert issue.metadata.source == IssueSource.MANUAL
-    assert issue.metadata.github_issue_url is None
     assert issue.labels == []
     assert issue.comments == []
     assert issue.closed_at is None
@@ -69,56 +64,18 @@ async def test_create_issue_persists_with_open_state_and_defaults(cosmos):
 
 
 @pytest.mark.asyncio
-async def test_create_issue_records_github_url_and_source(cosmos):
-    """The webhook-import path sets `source=GITHUB_WEBHOOK_IMPORT` and
-    threads the GH issue URL through; both round-trip cleanly."""
-    issue = await create_issue(
-        cosmos, project="ambience",
-        title="imported from GH",
-        source=IssueSource.GITHUB_WEBHOOK_IMPORT,
-        github_issue_url="https://github.com/nelsong6/ambience/issues/42",
-        labels=["issue-agent"],
-    )
-    assert issue.metadata.source == IssueSource.GITHUB_WEBHOOK_IMPORT
-    assert issue.metadata.github_issue_url == "https://github.com/nelsong6/ambience/issues/42"
-    assert issue.labels == ["issue-agent"]
-
-    fetched, _ = await read_issue(cosmos, project="ambience", issue_id=issue.id)
-    assert fetched.metadata.github_issue_url == issue.metadata.github_issue_url
-    assert fetched.metadata.source == IssueSource.GITHUB_WEBHOOK_IMPORT
+async def test_create_issue_rejects_github_import_source(cosmos):
+    with pytest.raises(ValueError, match="GitHub Issues are disabled"):
+        await create_issue(
+            cosmos, project="ambience",
+            title="imported from GitHub",
+            source=IssueSource.GITHUB_WEBHOOK_IMPORT,
+        )
 
 
-@pytest.mark.asyncio
-async def test_read_issue_accepts_purged_github_issue_import_source(cosmos):
-    """Migrated GitHub-backed issues can outlive the source GH issue."""
-    issue = await create_issue(
-        cosmos, project="ambience",
-        title="imported then purged from GH",
-        source=IssueSource.PURGED_GITHUB_ISSUE_IMPORT,
-        github_issue_url="https://github.com/nelsong6/ambience/issues/124",
-        github_issue_repo="nelsong6/ambience",
-        github_issue_number=124,
-    )
-
-    fetched, _ = await read_issue_by_number(cosmos, project="ambience", number=issue.number)
-
-    assert fetched.metadata.source == IssueSource.PURGED_GITHUB_ISSUE_IMPORT
-    assert fetched.metadata.github_issue_number == 124
-
-
-@pytest.mark.asyncio
-async def test_create_issue_allocates_native_number_independent_of_github_number(cosmos):
-    issue = await create_issue(
-        cosmos, project="ambience",
-        title="imported from GH",
-        source=IssueSource.GITHUB_WEBHOOK_IMPORT,
-        github_issue_url="https://github.com/nelsong6/ambience/issues/42",
-        github_issue_repo="nelsong6/ambience",
-        github_issue_number=42,
-    )
-
+async def test_create_issue_allocates_native_number(cosmos):
+    issue = await create_issue(cosmos, project="ambience", title="native")
     assert issue.number == 1
-    assert issue.metadata.github_issue_number == 42
 
 
 @pytest.mark.asyncio
@@ -131,10 +88,7 @@ async def test_next_issue_number_seeds_counter_from_top_level_numbers_only(cosmo
         "body": "",
         "labels": [],
         "state": "open",
-        "metadata": {
-            "source": "github_webhook_import",
-            "github_issue_number": 99,
-        },
+        "metadata": {"source": "manual"},
         "comments": [],
         "created_at": "2026-01-01T00:00:00+00:00",
         "updated_at": "2026-01-01T00:00:00+00:00",
@@ -173,16 +127,12 @@ async def test_next_issue_number_allocates_unique_values_concurrently(cosmos):
 
 
 @pytest.mark.asyncio
-async def test_read_issue_by_number_does_not_fall_back_to_github_number(cosmos):
-    await create_issue(
-        cosmos, project="ambience",
-        title="imported from GH",
-        github_issue_url="https://github.com/nelsong6/ambience/issues/42",
-        github_issue_repo="nelsong6/ambience",
-        github_issue_number=42,
-    )
-
-    assert await read_issue_by_number(cosmos, project="ambience", number=42) is None
+async def test_read_issue_by_number_uses_project_scoped_number(cosmos):
+    issue = await create_issue(cosmos, project="ambience", title="native")
+    found = await read_issue_by_number(cosmos, project="ambience", number=issue.number)
+    assert found is not None
+    fetched, _ = found
+    assert fetched.id == issue.id
 
 
 @pytest.mark.asyncio
@@ -207,26 +157,10 @@ async def test_update_issue_patches_specified_fields_only(cosmos):
     assert updated.title == "new title"
     assert updated.body == "orig body"          # unchanged
     assert updated.labels == ["a"]              # unchanged
-    assert updated.metadata.github_issue_url is None
     assert new_etag != etag
 
 
 @pytest.mark.asyncio
-async def test_update_issue_can_set_github_url_after_creation(cosmos):
-    """A glimmung-first Issue gains a GH counterpart later (outbound
-    syndication path, deferred to a later consumer PR). Update must
-    accept the URL without changing source."""
-    issue = await create_issue(cosmos, project="ambience", title="manual one")
-    fetched, etag = await read_issue(cosmos, project="ambience", issue_id=issue.id)
-
-    updated, _ = await update_issue(
-        cosmos, issue=fetched, etag=etag,
-        github_issue_url="https://github.com/nelsong6/ambience/issues/99",
-    )
-    assert updated.metadata.github_issue_url == "https://github.com/nelsong6/ambience/issues/99"
-    assert updated.metadata.source == IssueSource.MANUAL  # source untouched
-
-
 @pytest.mark.asyncio
 async def test_update_issue_replaces_labels_wholesale(cosmos):
     issue = await create_issue(
@@ -407,90 +341,3 @@ async def test_list_open_issues_orders_oldest_first(cosmos):
     c = await create_issue(cosmos, project="ambience", title="third")
     open_issues = await list_open_issues(cosmos, project="ambience")
     assert [i.id for i in open_issues] == [a.id, b.id, c.id]
-
-
-# ─── find_issue_by_github_url ────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_find_issue_by_github_url_returns_matching_issue(cosmos):
-    url = "https://github.com/nelsong6/ambience/issues/42"
-    expected = await create_issue(
-        cosmos, project="ambience",
-        title="imported",
-        source=IssueSource.GITHUB_WEBHOOK_IMPORT,
-        github_issue_url=url,
-    )
-    # Decoy with a different URL, same project.
-    await create_issue(
-        cosmos, project="ambience",
-        title="decoy",
-        source=IssueSource.GITHUB_WEBHOOK_IMPORT,
-        github_issue_url="https://github.com/nelsong6/ambience/issues/99",
-    )
-
-    result = await find_issue_by_github_url(cosmos, github_issue_url=url)
-    assert result is not None
-    issue, etag = result
-    assert issue.id == expected.id
-    assert etag
-
-
-@pytest.mark.asyncio
-async def test_find_issue_by_github_url_crosses_partitions(cosmos):
-    """Webhook URL doesn't carry the glimmung project name, so the
-    lookup must scan across `/project` partitions."""
-    url = "https://github.com/nelsong6/kill-me/issues/7"
-    expected = await create_issue(
-        cosmos, project="kill-me",
-        title="killme imported",
-        source=IssueSource.GITHUB_WEBHOOK_IMPORT,
-        github_issue_url=url,
-    )
-    await create_issue(
-        cosmos, project="ambience",
-        title="ambience unrelated",
-        source=IssueSource.MANUAL,
-    )
-
-    result = await find_issue_by_github_url(cosmos, github_issue_url=url)
-    assert result is not None
-    issue, _ = result
-    assert issue.id == expected.id
-    assert issue.project == "kill-me"
-
-
-@pytest.mark.asyncio
-async def test_find_issue_by_github_url_returns_none_for_missing(cosmos):
-    await create_issue(
-        cosmos, project="ambience",
-        title="exists",
-        github_issue_url="https://github.com/nelsong6/ambience/issues/1",
-    )
-    result = await find_issue_by_github_url(
-        cosmos, github_issue_url="https://github.com/nelsong6/ambience/issues/9999",
-    )
-    assert result is None
-
-
-@pytest.mark.asyncio
-async def test_find_issue_by_github_url_ignores_issues_with_no_link(cosmos):
-    """Issues without a github_issue_url should never come back from
-    this lookup, even if no linked issue exists."""
-    await create_issue(cosmos, project="ambience", title="no link here")
-    result = await find_issue_by_github_url(
-        cosmos, github_issue_url="https://github.com/nelsong6/ambience/issues/1",
-    )
-    assert result is None
-
-
-# ─── github_issue_url_for ───────────────────────────────────────────────────
-
-
-def test_github_issue_url_for_renders_canonical_form():
-    """Both the dispatch shim and the PR `Closes #N` parser must stitch
-    URLs identically so `find_issue_by_github_url` is deterministic."""
-    assert (
-        github_issue_url_for("nelsong6/ambience", 42)
-        == "https://github.com/nelsong6/ambience/issues/42"
-    )
