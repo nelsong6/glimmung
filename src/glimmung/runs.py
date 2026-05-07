@@ -850,10 +850,43 @@ async def mark_aborted(
     reason: str,
 ) -> tuple[Run, str]:
     def apply(r: Run) -> Run:
+        now = _now()
+        # Cascade to in-flight native attempts. If the runner never
+        # emitted a terminal step_completed/step_failed event before
+        # the abort (operator cancel, dispatch_failed, runaway-loop
+        # cancel), the PhaseAttempt + jobs + steps stay
+        # pending/active. The dashboard reads those to decide whether
+        # the Run is "still running" and would mis-report a terminal
+        # Run as live; cleanup so Run.state and inner attempt state
+        # agree.
+        for attempt in r.attempts:
+            if attempt.phase_kind != "k8s_job":
+                continue
+            if attempt.completed_at is not None:
+                continue
+            attempt.completed_at = now
+            if attempt.conclusion is None:
+                attempt.conclusion = "cancelled"
+            for job in attempt.jobs:
+                if job.state in (NativeStepState.PENDING, NativeStepState.ACTIVE):
+                    job.state = NativeStepState.FAILED
+                    if job.started_at is None:
+                        job.started_at = now
+                    if job.completed_at is None:
+                        job.completed_at = now
+                for step in job.steps:
+                    if step.state in (NativeStepState.PENDING, NativeStepState.ACTIVE):
+                        step.state = NativeStepState.FAILED
+                        if step.started_at is None:
+                            step.started_at = now
+                        if step.completed_at is None:
+                            step.completed_at = now
+                        if step.message is None:
+                            step.message = reason
         return r.model_copy(update={
             "state": RunState.ABORTED,
             "abort_reason": reason,
-            "updated_at": _now(),
+            "updated_at": now,
         })
     return await _retry_on_conflict(cosmos, run, etag, apply)
 
