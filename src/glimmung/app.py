@@ -6835,7 +6835,7 @@ async def _find_touchpoint_for_issue(
         int(d["pr_number"]) for d in run_docs
         if d.get("pr_number") is not None
     }
-    repo = issue.metadata.github_issue_repo or ""
+    repo = getattr(issue.metadata, "github_issue_repo", None) or ""
     report_docs = await query_all(
         cosmos.reports,
         "SELECT * FROM c WHERE c.project = @p",
