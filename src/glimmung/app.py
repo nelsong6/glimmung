@@ -993,24 +993,44 @@ async def _process_run_completion(
     decision = decide(decision_run, workflow_model)
     run, etag = await run_ops.record_decision(cosmos, run=run, etag=etag, decision=decision)
 
-    if decision == RunDecision.ADVANCE:
-        # Multi-phase routing (#101): if there's a next phase in the
-        # workflow's ordered list, dispatch it instead of going terminal.
-        # Run stays IN_PROGRESS, issue lock stays held, lease released
-        # by the just-completed workflow's release-lease job is fine —
-        # the next phase acquires its own lease.
-        next_phase = _next_phase_after(workflow_model, run.attempts[-1].phase)
-        if next_phase is not None:
-            await _dispatch_next_phase(
-                run=run, etag=etag, repo=repo,
-                workflow_model=workflow_model, next_phase=next_phase,
+    if decision == RunDecision.RETRY:
+        await _dispatch_retry(
+            run=run, etag=etag, repo=repo,
+            workflow_model=workflow_model,
+        )
+        return decision.value
+
+    # Multi-phase routing (#101) extended for always-run teardown phases
+    # (#296): forward to the next phase if any, otherwise go terminal with
+    # the disposition computed from non-always history. Runs whose verify
+    # phase aborted are routed through the teardown chain before being
+    # sealed as ABORTED, so cleanup phases get a chance to run.
+    target_phase = _next_dispatch_target(workflow_model, run, decision)
+    if target_phase is not None:
+        await _dispatch_next_phase(
+            run=run, etag=etag, repo=repo,
+            workflow_model=workflow_model, next_phase=target_phase,
+        )
+        last_phase = _phase_by_name(workflow_model, run.attempts[-1].phase)
+        last_phase_was_always = bool(last_phase and last_phase.always)
+        if target_phase.always and not last_phase_was_always:
+            log.info(
+                "run %s entering teardown chain at phase %r (decision=%s)",
+                run.id, target_phase.name, decision.value,
             )
+        else:
             log.info(
                 "run %s advanced from phase %r to %r",
-                run.id, run.attempts[-1].phase, next_phase.name,
+                run.id, run.attempts[-1].phase, target_phase.name,
             )
-            return "advance_phase"
+        return "advance_phase"
 
+    # No more phases (regular or teardown). Seal disposition from the
+    # non-always-phase history so a clean teardown after an abort still
+    # marks the run ABORTED with the original verify-loop reason.
+    disposition, abort_decision = _terminal_disposition(workflow_model, run)
+
+    if disposition == "passed":
         # PR primitive: when the workflow opts in (`pr.enabled=True`),
         # glimmung calls `gh pr create` itself rather than relying on the
         # consumer's YAML. Default-off during the rollout per #69 — flip
@@ -1038,19 +1058,15 @@ async def _process_run_completion(
                 return "abort_pr_create_failed"
         await run_ops.mark_passed(cosmos, run=run, etag=etag)
         log.info("run %s passed verification on attempt %d", run.id, len(run.attempts))
-        return decision.value
+        return RunDecision.ADVANCE.value
 
-    if decision == RunDecision.RETRY:
-        await _dispatch_retry(
-            run=run, etag=etag, repo=repo,
-            workflow_model=workflow_model,
-        )
-        return decision.value
-
-    # Any abort decision.
-    reason = abort_explanation(decision_run, workflow_model, decision)
+    # Aborted run — recover the original abort decision from history and
+    # render the explanation against the verify-phase attempt that drove
+    # it (not against any teardown attempts that ran after).
+    primary_decision = RunDecision(abort_decision) if abort_decision else decision
+    reason = abort_explanation(decision_run, workflow_model, primary_decision)
     await run_ops.mark_aborted(cosmos, run=run, etag=etag, reason=reason)
-    return decision.value
+    return primary_decision.value
 
 
 async def _run_with_recycle_lineage_accounting(cosmos: Cosmos, run: Run) -> Run:
@@ -1298,6 +1314,73 @@ def _next_phase_after(workflow: Workflow, phase_name: str):
                 return workflow.phases[i + 1]
             return None
     return None
+
+
+def _phase_by_name(workflow: Workflow, phase_name: str):
+    return next((p for p in workflow.phases if p.name == phase_name), None)
+
+
+def _first_always_phase(workflow: Workflow):
+    """First phase with always=True, or None. Always-phases are validated
+    to form a contiguous suffix at the end of the phase list, so the
+    "first always-phase" is the entry point for any teardown chain."""
+    for p in workflow.phases:
+        if p.always:
+            return p
+    return None
+
+
+_ABORT_DECISION_VALUES = frozenset({
+    RunDecision.ABORT_BUDGET_ATTEMPTS.value,
+    RunDecision.ABORT_BUDGET_COST.value,
+    RunDecision.ABORT_MALFORMED.value,
+})
+
+
+def _terminal_disposition(workflow: Workflow, run: Run) -> tuple[str, str | None]:
+    """Compute the run's true disposition by ignoring always-run teardown
+    attempts. Returns ('passed', None) or ('aborted', <abort decision value>).
+
+    Always-phases run as cleanup; their per-attempt outcomes don't move the
+    run into ABORTED. The disposition is determined by the most recent
+    non-always-phase attempt. Pre-teardown runs (no always-phases registered)
+    fall through identically to today's behavior because every attempt is
+    non-always."""
+    for attempt in reversed(run.attempts):
+        ph = _phase_by_name(workflow, attempt.phase)
+        if ph is not None and ph.always:
+            continue
+        if attempt.decision in _ABORT_DECISION_VALUES:
+            return ("aborted", attempt.decision)
+        return ("passed", None)
+    return ("passed", None)
+
+
+def _next_dispatch_target(workflow: Workflow, run: Run, decision: RunDecision):
+    """Pick the next phase to dispatch given the just-recorded `decision`
+    on the latest attempt. Returns the PhaseSpec to dispatch, or None when
+    the run should go terminal.
+
+    Routing rules:
+    - Last attempt was a teardown phase: chain to the next phase regardless
+      of this teardown's outcome (teardown failures log but don't escalate).
+    - Last attempt was non-always with ADVANCE: forward to the next phase
+      (which may itself be an always-phase — that's how the success path
+      enters teardown).
+    - Last attempt was non-always with any abort decision: skip remaining
+      non-always phases and route to the first always-phase. The terminal
+      disposition is preserved via attempt history; no extra state needed.
+    - RETRY is handled by the caller (recycle dispatch) and never reaches
+      this function."""
+    if not run.attempts:
+        return None
+    last_attempt = run.attempts[-1]
+    last_phase = _phase_by_name(workflow, last_attempt.phase)
+    if last_phase is not None and last_phase.always:
+        return _next_phase_after(workflow, last_attempt.phase)
+    if decision == RunDecision.ADVANCE:
+        return _next_phase_after(workflow, last_attempt.phase)
+    return _first_always_phase(workflow)
 
 
 def _phase_runner_label(phase: PhaseSpec) -> str:
@@ -1993,6 +2076,7 @@ def _phase_to_doc(p: Any) -> dict[str, Any]:
         "requirements": p.requirements,
         "verify": p.verify,
         "recyclePolicy": _recycle_policy_to_doc(p.recycle_policy),
+        "always": bool(p.always),
         "inputs": dict(p.inputs),
         "outputs": list(p.outputs),
         "jobs": [_native_job_to_doc(job) for job in p.jobs],
@@ -2040,6 +2124,7 @@ def _phase_from_doc(d: dict[str, Any]):
         requirements=d.get("requirements"),
         verify=bool(d.get("verify", False)),
         recycle_policy=_recycle_policy_from_doc(d.get("recyclePolicy")),
+        always=bool(d.get("always", False)),
         inputs=dict(d.get("inputs") or {}),
         outputs=list(d.get("outputs") or []),
         jobs=[
