@@ -284,9 +284,10 @@ jobs:
           else
             issue_url="${GLIMMUNG_BASE}/issues/${GLIMMUNG_PROJECT}/${GLIMMUNG_ISSUE_ID}"
           fi
+          run_slug="$(printf '%s' "${GLIMMUNG_RUN_ID}" | tr '[:upper:]' '[:lower:]')"
           {
             echo "AGENT_NAMESPACE=glimmung-${IMAGE_TAG}"
-            echo "JOB_NAME=agent-${IMAGE_TAG}"
+            echo "JOB_NAME=agent-${run_slug}"
             echo "ISSUE_URL=${issue_url}"
           } >> "$GITHUB_ENV"
 
