@@ -442,13 +442,12 @@ async def _promote_loop(app: FastAPI, settings: Settings) -> None:
 
 
 async def _standby_dns_loop(app: FastAPI, settings: Settings) -> None:
-    """Keep project-declared native standby resources materialized."""
+    """Keep project-declared native standby DNS records materialized in Kubernetes."""
     while True:
         try:
             await _reconcile_standby_dns(app)
-            await _reconcile_standby_workload_identity(app)
         except Exception:
-            log.exception("standby reconcile failed; will retry")
+            log.exception("standby DNS reconcile failed; will retry")
         await asyncio.sleep(settings.sweep_interval_seconds)
 
 
@@ -459,18 +458,6 @@ async def _reconcile_standby_dns(app: FastAPI, project_docs: list[dict[str, Any]
     if project_docs is None:
         project_docs = await query_all(app.state.cosmos.projects, "SELECT * FROM c")
     await launcher.reconcile_standby_dns(project_docs)
-
-
-async def _reconcile_standby_workload_identity(
-    app: FastAPI,
-    project_docs: list[dict[str, Any]] | None = None,
-) -> None:
-    launcher = getattr(app.state, "native_k8s_launcher", None)
-    if launcher is None:
-        return
-    if project_docs is None:
-        project_docs = await query_all(app.state.cosmos.projects, "SELECT * FROM c")
-    await launcher.reconcile_standby_workload_identity(project_docs)
 
 
 # Lease metadata is dual-purpose: glimmung-internal bookkeeping
@@ -3776,9 +3763,8 @@ async def register_project(p: ProjectRegister) -> Project:
         await cosmos.projects.create_item(doc)
     try:
         await _reconcile_standby_dns(app, [doc])
-        await _reconcile_standby_workload_identity(app, [doc])
     except Exception:
-        log.exception("standby reconcile failed for project %s; background loop will retry", p.name)
+        log.exception("standby DNS reconcile failed for project %s; background loop will retry", p.name)
     return Project.model_validate(lease_ops._camel_to_snake(doc))
 
 

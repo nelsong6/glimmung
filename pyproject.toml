@@ -19,7 +19,6 @@ dependencies = [
   "aiohttp>=3.10",
   "pyjwt[crypto]>=2.9",
   "azure-storage-blob>=12.25",
-  "mcp>=1.21",
 ]
 
 [project.optional-dependencies]

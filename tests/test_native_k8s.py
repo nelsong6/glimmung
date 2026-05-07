@@ -46,17 +46,9 @@ class _RecordingLauncher(NativeKubernetesLauncher):
     def __init__(self, settings):
         super().__init__(settings)
         self.calls = []
-        self.mcp_calls = []
 
     async def _request(self, method: str, path: str, *, json=None):
         self.calls.append({"method": method, "path": path, "json": json})
-        return {}
-
-    def _workload_identity_issuer(self) -> str:
-        return "https://issuer.example/"
-
-    async def _call_mcp_tool(self, name: str, arguments: dict):
-        self.mcp_calls.append({"name": name, "arguments": arguments})
         return {}
 
 
@@ -257,61 +249,6 @@ async def test_reconcile_standby_dns_creates_project_slots():
             "targets": ["172.179.163.96"],
         },
     ]
-
-
-@pytest.mark.asyncio
-async def test_reconcile_standby_workload_identity_upserts_project_slots():
-    settings = _settings()
-    settings.native_standby_identity_subscription = "sub-123"
-    launcher = _RecordingLauncher(settings)
-
-    await launcher.reconcile_standby_workload_identity([
-        {
-            "id": "tank",
-            "name": "tank",
-            "metadata": {
-                "native_standby_dns": {"enabled": True, "count": 2},
-                "native_standby_workload_identity": {
-                    "enabled": True,
-                    "resource_group": "infra",
-                    "slot_prefix": "tank-slot",
-                    "credentials": [
-                        {
-                            "identity_name": "claude-credentials-refresher-identity",
-                            "credential_name": "{slot_name}-orchestrator",
-                            "subject": "system:serviceaccount:{namespace}:{slot_name}",
-                        },
-                        {
-                            "identity_name": "claude-api-proxy-identity",
-                            "credential_name": "{slot_name}-claude-api-proxy",
-                            "subject": "system:serviceaccount:{namespace}:claude-api-proxy",
-                        },
-                    ],
-                },
-            },
-        }
-    ])
-
-    assert [call["name"] for call in launcher.mcp_calls] == [
-        "uami_upsert_federated_credential",
-        "uami_upsert_federated_credential",
-        "uami_upsert_federated_credential",
-        "uami_upsert_federated_credential",
-    ]
-    assert launcher.mcp_calls[0]["arguments"] == {
-        "subscription": "sub-123",
-        "resource_group": "infra",
-        "identity_name": "claude-credentials-refresher-identity",
-        "credential_name": "tank-slot-1-orchestrator",
-        "issuer": "https://issuer.example/",
-        "subject": "system:serviceaccount:tank-slot-1:tank-slot-1",
-        "dry_run": False,
-    }
-    assert launcher.mcp_calls[3]["arguments"]["identity_name"] == "claude-api-proxy-identity"
-    assert launcher.mcp_calls[3]["arguments"]["credential_name"] == "tank-slot-2-claude-api-proxy"
-    assert launcher.mcp_calls[3]["arguments"]["subject"] == (
-        "system:serviceaccount:tank-slot-2:claude-api-proxy"
-    )
 
 
 @pytest.mark.asyncio

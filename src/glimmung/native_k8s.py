@@ -217,28 +217,6 @@ class NativeKubernetesLauncher:
             for name in sorted(set(existing) - set(configs)):
                 await self._delete_standby_dns(namespace, name)
 
-    async def reconcile_standby_workload_identity(self, project_docs: list[dict[str, Any]]) -> None:
-        """Reconcile Azure workload-identity federated credentials for standby slots."""
-        for project_doc in project_docs:
-            for config in _standby_workload_identity_configs(project_doc, self._settings):
-                issuer = config.get("issuer") or self._workload_identity_issuer()
-                if not issuer:
-                    raise NativeLaunchError(
-                        f"standby workload identity issuer is required for {project_doc.get('id')}"
-                    )
-                args = {
-                    "subscription": config.get("subscription") or None,
-                    "resource_group": config["resource_group"],
-                    "identity_name": config["identity_name"],
-                    "credential_name": config["credential_name"],
-                    "issuer": issuer,
-                    "subject": config["subject"],
-                    "dry_run": False,
-                }
-                if config.get("audiences"):
-                    args["audiences"] = config["audiences"]
-                await self._call_mcp_tool("uami_upsert_federated_credential", args)
-
     async def _standby_dns_target(self, configs: Any) -> str:
         for config in configs:
             target = str(config.get("target") or "").strip()
@@ -297,44 +275,6 @@ class NativeKubernetesLauncher:
             if exc.response.status_code == 404:
                 return
             raise
-
-    def _workload_identity_issuer(self) -> str:
-        configured = str(getattr(self._settings, "native_standby_identity_issuer", "") or "").strip()
-        if configured:
-            return configured
-        token_path = Path(self._settings.k8s_sa_token_path)
-        if not token_path.exists():
-            return ""
-        token = token_path.read_text(encoding="utf-8").strip()
-        parts = token.split(".")
-        if len(parts) < 2:
-            return ""
-        payload = parts[1] + "=" * (-len(parts[1]) % 4)
-        try:
-            claims = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
-        except (ValueError, json.JSONDecodeError):
-            return ""
-        return str(claims.get("iss") or "").strip()
-
-    async def _call_mcp_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-        from mcp import ClientSession
-        from mcp.client.streamable_http import streamablehttp_client
-
-        token = Path(self._settings.k8s_sa_token_path).read_text(encoding="utf-8").strip()
-        url = str(getattr(self._settings, "native_standby_identity_mcp_url", "") or "").strip()
-        if not url:
-            raise NativeLaunchError("native_standby_identity_mcp_url is required")
-        headers = {"Authorization": f"Bearer {token}"}
-        async with streamablehttp_client(url, headers=headers) as (read, write, _session_id):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                result = await session.call_tool(name, arguments)
-        if getattr(result, "isError", False):
-            text = "; ".join(
-                str(getattr(content, "text", content)) for content in (result.content or [])
-            )
-            raise NativeLaunchError(f"MCP tool {name} failed: {text}")
-        return result
 
     async def read_attempt_pod_logs(
         self,
@@ -798,99 +738,6 @@ def _standby_dns_body(config: dict[str, Any], target: str) -> dict[str, Any]:
             ],
         },
     }
-
-
-def _standby_workload_identity_configs(
-    project_doc: dict[str, Any],
-    settings: Settings,
-) -> list[dict[str, Any]]:
-    metadata = project_doc.get("metadata") or {}
-    if not isinstance(metadata, dict):
-        return []
-    raw = (
-        metadata.get("native_standby_workload_identity")
-        or metadata.get("nativeStandbyWorkloadIdentity")
-    )
-    if not isinstance(raw, dict) or raw.get("enabled") is not True:
-        return []
-
-    project = str(project_doc.get("name") or project_doc.get("id") or "").strip()
-    if not project:
-        return []
-    count = _standby_workload_identity_count(raw, metadata, settings)
-    if count < 1:
-        return []
-    credentials = raw.get("credentials")
-    if not isinstance(credentials, list):
-        return []
-
-    subscription = str(
-        raw.get("subscription")
-        or raw.get("subscription_id")
-        or raw.get("subscriptionId")
-        or getattr(settings, "native_standby_identity_subscription", "")
-        or ""
-    ).strip()
-    resource_group = str(
-        raw.get("resource_group")
-        or raw.get("resourceGroup")
-        or getattr(settings, "native_standby_identity_resource_group", "infra")
-        or "infra"
-    ).strip()
-    issuer = str(raw.get("issuer") or getattr(settings, "native_standby_identity_issuer", "") or "").strip()
-    slot_prefix = str(raw.get("slot_prefix") or raw.get("slotPrefix") or f"{project}-slot").strip()
-
-    configs: list[dict[str, Any]] = []
-    for slot in range(1, count + 1):
-        slot_name = f"{slot_prefix}-{slot}"
-        values = {
-            "project": project,
-            "slot": str(slot),
-            "slot_index": str(slot),
-            "slot_name": slot_name,
-            "namespace": slot_name,
-        }
-        for item in credentials:
-            if not isinstance(item, dict):
-                continue
-            identity_name = str(
-                item.get("identity_name") or item.get("identityName") or ""
-            ).strip()
-            credential_template = str(
-                item.get("credential_name") or item.get("credentialName") or ""
-            ).strip()
-            subject_template = str(item.get("subject") or "").strip()
-            if not identity_name or not credential_template or not subject_template:
-                continue
-            audiences = item.get("audiences")
-            configs.append({
-                "subscription": subscription,
-                "resource_group": resource_group,
-                "identity_name": identity_name,
-                "credential_name": credential_template.format(**values),
-                "issuer": issuer,
-                "subject": subject_template.format(**values),
-                "audiences": audiences if isinstance(audiences, list) else None,
-            })
-    return configs
-
-
-def _standby_workload_identity_count(
-    raw: dict[str, Any],
-    metadata: dict[str, Any],
-    settings: Settings,
-) -> int:
-    count_raw = raw.get("count")
-    if count_raw is None:
-        dns_raw = metadata.get("native_standby_dns") or metadata.get("nativeStandbyDns")
-        if isinstance(dns_raw, dict):
-            count_raw = dns_raw.get("count")
-    try:
-        return int(str(count_raw)) if count_raw is not None else int(
-            getattr(settings, "native_runner_project_concurrency", 5)
-        )
-    except (TypeError, ValueError):
-        return 0
 
 
 def _resource_name(prefix: str, run_id: str, attempt_index: int) -> str:
