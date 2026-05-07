@@ -19,6 +19,9 @@ from glimmung.app import _abort_run
 from glimmung.models import (
     BudgetConfig,
     LeaseState,
+    NativeJobAttempt,
+    NativeStepAttempt,
+    NativeStepState,
     PhaseAttempt,
     Run,
     RunState,
@@ -456,3 +459,101 @@ async def test_abort_is_idempotent(cosmos, minter):
         cosmos, minter, run_id="run-1", project="p", reason="r",
     )
     assert second.state == "already_terminal"
+
+
+# ─── attempt-state cascade ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_abort_cascades_to_in_flight_native_attempt_jobs_and_steps(cosmos, minter):
+    """When a Run is aborted before the runner emits terminal step
+    events (operator cancel, runaway-loop guard), the inner
+    PhaseAttempt + jobs + steps used to stay pending/active and the
+    dashboard would mis-report the Run as live. mark_aborted should
+    flip them to terminal so Run.state and inner state agree."""
+    now = datetime.now(UTC)
+    run = Run(
+        id="run-cascade",
+        project="p",
+        workflow="agent-run",
+        issue_repo="r/n",
+        issue_number=42,
+        state=RunState.IN_PROGRESS,
+        budget=BudgetConfig(),
+        attempts=[
+            PhaseAttempt(
+                attempt_index=0,
+                phase="env-prep",
+                phase_kind="k8s_job",
+                workflow_filename="",
+                dispatched_at=now,
+                completed_at=now,
+                conclusion="success",
+                jobs=[NativeJobAttempt(
+                    job_id="env-prep",
+                    state=NativeStepState.SUCCEEDED,
+                    started_at=now,
+                    completed_at=now,
+                    steps=[NativeStepAttempt(
+                        slug="emit-env-outputs",
+                        state=NativeStepState.SUCCEEDED,
+                        started_at=now, completed_at=now,
+                    )],
+                )],
+            ),
+            PhaseAttempt(
+                attempt_index=1,
+                phase="agent-execute",
+                phase_kind="k8s_job",
+                workflow_filename="",
+                dispatched_at=now,
+                jobs=[NativeJobAttempt(
+                    job_id="agent-execute",
+                    state=NativeStepState.ACTIVE,
+                    started_at=now,
+                    steps=[
+                        NativeStepAttempt(
+                            slug="run-agent",
+                            state=NativeStepState.ACTIVE,
+                            started_at=now,
+                        ),
+                        NativeStepAttempt(
+                            slug="verify-result",
+                            state=NativeStepState.PENDING,
+                        ),
+                    ],
+                )],
+            ),
+        ],
+        created_at=now,
+        updated_at=now,
+    )
+    await cosmos.runs.create_item(run.model_dump(mode="json"))
+
+    result = await _abort_run(
+        cosmos, minter, run_id="run-cascade", project="p",
+        reason="runaway native recycle loop",
+    )
+    assert result.state == "aborted"
+
+    doc = await cosmos.runs.read_item(item="run-cascade", partition_key="p")
+    assert doc["state"] == RunState.ABORTED.value
+
+    # First attempt was already terminal; cascade leaves it alone.
+    first, second = doc["attempts"]
+    assert first["conclusion"] == "success"
+    assert first["jobs"][0]["state"] == NativeStepState.SUCCEEDED.value
+    assert first["jobs"][0]["steps"][0]["state"] == NativeStepState.SUCCEEDED.value
+
+    # Second attempt was in-flight; cascade closes it out.
+    assert second["completed_at"] is not None
+    assert second["conclusion"] == "cancelled"
+    assert second["jobs"][0]["state"] == NativeStepState.FAILED.value
+    assert second["jobs"][0]["completed_at"] is not None
+    active_step, pending_step = second["jobs"][0]["steps"]
+    assert active_step["state"] == NativeStepState.FAILED.value
+    assert active_step["completed_at"] is not None
+    assert active_step["message"] == "runaway native recycle loop"
+    assert pending_step["state"] == NativeStepState.FAILED.value
+    assert pending_step["started_at"] is not None
+    assert pending_step["completed_at"] is not None
