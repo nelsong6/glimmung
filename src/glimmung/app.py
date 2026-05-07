@@ -3989,6 +3989,142 @@ async def register_workflow(w: WorkflowRegister) -> Workflow:
     return _doc_to_workflow(doc)
 
 
+class WorkflowUpstreamResult(BaseModel):
+    """Comparison of the project repo's `.glimmung/workflows/<name>.yaml`
+    file (`upstream`) against what's currently registered in Cosmos
+    (`current`). `in_sync` is True only when both exist and serialize to
+    the same shape (after stripping server-set fields like createdAt).
+    Returned by `GET .../upstream` so the UI can render the diff and
+    decide whether to surface "Install"."""
+
+    project: str
+    workflow: str
+    ref: str
+    repo: str
+    upstream: WorkflowRegister | None
+    current: Workflow | None
+    in_sync: bool
+    fetch_error: str | None = None
+
+
+async def _fetch_upstream_for_endpoint(
+    *,
+    project: str,
+    workflow_name: str,
+    ref: str,
+) -> tuple[Project, WorkflowRegister, Workflow | None]:
+    """Shared loader for the upstream + sync endpoints. Reads the project
+    doc, fetches the upstream YAML, and reads the currently-registered
+    workflow (if any). Raises HTTPException on every failure shape so each
+    endpoint is a thin wrapper."""
+    from glimmung.workflow_sync import UpstreamFetchError, fetch_upstream
+
+    cosmos: Cosmos = app.state.cosmos
+    project_doc = await _read_project(cosmos, project)
+    if not project_doc:
+        raise HTTPException(404, f"project {project!r} does not exist")
+    project_model = Project.model_validate(lease_ops._camel_to_snake(project_doc))
+    if not project_model.github_repo:
+        raise HTTPException(
+            400,
+            f"project {project!r} has no github_repo set; cannot fetch workflow upstream",
+        )
+
+    minter: GitHubAppTokenMinter | None = app.state.gh_minter
+    try:
+        upstream = await fetch_upstream(
+            repo=project_model.github_repo,
+            workflow_name=workflow_name,
+            project_name=project,
+            minter=minter,
+            ref=ref,
+        )
+    except UpstreamFetchError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+
+    try:
+        current_doc = await cosmos.workflows.read_item(
+            item=workflow_name, partition_key=project,
+        )
+        current = _doc_to_workflow(current_doc)
+    except Exception:
+        current = None
+    return project_model, upstream, current
+
+
+@app.get(
+    "/v1/projects/{project}/workflows/{name}/upstream",
+    response_model=WorkflowUpstreamResult,
+)
+async def get_workflow_upstream(
+    project: str,
+    name: str,
+    ref: Annotated[str, Query()] = "main",
+) -> WorkflowUpstreamResult:
+    """Fetch the project repo's `.glimmung/workflows/<name>.yaml`, parse
+    it, and compare against what's registered. Read-only — answer drives
+    the "Check for updates" button."""
+    from glimmung.workflow_sync import compute_in_sync
+
+    project_model, upstream, current = await _fetch_upstream_for_endpoint(
+        project=project, workflow_name=name, ref=ref,
+    )
+    return WorkflowUpstreamResult(
+        project=project,
+        workflow=name,
+        ref=ref,
+        repo=project_model.github_repo,
+        upstream=upstream,
+        current=current,
+        in_sync=compute_in_sync(upstream=upstream, current=current),
+    )
+
+
+@app.post(
+    "/v1/projects/{project}/workflows/{name}/sync",
+    response_model=WorkflowUpstreamResult,
+    dependencies=[Depends(require_admin_user)],
+)
+async def sync_workflow(
+    project: str,
+    name: str,
+    ref: Annotated[str, Query()] = "main",
+) -> WorkflowUpstreamResult:
+    """Fetch upstream, validate, upsert into Cosmos when different.
+    Idempotent — calling on an already-in-sync workflow is a no-op that
+    still returns the comparison result. Drives the "Install" button."""
+    from glimmung.workflow_sync import compute_in_sync
+
+    project_model, upstream, current = await _fetch_upstream_for_endpoint(
+        project=project, workflow_name=name, ref=ref,
+    )
+    if compute_in_sync(upstream=upstream, current=current):
+        return WorkflowUpstreamResult(
+            project=project, workflow=name, ref=ref,
+            repo=project_model.github_repo,
+            upstream=upstream, current=current, in_sync=True,
+        )
+
+    cosmos: Cosmos = app.state.cosmos
+    _assert_workflow_allowed_for_project(
+        await _read_project(cosmos, project), upstream,
+    )
+    doc = _workflow_to_doc(upstream)
+    try:
+        existing = await cosmos.workflows.read_item(item=name, partition_key=project)
+        doc["createdAt"] = existing.get("createdAt", doc["createdAt"])
+        await cosmos.workflows.replace_item(item=name, body=doc)
+    except Exception:
+        await cosmos.workflows.create_item(doc)
+
+    new_current = _doc_to_workflow(doc)
+    return WorkflowUpstreamResult(
+        project=project, workflow=name, ref=ref,
+        repo=project_model.github_repo,
+        upstream=upstream, current=new_current, in_sync=True,
+    )
+
+
 @app.get("/v1/workflows", response_model=list[Workflow])
 async def list_workflows(
     project: Annotated[str | None, Query()] = None,
