@@ -1167,27 +1167,26 @@ function PipelineDag({
   return (
     <div className="dag-wrap">
       <div className="dag" aria-label="pipeline">
-        {activeEntry && (
-          <>
-            <div className="dag-entry active">
-              <span className="mono">entry</span>
-              <span className="dim mono">{activeEntry}</span>
-            </div>
-            <div className="dag-edge" aria-hidden="true">→</div>
-          </>
-        )}
-        {phases.map((p, index) => (
-          <Fragment key={p.phaseName}>
-            {index > 0 && <div className="dag-edge" aria-hidden="true">→</div>}
-            <DagPhaseNode
-              phase={p}
-              selected={selectedNodeId === `phase:${p.phaseName}`}
-              onSelect={() =>
-                onSelectNode(selectedNodeId === `phase:${p.phaseName}` ? null : `phase:${p.phaseName}`)
-              }
-            />
-          </Fragment>
-        ))}
+        {phases.map((p) => {
+          const isEntry = p.phaseName === activeEntry;
+          return (
+            <Fragment key={p.phaseName}>
+              <div
+                className={`dag-edge${isEntry ? " entry" : ""}`}
+                aria-label={isEntry ? "the run entered here" : undefined}
+                title={isEntry ? "the run entered here" : undefined}
+                aria-hidden={isEntry ? undefined : "true"}
+              >→</div>
+              <DagPhaseNode
+                phase={p}
+                selected={selectedNodeId === `phase:${p.phaseName}`}
+                onSelect={() =>
+                  onSelectNode(selectedNodeId === `phase:${p.phaseName}` ? null : `phase:${p.phaseName}`)
+                }
+              />
+            </Fragment>
+          );
+        })}
         <div className="dag-edge" aria-hidden="true">→</div>
         <button
           type="button"

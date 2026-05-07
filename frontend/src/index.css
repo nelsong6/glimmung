@@ -1908,6 +1908,15 @@ h2 .inline-action,
   font-size: 1.1rem;
   user-select: none;
 }
+/* Highlights the arrow leading into the phase a run actually entered
+   (default phase[0] for fresh runs; entrypoint_phase for resumed /
+   recycle children). Pairs with the "the run entered here" tooltip
+   on the same element. Contrasts with the dim recycle arrows on the
+   policy rail below. */
+.dag-edge.entry {
+  color: var(--state-success-fg);
+  cursor: help;
+}
 .dag-policy-rail {
   display: flex;
   flex-wrap: wrap;
