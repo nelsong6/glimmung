@@ -58,11 +58,14 @@ This lets Glimmung show "the run" as the complete story while still
 showing each pass through the graph as a distinct cycle.
 
 **Touchpoint** replaces the old user-facing `Report` concept. A
-Touchpoint is the issue-level decision surface: what the human needs to
-inspect, approve, reject, or discuss. A GitHub PR, validation URL,
-screenshots, generated design portfolio rows, logs, or artifacts are
-evidence inside the Touchpoint; they are not separate primary navigation
-surfaces.
+Touchpoint is the issue-level live summary and navigation page: what the
+human needs to inspect, approve, reject, or discuss now. Touchpoints are
+strictly one-to-one with Issues; repeated Runs, retries, resumes, and PR
+updates revise the same Touchpoint rather than creating additional
+Touchpoints. A GitHub PR, validation URL, screenshots, generated design
+portfolio rows, logs, or artifacts can be linked from the Touchpoint as
+current evidence, but anything that must be retained per Run belongs in the
+Run and RunReport UI.
 
 The fuller object-boundary and Playbook integration vocabulary lives in
 [Touchpoints, RunReports, And Playbook Integration](touchpoints-runreports-playbooks.md).
@@ -244,7 +247,7 @@ surface. On mobile, the step list can stack above the log.
 The run graph is explanatory. It tells the user what happened and why.
 
 The Touchpoint is decision-oriented. It tells the user what to inspect
-or decide now.
+or decide now, and acts as navigation to the relevant Run surfaces.
 
 Do not overload the run graph with every approval workflow. The graph
 should link to evidence and decision surfaces, while the Touchpoint
@@ -258,11 +261,12 @@ should aggregate the things that need human attention:
 - run summary and recommendation,
 - approve/request changes/rerun actions.
 
-Touchpoints are one-to-one with issues in the primary UI. They should
-not need their own top-level tab. The issue workspace should surface the
-current Touchpoint alongside issue context and the run/cycle graph. A
-historical list of touchpoint evidence may exist as part of issue
-history, but it should not become a separate "Reports" area.
+Touchpoints are one-to-one with issues. They should not need their own
+top-level tab or an issue-local collection route. The issue workspace should
+surface the current Touchpoint alongside issue context and the run/cycle
+graph. Historical or per-Run evidence should live in Run and RunReport views,
+with the Touchpoint linking to the relevant current Run instead of carrying
+its own history.
 
 ## Design Portfolio Implications
 

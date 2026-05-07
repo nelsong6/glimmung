@@ -4,8 +4,9 @@
  * Touchpoint meta comes from Glimmung; GitHub PR coordinates are syndication
  * metadata when present. Runtime fields come from the linked Run.
  *
- * Routed via `/touchpoints/<owner>/<repo>/<n>`. Repo + PR number are derived
- * from URL params so deep-link reloads land directly here.
+ * Legacy fallback for `/touchpoints/<owner>/<repo>/<n>` when a mirrored PR is
+ * not linked to a Glimmung Issue. Linked Touchpoints redirect to the canonical
+ * issue workspace: `/projects/<project>/issues/<n>/touchpoint`.
  */
 import { useEffect, useState } from "react";
 import { useNavigate, useOutletContext, useParams } from "react-router-dom";

@@ -6573,6 +6573,13 @@ async def _list_touchpoints_from_cosmos(
     if not touchpoints:
         return []
 
+    issue_docs = await query_all(cosmos.issues, "SELECT * FROM c")
+    issue_number_by_id = {
+        str(d["id"]): int(d["number"])
+        for d in issue_docs
+        if d.get("id") is not None and d.get("number") is not None
+    }
+
     run_docs = await query_all(cosmos.runs, "SELECT * FROM c")
     runs_by_id: dict[str, dict[str, Any]] = {d["id"]: d for d in run_docs}
     runs_by_repo_pr: dict[tuple[str, int], dict[str, Any]] = {}
@@ -6641,6 +6648,8 @@ async def _list_touchpoints_from_cosmos(
             issue_number = run_doc.get("issue_number")
             if issue_number is not None and issue_number != 0:
                 row.issue_number = int(issue_number)
+        if row.issue_number is None and pr.linked_issue_id:
+            row.issue_number = issue_number_by_id.get(pr.linked_issue_id)
 
         rows.append(row)
 
@@ -6698,6 +6707,34 @@ async def touchpoint_detail(
         raise HTTPException(404, f"no glimmung Report for {repo}#{pr_number}")
     pr, _ = found
     return await _build_touchpoint_detail(cosmos, pr=pr)
+
+
+@app.get(
+    "/v1/projects/{project}/issues/{issue_number}/touchpoint",
+    response_model=TouchpointDetail,
+)
+async def issue_touchpoint_detail(
+    project: str = Path(...),
+    issue_number: int = Path(...),
+) -> TouchpointDetail:
+    """Canonical Touchpoint read path.
+
+    Touchpoints are a live one-to-one Issue surface. GitHub PR coordinates are
+    compatibility/syndication metadata, so issue-scoped callers should use this
+    endpoint and let the server resolve the current Touchpoint object.
+    """
+    cosmos: Cosmos = app.state.cosmos
+    found_issue = await issue_ops.read_issue_by_number(
+        cosmos, project=project, number=issue_number,
+    )
+    if found_issue is None:
+        raise HTTPException(404, f"no glimmung issue {project}#{issue_number}")
+    issue, _ = found_issue
+    found_touchpoint = await _find_touchpoint_for_issue(cosmos, issue=issue)
+    if found_touchpoint is None:
+        raise HTTPException(404, f"no touchpoint for glimmung issue {project}#{issue_number}")
+    pr, _ = found_touchpoint
+    return await _build_touchpoint_detail(cosmos, pr=pr, issue=issue)
 
 
 @app.get(
@@ -6772,7 +6809,62 @@ async def touchpoint_version_detail_endpoint(
     return version_doc
 
 
-async def _build_touchpoint_detail(cosmos: Cosmos, *, pr: Report) -> TouchpointDetail:
+async def _find_touchpoint_for_issue(
+    cosmos: Cosmos,
+    *,
+    issue: Issue,
+) -> tuple[Report, str] | None:
+    """Find the current Touchpoint for one Issue.
+
+    The intended cardinality is one Touchpoint per Issue. During the staged
+    Report-to-Touchpoint migration, old records may only link through a Run or
+    PR coordinate, so this accepts those compatibility shapes too.
+    """
+    run_docs = await query_all(
+        cosmos.runs,
+        "SELECT * FROM c WHERE c.issue_id = @i",
+        parameters=[{"name": "@i", "value": issue.id}],
+    )
+    run_ids = {str(d["id"]) for d in run_docs if d.get("id") is not None}
+    pr_numbers = {
+        int(d["pr_number"]) for d in run_docs
+        if d.get("pr_number") is not None
+    }
+    repo = getattr(issue.metadata, "github_issue_repo", None) or ""
+    report_docs = await query_all(
+        cosmos.reports,
+        "SELECT * FROM c WHERE c.project = @p",
+        parameters=[{"name": "@p", "value": issue.project}],
+    )
+    matches: list[dict[str, Any]] = []
+    for doc in report_docs:
+        if doc.get("linked_issue_id") == issue.id:
+            matches.append(doc)
+            continue
+        if doc.get("linked_run_id") in run_ids:
+            matches.append(doc)
+            continue
+        if repo and doc.get("repo") == repo and doc.get("number") in pr_numbers:
+            matches.append(doc)
+
+    if not matches:
+        return None
+    if len(matches) > 1:
+        log.warning(
+            "multiple touchpoints link to issue %s/%s: %s",
+            issue.project, issue.id, [d.get("id") for d in matches],
+        )
+        matches.sort(key=lambda d: d.get("updated_at") or d.get("created_at") or "")
+    doc = matches[-1]
+    return Report.model_validate(run_ops._strip_meta(doc)), doc["_etag"]
+
+
+async def _build_touchpoint_detail(
+    cosmos: Cosmos,
+    *,
+    pr: Report,
+    issue: Issue | None = None,
+) -> TouchpointDetail:
     """Render a Report plus linked Run state."""
     detail = TouchpointDetail(
         id=pr.id,
@@ -6839,7 +6931,19 @@ async def _build_touchpoint_detail(cosmos: Cosmos, *, pr: Report) -> TouchpointD
                 "log_archive_url": a.log_archive_url,
             })
 
-    if pr.linked_issue_id:
+    if issue is None and pr.linked_issue_id:
+        try:
+            doc = await cosmos.issues.read_item(
+                item=pr.linked_issue_id, partition_key=pr.project,
+            )
+            issue = Issue.model_validate(run_ops._strip_meta(doc))
+        except Exception:
+            pass
+    if issue is not None:
+        if issue.number:
+            detail.issue_number = issue.number
+        detail.issue_title = issue.title
+    elif pr.linked_issue_id:
         try:
             doc = await cosmos.issues.read_item(
                 item=pr.linked_issue_id, partition_key=pr.project,

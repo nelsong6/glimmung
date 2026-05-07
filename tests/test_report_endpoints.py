@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
+from glimmung import issues as issue_ops
 from glimmung import reports as report_ops
 from glimmung.app import (
     ReportCreateRequest,
@@ -23,6 +24,8 @@ from glimmung.app import (
     _build_report_detail,
     _list_reports_from_cosmos,
     _list_report_versions_from_cosmos,
+    app,
+    issue_touchpoint_detail,
 )
 from glimmung.models import ReportState
 
@@ -38,6 +41,17 @@ def cosmos():
         issues=FakeContainer("issues", "/project"),
         locks=FakeContainer("locks", "/scope"),
     )
+
+
+@pytest.fixture
+def app_state(cosmos):
+    old = getattr(app.state, "cosmos", None)
+    app.state.cosmos = cosmos
+    yield
+    if old is None:
+        delattr(app.state, "cosmos")
+    else:
+        app.state.cosmos = old
 
 
 # ─── list_reports ────────────────────────────────────────────────────────────────
@@ -236,6 +250,48 @@ async def test_build_report_detail_stitches_linked_issue_title(cosmos):
     detail = await _build_report_detail(cosmos, pr=pr)
     assert detail.linked_issue_id == "01JISSUEZZZ"
     assert detail.issue_title == "the linked issue title"
+
+
+@pytest.mark.asyncio
+async def test_build_report_detail_stitches_linked_issue_number(cosmos):
+    issue = await issue_ops.create_issue(
+        cosmos,
+        project="ambience",
+        number=42,
+        title="canonical touchpoint issue",
+    )
+    pr = await report_ops.create_report(
+        cosmos, project="ambience", repo="nelsong6/ambience",
+        number=14, title="t", branch="b",
+        linked_issue_id=issue.id,
+    )
+
+    detail = await _build_report_detail(cosmos, pr=pr)
+
+    assert detail.issue_number == 42
+    assert detail.issue_title == "canonical touchpoint issue"
+
+
+@pytest.mark.asyncio
+async def test_issue_touchpoint_detail_reads_one_to_one_touchpoint(cosmos, app_state):
+    issue = await issue_ops.create_issue(
+        cosmos,
+        project="ambience",
+        number=42,
+        title="canonical touchpoint issue",
+    )
+    pr = await report_ops.create_report(
+        cosmos, project="ambience", repo="nelsong6/ambience",
+        number=14, title="t", branch="b",
+        linked_issue_id=issue.id,
+    )
+
+    detail = await issue_touchpoint_detail(project="ambience", issue_number=42)
+
+    assert detail.id == pr.id
+    assert detail.project == "ambience"
+    assert detail.issue_number == 42
+    assert detail.linked_issue_id == issue.id
 
 
 @pytest.mark.asyncio

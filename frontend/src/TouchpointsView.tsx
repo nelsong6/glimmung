@@ -5,7 +5,9 @@
  * Sourced from `/v1/touchpoints`. Rows include both agent-opened GitHub PR
  * touchpoints and manually mirrored PRs with no run linkage.
  *
- * Row click navigates to `/touchpoints/<owner>/<repo>/<n>`.
+ * Row click navigates to the canonical issue Touchpoint tab when the
+ * Touchpoint is linked to an Issue. The legacy PR-coordinate route remains a
+ * compatibility fallback for unlinked mirrored PRs.
  */
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -111,7 +113,13 @@ export function TouchpointsView({
               <tr
                 key={row.id}
                 className={row.pr_lock_held ? "eligible" : ""}
-                onClick={() => navigate(`/touchpoints/${row.repo}/${row.pr_number}`)}
+                onClick={() => {
+                  if (row.issue_number !== null) {
+                    navigate(`/projects/${encodeURIComponent(row.project)}/issues/${row.issue_number}/touchpoint`);
+                  } else {
+                    navigate(`/touchpoints/${row.repo}/${row.pr_number}`);
+                  }
+                }}
                 style={{ cursor: "pointer" }}
               >
                 <td>{row.project}</td>

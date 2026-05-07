@@ -116,8 +116,9 @@ matching surface in the same PR:
 | POST   | `/v1/runs/dispatch`               | UI-initiated dispatch (`{repo, issue_number, workflow?}`). Same path as the label-webhook trigger; per-issue lock-serialized. |
 | GET    | `/v1/runs/{project}/{run_id}/report` | Factual RunReport for one Run: attempts, cost, validation URL, screenshot markdown, and terminal status. |
 | POST   | `/v1/portfolio/elements/dispatch` | Mint a Glimmung issue from selected portfolio review rows and dispatch it through the normal issue lock/lease path. |
-| GET    | `/v1/touchpoints`                 | Touchpoint history across registered repos (GitHub PR syndication metadata + linked Run state). |
-| GET    | `/v1/touchpoints/{owner}/{repo}/{n}` | Touchpoint detail with attempt history + reject feedback surface. |
+| GET    | `/v1/touchpoints`                 | Touchpoint index across registered projects (GitHub PR syndication metadata + linked Issue/Run state). |
+| GET    | `/v1/projects/{project}/issues/{n}/touchpoint` | Canonical live Touchpoint summary for one Glimmung Issue. |
+| GET    | `/v1/touchpoints/{owner}/{repo}/{n}` | Compatibility Touchpoint lookup by GitHub PR coordinates. |
 | GET    | `/v1/reports`                     | Compatibility alias for `/v1/touchpoints`. |
 | GET    | `/v1/reports/{owner}/{repo}/{n}`  | Compatibility alias for `/v1/touchpoints/{owner}/{repo}/{n}`. |
 | POST   | `/v1/signals`                     | Enqueue a Signal (e.g., `{target_type:"pr", target_repo, target_id, source:"glimmung_ui", payload:{kind:"reject", feedback:"…"}}`). UI reject button uses this. |
