@@ -197,6 +197,7 @@ export type AbortState =
 
 type AuthContext = {
   signedIn: boolean;
+  isAdmin: boolean;
   snap?: {
     projects: Array<{
       name: string;
@@ -231,6 +232,26 @@ const POLL_INTERVAL_MS = 3000;
 const RUN_VIEWER_IDLE_DISPATCH: DispatchState = { kind: "idle" };
 const RUN_VIEWER_IDLE_ABORT: AbortState = { kind: "idle" };
 
+// Pull a human-readable cause out of the raw error string built in
+// dispatchRun: `/v1/runs/dispatch -> <status>: <body>`. FastAPI errors
+// arrive as `{"detail":"..."}` JSON; surface that detail if present so
+// users see "403: email not allowed" instead of opaque JSON.
+function formatDispatchError(message: string): string {
+  const m = message.match(/-> (\d+): ([\s\S]*)$/);
+  if (!m) return message;
+  const status = m[1];
+  const body = m[2].trim();
+  try {
+    const parsed = JSON.parse(body) as { detail?: unknown };
+    if (typeof parsed.detail === "string" && parsed.detail) {
+      return `${status}: ${parsed.detail}`;
+    }
+  } catch {
+    // body isn't JSON — fall through and show as-is
+  }
+  return `${status}: ${body}`;
+}
+
 type IssueDetailRouteParams = {
   owner?: string;
   repo?: string;
@@ -244,7 +265,7 @@ export function IssueDetailView() {
   const navigate = useNavigate();
   const location = useLocation();
   const params = useParams<IssueDetailRouteParams>();
-  const { signedIn, snap } = useOutletContext<AuthContext>();
+  const { signedIn, isAdmin, snap } = useOutletContext<AuthContext>();
 
   const projectRouteIssueNumber = params.issueNumber ? parseInt(params.issueNumber, 10) : null;
   // Three route shapes land here. Project-shaped issue URLs are
@@ -475,6 +496,7 @@ export function IssueDetailView() {
                   && w.name === (stringOrNull(detail.metadata?.workflow) ?? stringOrNull(graph?.nodes.find((n) => n.kind === "run")?.metadata.workflow))
                 )) ?? null}
                 signedIn={signedIn}
+                isAdmin={isAdmin}
                 dispatchState={dispatchState}
                 selectedRunId={selectedRunId}
                 onSelectRun={setSelectedRunId}
@@ -818,6 +840,7 @@ export function RunViewer({
   graph,
   graphAvailable,
   signedIn,
+  isAdmin = false,
   project,
   repo,
   inFlight,
@@ -835,6 +858,7 @@ export function RunViewer({
   graph: IssueGraph | null;
   graphAvailable: boolean;
   signedIn: boolean;
+  isAdmin?: boolean;
   project: string;
   repo: string | null;
   inFlight: boolean;
@@ -882,7 +906,7 @@ export function RunViewer({
   }
 
   const dispatching = dispatchState.kind === "dispatching";
-  const dispatchDisabled = inFlight || dispatching || !signedIn;
+  const dispatchDisabled = inFlight || dispatching || !signedIn || !isAdmin;
   // Abort button shows only when an actual run record exists in flight.
   // Lock-only state (issue_lock_held but no run yet) doesn't have a run
   // id to target; that case stays as "Run lock held — waiting…".
@@ -892,6 +916,20 @@ export function RunViewer({
   const abortableRunId = activeRun ? runIdFromNode(activeRun) : null;
   const aborting = abortState.kind === "aborting";
   const armed = abortState.kind === "armed";
+  const dispatchLabel = dispatching
+    ? "dispatching…"
+    : inFlight
+    ? "in flight"
+    : !signedIn
+    ? "sign in"
+    : !isAdmin
+    ? "admin only"
+    : "re-dispatch";
+  const dispatchTitle = !signedIn
+    ? undefined
+    : !isAdmin && !dispatching && !inFlight
+    ? "Re-dispatching is restricted to admins (your email is not in ALLOWED_EMAILS)."
+    : undefined;
   const actions = actionsVisible ? (
     <div
       className="run-actions"
@@ -902,12 +940,14 @@ export function RunViewer({
         className="link"
         onClick={onRedispatch}
         disabled={dispatchDisabled}
+        title={dispatchTitle}
       >
-        {dispatching ? "dispatching…" : inFlight ? "in flight" : signedIn ? "re-dispatch" : "sign in"}
+        {dispatchLabel}
       </button>
       {dispatchState.kind === "error" && (
-        <span className="pill drain" title={dispatchState.message}>
-          error
+        <span className="dispatch-error" role="alert">
+          <span className="pill drain">error</span>
+          <span className="dispatch-error-message">{formatDispatchError(dispatchState.message)}</span>
         </span>
       )}
       {signedIn && abortableRunId && (
@@ -1696,6 +1736,7 @@ function RunsPane({
   detail,
   workflow,
   signedIn,
+  isAdmin,
   dispatchState,
   selectedRunId,
   onSelectRun,
@@ -1709,6 +1750,7 @@ function RunsPane({
   detail: IssueDetail;
   workflow: Workflow | null;
   signedIn: boolean;
+  isAdmin: boolean;
   dispatchState: DispatchState;
   selectedRunId: string | null;
   onSelectRun: (runId: string | null) => void;
@@ -1716,7 +1758,24 @@ function RunsPane({
   onOpenTouchpoint: () => void;
 }) {
   const dispatching = dispatchState.kind === "dispatching";
-  const dispatchDisabled = detail.issue_lock_held || dispatching || !signedIn;
+  // Disable for non-admins so a 403 is impossible by clicking. The server
+  // is still authoritative — disabling is purely a UX layer.
+  const dispatchDisabled =
+    detail.issue_lock_held || dispatching || !signedIn || !isAdmin;
+  const buttonLabel = dispatching
+    ? "dispatching…"
+    : detail.issue_lock_held
+    ? "in flight"
+    : !signedIn
+    ? "sign in"
+    : !isAdmin
+    ? "admin only"
+    : "new run";
+  const buttonTitle = !signedIn
+    ? undefined
+    : !isAdmin && !dispatching && !detail.issue_lock_held
+    ? "Dispatching runs is restricted to admins (your email is not in ALLOWED_EMAILS)."
+    : undefined;
   const newRunButton = (
     <div
       className="run-actions"
@@ -1727,8 +1786,9 @@ function RunsPane({
         className="link"
         onClick={onDispatch}
         disabled={dispatchDisabled}
+        title={buttonTitle}
       >
-        {dispatching ? "dispatching…" : detail.issue_lock_held ? "in flight" : signedIn ? "new run" : "sign in"}
+        {buttonLabel}
       </button>
       {dispatchState.kind === "result" && (
         <span className={`pill ${dispatchState.state === "dispatched" ? "free" : "info"}`}>
@@ -1736,8 +1796,9 @@ function RunsPane({
         </span>
       )}
       {dispatchState.kind === "error" && (
-        <span className="pill drain" title={dispatchState.message}>
-          error
+        <span className="dispatch-error" role="alert">
+          <span className="pill drain">error</span>
+          <span className="dispatch-error-message">{formatDispatchError(dispatchState.message)}</span>
         </span>
       )}
     </div>
@@ -1838,7 +1899,9 @@ function RunsPane({
             <th>Run</th>
             <th>State</th>
             <th>Started</th>
-            <th>Cycles</th>
+            <th title="How many retries deep this run is. 0 = original.">Retry</th>
+            <th title="The original run this retry chain started from. Blank when the immediate parent IS the origin.">Origin</th>
+            <th title="The run that directly spawned this one. Differs from origin when this is retry ≥ 2.">Kicked off by</th>
             <th>Cost</th>
             <th>Touchpoint</th>
             <th></th>
@@ -1849,16 +1912,15 @@ function RunsPane({
             const id = runIdFromNode(r);
             const slug = issueRunSlug(graph, r);
             const meta = r.metadata;
-            const cycleCount = numberOrNull(meta.cycles_count) ?? 1;
-            const attemptCount = graph.nodes.filter(
-              (n) => n.kind === "attempt" && n.id.startsWith(`attempt:${id}:`),
-            ).length;
             const cost = numberOrNull(meta.cumulative_cost_usd);
             const prNumber = numberOrNull(meta.pr_number);
-            // Resume primitive (#111) — flag rows that started as
-            // resumed clones so the lineage is visible at a glance
-            // without drilling in. Tooltip carries the prior run id.
-            const clonedFrom = stringOrNull(meta.cloned_from_run_id);
+            // Walk the cloned_from_run_id chain to compute retry depth +
+            // origin. Each retry IS a fresh run (decided model), so
+            // "depth" is the chain length back to the run that has no
+            // parent. Origin is rendered only when it differs from the
+            // immediate kicker — depth=1 collapses the columns to avoid
+            // visual noise.
+            const lineage = computeRetryLineage(graph, id);
             const entrypointPhase = stringOrNull(meta.entrypoint_phase);
             return (
               <tr key={r.id}>
@@ -1871,15 +1933,6 @@ function RunsPane({
                   >
                     {runSlugDisplay(slug)}
                   </button>
-                  {clonedFrom && (
-                    <span
-                      className="dim mono"
-                      style={{ marginLeft: "0.5rem" }}
-                      title={`resumed from ${clonedFrom}${entrypointPhase ? ` at ${entrypointPhase}` : ""}`}
-                    >
-                      ↩ {clonedFrom.slice(0, 8)}…
-                    </span>
-                  )}
                 </td>
                 <td>
                   <button
@@ -1892,9 +1945,29 @@ function RunsPane({
                   </button>
                 </td>
                 <td className="mono dim">{r.timestamp ? formatTime(r.timestamp) : "—"}</td>
+                <td
+                  className="mono"
+                  title={
+                    entrypointPhase && lineage.depth > 0
+                      ? `Resumed at phase ${entrypointPhase}.`
+                      : undefined
+                  }
+                >
+                  {lineage.depth}
+                </td>
                 <td className="mono">
-                  {cycleCount}
-                  <span className="dim"> / {attemptCount} stage attempts</span>
+                  {lineage.depth >= 2 && lineage.origin ? (
+                    <RunRefLink graph={graph} runId={lineage.origin} onSelectRun={onSelectRun} />
+                  ) : (
+                    <span className="dim">—</span>
+                  )}
+                </td>
+                <td className="mono">
+                  {lineage.kicker ? (
+                    <RunRefLink graph={graph} runId={lineage.kicker} onSelectRun={onSelectRun} />
+                  ) : (
+                    <span className="dim">—</span>
+                  )}
                 </td>
                 <td className="mono">{cost !== null ? `$${cost.toFixed(4)}` : "—"}</td>
                 <td className="mono dim">{prNumber !== null ? `#${prNumber}` : "—"}</td>
@@ -2555,6 +2628,68 @@ function issueRunSlug(graph: IssueGraph, run: GraphNode): string {
 
 function runSlugDisplay(slug: string): string {
   return /^\d+$/.test(slug) ? `run ${slug}` : `${slug.slice(0, 8)}…`;
+}
+
+type RetryLineage = {
+  depth: number;
+  kicker: string | null;
+  origin: string | null;
+};
+
+// Walk the cloned_from_run_id chain to compute retry depth + origin.
+// Each retry is its own Run (decided model — no in-run retries), so
+// "depth" is the chain length back to the run with no parent. The
+// kicker is the immediate parent (depth ≥ 1). Origin is the chain root,
+// surfaced only when it differs from the kicker (depth ≥ 2). Cycles are
+// guarded against malformed graphs.
+function computeRetryLineage(graph: IssueGraph, runId: string): RetryLineage {
+  const byId = new Map<string, GraphNode>();
+  for (const node of graph.nodes) {
+    if (node.kind === "run") byId.set(runIdFromNode(node), node);
+  }
+  let cursor: string | null = runId;
+  let depth = 0;
+  let kicker: string | null = null;
+  let origin: string | null = null;
+  const visited = new Set<string>();
+  while (cursor) {
+    if (visited.has(cursor)) break;
+    visited.add(cursor);
+    const node = byId.get(cursor);
+    if (!node) break;
+    const parent = stringOrNull(node.metadata.cloned_from_run_id);
+    if (!parent) {
+      origin = depth === 0 ? null : cursor;
+      break;
+    }
+    if (depth === 0) kicker = parent;
+    depth += 1;
+    cursor = parent;
+  }
+  return { depth, kicker, origin };
+}
+
+function RunRefLink({
+  graph,
+  runId,
+  onSelectRun,
+}: {
+  graph: IssueGraph;
+  runId: string;
+  onSelectRun: (runId: string) => void;
+}) {
+  const node = graph.nodes.find((n) => n.kind === "run" && runIdFromNode(n) === runId);
+  const label = node ? runSlugDisplay(issueRunSlug(graph, node)) : `${runId.slice(0, 8)}…`;
+  return (
+    <button
+      type="button"
+      className="link mono"
+      title={runId}
+      onClick={() => onSelectRun(runId)}
+    >
+      {label}
+    </button>
+  );
 }
 
 function runDisplayName(run: GraphNode): string {

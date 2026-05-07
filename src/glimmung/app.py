@@ -13,7 +13,7 @@ from urllib.parse import urlencode
 
 import httpx
 from azure.core.exceptions import ResourceNotFoundError
-from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -36,7 +36,7 @@ from glimmung.dispatch import (
     dispatch_resumed_run,
     dispatch_run,
 )
-from glimmung.auth import User, require_admin_user
+from glimmung.auth import User, require_admin_user, resolve_caller_identity
 from glimmung.db import Cosmos, query_all
 from glimmung.decision import abort_explanation, decide
 from glimmung.github_app import (
@@ -2135,6 +2135,28 @@ def _is_disposable_frontend_host(host: str) -> bool:
         host == "glimmung.dev.romaine.life"
         or host.endswith(".glimmung.dev.romaine.life")
     )
+
+
+@app.get("/v1/auth/me")
+async def auth_me(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    """Return identity + admin status for the caller.
+
+    Public endpoint that softens allowlist failures from 403 to
+    `is_admin=false`, so the dashboard can disable admin-only actions
+    instead of rendering them clickable and 403-on-click. Invalid tokens
+    still resolve to `signed_in=false` — token signature/audience checks
+    aren't relaxed.
+    """
+    resolved = await resolve_caller_identity(authorization)
+    if resolved is None:
+        return {"signed_in": False, "is_admin": False, "email": None, "name": None}
+    user, is_admin = resolved
+    return {
+        "signed_in": True,
+        "is_admin": is_admin,
+        "email": user.email or None,
+        "name": user.name or None,
+    }
 
 
 @app.get("/v1/artifacts/{blob_path:path}")
