@@ -1911,11 +1911,53 @@ h2 .inline-action,
 /* Highlights the arrow leading into the phase a run actually entered
    (default phase[0] for fresh runs; entrypoint_phase for resumed /
    recycle children). Pairs with the "the run entered here" tooltip
-   on the same element. Contrasts with the dim recycle arrows on the
-   policy rail below. */
+   on the same element. Contrasts with the dim recycle arrows in the
+   recycle band below. */
 .dag-edge.entry {
   color: var(--state-success-fg);
   cursor: help;
+}
+
+/* Recycle policy band. Sits below the main pipeline row in PipelineDag
+   and renders one orthogonal (L-path) arrow per policy: source phase
+   → target phase, exiting the source's bottom-center, threading a
+   horizontal lane, and approaching the target's left edge. Self-loops
+   land on their own left edge. Inactive policies (`max_attempts: 0`,
+   scaffolded but disabled) draw dashed + dim. */
+.dag-recycle-band {
+  position: relative;
+  width: 100%;
+  margin-top: 4px;
+  pointer-events: none;
+}
+.dag-recycle-band > svg {
+  display: block;
+  overflow: visible;
+}
+.dag-recycle-band path {
+  pointer-events: visibleStroke;
+}
+.dag-recycle-path {
+  fill: none;
+  stroke: var(--fg-dimmer);
+  stroke-width: 1.25;
+}
+.dag-recycle-path.inactive {
+  stroke-dasharray: 4 3;
+  stroke: color-mix(in srgb, var(--fg-dimmer) 70%, transparent);
+}
+.dag-recycle-path.fired {
+  stroke: var(--state-success-fg);
+}
+.dag-recycle-band marker > path {
+  fill: var(--fg-dimmer);
+}
+.dag-recycle-label {
+  fill: var(--fg-muted, var(--fg-dimmer));
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  user-select: none;
 }
 .dag-policy-rail {
   display: flex;

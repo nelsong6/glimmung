@@ -23,7 +23,7 @@
  * Routed canonically via `/projects/<project>/issues/<number>`. Legacy
  * GitHub-shaped and id-shaped URLs still load so old links can redirect.
  */
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { authedFetch } from "./auth";
 
@@ -1129,6 +1129,107 @@ function DefinitionDag({
 // list from the run's attempts (one node per distinct phase touched,
 // in order) plus a trailing PR node colored by pr linkage. Click a
 // node to drill in.
+type RecyclePathLayout = {
+  arrow: RecycleArrow;
+  d: string;
+  label: string;
+  labelX: number;
+  labelY: number;
+  labelAnchor: "start" | "middle" | "end";
+  cls: string;
+  title: string;
+};
+
+const RECYCLE_LANE_HEIGHT = 26;
+const RECYCLE_BAND_TOP_PAD = 14;
+const RECYCLE_BAND_BOTTOM_PAD = 12;
+const RECYCLE_TARGET_OVERSHOOT = 14;
+
+function computeRecyclePaths(
+  arrows: RecycleArrow[],
+  phaseRects: Map<string, DOMRect>,
+  tpRect: DOMRect | null,
+  bandLeft: number,
+  bandTop: number,
+): { paths: RecyclePathLayout[]; bandHeight: number } {
+  const local = (rect: DOMRect) => ({
+    left: rect.left - bandLeft,
+    right: rect.right - bandLeft,
+    top: rect.top - bandTop,
+    bottom: rect.bottom - bandTop,
+    cx: (rect.left + rect.right) / 2 - bandLeft,
+    cy: (rect.top + rect.bottom) / 2 - bandTop,
+  });
+  const sourceRectFor = (arrow: RecycleArrow): DOMRect | null => {
+    if (arrow.kind === "report_recycle" || arrow.source === "report") return tpRect;
+    return phaseRects.get(arrow.source) ?? null;
+  };
+  const targetRectFor = (arrow: RecycleArrow): DOMRect | null => {
+    return phaseRects.get(arrow.target) ?? null;
+  };
+
+  const renderable = arrows
+    .map((arrow) => {
+      const sRaw = sourceRectFor(arrow);
+      const tRaw = targetRectFor(arrow);
+      if (!sRaw || !tRaw) return null;
+      return { arrow, s: local(sRaw), t: local(tRaw) };
+    })
+    .filter((x): x is { arrow: RecycleArrow; s: ReturnType<typeof local>; t: ReturnType<typeof local> } => x !== null);
+
+  // Lane assignment: shorter horizontal spans get inner lanes (closer
+  // to the row), so a self-loop sits tighter under its node than a
+  // long cross-phase loop draped underneath it.
+  renderable.sort((a, b) => {
+    const aSpan = Math.abs(a.s.cx - a.t.left);
+    const bSpan = Math.abs(b.s.cx - b.t.left);
+    return aSpan - bSpan;
+  });
+
+  const paths: RecyclePathLayout[] = renderable.map((r, lane) => {
+    const { s, t } = r;
+    const laneY = RECYCLE_BAND_TOP_PAD + (lane + 0.5) * RECYCLE_LANE_HEIGHT;
+    const sX = s.cx;
+    const sY = 0;                          // top of band, just below the row
+    const cornerX = t.left - RECYCLE_TARGET_OVERSHOOT;
+    const tX = t.left;
+    const tY = 0;                          // arrowhead at the row baseline
+    const d = [
+      `M ${sX} ${sY}`,
+      `L ${sX} ${laneY}`,
+      `L ${cornerX} ${laneY}`,
+      `L ${cornerX} ${tY}`,
+      `L ${tX} ${tY}`,
+    ].join(" ");
+    const horizMid = (sX + cornerX) / 2;
+    const inactive = r.arrow.max_attempts <= 0;
+    const cls = [
+      "dag-recycle-path",
+      r.arrow.active ? "fired" : "registered",
+      inactive ? "inactive" : "active",
+    ].join(" ");
+    const cap = inactive ? "disabled" : `×${r.arrow.max_attempts}`;
+    const trigger = r.arrow.trigger || "recycle";
+    return {
+      arrow: r.arrow,
+      d,
+      label: `${trigger} · ${cap}`,
+      labelX: horizMid,
+      labelY: laneY - 6,
+      labelAnchor: "middle",
+      cls,
+      title: `${r.arrow.source} ↻ ${r.arrow.target}: ${trigger}; ${
+        inactive ? "no retries (max_attempts: 0)" : `max ${r.arrow.max_attempts}`
+      }`,
+    };
+  });
+
+  const bandHeight = renderable.length === 0
+    ? 0
+    : RECYCLE_BAND_TOP_PAD + RECYCLE_BAND_BOTTOM_PAD + renderable.length * RECYCLE_LANE_HEIGHT;
+  return { paths, bandHeight };
+}
+
 function PipelineDag({
   run,
   graph,
@@ -1144,7 +1245,10 @@ function PipelineDag({
 }) {
   const phases = useMemo(() => phaseNodesForRun(graph, run), [graph, run]);
   const meta = run.metadata;
-  const workflowGraph = workflowGraphMeta(meta.workflow_graph);
+  const workflowGraph = useMemo(
+    () => workflowGraphMeta(meta.workflow_graph),
+    [meta.workflow_graph],
+  );
   const activeEntry = stringOrNull(meta.entrypoint_phase)
     ?? workflowGraph?.default_entry?.target
     ?? phases[0]?.phaseName
@@ -1164,6 +1268,47 @@ function PipelineDag({
   const touchpointStatus = primitiveState === "failed"
     ? "failed"
     : touchpointState ?? (prNumber ? `#${prNumber}` : prBranch ? prBranch : "pending");
+
+  const bandRef = useRef<HTMLDivElement>(null);
+  const phaseRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const tpRef = useRef<HTMLButtonElement | null>(null);
+  const [paths, setPaths] = useState<RecyclePathLayout[]>([]);
+  const [bandHeight, setBandHeight] = useState(0);
+
+  useLayoutEffect(() => {
+    const recycleArrows = workflowGraph?.recycle_arrows ?? [];
+    if (recycleArrows.length === 0) {
+      setPaths([]);
+      setBandHeight(0);
+      return;
+    }
+    const recompute = () => {
+      const band = bandRef.current;
+      if (!band) return;
+      const bandRect = band.getBoundingClientRect();
+      const phaseRects = new Map<string, DOMRect>();
+      phaseRefs.current.forEach((el, name) => {
+        if (el && el.isConnected) phaseRects.set(name, el.getBoundingClientRect());
+      });
+      const tpRect = tpRef.current?.getBoundingClientRect() ?? null;
+      const { paths: nextPaths, bandHeight: nextHeight } = computeRecyclePaths(
+        recycleArrows,
+        phaseRects,
+        tpRect,
+        bandRect.left,
+        bandRect.top,
+      );
+      setPaths(nextPaths);
+      setBandHeight(nextHeight);
+    };
+    recompute();
+    const ro = new ResizeObserver(recompute);
+    if (bandRef.current) ro.observe(bandRef.current);
+    phaseRefs.current.forEach((el) => ro.observe(el));
+    if (tpRef.current) ro.observe(tpRef.current);
+    return () => ro.disconnect();
+  }, [workflowGraph, phases]);
+
   return (
     <div className="dag-wrap">
       <div className="dag" aria-label="pipeline">
@@ -1183,12 +1328,17 @@ function PipelineDag({
                 onSelect={() =>
                   onSelectNode(selectedNodeId === `phase:${p.phaseName}` ? null : `phase:${p.phaseName}`)
                 }
+                nodeRef={(el) => {
+                  if (el) phaseRefs.current.set(p.phaseName, el);
+                  else phaseRefs.current.delete(p.phaseName);
+                }}
               />
             </Fragment>
           );
         })}
         <div className="dag-edge" aria-hidden="true">→</div>
         <button
+          ref={tpRef}
           type="button"
           className={`dag-node dag-node-pr ${touchpointClass}${selectedNodeId === "pr" ? " selected" : ""}`}
           onClick={() => {
@@ -1210,22 +1360,50 @@ function PipelineDag({
           )}
         </button>
       </div>
-      {workflowGraph && workflowGraph.recycle_arrows.length > 0 && (
-        <div className="dag-policy-rail" aria-label="recycle policies">
-          {workflowGraph.recycle_arrows.map((arrow) => (
-            <span
-              key={`${arrow.kind}:${arrow.source}:${arrow.target}:${arrow.trigger}`}
-              className={`dag-policy ${arrow.active ? "active" : "inactive"}`}
-              title={`${arrow.trigger || "recycle"}; max ${arrow.max_attempts}`}
-            >
-              <span className="mono">{arrow.source}</span>
-              <span className="dim mono">↻</span>
-              <span className="mono">{arrow.target}</span>
-              {arrow.trigger && <span className="dim mono">{arrow.trigger}</span>}
-            </span>
-          ))}
-        </div>
-      )}
+      <div
+        ref={bandRef}
+        className="dag-recycle-band"
+        style={{ height: bandHeight }}
+        aria-hidden={paths.length === 0 ? "true" : undefined}
+      >
+        {paths.length > 0 && (
+          <svg
+            className="dag-recycle-svg"
+            width="100%"
+            height={bandHeight}
+            aria-label="recycle policies"
+          >
+            <defs>
+              <marker
+                id="dag-recycle-head"
+                viewBox="0 0 10 10"
+                refX="9"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                orient="auto-start-reverse"
+              >
+                <path d="M 0 0 L 10 5 L 0 10 z" />
+              </marker>
+            </defs>
+            {paths.map((p, i) => (
+              <g key={`${p.arrow.kind}:${p.arrow.source}:${p.arrow.target}:${i}`}>
+                <path d={p.d} className={p.cls} markerEnd="url(#dag-recycle-head)">
+                  <title>{p.title}</title>
+                </path>
+                <text
+                  className="dag-recycle-label"
+                  x={p.labelX}
+                  y={p.labelY}
+                  textAnchor={p.labelAnchor}
+                >
+                  {p.label}
+                </text>
+              </g>
+            ))}
+          </svg>
+        )}
+      </div>
     </div>
   );
 }
@@ -1298,13 +1476,16 @@ function DagPhaseNode({
   phase,
   selected,
   onSelect,
+  nodeRef,
 }: {
   phase: PhaseRollup;
   selected: boolean;
   onSelect: () => void;
+  nodeRef?: (el: HTMLButtonElement | null) => void;
 }) {
   return (
     <button
+      ref={nodeRef}
       type="button"
       className={`dag-node dag-node-phase${selected ? " selected" : ""}`}
       onClick={onSelect}
