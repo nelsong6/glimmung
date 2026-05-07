@@ -278,6 +278,12 @@ class NativeKubernetesLauncher:
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 409:
                 raise
+            existing = await self._request("GET", f"{path}/{name}")
+            resource_version = str(
+                ((existing.get("metadata") or {}).get("resourceVersion") or "")
+            ).strip()
+            if resource_version:
+                body.setdefault("metadata", {})["resourceVersion"] = resource_version
             await self._request("PUT", f"{path}/{name}", json=body)
 
     async def _delete_standby_dns(self, namespace: str, name: str) -> None:

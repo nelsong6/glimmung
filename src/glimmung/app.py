@@ -464,8 +464,14 @@ async def _reconcile_standby_resources(
         return
     if project_docs is None:
         project_docs = await query_all(app.state.cosmos.projects, "SELECT * FROM c")
-    await launcher.reconcile_standby_dns(project_docs)
-    await launcher.reconcile_standby_workload_identity(project_docs)
+    try:
+        await launcher.reconcile_standby_dns(project_docs)
+    except Exception:
+        log.exception("standby DNS reconcile failed")
+    try:
+        await launcher.reconcile_standby_workload_identity(project_docs)
+    except Exception:
+        log.exception("standby workload identity reconcile failed")
 
 
 # Lease metadata is dual-purpose: glimmung-internal bookkeeping

@@ -58,6 +58,18 @@ class _RecordingAzureLauncher(_RecordingLauncher):
         return {}
 
 
+class _ExistingDnsLauncher(_RecordingLauncher):
+    async def _request(self, method: str, path: str, *, json=None):
+        self.calls.append({"method": method, "path": path, "json": json})
+        if method == "POST" and path.endswith("/dnsendpoints"):
+            request = httpx.Request(method, f"https://kubernetes.default.svc{path}")
+            response = httpx.Response(409, request=request)
+            raise httpx.HTTPStatusError("conflict", request=request, response=response)
+        if method == "GET" and path.endswith("/dnsendpoints/native-standby-ambience"):
+            return {"metadata": {"resourceVersion": "12345"}}
+        return {}
+
+
 class _FailingRoleBindingLauncher(_RecordingLauncher):
     async def _request(self, method: str, path: str, *, json=None):
         self.calls.append({"method": method, "path": path, "json": json})
@@ -255,6 +267,33 @@ async def test_reconcile_standby_dns_creates_project_slots():
             "targets": ["172.179.163.96"],
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_standby_dns_puts_existing_resource_version():
+    launcher = _ExistingDnsLauncher(_settings())
+
+    await launcher.reconcile_standby_dns([
+        {
+            "id": "ambience",
+            "name": "ambience",
+            "metadata": {
+                "native_standby_dns": {
+                    "enabled": True,
+                    "record_base": "ambience.dev.romaine.life",
+                    "slot_prefix": "ambience-slot",
+                    "count": 1,
+                }
+            },
+        }
+    ])
+
+    put_call = next(call for call in launcher.calls if call["method"] == "PUT")
+    assert put_call["path"] == (
+        "/apis/externaldns.k8s.io/v1alpha1/namespaces/glimmung"
+        "/dnsendpoints/native-standby-ambience"
+    )
+    assert put_call["json"]["metadata"]["resourceVersion"] == "12345"
 
 
 @pytest.mark.asyncio
