@@ -197,7 +197,14 @@ class PhaseSpec(BaseModel):
     `inputs` maps an input name (becomes a `workflow_dispatch.inputs` key)
     to a ref expression of the form `${{ phases.<phase_name>.outputs.<key> }}`
     pointing at an earlier phase's declared output. Cross-phase ref
-    validation runs at registration time."""
+    validation runs at registration time.
+
+    `always` marks a phase as a teardown phase: it runs on every terminal
+    outcome (success/abort/fail) before the run's disposition is sealed
+    (glimmung#296). Always-phases must come at the end of the phase list,
+    cannot opt into verify/recycle (no retry semantics — they always run
+    once, and their own failure logs but doesn't escalate), and cannot be
+    referenced as a recycle `lands_at` target."""
     name: str
     kind: str = "gha_dispatch"
     workflow_filename: str = ""
@@ -207,6 +214,7 @@ class PhaseSpec(BaseModel):
     requirements: dict[str, Any] | None = None
     verify: bool = False
     recycle_policy: RecyclePolicy | None = None
+    always: bool = False
     jobs: list[NativeJobSpec] = Field(default_factory=list)
 
 
@@ -312,6 +320,48 @@ class WorkflowRegister(BaseModel):
                         f"phase {p.name!r} recycle_policy.on contains unknown triggers: {bad}; "
                         f"valid: {sorted(VERIFY_PHASE_TRIGGERS)}"
                     )
+            if p.always:
+                if p.verify:
+                    raise ValueError(
+                        f"phase {p.name!r} has always=True with verify=True; "
+                        "always-run teardown phases cannot opt into the verify loop"
+                    )
+                if p.recycle_policy is not None:
+                    raise ValueError(
+                        f"phase {p.name!r} has always=True with recycle_policy; "
+                        "always-run teardown phases run once with no retry semantics"
+                    )
+        # always-run teardown phases must form a contiguous suffix at the
+        # end of the phase list. The dispatch layer relies on "first
+        # always-phase" being the entry point for teardown chains.
+        seen_always = False
+        for p in self.phases:
+            if seen_always and not p.always:
+                raise ValueError(
+                    f"phase {p.name!r} (always=False) cannot follow an always=True "
+                    "teardown phase; teardown phases must be contiguous at the end "
+                    "of the phase list"
+                )
+            seen_always = seen_always or p.always
+        if all(p.always for p in self.phases):
+            raise ValueError(
+                "workflow must declare at least one non-always phase; "
+                "teardown-only workflows have no work to tear down after"
+            )
+        # Recycle targets must be regular phases — recycling INTO a teardown
+        # phase would re-enter cleanup mid-run.
+        for p in self.phases:
+            if p.recycle_policy is None:
+                continue
+            la = p.recycle_policy.lands_at
+            if la == "self":
+                continue
+            target = next((q for q in self.phases if q.name == la), None)
+            if target is not None and target.always:
+                raise ValueError(
+                    f"phase {p.name!r} recycle_policy.lands_at={la!r} targets an "
+                    "always-run teardown phase; recycle targets must be regular phases"
+                )
         validate_phase_input_refs(self.phases)
         if self.pr.recycle_policy is not None:
             la = self.pr.recycle_policy.lands_at

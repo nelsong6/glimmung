@@ -94,8 +94,21 @@ def decide(run: Run, workflow: Workflow) -> RunDecision:
 
 def abort_explanation(run: Run, workflow: Workflow, decision: RunDecision) -> str:
     """Human-readable abort comment body. Kept alongside the engine so the
-    wording is part of the decision contract."""
-    last = run.attempts[-1] if run.attempts else None
+    wording is part of the decision contract.
+
+    The "primary" attempt for messaging is the most recent non-always-run
+    attempt (always-run teardown phases run after the abort decision and
+    don't carry the abort context). Falls back to the latest attempt
+    overall when no non-always attempts exist (defensive — pre-teardown
+    workflows will always hit this path)."""
+    last = None
+    for a in reversed(run.attempts):
+        ph = next((p for p in workflow.phases if p.name == a.phase), None)
+        if ph is None or not ph.always:
+            last = a
+            break
+    if last is None and run.attempts:
+        last = run.attempts[-1]
     reasons = last.verification.reasons if (last and last.verification) else []
     detail = ""
     if reasons:
