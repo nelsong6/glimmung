@@ -15,8 +15,9 @@ from glimmung.reports import (
     create_report as create_touchpoint,
     create_report_version as create_touchpoint_version,
     ensure_report_for_github as ensure_touchpoint_for_github,
+    find_report_by_linked_issue as find_touchpoint_by_linked_issue,
     find_report_by_repo_number as find_touchpoint_by_repo_number,
-    github_pull_request_url_for,
+    github_pull_request_url_for as _github_pull_request_url_for,
     list_active_reports as list_active_touchpoints,
     list_report_versions as list_touchpoint_versions,
     list_reports as list_touchpoints,
@@ -24,6 +25,7 @@ from glimmung.reports import (
     read_report as read_touchpoint,
     read_report_version as read_touchpoint_version,
     reopen_report as reopen_touchpoint,
+    retarget_report_to_github as retarget_touchpoint_to_github,
     set_report_state as set_touchpoint_state,
     update_report as update_touchpoint,
 )
@@ -36,7 +38,9 @@ close_report = close_touchpoint
 create_report = create_touchpoint
 create_report_version = create_touchpoint_version
 ensure_report_for_github = ensure_touchpoint_for_github
+find_report_by_linked_issue = find_touchpoint_by_linked_issue
 find_report_by_repo_number = find_touchpoint_by_repo_number
+github_pull_request_url_for = _github_pull_request_url_for
 list_active_reports = list_active_touchpoints
 list_report_versions = list_touchpoint_versions
 list_reports = list_touchpoints
@@ -44,5 +48,6 @@ merge_report = merge_touchpoint
 read_report = read_touchpoint
 read_report_version = read_touchpoint_version
 reopen_report = reopen_touchpoint
+retarget_report_to_github = retarget_touchpoint_to_github
 set_report_state = set_touchpoint_state
 update_report = update_touchpoint

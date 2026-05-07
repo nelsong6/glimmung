@@ -389,6 +389,83 @@ async def find_report_by_repo_number(
     return Report.model_validate(_strip_meta(doc)), doc["_etag"]
 
 
+async def find_report_by_linked_issue(
+    cosmos: Cosmos,
+    *,
+    project: str,
+    linked_issue_id: str,
+) -> tuple[Report, str] | None:
+    """Lookup keyed by the product invariant: one Touchpoint per Issue.
+
+    During the Reports-to-Touchpoints migration there may be old duplicate
+    rows. Log that loudly and pick the newest row so future writes converge on
+    a single current surface instead of minting yet another record.
+    """
+    docs = await query_all(
+        cosmos.reports,
+        "SELECT * FROM c WHERE c.project = @p AND c.linked_issue_id = @i ORDER BY c.updated_at DESC",
+        parameters=[
+            {"name": "@p", "value": project},
+            {"name": "@i", "value": linked_issue_id},
+        ],
+    )
+    if not docs:
+        return None
+    if len(docs) > 1:
+        log.warning(
+            "multiple glimmung Touchpoints link to issue %s/%s: %s",
+            project, linked_issue_id, [d["id"] for d in docs],
+        )
+    doc = docs[0]
+    return Report.model_validate(_strip_meta(doc)), doc["_etag"]
+
+
+async def retarget_report_to_github(
+    cosmos: Cosmos,
+    *,
+    pr: Report,
+    etag: str,
+    repo: str,
+    number: int,
+    title: str,
+    branch: str,
+    body: str = "",
+    base_ref: str = "main",
+    head_sha: str = "",
+    html_url: str = "",
+    linked_issue_id: str | None = None,
+    linked_run_id: str | None = None,
+) -> tuple[Report, str]:
+    """Move an Issue's live Touchpoint to a new GitHub PR.
+
+    A rerun may close or abandon an earlier PR and open a new one. The
+    Touchpoint is the current decision surface for the Issue, so this updates
+    the same row to point at the new PR and clears terminal/PR-specific audit
+    state from the previous PR.
+    """
+    def apply(p: Report) -> Report:
+        return p.model_copy(update={
+            "repo": repo,
+            "number": number,
+            "title": title or f"{repo}#{number}",
+            "body": body,
+            "state": ReportState.READY,
+            "branch": branch,
+            "base_ref": base_ref,
+            "head_sha": head_sha,
+            "html_url": html_url,
+            "comments": [],
+            "reviews": [],
+            "linked_issue_id": linked_issue_id or p.linked_issue_id,
+            "linked_run_id": linked_run_id,
+            "updated_at": _now(),
+            "merged_at": None,
+            "merged_by": None,
+        })
+
+    return await _retry_on_conflict(cosmos, pr, etag, apply)
+
+
 async def ensure_report_for_github(
     cosmos: Cosmos,
     *,
@@ -404,12 +481,38 @@ async def ensure_report_for_github(
     linked_issue_id: str | None = None,
     linked_run_id: str | None = None,
 ) -> tuple[Report, str, bool]:
-    """Find or mint a Report mirroring a GitHub PR.
+    """Find or mint a Touchpoint mirroring a GitHub PR.
 
-    The webhook mirror calls this on every relevant `pull_request.*` event
-    so subsequent comment / review appends always have a target. Title /
-    body / branch / etc. only apply on create — the mirror's update path
-    is the right tool for refreshing existing fields."""
+    When `linked_issue_id` is present, the Issue owns exactly one Touchpoint.
+    New PRs from reruns retarget that existing row instead of minting another
+    issue-linked Touchpoint. Without an issue linkage, fall back to the legacy
+    `(repo, number)` idempotency key used by GitHub webhook mirroring.
+    """
+    if linked_issue_id:
+        existing_for_issue = await find_report_by_linked_issue(
+            cosmos, project=project, linked_issue_id=linked_issue_id,
+        )
+        if existing_for_issue is not None:
+            pr, etag = existing_for_issue
+            if pr.repo == repo and pr.number == number:
+                return pr, etag, False
+            pr, etag = await retarget_report_to_github(
+                cosmos,
+                pr=pr,
+                etag=etag,
+                repo=repo,
+                number=number,
+                title=title,
+                branch=branch,
+                body=body,
+                base_ref=base_ref,
+                head_sha=head_sha,
+                html_url=html_url,
+                linked_issue_id=linked_issue_id,
+                linked_run_id=linked_run_id,
+            )
+            return pr, etag, False
+
     existing = await find_report_by_repo_number(cosmos, repo=repo, number=number)
     if existing is not None:
         pr, etag = existing
