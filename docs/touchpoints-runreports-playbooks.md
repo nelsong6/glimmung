@@ -67,6 +67,13 @@ persist per-Run records. It updates as new Runs happen. Anything that is
 specific to one Run belongs in the Run and RunReport UI. History lives under
 Runs and RunReports.
 
+A merged Touchpoint closes its Issue. In the normal isolated-PR case, merge is
+the acceptance event for the work represented by that Issue; after the
+Touchpoint reaches `merged`, the linked Issue should transition to `closed`.
+Follow-on orchestration that needs different integration behavior should model
+that explicitly through Playbook integration strategy or dependencies rather
+than leaving the Issue open after its Touchpoint has merged.
+
 A Touchpoint may eventually expose an audit/debug history of changes to the
 live surface itself. That history is acceptable only as history of one
 Touchpoint being updated; it must not imply that an Issue has multiple

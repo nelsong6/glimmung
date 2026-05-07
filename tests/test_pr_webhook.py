@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
+from glimmung import issues as issue_ops
 from glimmung import reports as report_ops
 from glimmung.app import (
     _handle_pull_request,
@@ -24,6 +25,7 @@ from glimmung.app import (
 from glimmung.models import (
     ReportReviewState,
     ReportState,
+    IssueState,
     Signal,
     SignalSource,
     SignalState,
@@ -188,6 +190,36 @@ async def test_pr_closed_with_merge_stamps_merged_metadata(cosmos, app_state):
     assert pr.state == ReportState.MERGED
     assert pr.merged_at is not None
     assert pr.merged_by == "nelsong6"
+
+
+@pytest.mark.asyncio
+async def test_pr_closed_with_merge_closes_linked_issue(cosmos, app_state):
+    await _register_project(cosmos, "ambience", "nelsong6/ambience")
+    issue = await issue_ops.create_issue(
+        cosmos, project="ambience", title="Effect: cave crystals",
+    )
+    await report_ops.create_report(
+        cosmos,
+        project="ambience",
+        repo="nelsong6/ambience",
+        number=14,
+        title="Effect: cave crystals",
+        branch="glimmung/run",
+        linked_issue_id=issue.id,
+    )
+
+    with patch("glimmung.app.app", app_state):
+        outcome = await _handle_pull_request(_pr_payload(
+            action="closed", merged=True, merged_by="nelsong6", state="closed",
+        ))
+
+    assert outcome["merged"] is True
+    assert outcome["linked_issue_closed"] is True
+    found = await issue_ops.read_issue(cosmos, project="ambience", issue_id=issue.id)
+    assert found is not None
+    closed_issue, _ = found
+    assert closed_issue.state == IssueState.CLOSED
+    assert closed_issue.closed_at is not None
 
 
 @pytest.mark.asyncio

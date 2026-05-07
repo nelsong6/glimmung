@@ -809,24 +809,32 @@ async def _release_locks_on_terminal(
 
     # Issue lock — keyed off the Run's stored holder_id so retries don't
     # release the lock the initial dispatch claimed.
-    issue_lock_key = _issue_lock_key(
+    issue_lock_keys: list[str] = []
+    if run.issue_number is not None and run.issue_number > 0:
+        issue_lock_keys.append(f"{run.project}#{run.issue_number}")
+    legacy_issue_lock_key = _issue_lock_key(
         issue_repo=run.issue_repo or repo,
         issue_number=run.issue_number,
         issue_id=run.issue_id,
     )
-    if run.issue_lock_holder_id and issue_lock_key:
-        try:
-            released_lock = await lock_ops.release_lock(
-                cosmos, scope="issue",
-                key=issue_lock_key,
-                holder_id=run.issue_lock_holder_id,
-            )
-            result["issue_lock_released"] = released_lock
-        except Exception:
-            log.exception(
-                "issue lock release failed for %s holder=%s",
-                issue_lock_key, run.issue_lock_holder_id,
-            )
+    if legacy_issue_lock_key and legacy_issue_lock_key not in issue_lock_keys:
+        issue_lock_keys.append(legacy_issue_lock_key)
+    if run.issue_lock_holder_id and issue_lock_keys:
+        result["issue_lock_released"] = False
+        for issue_lock_key in issue_lock_keys:
+            try:
+                if await lock_ops.release_lock(
+                    cosmos, scope="issue",
+                    key=issue_lock_key,
+                    holder_id=run.issue_lock_holder_id,
+                ):
+                    result["issue_lock_released"] = True
+                    break
+            except Exception:
+                log.exception(
+                    "issue lock release failed for %s holder=%s",
+                    issue_lock_key, run.issue_lock_holder_id,
+                )
 
     # PR lock — only set on triage cycles. Re-read the run for the
     # freshest pr_lock_holder_id in case a triage re-open landed
@@ -4577,11 +4585,41 @@ async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
                 merged_by=merged_by_user or "unknown",
             )
             outcome["merged"] = True
+            if await _close_linked_issue_after_touchpoint_merge(
+                cosmos, touchpoint=pr,
+            ):
+                outcome["linked_issue_closed"] = True
         else:
             pr, etag = await touchpoint_ops.close_touchpoint(cosmos, pr=pr, etag=etag)
             outcome["closed"] = True
 
     return outcome
+
+
+async def _close_linked_issue_after_touchpoint_merge(
+    cosmos: Cosmos,
+    *,
+    touchpoint: Report,
+) -> bool:
+    """Merged Touchpoint means the originating Issue is accepted/closed."""
+    if not touchpoint.linked_issue_id:
+        return False
+    found = await issue_ops.read_issue(
+        cosmos,
+        project=touchpoint.project,
+        issue_id=touchpoint.linked_issue_id,
+    )
+    if found is None:
+        log.warning(
+            "merged touchpoint %s links missing issue %s/%s",
+            touchpoint.id, touchpoint.project, touchpoint.linked_issue_id,
+        )
+        return False
+    issue, issue_etag = found
+    if issue.state == IssueState.CLOSED:
+        return False
+    await issue_ops.close_issue(cosmos, issue=issue, etag=issue_etag)
+    return True
 
 
 async def _handle_pull_request_review(payload: dict[str, Any]) -> dict[str, Any]:
@@ -7157,6 +7195,7 @@ async def patch_touchpoint_endpoint(
             pr, etag = await touchpoint_ops.merge_touchpoint(
                 cosmos, pr=pr, etag=etag, merged_by=req.merged_by,
             )
+            await _close_linked_issue_after_touchpoint_merge(cosmos, touchpoint=pr)
         elif target == "ready" and pr.state != ReportState.READY:
             if pr.merged_at is not None:
                 raise HTTPException(409, "merged Report cannot be reopened")
