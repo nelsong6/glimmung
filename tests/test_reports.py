@@ -375,6 +375,71 @@ async def test_ensure_pr_for_github_returns_existing(cosmos):
 
 
 @pytest.mark.asyncio
+async def test_ensure_pr_for_github_retargets_existing_issue_touchpoint(cosmos):
+    """Reruns may open a new GitHub PR, but the Issue still owns one
+    Touchpoint. The existing issue-linked row is updated to the current PR
+    instead of minting a second Touchpoint for the same issue."""
+    issue_id = "01JISSUEZZZ"
+    original = await create_report(
+        cosmos,
+        project="ambience",
+        repo="nelsong6/ambience",
+        number=213,
+        title="old implementation",
+        branch="glimmung/old-run",
+        html_url="https://github.com/nelsong6/ambience/pull/213",
+        linked_issue_id=issue_id,
+        linked_run_id="01JRUNOLD",
+    )
+    fetched = await read_report(cosmos, project="ambience", report_id=original.id)
+    assert fetched is not None
+    closed, etag = await close_report(cosmos, pr=fetched[0], etag=fetched[1])
+    closed, etag = await append_report_comment(
+        cosmos,
+        pr=closed,
+        etag=etag,
+        comment=_comment(gh_id=213001, body="old PR comment"),
+    )
+
+    current, current_etag, created = await ensure_report_for_github(
+        cosmos,
+        project="ambience",
+        repo="nelsong6/ambience",
+        number=218,
+        title="current implementation",
+        branch="glimmung/new-run",
+        html_url="https://github.com/nelsong6/ambience/pull/218",
+        linked_issue_id=issue_id,
+        linked_run_id="01JRUNNEW",
+    )
+
+    assert created is False
+    assert current_etag
+    assert current.id == original.id
+    assert current.repo == "nelsong6/ambience"
+    assert current.number == 218
+    assert current.title == "current implementation"
+    assert current.branch == "glimmung/new-run"
+    assert current.html_url == "https://github.com/nelsong6/ambience/pull/218"
+    assert current.linked_issue_id == issue_id
+    assert current.linked_run_id == "01JRUNNEW"
+    assert current.state == ReportState.READY
+    assert current.merged_at is None
+    assert current.comments == []
+
+    reports = await list_reports(cosmos, project="ambience")
+    assert [r.id for r in reports] == [original.id]
+    assert await find_report_by_repo_number(
+        cosmos, repo="nelsong6/ambience", number=213,
+    ) is None
+    found_current = await find_report_by_repo_number(
+        cosmos, repo="nelsong6/ambience", number=218,
+    )
+    assert found_current is not None
+    assert found_current[0].id == original.id
+
+
+@pytest.mark.asyncio
 async def test_ensure_pr_for_github_uses_default_title_when_omitted(cosmos):
     pr, _, _ = await ensure_report_for_github(
         cosmos, project="ambience",
