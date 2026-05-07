@@ -99,6 +99,20 @@ resource "azurerm_role_assignment" "native_runner_acr_build_contributor" {
   principal_id         = azurerm_user_assigned_identity.native_runner.principal_id
 }
 
+resource "azurerm_role_assignment" "glimmung_dedicated_subscription_contributor" {
+  scope                = "/subscriptions/${data.azurerm_client_config.current.subscription_id}"
+  role_definition_name = "Contributor"
+  principal_id         = azurerm_user_assigned_identity.glimmung_dedicated.principal_id
+  principal_type       = "ServicePrincipal"
+}
+
+resource "azurerm_role_assignment" "glimmung_dedicated_subscription_rbac_admin" {
+  scope                = "/subscriptions/${data.azurerm_client_config.current.subscription_id}"
+  role_definition_name = "Role Based Access Control Administrator"
+  principal_id         = azurerm_user_assigned_identity.glimmung_dedicated.principal_id
+  principal_type       = "ServicePrincipal"
+}
+
 output "glimmung_dedicated_identity_client_id" {
   value       = azurerm_user_assigned_identity.glimmung_dedicated.client_id
   description = "client_id of the Glimmung-owned glimmung-identity. Pin this into k8s/values.yaml."
