@@ -1206,6 +1206,181 @@ async def test_retry_dispatch_carries_phase_inputs_to_native_phase(
 
 
 @pytest.mark.asyncio
+async def test_native_recycle_attempt_cap_counts_resumed_lineage(
+    cosmos,
+    app_state_with_settings,
+):
+    from glimmung.db import query_all
+    await _register_project(cosmos, "ambience", "nelsong6/ambience")
+    await _register_2phase_native_retry_workflow(cosmos, "ambience")
+    now = datetime.now(UTC)
+    phase_outputs = {
+        "validation_url": "https://preview.example",
+        "namespace": "glim-run-01-test-0",
+        "image_tag": "glim-run-01-test-0",
+    }
+
+    root = Run(
+        id="01KQTEST_NATIVE_ROOT",
+        project="ambience",
+        workflow="agent-run",
+        issue_id="01HZZZTESTISSUE",
+        issue_repo="nelsong6/ambience",
+        issue_number=203,
+        state=RunState.ABORTED,
+        budget=BudgetConfig(total=25.0),
+        attempts=[
+            PhaseAttempt(
+                attempt_index=0,
+                phase="env-prep",
+                workflow_filename="env-prep.yml",
+                dispatched_at=now,
+                completed_at=now,
+                conclusion="success",
+                phase_outputs=phase_outputs,
+            ),
+            PhaseAttempt(
+                attempt_index=1,
+                phase="agent-execute",
+                phase_kind="k8s_job",
+                workflow_filename="k8s_job:agent-execute",
+                dispatched_at=now,
+                completed_at=now,
+                conclusion="success",
+                verification={
+                    "schema_version": 1,
+                    "status": VerificationStatus.FAIL.value,
+                    "reasons": ["first failure"],
+                    "evidence_refs": [],
+                    "cost_usd": 0.01,
+                },
+                decision="retry",
+                cost_usd=0.01,
+            ),
+        ],
+        cumulative_cost_usd=0.01,
+        issue_lock_holder_id="01HOLDER",
+        created_at=now,
+        updated_at=now,
+    )
+    child = Run(
+        id="01KQTEST_NATIVE_CHILD1",
+        project="ambience",
+        workflow="agent-run",
+        issue_id=root.issue_id,
+        issue_repo=root.issue_repo,
+        issue_number=root.issue_number,
+        state=RunState.ABORTED,
+        budget=BudgetConfig(total=25.0),
+        attempts=[
+            PhaseAttempt(
+                attempt_index=0,
+                phase="env-prep",
+                workflow_filename="env-prep.yml",
+                dispatched_at=now,
+                completed_at=now,
+                conclusion="success",
+                phase_outputs=phase_outputs,
+                skipped_from_run_id=root.id,
+            ),
+            PhaseAttempt(
+                attempt_index=1,
+                phase="agent-execute",
+                phase_kind="k8s_job",
+                workflow_filename="k8s_job:agent-execute",
+                dispatched_at=now,
+                completed_at=now,
+                conclusion="success",
+                verification={
+                    "schema_version": 1,
+                    "status": VerificationStatus.FAIL.value,
+                    "reasons": ["second failure"],
+                    "evidence_refs": [],
+                    "cost_usd": 0.01,
+                },
+                decision="retry",
+                cost_usd=0.01,
+            ),
+        ],
+        cumulative_cost_usd=0.01,
+        issue_lock_holder_id="01HOLDER",
+        cloned_from_run_id=root.id,
+        entrypoint_phase="agent-execute",
+        created_at=now,
+        updated_at=now,
+    )
+    current = Run(
+        id="01KQTEST_NATIVE_CHILD2",
+        project="ambience",
+        workflow="agent-run",
+        issue_id=root.issue_id,
+        issue_repo=root.issue_repo,
+        issue_number=root.issue_number,
+        state=RunState.IN_PROGRESS,
+        budget=BudgetConfig(total=25.0),
+        attempts=[
+            PhaseAttempt(
+                attempt_index=0,
+                phase="env-prep",
+                workflow_filename="env-prep.yml",
+                dispatched_at=now,
+                completed_at=now,
+                conclusion="success",
+                phase_outputs=phase_outputs,
+                skipped_from_run_id=child.id,
+            ),
+            PhaseAttempt(
+                attempt_index=1,
+                phase="agent-execute",
+                phase_kind="k8s_job",
+                workflow_filename="k8s_job:agent-execute",
+                dispatched_at=now,
+            ),
+        ],
+        cumulative_cost_usd=0.0,
+        issue_lock_holder_id="01HOLDER",
+        cloned_from_run_id=child.id,
+        entrypoint_phase="agent-execute",
+        created_at=now,
+        updated_at=now,
+    )
+    for run_doc in (root, child, current):
+        await cosmos.runs.create_item(run_doc.model_dump(mode="json"))
+
+    body = RunCompletedRequest(
+        workflow_run_id=456,
+        conclusion="success",
+        verification={
+            "schema_version": 1,
+            "status": VerificationStatus.FAIL.value,
+            "reasons": ["third failure"],
+            "evidence_refs": [],
+            "cost_usd": 0.01,
+        },
+    )
+    with patch("glimmung.app.app", app_state_with_settings):
+        result = await run_completed(body, project="ambience", run_id=current.id)
+    assert result.decision == "abort_budget_attempts"
+
+    found = await run_ops.read_run(cosmos, project="ambience", run_id=current.id)
+    final, _ = found  # type: ignore[misc]
+    assert final.state == RunState.ABORTED
+    assert final.abort_reason is not None
+    assert "after 3 attempt(s) on phase 'agent-execute'" in final.abort_reason
+    assert "max_attempts=3" in final.abort_reason
+
+    runs = await query_all(
+        cosmos.runs,
+        "SELECT * FROM c WHERE c.project = @p",
+        parameters=[{"name": "@p", "value": "ambience"}],
+    )
+    assert not [
+        doc for doc in runs
+        if doc.get("cloned_from_run_id") == current.id
+    ]
+
+
+@pytest.mark.asyncio
 async def test_completed_marks_passed_after_last_phase(cosmos, app_state_with_settings):
     """After agent-execute (phase 2, the terminal phase) completes
     successfully, the run goes terminal — same flow as today's

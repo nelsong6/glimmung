@@ -962,7 +962,6 @@ async def _process_run_completion(
     from the completed callback, persisted on the latest attempt.
     """
     cosmos: Cosmos = app.state.cosmos
-    minter: GitHubAppTokenMinter | None = app.state.gh_minter
 
     run, etag = await run_ops.record_completion(
         cosmos,
@@ -990,7 +989,8 @@ async def _process_run_completion(
         )
         return "abort_no_workflow"
 
-    decision = decide(run, workflow_model)
+    decision_run = await _run_with_recycle_lineage_accounting(cosmos, run)
+    decision = decide(decision_run, workflow_model)
     run, etag = await run_ops.record_decision(cosmos, run=run, etag=etag, decision=decision)
 
     if decision == RunDecision.ADVANCE:
@@ -1045,9 +1045,56 @@ async def _process_run_completion(
         return decision.value
 
     # Any abort decision.
-    reason = abort_explanation(run, workflow_model, decision)
+    reason = abort_explanation(decision_run, workflow_model, decision)
     await run_ops.mark_aborted(cosmos, run=run, etag=etag, reason=reason)
     return decision.value
+
+
+async def _run_with_recycle_lineage_accounting(cosmos: Cosmos, run: Run) -> Run:
+    """Return a decision-engine view that spans native recycle children.
+
+    Native k8s recycle creates a new Run for each retry so validation
+    environments and skipped phase outputs remain explicit. The recycle
+    budget is still meant to apply to the whole retry lineage, not to each
+    child Run independently. Keep persistence unchanged and only widen the
+    accounting view used by `decide()` and `abort_explanation()`.
+    """
+    if not run.cloned_from_run_id:
+        return run
+
+    lineage = [run]
+    seen = {run.id}
+    parent_id = run.cloned_from_run_id
+    while parent_id and parent_id not in seen:
+        found = await run_ops.read_run(cosmos, project=run.project, run_id=parent_id)
+        if found is None:
+            log.warning(
+                "run %s recycle lineage parent %s was not found; using partial lineage",
+                run.id, parent_id,
+            )
+            break
+        parent, _ = found
+        lineage.append(parent)
+        seen.add(parent.id)
+        parent_id = parent.cloned_from_run_id
+    if parent_id in seen:
+        log.warning("run %s recycle lineage contains a cycle at %s", run.id, parent_id)
+
+    attempts: list[PhaseAttempt] = []
+    cumulative_cost_usd = 0.0
+    for lineage_run in reversed(lineage):
+        cumulative_cost_usd += lineage_run.cumulative_cost_usd
+        for attempt in lineage_run.attempts:
+            if attempt.skipped_from_run_id is not None:
+                continue
+            attempts.append(attempt.model_copy(update={"attempt_index": len(attempts)}))
+
+    if not attempts:
+        return run
+    return run.model_copy(update={
+        "attempts": attempts,
+        "cumulative_cost_usd": cumulative_cost_usd,
+    })
 
 
 async def _dispatch_retry(
