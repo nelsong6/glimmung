@@ -67,6 +67,11 @@ persist per-Run records. It updates as new Runs happen. Anything that is
 specific to one Run belongs in the Run and RunReport UI. History lives under
 Runs and RunReports.
 
+A Touchpoint may eventually expose an audit/debug history of changes to the
+live surface itself. That history is acceptable only as history of one
+Touchpoint being updated; it must not imply that an Issue has multiple
+Touchpoint instances.
+
 Potential generic actions:
 
 - approve, merge, or submit
@@ -94,6 +99,13 @@ context belongs mostly there. The Touchpoint should focus on the current exact
 evidence, links into the relevant Run UI, and the decision in front of the
 user. If evidence or state needs to be retained per Run, model and render it
 from the Run or RunReport instead of adding Touchpoint history.
+
+The Touchpoint UI should not feel like a record detail page or a ledger. Avoid
+showing Run counts, attempt tables, historical PR lists, or multiple
+Touchpoint-looking rows in the Touchpoint section. Those are valuable
+inspection tools, but they belong in the Runs tab, RunReport pages, or a
+future debug view. The default Touchpoint experience is the current live
+frontend for user interaction.
 
 ## Compatibility Rename
 

@@ -67,6 +67,12 @@ portfolio rows, logs, or artifacts can be linked from the Touchpoint as
 current evidence, but anything that must be retained per Run belongs in the
 Run and RunReport UI.
 
+The Touchpoint must not feel like an instance detail page. It is the live
+frontend for interacting with the Issue: inspect the current evidence, make
+the current decision, request changes, rerun, or enter attended work. It may
+have an audit/debug history later, but that history describes updates to the
+same Touchpoint; it is not a collection of Touchpoint instances.
+
 The fuller object-boundary and Playbook integration vocabulary lives in
 [Touchpoints, RunReports, And Playbook Integration](touchpoints-runreports-playbooks.md).
 
@@ -266,7 +272,9 @@ top-level tab or an issue-local collection route. The issue workspace should
 surface the current Touchpoint alongside issue context and the run/cycle
 graph. Historical or per-Run evidence should live in Run and RunReport views,
 with the Touchpoint linking to the relevant current Run instead of carrying
-its own history.
+its own history. The Touchpoint UI should not enumerate Runs, attempts, or
+past PRs as its primary content; those belong in the Runs tab and RunReport
+surfaces.
 
 ## Design Portfolio Implications
 
