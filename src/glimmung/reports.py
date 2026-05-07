@@ -482,10 +482,7 @@ async def append_report_review(
 
 
 def github_pull_request_url_for(repo: str, number: int) -> str:
-    """Canonical rendering of a GitHub pull request URL. Mirrors
-    `github_issue_url_for` so any code path that stitches a URL gets the
-    same shape; future cross-lookup helpers can rely on the format being
-    deterministic."""
+    """Canonical rendering of a GitHub pull request URL."""
     return f"https://github.com/{repo}/pull/{number}"
 
 

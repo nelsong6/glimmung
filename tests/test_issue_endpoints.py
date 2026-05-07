@@ -1,8 +1,8 @@
 """Issue API surface tests (#50).
 
-Covers the post-#50 issue endpoints — POST /v1/issues, PATCH by id,
-GET by id, and the IssueRow/IssueDetail rendering for both GH-anchored
-and glimmung-native shapes. Runs against the in-memory Cosmos fake;
+Covers the issue endpoints — POST /v1/issues, PATCH by id,
+GET by id, and the IssueRow/IssueDetail rendering for native issues.
+Runs against the in-memory Cosmos fake;
 uses the same direct-helper pattern as test_webhook_mirror.py rather
 than spinning up a FastAPI client.
 """
@@ -54,39 +54,24 @@ def app_state(cosmos):
         app.state.cosmos = old
 
 
-# ─── list_issues: native + GH-anchored coexist ──────────────────────────────
+# ─── list_issues ──────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_list_surfaces_both_native_and_gh_issues(cosmos):
-    """Pre-#50 the listing skipped issues without a GH url. Post-#50
-    glimmung-native ones surface too — the row carries `id` always and
-    `repo`/`html_url` only when GH-anchored. `number` is always the
-    Glimmung project-scoped issue number."""
+async def test_list_surfaces_native_issues(cosmos):
+    """The row carries `id` always; `number` is the Glimmung
+    project-scoped issue number."""
     await issue_ops.create_issue(
         cosmos, project="ambience", title="native one",
     )
-    await issue_ops.create_issue(
-        cosmos, project="ambience", title="gh one",
-        github_issue_url="https://github.com/nelsong6/ambience/issues/7",
-        github_issue_repo="nelsong6/ambience",
-        github_issue_number=7,
-    )
 
     rows = await _list_issues_from_cosmos(cosmos)
-    assert len(rows) == 2
-
-    # GitHub issue coordinates remain metadata; row.number is the
-    # Glimmung project-scoped issue number.
-    gh, native = rows
-    assert gh.number == 2
-    assert gh.repo == "nelsong6/ambience"
-    assert gh.html_url and gh.html_url.endswith("/issues/7")
-
-    assert native.number == 1
-    assert native.repo is None
-    assert native.html_url is None
-    assert native.id  # ULID always present
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.number == 1
+    assert row.repo is None
+    assert row.html_url is None
+    assert row.id
 
 
 @pytest.mark.asyncio
@@ -177,29 +162,21 @@ async def test_discard_issue_closes_and_comments(cosmos, app_state):
 
 
 @pytest.mark.asyncio
-async def test_list_filters_by_project_repo_and_limit(cosmos):
+async def test_list_filters_by_project_and_limit(cosmos):
     await issue_ops.create_issue(
         cosmos, project="ambience", title="ambience native",
     )
     await issue_ops.create_issue(
-        cosmos, project="ambience", title="ambience gh 8",
-        github_issue_url="https://github.com/nelsong6/ambience/issues/8",
-        github_issue_repo="nelsong6/ambience",
-        github_issue_number=8,
+        cosmos, project="ambience", title="ambience native 2",
     )
-    await issue_ops.create_issue(
-        cosmos, project="glimmung", title="glimmung gh 3",
-        github_issue_url="https://github.com/nelsong6/glimmung/issues/3",
-        github_issue_repo="nelsong6/glimmung",
-        github_issue_number=3,
-    )
+    await issue_ops.create_issue(cosmos, project="glimmung", title="glimmung native")
 
     rows = await _list_issues_from_cosmos(cosmos, project="ambience")
     assert [r.project for r in rows] == ["ambience", "ambience"]
 
-    rows = await _list_issues_from_cosmos(cosmos, repo="nelsong6/glimmung")
-    assert len(rows) == 1
-    assert rows[0].repo == "nelsong6/glimmung"
+    with pytest.raises(HTTPException) as exc_info:
+        await _list_issues_from_cosmos(cosmos, repo="nelsong6/glimmung")
+    assert exc_info.value.status_code == 410
 
     rows = await _list_issues_from_cosmos(cosmos, limit=1)
     assert len(rows) == 1
@@ -374,17 +351,12 @@ async def test_read_issue_by_number_reads_project_scoped_number(cosmos):
 
 
 @pytest.mark.asyncio
-async def test_build_detail_carries_gh_coords_when_present(cosmos):
-    issue = await issue_ops.create_issue(
-        cosmos, project="ambience", title="t",
-        github_issue_url="https://github.com/nelsong6/ambience/issues/12",
-        github_issue_repo="nelsong6/ambience",
-        github_issue_number=12,
-    )
+async def test_build_detail_has_no_repo_link(cosmos):
+    issue = await issue_ops.create_issue(cosmos, project="ambience", title="t")
     detail = await _build_issue_detail(cosmos, issue=issue)
-    assert detail.repo == "nelsong6/ambience"
+    assert detail.repo is None
     assert detail.number == 1
-    assert detail.html_url == "https://github.com/nelsong6/ambience/issues/12"
+    assert detail.html_url is None
 
 
 @pytest.mark.asyncio

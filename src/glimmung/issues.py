@@ -1,15 +1,10 @@
-"""Glimmung-native issues (#28).
+"""Glimmung-native issues.
 
 Cosmos-backed CRUD for the `issues` container. Glimmung is the
-orchestrator / source of truth for issues; GitHub is one of N possible
-syndication targets. Listing, dispatching, and signal-bus references
-all key off a glimmung issue id, never a GH issue number.
-
-A glimmung Issue *can* carry a GH reference
-(`metadata.github_issue_url`), but the glimmung object exists and is
-dispatchable whether or not a GH counterpart exists. This substrate is
-the foundation; consumer PRs rewire `dispatch_run`, `/v1/issues`, and
-the GH webhook handlers to flow through it.
+orchestrator / source of truth for issues. GitHub remains a source-control
+and PR backend, but GitHub Issues are not a supported task backend.
+Listing, dispatching, and signal-bus references all key off a glimmung
+issue id or project-scoped issue number.
 
 API:
 - `create_issue(...)` — mint a new Issue.
@@ -21,9 +16,6 @@ API:
 - `reopen_issue(...)` — state transition CLOSED → OPEN, clears `closed_at`.
 - `list_open_issues(project=None)` — list open issues, optionally
   scoped to a single project (single-partition).
-- `find_issue_by_github_url(...)` — cross-partition lookup used by the
-  PR `Closes #N` parser in the consumer PR; returns the glimmung Issue
-  whose `metadata.github_issue_url` matches.
 
 Concurrency model: same shape as runs.py — `_etag` + `IfNotModified`
 on every mutating write, with a small retry loop on the rare conflict.
@@ -75,17 +67,14 @@ async def create_issue(
     source: IssueSource = IssueSource.MANUAL,
     workflow: str | None = None,
     ui_validation_requested: bool = False,
-    github_issue_url: str | None = None,
-    github_issue_repo: str | None = None,
-    github_issue_number: int | None = None,
     metadata_overrides: dict[str, Any] | None = None,
 ) -> Issue:
     """Mint a new Issue in OPEN state. Returns the persisted Issue.
 
-    `source` defaults to MANUAL — UI/CLI creation. The GH-anchored
-    paths (webhook import + dispatch shim) pass all three GH fields
-    so the denormalized coords land on the Issue at creation. Issues
-    minted from non-GH sources (Slack, scheduled) leave them None."""
+    GitHub Issue coordinates are rejected. PRs still live in GitHub, but
+    issues are native-only for every project."""
+    if source == IssueSource.GITHUB_WEBHOOK_IMPORT:
+        raise ValueError("GitHub Issues are disabled; create a Glimmung-native issue")
     now = _now()
     issue_number = number
     if issue_number is None:
@@ -96,9 +85,6 @@ async def create_issue(
         source=source,
         workflow=workflow,
         ui_validation_requested=ui_validation_requested,
-        github_issue_url=github_issue_url,
-        github_issue_repo=github_issue_repo,
-        github_issue_number=github_issue_number,
     ).model_copy(update=metadata_overrides or {})
     issue = Issue(
         id=str(ULID()),
@@ -112,10 +98,10 @@ async def create_issue(
         created_at=now,
         updated_at=now,
     )
-    await cosmos.issues.create_item(issue.model_dump(mode="json"))
+    await cosmos.issues.create_item(issue.model_dump(mode="json", exclude_none=True))
     log.info(
-        "created issue %s in project=%s (source=%s github_url=%s)",
-        issue.id, project, source.value, github_issue_url or "-",
+        "created issue %s in project=%s (source=%s)",
+        issue.id, project, source.value,
     )
     return issue
 
@@ -300,7 +286,6 @@ async def update_issue(
     title: str | None = None,
     body: str | None = None,
     labels: list[str] | None = None,
-    github_issue_url: str | None = None,
 ) -> tuple[Issue, str]:
     """Patch fields on an Issue. `None` means "don't change"; pass an
     empty string / empty list to actually clear a field. State
@@ -316,10 +301,6 @@ async def update_issue(
             updates["body"] = body
         if labels is not None:
             updates["labels"] = list(labels)
-        if github_issue_url is not None:
-            updates["metadata"] = i.metadata.model_copy(
-                update={"github_issue_url": github_issue_url},
-            )
         return i.model_copy(update=updates)
 
     return await _retry_on_conflict(cosmos, issue, etag, apply)
@@ -484,44 +465,6 @@ async def list_issues(
     return [Issue.model_validate(_strip_meta(d)) for d in docs]
 
 
-def github_issue_url_for(repo: str, issue_number: int) -> str:
-    """Canonical glimmung-side rendering of a GH issue URL. The webhook
-    payload's html_url is what we'd ideally store, but `Closes #N`
-    parsing only sees `(repo, N)` — so the dispatch shim and PR-link
-    parser both stitch the URL the same way to keep `find_issue_by_
-    github_url` lookups deterministic."""
-    return f"https://github.com/{repo}/issues/{issue_number}"
-
-
-async def find_issue_by_github_url(
-    cosmos: Cosmos,
-    *,
-    github_issue_url: str,
-) -> tuple[Issue, str] | None:
-    """Cross-partition lookup keyed off the `metadata.github_issue_url`
-    link. Returns `(issue, etag)` or `None`. The PR `Closes #N` parser
-    uses this in the consumer PR to resolve a GH issue number (which it
-    can stitch into a URL given the repo) back to a glimmung Issue id."""
-    docs = await query_all(
-        cosmos.issues,
-        "SELECT * FROM c WHERE c.metadata.github_issue_url = @u",
-        parameters=[{"name": "@u", "value": github_issue_url}],
-    )
-    if not docs:
-        return None
-    if len(docs) > 1:
-        # Multiple glimmung Issues pointing at the same GH URL is a
-        # semantic error — log loudly and pick the oldest. The webhook-
-        # import path in the consumer PR should de-duplicate on import.
-        log.warning(
-            "multiple glimmung issues link to %s: %s",
-            github_issue_url, [d["id"] for d in docs],
-        )
-        docs.sort(key=lambda d: d.get("created_at", ""))
-    doc = docs[0]
-    return Issue.model_validate(_strip_meta(doc)), doc["_etag"]
-
-
 async def _retry_on_conflict(
     cosmos: Cosmos,
     issue: Issue,
@@ -538,7 +481,7 @@ async def _retry_on_conflict(
         try:
             response = await cosmos.issues.replace_item(
                 item=updated.id,
-                body=updated.model_dump(mode="json"),
+                body=updated.model_dump(mode="json", exclude_none=True),
                 etag=current_etag,
                 match_condition=MatchConditions.IfNotModified,
             )

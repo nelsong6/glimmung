@@ -183,20 +183,15 @@ async def _register_issue(
     body: str = "",
     labels: list[str] | None = None,
 ) -> str:
-    """Create a glimmung Issue with GH coords. Dispatch no longer mints
-    from GH coords (#50 + closed-issue-display fix), so tests that
-    exercise the legacy `(repo, issue_number)` lookup must seed the
-    Issue first. Returns the new Issue's id."""
+    """Create a native glimmung Issue. Returns the new Issue's id."""
     issue = await issue_ops.create_issue(
         app.state.cosmos,
         project=project,
+        number=issue_number,
         title=title or f"{repo}#{issue_number}",
         body=body,
         labels=labels or [],
         source=IssueSource.MANUAL,
-        github_issue_url=issue_ops.github_issue_url_for(repo, issue_number),
-        github_issue_repo=repo,
-        github_issue_number=issue_number,
     )
     return issue.id
 
@@ -245,8 +240,7 @@ async def test_dispatch_creates_lock_lease_and_run_when_workflow_opts_in(app):
 
     # Lock is held
     lock_doc = await app.state.cosmos.locks.read_item(
-        item="issue::ambience%231",
-        partition_key="issue",
+        item="issue::ambience%2342", partition_key="issue",
     )
     assert lock_doc["state"] == "held"
     assert lock_doc["held_by"] == result.issue_lock_holder_id
@@ -405,8 +399,7 @@ async def test_dispatch_creates_run_even_for_non_verify_phase(app):
 
     # Lock held; no Run created.
     lock = await app.state.cosmos.locks.read_item(
-        item="issue::ambience%231",
-        partition_key="issue",
+        item="issue::ambience%237", partition_key="issue",
     )
     assert lock["held_by"] == result.issue_lock_holder_id
 
@@ -614,13 +607,10 @@ async def test_concurrent_dispatch_on_same_issue_returns_already_running(app):
     assert "already" in (second.detail or "").lower() or "held" in (second.detail or "").lower()
 
     # Only one Run exists.
-    runs = [
-        d
-        async for d in app.state.cosmos.runs.query_items(
-            "SELECT * FROM c WHERE c.issue_number = @n",
-            parameters=[{"name": "@n", "value": 1}],
-        )
-    ]
+    runs = [d async for d in app.state.cosmos.runs.query_items(
+        "SELECT * FROM c WHERE c.issue_number = @n",
+        parameters=[{"name": "@n", "value": 42}],
+    )]
     assert len(runs) == 1
     assert runs[0]["id"] == first.run_id
 
@@ -655,9 +645,7 @@ async def test_dispatch_succeeds_after_lock_release(app):
     # Simulate Run completion: release the lease + the issue lock.
     await lease_ops.release(app.state.cosmos, first.lease_id, "ambience")
     await lock_ops.release_lock(
-        app.state.cosmos,
-        scope="issue",
-        key="ambience#1",
+        app.state.cosmos, scope="issue", key="ambience#42",
         holder_id=first.issue_lock_holder_id,
     )
 
@@ -941,7 +929,7 @@ async def test_dispatch_stamps_issue_id_on_run(app):
     ]
     assert run_docs[0]["issue_id"] == issue_id
     assert run_docs[0]["issue_repo"] == "nelsong6/ambience"
-    assert run_docs[0]["issue_number"] == 1
+    assert run_docs[0]["issue_number"] == 42
 
 
 @pytest.mark.asyncio
@@ -978,8 +966,8 @@ async def test_dispatch_does_not_mint_issue_when_unknown(app):
 
 @pytest.mark.asyncio
 async def test_find_run_by_issue_id_returns_most_recent_run_cross_partition(app):
-    """The PR `Closes #N` parser doesn't know the project, so the
-    lookup is cross-partition by issue_id alone. Verify it picks the
+    """Some callers only know the issue id, so the lookup is
+    cross-partition by issue_id alone. Verify it picks the
     most-recent run when an issue has multiple runs (initial + retry,
     etc.)."""
     from glimmung import locks as lock_ops
@@ -1009,10 +997,8 @@ async def test_find_run_by_issue_id_returns_most_recent_run_cross_partition(app)
     )
     # Release the lock so a second dispatch can land on the same issue.
     await lock_ops.release_lock(
-        app.state.cosmos,
-        scope="issue",
-        key="ambience#1",
-        holder_id=first.issue_lock_holder_id,
+        app.state.cosmos, scope="issue",
+        key="ambience#42", holder_id=first.issue_lock_holder_id,
     )
     second = await dispatch_run(
         app,

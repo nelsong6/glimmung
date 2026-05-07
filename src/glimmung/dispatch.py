@@ -126,13 +126,10 @@ async def dispatch_run(
 ) -> DispatchResult:
     """Start an agent run on a glimmung Issue.
 
-    The target Issue must already exist in glimmung — dispatch never
-    mints from GH coords. Two ways to identify the target:
-    - `issue_id` (canonical, what the UI sends): cross-partition point
-      read; `project` may be passed to make it a single-partition read.
-    - `(repo, issue_number)` (legacy lookup shape): looks up by
-      `metadata.github_issue_url`. Returns `no_project` if no glimmung
-      Issue links to that URL.
+    The target Issue must already exist in glimmung. Dispatch resolves by
+    `issue_id` when available. The repo+issue-number shape is retained as
+    a source-repo convenience, but the number is a project-scoped Glimmung
+    issue number; no GitHub Issue lookup is performed.
 
     `trigger_source` is recorded on the Run for observability. Required
     fields by convention: `kind` (one of `glimmung_ui`, `scheduled`,
@@ -166,21 +163,30 @@ async def dispatch_run(
     else:
         if repo is None or issue_number is None:
             raise ValueError("dispatch_run requires either issue_id or (repo + issue_number)")
-        url = issue_ops.github_issue_url_for(repo, issue_number)
-        found = await issue_ops.find_issue_by_github_url(
-            cosmos, github_issue_url=url,
+        projects = await query_all(
+            cosmos.projects,
+            "SELECT * FROM c WHERE c.githubRepo = @r",
+            parameters=[{"name": "@r", "value": repo}],
+        )
+        if not projects:
+            return DispatchResult(
+                state="no_project",
+                detail=f"no project registered for repo {repo}",
+            )
+        project_from_repo = str(projects[0].get("name") or "")
+        found = await issue_ops.read_issue_by_number(
+            cosmos, project=project_from_repo, number=issue_number,
         )
         if found is None:
             return DispatchResult(
                 state="no_project",
-                detail=f"no glimmung issue for {repo}#{issue_number}",
+                detail=f"no glimmung issue {project_from_repo}#{issue_number}",
             )
         issue, _ = found
     project_name = issue.project
     project_doc = await _read_project(cosmos, project_name)
     project_repo = str((project_doc or {}).get("githubRepo") or "")
-    github_issue_repo = issue.metadata.github_issue_repo
-    repo = github_issue_repo or project_repo
+    repo = project_repo
     issue_number = issue.number
 
     # 2. Resolve workflow.
@@ -281,8 +287,6 @@ async def dispatch_run(
             metadata["phase_name"] = initial_phase["name"]
     metadata["issue_number"] = str(issue_number)
     metadata["issue_id"] = issue.id
-    if github_issue_repo:
-        metadata["issue_repo"] = github_issue_repo
     requirements = (
         (initial_phase or {}).get("requirements")
         or workflow_doc.get("defaultRequirements", {})

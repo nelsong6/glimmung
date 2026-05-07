@@ -295,10 +295,8 @@ async def find_run_by_issue_id(
     issue_id: str,
 ) -> Run | None:
     """Most-recent Run for a glimmung issue id, regardless of state.
-    Cross-partition because the caller (PR `Closes #N` parser) only
-    knows the issue, not the project. Used by `_handle_pull_request`
-    after `find_issue_by_github_url` resolves a `Closes #N` to a
-    glimmung Issue."""
+    Cross-partition because some callers only know the issue id, not
+    the project."""
     docs = await query_all(
         cosmos.runs,
         "SELECT * FROM c WHERE c.issue_id = @i",
@@ -349,8 +347,7 @@ async def link_pr_to_run(
     pr_branch: str,
 ) -> tuple[Run, str]:
     """Stamp `pr_number` + `pr_branch` on a Run. Called by the
-    `pull_request.opened` webhook handler when the new PR's body
-    references the issue (`Closes #N`)."""
+    PR creation/report linkage path once GitHub assigns a PR number."""
     def apply(r: Run) -> Run:
         return r.model_copy(update={
             "pr_number": pr_number,

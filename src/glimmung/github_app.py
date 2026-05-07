@@ -159,18 +159,22 @@ async def cancel_workflow_run(
         return True
 
 
-async def post_issue_comment(
+async def post_pr_comment(
     minter: GitHubAppTokenMinter,
     *,
     repo: str,
-    issue_number: int,
+    pr_number: int,
     body: str,
 ) -> None:
-    """POST /repos/{repo}/issues/{number}/comments"""
+    """Post a comment on a pull request.
+
+    GitHub's REST API exposes PR comments through the issues comments
+    route; callers must pass a PR number.
+    """
     token = await minter.installation_token()
     async with httpx.AsyncClient(timeout=15.0) as client:
         r = await client.post(
-            f"https://api.github.com/repos/{repo}/issues/{issue_number}/comments",
+            f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments",
             headers={
                 "Authorization": f"Bearer {token}",
                 "Accept": "application/vnd.github+json",
