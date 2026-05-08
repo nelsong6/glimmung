@@ -2144,3 +2144,38 @@ h2 .inline-action,
   max-height: 420px;
   white-space: pre-wrap;
 }
+
+/* Upstream sync (`.glimmung/workflows/<name>.yaml` -> Cosmos).
+   Pairs with /v1/projects/{project}/workflows/{name}/{upstream,sync}. */
+.upstream-sync {
+  margin: 8px 0 16px;
+  padding: 10px 14px;
+  background: color-mix(in srgb, var(--surface) 76%, transparent);
+  border-left: 2px solid var(--state-info-fg);
+}
+.upstream-sync-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.upstream-sync-row .key {
+  display: inline-block;
+  color: var(--fg-dimmer);
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.upstream-sync-row .sep {
+  color: var(--fg-faintest);
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+}
+.upstream-sync-meta {
+  margin-top: 6px;
+  font-size: 0.78rem;
+}
+.upstream-sync-error {
+  margin-top: 6px;
+  font-size: 0.85rem;
+}
