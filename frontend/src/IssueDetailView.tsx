@@ -1491,9 +1491,17 @@ function phaseStatus(attempt: GraphNode): { cls: string; text: string } {
       ? { cls: "busy", text: "running" }
       : { cls: "info", text: "dispatching" };
   }
-  if (verStatus === "pass" || conclusion === "success") return { cls: "free", text: "pass" };
+  // Verification status is the authoritative verdict on a verify phase
+  // and must beat the k8s conclusion. The job conclusion can be "success"
+  // (exit 0, the runner Pod ran to completion and emitted an artifact)
+  // while the artifact's verification.status is "fail" — that's what
+  // verify_fail looks like at this layer. The previous ordering combined
+  // these in one `||` and rendered "pass" for any conclusion-success
+  // attempt, hiding verify_fail aborts in the latest-run strip.
+  if (verStatus === "pass") return { cls: "free", text: "pass" };
   if (verStatus === "fail") return { cls: "drain", text: "fail" };
   if (verStatus === "error") return { cls: "drain", text: "error" };
+  if (conclusion === "success") return { cls: "free", text: "pass" };
   if (conclusion === "cancelled") return { cls: "drain", text: "cancelled" };
   if (conclusion) return { cls: "drain", text: conclusion };
   return { cls: "", text: "completed" };
