@@ -46,12 +46,17 @@ class NativeKubernetesLauncher:
         lease_doc: dict[str, Any],
         workflow_doc: dict[str, Any],
         phase: PhaseSpec,
-    ) -> str:
-        """Create the per-attempt Secret and Kubernetes Job for a native phase.
+    ) -> list[str]:
+        """Create the per-attempt Secret and one Kubernetes Job per
+        `phase.jobs[*]` entry.
 
-        Returns the Kubernetes Job name. Repeated calls for the same lease/run
-        are idempotent: if the Secret or Job already exists, the existing
-        Secret token is reused and the existing Job is treated as launched.
+        Returns the list of Kubernetes Job names launched (one per
+        `NativeJobSpec`). All jobs in a phase mount the same per-attempt
+        token Secret; each Job runs in its own Pod and reports back via
+        the `job_id` field on the completion / failed callbacks.
+
+        Repeated calls for the same lease/run are idempotent: existing
+        Secret and Jobs are treated as already-launched.
         """
         metadata = lease_doc.get("metadata") or {}
         run_id = str(metadata.get("run_id") or "")
@@ -64,9 +69,11 @@ class NativeKubernetesLauncher:
             raise NativeLaunchError(f"native run {lease_doc['project']}/{run_id} not found")
         run, etag = found
 
-        job_name = _resource_name("glim", run_id, attempt_index)
-        secret_name = f"{job_name}-token"
+        attempt_base = _resource_name("glim", run_id, attempt_index)
+        secret_name = f"{attempt_base}-token"
         token = await self._ensure_attempt_secret(secret_name)
+        if not phase.jobs:
+            raise NativeLaunchError(f"phase {phase.name!r} has no native jobs")
         try:
             await run_ops.set_latest_attempt_token_hash(
                 cosmos,
@@ -81,16 +88,21 @@ class NativeKubernetesLauncher:
                 run_id=run_id,
                 attempt_index=attempt_index,
             )
-
-            manifest = _job_manifest(
-                settings=self._settings,
-                lease_doc=lease_doc,
-                workflow_doc=workflow_doc,
-                phase=phase,
-                job_name=job_name,
-                secret_name=secret_name,
-            )
-            await self._create_job(job_name, manifest)
+            job_names: list[str] = []
+            for job_spec in phase.jobs:
+                job_name = _job_name_for(attempt_base, job_spec.id)
+                manifest = _job_manifest(
+                    settings=self._settings,
+                    lease_doc=lease_doc,
+                    workflow_doc=workflow_doc,
+                    phase=phase,
+                    job_spec=job_spec,
+                    job_name=job_name,
+                    secret_name=secret_name,
+                    attempt_base=attempt_base,
+                )
+                await self._create_job(job_name, manifest)
+                job_names.append(job_name)
         except Exception:
             with suppress(Exception):
                 await self.delete_attempt_secret(run_id=run_id, attempt_index=attempt_index)
@@ -98,10 +110,10 @@ class NativeKubernetesLauncher:
         await _stamp_lease_launched(
             cosmos,
             lease_doc=lease_doc,
-            job_name=job_name,
+            job_name=attempt_base,
             secret_name=secret_name,
         )
-        return job_name
+        return job_names
 
     async def _ensure_attempt_secret(self, name: str) -> str:
         namespace = self._settings.native_runner_namespace
@@ -167,30 +179,61 @@ class NativeKubernetesLauncher:
         attempt_index: int,
         grace_period_seconds: int = 60,
     ) -> None:
-        """Delete the native Kubernetes Job for an attempt.
+        """Delete every native Kubernetes Job belonging to an attempt.
 
-        Kubernetes sends SIGTERM to the pod and enforces the requested grace
-        period before killing remaining containers, which gives the runner a
-        bounded final-flush window on operator-initiated aborts.
+        With job-level concurrent dispatch, an attempt fans out to N
+        Jobs; this deletes them all by attempt-base label so siblings
+        receive SIGTERM together. Kubernetes enforces the requested
+        grace period before killing remaining containers, giving each
+        runner a bounded final-flush window on operator-initiated
+        aborts.
         """
         namespace = self._settings.native_runner_namespace
-        job_name = _resource_name("glim", run_id, attempt_index)
+        attempt_base = _resource_name("glim", run_id, attempt_index)
         body = {
             "apiVersion": "v1",
             "kind": "DeleteOptions",
             "propagationPolicy": "Foreground",
             "gracePeriodSeconds": grace_period_seconds,
         }
+        selector = urlencode({
+            "labelSelector": f"glimmung.romaine.life/attempt-base={attempt_base}",
+        })
         try:
-            await self._request(
-                "DELETE",
-                f"/apis/batch/v1/namespaces/{namespace}/jobs/{job_name}",
-                json=body,
+            jobs = await self._request(
+                "GET",
+                f"/apis/batch/v1/namespaces/{namespace}/jobs?{selector}",
             )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 return
             raise
+        for item in (jobs.get("items") or []):
+            name = str((item.get("metadata") or {}).get("name") or "")
+            if not name:
+                continue
+            try:
+                await self._request(
+                    "DELETE",
+                    f"/apis/batch/v1/namespaces/{namespace}/jobs/{name}",
+                    json=body,
+                )
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    continue
+                raise
+        # Back-compat: pre-fan-out attempts named the Job by attempt-base
+        # directly (no per-job suffix). If anything matches that legacy
+        # name, delete it too — labels are missing on those.
+        try:
+            await self._request(
+                "DELETE",
+                f"/apis/batch/v1/namespaces/{namespace}/jobs/{attempt_base}",
+                json=body,
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
 
     async def reconcile_standby_dns(self, project_docs: list[dict[str, Any]]) -> None:
         """Reconcile DNSEndpoint records for projects that opt into warm native DNS."""
@@ -325,26 +368,45 @@ class NativeKubernetesLauncher:
         job_id: str,
         tail_lines: int = 200,
     ) -> dict[str, Any]:
-        """Read the latest logs from the Kubernetes pod/container for an attempt."""
+        """Read the latest logs from the Kubernetes pod/container for one
+        job within an attempt.
+
+        Under job-level concurrent dispatch each `phase.jobs[*]` runs in
+        its own Pod; we filter by both the per-attempt label and the
+        per-job label so the right sibling Pod is selected.
+        """
         namespace = self._settings.native_runner_namespace
-        job_name = _resource_name("glim", run_id, attempt_index)
-        pods = await self._request(
-            "GET",
-            f"/api/v1/namespaces/{namespace}/pods?"
-            + urlencode({"labelSelector": f"job-name={job_name}"}),
-        )
-        if not pods.get("items"):
+        attempt_base = _resource_name("glim", run_id, attempt_index)
+        per_job_name = _job_name_for(attempt_base, job_id)
+        # Prefer the per-job label (post-fan-out). Fall back to legacy
+        # per-attempt Job name selectors so attempts launched by older
+        # glimmung versions still surface logs.
+        selectors = [
+            f"glimmung.romaine.life/attempt-base={attempt_base},glimmung.romaine.life/job-id={_label_value(job_id)}",
+            f"job-name={per_job_name}",
+            f"batch.kubernetes.io/job-name={per_job_name}",
+            f"job-name={attempt_base}",
+            f"batch.kubernetes.io/job-name={attempt_base}",
+        ]
+        pod = None
+        for selector in selectors:
             pods = await self._request(
                 "GET",
                 f"/api/v1/namespaces/{namespace}/pods?"
-                + urlencode({"labelSelector": f"batch.kubernetes.io/job-name={job_name}"}),
+                + urlencode({"labelSelector": selector}),
             )
-        pod = _select_log_pod(pods.get("items") or [])
+            pod = _select_log_pod(pods.get("items") or [])
+            if pod is not None:
+                break
         if pod is None:
-            raise NativePodLogError(f"no pod found for native job {namespace}/{job_name}")
+            raise NativePodLogError(
+                f"no pod found for native job {namespace}/{per_job_name}",
+            )
         pod_name = str((pod.get("metadata") or {}).get("name") or "")
         if not pod_name:
-            raise NativePodLogError(f"native job {namespace}/{job_name} has a pod without a name")
+            raise NativePodLogError(
+                f"native job {namespace}/{per_job_name} has a pod without a name",
+            )
 
         container = _dns_label(job_id)
         query = urlencode({
@@ -513,9 +575,18 @@ def _job_manifest(
     lease_doc: dict[str, Any],
     workflow_doc: dict[str, Any],
     phase: PhaseSpec,
+    job_spec: NativeJobSpec,
     job_name: str,
     secret_name: str,
+    attempt_base: str,
 ) -> dict[str, Any]:
+    """Build a Kubernetes Job manifest for one `NativeJobSpec` in a phase.
+
+    Each `phase.jobs[*]` becomes its own k8s Job; siblings run in
+    parallel and report back independently via `job_id` on the
+    completion callback. The shared per-attempt token Secret is mounted
+    in every sibling Pod.
+    """
     labels = {
         **_managed_labels(),
         "glimmung.romaine.life/project": _label_value(lease_doc["project"]),
@@ -524,6 +595,8 @@ def _job_manifest(
             str((lease_doc.get("metadata") or {}).get("run_id", "")),
         ),
         "glimmung.romaine.life/phase": _label_value(phase.name),
+        "glimmung.romaine.life/attempt-base": _label_value(attempt_base),
+        "glimmung.romaine.life/job-id": _label_value(job_spec.id),
     }
     pod_labels = {**labels, "azure.workload.identity/use": "true"}
     metadata = lease_doc.get("metadata") or {}
@@ -534,19 +607,13 @@ def _job_manifest(
         phase=phase,
         secret_name=secret_name,
     )
-    containers = [
-        _container_for_job(
-            job,
-            settings=settings,
-            universal_env=universal_env,
-            secret_name=secret_name,
-        )
-        for job in phase.jobs
-    ]
-    if not containers:
-        raise NativeLaunchError(f"phase {phase.name!r} has no native jobs")
-
-    active_deadline = _active_deadline_seconds(phase.jobs)
+    container = _container_for_job(
+        job_spec,
+        settings=settings,
+        universal_env=universal_env,
+        secret_name=secret_name,
+    )
+    active_deadline = _active_deadline_seconds([job_spec])
     pod_spec: dict[str, Any] = {
         "serviceAccountName": settings.native_runner_service_account,
         "restartPolicy": "Never",
@@ -563,10 +630,8 @@ def _job_manifest(
                 },
             },
         ],
-        "containers": [containers[-1]],
+        "containers": [container],
     }
-    if len(containers) > 1:
-        pod_spec["initContainers"] = containers[:-1]
     if active_deadline is not None:
         pod_spec["activeDeadlineSeconds"] = active_deadline
 
@@ -580,6 +645,7 @@ def _job_manifest(
             "annotations": {
                 "glimmung.romaine.life/lease-id": str(lease_doc["id"]),
                 "glimmung.romaine.life/attempt-index": str(metadata.get("attempt_index", "0")),
+                "glimmung.romaine.life/job-id": str(job_spec.id),
             },
         },
         "spec": {
@@ -936,6 +1002,27 @@ def _workload_identity_issuer_from_token(settings: Settings) -> str:
 
 def _resource_name(prefix: str, run_id: str, attempt_index: int) -> str:
     return _dns_label(f"{prefix}-{run_id.lower()}-{attempt_index}")[:63].rstrip("-")
+
+
+def _job_name_for(attempt_base: str, job_id: str) -> str:
+    """Per-job k8s Job name.
+
+    `attempt_base` is the per-attempt resource name (e.g.
+    `glim-{run_id}-{attempt_index}`); appending the job_id slug lets
+    multiple Jobs coexist in one attempt for parallel dispatch.
+
+    Truncated to the 63-char DNS-label limit. When attempt_base is
+    long enough that there's no room for a meaningful job suffix, the
+    suffix is hashed to keep the name unique.
+    """
+    suffix = _dns_label(job_id)
+    candidate = f"{attempt_base}-{suffix}"
+    if len(candidate) <= 63:
+        return candidate.rstrip("-")
+    # Reserve 8 chars for a stable hash so collision-free with siblings.
+    short_hash = hashlib.sha256(job_id.encode("utf-8")).hexdigest()[:8]
+    head_room = 63 - 1 - 8  # for "-" + hash
+    return f"{attempt_base[:head_room].rstrip('-')}-{short_hash}"
 
 
 def _validation_namespace(run_id: str, attempt_index: int) -> str:

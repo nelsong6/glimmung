@@ -723,6 +723,15 @@ class NativeJobAttempt(BaseModel):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     last_seq: int = 0
+    # Per-job completion fields. Populated when this job's runner posts
+    # to /native/completed or /native/failed with its `job_id`. The
+    # phase-level conclusion / verification / outputs on `PhaseAttempt`
+    # are aggregated across all jobs once every job in the attempt has
+    # reported terminal state.
+    conclusion: str | None = None
+    outputs: dict[str, str] | None = None
+    verification: VerificationResult | None = None
+    failure_reason: str | None = None
 
 
 class NativeRunEventType(str, Enum):

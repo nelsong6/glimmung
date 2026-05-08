@@ -80,6 +80,27 @@ class _FailingRoleBindingLauncher(_RecordingLauncher):
         return {}
 
 
+class _DeleteAttemptJobLauncher(_RecordingLauncher):
+    """Returns two per-job k8s Jobs from the label-selector list call so
+    `delete_attempt_job` exercises the per-job delete loop."""
+    async def _request(self, method: str, path: str, *, json=None):
+        self.calls.append({"method": method, "path": path, "json": json})
+        if method == "GET" and path.startswith(
+            "/apis/batch/v1/namespaces/glimmung-runs/jobs?"
+        ):
+            return {
+                "items": [
+                    {"metadata": {
+                        "name": "glim-01krnative0000000000000000-2-plan",
+                    }},
+                    {"metadata": {
+                        "name": "glim-01krnative0000000000000000-2-impl",
+                    }},
+                ]
+            }
+        return {}
+
+
 class _PodLogLauncher(_RecordingLauncher):
     async def _request(self, method: str, path: str, *, json=None):
         self.calls.append({"method": method, "path": path, "json": json})
@@ -106,7 +127,12 @@ def _cosmos():
     )
 
 
-def test_job_manifest_maps_phase_jobs_to_sequential_pod_containers():
+def test_job_manifest_per_job_renders_one_container_pod():
+    """Job-level concurrent dispatch: every `phase.jobs[*]` becomes its
+    own k8s Job with a single-container Pod. The pre-fan-out shape
+    (initContainers + main container in one Pod) is gone — siblings now
+    run in parallel and report back via `job_id` on the completion
+    callback."""
     phase = PhaseSpec(
         name="agent",
         kind="k8s_job",
@@ -161,14 +187,19 @@ def test_job_manifest_maps_phase_jobs_to_sequential_pod_containers():
         lease_doc=lease_doc,
         workflow_doc={"name": "native-agent"},
         phase=phase,
-        job_name="glim-01krnative-2",
+        job_spec=phase.jobs[1],
+        job_name="glim-01krnative-2-agent",
         secret_name="glim-01krnative-2-token",
+        attempt_base="glim-01krnative-2",
     )
 
     spec = manifest["spec"]["template"]["spec"]
     assert (
         manifest["spec"]["template"]["metadata"]["labels"]["azure.workload.identity/use"] == "true"
     )
+    assert manifest["metadata"]["labels"]["glimmung.romaine.life/job-id"] == "agent"
+    assert manifest["metadata"]["labels"]["glimmung.romaine.life/attempt-base"] == "glim-01krnative-2"
+    assert manifest["metadata"]["annotations"]["glimmung.romaine.life/job-id"] == "agent"
     assert spec["serviceAccountName"] == "glimmung-native-runner"
     volumes = {item["name"]: item for item in spec["volumes"]}
     assert volumes["codex-credentials"]["secret"] == {
@@ -176,8 +207,10 @@ def test_job_manifest_maps_phase_jobs_to_sequential_pod_containers():
         "optional": False,
     }
 
-    assert spec["activeDeadlineSeconds"] == 90
-    assert spec["initContainers"][0]["name"] == "clone"
+    # One Pod per job: no initContainers any more, exactly one container.
+    assert "initContainers" not in spec
+    assert len(spec["containers"]) == 1
+    assert spec["activeDeadlineSeconds"] == 60
     assert spec["containers"][0]["name"] == "agent"
     assert spec["containers"][0]["args"] == ["run"]
     mounts = {item["name"]: item for item in spec["containers"][0]["volumeMounts"]}
@@ -354,8 +387,12 @@ async def test_reconcile_standby_workload_identity_upserts_slot_credentials():
 
 
 @pytest.mark.asyncio
-async def test_delete_attempt_job_uses_graceful_foreground_delete():
-    launcher = _RecordingLauncher(_settings())
+async def test_delete_attempt_job_label_selects_then_deletes_per_job():
+    """delete_attempt_job lists every Job for the attempt by attempt-base
+    label, deletes each (per-job fan-out), then falls through to the
+    legacy per-attempt name for back-compat with attempts launched by
+    older glimmung versions."""
+    launcher = _DeleteAttemptJobLauncher(_settings())
 
     await launcher.delete_attempt_job(
         run_id="01KRNATIVE0000000000000000",
@@ -363,20 +400,31 @@ async def test_delete_attempt_job_uses_graceful_foreground_delete():
         grace_period_seconds=60,
     )
 
-    assert launcher.calls == [
-        {
-            "method": "DELETE",
-            "path": (
-                "/apis/batch/v1/namespaces/glimmung-runs/jobs/glim-01krnative0000000000000000-2"
-            ),
-            "json": {
-                "apiVersion": "v1",
-                "kind": "DeleteOptions",
-                "propagationPolicy": "Foreground",
-                "gracePeriodSeconds": 60,
-            },
-        }
-    ]
+    list_call, del_a, del_b, legacy_del = launcher.calls
+    assert list_call["method"] == "GET"
+    assert "labelSelector=" in list_call["path"]
+    assert "glimmung.romaine.life%2Fattempt-base%3Dglim-01krnative0000000000000000-2" in list_call["path"]
+    body = {
+        "apiVersion": "v1",
+        "kind": "DeleteOptions",
+        "propagationPolicy": "Foreground",
+        "gracePeriodSeconds": 60,
+    }
+    assert del_a == {
+        "method": "DELETE",
+        "path": "/apis/batch/v1/namespaces/glimmung-runs/jobs/glim-01krnative0000000000000000-2-plan",
+        "json": body,
+    }
+    assert del_b == {
+        "method": "DELETE",
+        "path": "/apis/batch/v1/namespaces/glimmung-runs/jobs/glim-01krnative0000000000000000-2-impl",
+        "json": body,
+    }
+    assert legacy_del == {
+        "method": "DELETE",
+        "path": "/apis/batch/v1/namespaces/glimmung-runs/jobs/glim-01krnative0000000000000000-2",
+        "json": body,
+    }
 
 
 @pytest.mark.asyncio
@@ -397,24 +445,29 @@ async def test_read_attempt_pod_logs_selects_job_pod_and_container_tail():
         "phase": "Running",
         "logs": "line one\nline two\n",
     }
-    assert launcher.calls == [
-        {
-            "method": "GET",
-            "path": (
-                "/api/v1/namespaces/glimmung-runs/pods?"
-                "labelSelector=job-name%3Dglim-01krnative0000000000000000-2"
-            ),
-            "json": None,
-        },
-        {
-            "method": "GET",
-            "path": (
-                "/api/v1/namespaces/glimmung-runs/pods/glim-run-pod/log?"
-                "container=codex-agent&tailLines=200&timestamps=false"
-            ),
-            "json": None,
-        },
-    ]
+    # Per-job dispatch: the first selector tries the per-job
+    # attempt-base + job-id combination so siblings in a parallel phase
+    # don't return each other's logs. _PodLogLauncher always returns the
+    # same pod, so the first GET matches and we move straight to the
+    # log read.
+    pod_query = launcher.calls[0]
+    assert pod_query["method"] == "GET"
+    assert pod_query["path"].startswith(
+        "/api/v1/namespaces/glimmung-runs/pods?"
+    )
+    assert (
+        "glimmung.romaine.life%2Fattempt-base%3D"
+        "glim-01krnative0000000000000000-2"
+    ) in pod_query["path"]
+    assert "glimmung.romaine.life%2Fjob-id%3Dcodex-agent" in pod_query["path"]
+    assert launcher.calls[1] == {
+        "method": "GET",
+        "path": (
+            "/api/v1/namespaces/glimmung-runs/pods/glim-run-pod/log?"
+            "container=codex-agent&tailLines=200&timestamps=false"
+        ),
+        "json": None,
+    }
 
 
 @pytest.mark.asyncio
