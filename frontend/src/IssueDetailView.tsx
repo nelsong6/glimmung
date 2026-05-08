@@ -314,6 +314,7 @@ export function IssueDetailView() {
   const [editing, setEditing] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
   const [dispatchState, setDispatchState] = useState<DispatchState>({ kind: "idle" });
+  const [abortState, setAbortState] = useState<AbortState>({ kind: "idle" });
   const detailUrl =
     target?.kind === "gh"
       ? `/v1/issues/${target.repo}/${target.issue_number}`
@@ -368,8 +369,28 @@ export function IssueDetailView() {
     }
   };
 
+  const abortRun = async (runId: string) => {
+    if (!detail) return;
+    setAbortState({ kind: "aborting" });
+    try {
+      const r = await authedFetch(
+        `/v1/runs/${encodeURIComponent(detail.project)}/${encodeURIComponent(runId)}/abort?reason=aborted_via_ui`,
+        { method: "POST" },
+      );
+      if (!r.ok) {
+        const text = await r.text();
+        throw new Error(`/v1/runs/${detail.project}/${runId}/abort -> ${r.status}: ${text}`);
+      }
+      setAbortState({ kind: "idle" });
+      setRefreshTick((t) => t + 1);
+    } catch (e) {
+      setAbortState({ kind: "error", message: String(e) });
+    }
+  };
+
   useEffect(() => {
     setSelectedRunId(null);
+    setAbortState({ kind: "idle" });
   }, [detail?.id]);
 
   useEffect(() => {
@@ -498,6 +519,10 @@ export function IssueDetailView() {
                 signedIn={signedIn}
                 isAdmin={isAdmin}
                 dispatchState={dispatchState}
+                abortState={abortState}
+                onArmAbort={() => setAbortState({ kind: "armed" })}
+                onCancelAbort={() => setAbortState({ kind: "idle" })}
+                onConfirmAbort={(runId) => void abortRun(runId)}
                 selectedRunId={selectedRunId}
                 onSelectRun={setSelectedRunId}
                 onDispatch={() => void dispatchRun()}
@@ -1751,6 +1776,10 @@ function RunsPane({
   signedIn,
   isAdmin,
   dispatchState,
+  abortState,
+  onArmAbort,
+  onCancelAbort,
+  onConfirmAbort,
   selectedRunId,
   onSelectRun,
   onDispatch,
@@ -1765,6 +1794,10 @@ function RunsPane({
   signedIn: boolean;
   isAdmin: boolean;
   dispatchState: DispatchState;
+  abortState: AbortState;
+  onArmAbort: () => void;
+  onCancelAbort: () => void;
+  onConfirmAbort: (runId: string) => void;
   selectedRunId: string | null;
   onSelectRun: (runId: string | null) => void;
   onDispatch: () => void;
@@ -1789,6 +1822,13 @@ function RunsPane({
     : !isAdmin && !dispatching && !detail.issue_lock_held
     ? "Dispatching runs is restricted to admins (your email is not in ALLOWED_EMAILS)."
     : undefined;
+  const activeRunId = (() => {
+    const node = graph ? findActiveRun(graph) : null;
+    return node ? runIdFromNode(node) : null;
+  })();
+  const aborting = abortState.kind === "aborting";
+  const armed = abortState.kind === "armed";
+  const cancelVisible = signedIn && isAdmin && !!activeRunId;
   const newRunButton = (
     <div
       className="run-actions"
@@ -1812,6 +1852,45 @@ function RunsPane({
         <span className="dispatch-error" role="alert">
           <span className="pill drain">error</span>
           <span className="dispatch-error-message">{formatDispatchError(dispatchState.message)}</span>
+        </span>
+      )}
+      {cancelVisible && (
+        armed || aborting ? (
+          <span className="confirm">
+            <button
+              type="button"
+              className="link danger-text"
+              onClick={() => onConfirmAbort(activeRunId)}
+              disabled={aborting}
+            >
+              {aborting ? "cancelling…" : "cancel?"}
+            </button>
+            <span className="sep">/</span>
+            <button
+              type="button"
+              className="link"
+              onClick={onCancelAbort}
+              disabled={aborting}
+            >
+              keep
+            </button>
+          </span>
+        ) : (
+          <button
+            type="button"
+            className="link danger-text"
+            onClick={onArmAbort}
+          >
+            cancel run
+          </button>
+        )
+      )}
+      {abortState.kind === "error" && (
+        <span
+          className="pill drain"
+          title={abortState.message}
+        >
+          cancel error
         </span>
       )}
     </div>
