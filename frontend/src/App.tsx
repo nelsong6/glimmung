@@ -193,11 +193,11 @@ export function App() {
         <Route path="projects/:project/issues" element={<ProjectIssuesRoute />} />
         <Route path="projects/:project/portfolio" element={<ProjectPortfolioRoute />} />
         <Route path="projects/:project/issues/new" element={<IssueOnboardingRoute />} />
-        <Route path="projects/:project/issues/:issueNumber/runs/:runId" element={<ProjectRunRoute />} />
         <Route path="projects/:project/issues/:issueNumber" element={<IssueDetailView />}>
           <Route path="summary" element={null} />
           <Route path="issue" element={null} />
           <Route path="runs" element={null} />
+          <Route path="runs/:runId" element={null} />
           <Route path="touchpoint" element={null} />
           <Route path="description" element={null} />
           <Route path="the-run" element={null} />
@@ -743,19 +743,6 @@ function ProjectHostsRoute() {
   const params = useParams<{ project?: string }>();
   const ctx = useOutletContext<LayoutContext>();
   return <ProjectHostsView {...ctx} projectName={decodeURIComponent(params.project ?? "")} />;
-}
-
-function ProjectRunRoute() {
-  const params = useParams<{ project?: string; issueNumber?: string; runId?: string }>();
-  const ctx = useOutletContext<LayoutContext>();
-  return (
-    <ProjectRunView
-      {...ctx}
-      projectName={decodeURIComponent(params.project ?? "")}
-      issueNumber={params.issueNumber ? parseInt(params.issueNumber, 10) : null}
-      runId={decodeURIComponent(params.runId ?? "")}
-    />
-  );
 }
 
 function ProjectRunRedirectRoute() {
