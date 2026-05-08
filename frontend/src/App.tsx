@@ -205,6 +205,7 @@ export function App() {
           <Route path="lineage" element={null} />
         </Route>
         <Route path="projects/:project/needs-attention" element={<ProjectNeedsAttentionRoute />} />
+        <Route path="projects/:project/hosts" element={<ProjectHostsRoute />} />
         <Route path="projects/:project/runs" element={<ProjectRunsRoute />} />
         <Route path="projects/:project/runs/:runId" element={<ProjectRunRedirectRoute />} />
         <Route path="issues" element={<Navigate to="/needs-attention" replace />} />
@@ -738,6 +739,12 @@ function ProjectRunsRoute() {
   return <ProjectRunsView {...ctx} projectName={decodeURIComponent(params.project ?? "")} />;
 }
 
+function ProjectHostsRoute() {
+  const params = useParams<{ project?: string }>();
+  const ctx = useOutletContext<LayoutContext>();
+  return <ProjectHostsView {...ctx} projectName={decodeURIComponent(params.project ?? "")} />;
+}
+
 function ProjectRunRoute() {
   const params = useParams<{ project?: string; issueNumber?: string; runId?: string }>();
   const ctx = useOutletContext<LayoutContext>();
@@ -989,6 +996,7 @@ function ProjectsView({ snap }: LayoutContext) {
 function ProjectView({
   snap,
   signedIn,
+  matchesRequirements,
   projectName,
 }: LayoutContext & { projectName: string }) {
   if (snap === null) return <div className="empty">Connecting…</div>;
@@ -1004,8 +1012,14 @@ function ProjectView({
     .sort((a, b) => a.name.localeCompare(b.name));
   const pending = snap.pending_leases.filter((l) => l.project === project.name);
   const active = snap.active_leases.filter((l) => l.project === project.name);
-  const activeHosts = new Set(active.flatMap((l) => (l.host ? [l.host] : [])));
   const projectPath = `/projects/${encodeURIComponent(project.name)}`;
+
+  const nonEmptyReqs = workflows
+    .map((w) => w.default_requirements)
+    .filter((r) => Object.keys(r).length > 0);
+  const hasHosts = snap.hosts.some((h) =>
+    nonEmptyReqs.some((reqs) => matchesRequirements(h, reqs))
+  );
 
   return (
     <div className="project-workspace">
@@ -1032,10 +1046,6 @@ function ProjectView({
             <span>pending</span>
             <strong>{pending.length}</strong>
           </div>
-          <div className="project-fact">
-            <span>hosts</span>
-            <strong>{activeHosts.size}</strong>
-          </div>
         </div>
       </section>
 
@@ -1060,6 +1070,12 @@ function ProjectView({
           <span className="key">Runs</span>
           <strong>Run and cycle history for project work</strong>
         </Link>
+        {hasHosts && (
+          <Link to={`${projectPath}/hosts`} className="home-link">
+            <span className="key">Hosts</span>
+            <strong>Registered agent machines for this project</strong>
+          </Link>
+        )}
       </section>
 
       <IssuesView
@@ -1705,6 +1721,80 @@ function ProjectRunsView({
   );
 }
 
+function ProjectHostsView({
+  snap,
+  projectName,
+  matchesRequirements,
+}: LayoutContext & { projectName: string }) {
+  if (snap === null) return <div className="empty">Connecting…</div>;
+
+  const project = snap.projects.find((p) => p.name === projectName);
+  if (!project) return <div className="empty">Project {projectName || "(missing)"} was not found.</div>;
+
+  const workflows = snap.workflows.filter((w) => w.project === project.name);
+  const nonEmptyReqs = workflows
+    .map((w) => w.default_requirements)
+    .filter((r) => Object.keys(r).length > 0);
+
+  const hosts = snap.hosts.filter((h) =>
+    nonEmptyReqs.some((reqs) => matchesRequirements(h, reqs))
+  );
+
+  return (
+    <div className="project-workspace">
+      <section className="project-hero">
+        <div className="project-hero-main">
+          <div className="project-kicker mono">project / {project.name}</div>
+          <h2>Hosts</h2>
+        </div>
+        <div className="project-facts">
+          <div className="project-fact"><span>total</span><strong>{hosts.length}</strong></div>
+          <div className="project-fact"><span>free</span><strong>{hosts.filter((h) => !h.drained && !h.current_lease_id).length}</strong></div>
+          <div className="project-fact"><span>busy</span><strong>{hosts.filter((h) => !h.drained && h.current_lease_id).length}</strong></div>
+          <div className="project-fact"><span>drained</span><strong>{hosts.filter((h) => h.drained).length}</strong></div>
+        </div>
+      </section>
+
+      {hosts.length === 0 ? (
+        <div className="empty">No hosts match this project's workflow requirements.</div>
+      ) : (
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Capabilities</th>
+              <th>State</th>
+              <th>Current lease</th>
+              <th>Last heartbeat</th>
+              <th>Last used</th>
+            </tr>
+          </thead>
+          <tbody>
+            {hosts.map((h) => (
+              <tr key={h.name}>
+                <td className="mono">{h.name}</td>
+                <td className="mono">{JSON.stringify(h.capabilities)}</td>
+                <td>
+                  {h.drained ? (
+                    <span className="pill drain">drained</span>
+                  ) : h.current_lease_id ? (
+                    <span className="pill busy">busy</span>
+                  ) : (
+                    <span className="pill free">free</span>
+                  )}
+                </td>
+                <td className="mono dim">{h.current_lease_id ?? "—"}</td>
+                <td className="mono dim">{relTime(h.last_heartbeat)}</td>
+                <td className="mono dim">{relTime(h.last_used_at)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
 function ProjectRunsTable({ title, runs, project }: { title: string; runs: ProjectRun[]; project: Project }) {
   const runsPath = `/projects/${encodeURIComponent(project.name)}/runs`;
   return (
@@ -2266,8 +2356,6 @@ type CapacityViewProps = {
   selected: Selection;
   selectedWorkflow: Workflow | null;
   selectedProject: Project | null;
-  eligibilityReqs: Record<string, unknown> | null;
-  matchesRequirements: (host: Host, reqs: Record<string, unknown>) => boolean;
 };
 
 function CapacityView({
@@ -2278,8 +2366,6 @@ function CapacityView({
   selected,
   selectedWorkflow,
   selectedProject,
-  eligibilityReqs,
-  matchesRequirements,
 }: CapacityViewProps) {
   // Two-click confirm pattern for the cancel button (#30): first click
   // arms the row (replaces the button with [Cancel?] [Keep]); second
@@ -2307,65 +2393,14 @@ function CapacityView({
     }
   };
 
-  const free = snap?.hosts.filter((h) => !h.drained && !h.current_lease_id).length ?? 0;
-  const busy = snap?.hosts.filter((h) => !h.drained && h.current_lease_id).length ?? 0;
-  const drained = snap?.hosts.filter((h) => h.drained).length ?? 0;
-
   return (
     <>
       {snap !== null && (
         <div className="kpi-strip">
-          <div className="kpi"><span className="k">hosts</span><span className="v">{snap.hosts.length}</span></div>
-          <div className="kpi"><span className="k">free</span><span className="v green">{free}</span></div>
-          <div className="kpi"><span className="k">busy</span><span className="v amber">{busy}</span></div>
-          <div className="kpi"><span className="k">drained</span><span className="v red">{drained}</span></div>
           <div className="kpi"><span className="k">pending</span><span className="v">{snap.pending_leases.length}</span></div>
           <div className="kpi"><span className="k">active</span><span className="v">{snap.active_leases.length}</span></div>
         </div>
       )}
-
-      <h2>Hosts</h2>
-        {snap === null ? (
-          <div className="empty">Connecting…</div>
-        ) : snap.hosts.length === 0 ? (
-          <div className="empty">No hosts registered. Sign in and use the admin panel to add one.</div>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Capabilities</th>
-                <th>State</th>
-                <th>Current lease</th>
-                <th>Last heartbeat</th>
-                <th>Last used</th>
-              </tr>
-            </thead>
-            <tbody>
-              {snap.hosts.map((h) => {
-                const eligible = eligibilityReqs !== null && matchesRequirements(h, eligibilityReqs);
-                return (
-                  <tr key={h.name} className={eligible ? "eligible" : ""}>
-                    <td className="mono">{h.name}</td>
-                    <td className="mono">{JSON.stringify(h.capabilities)}</td>
-                    <td>
-                      {h.drained ? (
-                        <span className="pill drain">drained</span>
-                      ) : h.current_lease_id ? (
-                        <span className="pill busy">busy</span>
-                      ) : (
-                        <span className="pill free">free</span>
-                      )}
-                    </td>
-                    <td className="mono dim">{h.current_lease_id ?? "—"}</td>
-                    <td className="mono dim">{relTime(h.last_heartbeat)}</td>
-                    <td className="mono dim">{relTime(h.last_used_at)}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
 
         <h2>
           Pending queue ({filteredPending.length})
