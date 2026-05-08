@@ -1100,7 +1100,7 @@ function DefinitionDag({
       <div className="dag dag-definition" aria-label="workflow definition">
         {workflow && (
           <>
-            <div className="dag-entry active">
+            <div className="dag-entry">
               <span className="mono">entry</span>
               <span className="dim mono">{workflow.trigger_label}</span>
             </div>
@@ -1112,9 +1112,6 @@ function DefinitionDag({
             {index > 0 && <div className="dag-edge" aria-hidden="true">→</div>}
             <div className="dag-node dag-node-definition">
               <div className="dag-node-label">{phase.name}</div>
-              <div className="dag-node-state">
-                <span className="pill info">not run</span>
-              </div>
               <div className="dag-node-meta dim mono">{phase.verify ? "verify" : phase.kind}</div>
             </div>
           </Fragment>
@@ -1122,9 +1119,8 @@ function DefinitionDag({
         {(!workflow || workflow.pr.enabled) && (
           <>
             <div className="dag-edge" aria-hidden="true">→</div>
-            <div className="dag-node dag-node-definition dag-node-pr pending">
+            <div className="dag-node dag-node-definition dag-node-pr">
               <div className="dag-node-label">touchpoint</div>
-              <div className="dag-node-state mono">pending</div>
               <div className="dag-node-meta dim mono">PR primitive</div>
             </div>
           </>

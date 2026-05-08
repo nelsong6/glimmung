@@ -1861,6 +1861,11 @@ h2 .inline-action,
 .dag-entry {
   min-width: 96px;
   cursor: default;
+}
+/* Green left edge marks the entry box as "the run entered here" — only
+   applied in the run-pipeline strip, never on the workflow definition
+   view (which is a template, not an instance). */
+.dag-entry.active {
   border-left: 2px solid var(--state-success-fg);
 }
 .dag-node:hover {

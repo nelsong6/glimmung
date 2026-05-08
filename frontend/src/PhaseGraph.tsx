@@ -87,12 +87,12 @@ function defaultPhaseNode(phase: PhaseGraphPhase): ReactNode {
       : phase.verify
         ? "verify"
         : phase.kind;
+  // No "not run" pill in definition view — the view itself signals
+  // "this is a template, not an instance". State pills belong on the
+  // run-pipeline strip.
   return (
     <div className="dag-node dag-node-phase dag-node-definition">
       <div className="dag-node-label">{phase.name}</div>
-      <div className="dag-node-state">
-        <span className="pill info">not run</span>
-      </div>
       <div className="dag-node-meta dim mono">{meta}</div>
     </div>
   );
@@ -100,9 +100,8 @@ function defaultPhaseNode(phase: PhaseGraphPhase): ReactNode {
 
 function defaultTouchpointNode(): ReactNode {
   return (
-    <div className="dag-node dag-node-definition dag-node-pr pending">
+    <div className="dag-node dag-node-definition dag-node-pr">
       <div className="dag-node-label">touchpoint</div>
-      <div className="dag-node-state mono">pending</div>
       <div className="dag-node-meta dim mono">PR primitive</div>
     </div>
   );
@@ -135,7 +134,7 @@ export function PhaseGraph({
 
   return (
     <div className={`dag${dagClassName ? " " + dagClassName : ""}`} aria-label={ariaLabel}>
-      <div className="dag-entry active">
+      <div className="dag-entry">
         <span className="mono">entry</span>
         <span className="dim mono">{triggerLabel ?? "—"}</span>
       </div>
