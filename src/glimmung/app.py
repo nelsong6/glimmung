@@ -2128,6 +2128,7 @@ def _phase_to_doc(p: Any) -> dict[str, Any]:
         "recyclePolicy": _recycle_policy_to_doc(p.recycle_policy),
         "always": bool(p.always),
         "evidenceVerificationGate": is_gate,
+        "dependsOn": list(getattr(p, "depends_on", []) or []),
         "inputs": dict(p.inputs),
         "outputs": list(p.outputs),
         "jobs": jobs_doc,
@@ -2177,6 +2178,7 @@ def _phase_from_doc(d: dict[str, Any]):
         recycle_policy=_recycle_policy_from_doc(d.get("recyclePolicy")),
         always=bool(d.get("always", False)),
         evidence_verification_gate=bool(d.get("evidenceVerificationGate", False)),
+        depends_on=list(d.get("dependsOn") or []),
         inputs=dict(d.get("inputs") or {}),
         outputs=list(d.get("outputs") or []),
         jobs=[
