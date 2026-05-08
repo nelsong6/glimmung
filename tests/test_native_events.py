@@ -661,6 +661,133 @@ async def test_native_completion_fails_before_decision_when_archive_upload_fails
 
 
 @pytest.mark.asyncio
+async def test_native_completion_aborts_when_phase_renamed_in_workflow(
+    cosmos, monkeypatch,
+):
+    """Regression for the resumed-run bug where a workflow re-registration
+    that renamed the run's completing phase caused /native/completed to
+    400 with "phase_outputs contract violation" — leaving the run stuck
+    in_progress because the runner gives up after a few retries.
+
+    Now: completion is accepted, posted outputs are persisted, the run
+    is marked aborted with a reason that names the missing phase so
+    operators can correlate the registration drift.
+    """
+    now = datetime.now(UTC)
+    # Workflow currently declares phase "agent-execute" with a known
+    # output set. The run below was dispatched against a stale
+    # registration that named the phase "prepare", so the attempt
+    # carries that name.
+    await cosmos.workflows.create_item({
+        "id": "native-agent",
+        "name": "native-agent",
+        "project": "ambience",
+        "phases": [{
+            "name": "agent-execute",
+            "kind": "k8s_job",
+            "workflowFilename": "",
+            "workflowRef": "main",
+            "requirements": None,
+            "verify": True,
+            "recyclePolicy": None,
+            "inputs": {},
+            "outputs": ["validation_url"],
+            "jobs": [{
+                "id": "agent",
+                "name": None,
+                "image": "runner:latest",
+                "command": [],
+                "args": [],
+                "env": {},
+                "steps": [
+                    {"slug": "clone-repo", "title": None},
+                    {"slug": "run-agent", "title": None},
+                ],
+                "timeoutSeconds": None,
+            }],
+        }],
+        "pr": {"enabled": False, "recyclePolicy": None},
+        "budget": {"total": 25.0},
+        "triggerLabel": "agent-run",
+        "defaultRequirements": {},
+        "metadata": {},
+        "createdAt": now.isoformat(),
+    })
+    run = Run(
+        id="01KRNATIVE_RENAMED_PHASE000",
+        project="ambience",
+        workflow="native-agent",
+        issue_id="01KRISSUE_RENAMED_PHASE000",
+        issue_repo="nelsong6/ambience",
+        issue_number=172,
+        state=RunState.IN_PROGRESS,
+        budget=BudgetConfig(total=25.0),
+        attempts=[
+            PhaseAttempt(
+                attempt_index=0,
+                phase="prepare",  # stale: workflow now has "agent-execute"
+                phase_kind="k8s_job",
+                workflow_filename="k8s_job:prepare",
+                dispatched_at=now,
+                jobs=_native_jobs(),
+            )
+        ],
+        cumulative_cost_usd=0.0,
+        cloned_from_run_id="01KRPRIORRUN0000000000000",
+        entrypoint_phase="prepare",
+        created_at=now,
+        updated_at=now,
+    )
+    await cosmos.runs.create_item(run.model_dump(mode="json"))
+    monkeypatch.setattr("glimmung.app.app", _app_with(cosmos))
+
+    seq = 1
+    for step in ("clone-repo", "run-agent"):
+        await native_run_event(
+            NativeRunEventRequest(
+                job_id="agent", seq=seq,
+                event=NativeRunEventType.STEP_STARTED, step_slug=step,
+            ),
+            request=_request(), project=run.project, run_id=run.id,
+        )
+        seq += 1
+        await native_run_event(
+            NativeRunEventRequest(
+                job_id="agent", seq=seq,
+                event=NativeRunEventType.STEP_COMPLETED, step_slug=step,
+                exit_code=0,
+            ),
+            request=_request(), project=run.project, run_id=run.id,
+        )
+        seq += 1
+
+    result = await native_run_completed(
+        NativeRunCompletedRequest(
+            verification={
+                "schema_version": 1,
+                "status": VerificationStatus.PASS.value,
+                "reasons": [],
+                "evidence_refs": [],
+                "cost_usd": 0.0,
+            },
+            outputs={"validation_url": "https://issue-172.dev.example"},
+        ),
+        request=_request(),
+        project=run.project,
+        run_id=run.id,
+    )
+
+    # No HTTPException raised; run is aborted with a clear reason
+    # rather than stuck in_progress with the runner's curl looping on a
+    # 400 until it gives up.
+    assert result.decision == "abort_no_workflow"
+    doc = await cosmos.runs.read_item(item=run.id, partition_key=run.project)
+    assert doc["state"] == "aborted"
+    assert "prepare" in (doc["abort_reason"] or "")
+    assert doc["attempts"][0]["completed_at"] is not None
+
+
+@pytest.mark.asyncio
 async def test_native_callbacks_require_bound_attempt_token(cosmos, monkeypatch):
     run = await _seed_native_run(cosmos)
     monkeypatch.setattr("glimmung.app.app", _app_with(cosmos))
