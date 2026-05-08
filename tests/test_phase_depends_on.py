@@ -182,3 +182,162 @@ def test_depends_on_round_trips_through_phase_doc():
     assert restored[2].depends_on == ["env-prep"]
     assert restored[3].depends_on == ["test-plan", "implement"]
     assert restored[4].depends_on == ["verify"]
+
+
+# ─── DAG-aware dispatch routing (stage 2B) ────────────────────────────
+
+
+from datetime import UTC, datetime
+from glimmung import app as glimmung_app
+from glimmung.models import (
+    PhaseAttempt,
+    Run,
+    RunState,
+    Workflow,
+)
+
+
+def _attempt(phase, *, conclusion="success", decision=None):
+    return PhaseAttempt(
+        attempt_index=0, phase=phase, phase_kind="k8s_job",
+        workflow_filename=f"k8s_job:{phase}",
+        dispatched_at=datetime.now(UTC),
+        completed_at=datetime.now(UTC),
+        conclusion=conclusion,
+        decision=(decision.value if decision else None),
+    )
+
+
+def _run_with(*phases_attempted):
+    now = datetime.now(UTC)
+    return Run(
+        id="01TESTRUN0000000000000000",
+        project="p", workflow="w", run_number=1, issue_number=1,
+        attempts=list(phases_attempted),
+        cumulative_cost_usd=0.0,
+        budget=BudgetConfig(total=25.0),
+        state=RunState.IN_PROGRESS,
+        created_at=now, updated_at=now,
+    )
+
+
+def _wf(phases):
+    wr = WorkflowRegister(project="p", name="w", phases=phases)
+    return Workflow(
+        id="w", project="p", name="w",
+        phases=wr.phases, budget=BudgetConfig(total=25.0),
+        created_at=datetime.now(UTC),
+    )
+
+
+from glimmung.models import RunDecision
+
+
+def test_dag_dispatch_routes_to_first_ready_phase_by_list_order():
+    """In a DAG with parallel branches, the dispatcher picks the first
+    branch in list order. Subsequent dispatches re-evaluate after each
+    completes."""
+    wf = _wf([
+        _phase("env-prep"),
+        _phase("test-plan", depends_on=["env-prep"]),
+        _phase("implement", depends_on=["env-prep"]),
+        _phase("verify", depends_on=["test-plan", "implement"]),
+    ])
+    # env-prep just advanced
+    run = _run_with(_attempt("env-prep", decision=RunDecision.ADVANCE))
+    target = glimmung_app._next_dispatch_target(wf, run, RunDecision.ADVANCE)
+    # First ready phase in list order is test-plan
+    assert target is not None
+    assert target.name == "test-plan"
+
+
+def test_dag_dispatch_does_not_advance_to_join_until_both_branches_complete():
+    """A phase with multiple deps doesn't dispatch until ALL deps have
+    advanced."""
+    wf = _wf([
+        _phase("env-prep"),
+        _phase("test-plan", depends_on=["env-prep"]),
+        _phase("implement", depends_on=["env-prep"]),
+        _phase("verify", depends_on=["test-plan", "implement"]),
+    ])
+    # env-prep + test-plan advanced; implement still pending
+    run = _run_with(
+        _attempt("env-prep", decision=RunDecision.ADVANCE),
+        _attempt("test-plan", decision=RunDecision.ADVANCE),
+    )
+    target = glimmung_app._next_dispatch_target(wf, run, RunDecision.ADVANCE)
+    # verify isn't ready (implement hasn't advanced); should pick implement
+    assert target is not None
+    assert target.name == "implement"
+
+
+def test_dag_dispatch_advances_to_join_when_both_branches_complete():
+    wf = _wf([
+        _phase("env-prep"),
+        _phase("test-plan", depends_on=["env-prep"]),
+        _phase("implement", depends_on=["env-prep"]),
+        _phase("verify", depends_on=["test-plan", "implement"]),
+    ])
+    run = _run_with(
+        _attempt("env-prep", decision=RunDecision.ADVANCE),
+        _attempt("test-plan", decision=RunDecision.ADVANCE),
+        _attempt("implement", decision=RunDecision.ADVANCE),
+    )
+    target = glimmung_app._next_dispatch_target(wf, run, RunDecision.ADVANCE)
+    assert target is not None
+    assert target.name == "verify"
+
+
+def test_dag_advance_falls_through_to_teardown_when_no_more_user_work():
+    """When no more non-always phases are ready, advance routes to the
+    first ready always-phase (which has all non-always phases as deps
+    via the auto-fill rule)."""
+    wf = _wf([
+        _phase("env-prep"),
+        _phase("test-plan", depends_on=["env-prep"]),
+        _phase("implement", depends_on=["env-prep"]),
+        _phase("env-destroy", always=True),  # auto-fills depends_on=[env-prep, test-plan, implement]
+    ])
+    run = _run_with(
+        _attempt("env-prep", decision=RunDecision.ADVANCE),
+        _attempt("test-plan", decision=RunDecision.ADVANCE),
+        _attempt("implement", decision=RunDecision.ADVANCE),
+    )
+    target = glimmung_app._next_dispatch_target(wf, run, RunDecision.ADVANCE)
+    assert target is not None
+    assert target.name == "env-destroy"
+
+
+def test_dag_abort_jumps_to_first_always_phase():
+    """Abort path skips remaining non-always phases regardless of their
+    deps and routes to the first always-phase for unconditional cleanup."""
+    wf = _wf([
+        _phase("env-prep"),
+        _phase("test-plan", depends_on=["env-prep"]),
+        _phase("implement", depends_on=["env-prep"]),
+        _phase("env-destroy", always=True),
+    ])
+    # implement aborted; test-plan never even ran
+    run = _run_with(
+        _attempt("env-prep", decision=RunDecision.ADVANCE),
+        _attempt("implement", decision=RunDecision.ABORT_BUDGET_ATTEMPTS),
+    )
+    target = glimmung_app._next_dispatch_target(wf, run, RunDecision.ABORT_BUDGET_ATTEMPTS)
+    assert target is not None
+    assert target.name == "env-destroy"
+
+
+def test_sequential_workflow_unchanged_under_dag_routing():
+    """Sequential workflows (no explicit depends_on; inferred from list
+    index) dispatch in the same list order they always did."""
+    wf = _wf([
+        _phase("env-prep"),
+        _phase("agent-execute", verify=True, outputs=["verification"]),
+        _phase("agent-gate", evidence_verification_gate=True,
+               inputs={"verification": "${{ phases.agent-execute.outputs.verification }}"}),
+        _phase("env-destroy", always=True),
+    ])
+    run = _run_with(_attempt("env-prep", decision=RunDecision.ADVANCE))
+    target = glimmung_app._next_dispatch_target(wf, run, RunDecision.ADVANCE)
+    assert target is not None
+    assert target.name == "agent-execute"

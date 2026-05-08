@@ -1306,13 +1306,61 @@ async def _dispatch_retry(
 def _next_phase_after(workflow: Workflow, phase_name: str):
     """Return the PhaseSpec immediately after `phase_name` in the
     workflow's declared order, or None if `phase_name` is the last
-    phase (or doesn't appear). Pure lookup; multi-phase routing
-    depends on this being deterministic."""
+    phase (or doesn't appear). Pure lookup, retained for the gate
+    primitive's "is the next phase a gate?" check (#296). For
+    dispatch routing, prefer `_next_ready_phase` which honors
+    depends_on (the DAG primitive added in stage 2A)."""
     for i, p in enumerate(workflow.phases):
         if p.name == phase_name:
             if i + 1 < len(workflow.phases):
                 return workflow.phases[i + 1]
             return None
+    return None
+
+
+def _completed_advance_phases(run: Run) -> set[str]:
+    """Phases whose latest attempt resulted in ADVANCE. Used by
+    DAG-aware routing to gate downstream phases."""
+    advance = RunDecision.ADVANCE.value
+    by_phase: dict[str, str | None] = {}
+    for attempt in run.attempts:
+        by_phase[attempt.phase] = attempt.decision
+    return {name for name, dec in by_phase.items() if dec == advance}
+
+
+def _attempted_phases(run: Run) -> set[str]:
+    """Phases that have at least one attempt recorded. Used to skip
+    phases we've already touched when picking the next ready one."""
+    return {a.phase for a in run.attempts}
+
+
+def _next_ready_phase(
+    workflow: Workflow,
+    run: Run,
+    *,
+    include_always: bool = True,
+) -> PhaseSpec | None:
+    """First phase (in declared list order) that's ready to dispatch:
+    not yet attempted, and all its `depends_on` predecessors have
+    completed-with-ADVANCE. DAG-aware — for sequential workflows
+    (depends_on inferred from list index) this is identical to walking
+    by index. For explicit DAG workflows with parallel branches, this
+    picks one branch at a time (single-dispatch); concurrent multi-
+    branch dispatch is stage 2C and lands separately.
+
+    `include_always=False` skips always-phases so a verify or normal
+    phase advancing doesn't accidentally jump straight into teardown
+    when there's still real work pending — the caller falls back to
+    `_first_always_phase` only when nothing else is ready."""
+    completed = _completed_advance_phases(run)
+    attempted = _attempted_phases(run)
+    for phase in workflow.phases:
+        if phase.name in attempted:
+            continue
+        if phase.always and not include_always:
+            continue
+        if all(dep in completed for dep in phase.depends_on):
+            return phase
     return None
 
 
@@ -1361,12 +1409,18 @@ def _next_dispatch_target(workflow: Workflow, run: Run, decision: RunDecision):
     on the latest attempt. Returns the PhaseSpec to dispatch, or None when
     the run should go terminal.
 
+    Reads `depends_on` to find the next ready phase in topological order
+    (stage 2A added the field; this is the routing layer). For sequential
+    workflows (depends_on inferred from list index) routing is identical
+    to walking by index. For explicit DAG workflows it picks one ready
+    branch at a time — concurrent multi-branch dispatch lands in 2C.
+
     Routing rules:
-    - Last attempt was a teardown phase: chain to the next phase regardless
-      of this teardown's outcome (teardown failures log but don't escalate).
-    - Last attempt was non-always with ADVANCE: forward to the next phase
-      (which may itself be an always-phase — that's how the success path
-      enters teardown).
+    - Last attempt was a teardown phase: chain to the next ready phase
+      (whose deps may include the just-completed teardown). Teardown
+      failures don't escalate — the next teardown still fires.
+    - Last attempt was non-always with ADVANCE: route to the next ready
+      non-always phase. If none, fall through to teardown.
     - Last attempt was non-always with any abort decision: skip remaining
       non-always phases and route to the first always-phase. The terminal
       disposition is preserved via attempt history; no extra state needed.
@@ -1377,9 +1431,21 @@ def _next_dispatch_target(workflow: Workflow, run: Run, decision: RunDecision):
     last_attempt = run.attempts[-1]
     last_phase = _phase_by_name(workflow, last_attempt.phase)
     if last_phase is not None and last_phase.always:
-        return _next_phase_after(workflow, last_attempt.phase)
+        # In teardown chain — continue with next ready phase (may be
+        # another always-phase whose deps are now satisfied, or None if
+        # we've reached the end of the teardown chain).
+        return _next_ready_phase(workflow, run)
     if decision == RunDecision.ADVANCE:
-        return _next_phase_after(workflow, last_attempt.phase)
+        # Look for the next ready non-always phase first; if none,
+        # the always-chain begins.
+        next_non_always = _next_ready_phase(workflow, run, include_always=False)
+        if next_non_always is not None:
+            return next_non_always
+        # No more user-phase work — start teardown.
+        return _next_ready_phase(workflow, run)
+    # Abort: skip remaining non-always work, jump to teardown. Teardown
+    # phases run on the abort path regardless of their depends_on (their
+    # purpose is unconditional cleanup).
     return _first_always_phase(workflow)
 
 
