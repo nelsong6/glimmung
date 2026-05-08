@@ -400,7 +400,8 @@ async def promote_pending(cosmos: Cosmos) -> list[tuple[dict[str, Any], Host]]:
 
 
 async def sweep_expired(cosmos: Cosmos, settings: Settings) -> int:
-    """Reclaim hosts whose holders haven't heartbeated within the grace window.
+    """Reclaim hosts whose holders haven't heartbeated within the grace window,
+    and reap stranded native-k8s leases whose env-destroy callback never fired.
 
     Runs on a timer. Returns count of leases expired.
     """
@@ -431,6 +432,31 @@ async def sweep_expired(cosmos: Cosmos, settings: Settings) -> int:
             await cosmos.hosts.replace_item(item=host_doc["id"], body=host_doc)
         except CosmosAccessConditionFailedError:
             continue
+
+    # Native-k8s leases have no host record (the host is virtual / in-memory),
+    # so the host-driven path above can't reach them. Sweep them directly off
+    # the leases container using `assignedAt` as the staleness reference: if
+    # an active native lease has been assigned for longer than the TTL, the
+    # env-destroy job's `native_completed` callback never fired and the lease
+    # would otherwise stay ACTIVE forever, holding a virtual capacity slot.
+    stale_native = await query_all(
+        cosmos.leases,
+        (
+            "SELECT * FROM c WHERE c.state = @s "
+            "AND c.metadata.native_k8s = true "
+            "AND c.assignedAt < @cutoff"
+        ),
+        parameters=[
+            {"name": "@s", "value": LeaseState.ACTIVE.value},
+            {"name": "@cutoff", "value": cutoff},
+        ],
+    )
+    for lease_doc in stale_native:
+        lease_doc["state"] = LeaseState.EXPIRED.value
+        lease_doc["releasedAt"] = _utcnow_iso()
+        await cosmos.leases.replace_item(item=lease_doc["id"], body=lease_doc)
+        expired_count += 1
+
     return expired_count
 
 
