@@ -1273,6 +1273,7 @@ function PipelineDag({
   onSelectNode: (id: string | null) => void;
   onOpenTouchpoint: () => void;
 }) {
+  const workflowTriggerLabel = stringOrNull(run.metadata.workflow) ?? "agent-run";
   const phases = useMemo(() => phaseNodesForRun(graph, run), [graph, run]);
   const meta = run.metadata;
   const workflowGraph = useMemo(
@@ -1342,6 +1343,14 @@ function PipelineDag({
   return (
     <div className="dag-wrap">
       <div className="dag" aria-label="pipeline">
+        {/* Entry box: shape must match the workflow definition view. The
+            two views can drift on highlighting / status / interactivity,
+            but never on structural shape — they're rendering the same
+            phase pipeline. */}
+        <div className="dag-entry active">
+          <span className="mono">entry</span>
+          <span className="dim mono">{workflowTriggerLabel}</span>
+        </div>
         {phases.map((p) => {
           const isEntry = p.phaseName === activeEntry;
           return (
