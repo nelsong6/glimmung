@@ -341,3 +341,148 @@ def test_sequential_workflow_unchanged_under_dag_routing():
     target = glimmung_app._next_dispatch_target(wf, run, RunDecision.ADVANCE)
     assert target is not None
     assert target.name == "agent-execute"
+
+
+# ─── Stage 2C: concurrent fan-out dispatch ─────────────────────────────
+
+
+def test_dag_fan_out_returns_all_ready_branches():
+    """After env-prep advances in a DAG with parallel test-plan +
+    implement, fan-out returns BOTH branches simultaneously."""
+    wf = _wf([
+        _phase("env-prep"),
+        _phase("test-plan", depends_on=["env-prep"]),
+        _phase("implement", depends_on=["env-prep"]),
+        _phase("verify", depends_on=["test-plan", "implement"]),
+    ])
+    run = _run_with(_attempt("env-prep", decision=RunDecision.ADVANCE))
+    targets = glimmung_app._all_ready_dispatch_targets(wf, run, RunDecision.ADVANCE)
+    names = [p.name for p in targets]
+    assert names == ["test-plan", "implement"]
+
+
+def test_dag_fan_out_does_not_advance_to_join_until_both_complete():
+    """Test-plan advances; implement is in flight (no decision yet).
+    Fan-out should return [] (no new ready phases) and the wait check
+    will hold the run until implement reports back."""
+    wf = _wf([
+        _phase("env-prep"),
+        _phase("test-plan", depends_on=["env-prep"]),
+        _phase("implement", depends_on=["env-prep"]),
+        _phase("verify", depends_on=["test-plan", "implement"]),
+    ])
+    # implement is dispatched but hasn't completed
+    impl_in_flight = PhaseAttempt(
+        attempt_index=2, phase="implement", phase_kind="k8s_job",
+        workflow_filename="k8s_job:implement",
+        dispatched_at=datetime.now(UTC),
+        # No completed_at, no decision — in flight
+    )
+    run = _run_with(
+        _attempt("env-prep", decision=RunDecision.ADVANCE),
+        _attempt("test-plan", decision=RunDecision.ADVANCE),
+        impl_in_flight,
+    )
+    # Decision passed in is for test-plan (the just-completed advance)
+    targets = glimmung_app._all_ready_dispatch_targets(
+        wf, run, RunDecision.ADVANCE, completed_attempt_index=1,
+    )
+    assert targets == []
+    assert glimmung_app._has_in_flight_attempts(run) is True
+
+
+def test_dag_fan_out_advances_to_join_when_both_branches_complete():
+    wf = _wf([
+        _phase("env-prep"),
+        _phase("test-plan", depends_on=["env-prep"]),
+        _phase("implement", depends_on=["env-prep"]),
+        _phase("verify", depends_on=["test-plan", "implement"]),
+    ])
+    run = _run_with(
+        _attempt("env-prep", decision=RunDecision.ADVANCE),
+        _attempt("test-plan", decision=RunDecision.ADVANCE),
+        _attempt("implement", decision=RunDecision.ADVANCE),
+    )
+    targets = glimmung_app._all_ready_dispatch_targets(
+        wf, run, RunDecision.ADVANCE, completed_attempt_index=2,
+    )
+    names = [p.name for p in targets]
+    assert names == ["verify"]
+
+
+def test_abort_path_waits_for_in_flight_branches_before_teardown():
+    """When implement aborts but test-plan is still in flight, fan-out
+    returns [] — env-destroy doesn't start until test-plan finishes,
+    because deleting the validation namespace mid-flight could break
+    a still-running pod."""
+    wf = _wf([
+        _phase("env-prep"),
+        _phase("test-plan", depends_on=["env-prep"]),
+        _phase("implement", depends_on=["env-prep"]),
+        _phase("verify", depends_on=["test-plan", "implement"]),
+        _phase("env-destroy", always=True),
+    ])
+    test_plan_in_flight = PhaseAttempt(
+        attempt_index=1, phase="test-plan", phase_kind="k8s_job",
+        workflow_filename="k8s_job:test-plan",
+        dispatched_at=datetime.now(UTC),
+    )
+    run = _run_with(
+        _attempt("env-prep", decision=RunDecision.ADVANCE),
+        test_plan_in_flight,
+        _attempt("implement", decision=RunDecision.ABORT_BUDGET_ATTEMPTS),
+    )
+    targets = glimmung_app._all_ready_dispatch_targets(
+        wf, run, RunDecision.ABORT_BUDGET_ATTEMPTS, completed_attempt_index=2,
+    )
+    assert targets == []
+    assert glimmung_app._has_in_flight_attempts(run) is True
+
+
+def test_abort_path_runs_teardown_after_all_branches_complete():
+    """Once test-plan also reports back (advance or abort doesn't
+    matter), teardown can start."""
+    wf = _wf([
+        _phase("env-prep"),
+        _phase("test-plan", depends_on=["env-prep"]),
+        _phase("implement", depends_on=["env-prep"]),
+        _phase("verify", depends_on=["test-plan", "implement"]),
+        _phase("env-destroy", always=True),
+    ])
+    run = _run_with(
+        _attempt("env-prep", decision=RunDecision.ADVANCE),
+        _attempt("test-plan", decision=RunDecision.ADVANCE),
+        _attempt("implement", decision=RunDecision.ABORT_BUDGET_ATTEMPTS),
+    )
+    # Now test-plan has completed; the next handler call (after
+    # implement aborted, test-plan advanced after that) routes to
+    # env-destroy.
+    targets = glimmung_app._all_ready_dispatch_targets(
+        wf, run, RunDecision.ADVANCE, completed_attempt_index=1,
+    )
+    # test-plan advancing while implement aborted: no more
+    # non-always work, but we have an aborted run. _has_in_flight is
+    # False (everyone reported back). The advance-on-test-plan branch
+    # returns ready always-phases.
+    names = [p.name for p in targets]
+    assert "env-destroy" in names
+
+
+def test_terminal_disposition_aborted_when_any_non_always_aborted():
+    """A test-plan abort + implement advance both in attempts — the
+    run is ABORTED with the test-plan abort reason."""
+    wf = _wf([
+        _phase("env-prep"),
+        _phase("test-plan", depends_on=["env-prep"]),
+        _phase("implement", depends_on=["env-prep"]),
+        _phase("env-destroy", always=True),
+    ])
+    run = _run_with(
+        _attempt("env-prep", decision=RunDecision.ADVANCE),
+        _attempt("test-plan", decision=RunDecision.ABORT_BUDGET_ATTEMPTS),
+        _attempt("implement", decision=RunDecision.ADVANCE),
+        _attempt("env-destroy", decision=RunDecision.ADVANCE),
+    )
+    disposition, decision_value = glimmung_app._terminal_disposition(wf, run)
+    assert disposition == "aborted"
+    assert decision_value == RunDecision.ABORT_BUDGET_ATTEMPTS.value

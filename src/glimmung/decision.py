@@ -57,11 +57,29 @@ def _trigger_for_attempt(attempt) -> str:
     return "verify_fail"  # FAIL or ERROR
 
 
-def decide(run: Run, workflow: Workflow) -> RunDecision:
+def decide(
+    run: Run,
+    workflow: Workflow,
+    attempt_index: int | None = None,
+) -> RunDecision:
+    """Decide what to do next based on a specific attempt's outcome.
+
+    `attempt_index` selects which attempt the decision applies to.
+    Defaults to attempts[-1] for the legacy single-in-flight model;
+    pass an explicit index when concurrent dispatch means the just-
+    completed attempt isn't necessarily the latest in the list."""
     if not run.attempts:
         raise ValueError("decide() called on run with no attempts")
 
-    last = run.attempts[-1]
+    if attempt_index is not None:
+        if attempt_index < 0 or attempt_index >= len(run.attempts):
+            raise ValueError(
+                f"decide() attempt_index={attempt_index} out of range "
+                f"(0..{len(run.attempts) - 1})"
+            )
+        last = run.attempts[attempt_index]
+    else:
+        last = run.attempts[-1]
     phase_spec = next((p for p in workflow.phases if p.name == last.phase), None)
     if phase_spec is None:
         raise ValueError(
