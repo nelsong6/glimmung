@@ -883,7 +883,10 @@ class TriageDecision(str, Enum):
 
 class Run(BaseModel):
     schema_version: int = 1
-    id: str                                      # ULID
+    # Internal database backing key (ULID). Never exposed in URLs, UI labels,
+    # MCP tool parameters, or API responses intended for human consumption.
+    # The user-facing identifier is `run_number` (issue-scoped ordinal).
+    id: str
     project: str                                 # partition key
     workflow: str                                # workflow name (e.g. "issue-agent")
     # Human-facing run ordinal scoped to `(project, issue_number)`.
