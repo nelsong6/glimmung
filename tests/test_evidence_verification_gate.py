@@ -145,32 +145,34 @@ def test_canonical_verify_gate_shape_is_accepted():
     )
 
 
-def test_verify_phase_without_gate_rejected_with_pointer():
-    with pytest.raises(ValueError) as excinfo:
-        WorkflowRegister(
-            project="ambience", name="agent-run",
-            phases=[
-                _phase("env-prep"),
-                _phase("agent-execute", verify=True, outputs=["verification"]),
-                _phase("env-destroy", always=True),
-            ],
-        )
-    msg = str(excinfo.value)
-    # Pointer-style help so the registrar knows what to add.
-    assert "evidence_verification_gate" in msg
-    assert "agent-execute-gate" in msg
-    assert "kind: k8s_job" in msg
+def test_verify_phase_without_gate_is_now_accepted():
+    """The strict verify→gate rule was relaxed: a verify phase can
+    self-enforce by exiting non-zero on bad verdict in its own runner
+    script. Glimmung's gate primitive remains opt-in for projects that
+    want a separately-rendered gate phase. (Originally required the
+    gate; the tighter rule pushed projects toward inflexible shapes
+    when many already self-enforced before the primitive existed.)"""
+    WorkflowRegister(
+        project="ambience", name="agent-run",
+        phases=[
+            _phase("env-prep"),
+            _phase("agent-execute", verify=True, outputs=["verification"]),
+            _phase("env-destroy", always=True),
+        ],
+    )
 
 
-def test_verify_phase_as_last_phase_rejected():
-    with pytest.raises(ValueError, match="is the last phase"):
-        WorkflowRegister(
-            project="ambience", name="agent-run",
-            phases=[
-                _phase("env-prep"),
-                _phase("agent-execute", verify=True, outputs=["verification"]),
-            ],
-        )
+def test_verify_phase_as_last_phase_is_now_accepted():
+    """Verify-as-last-phase used to be rejected (gate had to follow);
+    with the relaxed rule, a self-enforcing verify can be the last
+    workflow phase too."""
+    WorkflowRegister(
+        project="ambience", name="agent-run",
+        phases=[
+            _phase("env-prep"),
+            _phase("agent-execute", verify=True, outputs=["verification"]),
+        ],
+    )
 
 
 def test_gate_without_preceding_verify_rejected():
