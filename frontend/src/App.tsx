@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, Navigate, NavLink, Outlet, Route, Routes, useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { AdminPanel } from "./AdminPanel";
 import { IssueDetailView, RunViewer, type AbortState, type DispatchState, type IssueGraph } from "./IssueDetailView";
@@ -7,6 +7,7 @@ import { PortfolioView } from "./PortfolioView";
 import { TouchpointDetailView } from "./TouchpointDetailView";
 import { TouchpointsView } from "./TouchpointsView";
 import { StyleguideView } from "./StyleguideView";
+import { PhaseGraph, type PhaseGraphPhase } from "./PhaseGraph";
 import { authedFetch, currentAccount, initAuth, signIn, signOut } from "./auth";
 import { isMockMode, mockRuns, mockSnapshot } from "./mockApi";
 import type { AccountInfo } from "@azure/msal-browser";
@@ -1206,6 +1207,7 @@ function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
         requirements: workflow.default_requirements,
         verify: false,
         recycle_policy: null,
+        depends_on: [],
       }];
   const policies = [
     ...phases.flatMap((phase) => phase.recycle_policy ? [{
@@ -1226,44 +1228,13 @@ function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
     <section>
       <h2>Workflow graph</h2>
       <div className="dag-wrap">
-        <div className="dag dag-definition" aria-label={`${workflow.name} workflow graph`}>
-          <div className="dag-entry active">
-            <span className="mono">entry</span>
-            <span className="dim mono">{workflow.trigger_label}</span>
-          </div>
-          <span className="dag-edge" aria-hidden="true">→</span>
-          {phases.map((phase, index) => (
-            <Fragment key={phase.name}>
-              <button
-                type="button"
-                className="dag-node dag-node-phase dag-node-definition"
-                aria-disabled="true"
-              >
-                <div className="dag-node-label">{phase.name}</div>
-                <div className="dag-node-state">
-                  <span className="pill info">not run</span>
-                </div>
-                <div className="dag-node-meta dim mono">
-                  {phase.verify ? "verify" : phase.kind}
-                </div>
-              </button>
-              {(index < phases.length - 1 || workflow.pr.enabled) && (
-                <span className="dag-edge" aria-hidden="true">→</span>
-              )}
-            </Fragment>
-          ))}
-          {workflow.pr.enabled && (
-            <button
-              type="button"
-              className="dag-node dag-node-definition dag-node-pr pending"
-              aria-disabled="true"
-            >
-              <div className="dag-node-label">touchpoint</div>
-              <div className="dag-node-state mono">pending</div>
-              <div className="dag-node-meta dim mono">PR primitive</div>
-            </button>
-          )}
-        </div>
+        <PhaseGraph
+          phases={phases as PhaseGraphPhase[]}
+          triggerLabel={workflow.trigger_label}
+          prEnabled={workflow.pr.enabled}
+          dagClassName="dag-definition"
+          ariaLabel={`${workflow.name} workflow graph`}
+        />
         {policies.length > 0 && (
           <div className="dag-policy-rail" aria-label="recycle policies">
             {policies.map((policy) => (
@@ -1342,8 +1313,6 @@ function ProjectWorkflowView({
         </div>
       </section>
 
-      <UpstreamSyncControls projectName={project.name} workflowName={workflow.name} signedIn={signedIn} />
-
       <WorkflowDefinitionGraph workflow={workflow} />
 
       <h2>Current work</h2>
@@ -1357,147 +1326,6 @@ function ProjectWorkflowView({
         showProjectColumn={false}
       />
     </div>
-  );
-}
-
-// Promote `.glimmung/workflows/<name>.yaml` from the project repo into
-// the live registration. The file is the desired-state source of truth;
-// glimmung's DB is the runtime source of truth. "check for updates" is
-// the read-only diff; "install" is the explicit promotion. Pairs with
-// the /v1/projects/{project}/workflows/{name}/{upstream,sync} endpoints
-// (glimmung#296 series).
-type UpstreamCheckResult = {
-  in_sync: boolean;
-  ref: string;
-  repo: string;
-  upstream: unknown;
-  current: unknown;
-};
-
-function UpstreamSyncControls({
-  projectName,
-  workflowName,
-  signedIn,
-}: {
-  projectName: string;
-  workflowName: string;
-  signedIn: boolean;
-}) {
-  const [check, setCheck] = useState<UpstreamCheckResult | null>(null);
-  const [busy, setBusy] = useState<"check" | "install" | null>(null);
-  const [confirming, setConfirming] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [lastCheckedAt, setLastCheckedAt] = useState<number | null>(null);
-
-  const projPath = encodeURIComponent(projectName);
-  const wfPath = encodeURIComponent(workflowName);
-
-  const runCheck = async () => {
-    setBusy("check");
-    setError(null);
-    try {
-      const r = await authedFetch(`/v1/projects/${projPath}/workflows/${wfPath}/upstream`);
-      if (!r.ok) {
-        const text = await r.text().catch(() => "");
-        setError(`${r.status} ${text || r.statusText}`);
-        setCheck(null);
-      } else {
-        setCheck(await r.json());
-        setLastCheckedAt(Date.now());
-      }
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const runInstall = async () => {
-    setBusy("install");
-    setError(null);
-    try {
-      const r = await authedFetch(
-        `/v1/projects/${projPath}/workflows/${wfPath}/sync`,
-        { method: "POST" },
-      );
-      if (!r.ok) {
-        const text = await r.text().catch(() => "");
-        setError(`${r.status} ${text || r.statusText}`);
-      } else {
-        setCheck(await r.json());
-        setLastCheckedAt(Date.now());
-      }
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(null);
-      setConfirming(false);
-    }
-  };
-
-  return (
-    <section className="upstream-sync">
-      <div className="upstream-sync-row">
-        <span className="key">upstream</span>
-        {check === null ? (
-          <span className="dim">not checked yet</span>
-        ) : check.in_sync ? (
-          <span className="mono">in sync · {check.ref}</span>
-        ) : (
-          <span className="mono">out of sync · {check.ref}</span>
-        )}
-        <span className="sep">·</span>
-        <button
-          type="button"
-          className="link"
-          onClick={() => void runCheck()}
-          disabled={busy !== null}
-        >
-          {busy === "check" ? "checking…" : "check for updates"}
-        </button>
-        {signedIn && check !== null && !check.in_sync && (
-          <>
-            <span className="sep">·</span>
-            {confirming ? (
-              <span className="confirm">
-                <button
-                  type="button"
-                  className="link"
-                  onClick={() => void runInstall()}
-                  disabled={busy !== null}
-                >
-                  {busy === "install" ? "installing…" : "install?"}
-                </button>
-                <span className="sep">/</span>
-                <button
-                  type="button"
-                  className="link"
-                  onClick={() => setConfirming(false)}
-                  disabled={busy !== null}
-                >
-                  keep
-                </button>
-              </span>
-            ) : (
-              <button
-                type="button"
-                className="link"
-                onClick={() => setConfirming(true)}
-                disabled={busy !== null}
-              >
-                install
-              </button>
-            )}
-          </>
-        )}
-      </div>
-      {check !== null && (
-        <div className="upstream-sync-meta dim mono">
-          {check.repo} · checked {lastCheckedAt ? relTime(new Date(lastCheckedAt).toISOString()) : "—"}
-        </div>
-      )}
-      {error !== null && <div className="upstream-sync-error danger-text mono">{error}</div>}
-    </section>
   );
 }
 
