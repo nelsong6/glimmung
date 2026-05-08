@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, Navigate, NavLink, Outlet, Route, Routes, useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { AdminPanel } from "./AdminPanel";
 import { IssueDetailView, RunViewer, type AbortState, type DispatchState, type IssueGraph } from "./IssueDetailView";
@@ -8,6 +8,7 @@ import { TouchpointDetailView } from "./TouchpointDetailView";
 import { TouchpointsView } from "./TouchpointsView";
 import { StyleguideView } from "./StyleguideView";
 import { PhaseGraph, type PhaseGraphPhase } from "./PhaseGraph";
+import { computeRecyclePaths, type RecycleArrow, type RecyclePathLayout } from "./recycleLayout";
 import { authedFetch, currentAccount, initAuth, signIn, signOut } from "./auth";
 import { isMockMode, mockRuns, mockSnapshot } from "./mockApi";
 import type { AccountInfo } from "@azure/msal-browser";
@@ -1212,20 +1213,103 @@ function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
         recycle_policy: null,
         depends_on: [],
       }];
-  const policies = [
-    ...phases.flatMap((phase) => phase.recycle_policy ? [{
-      source: phase.name,
-      target: phase.recycle_policy.lands_at,
-      trigger: phase.recycle_policy.on.join(" / ") || "recycle",
-      max: phase.recycle_policy.max_attempts,
-    }] : []),
-    ...(workflow.pr.recycle_policy ? [{
-      source: "touchpoint",
-      target: workflow.pr.recycle_policy.lands_at,
-      trigger: workflow.pr.recycle_policy.on.join(" / ") || "feedback",
-      max: workflow.pr.recycle_policy.max_attempts,
-    }] : []),
+
+  const recycleArrows: RecycleArrow[] = [
+    ...phases.flatMap((phase) => phase.recycle_policy
+      ? phase.recycle_policy.on.map((trigger) => ({
+          source: phase.name,
+          target: phase.recycle_policy!.lands_at,
+          trigger,
+          max_attempts: phase.recycle_policy!.max_attempts,
+          active: false,
+          kind: "phase_recycle" as const,
+        }))
+      : []
+    ),
+    ...(workflow.pr.recycle_policy
+      ? workflow.pr.recycle_policy.on.map((trigger) => ({
+          source: "report",
+          target: workflow.pr.recycle_policy!.lands_at,
+          trigger,
+          max_attempts: workflow.pr.recycle_policy!.max_attempts,
+          active: false,
+          kind: "report_recycle" as const,
+        }))
+      : []
+    ),
   ];
+
+  const bandRef = useRef<HTMLDivElement>(null);
+  const phaseRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const tpRef = useRef<HTMLDivElement | null>(null);
+  const [paths, setPaths] = useState<RecyclePathLayout[]>([]);
+  const [bandHeight, setBandHeight] = useState(0);
+
+  useLayoutEffect(() => {
+    if (recycleArrows.length === 0) {
+      setPaths([]);
+      setBandHeight(0);
+      return;
+    }
+    const recompute = () => {
+      const band = bandRef.current;
+      if (!band) return;
+      const bandRect = band.getBoundingClientRect();
+      const phaseRects = new Map<string, DOMRect>();
+      phaseRefs.current.forEach((el, name) => {
+        if (el && el.isConnected) phaseRects.set(name, el.getBoundingClientRect());
+      });
+      const tpRect = tpRef.current?.getBoundingClientRect() ?? null;
+      const { paths: nextPaths, bandHeight: nextHeight } = computeRecyclePaths(
+        recycleArrows,
+        phaseRects,
+        tpRect,
+        bandRect.left,
+        bandRect.top,
+      );
+      setPaths(nextPaths);
+      setBandHeight(nextHeight);
+    };
+    recompute();
+    const ro = new ResizeObserver(recompute);
+    if (bandRef.current) ro.observe(bandRef.current);
+    phaseRefs.current.forEach((el) => ro.observe(el));
+    if (tpRef.current) ro.observe(tpRef.current);
+    return () => ro.disconnect();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workflow]);
+
+  const renderPhase = (phase: PhaseGraphPhase) => {
+    const meta = phase.evidence_verification_gate
+      ? "verify-gate"
+      : phase.always
+        ? "always"
+        : phase.verify
+          ? "verify"
+          : phase.kind;
+    return (
+      <div
+        className="dag-node dag-node-phase dag-node-definition"
+        ref={(el) => {
+          if (el) phaseRefs.current.set(phase.name, el);
+          else phaseRefs.current.delete(phase.name);
+        }}
+      >
+        <div className="dag-node-label">{phase.name}</div>
+        <div className="dag-node-meta dim mono">{meta}</div>
+      </div>
+    );
+  };
+
+  const renderTouchpoint = () => (
+    <div
+      className="dag-node dag-node-definition dag-node-pr"
+      ref={(el) => { tpRef.current = el; }}
+    >
+      <div className="dag-node-label">touchpoint</div>
+      <div className="dag-node-meta dim mono">PR primitive</div>
+    </div>
+  );
 
   return (
     <section>
@@ -1236,23 +1320,50 @@ function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
           prEnabled={workflow.pr.enabled}
           dagClassName="dag-definition"
           ariaLabel={`${workflow.name} workflow graph`}
+          renderPhase={renderPhase}
+          renderTouchpoint={renderTouchpoint}
         />
-        {policies.length > 0 && (
-          <div className="dag-policy-rail" aria-label="recycle policies">
-            {policies.map((policy) => (
-              <span
-                className="dag-policy inactive"
-                key={`${policy.source}:${policy.target}:${policy.trigger}`}
-                title={`${policy.trigger}; max ${policy.max}`}
-              >
-                <span className="mono">{policy.source}</span>
-                <span className="dim mono">↻</span>
-                <span className="mono">{policy.target}</span>
-                <span className="dim mono">{policy.trigger}</span>
-              </span>
-            ))}
-          </div>
-        )}
+        <div
+          ref={bandRef}
+          className="dag-recycle-band"
+          style={{ height: bandHeight }}
+          aria-hidden={paths.length === 0 ? "true" : undefined}
+        >
+          {paths.length > 0 && (
+            <svg
+              className="dag-recycle-svg"
+              width="100%"
+              height={bandHeight}
+              aria-label="recycle policies"
+            >
+              <defs>
+                <marker
+                  id="dag-recycle-head-def"
+                  viewBox="0 0 10 10"
+                  refX="9"
+                  refY="5"
+                  markerWidth="7"
+                  markerHeight="7"
+                  orient="auto-start-reverse"
+                >
+                  <path d="M 0 0 L 10 5 L 0 10 z" />
+                </marker>
+              </defs>
+              {paths.map((p, i) => (
+                <g key={`${p.arrow.kind}:${p.arrow.source}:${p.arrow.target}:${i}`}>
+                  <path d={p.d} className="dag-recycle-hitarea">
+                    <title>{p.title}</title>
+                  </path>
+                  <path
+                    d={p.d}
+                    className={p.cls}
+                    markerEnd="url(#dag-recycle-head-def)"
+                  />
+                </g>
+              ))}
+            </svg>
+          )}
+        </div>
       </div>
     </section>
   );
