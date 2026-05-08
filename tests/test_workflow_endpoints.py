@@ -184,6 +184,10 @@ def _single_phase_register(
     project: str = "ambience",
     name: str = "agent-run",
 ) -> WorkflowRegister:
+    """Minimal valid workflow shape: prepare entry + verify phase + always
+    cleanup. Tests focused on registration semantics use this rather
+    than a one-phase fixture so the post-2026-05 mandatory-phase rule
+    in the /v1/workflows endpoint passes."""
     return WorkflowRegister(
         project=project,
         name=name,
@@ -192,6 +196,12 @@ def _single_phase_register(
                 name="agent",
                 workflow_filename="issue-agent.yml",
                 outputs=["validation_url"],
+                verify=True,
+            ),
+            PhaseSpec(
+                name="cleanup",
+                workflow_filename="cleanup.yml",
+                always=True,
             ),
         ],
     )
@@ -208,7 +218,7 @@ async def test_register_workflow_creates_new(cosmos, monkeypatch):
 
     assert result.project == "ambience"
     assert result.name == "agent-run"
-    assert [p.name for p in result.phases] == ["agent"]
+    assert [p.name for p in result.phases] == ["agent", "cleanup"]
     doc = await _read_workflow(cosmos, "ambience", "agent-run")
     assert doc is not None
     assert doc["phases"][0]["workflowFilename"] == "issue-agent.yml"
@@ -284,18 +294,24 @@ async def test_register_workflow_2phase_with_inputs_and_outputs(cosmos, monkeypa
             PhaseSpec(
                 name="agent-execute",
                 workflow_filename="agent-execute.yml",
+                verify=True,
                 inputs={
                     "validation_url": "${{ phases.env-prep.outputs.validation_url }}",
                     "image_tag": "${{ phases.env-prep.outputs.image_tag }}",
                 },
             ),
+            PhaseSpec(
+                name="cleanup",
+                workflow_filename="cleanup.yml",
+                always=True,
+            ),
         ],
     )
     result = await register_workflow(reg)
 
-    assert [p.name for p in result.phases] == ["env-prep", "agent-execute"]
+    assert [p.name for p in result.phases] == ["env-prep", "agent-execute", "cleanup"]
     doc = await _read_workflow(cosmos, "glimmung", "agent-run")
-    assert len(doc["phases"]) == 2
+    assert len(doc["phases"]) == 3
     assert doc["phases"][1]["inputs"] == {
         "validation_url": "${{ phases.env-prep.outputs.validation_url }}",
         "image_tag": "${{ phases.env-prep.outputs.image_tag }}",
@@ -333,6 +349,19 @@ async def test_register_workflow_accepts_native_k8s_job_phase(cosmos, monkeypatc
                 kind="k8s_job",
                 evidence_verification_gate=True,
                 inputs={"verification": "${{ phases.agent-execute.outputs.verification }}"},
+            ),
+            PhaseSpec(
+                name="cleanup",
+                kind="k8s_job",
+                always=True,
+                jobs=[
+                    NativeJobSpec(
+                        id="cleanup",
+                        image="romainecr.azurecr.io/ambience-runner:abc123",
+                        command=["/app/cleanup"],
+                        steps=[NativeStepSpec(slug="teardown")],
+                    )
+                ],
             ),
         ],
     )
@@ -378,11 +407,24 @@ async def test_register_workflow_accepts_k8s_job_for_native_webapp_project(
             PhaseSpec(
                 name="agent-execute",
                 kind="k8s_job",
+                verify=True,
                 jobs=[
                     NativeJobSpec(
                         id="agent",
                         image="romainecr.azurecr.io/glimmung-runner:abc123",
                         steps=[NativeStepSpec(slug="run-agent")],
+                    )
+                ],
+            ),
+            PhaseSpec(
+                name="cleanup",
+                kind="k8s_job",
+                always=True,
+                jobs=[
+                    NativeJobSpec(
+                        id="cleanup",
+                        image="romainecr.azurecr.io/glimmung-runner:abc123",
+                        steps=[NativeStepSpec(slug="teardown")],
                     )
                 ],
             ),

@@ -4409,6 +4409,10 @@ async def register_workflow(w: WorkflowRegister) -> Workflow:
     if not project_doc:
         raise HTTPException(400, f"project {w.project!r} does not exist; register it first")
     _assert_workflow_allowed_for_project(project_doc, w)
+    try:
+        w.validate_mandatory_phases()
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
     doc = _workflow_to_doc(w)
     try:
         existing = await cosmos.workflows.read_item(item=w.name, partition_key=w.project)
