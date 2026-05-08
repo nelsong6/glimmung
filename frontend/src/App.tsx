@@ -1233,7 +1233,6 @@ function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
       <div className="dag-wrap">
         <PhaseGraph
           phases={phases as PhaseGraphPhase[]}
-          triggerLabel={workflow.trigger_label}
           prEnabled={workflow.pr.enabled}
           dagClassName="dag-definition"
           ariaLabel={`${workflow.name} workflow graph`}

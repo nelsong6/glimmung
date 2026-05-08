@@ -25,8 +25,6 @@ export type PhaseGraphPhase = {
 export type PhaseGraphProps = {
   /** Phases in declared order (the same `phases` field on Workflow). */
   phases: PhaseGraphPhase[];
-  /** Trigger label shown in the entry box. */
-  triggerLabel: string | null;
   /** Whether to render the touchpoint (PR primitive) box at the end. */
   prEnabled: boolean;
   /**
@@ -52,11 +50,6 @@ export type PhaseGraphProps = {
    * recycle-child / resume runs that entered mid-pipeline.
    */
   entryPhaseName?: string | null;
-  /**
-   * When true the entry box renders with the `active` class — used by
-   * the run-pipeline strip but never by the workflow definition view.
-   */
-  entryActive?: boolean;
 };
 
 /**
@@ -121,14 +114,12 @@ function defaultTouchpointNode(): ReactNode {
 
 export function PhaseGraph({
   phases,
-  triggerLabel,
   prEnabled,
   renderPhase = defaultPhaseNode,
   renderTouchpoint = defaultTouchpointNode,
   dagClassName,
   ariaLabel,
   entryPhaseName = null,
-  entryActive = false,
 }: PhaseGraphProps) {
   const depths = computeDepths(phases);
   // Group phases by depth, preserving declared order within each depth.
@@ -148,10 +139,6 @@ export function PhaseGraph({
 
   return (
     <div className={`dag${dagClassName ? " " + dagClassName : ""}`} aria-label={ariaLabel}>
-      <div className={`dag-entry${entryActive ? " active" : ""}`}>
-        <span className="mono">entry</span>
-        <span className="dim mono">{triggerLabel ?? "—"}</span>
-      </div>
       {columns.map((col, idx) => {
         // Highlight the arrow leading into a column when any phase in
         // that column matches `entryPhaseName`. Parallel columns can
@@ -162,12 +149,14 @@ export function PhaseGraph({
         );
         return (
           <Fragment key={idx}>
-            <div
-              className={`dag-edge${colHasEntry ? " entry" : ""}`}
-              aria-label={colHasEntry ? "the run entered here" : undefined}
-              title={colHasEntry ? "the run entered here" : undefined}
-              aria-hidden={colHasEntry ? undefined : "true"}
-            >→</div>
+            {idx > 0 && (
+              <div
+                className={`dag-edge${colHasEntry ? " entry" : ""}`}
+                aria-label={colHasEntry ? "the run entered here" : undefined}
+                title={colHasEntry ? "the run entered here" : undefined}
+                aria-hidden={colHasEntry ? undefined : "true"}
+              >→</div>
+            )}
             <div className={`dag-column${col.length > 1 ? " dag-column-parallel" : ""}`}>
               {col.map((phase) => (
                 <Fragment key={phase.name}>{renderPhase(phase)}</Fragment>
