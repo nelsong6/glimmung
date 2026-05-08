@@ -128,24 +128,34 @@ def _attempt_token_sha256(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def _require_native_attempt_token(request: Request, run: Run) -> None:
-    """Validate native callback token when the attempt has one bound.
+def _require_native_attempt_token(request: Request, run: Run) -> int:
+    """Validate native callback token and return the attempt index it
+    matches.
+
+    Under concurrent dispatch multiple attempts can be in flight, each
+    with its own capability token. The token in the request header
+    identifies WHICH attempt is reporting completion. Returns the
+    matched attempt's index in `run.attempts`.
 
     Legacy callback paths and older test fixtures have no token hash on
-    the attempt; those remain run-id capability callbacks. Native Job
-    launch will bind the hash before the pod starts.
+    any attempt; those remain run-id capability callbacks and resolve
+    to the latest in-flight attempt as a back-compat fallback.
     """
     if not run.attempts:
         raise HTTPException(409, f"run {run.id} has no attempts")
-    expected = run.attempts[-1].capability_token_sha256
-    if not expected:
-        return
+    # If no attempt has a capability token bound, this is the legacy
+    # path — fall back to attempts[-1].
+    if not any(a.capability_token_sha256 for a in run.attempts):
+        return len(run.attempts) - 1
     presented = request.headers.get("x-glimmung-attempt-token", "")
     if not presented:
         raise HTTPException(401, "missing x-glimmung-attempt-token")
     actual = _attempt_token_sha256(presented)
-    if not hmac.compare_digest(actual, expected):
-        raise HTTPException(403, "invalid x-glimmung-attempt-token")
+    for i, attempt in enumerate(run.attempts):
+        expected = attempt.capability_token_sha256
+        if expected and hmac.compare_digest(actual, expected):
+            return i
+    raise HTTPException(403, "invalid x-glimmung-attempt-token")
 
 
 def _serving_artifact_blob_name(blob_path: str) -> str:
@@ -881,6 +891,7 @@ async def _validate_phase_outputs(
     *,
     run: Run,
     posted_outputs: dict[str, str] | None,
+    attempt_index: int | None = None,
 ) -> dict[str, str] | None:
     """Validate `outputs` posted to `/v1/runs/.../completed` against the
     registered phase's declared `PhaseSpec.outputs` (#101).
@@ -904,10 +915,14 @@ async def _validate_phase_outputs(
     declared: set[str] = set()
     workflow_doc = await _read_workflow(cosmos, run.project, run.workflow)
     workflow_model = _doc_to_workflow(workflow_doc) if workflow_doc else None
+    completing_phase_name = "<none>"
     if workflow_model is not None and run.attempts:
-        latest_phase_name = run.attempts[-1].phase
+        if attempt_index is not None and 0 <= attempt_index < len(run.attempts):
+            completing_phase_name = run.attempts[attempt_index].phase
+        else:
+            completing_phase_name = run.attempts[-1].phase
         for phase in workflow_model.phases:
-            if phase.name == latest_phase_name:
+            if phase.name == completing_phase_name:
                 declared = set(phase.outputs)
                 break
 
@@ -923,7 +938,7 @@ async def _validate_phase_outputs(
         raise HTTPException(
             400,
             f"phase_outputs contract violation for run {run.project}/{run.id} "
-            f"phase {run.attempts[-1].phase if run.attempts else '<none>'!r}: "
+            f"phase {completing_phase_name!r}: "
             f"{'; '.join(parts)}. Declared outputs: {sorted(declared)}.",
         )
 
@@ -944,6 +959,7 @@ async def _process_run_completion(
     screenshots_markdown: str | None = None,
     summary_markdown: str | None = None,
     phase_outputs: dict[str, str] | None = None,
+    completed_attempt_index: int | None = None,
 ) -> str:
     """Drive a Run through one decision-engine cycle. Returns the
     decision value.
@@ -974,6 +990,7 @@ async def _process_run_completion(
         summary_markdown=summary_markdown,
         screenshots_markdown=screenshots_markdown,
         phase_outputs=phase_outputs,
+        attempt_index=completed_attempt_index,
     )
 
     workflow_doc = await _read_workflow(cosmos, run.project, run.workflow)
@@ -990,44 +1007,60 @@ async def _process_run_completion(
         return "abort_no_workflow"
 
     decision_run = await _run_with_recycle_lineage_accounting(cosmos, run)
-    decision = decide(decision_run, workflow_model)
-    run, etag = await run_ops.record_decision(cosmos, run=run, etag=etag, decision=decision)
+    decision = decide(decision_run, workflow_model, completed_attempt_index)
+    run, etag = await run_ops.record_decision(
+        cosmos, run=run, etag=etag, decision=decision,
+        attempt_index=completed_attempt_index,
+    )
 
     if decision == RunDecision.RETRY:
         await _dispatch_retry(
             run=run, etag=etag, repo=repo,
             workflow_model=workflow_model,
+            failing_attempt_index=completed_attempt_index,
         )
         return decision.value
 
     # Multi-phase routing (#101) extended for always-run teardown phases
-    # (#296): forward to the next phase if any, otherwise go terminal with
-    # the disposition computed from non-always history. Runs whose verify
-    # phase aborted are routed through the teardown chain before being
-    # sealed as ABORTED, so cleanup phases get a chance to run.
-    target_phase = _next_dispatch_target(workflow_model, run, decision)
-    if target_phase is not None:
-        await _dispatch_next_phase(
-            run=run, etag=etag, repo=repo,
-            workflow_model=workflow_model, next_phase=target_phase,
+    # (#296) and DAG concurrent dispatch (#nnn): fan out to all ready
+    # phases. For sequential workflows this dispatches at most one
+    # phase per completion (same as before). For DAG workflows with
+    # parallel branches, multiple phases dispatch simultaneously.
+    target_phases = _all_ready_dispatch_targets(
+        workflow_model, run, decision, completed_attempt_index,
+    )
+    if target_phases:
+        completed_phase_name = (
+            run.attempts[completed_attempt_index].phase
+            if completed_attempt_index is not None
+            else run.attempts[-1].phase
         )
-        last_phase = _phase_by_name(workflow_model, run.attempts[-1].phase)
-        last_phase_was_always = bool(last_phase and last_phase.always)
-        if target_phase.always and not last_phase_was_always:
-            log.info(
-                "run %s entering teardown chain at phase %r (decision=%s)",
-                run.id, target_phase.name, decision.value,
+        for next_phase in target_phases:
+            run, etag = await _dispatch_next_phase(
+                run=run, etag=etag, repo=repo,
+                workflow_model=workflow_model, next_phase=next_phase,
             )
-        else:
-            log.info(
-                "run %s advanced from phase %r to %r",
-                run.id, run.attempts[-1].phase, target_phase.name,
-            )
+        log.info(
+            "run %s fan-out dispatched %d phase(s) after %r (decision=%s): %s",
+            run.id, len(target_phases), completed_phase_name, decision.value,
+            [p.name for p in target_phases],
+        )
         return "advance_phase"
 
-    # No more phases (regular or teardown). Seal disposition from the
-    # non-always-phase history so a clean teardown after an abort still
-    # marks the run ABORTED with the original verify-loop reason.
+    # No phases ready right now. If branches are still in flight, wait
+    # for them before sealing terminal — the next completion will
+    # re-evaluate fan-out.
+    if _has_in_flight_attempts(run):
+        log.info(
+            "run %s waiting for in-flight branches before terminal "
+            "(decision=%s on this branch)",
+            run.id, decision.value,
+        )
+        return decision.value
+
+    # All branches reported back. Seal disposition from non-always
+    # history so a clean teardown after an abort still marks the run
+    # ABORTED with the original verify-loop reason.
     disposition, abort_decision = _terminal_disposition(workflow_model, run)
 
     if disposition == "passed":
@@ -1122,13 +1155,17 @@ async def _dispatch_retry(
     etag: str,
     repo: str,
     workflow_model: Workflow,
+    failing_attempt_index: int | None = None,
 ) -> None:
     """Dispatch a recycle (formerly RETRY) for a Run. Reads the failing
     phase's `recycle_policy.lands_at` to pick the destination phase, finds
     that phase's spec, acquires a fresh lease, then fires workflow_dispatch
     with `prior_verification_artifact_url` set so the next attempt can pull
-    context from the previous attempt. v1 always lands at "self" (same
-    phase), but the lookup is general for the future multi-phase case."""
+    context from the previous attempt.
+
+    `failing_attempt_index` selects which attempt's failure triggered the
+    retry under concurrent dispatch. None falls back to attempts[-1]
+    (legacy single-in-flight)."""
     cosmos: Cosmos = app.state.cosmos
     settings: Settings = app.state.settings
     minter: GitHubAppTokenMinter = app.state.gh_minter
@@ -1136,7 +1173,10 @@ async def _dispatch_retry(
     if not run.attempts:
         log.warning("retry: run %s has no attempts; cannot dispatch", run.id)
         return
-    failing_phase_name = run.attempts[-1].phase
+    if failing_attempt_index is not None and 0 <= failing_attempt_index < len(run.attempts):
+        failing_phase_name = run.attempts[failing_attempt_index].phase
+    else:
+        failing_phase_name = run.attempts[-1].phase
     failing_phase = next(
         (p for p in workflow_model.phases if p.name == failing_phase_name), None,
     )
@@ -1320,12 +1360,39 @@ def _next_phase_after(workflow: Workflow, phase_name: str):
 
 def _completed_advance_phases(run: Run) -> set[str]:
     """Phases whose latest attempt resulted in ADVANCE. Used by
-    DAG-aware routing to gate downstream phases."""
+    DAG-aware routing to gate downstream phases.
+
+    Counts a phase as advanced when:
+    - its latest attempt's decision is ADVANCE, OR
+    - the attempt has completed_at set with conclusion=success and no
+      explicit decision (legacy attempts written before record_decision
+      was always called; treats success-with-no-decision as advance for
+      back-compat with fixtures that pre-date the decision field).
+    """
     advance = RunDecision.ADVANCE.value
-    by_phase: dict[str, str | None] = {}
+    abort_decisions = {
+        RunDecision.ABORT_BUDGET_ATTEMPTS.value,
+        RunDecision.ABORT_BUDGET_COST.value,
+        RunDecision.ABORT_MALFORMED.value,
+    }
+    # Latest attempt per phase wins (matters when a phase recycled).
+    by_phase: dict[str, PhaseAttempt] = {}
     for attempt in run.attempts:
-        by_phase[attempt.phase] = attempt.decision
-    return {name for name, dec in by_phase.items() if dec == advance}
+        by_phase[attempt.phase] = attempt
+    advanced: set[str] = set()
+    for name, attempt in by_phase.items():
+        if attempt.decision == advance:
+            advanced.add(name)
+            continue
+        if attempt.decision in abort_decisions:
+            continue  # explicit abort — not advanced
+        if (
+            attempt.decision is None
+            and attempt.completed_at is not None
+            and attempt.conclusion == "success"
+        ):
+            advanced.add(name)
+    return advanced
 
 
 def _attempted_phases(run: Run) -> set[str]:
@@ -1340,26 +1407,86 @@ def _next_ready_phase(
     *,
     include_always: bool = True,
 ) -> PhaseSpec | None:
-    """First phase (in declared list order) that's ready to dispatch:
-    not yet attempted, and all its `depends_on` predecessors have
-    completed-with-ADVANCE. DAG-aware — for sequential workflows
-    (depends_on inferred from list index) this is identical to walking
-    by index. For explicit DAG workflows with parallel branches, this
-    picks one branch at a time (single-dispatch); concurrent multi-
-    branch dispatch is stage 2C and lands separately.
+    """First ready phase by list order. Convenience wrapper around
+    `_list_ready_phases` for callers that only want one."""
+    ready = _list_ready_phases(workflow, run, include_always=include_always)
+    return ready[0] if ready else None
 
-    `include_always=False` skips always-phases so a verify or normal
-    phase advancing doesn't accidentally jump straight into teardown
-    when there's still real work pending — the caller falls back to
-    `_first_always_phase` only when nothing else is ready."""
+
+def _list_ready_phases(
+    workflow: Workflow,
+    run: Run,
+    *,
+    include_always: bool = True,
+) -> list[PhaseSpec]:
+    """All phases (in declared list order) ready to dispatch: not yet
+    attempted and all `depends_on` predecessors have completed-with-
+    ADVANCE. DAG-aware. For sequential workflows returns 0 or 1 phase.
+    For explicit-DAG workflows with parallel branches, returns multiple
+    phases that should fan-out dispatch concurrently."""
     completed = _completed_advance_phases(run)
     attempted = _attempted_phases(run)
+    ready: list[PhaseSpec] = []
     for phase in workflow.phases:
         if phase.name in attempted:
             continue
         if phase.always and not include_always:
             continue
         if all(dep in completed for dep in phase.depends_on):
+            ready.append(phase)
+    return ready
+
+
+def _run_has_non_always_abort(workflow: Workflow, run: Run) -> bool:
+    """Has any non-always phase ABORTED in this run? Used by the
+    fan-out router to detect the case where THIS branch advanced but
+    another branch already aborted — the run is heading to ABORTED
+    terminal and should route through teardown regardless of this
+    branch's decision."""
+    for attempt in run.attempts:
+        ph = _phase_by_name(workflow, attempt.phase)
+        if ph is not None and ph.always:
+            continue
+        if attempt.decision in _ABORT_DECISION_VALUES:
+            return True
+    return False
+
+
+def _has_in_flight_attempts(run: Run) -> bool:
+    """Are there attempts that haven't completed yet? Under concurrent
+    dispatch this gates terminal — we don't seal the run until every
+    in-flight branch reports back, even if their outcomes aren't going
+    to change disposition (e.g. an abort already happened on another
+    branch).
+
+    "In flight" means: not yet completed (no `completed_at`) AND no
+    decision recorded. Legacy attempts written before record_decision
+    was always called have `completed_at` set with `decision=None`;
+    those are NOT in flight (they reported back, just under the older
+    contract)."""
+    return any(
+        a.decision is None and a.completed_at is None
+        for a in run.attempts
+    )
+
+
+def _first_unattempted_always_phase_topo(
+    workflow: Workflow,
+    run: Run,
+) -> PhaseSpec | None:
+    """First always-phase by list order whose always-phase-only
+    dependencies are completed. Non-always deps are ignored — abort path
+    needs teardown to run even when upstream user-phases didn't advance.
+    Always-phase-to-always-phase deps are still respected so a teardown
+    chain (A then B-depends-on-A) runs in order."""
+    completed = _completed_advance_phases(run)
+    attempted = _attempted_phases(run)
+    always_names = {p.name for p in workflow.phases if p.always}
+    for phase in workflow.phases:
+        if not phase.always or phase.name in attempted:
+            continue
+        always_deps = [d for d in phase.depends_on if d in always_names]
+        if all(d in completed for d in always_deps):
             return phase
     return None
 
@@ -1390,63 +1517,104 @@ def _terminal_disposition(workflow: Workflow, run: Run) -> tuple[str, str | None
     attempts. Returns ('passed', None) or ('aborted', <abort decision value>).
 
     Always-phases run as cleanup; their per-attempt outcomes don't move the
-    run into ABORTED. The disposition is determined by the most recent
-    non-always-phase attempt. Pre-teardown runs (no always-phases registered)
-    fall through identically to today's behavior because every attempt is
-    non-always."""
-    for attempt in reversed(run.attempts):
+    run into ABORTED. Under concurrent dispatch, an abort on one branch
+    (e.g. implementation) and an advance on another (e.g. test-plan) can
+    co-exist in attempts; ANY non-always abort dominates — return aborted
+    with the FIRST such abort's decision so abort_reason references the
+    original failure cause rather than a later branch's separate failure.
+    Pre-teardown runs (no always-phases registered) fall through
+    identically to today's behavior because every attempt is non-always."""
+    first_abort = None
+    for attempt in run.attempts:
         ph = _phase_by_name(workflow, attempt.phase)
         if ph is not None and ph.always:
             continue
-        if attempt.decision in _ABORT_DECISION_VALUES:
-            return ("aborted", attempt.decision)
-        return ("passed", None)
+        if attempt.decision in _ABORT_DECISION_VALUES and first_abort is None:
+            first_abort = attempt
+    if first_abort is not None:
+        return ("aborted", first_abort.decision)
     return ("passed", None)
 
 
-def _next_dispatch_target(workflow: Workflow, run: Run, decision: RunDecision):
-    """Pick the next phase to dispatch given the just-recorded `decision`
-    on the latest attempt. Returns the PhaseSpec to dispatch, or None when
-    the run should go terminal.
+def _next_dispatch_target(
+    workflow: Workflow, run: Run, decision: RunDecision,
+) -> PhaseSpec | None:
+    """Single-target compatibility wrapper around
+    `_all_ready_dispatch_targets`. Returns the first ready phase (or
+    None). Kept for tests + any caller that only wants one phase."""
+    targets = _all_ready_dispatch_targets(workflow, run, decision)
+    return targets[0] if targets else None
 
-    Reads `depends_on` to find the next ready phase in topological order
-    (stage 2A added the field; this is the routing layer). For sequential
-    workflows (depends_on inferred from list index) routing is identical
-    to walking by index. For explicit DAG workflows it picks one ready
-    branch at a time — concurrent multi-branch dispatch lands in 2C.
 
-    Routing rules:
-    - Last attempt was a teardown phase: chain to the next ready phase
-      (whose deps may include the just-completed teardown). Teardown
-      failures don't escalate — the next teardown still fires.
-    - Last attempt was non-always with ADVANCE: route to the next ready
-      non-always phase. If none, fall through to teardown.
-    - Last attempt was non-always with any abort decision: skip remaining
-      non-always phases and route to the first always-phase. The terminal
-      disposition is preserved via attempt history; no extra state needed.
-    - RETRY is handled by the caller (recycle dispatch) and never reaches
-      this function."""
+def _all_ready_dispatch_targets(
+    workflow: Workflow,
+    run: Run,
+    decision: RunDecision,
+    completed_attempt_index: int | None = None,
+) -> list[PhaseSpec]:
+    """Fan-out dispatch list. Returns ALL phases that should dispatch
+    next given the just-completed attempt's decision.
+
+    For sequential workflows: returns 0 or 1 phase — back-compat with
+    the prior single-dispatch behavior.
+
+    For DAG workflows with parallel branches: returns multiple phases
+    that are simultaneously ready (e.g. test-plan + implement after
+    env-prep advances). Caller fans out by dispatching each.
+
+    When the result is empty AND there are still in-flight attempts,
+    the caller waits for the in-flight branches before going terminal —
+    a non-empty result on a later completion will start the next batch.
+
+    Routing:
+    - Last attempt was a teardown phase: returns next ready phases
+      (always-subgraph topological order).
+    - Last attempt was non-always with ADVANCE: returns all ready
+      non-always phases. When none are ready and no in-flight attempts
+      remain, returns ready always-phases (teardown begins).
+    - Last attempt was non-always with any abort decision: skip
+      remaining non-always work. Return the first always-phase whose
+      always-only deps are met (deps on non-always phases are ignored
+      on abort — teardown runs unconditionally). Returns at most one
+      always-phase per call so teardown chains run in order.
+    - RETRY is handled by the caller before this is consulted."""
     if not run.attempts:
-        return None
-    last_attempt = run.attempts[-1]
-    last_phase = _phase_by_name(workflow, last_attempt.phase)
-    if last_phase is not None and last_phase.always:
-        # In teardown chain — continue with next ready phase (may be
-        # another always-phase whose deps are now satisfied, or None if
-        # we've reached the end of the teardown chain).
-        return _next_ready_phase(workflow, run)
-    if decision == RunDecision.ADVANCE:
-        # Look for the next ready non-always phase first; if none,
-        # the always-chain begins.
-        next_non_always = _next_ready_phase(workflow, run, include_always=False)
-        if next_non_always is not None:
-            return next_non_always
-        # No more user-phase work — start teardown.
-        return _next_ready_phase(workflow, run)
-    # Abort: skip remaining non-always work, jump to teardown. Teardown
-    # phases run on the abort path regardless of their depends_on (their
-    # purpose is unconditional cleanup).
-    return _first_always_phase(workflow)
+        return []
+    if completed_attempt_index is not None and 0 <= completed_attempt_index < len(run.attempts):
+        completed = run.attempts[completed_attempt_index]
+    else:
+        completed = run.attempts[-1]
+    completed_phase = _phase_by_name(workflow, completed.phase)
+
+    if completed_phase is not None and completed_phase.always:
+        # In teardown chain — continue with any newly-ready phases.
+        return _list_ready_phases(workflow, run)
+
+    # If ANY non-always branch already aborted, the run is heading to
+    # ABORTED terminal regardless of this branch's outcome. Route
+    # through the abort path so teardown fires once everything reports
+    # back, instead of continuing to dispatch new user-phase work.
+    on_abort_path = (
+        decision != RunDecision.ADVANCE
+        or _run_has_non_always_abort(workflow, run)
+    )
+
+    if on_abort_path:
+        if _has_in_flight_attempts(run):
+            return []
+        first_always = _first_unattempted_always_phase_topo(workflow, run)
+        return [first_always] if first_always is not None else []
+
+    # Normal advance path: fan out to all ready non-always phases.
+    ready_non_always = _list_ready_phases(workflow, run, include_always=False)
+    if ready_non_always:
+        return ready_non_always
+    # No more user-phase work ready. If branches are still in flight,
+    # wait for them before entering teardown.
+    if _has_in_flight_attempts(run):
+        return []
+    # All non-always phases done — start teardown.
+    return _list_ready_phases(workflow, run, include_always=True)
 
 
 def _phase_runner_label(phase: PhaseSpec) -> str:
@@ -1502,16 +1670,17 @@ async def _dispatch_next_phase(
     workflow_model: Workflow,
     next_phase,
     resume_context: dict[str, Any] | None = None,
-) -> None:
+) -> tuple[Run, str]:
     """Forward dispatch (#101): fire `next_phase` for `run` after the
     prior phase ADVANCEd. Substitutes inputs from prior phases'
     captured outputs, acquires a fresh lease (capacity accounting is
     per-runner-job, same shape as recycle dispatch), appends a new
     PhaseAttempt, and fires workflow_dispatch.
 
-    Run stays IN_PROGRESS, issue lock stays held — lock release
-    fires only when the run goes terminal (last phase ADVANCEs to
-    PR / fails / aborts)."""
+    Returns the updated `(run, etag)` after the new attempt is appended
+    so callers fanning out to multiple ready phases can chain dispatches
+    without an intermediate re-read. Run stays IN_PROGRESS, issue lock
+    stays held — lock release fires only when the run goes terminal."""
     cosmos: Cosmos = app.state.cosmos
     settings: Settings = app.state.settings
     minter: GitHubAppTokenMinter | None = app.state.gh_minter
@@ -1531,7 +1700,7 @@ async def _dispatch_next_phase(
                 f"{next_phase.name!r} — see glimmung logs"
             ),
         )
-        return
+        return run, etag
     resume_context = resume_context or {}
     input_overrides = resume_context.get("input_overrides")
     if isinstance(input_overrides, dict):
@@ -1605,7 +1774,7 @@ async def _dispatch_next_phase(
             "forward dispatch: no host for run %s phase %r; lease %s pending",
             run.id, next_phase.name, lease.id,
         )
-        return
+        return run, etag
     if next_phase.kind == "k8s_job":
         lease_doc = {
             **lease_ops._lease_to_doc(lease),
@@ -1614,7 +1783,7 @@ async def _dispatch_next_phase(
             "workflow": lease.workflow,
         }
         await _maybe_dispatch_workflow(app, lease_doc, host)
-        return
+        return run, etag
 
     if minter is None:
         # Test path: no GH token minter wired in. The lease + attempt
@@ -1624,7 +1793,7 @@ async def _dispatch_next_phase(
             "forward dispatch (no minter): would dispatch %s on %s for run %s phase %r",
             next_phase.workflow_filename, host.name, run.id, next_phase.name,
         )
-        return
+        return run, etag
 
     inputs = {
         "host": host.name,
@@ -1651,6 +1820,7 @@ async def _dispatch_next_phase(
         )
     except Exception:
         log.exception("forward workflow_dispatch failed for run %s", run.id)
+    return run, etag
 
 
 def _native_jobs_with_resume_boundary(
@@ -3571,15 +3741,18 @@ async def native_run_completed(
     if found is None:
         raise HTTPException(404, f"no run {project}/{run_id}")
     run, etag = found
-    _require_native_attempt_token(request, run)
-    attempt_index = run.attempts[-1].attempt_index
+    # Token identifies the specific attempt under concurrent dispatch.
+    completed_attempt_index = _require_native_attempt_token(request, run)
     try:
-        await native_event_ops.assert_native_completion_ready(cosmos, run=run)
+        await native_event_ops.assert_native_completion_ready(
+            cosmos, run=run, attempt_index=completed_attempt_index,
+        )
     except native_event_ops.NativeEventError as e:
         raise HTTPException(409, str(e))
 
     phase_outputs = await _validate_phase_outputs(
         cosmos, run=run, posted_outputs=req.outputs,
+        attempt_index=completed_attempt_index,
     )
 
     verification_result: VerificationResult | None = None
@@ -3594,7 +3767,7 @@ async def native_run_completed(
             )
 
     run, etag = await _archive_native_attempt_logs(
-        cosmos, run=run, etag=etag, attempt_index=attempt_index,
+        cosmos, run=run, etag=etag, attempt_index=completed_attempt_index,
     )
     await _release_native_run_leases(cosmos, run)
     decision_value = await _process_run_completion(
@@ -3602,6 +3775,7 @@ async def native_run_completed(
         etag=etag,
         workflow_run_id=None,
         conclusion=req.conclusion,
+        completed_attempt_index=completed_attempt_index,
         verification_result=verification_result,
         repo=run.issue_repo,
         screenshots_markdown=req.screenshots_markdown,
@@ -3609,7 +3783,7 @@ async def native_run_completed(
         phase_outputs=phase_outputs,
     )
 
-    await _cleanup_native_attempt_secret(run, attempt_index)
+    await _cleanup_native_attempt_secret(run, completed_attempt_index)
     result_dict: dict[str, Any] = {}
     terminal = decision_value in (
         RunDecision.ADVANCE.value,

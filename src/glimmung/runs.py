@@ -553,6 +553,7 @@ async def record_completion(
     summary_markdown: str | None = None,
     screenshots_markdown: str | None = None,
     phase_outputs: dict[str, str] | None = None,
+    attempt_index: int | None = None,
 ) -> tuple[Run, str]:
     """Record the workflow_run.completed payload on the latest attempt
     of a run. Updates cumulative_cost_usd from the verification
@@ -582,6 +583,7 @@ async def record_completion(
         lambda r: _apply_completion(
             r, workflow_run_id, conclusion, verification, artifact_url,
             summary_markdown, screenshots_markdown, phase_outputs,
+            attempt_index,
         ),
     )
 
@@ -595,10 +597,24 @@ def _apply_completion(
     summary_markdown: str | None,
     screenshots_markdown: str | None,
     phase_outputs: dict[str, str] | None,
+    attempt_index: int | None = None,
 ) -> Run:
     if not run.attempts:
         raise RuntimeError(f"run {run.id} has no attempts to complete")
-    last = run.attempts[-1]
+    # `attempt_index` lets callers target a specific attempt under concurrent
+    # dispatch (multiple in-flight attempts exist simultaneously). When None,
+    # falls back to attempts[-1] — the legacy single-in-flight assumption,
+    # still correct for sequential workflows + GHA-dispatch phases that
+    # haven't migrated to per-attempt token routing.
+    if attempt_index is not None:
+        if attempt_index < 0 or attempt_index >= len(run.attempts):
+            raise RuntimeError(
+                f"run {run.id} attempt_index={attempt_index} out of range "
+                f"(0..{len(run.attempts) - 1})"
+            )
+        last = run.attempts[attempt_index]
+    else:
+        last = run.attempts[-1]
     if last.completed_at is not None:
         # Already completed (replayed webhook). Skip.
         log.info(
@@ -646,14 +662,22 @@ async def record_decision(
     run: Run,
     etag: str,
     decision: RunDecision,
+    attempt_index: int | None = None,
 ) -> tuple[Run, str]:
-    """Persist the decision the engine produced for the latest
-    completed attempt. Separate call from record_completion so the
-    decision-engine output is auditable in the run document."""
+    """Persist the decision the engine produced for a completed attempt.
+    Separate call from record_completion so the decision-engine output is
+    auditable in the run document.
+
+    `attempt_index` targets a specific attempt under concurrent dispatch.
+    None falls back to attempts[-1] (legacy single-in-flight assumption)."""
     def apply(r: Run) -> Run:
         if not r.attempts:
             return r
-        r.attempts[-1].decision = decision.value
+        if attempt_index is not None:
+            if 0 <= attempt_index < len(r.attempts):
+                r.attempts[attempt_index].decision = decision.value
+        else:
+            r.attempts[-1].decision = decision.value
         return r.model_copy(update={"updated_at": _now()})
     return await _retry_on_conflict(cosmos, run, etag, apply)
 

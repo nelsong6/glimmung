@@ -171,18 +171,33 @@ def _refresh_job_state(job: NativeJobAttempt) -> None:
         job.state = NativeStepState.ACTIVE
 
 
-async def assert_native_completion_ready(cosmos: Cosmos, *, run: Run) -> None:
-    """Validate the latest native attempt can complete.
+async def assert_native_completion_ready(
+    cosmos: Cosmos,
+    *,
+    run: Run,
+    attempt_index: int | None = None,
+) -> None:
+    """Validate a native attempt can complete.
 
     Completion requires every declared step to be terminal and every job's
     persisted event stream to have no sequence holes from 1..N.
-    """
+
+    `attempt_index` selects which attempt to validate under concurrent
+    dispatch. None falls back to attempts[-1] (legacy single-in-flight)."""
     if not run.attempts:
         raise NativeEventError(f"run {run.id} has no attempts")
-    attempt = run.attempts[-1]
+    if attempt_index is not None:
+        if attempt_index < 0 or attempt_index >= len(run.attempts):
+            raise NativeEventError(
+                f"run {run.id} attempt_index={attempt_index} out of range"
+            )
+        attempt = run.attempts[attempt_index]
+    else:
+        attempt = run.attempts[-1]
     if attempt.phase_kind != "k8s_job":
         raise NativeEventError(
-            f"run {run.id} latest attempt is {attempt.phase_kind!r}, not 'k8s_job'"
+            f"run {run.id} attempt {attempt.attempt_index} is "
+            f"{attempt.phase_kind!r}, not 'k8s_job'"
         )
     for job in attempt.jobs:
         for step in job.steps:
