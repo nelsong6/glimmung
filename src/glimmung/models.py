@@ -217,7 +217,18 @@ class PhaseSpec(BaseModel):
     onto the verify phase or itself, so it's the natural home for retry
     config). The visible effect: a verify_fail surfaces as a red gate
     phase in the run graph, not a buried artifact field on a green
-    user-phase attempt."""
+    user-phase attempt.
+
+    `depends_on` is the explicit dependency graph between phases. A phase
+    is dispatchable when all of its `depends_on` predecessors have
+    completed successfully. When empty, the phase is dispatchable at run
+    start (an entry phase). When undeclared on every phase in a workflow,
+    glimmung infers default sequential deps at registration time —
+    phase[i].depends_on = [phase[i-1].name] — preserving the historical
+    "phase list = pipeline" semantic. Multiple phases can become ready
+    simultaneously and dispatch concurrently when their deps fan out
+    (spirelens-style: test-plan + implement run in parallel, verify
+    waits for both)."""
     name: str
     kind: str = "gha_dispatch"
     workflow_filename: str = ""
@@ -229,6 +240,7 @@ class PhaseSpec(BaseModel):
     recycle_policy: RecyclePolicy | None = None
     always: bool = False
     evidence_verification_gate: bool = False
+    depends_on: list[str] = Field(default_factory=list)
     jobs: list[NativeJobSpec] = Field(default_factory=list)
 
 
@@ -380,6 +392,60 @@ class WorkflowRegister(BaseModel):
                         "and declares jobs; gate jobs are glimmung-supplied and "
                         "must not be hand-written"
                     )
+        # depends_on validation + back-compat default inference.
+        #
+        # When NO phase declares explicit depends_on, glimmung infers
+        # sequential deps (each phase depends on the previous one;
+        # always-phases depend on all preceding non-always phases). This
+        # preserves the historical "phase list = pipeline" semantic for
+        # workflows registered before this primitive shipped.
+        #
+        # When ANY phase declares explicit depends_on, the user has
+        # opted into the DAG model. Phases that still have empty
+        # depends_on are entry phases (run at start). Always-phases
+        # always get auto-filled deps on all non-always phases to
+        # guarantee they run after every non-always-phase finishes,
+        # regardless of DAG shape.
+        any_explicit = any(p.depends_on for p in self.phases)
+        non_always_phases = [q.name for q in self.phases if not q.always]
+        for i, p in enumerate(self.phases):
+            if p.depends_on:
+                continue  # user declared, leave alone
+            if not any_explicit:
+                # sequential inference (back-compat path)
+                if p.always:
+                    p.depends_on = [
+                        self.phases[j].name for j in range(i)
+                        if not self.phases[j].always
+                    ]
+                elif i > 0:
+                    p.depends_on = [self.phases[i - 1].name]
+            else:
+                # explicit-DAG path; only always-phases get auto-fill
+                if p.always:
+                    p.depends_on = list(non_always_phases)
+        # Reference + ordering validation: every dep must name a phase
+        # that appears earlier in the phase list. Forward refs are
+        # disallowed — the phase list IS the topological order.
+        seen_names: set[str] = set()
+        for p in self.phases:
+            for dep in p.depends_on:
+                if dep == p.name:
+                    raise ValueError(
+                        f"phase {p.name!r} depends_on cannot reference itself"
+                    )
+                if dep not in names:
+                    raise ValueError(
+                        f"phase {p.name!r} depends_on={dep!r} is not a phase name "
+                        f"in this workflow (declared phases: {names})"
+                    )
+                if dep not in seen_names:
+                    raise ValueError(
+                        f"phase {p.name!r} depends_on={dep!r} appears later in "
+                        "the phase list; depends_on can only reference earlier "
+                        "phases (the phase list is the topological order)"
+                    )
+            seen_names.add(p.name)
         # Every verify=True phase must be immediately followed by an
         # evidence_verification_gate=True phase (and vice versa). The gate
         # is the visible decider; making it required means a verify_fail
