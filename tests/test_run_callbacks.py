@@ -862,6 +862,77 @@ async def test_completed_400_when_outputs_omitted_against_declared_phase(
     assert "missing" in exc.value.detail
 
 
+@pytest.mark.asyncio
+async def test_completed_aborts_when_phase_renamed_in_workflow(
+    cosmos, app_state,
+):
+    """Workflow re-registered (e.g., phase rename) while a run is in
+    flight: the run's attempt phase no longer matches any phase on the
+    current registration. The completion callback can't evaluate the
+    outputs contract or run the decision engine — but rejecting the
+    request would strand the run in_progress (the runner gives up
+    after a few retries on 4xx). Persist what was posted and abort
+    the run with a clear reason, mirroring the workflow-vanished
+    handling.
+    """
+    await _register_project(cosmos, "ambience", "nelsong6/ambience")
+    # Current workflow registration declares phase "agent"; the run was
+    # dispatched against an earlier registration that named that phase
+    # "prepare", and that stale name is what's recorded on the attempt.
+    await _register_workflow_with_outputs(
+        cosmos, "ambience", outputs=["validation_url", "image_tag"], name="agent",
+    )
+    run = Run(
+        id="01KQTEST_RUN_RENAME",
+        project="ambience",
+        workflow="agent",
+        issue_id="01HZZZTESTISSUE",
+        issue_repo="nelsong6/ambience",
+        issue_number=200,
+        state=RunState.IN_PROGRESS,
+        budget=BudgetConfig(total=25.0),
+        attempts=[PhaseAttempt(
+            attempt_index=0,
+            phase="prepare",  # stale: workflow currently has "agent"
+            workflow_filename="agent-run.yml",
+            dispatched_at=datetime.now(UTC),
+        )],
+        cumulative_cost_usd=0.0,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    await cosmos.runs.create_item(run.model_dump(mode="json"))
+
+    body = RunCompletedRequest(
+        workflow_run_id=42,
+        conclusion="success",
+        verification=_pass_verification(),
+        outputs={
+            "validation_url": "https://issue-200.glimmung.dev.romaine.life",
+            "image_tag": "issue-200-abc",
+        },
+    )
+    with patch("glimmung.app.app", app_state):
+        result = await run_completed(body, project="ambience", run_id=run.id)
+
+    # Completion was accepted (no 400 raised) and the run is aborted
+    # with a reason that points the operator at the registration drift.
+    assert result.run_id == run.id
+    assert result.decision == "abort_no_workflow"
+    found = await run_ops.read_run(cosmos, project="ambience", run_id=run.id)
+    final, _ = found  # type: ignore[misc]
+    assert final.state == RunState.ABORTED
+    assert "prepare" in (final.abort_reason or "")
+    # Posted outputs were persisted on the attempt, even though the
+    # contract couldn't be evaluated. Operator can recover them after
+    # re-registering a workflow with the matching phase name.
+    assert final.attempts[-1].phase_outputs == {
+        "validation_url": "https://issue-200.glimmung.dev.romaine.life",
+        "image_tag": "issue-200-abc",
+    }
+    assert final.attempts[-1].completed_at is not None
+
+
 # ─── /completed: multi-phase forward dispatch (#101) ──────────────────────
 
 

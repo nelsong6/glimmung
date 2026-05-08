@@ -992,22 +992,47 @@ async def _validate_phase_outputs(
     A workflow that vanished mid-run yields `phase_outputs=None`; the
     `_process_run_completion` path then routes through abort_no_workflow
     and records nothing — output capture is a workflow-defined contract,
-    so a missing workflow can't be evaluated either way.
+    so a missing workflow can't be evaluated either way. The same
+    fall-through applies when the workflow still exists but the run's
+    completing phase no longer does (e.g., a workflow re-registration
+    renamed or removed it while a run was in flight): we can't evaluate
+    the contract, but rejecting the callback would strand the run
+    in_progress with no way out, so persist what the runner sent and
+    let `_process_run_completion` handle the downstream consequences.
     """
-    declared: set[str] = set()
     workflow_doc = await _read_workflow(cosmos, run.project, run.workflow)
     workflow_model = _doc_to_workflow(workflow_doc) if workflow_doc else None
     completing_phase_name = "<none>"
+    matched_phase = None
     if workflow_model is not None and run.attempts:
         if attempt_index is not None and 0 <= attempt_index < len(run.attempts):
             completing_phase_name = run.attempts[attempt_index].phase
         else:
             completing_phase_name = run.attempts[-1].phase
-        for phase in workflow_model.phases:
-            if phase.name == completing_phase_name:
-                declared = set(phase.outputs)
-                break
+        matched_phase = next(
+            (p for p in workflow_model.phases if p.name == completing_phase_name),
+            None,
+        )
 
+    if workflow_model is None or matched_phase is None:
+        # Either the workflow is gone or the completing phase isn't on
+        # the current registration. Either way the contract can't be
+        # evaluated — accept the posted outputs as-is so the run can
+        # leave in-flight state. _process_run_completion will route a
+        # missing workflow through abort_no_workflow; a missing-phase
+        # case typically lands on input-substitution failure at the
+        # next phase, which surfaces as an explicit aborted run.
+        if workflow_model is not None and run.attempts:
+            log.warning(
+                "run %s/%s: completing phase %r not declared on current "
+                "workflow %r registration (phases: %s); skipping outputs "
+                "contract validation and persisting posted outputs as-is",
+                run.project, run.id, completing_phase_name, run.workflow,
+                [p.name for p in workflow_model.phases],
+            )
+        return dict(posted_outputs) if posted_outputs else None
+
+    declared = set(matched_phase.outputs)
     posted = posted_outputs or {}
     if set(posted.keys()) != declared:
         missing = declared - set(posted.keys())
@@ -1085,6 +1110,38 @@ async def _process_run_completion(
         await run_ops.mark_aborted(
             cosmos, run=run, etag=etag,
             reason="workflow registration disappeared mid-run",
+        )
+        return "abort_no_workflow"
+
+    # The decision engine + downstream phase lookups all key off the
+    # attempt's `phase` matching a name on the current workflow. If the
+    # workflow was re-registered with that phase renamed/removed while
+    # the run was in flight, the lookup fails — same fundamental shape
+    # as "workflow vanished". Mark the run aborted with a clear reason
+    # rather than letting decide()'s ValueError 500 the callback (which
+    # would strand the run in_progress on every retry).
+    completing_attempt = (
+        run.attempts[completed_attempt_index]
+        if completed_attempt_index is not None and 0 <= completed_attempt_index < len(run.attempts)
+        else (run.attempts[-1] if run.attempts else None)
+    )
+    if completing_attempt is not None and not any(
+        p.name == completing_attempt.phase for p in workflow_model.phases
+    ):
+        log.warning(
+            "run %s: completing phase %r not declared on current workflow "
+            "%s/%s registration (phases: %s); aborting",
+            run.id, completing_attempt.phase, run.project, run.workflow,
+            [p.name for p in workflow_model.phases],
+        )
+        await run_ops.mark_aborted(
+            cosmos, run=run, etag=etag,
+            reason=(
+                f"workflow phase {completing_attempt.phase!r} disappeared "
+                "from registration mid-run (renamed or removed); "
+                "re-register a workflow that declares this phase, or "
+                "abort and re-dispatch"
+            ),
         )
         return "abort_no_workflow"
 
