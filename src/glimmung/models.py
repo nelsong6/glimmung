@@ -521,6 +521,48 @@ class WorkflowRegister(BaseModel):
                 )
         return self
 
+    def validate_mandatory_phases(self) -> None:
+        """Glimmung-managed workflows must declare the canonical
+        prepare/testing/cleanup trio:
+
+        - **prepare** — at least one entry phase (`depends_on=[]`).
+        - **testing** — at least one verify phase (`verify=True`)
+          OR an evidence-verification gate (`evidence_verification_gate=True`).
+        - **cleanup** — at least one always-run phase (`always=True`).
+
+        Called explicitly by the `/v1/workflows/register` API
+        endpoint and surfaced as an actionable error so projects opt
+        into the convention progressively. Not yet wired into the
+        model-level `_validate_v1` validator so existing test fixtures
+        keep building permissive workflows for unit-level rule tests.
+        Migration to model-level enforcement is queued (see
+        `docs/workflow-shape.md`).
+        """
+        missing: list[str] = []
+        if not any(not p.depends_on for p in self.phases):
+            missing.append(
+                "prepare — at least one phase with depends_on=[] (entry)"
+            )
+        if not any(
+            p.verify or p.evidence_verification_gate for p in self.phases
+        ):
+            missing.append(
+                "testing — at least one verify=True phase OR an "
+                "evidence_verification_gate phase"
+            )
+        if not any(p.always for p in self.phases):
+            missing.append(
+                "cleanup — at least one always=True teardown phase"
+            )
+        if missing:
+            bullets = "\n  - ".join(missing)
+            raise ValueError(
+                f"workflow {self.name!r} is missing required phases:\n"
+                f"  - {bullets}\n"
+                "see docs/workflow-shape.md for the canonical shape; "
+                "the MCP scaffold_workflow tool emits a starter template."
+            )
+
 
 class Host(BaseModel):
     id: str
