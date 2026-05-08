@@ -497,6 +497,37 @@ async def set_latest_attempt_token_hash(
     return await _retry_on_conflict(cosmos, run, etag, apply)
 
 
+async def set_native_job_token_hash(
+    cosmos: Cosmos,
+    *,
+    run: Run,
+    etag: str,
+    attempt_index: int,
+    job_id: str,
+    token_sha256: str,
+) -> tuple[Run, str]:
+    """Attach a callback capability-token hash to one job within a phase
+    attempt's `jobs[]`. Each `phase.jobs[*]` mounts its own Secret under
+    job-level concurrent dispatch; the hash is stored per-job so the
+    callback validator can identify which sibling is reporting.
+    """
+    def apply(r: Run) -> Run:
+        if attempt_index < 0 or attempt_index >= len(r.attempts):
+            raise RuntimeError(
+                f"run {r.id} attempt_index={attempt_index} out of range "
+                f"(0..{len(r.attempts) - 1})"
+            )
+        attempt = r.attempts[attempt_index]
+        job = next((j for j in attempt.jobs if j.job_id == job_id), None)
+        if job is None:
+            raise RuntimeError(
+                f"run {r.id} attempt {attempt_index} has no job {job_id!r}"
+            )
+        job.capability_token_sha256 = token_sha256
+        return r.model_copy(update={"updated_at": _now()})
+    return await _retry_on_conflict(cosmos, run, etag, apply)
+
+
 async def record_log_archive_url(
     cosmos: Cosmos,
     *,
