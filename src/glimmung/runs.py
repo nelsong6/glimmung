@@ -656,6 +656,100 @@ def _apply_completion(
     return run.model_copy(update=updates)
 
 
+async def record_native_job_completion(
+    cosmos: Cosmos,
+    *,
+    run: Run,
+    etag: str,
+    attempt_index: int,
+    job_id: str,
+    conclusion: str,
+    outputs: dict[str, str] | None,
+    verification: VerificationResult | None,
+) -> tuple[Run, str]:
+    """Record one job's terminal state on a phase attempt's `jobs[]`.
+
+    With job-level concurrent dispatch a phase fans out to N k8s Jobs;
+    each posts its own `/native/completed` with `job_id`. This stamps
+    just that job's terminal state without touching the phase-level
+    aggregation. Phase-level `record_completion` is invoked separately
+    after the caller verifies all jobs in the attempt have reported.
+
+    Idempotent: re-delivery (same `job_id`, attempt already terminal)
+    is a no-op.
+    """
+    def apply(r: Run) -> Run:
+        if attempt_index < 0 or attempt_index >= len(r.attempts):
+            raise RuntimeError(
+                f"run {r.id} attempt_index={attempt_index} out of range "
+                f"(0..{len(r.attempts) - 1})"
+            )
+        attempt = r.attempts[attempt_index]
+        job = next((j for j in attempt.jobs if j.job_id == job_id), None)
+        if job is None:
+            raise RuntimeError(
+                f"run {r.id} attempt {attempt_index} has no job {job_id!r} "
+                f"(known: {[j.job_id for j in attempt.jobs]})"
+            )
+        if job.completed_at is not None:
+            return r
+        from glimmung.models import NativeStepState
+        job.completed_at = _now()
+        job.conclusion = conclusion
+        job.state = (
+            NativeStepState.SUCCEEDED
+            if conclusion == "success"
+            else NativeStepState.FAILED
+        )
+        if outputs is not None:
+            job.outputs = outputs
+        if verification is not None:
+            job.verification = verification
+        return r.model_copy(update={"updated_at": _now()})
+    return await _retry_on_conflict(cosmos, run, etag, apply)
+
+
+async def record_native_job_failure(
+    cosmos: Cosmos,
+    *,
+    run: Run,
+    etag: str,
+    attempt_index: int,
+    job_id: str,
+    reason: str,
+) -> tuple[Run, str]:
+    """Record one job's failure on a phase attempt's `jobs[]`.
+
+    Mirrors `record_native_job_completion` for the failed callback —
+    sets terminal state and stamps the failure reason without
+    triggering phase-level aggregation. The completion handler
+    follows up with phase-level rollup once every sibling job has
+    reported.
+    """
+    def apply(r: Run) -> Run:
+        if attempt_index < 0 or attempt_index >= len(r.attempts):
+            raise RuntimeError(
+                f"run {r.id} attempt_index={attempt_index} out of range "
+                f"(0..{len(r.attempts) - 1})"
+            )
+        attempt = r.attempts[attempt_index]
+        job = next((j for j in attempt.jobs if j.job_id == job_id), None)
+        if job is None:
+            raise RuntimeError(
+                f"run {r.id} attempt {attempt_index} has no job {job_id!r} "
+                f"(known: {[j.job_id for j in attempt.jobs]})"
+            )
+        if job.completed_at is not None:
+            return r
+        from glimmung.models import NativeStepState
+        job.completed_at = _now()
+        job.conclusion = "failure"
+        job.failure_reason = reason
+        job.state = NativeStepState.FAILED
+        return r.model_copy(update={"updated_at": _now()})
+    return await _retry_on_conflict(cosmos, run, etag, apply)
+
+
 async def record_decision(
     cosmos: Cosmos,
     *,

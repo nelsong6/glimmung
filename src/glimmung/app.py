@@ -158,6 +158,70 @@ def _require_native_attempt_token(request: Request, run: Run) -> int:
     raise HTTPException(403, "invalid x-glimmung-attempt-token")
 
 
+def _resolve_native_job_id(
+    attempt: "PhaseAttempt", posted_job_id: str | None,
+) -> str:
+    """Pick the `job_id` for a per-job native callback.
+
+    Single-job phase attempts (the historical shape, and what every
+    workflow registered before fan-out shipped looks like) accept
+    callbacks with no `job_id` — the only job is implicit. Multi-job
+    attempts must include `job_id` so the right sibling is targeted.
+    """
+    if posted_job_id:
+        if not any(j.job_id == posted_job_id for j in attempt.jobs):
+            raise HTTPException(
+                400,
+                f"job_id {posted_job_id!r} not in attempt jobs "
+                f"({[j.job_id for j in attempt.jobs]})",
+            )
+        return posted_job_id
+    if len(attempt.jobs) == 1:
+        return attempt.jobs[0].job_id
+    raise HTTPException(
+        400,
+        f"job_id is required for multi-job phase attempts "
+        f"(jobs: {[j.job_id for j in attempt.jobs]})",
+    )
+
+
+def _attempt_all_jobs_terminal(attempt: "PhaseAttempt") -> bool:
+    """True when every sibling job in the phase attempt has reported
+    terminal state. Empty `jobs[]` falls through to True so legacy
+    callers without per-job state don't deadlock."""
+    if not attempt.jobs:
+        return True
+    return all(j.completed_at is not None for j in attempt.jobs)
+
+
+def _aggregate_attempt_from_jobs(
+    attempt: "PhaseAttempt",
+) -> tuple[str, dict[str, str], "VerificationResult | None"]:
+    """Roll job-level outcomes up into the phase-level fields the
+    decision engine consumes.
+
+    - Conclusion: success iff every job succeeded; otherwise failure.
+    - Outputs: union of every job's `outputs` (last-writer-wins on
+      key collisions; phase-level output validation downstream
+      enforces against declared `phase.outputs`).
+    - Verification: first job that emitted one (verify-phase jobs are
+      conventionally singletons, so there is at most one to pick).
+    """
+    if not attempt.jobs:
+        return ("success", {}, None)
+    has_failure = any(j.conclusion == "failure" for j in attempt.jobs)
+    phase_conclusion = "failure" if has_failure else "success"
+    outputs: dict[str, str] = {}
+    for j in attempt.jobs:
+        if j.outputs:
+            outputs.update(j.outputs)
+    verification = next(
+        (j.verification for j in attempt.jobs if j.verification is not None),
+        None,
+    )
+    return (phase_conclusion, outputs, verification)
+
+
 def _serving_artifact_blob_name(blob_path: str) -> str:
     blob_name = blob_path.strip("/")
     parts = blob_name.split("/")
@@ -586,16 +650,16 @@ async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host
             )
             return True
         try:
-            job_name = await launcher.launch(
+            job_names = await launcher.launch(
                 cosmos,
                 lease_doc=lease_doc,
                 workflow_doc=workflow_doc,
                 phase=_phase_from_doc(target_phase),
             )
             log.info(
-                "launched native job %s for lease %s (project=%s workflow=%s phase=%s)",
-                job_name, lease_doc["id"], lease_doc["project"], workflow_name,
-                target_phase["name"],
+                "launched native jobs %s for lease %s (project=%s workflow=%s phase=%s)",
+                ",".join(job_names), lease_doc["id"], lease_doc["project"],
+                workflow_name, target_phase["name"],
             )
             return True
         except Exception:
@@ -3384,10 +3448,17 @@ class NativeRunCompletedRequest(BaseModel):
     screenshots_markdown: str | None = None
     summary_markdown: str | None = None
     outputs: dict[str, str] | None = None
+    # Identifies which job within the phase attempt completed. Required
+    # when the phase has more than one `phase.jobs[*]` (parallel
+    # dispatch); optional for single-job phases (the only job is
+    # implicit). The phase-level decision engine fires once every job
+    # in the attempt has reported terminal state.
+    job_id: str | None = None
 
 
 class NativeRunFailedRequest(BaseModel):
     reason: str
+    job_id: str | None = None
 
 
 class NativeGitHubTokenResult(BaseModel):
@@ -3750,12 +3821,13 @@ async def native_run_completed(
     project: str = Path(...),
     run_id: str = Path(...),
 ) -> RunCallbackResult:
-    """Native k8s_job completion callback.
+    """Native k8s_job per-job completion callback.
 
-    Verifies ordered event continuity and terminal step states before
-    driving the same decision-engine path as the existing workflow
-    callback. Native attempts have no GitHub workflow_run_id, so the run
-    attempt stores that field as null.
+    Each `phase.jobs[*]` runs in its own Pod and posts here with
+    `job_id`. Recording a job marks just that sibling terminal; the
+    decision engine fires only once every sibling in the attempt has
+    reported. For single-job phases the resolved `job_id` defaults to
+    the only job.
     """
     cosmos: Cosmos = app.state.cosmos
     found = await run_ops.read_run(cosmos, project=project, run_id=run_id)
@@ -3764,17 +3836,9 @@ async def native_run_completed(
     run, etag = found
     # Token identifies the specific attempt under concurrent dispatch.
     completed_attempt_index = _require_native_attempt_token(request, run)
-    try:
-        await native_event_ops.assert_native_completion_ready(
-            cosmos, run=run, attempt_index=completed_attempt_index,
-        )
-    except native_event_ops.NativeEventError as e:
-        raise HTTPException(409, str(e))
+    attempt = run.attempts[completed_attempt_index]
 
-    phase_outputs = await _validate_phase_outputs(
-        cosmos, run=run, posted_outputs=req.outputs,
-        attempt_index=completed_attempt_index,
-    )
+    job_id = _resolve_native_job_id(attempt, req.job_id)
 
     verification_result: VerificationResult | None = None
     if req.verification is not None:
@@ -3787,6 +3851,45 @@ async def native_run_completed(
                 project, run_id,
             )
 
+    # Stamp per-job terminal state. Idempotent on replay.
+    run, etag = await run_ops.record_native_job_completion(
+        cosmos, run=run, etag=etag,
+        attempt_index=completed_attempt_index,
+        job_id=job_id,
+        conclusion=req.conclusion,
+        outputs=req.outputs,
+        verification=verification_result,
+    )
+    attempt = run.attempts[completed_attempt_index]
+    if not _attempt_all_jobs_terminal(attempt):
+        # Wait for sibling jobs to report before driving the engine.
+        return RunCallbackResult(
+            run_id=run.id,
+            decision=None,
+            issue_lock_released=None,
+            pr_lock_released=None,
+        )
+
+    # All jobs in the attempt have reported. Aggregate and fire the
+    # phase-level completion path the same way single-job phases do.
+    try:
+        await native_event_ops.assert_native_completion_ready(
+            cosmos, run=run, attempt_index=completed_attempt_index,
+        )
+    except native_event_ops.NativeEventError as e:
+        raise HTTPException(409, str(e))
+
+    aggregated_conclusion, aggregated_outputs, aggregated_verification = (
+        _aggregate_attempt_from_jobs(attempt)
+    )
+    if verification_result is None:
+        verification_result = aggregated_verification
+
+    phase_outputs = await _validate_phase_outputs(
+        cosmos, run=run, posted_outputs=aggregated_outputs,
+        attempt_index=completed_attempt_index,
+    )
+
     run, etag = await _archive_native_attempt_logs(
         cosmos, run=run, etag=etag, attempt_index=completed_attempt_index,
     )
@@ -3795,7 +3898,7 @@ async def native_run_completed(
         run=run,
         etag=etag,
         workflow_run_id=None,
-        conclusion=req.conclusion,
+        conclusion=aggregated_conclusion,
         completed_attempt_index=completed_attempt_index,
         verification_result=verification_result,
         repo=run.issue_repo,
@@ -3866,16 +3969,28 @@ async def native_run_failed(
     project: str = Path(...),
     run_id: str = Path(...),
 ) -> AbortRunResult:
-    """Native k8s_job failure callback for failures before completion."""
+    """Native k8s_job failure callback for failures before completion.
+
+    Stamps the failing job's per-job terminal state so the run graph
+    shows which sibling died, then aborts the whole run — sibling jobs
+    in a parallel phase can't reach a useful verdict once one of them
+    has crashed at runtime.
+    """
     cosmos: Cosmos = app.state.cosmos
     found = await run_ops.read_run(cosmos, project=project, run_id=run_id)
     if found is None:
         raise HTTPException(404, f"no run {project}/{run_id}")
-    run, _etag = found
-    _require_native_attempt_token(request, run)
-    attempt_index = run.attempts[-1].attempt_index
-    run, _etag = await _archive_native_attempt_logs(
-        cosmos, run=run, etag=_etag, attempt_index=attempt_index,
+    run, etag = found
+    completed_attempt_index = _require_native_attempt_token(request, run)
+    attempt = run.attempts[completed_attempt_index]
+    job_id = _resolve_native_job_id(attempt, req.job_id)
+    run, etag = await run_ops.record_native_job_failure(
+        cosmos, run=run, etag=etag,
+        attempt_index=completed_attempt_index,
+        job_id=job_id, reason=req.reason,
+    )
+    run, etag = await _archive_native_attempt_logs(
+        cosmos, run=run, etag=etag, attempt_index=completed_attempt_index,
     )
     await _release_native_run_leases(cosmos, run)
     result = await _abort_run(
@@ -3885,7 +4000,7 @@ async def native_run_failed(
         project=project,
         reason=req.reason,
     )
-    await _cleanup_native_attempt_secret(run, attempt_index)
+    await _cleanup_native_attempt_secret(run, completed_attempt_index)
     return result
 
 
