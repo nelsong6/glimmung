@@ -2438,18 +2438,39 @@ def _phase_from_doc(d: dict[str, Any]):
 
 def _doc_to_workflow(doc: dict[str, Any] | None):
     """Cosmos camelCase → Pydantic Workflow. Returns None if `doc` is None
-    so callers can null-check the workflow on disappearance mid-flight."""
+    so callers can null-check the workflow on disappearance mid-flight.
+
+    Applies the same depends_on inference that WorkflowRegister.validate
+    does at registration time, so workflow docs stored before the
+    depends_on field shipped (no per-phase deps recorded) still render
+    with their implied sequential structure. Without this, the frontend
+    PhaseGraph computes depth from depends_on and stacks every phase at
+    depth 0 (same column) — visible bug seen on workflows registered
+    before glimmung#304."""
     if doc is None:
         return None
     from glimmung.models import BudgetConfig, PrPrimitiveSpec
     phases_raw = doc.get("phases") or []
     pr_raw = doc.get("pr") or {}
     budget_raw = doc.get("budget") or {}
+    phases = [_phase_from_doc(p) for p in phases_raw]
+    # Defensive sequential-default inference for phases stored before
+    # depends_on existed. If NO phase has explicit depends_on, fill in
+    # sequential deps; otherwise respect what's stored.
+    if phases and not any(p.depends_on for p in phases):
+        for i, p in enumerate(phases):
+            if p.always:
+                p.depends_on = [
+                    phases[j].name for j in range(i)
+                    if not phases[j].always
+                ]
+            elif i > 0:
+                p.depends_on = [phases[i - 1].name]
     return Workflow(
         id=doc.get("id") or doc["name"],
         project=doc["project"],
         name=doc["name"],
-        phases=[_phase_from_doc(p) for p in phases_raw],
+        phases=phases,
         pr=PrPrimitiveSpec(
             enabled=bool(pr_raw.get("enabled", False)),
             recycle_policy=_recycle_policy_from_doc(pr_raw.get("recyclePolicy")),

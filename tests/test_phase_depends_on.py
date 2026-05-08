@@ -184,6 +184,127 @@ def test_depends_on_round_trips_through_phase_doc():
     assert restored[4].depends_on == ["verify"]
 
 
+def test_doc_to_workflow_infers_sequential_for_legacy_doc():
+    """Workflow docs stored before depends_on shipped (no per-phase
+    deps recorded) must come back through `_doc_to_workflow` with
+    the same sequential structure WorkflowRegister would have inferred
+    at registration time. Without this, the frontend PhaseGraph
+    computes depth=0 for every phase and stacks them into one column."""
+    from glimmung import app as glimmung_app
+
+    legacy_doc = {
+        "id": "agent-run", "project": "ambience", "name": "agent-run",
+        "phases": [
+            # No depends_on key — pre-#304 storage shape.
+            {
+                "name": "env-prep", "kind": "k8s_job",
+                "always": False, "verify": False,
+                "evidenceVerificationGate": False,
+                "inputs": {}, "outputs": [],
+                "jobs": [{
+                    "id": "env-prep", "image": "ghcr.io/example:latest",
+                    "command": ["/bin/true"],
+                    "steps": [{"slug": "run", "title": "run"}],
+                }],
+            },
+            {
+                "name": "agent-execute", "kind": "k8s_job",
+                "always": False, "verify": True,
+                "evidenceVerificationGate": False,
+                "inputs": {}, "outputs": ["verification"],
+                "jobs": [{
+                    "id": "agent-execute", "image": "ghcr.io/example:latest",
+                    "command": ["/bin/true"],
+                    "steps": [{"slug": "run", "title": "run"}],
+                }],
+            },
+            {
+                "name": "agent-verify-gate", "kind": "k8s_job",
+                "always": False, "verify": False,
+                "evidenceVerificationGate": True,
+                "inputs": {
+                    "verification":
+                        "${{ phases.agent-execute.outputs.verification }}",
+                },
+                "outputs": [], "jobs": [],
+            },
+            {
+                "name": "env-destroy", "kind": "k8s_job",
+                "always": True, "verify": False,
+                "evidenceVerificationGate": False,
+                "inputs": {}, "outputs": [],
+                "jobs": [{
+                    "id": "env-destroy", "image": "ghcr.io/example:latest",
+                    "command": ["/bin/true"],
+                    "steps": [{"slug": "run", "title": "run"}],
+                }],
+            },
+        ],
+        "pr": {}, "budget": {},
+    }
+    wf = glimmung_app._doc_to_workflow(legacy_doc)
+    assert wf is not None
+    assert wf.phases[0].depends_on == []
+    assert wf.phases[1].depends_on == ["env-prep"]
+    assert wf.phases[2].depends_on == ["agent-execute"]
+    assert wf.phases[3].depends_on == [
+        "env-prep", "agent-execute", "agent-verify-gate",
+    ]
+
+
+def test_doc_to_workflow_respects_explicit_depends_on():
+    """Modern docs with explicit depends_on come through unchanged —
+    the inference is opt-in via 'no phase has any deps'."""
+    from glimmung import app as glimmung_app
+
+    doc = {
+        "id": "w", "project": "p", "name": "w",
+        "phases": [
+            {
+                "name": "env-prep", "kind": "k8s_job",
+                "always": False, "verify": False,
+                "evidenceVerificationGate": False,
+                "dependsOn": [],
+                "inputs": {}, "outputs": [],
+                "jobs": [{
+                    "id": "env-prep", "image": "x",
+                    "command": ["/bin/true"],
+                    "steps": [{"slug": "run", "title": "run"}],
+                }],
+            },
+            {
+                "name": "test-plan", "kind": "k8s_job",
+                "always": False, "verify": False,
+                "evidenceVerificationGate": False,
+                "dependsOn": ["env-prep"],
+                "inputs": {}, "outputs": [],
+                "jobs": [{
+                    "id": "test-plan", "image": "x",
+                    "command": ["/bin/true"],
+                    "steps": [{"slug": "run", "title": "run"}],
+                }],
+            },
+            {
+                "name": "implement", "kind": "k8s_job",
+                "always": False, "verify": False,
+                "evidenceVerificationGate": False,
+                "dependsOn": ["env-prep"],
+                "inputs": {}, "outputs": [],
+                "jobs": [{
+                    "id": "implement", "image": "x",
+                    "command": ["/bin/true"],
+                    "steps": [{"slug": "run", "title": "run"}],
+                }],
+            },
+        ],
+        "pr": {}, "budget": {},
+    }
+    wf = glimmung_app._doc_to_workflow(doc)
+    assert wf is not None
+    assert wf.phases[1].depends_on == ["env-prep"]
+    assert wf.phases[2].depends_on == ["env-prep"]
+
+
 # ─── DAG-aware dispatch routing (stage 2B) ────────────────────────────
 
 
