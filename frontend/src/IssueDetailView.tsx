@@ -1103,6 +1103,7 @@ function DefinitionDag({
   workflow: Workflow | null;
   project: string;
 }) {
+  const location = useLocation();
   const phases = workflow?.phases.length
     ? workflow.phases
     : [{
@@ -1184,6 +1185,7 @@ function DefinitionDag({
           <Link
             className="link"
             to={`/projects/${encodeURIComponent(project)}/workflows/${encodeURIComponent(workflow.name)}`}
+            state={{ returnTo: location.pathname, returnLabel: "issue" }}
           >
             view workflow definition
           </Link>
@@ -1838,6 +1840,7 @@ function RunsPane({
   onDispatch: () => void;
   onOpenTouchpoint: () => void;
 }) {
+  const location = useLocation();
   const dispatching = dispatchState.kind === "dispatching";
   // Disable for non-admins so a 403 is impossible by clicking. The server
   // is still authoritative — disabling is purely a UX layer.
@@ -1996,6 +1999,7 @@ function RunsPane({
             <Link
               className="link"
               to={`/projects/${encodeURIComponent(project)}/workflows/${encodeURIComponent(workflow.name)}`}
+              state={{ returnTo: location.pathname, returnLabel: "issue" }}
             >
               view workflow definition
             </Link>

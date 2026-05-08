@@ -1834,6 +1834,7 @@ function ProjectRunsTable({ title, runs, project }: { title: string; runs: Proje
                 <Link
                   className="link mono"
                   to={`/projects/${encodeURIComponent(run.project)}/workflows/${encodeURIComponent(run.workflow)}`}
+                  state={{ returnTo: runsPath, returnLabel: "runs" }}
                 >
                   {run.workflow}
                 </Link>
@@ -2120,6 +2121,7 @@ function ProjectRunView({
   runId,
 }: LayoutContext & { projectName: string; issueNumber: number | null; runId: string }) {
   const navigate = useNavigate();
+  const location = useLocation();
   const [liveReport, setLiveReport] = useState<RunReport | null>(null);
   const [liveError, setLiveError] = useState<string | null>(null);
   const [liveLoading, setLiveLoading] = useState(false);
@@ -2235,6 +2237,7 @@ function ProjectRunView({
             <Link
               className="link"
               to={`/projects/${encodeURIComponent(project.name)}/workflows/${encodeURIComponent(run.workflow)}`}
+              state={{ returnTo: location.pathname, returnLabel: "run" }}
             >
               {run.workflow}
             </Link>
