@@ -26,3 +26,6 @@ subjects:
   - kind: ServiceAccount
     name: {{ .Values.serviceAccount }}
     namespace: {{ .Values.namespace }}
+  - kind: ServiceAccount
+    name: {{ .Values.nativeRunner.serviceAccount }}
+    namespace: {{ .Values.nativeRunner.namespace }}
