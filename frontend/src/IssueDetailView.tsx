@@ -1327,7 +1327,6 @@ function PipelineDag({
   onSelectNode: (id: string | null) => void;
   onOpenTouchpoint: () => void;
 }) {
-  const workflowTriggerLabel = stringOrNull(run.metadata.workflow) ?? "agent-run";
   const phaseRollups = useMemo(() => phaseNodesForRun(graph, run), [graph, run]);
   const rollupByName = useMemo(() => {
     const m = new Map<string, PhaseRollup>();
@@ -1471,13 +1470,11 @@ function PipelineDag({
     <div className="dag-wrap">
       <PhaseGraph
         phases={phasesForLayout}
-        triggerLabel={workflowTriggerLabel}
         prEnabled={true}
         renderPhase={renderPhase}
         renderTouchpoint={renderTouchpoint}
         ariaLabel="pipeline"
         entryPhaseName={activeEntry}
-        entryActive={true}
       />
       <div
         ref={bandRef}
