@@ -178,3 +178,99 @@ def test_aggregate_outputs_merge_last_writer_wins_on_collision():
         "only-a": "x",
         "only-b": "y",
     }
+
+
+# ─── _require_native_attempt_token (per-job tokens) ───────────────────
+
+
+from datetime import UTC, datetime as _datetime  # noqa: E402
+
+import pytest  # noqa: E402
+
+from glimmung.app import (  # noqa: E402
+    _attempt_token_sha256,
+    _require_native_attempt_token,
+)
+from glimmung.models import (  # noqa: E402
+    BudgetConfig,
+    PhaseAttempt as _PhaseAttempt,
+    Run,
+    RunState,
+)
+
+
+class _FakeRequest:
+    def __init__(self, token: str | None):
+        self.headers = {"x-glimmung-attempt-token": token} if token else {}
+
+
+def _run_with_attempts(*attempts):
+    now = _datetime.now(UTC)
+    return Run(
+        id="01TESTRUN", project="p", workflow="w", run_number=1,
+        issue_number=1,
+        attempts=list(attempts),
+        cumulative_cost_usd=0.0,
+        budget=BudgetConfig(total=25.0),
+        state=RunState.IN_PROGRESS,
+        created_at=now, updated_at=now,
+    )
+
+
+def _attempt_with_jobs(idx, jobs, *, attempt_token=None):
+    now = _datetime.now(UTC)
+    return _PhaseAttempt(
+        attempt_index=idx,
+        phase="work",
+        phase_kind="k8s_job",
+        workflow_filename="k8s_job:work",
+        dispatched_at=now,
+        capability_token_sha256=attempt_token,
+        jobs=jobs,
+    )
+
+
+def test_token_validator_returns_attempt_index_and_job_id_for_per_job_token():
+    """Post-fan-out shape: the presented token matches one job's hash;
+    the validator returns BOTH the attempt index and that job's id."""
+    plan_token = "plan-secret-token"
+    impl_token = "impl-secret-token"
+    attempt = _attempt_with_jobs(0, [
+        _job("plan", capability_token_sha256=_attempt_token_sha256(plan_token)),
+        _job("impl", capability_token_sha256=_attempt_token_sha256(impl_token)),
+    ])
+    run = _run_with_attempts(attempt)
+    assert _require_native_attempt_token(_FakeRequest(plan_token), run) == (0, "plan")
+    assert _require_native_attempt_token(_FakeRequest(impl_token), run) == (0, "impl")
+
+
+def test_token_validator_falls_back_to_attempt_token_for_legacy_attempts():
+    """Pre-fan-out attempts only have the per-attempt token. The
+    validator returns (attempt_index, None) — the completion handler
+    defaults to the only sibling on single-job phases."""
+    legacy_token = "legacy-attempt-token"
+    attempt = _attempt_with_jobs(
+        0,
+        [_job("agent")],
+        attempt_token=_attempt_token_sha256(legacy_token),
+    )
+    run = _run_with_attempts(attempt)
+    assert _require_native_attempt_token(_FakeRequest(legacy_token), run) == (0, None)
+
+
+def test_token_validator_rejects_invalid_token_when_per_job_tokens_set():
+    attempt = _attempt_with_jobs(0, [
+        _job("plan", capability_token_sha256=_attempt_token_sha256("real-token")),
+    ])
+    run = _run_with_attempts(attempt)
+    with pytest.raises(Exception) as excinfo:
+        _require_native_attempt_token(_FakeRequest("wrong-token"), run)
+    assert "invalid x-glimmung-attempt-token" in str(excinfo.value.detail)
+
+
+def test_token_validator_no_token_mode_returns_latest_attempt_no_job_id():
+    """No-token fixture path (used by older tests). When no attempt and
+    no job carries a hash, fall back to (latest, None)."""
+    attempt = _attempt_with_jobs(0, [_job("agent")])
+    run = _run_with_attempts(attempt)
+    assert _require_native_attempt_token(_FakeRequest(None), run) == (0, None)

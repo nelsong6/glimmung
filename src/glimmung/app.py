@@ -128,33 +128,51 @@ def _attempt_token_sha256(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def _require_native_attempt_token(request: Request, run: Run) -> int:
-    """Validate native callback token and return the attempt index it
-    matches.
+def _require_native_attempt_token(
+    request: Request, run: Run,
+) -> tuple[int, str | None]:
+    """Validate the native callback token and return the (attempt
+    index, job id) it matches.
 
-    Under concurrent dispatch multiple attempts can be in flight, each
-    with its own capability token. The token in the request header
-    identifies WHICH attempt is reporting completion. Returns the
-    matched attempt's index in `run.attempts`.
+    Under job-level concurrent dispatch each `phase.jobs[*]` runs in
+    its own Pod with its own mounted Secret; the presented token
+    identifies WHICH sibling is reporting and is the authoritative
+    `job_id`. Per-attempt fallback covers two cases:
 
-    Legacy callback paths and older test fixtures have no token hash on
-    any attempt; those remain run-id capability callbacks and resolve
-    to the latest in-flight attempt as a back-compat fallback.
+    - Legacy attempts launched by pre-fan-out glimmung versions (only
+      `PhaseAttempt.capability_token_sha256` set; `job_id` is None and
+      the caller defaults to the only sibling on single-job phases).
+    - Test / no-token mode where neither attempt nor job carries a
+      hash; returns the latest attempt's index, no job binding.
     """
     if not run.attempts:
         raise HTTPException(409, f"run {run.id} has no attempts")
-    # If no attempt has a capability token bound, this is the legacy
-    # path — fall back to attempts[-1].
-    if not any(a.capability_token_sha256 for a in run.attempts):
-        return len(run.attempts) - 1
+    has_attempt_token = any(a.capability_token_sha256 for a in run.attempts)
+    has_job_token = any(
+        j.capability_token_sha256
+        for a in run.attempts for j in a.jobs
+    )
+    if not has_attempt_token and not has_job_token:
+        # Legacy / no-token mode. Older tests and pre-token fixtures
+        # rely on the latest-attempt fallback.
+        return (len(run.attempts) - 1, None)
     presented = request.headers.get("x-glimmung-attempt-token", "")
     if not presented:
         raise HTTPException(401, "missing x-glimmung-attempt-token")
     actual = _attempt_token_sha256(presented)
+    # Per-job tokens take precedence — they're the post-fan-out shape
+    # and identify the sibling unambiguously.
+    for i, attempt in enumerate(run.attempts):
+        for job in attempt.jobs:
+            expected = job.capability_token_sha256
+            if expected and hmac.compare_digest(actual, expected):
+                return (i, job.job_id)
+    # Per-attempt token fallback for legacy attempts that haven't been
+    # rewritten to per-job tokens yet.
     for i, attempt in enumerate(run.attempts):
         expected = attempt.capability_token_sha256
         if expected and hmac.compare_digest(actual, expected):
-            return i
+            return (i, None)
     raise HTTPException(403, "invalid x-glimmung-attempt-token")
 
 
@@ -3834,11 +3852,20 @@ async def native_run_completed(
     if found is None:
         raise HTTPException(404, f"no run {project}/{run_id}")
     run, etag = found
-    # Token identifies the specific attempt under concurrent dispatch.
-    completed_attempt_index = _require_native_attempt_token(request, run)
+    # The presented token identifies BOTH the attempt and (under per-
+    # job tokens, the post-fan-out shape) the calling sibling job. The
+    # body's `req.job_id` is cross-checked against the token's job_id
+    # so a runner can't spoof a sibling's completion.
+    completed_attempt_index, token_job_id = _require_native_attempt_token(request, run)
     attempt = run.attempts[completed_attempt_index]
 
     job_id = _resolve_native_job_id(attempt, req.job_id)
+    if token_job_id is not None and token_job_id != job_id:
+        raise HTTPException(
+            403,
+            f"token job_id={token_job_id!r} does not match request "
+            f"job_id={job_id!r}",
+        )
 
     verification_result: VerificationResult | None = None
     if req.verification is not None:
@@ -3981,9 +4008,15 @@ async def native_run_failed(
     if found is None:
         raise HTTPException(404, f"no run {project}/{run_id}")
     run, etag = found
-    completed_attempt_index = _require_native_attempt_token(request, run)
+    completed_attempt_index, token_job_id = _require_native_attempt_token(request, run)
     attempt = run.attempts[completed_attempt_index]
     job_id = _resolve_native_job_id(attempt, req.job_id)
+    if token_job_id is not None and token_job_id != job_id:
+        raise HTTPException(
+            403,
+            f"token job_id={token_job_id!r} does not match request "
+            f"job_id={job_id!r}",
+        )
     run, etag = await run_ops.record_native_job_failure(
         cosmos, run=run, etag=etag,
         attempt_index=completed_attempt_index,

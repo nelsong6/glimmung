@@ -732,6 +732,12 @@ class NativeJobAttempt(BaseModel):
     outputs: dict[str, str] | None = None
     verification: VerificationResult | None = None
     failure_reason: str | None = None
+    # Per-job callback capability-token hash. Each `phase.jobs[*]` runs
+    # in its own Pod with its own mounted Secret; presenting the token
+    # on a callback identifies *which* sibling is reporting.
+    # Pre-fan-out attempts have only `PhaseAttempt.capability_token_sha256`
+    # set; the token validator falls back to it for back-compat.
+    capability_token_sha256: str | None = None
 
 
 class NativeRunEventType(str, Enum):

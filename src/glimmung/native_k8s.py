@@ -47,16 +47,14 @@ class NativeKubernetesLauncher:
         workflow_doc: dict[str, Any],
         phase: PhaseSpec,
     ) -> list[str]:
-        """Create the per-attempt Secret and one Kubernetes Job per
+        """Create one per-job Secret + one Kubernetes Job per
         `phase.jobs[*]` entry.
 
-        Returns the list of Kubernetes Job names launched (one per
-        `NativeJobSpec`). All jobs in a phase mount the same per-attempt
-        token Secret; each Job runs in its own Pod and reports back via
-        the `job_id` field on the completion / failed callbacks.
-
-        Repeated calls for the same lease/run are idempotent: existing
-        Secret and Jobs are treated as already-launched.
+        Returns the list of Kubernetes Job names launched. Each Pod
+        mounts its own token Secret; the presented token on a callback
+        identifies WHICH sibling is reporting. Repeated calls for the
+        same lease/run are idempotent: existing Secrets and Jobs are
+        treated as already-launched.
         """
         metadata = lease_doc.get("metadata") or {}
         run_id = str(metadata.get("run_id") or "")
@@ -70,17 +68,9 @@ class NativeKubernetesLauncher:
         run, etag = found
 
         attempt_base = _resource_name("glim", run_id, attempt_index)
-        secret_name = f"{attempt_base}-token"
-        token = await self._ensure_attempt_secret(secret_name)
         if not phase.jobs:
             raise NativeLaunchError(f"phase {phase.name!r} has no native jobs")
         try:
-            await run_ops.set_latest_attempt_token_hash(
-                cosmos,
-                run=run,
-                etag=etag,
-                token_sha256=_sha256(token),
-            )
             await self._ensure_run_namespace_access(
                 lease_doc=lease_doc,
                 workflow_doc=workflow_doc,
@@ -89,8 +79,25 @@ class NativeKubernetesLauncher:
                 attempt_index=attempt_index,
             )
             job_names: list[str] = []
+            first_secret_name = ""
             for job_spec in phase.jobs:
                 job_name = _job_name_for(attempt_base, job_spec.id)
+                secret_name = f"{job_name}-token"
+                if not first_secret_name:
+                    first_secret_name = secret_name
+                token = await self._ensure_attempt_secret(
+                    secret_name,
+                    extra_labels={
+                        "glimmung.romaine.life/attempt-base": _label_value(attempt_base),
+                        "glimmung.romaine.life/job-id": _label_value(job_spec.id),
+                    },
+                )
+                run, etag = await run_ops.set_native_job_token_hash(
+                    cosmos, run=run, etag=etag,
+                    attempt_index=attempt_index,
+                    job_id=job_spec.id,
+                    token_sha256=_sha256(token),
+                )
                 manifest = _job_manifest(
                     settings=self._settings,
                     lease_doc=lease_doc,
@@ -111,21 +118,26 @@ class NativeKubernetesLauncher:
             cosmos,
             lease_doc=lease_doc,
             job_name=attempt_base,
-            secret_name=secret_name,
+            secret_name=first_secret_name,
         )
         return job_names
 
-    async def _ensure_attempt_secret(self, name: str) -> str:
+    async def _ensure_attempt_secret(
+        self, name: str, *, extra_labels: dict[str, str] | None = None,
+    ) -> str:
         namespace = self._settings.native_runner_namespace
         path = f"/api/v1/namespaces/{namespace}/secrets"
         token = secrets.token_urlsafe(32)
+        labels = dict(_managed_labels())
+        if extra_labels:
+            labels.update(extra_labels)
         body = {
             "apiVersion": "v1",
             "kind": "Secret",
             "metadata": {
                 "name": name,
                 "namespace": namespace,
-                "labels": _managed_labels(),
+                "labels": labels,
             },
             "type": "Opaque",
             "stringData": {"attempt-token": token},
@@ -155,22 +167,52 @@ class NativeKubernetesLauncher:
             raise
 
     async def delete_attempt_secret(self, *, run_id: str, attempt_index: int) -> None:
-        """Delete the per-attempt callback token Secret.
+        """Delete every callback-token Secret belonging to an attempt.
 
-        Idempotent: a missing Secret means terminal cleanup already happened.
+        Under per-job dispatch each `phase.jobs[*]` has its own Secret;
+        this label-selects + deletes all of them, then falls through to
+        the legacy per-attempt name (`{attempt_base}-token`) for
+        attempts launched by older glimmung versions.
+
+        Idempotent: missing Secrets are treated as already cleaned up.
         """
         namespace = self._settings.native_runner_namespace
-        job_name = _resource_name("glim", run_id, attempt_index)
-        secret_name = f"{job_name}-token"
+        attempt_base = _resource_name("glim", run_id, attempt_index)
+        selector = urlencode({
+            "labelSelector": f"glimmung.romaine.life/attempt-base={attempt_base}",
+        })
+        try:
+            secrets_doc = await self._request(
+                "GET",
+                f"/api/v1/namespaces/{namespace}/secrets?{selector}",
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+            secrets_doc = {"items": []}
+        for item in (secrets_doc.get("items") or []):
+            name = str((item.get("metadata") or {}).get("name") or "")
+            if not name:
+                continue
+            try:
+                await self._request(
+                    "DELETE",
+                    f"/api/v1/namespaces/{namespace}/secrets/{name}",
+                )
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 404:
+                    raise
+        # Back-compat: pre-fan-out attempts named the Secret by attempt
+        # base directly. Labels are missing on those, so the selector
+        # above won't catch them.
         try:
             await self._request(
                 "DELETE",
-                f"/api/v1/namespaces/{namespace}/secrets/{secret_name}",
+                f"/api/v1/namespaces/{namespace}/secrets/{attempt_base}-token",
             )
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 404:
-                return
-            raise
+            if exc.response.status_code != 404:
+                raise
 
     async def delete_attempt_job(
         self,
