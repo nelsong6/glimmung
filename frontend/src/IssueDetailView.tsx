@@ -309,15 +309,32 @@ export function IssueDetailView() {
   // legacy slugs are normalized to `/summary` so the breadcrumb leaf
   // and address bar stay aligned.
   const lastSeg = location.pathname.split("/").filter(Boolean).pop() ?? "";
-  // When the URL is .../runs/:runId, `params.runId` is set and the tab is "runs".
-  const selectedRunId = params.runId ?? null;
-  const tab: Tab = selectedRunId ? "runs" : (SLUG_TO_TAB[lastSeg] ?? "summary");
+  // params.runId holds the user-facing run number (e.g. "3"), not the internal ID.
+  // Tab is "runs" whenever params.runId is set, independent of graph load state.
+  const tab: Tab = params.runId ? "runs" : (SLUG_TO_TAB[lastSeg] ?? "summary");
   const setTab = (t: Tab) => navigate(`${baseUrl}/${TAB_SLUGS[t]}`);
-  const selectRun = (runId: string | null) =>
-    navigate(runId ? `${baseUrl}/runs/${runId}` : `${baseUrl}/runs`);
 
   const [detail, setDetail] = useState<IssueDetail | null>(null);
   const [graph, setGraph] = useState<IssueGraph | null>(null);
+
+  // Resolve the URL run-number slug to the internal graph node ID so RunViewer
+  // can look it up. Null while graph is loading; tab is still "runs" via params.runId.
+  const selectedRunId = (() => {
+    if (!params.runId || !graph) return null;
+    const node = graph.nodes
+      .filter((n) => n.kind === "run")
+      .find((n) => issueRunSlug(graph, n) === params.runId);
+    return node ? runIdFromNode(node) : null;
+  })();
+
+  // Navigate to a run using its user-facing issue-scoped number (issueRunSlug),
+  // never the internal backing ID.
+  const selectRun = (runId: string | null) => {
+    if (!runId) { navigate(`${baseUrl}/runs`); return; }
+    const node = graph?.nodes.find((n) => n.kind === "run" && runIdFromNode(n) === runId);
+    const slug = node && graph ? issueRunSlug(graph, node) : runId;
+    navigate(`${baseUrl}/runs/${slug}`);
+  };
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
@@ -399,9 +416,9 @@ export function IssueDetailView() {
   }, [detail?.id]);
 
   useEffect(() => {
-    // On a runs/:runId URL the last segment is the run ID, not a tab slug —
-    // skip slug normalization so we don't strip the run from the URL.
-    if (selectedRunId) return;
+    // On a runs/:runNumber URL the last segment is the run number, not a tab slug —
+    // skip slug normalization so we don't strip it from the URL.
+    if (params.runId) return;
     const canonicalSlug = TAB_SLUGS[tab];
     if (lastSeg !== canonicalSlug) {
       navigate(`${baseUrl}/${canonicalSlug}`, { replace: true });
@@ -415,18 +432,18 @@ export function IssueDetailView() {
       `/projects/${encodeURIComponent(project.name)}/issues/${target.issue_number}/${canonicalSlug}`,
       { replace: true },
     );
-  }, [baseUrl, lastSeg, navigate, projectRouteIssueNumber, selectedRunId, snap?.projects, tab, target]);
+  }, [baseUrl, lastSeg, navigate, params.runId, projectRouteIssueNumber, snap?.projects, tab, target]);
 
   useEffect(() => {
     if (!detail?.number) return;
     if (projectRouteIssueNumber !== null) return;
     const canonicalSlug = TAB_SLUGS[tab];
-    const runSuffix = selectedRunId ? `/${selectedRunId}` : "";
+    const runSuffix = params.runId ? `/${params.runId}` : "";
     navigate(
       `/projects/${encodeURIComponent(detail.project)}/issues/${detail.number}/${canonicalSlug}${runSuffix}`,
       { replace: true },
     );
-  }, [detail, navigate, projectRouteIssueNumber, selectedRunId, tab]);
+  }, [detail, navigate, params.runId, projectRouteIssueNumber, tab]);
 
   useEffect(() => {
     let cancelled = false;
