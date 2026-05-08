@@ -36,7 +36,16 @@ single expensive attempt could blow past the $25 default while still
 well under the per-phase attempt cap.
 """
 
-from glimmung.models import RecyclePolicy, Run, RunDecision, VerificationStatus, Workflow
+from glimmung.models import Run, RunDecision, VerificationStatus, Workflow
+
+
+def _next_phase_after(workflow: Workflow, phase_name: str):
+    for i, p in enumerate(workflow.phases):
+        if p.name == phase_name:
+            if i + 1 < len(workflow.phases):
+                return workflow.phases[i + 1]
+            return None
+    return None
 
 
 def _trigger_for_attempt(attempt) -> str:
@@ -60,29 +69,54 @@ def decide(run: Run, workflow: Workflow) -> RunDecision:
             f"({[p.name for p in workflow.phases]})"
         )
 
+    # Evidence verification gate (#296 follow-up). The gate is a glimmung-
+    # owned phase that runs after a verify phase, reads the verification
+    # artifact, and exits 0 if status==pass else 1. Routing is on
+    # conclusion (no verification.status of its own), and recycle lands
+    # back on the verify phase to re-run the agent on a fresh attempt.
+    if phase_spec.evidence_verification_gate:
+        if last.conclusion == "success":
+            return RunDecision.ADVANCE
+        if run.cumulative_cost_usd >= run.budget.total:
+            return RunDecision.ABORT_BUDGET_COST
+        rp = phase_spec.recycle_policy
+        if rp is None or "verify_fail" not in rp.on:
+            return RunDecision.ABORT_BUDGET_ATTEMPTS
+        attempts_in_phase = sum(1 for a in run.attempts if a.phase == last.phase)
+        if attempts_in_phase >= rp.max_attempts:
+            return RunDecision.ABORT_BUDGET_ATTEMPTS
+        return RunDecision.RETRY
+
     # Non-verify phase: GHA conclusion is the verdict. Any failure ends the run.
     if not phase_spec.verify:
         if last.conclusion == "success":
             return RunDecision.ADVANCE
         return RunDecision.ABORT_MALFORMED
 
-    # Verify phase. PASS short-circuits.
+    # Verify phase followed by an evidence_verification_gate: the gate is
+    # the decider; the verify phase just emits the artifact and we ADVANCE
+    # to the gate on conclusion success regardless of verification.status
+    # (the artifact's verdict will be enforced one phase downstream).
+    next_phase = _next_phase_after(workflow, phase_spec.name)
+    if next_phase is not None and next_phase.evidence_verification_gate:
+        if last.conclusion == "success":
+            return RunDecision.ADVANCE
+        return RunDecision.ABORT_MALFORMED
+
+    # Legacy verify phase (no gate): route on verification.status. Kept so
+    # workflows registered before the gate primitive shipped continue to
+    # behave identically. New registrations are required by the validator
+    # to declare a gate, so this branch fades out as projects migrate.
     if last.verification is not None and last.verification.status == VerificationStatus.PASS:
         return RunDecision.ADVANCE
 
-    # Cost cap is checked before the recycle gate.
     if run.cumulative_cost_usd >= run.budget.total:
         return RunDecision.ABORT_BUDGET_COST
 
     trigger = _trigger_for_attempt(last)
-    rp: RecyclePolicy | None = phase_spec.recycle_policy
+    rp = phase_spec.recycle_policy
 
     if rp is None or trigger not in rp.on:
-        # No recycle for this trigger. Surface the *reason* for the abort:
-        # malformed artifacts get the malformed code; failures with no
-        # retry path collapse to attempts-exhausted (semantically "no
-        # retry available," kept under the existing enum to avoid churning
-        # the abort-comment surface for v1).
         return RunDecision.ABORT_MALFORMED if trigger == "verify_malformed" else RunDecision.ABORT_BUDGET_ATTEMPTS
 
     attempts_in_phase = sum(1 for a in run.attempts if a.phase == last.phase)

@@ -204,7 +204,20 @@ class PhaseSpec(BaseModel):
     (glimmung#296). Always-phases must come at the end of the phase list,
     cannot opt into verify/recycle (no retry semantics — they always run
     once, and their own failure logs but doesn't escalate), and cannot be
-    referenced as a recycle `lands_at` target."""
+    referenced as a recycle `lands_at` target.
+
+    `evidence_verification_gate` marks a phase as a glimmung-owned
+    primitive that gates on a preceding verify phase's verification
+    artifact. The user phase emits the artifact and exits 0 always; the
+    gate consumes the artifact via an `inputs` ref and decides the
+    verdict (status==pass → exit 0, else exit 1). Gate phases must be
+    `kind: k8s_job`, must immediately follow a `verify: true` phase, must
+    not declare their own jobs (glimmung supplies the runner), and may
+    carry `recycle_policy` (the gate is the decision point that recycles
+    onto the verify phase or itself, so it's the natural home for retry
+    config). The visible effect: a verify_fail surfaces as a red gate
+    phase in the run graph, not a buried artifact field on a green
+    user-phase attempt."""
     name: str
     kind: str = "gha_dispatch"
     workflow_filename: str = ""
@@ -215,6 +228,7 @@ class PhaseSpec(BaseModel):
     verify: bool = False
     recycle_policy: RecyclePolicy | None = None
     always: bool = False
+    evidence_verification_gate: bool = False
     jobs: list[NativeJobSpec] = Field(default_factory=list)
 
 
@@ -289,7 +303,11 @@ class WorkflowRegister(BaseModel):
                         f"phase {p.name!r} kind='gha_dispatch' cannot declare native jobs"
                     )
             if p.kind == "k8s_job":
-                if not p.jobs:
+                # Gate phases are glimmung-supplied — jobs[] is filled in
+                # at storage time, not by the user. The dedicated
+                # evidence_verification_gate validator below catches
+                # accidental user-supplied jobs.
+                if not p.jobs and not p.evidence_verification_gate:
                     raise ValueError(
                         f"phase {p.name!r} kind='k8s_job' must declare at least one job"
                     )
@@ -310,10 +328,11 @@ class WorkflowRegister(BaseModel):
                             f"got {step_slugs}"
                         )
             if p.recycle_policy is not None:
-                if not p.verify:
+                if not (p.verify or p.evidence_verification_gate):
                     raise ValueError(
-                        f"phase {p.name!r} has recycle_policy but verify=False; "
-                        "recycle is only valid on verify phases"
+                        f"phase {p.name!r} has recycle_policy but is neither verify "
+                        "nor an evidence_verification_gate; recycle is only valid "
+                        "on phases that decide a pass/fail verdict"
                     )
                 if p.recycle_policy.lands_at != "self" and p.recycle_policy.lands_at not in names:
                     raise ValueError(
@@ -332,10 +351,73 @@ class WorkflowRegister(BaseModel):
                         f"phase {p.name!r} has always=True with verify=True; "
                         "always-run teardown phases cannot opt into the verify loop"
                     )
+                if p.evidence_verification_gate:
+                    raise ValueError(
+                        f"phase {p.name!r} has always=True with "
+                        "evidence_verification_gate=True; teardown and gate phases "
+                        "are mutually exclusive roles"
+                    )
                 if p.recycle_policy is not None:
                     raise ValueError(
                         f"phase {p.name!r} has always=True with recycle_policy; "
                         "always-run teardown phases run once with no retry semantics"
+                    )
+            if p.evidence_verification_gate:
+                if p.verify:
+                    raise ValueError(
+                        f"phase {p.name!r} cannot be both verify=True and "
+                        "evidence_verification_gate=True; the verify phase emits "
+                        "the artifact, the gate consumes it"
+                    )
+                if p.kind != "k8s_job":
+                    raise ValueError(
+                        f"phase {p.name!r} has evidence_verification_gate=True "
+                        f"with kind={p.kind!r}; gate phases must be kind=k8s_job"
+                    )
+                if p.jobs:
+                    raise ValueError(
+                        f"phase {p.name!r} has evidence_verification_gate=True "
+                        "and declares jobs; gate jobs are glimmung-supplied and "
+                        "must not be hand-written"
+                    )
+        # Every verify=True phase must be immediately followed by an
+        # evidence_verification_gate=True phase (and vice versa). The gate
+        # is the visible decider; making it required means a verify_fail
+        # always renders as a red gate phase, never as a buried artifact
+        # field on a green user-phase attempt.
+        for i, p in enumerate(self.phases):
+            if p.verify:
+                next_phase = self.phases[i + 1] if i + 1 < len(self.phases) else None
+                if next_phase is None or not next_phase.evidence_verification_gate:
+                    head = (
+                        f"phase {p.name!r} has verify=True but the next phase is "
+                        f"{next_phase.name!r} (evidence_verification_gate=False)"
+                        if next_phase is not None
+                        else f"phase {p.name!r} has verify=True but is the last phase"
+                    )
+                    pointer = (
+                        ". Verify phases must be immediately followed by an "
+                        "evidence_verification_gate phase. Add:\n"
+                        f"  - name: {p.name}-gate\n"
+                        f"    kind: k8s_job\n"
+                        f"    evidence_verification_gate: true\n"
+                        f"    inputs:\n"
+                        f"      verification: ${{{{ phases.{p.name}.outputs.verification }}}}\n"
+                        f"    recycle_policy:\n"
+                        f"      max_attempts: <move from {p.name}>\n"
+                        f"      on: [verify_fail, verify_malformed]\n"
+                        f"      lands_at: {p.name}\n"
+                        f"immediately after {p.name!r}, and remove recycle_policy "
+                        f"from {p.name!r} itself."
+                    )
+                    raise ValueError(head + pointer)
+            if p.evidence_verification_gate:
+                prev = self.phases[i - 1] if i > 0 else None
+                if prev is None or not prev.verify:
+                    raise ValueError(
+                        f"phase {p.name!r} has evidence_verification_gate=True but "
+                        "is not preceded by a verify=True phase; the gate has "
+                        "nothing to gate on"
                     )
         # always-run teardown phases must form a contiguous suffix at the
         # end of the phase list. The dispatch layer relies on "first
