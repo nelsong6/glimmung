@@ -31,9 +31,9 @@ export type PhaseGraphProps = {
   prEnabled: boolean;
   /**
    * Optional render override for each phase node. When omitted, a
-   * default "definition" node is rendered (label + "not run" pill +
-   * `verify`/`kind` meta). The run-mode caller passes a renderer that
-   * uses live attempt-rollup state.
+   * default "definition" node is rendered (label + `verify`/`kind`
+   * meta). The run-mode caller passes a renderer that uses live
+   * attempt-rollup state and wires per-phase button refs for layout.
    */
   renderPhase?: (phase: PhaseGraphPhase) => ReactNode;
   /**
@@ -45,6 +45,18 @@ export type PhaseGraphProps = {
   dagClassName?: string;
   /** Aria label on the wrapping `.dag` div. */
   ariaLabel?: string;
+  /**
+   * Phase name the active run entered at. The arrow leading into that
+   * phase gets the `entry` class so reviewers can see "the run entered
+   * here" — distinguishing default-entry runs from
+   * recycle-child / resume runs that entered mid-pipeline.
+   */
+  entryPhaseName?: string | null;
+  /**
+   * When true the entry box renders with the `active` class — used by
+   * the run-pipeline strip but never by the workflow definition view.
+   */
+  entryActive?: boolean;
 };
 
 /**
@@ -115,6 +127,8 @@ export function PhaseGraph({
   renderTouchpoint = defaultTouchpointNode,
   dagClassName,
   ariaLabel,
+  entryPhaseName = null,
+  entryActive = false,
 }: PhaseGraphProps) {
   const depths = computeDepths(phases);
   // Group phases by depth, preserving declared order within each depth.
@@ -134,20 +148,34 @@ export function PhaseGraph({
 
   return (
     <div className={`dag${dagClassName ? " " + dagClassName : ""}`} aria-label={ariaLabel}>
-      <div className="dag-entry">
+      <div className={`dag-entry${entryActive ? " active" : ""}`}>
         <span className="mono">entry</span>
         <span className="dim mono">{triggerLabel ?? "—"}</span>
       </div>
-      {columns.map((col, idx) => (
-        <Fragment key={idx}>
-          <div className="dag-edge" aria-hidden="true">→</div>
-          <div className={`dag-column${col.length > 1 ? " dag-column-parallel" : ""}`}>
-            {col.map((phase) => (
-              <Fragment key={phase.name}>{renderPhase(phase)}</Fragment>
-            ))}
-          </div>
-        </Fragment>
-      ))}
+      {columns.map((col, idx) => {
+        // Highlight the arrow leading into a column when any phase in
+        // that column matches `entryPhaseName`. Parallel columns can
+        // have multiple entries; today only one entry phase is
+        // active per run, so at most one column lights up.
+        const colHasEntry = col.some(
+          (phase) => entryPhaseName != null && phase.name === entryPhaseName,
+        );
+        return (
+          <Fragment key={idx}>
+            <div
+              className={`dag-edge${colHasEntry ? " entry" : ""}`}
+              aria-label={colHasEntry ? "the run entered here" : undefined}
+              title={colHasEntry ? "the run entered here" : undefined}
+              aria-hidden={colHasEntry ? undefined : "true"}
+            >→</div>
+            <div className={`dag-column${col.length > 1 ? " dag-column-parallel" : ""}`}>
+              {col.map((phase) => (
+                <Fragment key={phase.name}>{renderPhase(phase)}</Fragment>
+              ))}
+            </div>
+          </Fragment>
+        );
+      })}
       {prEnabled && (
         <>
           <div className="dag-edge" aria-hidden="true">→</div>

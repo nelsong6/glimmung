@@ -26,6 +26,7 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { authedFetch } from "./auth";
+import { PhaseGraph, type PhaseGraphPhase } from "./PhaseGraph";
 
 type IssueDetail = {
   id: string;
@@ -150,6 +151,9 @@ type WorkflowPhase = {
   workflow_filename: string;
   workflow_ref: string;
   verify: boolean;
+  always?: boolean;
+  evidence_verification_gate?: boolean;
+  depends_on?: string[];
   recycle_policy: WorkflowRecyclePolicy | null;
 };
 
@@ -868,6 +872,7 @@ export function RunViewer({
   isAdmin = false,
   project,
   repo,
+  workflow = null,
   inFlight,
   dispatchState,
   onRedispatch,
@@ -886,6 +891,7 @@ export function RunViewer({
   isAdmin?: boolean;
   project: string;
   repo: string | null;
+  workflow?: Workflow | null;
   inFlight: boolean;
   dispatchState: DispatchState;
   onRedispatch: () => void;
@@ -1067,6 +1073,7 @@ export function RunViewer({
       <PipelineDag
         run={focused}
         graph={graph}
+        workflow={workflow}
         selectedNodeId={drillNodeId}
         onSelectNode={setDrillNodeId}
         onOpenTouchpoint={onOpenTouchpoint}
@@ -1284,26 +1291,51 @@ function computeRecyclePaths(
 function PipelineDag({
   run,
   graph,
+  workflow,
   selectedNodeId,
   onSelectNode,
   onOpenTouchpoint,
 }: {
   run: GraphNode;
   graph: IssueGraph;
+  workflow: Workflow | null;
   selectedNodeId: string | null;
   onSelectNode: (id: string | null) => void;
   onOpenTouchpoint: () => void;
 }) {
   const workflowTriggerLabel = stringOrNull(run.metadata.workflow) ?? "agent-run";
-  const phases = useMemo(() => phaseNodesForRun(graph, run), [graph, run]);
+  const phaseRollups = useMemo(() => phaseNodesForRun(graph, run), [graph, run]);
+  const rollupByName = useMemo(() => {
+    const m = new Map<string, PhaseRollup>();
+    for (const p of phaseRollups) m.set(p.phaseName, p);
+    return m;
+  }, [phaseRollups]);
   const meta = run.metadata;
   const workflowGraph = useMemo(
     () => workflowGraphMeta(meta.workflow_graph),
     [meta.workflow_graph],
   );
+  // PhaseGraph drives layout from workflow.phases (declared order +
+  // depends_on for column grouping). When the workflow definition isn't
+  // available yet (rare — pre-snapshot window), fall back to the
+  // run-derived rollup names so we still render something.
+  const phasesForLayout: PhaseGraphPhase[] = useMemo(() => {
+    if (workflow?.phases?.length) {
+      return workflow.phases.map((p) => ({
+        name: p.name,
+        kind: p.kind,
+        verify: p.verify,
+        always: p.always,
+        evidence_verification_gate: (p as { evidence_verification_gate?: boolean })
+          .evidence_verification_gate,
+        depends_on: (p as { depends_on?: string[] }).depends_on ?? [],
+      }));
+    }
+    return phaseRollups.map((p) => ({ name: p.phaseName, kind: "phase" }));
+  }, [workflow, phaseRollups]);
   const activeEntry = stringOrNull(meta.entrypoint_phase)
     ?? workflowGraph?.default_entry?.target
-    ?? phases[0]?.phaseName
+    ?? phaseRollups[0]?.phaseName
     ?? null;
   const touchpointId = stringOrNull(meta.report_id);
   const touchpointState = stringOrNull(meta.report_state);
@@ -1359,67 +1391,70 @@ function PipelineDag({
     phaseRefs.current.forEach((el) => ro.observe(el));
     if (tpRef.current) ro.observe(tpRef.current);
     return () => ro.disconnect();
-  }, [workflowGraph, phases]);
+  }, [workflowGraph, phasesForLayout]);
+
+  // Render-phase callback wraps the existing run-state DagPhaseNode and
+  // wires its button ref into `phaseRefs` so the recycle band SVG can
+  // continue to compute orthogonal paths from per-phase bounding rects.
+  const renderPhase = (graphPhase: PhaseGraphPhase) => {
+    const rollup = rollupByName.get(graphPhase.name) ?? {
+      phaseName: graphPhase.name,
+      attempts: [],
+      latest: run,
+      status: { cls: "info", text: "pending" },
+    };
+    return (
+      <DagPhaseNode
+        phase={rollup}
+        selected={selectedNodeId === `phase:${graphPhase.name}`}
+        onSelect={() =>
+          onSelectNode(
+            selectedNodeId === `phase:${graphPhase.name}` ? null : `phase:${graphPhase.name}`,
+          )
+        }
+        nodeRef={(el) => {
+          if (el) phaseRefs.current.set(graphPhase.name, el);
+          else phaseRefs.current.delete(graphPhase.name);
+        }}
+      />
+    );
+  };
+
+  const renderTouchpoint = () => (
+    <button
+      ref={tpRef}
+      type="button"
+      className={`dag-node dag-node-pr ${touchpointClass}${selectedNodeId === "pr" ? " selected" : ""}`}
+      onClick={() => {
+        if (primitiveState === "failed") {
+          onSelectNode(selectedNodeId === "pr" ? null : "pr");
+        } else {
+          onOpenTouchpoint();
+        }
+      }}
+      aria-pressed={selectedNodeId === "pr"}
+    >
+      <div className="dag-node-label">touchpoint</div>
+      <div className="dag-node-state mono">{touchpointStatus}</div>
+      {touchpointTitle && <div className="dag-node-meta dim mono">{touchpointTitle}</div>}
+      {!touchpointTitle && primitiveError && (
+        <div className="dag-node-meta dim mono">prepare failed</div>
+      )}
+    </button>
+  );
 
   return (
     <div className="dag-wrap">
-      <div className="dag" aria-label="pipeline">
-        {/* Entry box: shape must match the workflow definition view. The
-            two views can drift on highlighting / status / interactivity,
-            but never on structural shape — they're rendering the same
-            phase pipeline. */}
-        <div className="dag-entry active">
-          <span className="mono">entry</span>
-          <span className="dim mono">{workflowTriggerLabel}</span>
-        </div>
-        {phases.map((p) => {
-          const isEntry = p.phaseName === activeEntry;
-          return (
-            <Fragment key={p.phaseName}>
-              <div
-                className={`dag-edge${isEntry ? " entry" : ""}`}
-                aria-label={isEntry ? "the run entered here" : undefined}
-                title={isEntry ? "the run entered here" : undefined}
-                aria-hidden={isEntry ? undefined : "true"}
-              >→</div>
-              <DagPhaseNode
-                phase={p}
-                selected={selectedNodeId === `phase:${p.phaseName}`}
-                onSelect={() =>
-                  onSelectNode(selectedNodeId === `phase:${p.phaseName}` ? null : `phase:${p.phaseName}`)
-                }
-                nodeRef={(el) => {
-                  if (el) phaseRefs.current.set(p.phaseName, el);
-                  else phaseRefs.current.delete(p.phaseName);
-                }}
-              />
-            </Fragment>
-          );
-        })}
-        <div className="dag-edge" aria-hidden="true">→</div>
-        <button
-          ref={tpRef}
-          type="button"
-          className={`dag-node dag-node-pr ${touchpointClass}${selectedNodeId === "pr" ? " selected" : ""}`}
-          onClick={() => {
-            if (primitiveState === "failed") {
-              onSelectNode(selectedNodeId === "pr" ? null : "pr");
-            } else {
-              onOpenTouchpoint();
-            }
-          }}
-          aria-pressed={selectedNodeId === "pr"}
-        >
-          <div className="dag-node-label">touchpoint</div>
-          <div className="dag-node-state mono">
-            {touchpointStatus}
-          </div>
-          {touchpointTitle && <div className="dag-node-meta dim mono">{touchpointTitle}</div>}
-          {!touchpointTitle && primitiveError && (
-            <div className="dag-node-meta dim mono">prepare failed</div>
-          )}
-        </button>
-      </div>
+      <PhaseGraph
+        phases={phasesForLayout}
+        triggerLabel={workflowTriggerLabel}
+        prEnabled={true}
+        renderPhase={renderPhase}
+        renderTouchpoint={renderTouchpoint}
+        ariaLabel="pipeline"
+        entryPhaseName={activeEntry}
+        entryActive={true}
+      />
       <div
         ref={bandRef}
         className="dag-recycle-band"
@@ -1935,6 +1970,7 @@ function RunsPane({
           signedIn={false}
           project={project}
           repo={repo}
+          workflow={workflow}
           inFlight={runs.some((run) => run.state === "in_progress")}
           dispatchState={RUN_VIEWER_IDLE_DISPATCH}
           onRedispatch={() => undefined}
@@ -1971,6 +2007,7 @@ function RunsPane({
           signedIn={false}
           project={project}
           repo={repo}
+          workflow={workflow}
           inFlight={runs.some((run) => run.state === "in_progress")}
           dispatchState={RUN_VIEWER_IDLE_DISPATCH}
           onRedispatch={() => undefined}
