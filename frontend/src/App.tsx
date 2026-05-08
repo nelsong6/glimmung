@@ -2356,8 +2356,6 @@ type CapacityViewProps = {
   selected: Selection;
   selectedWorkflow: Workflow | null;
   selectedProject: Project | null;
-  eligibilityReqs: Record<string, unknown> | null;
-  matchesRequirements: (host: Host, reqs: Record<string, unknown>) => boolean;
 };
 
 function CapacityView({
@@ -2368,8 +2366,6 @@ function CapacityView({
   selected,
   selectedWorkflow,
   selectedProject,
-  eligibilityReqs,
-  matchesRequirements,
 }: CapacityViewProps) {
   // Two-click confirm pattern for the cancel button (#30): first click
   // arms the row (replaces the button with [Cancel?] [Keep]); second
