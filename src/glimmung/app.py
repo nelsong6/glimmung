@@ -2067,7 +2067,57 @@ def _native_job_to_doc(job: NativeJobSpec) -> dict[str, Any]:
     }
 
 
+_GATE_RUNNER_IMAGE = "python:3.12-slim"
+# The gate script reads the verification artifact from the VERIFICATION
+# env var (a JSON string substituted by glimmung from the prior verify
+# phase's outputs.verification ref) and exits 0 if status=="pass" else 1.
+# Inline so the gate runtime ships from glimmung directly with no
+# baked-in tooling beyond Python's stdlib.
+_GATE_RUNNER_SCRIPT = (
+    "import json, os, sys\n"
+    "raw = os.environ.get('VERIFICATION', '').strip()\n"
+    "if not raw:\n"
+    "    print('verification input is empty', file=sys.stderr)\n"
+    "    sys.exit(2)\n"
+    "try:\n"
+    "    payload = json.loads(raw)\n"
+    "except json.JSONDecodeError as exc:\n"
+    "    print(f'verification input is not valid JSON: {exc}', file=sys.stderr)\n"
+    "    sys.exit(2)\n"
+    "status = payload.get('status')\n"
+    "print(f'verification.status = {status!r}')\n"
+    "for r in payload.get('reasons') or []:\n"
+    "    print(f'reason: {r}')\n"
+    "sys.exit(0 if status == 'pass' else 1)\n"
+)
+
+
+def _gate_runner_jobs_doc() -> list[dict[str, Any]]:
+    """Glimmung-supplied jobs[] for an evidence_verification_gate phase.
+    Auto-filled at storage time so the stored phase doc looks like a
+    normal k8s_job phase (jobs[0] populated). Validator rejects user-
+    supplied jobs on these phases."""
+    return [{
+        "id": "evidence-verification-gate",
+        "name": "Evidence verification gate",
+        "image": _GATE_RUNNER_IMAGE,
+        "command": ["python", "-c"],
+        "args": [_GATE_RUNNER_SCRIPT],
+        "env": {},
+        "steps": [{
+            "slug": "evaluate-verdict",
+            "title": "Evaluate verification verdict",
+        }],
+        "timeoutSeconds": 60,
+    }]
+
+
 def _phase_to_doc(p: Any) -> dict[str, Any]:
+    is_gate = bool(getattr(p, "evidence_verification_gate", False))
+    if is_gate and not p.jobs:
+        jobs_doc = _gate_runner_jobs_doc()
+    else:
+        jobs_doc = [_native_job_to_doc(job) for job in p.jobs]
     return {
         "name": p.name,
         "kind": p.kind,
@@ -2077,9 +2127,10 @@ def _phase_to_doc(p: Any) -> dict[str, Any]:
         "verify": p.verify,
         "recyclePolicy": _recycle_policy_to_doc(p.recycle_policy),
         "always": bool(p.always),
+        "evidenceVerificationGate": is_gate,
         "inputs": dict(p.inputs),
         "outputs": list(p.outputs),
-        "jobs": [_native_job_to_doc(job) for job in p.jobs],
+        "jobs": jobs_doc,
     }
 
 
@@ -2125,6 +2176,7 @@ def _phase_from_doc(d: dict[str, Any]):
         verify=bool(d.get("verify", False)),
         recycle_policy=_recycle_policy_from_doc(d.get("recyclePolicy")),
         always=bool(d.get("always", False)),
+        evidence_verification_gate=bool(d.get("evidenceVerificationGate", False)),
         inputs=dict(d.get("inputs") or {}),
         outputs=list(d.get("outputs") or []),
         jobs=[

@@ -325,8 +325,14 @@ async def test_register_workflow_accepts_native_k8s_job_phase(cosmos, monkeypatc
                         ],
                     )
                 ],
-                outputs=["branch"],
+                outputs=["branch", "verification"],
                 verify=True,
+            ),
+            PhaseSpec(
+                name="agent-verify-gate",
+                kind="k8s_job",
+                evidence_verification_gate=True,
+                inputs={"verification": "${{ phases.agent-execute.outputs.verification }}"},
             ),
         ],
     )

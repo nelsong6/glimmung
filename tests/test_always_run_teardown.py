@@ -41,17 +41,23 @@ def _k8s_phase(
     *,
     verify: bool = False,
     always: bool = False,
+    evidence_verification_gate: bool = False,
     recycle_policy: RecyclePolicy | None = None,
     outputs: list[str] | None = None,
+    inputs: dict[str, str] | None = None,
 ) -> PhaseSpec:
     return PhaseSpec(
         name=name,
         kind="k8s_job",
         verify=verify,
         always=always,
+        evidence_verification_gate=evidence_verification_gate,
         recycle_policy=recycle_policy,
         outputs=outputs or [],
-        jobs=[
+        inputs=inputs or {},
+        # gate phases get glimmung-supplied jobs at storage time; in
+        # WorkflowRegister inputs they're left empty.
+        jobs=[] if evidence_verification_gate else [
             NativeJobSpec(
                 id=name,
                 image="ghcr.io/example/runner:latest",
@@ -126,9 +132,16 @@ def test_always_phase_can_be_registered_after_regular_phase():
         name="agent-run",
         phases=[
             _k8s_phase("env-prep"),
-            _k8s_phase("agent-execute", verify=True, recycle_policy=RecyclePolicy(
-                max_attempts=0, on=["verify_fail", "verify_malformed"], lands_at="self",
-            )),
+            _k8s_phase("agent-execute", verify=True, outputs=["verification"]),
+            _k8s_phase(
+                "agent-verify-gate",
+                evidence_verification_gate=True,
+                inputs={"verification": "${{ phases.agent-execute.outputs.verification }}"},
+                recycle_policy=RecyclePolicy(
+                    max_attempts=0, on=["verify_fail", "verify_malformed"],
+                    lands_at="agent-execute",
+                ),
+            ),
             _k8s_phase("env-destroy", always=True),
         ],
     )
@@ -194,9 +207,11 @@ def test_recycle_target_pointing_at_always_phase_rejected():
             name="agent-run",
             phases=[
                 _k8s_phase("env-prep"),
+                _k8s_phase("agent-execute", verify=True, outputs=["verification"]),
                 _k8s_phase(
-                    "agent-execute",
-                    verify=True,
+                    "agent-verify-gate",
+                    evidence_verification_gate=True,
+                    inputs={"verification": "${{ phases.agent-execute.outputs.verification }}"},
                     recycle_policy=RecyclePolicy(
                         max_attempts=2,
                         on=["verify_fail"],
