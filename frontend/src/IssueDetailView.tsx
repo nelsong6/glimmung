@@ -263,6 +263,7 @@ type IssueDetailRouteParams = {
   project?: string;
   issueId?: string;
   issueNumber?: string;
+  runId?: string;
 };
 
 export function IssueDetailView() {
@@ -308,12 +309,15 @@ export function IssueDetailView() {
   // legacy slugs are normalized to `/summary` so the breadcrumb leaf
   // and address bar stay aligned.
   const lastSeg = location.pathname.split("/").filter(Boolean).pop() ?? "";
-  const tab: Tab = SLUG_TO_TAB[lastSeg] ?? "summary";
+  // When the URL is .../runs/:runId, `params.runId` is set and the tab is "runs".
+  const selectedRunId = params.runId ?? null;
+  const tab: Tab = selectedRunId ? "runs" : (SLUG_TO_TAB[lastSeg] ?? "summary");
   const setTab = (t: Tab) => navigate(`${baseUrl}/${TAB_SLUGS[t]}`);
+  const selectRun = (runId: string | null) =>
+    navigate(runId ? `${baseUrl}/runs/${runId}` : `${baseUrl}/runs`);
 
   const [detail, setDetail] = useState<IssueDetail | null>(null);
   const [graph, setGraph] = useState<IssueGraph | null>(null);
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
@@ -342,7 +346,6 @@ export function IssueDetailView() {
       ? `${target.project} (native)`
       : "";
   const selectTab = (t: Tab) => {
-    if (t === "runs") setSelectedRunId(null);
     setTab(t);
   };
 
@@ -366,7 +369,6 @@ export function IssueDetailView() {
       const result = await r.json() as { state?: string };
       setDispatchState({ kind: "result", state: result.state ?? "dispatched" });
       setRefreshTick((t) => t + 1);
-      setSelectedRunId(null);
       setTab("runs");
     } catch (e) {
       setDispatchState({ kind: "error", message: String(e) });
@@ -393,11 +395,13 @@ export function IssueDetailView() {
   };
 
   useEffect(() => {
-    setSelectedRunId(null);
     setAbortState({ kind: "idle" });
   }, [detail?.id]);
 
   useEffect(() => {
+    // On a runs/:runId URL the last segment is the run ID, not a tab slug —
+    // skip slug normalization so we don't strip the run from the URL.
+    if (selectedRunId) return;
     const canonicalSlug = TAB_SLUGS[tab];
     if (lastSeg !== canonicalSlug) {
       navigate(`${baseUrl}/${canonicalSlug}`, { replace: true });
@@ -411,17 +415,18 @@ export function IssueDetailView() {
       `/projects/${encodeURIComponent(project.name)}/issues/${target.issue_number}/${canonicalSlug}`,
       { replace: true },
     );
-  }, [baseUrl, lastSeg, navigate, projectRouteIssueNumber, snap?.projects, tab, target]);
+  }, [baseUrl, lastSeg, navigate, projectRouteIssueNumber, selectedRunId, snap?.projects, tab, target]);
 
   useEffect(() => {
     if (!detail?.number) return;
     if (projectRouteIssueNumber !== null) return;
     const canonicalSlug = TAB_SLUGS[tab];
+    const runSuffix = selectedRunId ? `/${selectedRunId}` : "";
     navigate(
-      `/projects/${encodeURIComponent(detail.project)}/issues/${detail.number}/${canonicalSlug}`,
+      `/projects/${encodeURIComponent(detail.project)}/issues/${detail.number}/${canonicalSlug}${runSuffix}`,
       { replace: true },
     );
-  }, [detail, navigate, projectRouteIssueNumber, tab]);
+  }, [detail, navigate, projectRouteIssueNumber, selectedRunId, tab]);
 
   useEffect(() => {
     let cancelled = false;
@@ -528,7 +533,7 @@ export function IssueDetailView() {
                 onCancelAbort={() => setAbortState({ kind: "idle" })}
                 onConfirmAbort={(runId) => void abortRun(runId)}
                 selectedRunId={selectedRunId}
-                onSelectRun={setSelectedRunId}
+                onSelectRun={selectRun}
                 onDispatch={() => void dispatchRun()}
                 onOpenTouchpoint={() => setTab("touchpoint")}
               />
