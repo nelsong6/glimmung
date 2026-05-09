@@ -4,11 +4,13 @@
 
 import { Fragment, ReactNode, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
+  BaseEdge,
   Handle,
   MarkerType,
   Position,
   ReactFlow,
   type Edge,
+  type EdgeProps,
   type Node,
   type NodeProps,
 } from "@xyflow/react";
@@ -49,8 +51,14 @@ type TouchpointNodeData = {
   renderTouchpoint: () => ReactNode;
 };
 
-type GraphEdge = Edge & {
-  pathOptions?: { borderRadius?: number; offset?: number };
+type RecycleEdgeData = {
+  laneIndex: number;
+};
+
+type GraphEdge = Edge<RecycleEdgeData>;
+
+type RecycleGraphEdge = Edge<RecycleEdgeData> & {
+  type: "recycle";
 };
 
 const PHASE_WIDTH = 172;
@@ -133,7 +141,9 @@ function defaultTouchpointNode(): ReactNode {
 
 function handleTop(index: number, count: number): string {
   if (count <= 1) return "72%";
-  return `${64 + index * 18}%`;
+  const first = 62;
+  const last = 88;
+  return `${first + (index * (last - first)) / (count - 1)}%`;
 }
 
 function PhaseFlowNode({ data }: NodeProps<Node<PhaseNodeData>>) {
@@ -183,6 +193,47 @@ function TouchpointFlowNode({ data }: NodeProps<Node<TouchpointNodeData>>) {
 const nodeTypes = {
   phase: PhaseFlowNode,
   touchpoint: TouchpointFlowNode,
+};
+
+function RecycleFlowEdge({
+  id,
+  sourceX,
+  sourceY,
+  targetX,
+  targetY,
+  markerEnd,
+  style,
+  data,
+  interactionWidth,
+}: EdgeProps<RecycleGraphEdge>) {
+  const laneIndex = data?.laneIndex ?? 0;
+  const radius = 10;
+  const laneY = Math.max(sourceY, targetY) + 30 + laneIndex * 24;
+  const approachX = targetX - 30 - laneIndex * 16;
+  const path = [
+    `M ${sourceX},${sourceY}`,
+    `L ${sourceX},${laneY - radius}`,
+    `Q ${sourceX},${laneY} ${sourceX - radius},${laneY}`,
+    `L ${approachX + radius},${laneY}`,
+    `Q ${approachX},${laneY} ${approachX},${laneY - radius}`,
+    `L ${approachX},${targetY + radius}`,
+    `Q ${approachX},${targetY} ${approachX + radius},${targetY}`,
+    `L ${targetX},${targetY}`,
+  ].join(" ");
+
+  return (
+    <BaseEdge
+      id={id}
+      path={path}
+      markerEnd={markerEnd}
+      style={style}
+      interactionWidth={interactionWidth}
+    />
+  );
+}
+
+const edgeTypes = {
+  recycle: RecycleFlowEdge,
 };
 
 export function PhaseGraph({
@@ -301,10 +352,10 @@ export function PhaseGraph({
             sourceHandle: "recycle-out",
             target: `phase:${targetCol}`,
             targetHandle: `recycle-in-${idx}`,
-            type: "smoothstep",
+            type: "recycle",
             markerEnd: { type: MarkerType.ArrowClosed },
             className: `dag-rf-edge dag-rf-recycle${arrow.active ? " fired" : ""}${arrow.max_attempts <= 0 ? " policy-disabled" : ""}`,
-            pathOptions: { borderRadius: 8, offset: 36 + idx * 16 },
+            data: { laneIndex: idx },
             label: "",
           });
         });
@@ -361,6 +412,7 @@ export function PhaseGraph({
           nodes={nodes}
           edges={edges}
           nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
           fitView={false}
           panOnDrag={false}
           zoomOnScroll={false}
