@@ -122,7 +122,8 @@ The palette is built around **near-black backgrounds**, a single-step neutral ra
 | State | Background | Foreground | Used for |
 |---|---|---|---|
 | Success / Free / Live / Pass | `#14532d` | `#4ade80` | `pill.free`, `connection.live`, project-row selected count, primary submit button, sidebar "selected" left-border, tab "selected" underline. |
-| Busy / Stale / In-progress | `#422006` | `#fb923c` | `pill.busy`, `connection.stale`, live-dot pulse, tab unread dot. |
+| Busy / Running / In-progress | `#1e3a5f` | `#60a5fa` | `pill.busy`, live-dot pulse, tab unread dot. |
+| Pending / Queued / Warming | `#422006` | `#fb923c` | `pill.pending`, `connection.stale`, pending counters. |
 | Drain / Dead / Aborted / Error | `#3f1c1c` | `#f87171` | `pill.drain`, `connection.dead`, error toast, danger button text. |
 | Workflow accent | `#1e3a5f` | `#60a5fa` | Workflow-row selected count, workflow selected left-border. |
 

@@ -679,6 +679,9 @@
   border-left-color: var(--state-danger-fg);
   color: var(--fg);
 }
+.step-row.skipped {
+  color: var(--fg-dimmer);
+}
 .step-row.selected {
   background: var(--surface-hover);
   color: var(--fg);
@@ -1043,10 +1046,10 @@ tr.eligible td.mono:first-child {
   --pill-fg:   var(--state-success-fg);
 }
 .connection.stale {
-  --pill-rail: var(--state-busy-fg);
-  --pill-edge: color-mix(in srgb, var(--state-busy-fg) 32%, var(--border));
-  --pill-bg:   color-mix(in srgb, var(--state-busy-bg) 55%, transparent);
-  --pill-fg:   var(--state-busy-fg);
+  --pill-rail: var(--state-pending-fg);
+  --pill-edge: color-mix(in srgb, var(--state-pending-fg) 32%, var(--border));
+  --pill-bg:   color-mix(in srgb, var(--state-pending-bg) 55%, transparent);
+  --pill-fg:   var(--state-pending-fg);
 }
 .connection.dead  {
   --pill-rail: var(--state-danger-fg);
@@ -1384,6 +1387,7 @@ header {
 }
 .graph-node.free { border-left-color: var(--state-success-fg); }
 .graph-node.busy { border-left-color: var(--state-busy-fg); }
+.graph-node.pending { border-left-color: var(--state-pending-fg); }
 .graph-node.drain { border-left-color: var(--state-danger-fg); }
 .graph-node.info { border-left-color: var(--state-info-fg); }
 .graph-node.stale {
@@ -1812,7 +1816,7 @@ h2 .inline-action,
   font-variant-numeric: tabular-nums;
 }
 .kpi .v.green { color: var(--state-success-fg); }
-.kpi .v.amber { color: var(--state-busy-fg); }
+.kpi .v.amber { color: var(--state-pending-fg); }
 .kpi .v.red   { color: var(--state-danger-fg); }
 
 .run-status-banner {
@@ -2197,7 +2201,7 @@ h2 .inline-action,
   padding: 10px 12px;
 }
 .attempt-card.running {
-  border-color: #5a3a14;
+  border-color: var(--state-busy-fg);
 }
 /* Stuck-in-dispatching (#83): no workflow_run_id received past the
    STUCK_DISPATCHING_MS threshold. Borrows the danger rail so it pulls

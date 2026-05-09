@@ -726,7 +726,8 @@ async def test_ensure_test_slot_helm_release_creates_rolebinding_secret_and_job(
     install_container = pod_spec["containers"][0]
     assert install_container["image"] == "alpine/k8s:1.30.0"
     install_script = install_container["command"][2]
-    assert "scripts/render-test-env.sh" in install_script
+    assert "helm template 'tank-slot-1' 'k8s'" in install_script
+    assert 'select(.kind != "ClusterRoleBinding" and .kind != "ClusterRole")' in install_script
     assert "kubectl apply -n 'tank-slot-1'" in install_script
     env = {item["name"]: item["value"] for item in install_container["env"]}
     assert env["GLIM_SLOT_NAME"] == "tank-slot-1"
@@ -756,6 +757,10 @@ async def test_delete_test_slot_helm_release_deletes_job_and_secret():
         (
             "DELETE",
             "/api/v1/namespaces/glimmung-runs/secrets/glim-helm-clone-01lease-0",
+        ),
+        (
+            "GET",
+            "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings?labelSelector=glimmung.romaine.life/native-slot-name=tank-slot-1",
         ),
     ]
 
