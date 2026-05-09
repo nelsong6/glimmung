@@ -9,32 +9,30 @@ shown to the user must follow Glimmung's product model:
 ```text
 Issue
   -> Run
-    -> Cycle
-      -> Stage
-        -> Job
-          -> Step
-      -> Evidence
+    -> Phase
+      -> Job
+        -> Step
+    -> Evidence
   -> Touchpoint
 ```
 
-The executor behind a stage may be GitHub Actions, a native Kubernetes
+The executor behind a phase may be GitHub Actions, a native Kubernetes
 job, a future Argo Workflow, or something else. That executor is an
 implementation detail. The user-facing graph is Glimmung's explanation
 of agent work, review evidence, and next decisions.
 
 ## Terminology
 
-Use **stage** in the UI. The backend may continue to use `phase` where
-that is already established, but stage is the more common user-facing
-term and maps better to how people read pipelines.
+Use **phase** consistently. A phase is the user-facing pipeline boundary
+and the backend workflow boundary. Do not introduce a second UI term for
+the same concept.
 
 Suggested mapping:
 
 ```text
 Issue          -> Issue / origin
 Run            -> Continuous lifecycle from one trigger
-Cycle          -> One pass through the graph inside a Run
-Workflow phase -> Stage
+Workflow phase -> Phase
 Native/GHA job -> Job
 Native/GHA step -> Step
 Attempt        -> Executor-level attempt, not the main UI container
@@ -42,20 +40,22 @@ Report         -> Touchpoint / evidence, depending on context
 ```
 
 The API can expose either raw names or display labels, but the UI should
-prefer stage/job/step language unless it is showing raw backend metadata.
+prefer phase/job/step language unless it is showing raw backend metadata.
 
-The key distinction is **Run vs Cycle**:
+The key distinction is **Phase vs Attempt**:
 
 - A **Run** starts from one continuous trigger or origin event and ends
   when the issue is accepted, abandoned, or otherwise closed out.
-- A **Cycle** is one traversal through the run graph. Requesting changes,
-  recycling a stage, or resuming from a later point may create another
-  cycle under the same run.
-- A **Stage attempt** remains a lower-level executor fact. Do not use
-  attempt as the user-facing name for the whole graph pass.
+- A **Phase** is a workflow column. Phases flow left-to-right according
+  to the workflow's `depends_on` graph.
+- A **Job** is a runnable box inside a phase. Multiple jobs in one phase
+  stack vertically and run in parallel.
+- An **Attempt** is a lower-level executor fact. It can explain retries,
+  resumes, and historical execution, but it should not replace phase or
+  job as the main UI container.
 
-This lets Glimmung show "the run" as the complete story while still
-showing each pass through the graph as a distinct cycle.
+This lets Glimmung show "the run" as the complete story while preserving
+the pipeline shape: issue -> run -> phase -> job -> step.
 
 **Touchpoint** replaces the old user-facing `Report` concept. A
 Touchpoint is the issue-level live summary and navigation page: what the
@@ -86,7 +86,7 @@ Glimmung needs to explain things Argo does not own:
 
 - Issues and issue locks.
 - Leases and scarce agent capacity.
-- Stage attempts and resume/recycle paths.
+- Phase attempts and resume/recycle paths.
 - Validation environments.
 - Screenshots and UI review evidence.
 - PR/evidence/touchpoint state.
@@ -95,7 +95,7 @@ Glimmung needs to explain things Argo does not own:
 - Playbook integration strategy such as shared feature branches.
 
 Argo can still become an executor later. If that happens, it should be a
-stage kind beneath the Glimmung graph, not the source of truth for the
+phase kind beneath the Glimmung graph, not the source of truth for the
 graph itself.
 
 ## Screen Structure
@@ -122,8 +122,7 @@ Issues / glimmung / Add design portfolio / Run 01KQ...
 The run page should support deep links to:
 
 - the current run overview,
-- a cycle,
-- a stage,
+- a phase,
 - a job,
 - a specific step log,
 - the related Touchpoint.
@@ -133,11 +132,10 @@ The run page should support deep links to:
 The overview should show the high-level execution shape:
 
 ```text
-Cycle 1: env-prep -> agent-execute -> touchpoint
-Cycle 2: agent-execute -> verify -> touchpoint
+env-prep -> agent-execute -> verify -> touchpoint
 ```
 
-For more complex runs, the overview should show stage ordering and
+For more complex runs, the overview should show phase ordering and
 branching/recycle/resume relationships. The graph should answer:
 
 - What ran?
@@ -153,11 +151,11 @@ Nodes can keep Glimmung's chamfered block vocabulary, but the boxes
 themselves should stay sparse. The graph should use hierarchy and
 position to explain structure:
 
-- stages own columns or lanes,
-- stage names sit at the column/header tier,
-- jobs are boxes inside the stage column,
-- parallel jobs stack inside the same stage,
-- directional connectors show flow between stages/jobs,
+- phases own columns or lanes,
+- phase names sit at the column/header tier,
+- jobs are boxes inside the phase column,
+- parallel jobs stack inside the same phase,
+- directional connectors show flow between phases/jobs,
 - recycle/request-changes paths use secondary/dashed connectors.
 
 Clicking a node should pin an inspector panel that explains what is in
@@ -165,30 +163,30 @@ the box. Hover previews can be added later, but click selection is the
 more durable interaction for debugging, sharing, and review. The graph
 should not depend on hover-only state for important information.
 
-## Stage Detail
+## Phase Detail
 
-A stage is the first meaningful drill-down boundary.
+A phase is the first meaningful drill-down boundary.
 
-Stage detail should show:
+Phase detail should show:
 
-- stage name,
+- phase name,
 - executor kind,
 - state,
 - attempt count,
 - duration,
 - cost when known,
 - input/output values,
-- validation URL or artifacts produced by the stage,
+- validation URL or artifacts produced by the phase,
 - child jobs.
 
-Stages may be skipped during resume. Skipped stages should remain
+Phases may be skipped during resume. Skipped phases should remain
 visible because they explain why a resumed run started later in the
 workflow.
 
-In the overview, stage information should usually appear as a lane or
-column heading rather than as a full graph box. The full stage detail can
-appear in the inspector when the user selects the stage heading or a
-stage-level summary affordance.
+In the overview, phase information should usually appear as a lane or
+column heading rather than as a full graph box. The full phase detail can
+appear in the inspector when the user selects the phase heading or a
+phase-level summary affordance.
 
 ## Job and Step Detail
 
@@ -210,7 +208,7 @@ The left side is a compact list of steps for the selected job. The right
 side is a terminal-style log surface for the selected step.
 
 This solves the step visibility problem without forcing every step into
-the global graph. Stages and jobs are graph nodes; steps are usually
+the global graph. Phases and jobs are graph nodes; steps are usually
 shown in the selected job's detail pane. A future view may promote steps
 into graph nodes for very small jobs or debugging, but that should not be
 the default run overview.
@@ -239,8 +237,8 @@ A reasonable default layout:
 
 ```text
 Top:    breadcrumb + run title + state/action strip
-Middle: stage graph / timeline
-Bottom: selected stage/job/step inspector
+Middle: phase graph / timeline
+Bottom: selected phase/job/step inspector
 ```
 
 For native job execution, the inspector should be large enough that the
@@ -269,7 +267,7 @@ should aggregate the things that need human attention:
 
 Touchpoints are one-to-one with issues. They should not need their own
 top-level tab or an issue-local collection route. The issue workspace should
-surface the current Touchpoint alongside issue context and the run/cycle
+surface the current Touchpoint alongside issue context and the run/phase
 graph. Historical or per-Run evidence should live in Run and RunReport views,
 with the Touchpoint linking to the relevant current Run instead of carrying
 its own history. The Touchpoint UI should not enumerate Runs, attempts, or
@@ -284,11 +282,11 @@ without requiring live data.
 
 Add portfolio rows for at least:
 
-- simple two-stage run,
+- simple two-phase run,
 - native job with step list and selected terminal log,
 - failed step with log output,
-- resumed run with skipped earlier stages,
-- stage recycle/retry,
+- resumed run with skipped earlier phases,
+- phase recycle/retry,
 - pending/no-host state,
 - aborted/cancelled state,
 - Touchpoint evidence checklist.
@@ -312,13 +310,13 @@ Minimum projection concepts:
 ```text
 RunGraphProjection
   run
-  stages[]
+  phases[]
   edges[]
   selected/default focus hints
   evidence links
   available actions
 
-StageNode
+PhaseNode
   id
   label
   state
