@@ -629,6 +629,138 @@ async def test_delete_test_slot_namespace_deletes_namespace():
 
 
 @pytest.mark.asyncio
+async def test_ensure_test_slot_helm_release_skips_when_project_not_opted_in():
+    launcher = _RecordingLauncher(_settings())
+
+    result = await launcher.ensure_test_slot_helm_release(
+        lease_doc={
+            "id": "01LEASE",
+            "project": "tank-operator",
+            "metadata": {
+                "native_slot_index": "1",
+                "native_slot_name": "tank-slot-1",
+            },
+        },
+        project_doc={
+            "id": "tank-operator",
+            "githubRepo": "nelsong6/tank-operator",
+            "metadata": {},
+        },
+        repo_token="ghs_dummy",
+    )
+
+    assert result is None
+    assert launcher.calls == []
+
+
+@pytest.mark.asyncio
+async def test_ensure_test_slot_helm_release_creates_rolebinding_secret_and_job():
+    launcher = _RecordingLauncher(_settings())
+
+    result = await launcher.ensure_test_slot_helm_release(
+        lease_doc={
+            "id": "01LEASE",
+            "project": "tank-operator",
+            "metadata": {
+                "native_slot_index": "1",
+                "native_slot_name": "tank-slot-1",
+            },
+        },
+        project_doc={
+            "id": "tank-operator",
+            "githubRepo": "nelsong6/tank-operator",
+            "metadata": {
+                "native_standby_dns": {
+                    "enabled": True,
+                    "record_base": "tank.dev.romaine.life",
+                    "slot_prefix": "tank-slot",
+                    "count": 5,
+                },
+                "test_slot_helm": {"enabled": True},
+            },
+        },
+        repo_token="ghs_dummy",
+    )
+
+    methods_paths = [(call["method"], call["path"]) for call in launcher.calls]
+    # RoleBinding for installer SA in slot namespace, then the clone-token
+    # Secret in the runner namespace, then the install Job.
+    assert methods_paths == [
+        (
+            "POST",
+            "/apis/rbac.authorization.k8s.io/v1/namespaces/tank-slot-1/rolebindings",
+        ),
+        ("POST", "/api/v1/namespaces/glimmung-runs/secrets"),
+        ("POST", "/apis/batch/v1/namespaces/glimmung-runs/jobs"),
+    ]
+    assert result == launcher.calls[-1]["json"]["metadata"]["name"]
+
+    rolebinding = launcher.calls[0]["json"]
+    assert rolebinding["roleRef"]["name"] == "admin"
+    assert rolebinding["subjects"][0] == {
+        "kind": "ServiceAccount",
+        "name": "glimmung-native-runner",
+        "namespace": "glimmung-runs",
+    }
+
+    secret = launcher.calls[1]["json"]
+    assert secret["stringData"] == {"token": "ghs_dummy"}
+    assert (
+        secret["metadata"]["labels"]["glimmung.romaine.life/lease-id"]
+        == "01lease"
+    )
+
+    job = launcher.calls[2]["json"]
+    assert job["kind"] == "Job"
+    pod_spec = job["spec"]["template"]["spec"]
+    assert pod_spec["serviceAccountName"] == "glimmung-native-runner"
+    init_container = pod_spec["initContainers"][0]
+    assert init_container["image"] == "alpine/git:latest"
+    # The init container's clone script must inject the token via the
+    # mounted Secret, not bake it into the manifest where it would be
+    # readable by anyone with `get pods -o yaml` permission on the
+    # runner namespace.
+    assert "ghs_dummy" not in init_container["command"][2]
+    assert "/var/run/glim-clone/token" in init_container["command"][2]
+    assert "nelsong6/tank-operator" in init_container["command"][2]
+    install_container = pod_spec["containers"][0]
+    assert install_container["image"] == "alpine/k8s:1.30.0"
+    install_script = install_container["command"][2]
+    assert "scripts/render-test-env.sh" in install_script
+    assert "kubectl apply -n 'tank-slot-1'" in install_script
+    env = {item["name"]: item["value"] for item in install_container["env"]}
+    assert env["GLIM_SLOT_NAME"] == "tank-slot-1"
+    assert env["GLIM_SLOT_INDEX"] == "1"
+    assert env["GLIM_HOST"] == "tank-slot-1.tank.dev.romaine.life"
+
+
+@pytest.mark.asyncio
+async def test_delete_test_slot_helm_release_deletes_job_and_secret():
+    launcher = _RecordingLauncher(_settings())
+
+    await launcher.delete_test_slot_helm_release({
+        "id": "01LEASE",
+        "project": "tank-operator",
+        "metadata": {
+            "native_slot_index": "1",
+            "native_slot_name": "tank-slot-1",
+        },
+    })
+
+    methods_paths = [(call["method"], call["path"]) for call in launcher.calls]
+    assert methods_paths == [
+        (
+            "DELETE",
+            "/apis/batch/v1/namespaces/glimmung-runs/jobs/glim-helm-install-01lease-0",
+        ),
+        (
+            "DELETE",
+            "/api/v1/namespaces/glimmung-runs/secrets/glim-helm-clone-01lease-0",
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_ensure_test_slot_namespace_creates_assigned_slot_namespace():
     launcher = _RecordingLauncher(_settings())
 
