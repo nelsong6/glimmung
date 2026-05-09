@@ -56,6 +56,10 @@ type RecycleEdgeData = {
   laneBaseY: number;
 };
 
+type AdvanceGraphEdge = Edge & {
+  type: "advance";
+};
+
 type GraphEdge = Edge<RecycleEdgeData>;
 
 type RecycleGraphEdge = Edge<RecycleEdgeData> & {
@@ -68,6 +72,7 @@ const PHASE_Y = 12;
 const JOB_HEIGHT = 70;
 const PHASE_BASE_HEIGHT = 44;
 const TOUCHPOINT_FALLBACK_HEIGHT = 55;
+const ENTRY_OFFSET_PERCENT = 13;
 
 function estimatedPhaseHeight(col: PhaseGraphPhase[]): number {
   return PHASE_BASE_HEIGHT + Math.max(1, col.length) * JOB_HEIGHT;
@@ -141,10 +146,8 @@ function defaultTouchpointNode(): ReactNode {
 }
 
 function handleTop(index: number, count: number): string {
-  if (count <= 1) return "72%";
-  const first = 62;
-  const last = 88;
-  return `${first + (index * (last - first)) / (count - 1)}%`;
+  if (count <= 1) return "50%";
+  return `${50 + index * ENTRY_OFFSET_PERCENT}%`;
 }
 
 function PhaseFlowNode({ data }: NodeProps<Node<PhaseNodeData>>) {
@@ -155,7 +158,13 @@ function PhaseFlowNode({ data }: NodeProps<Node<PhaseNodeData>>) {
         for (const phase of data.col) data.phaseRef?.(phase, el);
       }}
     >
-      <Handle id="advance-in" type="target" position={Position.Left} className="dag-rf-handle" />
+      <Handle
+        id="advance-in"
+        type="target"
+        position={Position.Left}
+        className="dag-rf-handle"
+        style={data.recycleTargets > 0 ? { top: `${50 - ENTRY_OFFSET_PERCENT}%` } : undefined}
+      />
       <Handle id="advance-out" type="source" position={Position.Right} className="dag-rf-handle" />
       <Handle id="recycle-out" type="source" position={Position.Bottom} className="dag-rf-handle" />
       {Array.from({ length: Math.max(1, data.recycleTargets) }).map((_, idx) => (
@@ -234,7 +243,34 @@ function RecycleFlowEdge({
   );
 }
 
+function AdvanceFlowEdge({
+  id,
+  sourceX,
+  sourceY,
+  targetX,
+  targetY,
+  markerEnd,
+  style,
+  interactionWidth,
+}: EdgeProps<AdvanceGraphEdge>) {
+  const verticalDelta = Math.abs(sourceY - targetY);
+  const path = verticalDelta < 1
+    ? `M ${sourceX},${sourceY} L ${targetX},${targetY}`
+    : `M ${sourceX},${sourceY} C ${sourceX + 44},${sourceY} ${targetX - 44},${targetY} ${targetX},${targetY}`;
+
+  return (
+    <BaseEdge
+      id={id}
+      path={path}
+      markerEnd={markerEnd}
+      style={style}
+      interactionWidth={interactionWidth}
+    />
+  );
+}
+
 const edgeTypes = {
+  advance: AdvanceFlowEdge,
   recycle: RecycleFlowEdge,
 };
 
@@ -319,7 +355,7 @@ export function PhaseGraph({
         sourceHandle: "advance-out",
         target: `phase:${idx + 1}`,
         targetHandle: "advance-in",
-        type: "straight",
+        type: "advance",
         markerEnd: { type: MarkerType.ArrowClosed },
         className: `dag-rf-edge${entry ? " entry" : ""}`,
       });
@@ -331,7 +367,7 @@ export function PhaseGraph({
         sourceHandle: "advance-out",
         target: "touchpoint",
         targetHandle: "advance-in",
-        type: "straight",
+        type: "advance",
         markerEnd: { type: MarkerType.ArrowClosed },
         className: "dag-rf-edge",
       });
@@ -350,7 +386,6 @@ export function PhaseGraph({
         .slice()
         .sort((a, b) => sourceOrder(a, phaseToColumn, columns.length) - sourceOrder(b, phaseToColumn, columns.length))
         .forEach((arrow, idx) => {
-          const targetHandleIndex = arrows.length - 1 - idx;
           const source = arrow.kind === "report_recycle" || arrow.source === "report"
             ? "touchpoint"
             : `phase:${phaseToColumn.get(arrow.source) ?? 0}`;
@@ -359,7 +394,7 @@ export function PhaseGraph({
             source,
             sourceHandle: "recycle-out",
             target: `phase:${targetCol}`,
-            targetHandle: `recycle-in-${targetHandleIndex}`,
+            targetHandle: `recycle-in-${idx}`,
             type: "recycle",
             markerEnd: { type: MarkerType.ArrowClosed },
             className: `dag-rf-edge dag-rf-recycle${arrow.active ? " fired" : ""}${arrow.max_attempts <= 0 ? " policy-disabled" : ""}`,
