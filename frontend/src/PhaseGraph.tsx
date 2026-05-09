@@ -12,6 +12,7 @@
 // branches stack the parallel phases vertically at the same column.
 
 import { Fragment, ReactNode, useId, useLayoutEffect, useRef, useState } from "react";
+import { getSmoothStepPath, Position } from "@xyflow/react";
 
 export type PhaseGraphPhase = {
   name: string;
@@ -125,11 +126,6 @@ type AdvancePath = {
   entry: boolean;
 };
 
-function advancePath(sx: number, sy: number, ex: number, ey: number): string {
-  const midX = sx + (ex - sx) / 2;
-  return `M ${sx} ${sy} L ${midX} ${sy} L ${midX} ${ey} L ${ex} ${ey}`;
-}
-
 export function PhaseGraph({
   phases,
   prEnabled,
@@ -182,7 +178,17 @@ export function PhaseGraph({
         const entry = columns[idx].some(
           (phase) => entryPhaseName != null && phase.name === entryPhaseName,
         );
-        paths.push({ d: advancePath(sx, sy, ex, ey), entry });
+        const [d] = getSmoothStepPath({
+          sourceX: sx,
+          sourceY: sy,
+          sourcePosition: Position.Right,
+          targetX: ex,
+          targetY: ey,
+          targetPosition: Position.Left,
+          borderRadius: 8,
+          offset: 18,
+        });
+        paths.push({ d, entry });
       }
       const last = rects[rects.length - 1];
       const terminal = terminalRef.current?.getBoundingClientRect() ?? null;
@@ -191,7 +197,17 @@ export function PhaseGraph({
         const sy = last.top + last.height / 2 - dagRect.top;
         const ex = terminal.left - dagRect.left;
         const ey = terminal.top + terminal.height / 2 - dagRect.top;
-        paths.push({ d: advancePath(sx, sy, ex, ey), entry: false });
+        const [d] = getSmoothStepPath({
+          sourceX: sx,
+          sourceY: sy,
+          sourcePosition: Position.Right,
+          targetX: ex,
+          targetY: ey,
+          targetPosition: Position.Left,
+          borderRadius: 8,
+          offset: 18,
+        });
+        paths.push({ d, entry: false });
       }
       setAdvancePaths(paths);
     };
