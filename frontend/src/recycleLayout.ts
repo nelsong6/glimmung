@@ -19,6 +19,7 @@ const RECYCLE_LANE_HEIGHT = 18;
 const RECYCLE_BAND_TOP_PAD = 8;
 const RECYCLE_BAND_BOTTOM_PAD = 8;
 const RECYCLE_TARGET_OVERSHOOT = 14;
+const RECYCLE_TARGET_ENTRY_OFFSET = 18;
 
 export function computeRecyclePaths(
   arrows: RecycleArrow[],
@@ -34,6 +35,7 @@ export function computeRecyclePaths(
     bottom: rect.bottom - bandTop,
     cx: (rect.left + rect.right) / 2 - bandLeft,
     cy: (rect.top + rect.bottom) / 2 - bandTop,
+    height: rect.height,
   });
   const sourceRectFor = (arrow: RecycleArrow): DOMRect | null => {
     if (arrow.kind === "report_recycle" || arrow.source === "report") return tpRect;
@@ -68,7 +70,7 @@ export function computeRecyclePaths(
     const sY = s.bottom;
     const cornerX = t.left - RECYCLE_TARGET_OVERSHOOT;
     const tX = t.left;
-    const tY = t.cy;
+    const tY = t.cy + Math.min(RECYCLE_TARGET_ENTRY_OFFSET, Math.max(0, t.height / 3));
     const inactive = r.arrow.max_attempts <= 0;
     const cls = [
       "dag-recycle-path",
