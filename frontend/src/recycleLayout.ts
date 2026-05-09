@@ -15,7 +15,7 @@ export type RecyclePathLayout = {
   markerEnd?: boolean;
 };
 
-const RECYCLE_LANE_HEIGHT = 18;
+const RECYCLE_LANE_HEIGHT = 28;
 const RECYCLE_BAND_TOP_PAD = 8;
 const RECYCLE_BAND_BOTTOM_PAD = 8;
 const RECYCLE_TARGET_OVERSHOOT = 14;
