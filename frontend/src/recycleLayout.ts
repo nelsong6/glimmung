@@ -17,11 +17,11 @@ export type RecyclePathLayout = {
   markerEnd?: boolean;
 };
 
-const RECYCLE_LANE_HEIGHT = 28;
+const RECYCLE_LANE_HEIGHT = 34;
 const RECYCLE_BAND_TOP_PAD = 8;
 const RECYCLE_BAND_BOTTOM_PAD = 8;
-const RECYCLE_TARGET_ENTRY_OFFSET = 30;
-const RECYCLE_TARGET_PORT_GAP = 16;
+const RECYCLE_TARGET_ENTRY_OFFSET = 42;
+const RECYCLE_TARGET_PORT_GAP = 24;
 const RECYCLE_CORNER_RADIUS = 6;
 
 export function computeRecyclePaths(
@@ -116,7 +116,7 @@ export function computeRecyclePaths(
         targetY: r.t.cy + targetOffset,
         targetPosition: Position.Left,
         borderRadius: RECYCLE_CORNER_RADIUS,
-        offset: 24 + targetPortIndex * 12,
+        offset: 34 + targetPortIndex * 18,
         centerY: r.laneY,
       });
       paths.push({

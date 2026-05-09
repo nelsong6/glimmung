@@ -1869,7 +1869,7 @@ h2 .inline-action,
   gap: 8px;
   min-width: 172px;
   padding: 8px;
-  background: color-mix(in srgb, var(--surface) 58%, transparent);
+  background: color-mix(in srgb, var(--surface) 72%, var(--bg));
   border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
   border-radius: 5px;
 }
