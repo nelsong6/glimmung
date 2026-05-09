@@ -808,12 +808,58 @@ async def _ensure_test_env_for_lease(lease_doc: dict[str, Any]) -> None:
             await launcher.delete_test_slot_namespace(namespace)
         await launcher.ensure_test_slot_namespace(lease_doc)
         await launcher.ensure_playwright_slot(lease_doc)
+        await _ensure_test_slot_helm_release(lease_doc)
     except Exception:
         log.exception(
             "failed to ensure test environment for native lease %s",
             lease_doc.get("id"),
         )
         raise
+
+
+async def _ensure_test_slot_helm_release(lease_doc: dict[str, Any]) -> None:
+    """Provision the project's Helm chart into a freshly-checked-out slot.
+
+    Without this the slot namespace is empty: there's no orchestrator,
+    ingress, or session capacity to test against. The launcher reads
+    `metadata.test_slot_helm` off the project doc — projects that haven't
+    opted in skip silently so this stays inert for non-native flows.
+    """
+    launcher = getattr(app.state, "native_k8s_launcher", None)
+    if launcher is None:
+        return
+    cosmos: Cosmos | None = getattr(app.state, "cosmos", None)
+    if cosmos is None:
+        return
+    project = str(lease_doc.get("project") or "").strip()
+    if not project:
+        return
+    project_doc = await _read_project(cosmos, project)
+    if project_doc is None:
+        return
+    repo = str(
+        project_doc.get("github_repo")
+        or project_doc.get("githubRepo")
+        or ""
+    ).strip()
+    if not repo:
+        return
+    minter: GitHubAppTokenMinter | None = getattr(app.state, "gh_minter", None)
+    if minter is None:
+        return
+    try:
+        token, _ = await minter.repository_token(repo=repo)
+    except Exception:
+        log.exception(
+            "failed to mint repo token for test slot install (lease %s repo %s)",
+            lease_doc.get("id"), repo,
+        )
+        raise
+    await launcher.ensure_test_slot_helm_release(
+        lease_doc=lease_doc,
+        project_doc=project_doc,
+        repo_token=token,
+    )
 
 
 async def _delete_playwright_slot_for_lease(lease_doc: dict[str, Any]) -> None:
@@ -2874,6 +2920,16 @@ async def _cleanup_test_slot_before_release(lease_doc: dict[str, Any]) -> None:
             lease_doc.get("id"), namespace,
         )
         raise HTTPException(502, f"test slot cleanup failed for namespace {namespace}") from exc
+    # The install Job + its clone-token Secret live in the runner namespace,
+    # not the slot namespace, so deleting the slot namespace doesn't reclaim
+    # them. A leftover Job would 409 the next checkout's POST.
+    try:
+        await launcher.delete_test_slot_helm_release(lease_doc)
+    except Exception:
+        log.exception(
+            "test slot install-job cleanup failed for lease %s namespace=%s",
+            lease_doc.get("id"), namespace,
+        )
 
 
 def _test_slot_namespace(lease_doc: dict[str, Any]) -> str:

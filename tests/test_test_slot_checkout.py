@@ -36,8 +36,10 @@ class _RecordingTestSlotLauncher:
     def __init__(self) -> None:
         self.ensured_namespaces: list[dict] = []
         self.ensured_playwright: list[dict] = []
+        self.ensured_helm_releases: list[dict] = []
         self.deleted_namespaces: list[str] = []
         self.deleted_playwright: list[dict] = []
+        self.deleted_helm_releases: list[dict] = []
         self.reconciled_playwright_leases: list[dict] | None = None
 
     async def ensure_test_slot_namespace(self, lease_doc: dict) -> None:
@@ -46,11 +48,27 @@ class _RecordingTestSlotLauncher:
     async def ensure_playwright_slot(self, lease_doc: dict) -> None:
         self.ensured_playwright.append(lease_doc)
 
+    async def ensure_test_slot_helm_release(
+        self,
+        *,
+        lease_doc: dict,
+        project_doc: dict,
+        repo_token: str,
+    ) -> None:
+        self.ensured_helm_releases.append({
+            "lease_doc": lease_doc,
+            "project_doc": project_doc,
+            "repo_token": repo_token,
+        })
+
     async def delete_test_slot_namespace(self, namespace: str) -> None:
         self.deleted_namespaces.append(namespace)
 
     async def delete_playwright_slot(self, lease_doc: dict) -> None:
         self.deleted_playwright.append(lease_doc)
+
+    async def delete_test_slot_helm_release(self, lease_doc: dict) -> None:
+        self.deleted_helm_releases.append(lease_doc)
 
     async def reconcile_playwright_slots(self, active_native_leases: list[dict]) -> None:
         self.reconciled_playwright_leases = active_native_leases
