@@ -197,10 +197,10 @@ export function PhaseGraph({
               }}
             >
               <div className="dag-phase-head">
-                <span className="dag-phase-kicker">phase</span>
                 <span className="dag-phase-title">
                   {col.length > 1 ? `phase ${idx + 1}` : (col[0]?.name ?? `phase ${idx + 1}`)}
                 </span>
+                <span className="dag-phase-kicker">phase</span>
               </div>
               <div className="dag-phase-body">
                 {col.map((phase) => (
