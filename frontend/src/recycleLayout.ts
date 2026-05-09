@@ -18,8 +18,10 @@ export type RecyclePathLayout = {
 const RECYCLE_LANE_HEIGHT = 34;
 const RECYCLE_BAND_TOP_PAD = 8;
 const RECYCLE_BAND_BOTTOM_PAD = 8;
-const RECYCLE_TARGET_ENTRY_OFFSET = 42;
-const RECYCLE_TARGET_PORT_GAP = 24;
+const RECYCLE_ENTRY_ARC_RADIUS = 60;
+const RECYCLE_ENTRY_ARC_SWEEP = 12;
+const RECYCLE_TARGET_ENTRY_OFFSET = 34;
+const RECYCLE_TARGET_PORT_GAP = 20;
 const RECYCLE_CORNER_RADIUS = 6;
 
 type Point = { x: number; y: number };
@@ -134,20 +136,32 @@ export function computeRecyclePaths(
   for (const group of byTarget.values()) {
     group.sort((a, b) => a.lane - b.lane);
     group.forEach((r, targetPortIndex) => {
-      const maxOffset = Math.max(0, r.t.height / 2 - 12);
+      const maxOffset = Math.min(RECYCLE_ENTRY_ARC_RADIUS - 6, Math.max(0, r.t.height / 2 - 12));
       const targetOffset = Math.min(
         maxOffset,
         RECYCLE_TARGET_ENTRY_OFFSET + targetPortIndex * RECYCLE_TARGET_PORT_GAP,
       );
-      const targetY = r.t.cy + targetOffset;
-      const approachX = r.t.left - 24 - targetPortIndex * 12;
-      const d = roundedOrthogonalPath([
+      const arcCenterX = r.t.left - RECYCLE_ENTRY_ARC_RADIUS;
+      const pointOnEntryArc = (offset: number) => ({
+        x: arcCenterX + Math.sqrt(Math.max(0, RECYCLE_ENTRY_ARC_RADIUS ** 2 - offset ** 2)),
+        y: r.t.cy + offset,
+      });
+      const end = pointOnEntryArc(targetOffset);
+      const arcStart = pointOnEntryArc(Math.min(maxOffset, targetOffset + RECYCLE_ENTRY_ARC_SWEEP));
+      const approachX = end.x - 28 - targetPortIndex * 12;
+      const approach = roundedOrthogonalPath([
         { x: r.sX, y: r.sY },
         { x: r.sX, y: r.laneY },
         { x: approachX, y: r.laneY },
-        { x: approachX, y: targetY },
-        { x: r.t.left, y: targetY },
+        { x: approachX, y: arcStart.y },
+        arcStart,
       ]);
+      const d = [
+        approach,
+        `C ${arcStart.x + 8} ${arcStart.y}`,
+        `${end.x - 14} ${end.y}`,
+        `${end.x} ${end.y}`,
+      ].join(" ");
       paths.push({
         arrow: r.arrow,
         d,
