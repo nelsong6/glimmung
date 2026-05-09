@@ -507,6 +507,15 @@ class NativeKubernetesLauncher:
                 ).strip() or _DEFAULT_CHART_PATH
 
         await self._ensure_slot_admin_binding(slot_name, slot=slot)
+        # Pre-create the sessions namespace and give the runner admin access
+        # there too so kubectl apply can write cross-namespace manifests.
+        sessions_ns = f"{slot_name}-sessions"
+        await self._ensure_namespace(sessions_ns, labels={
+            **_managed_labels(),
+            "glimmung.romaine.life/test-slot": "true",
+            "glimmung.romaine.life/native-slot-name": _label_value(slot_name),
+        })
+        await self._ensure_slot_admin_binding(sessions_ns, slot=slot)
         await self._ensure_slot_cluster_role_bindings(
             config["cluster_role_bindings"], substitutions, slot_name=slot_name
         )
@@ -1938,7 +1947,7 @@ def _test_slot_install_manifest(
         f"helm template {_shell_quote(slot_name)} {_shell_quote(chart_path)}"
         f" --namespace {_shell_quote(slot_name)} {set_flags}"
         " | yq 'select(.kind != \"ClusterRoleBinding\" and .kind != \"ClusterRole\")'"
-        f" | kubectl apply -n {_shell_quote(slot_name)} -f -\n"
+        " | kubectl apply -f -\n"
     )
     pod_spec: dict[str, Any] = {
         "serviceAccountName": settings.native_runner_service_account,

@@ -20,7 +20,7 @@ nativeRunner:
   projectConcurrency: 5
   globalConcurrency: 5
   jobTtlSeconds: 259200
-  namespaceRole: admin
+  namespaceRole: cluster-admin
   standbyDns:
     namespace: glimmung
     gatewayNamespace: envoy-gateway-system
