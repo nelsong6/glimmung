@@ -2,7 +2,7 @@
 // views use this component so phase/job structure and edge semantics
 // stay aligned.
 
-import { Fragment, ReactNode, useMemo } from "react";
+import { Fragment, ReactNode, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Handle,
   MarkerType,
@@ -58,6 +58,7 @@ const PHASE_X_GAP = 240;
 const PHASE_Y = 12;
 const JOB_HEIGHT = 70;
 const PHASE_BASE_HEIGHT = 44;
+const TOUCHPOINT_FALLBACK_HEIGHT = 55;
 
 function estimatedPhaseHeight(col: PhaseGraphPhase[]): number {
   return PHASE_BASE_HEIGHT + Math.max(1, col.length) * JOB_HEIGHT;
@@ -195,6 +196,8 @@ export function PhaseGraph({
   entryPhaseName = null,
   recycleArrows = [],
 }: PhaseGraphProps) {
+  const graphRef = useRef<HTMLDivElement | null>(null);
+  const [nodeHeights, setNodeHeights] = useState<Record<string, number>>({});
   const columns = useMemo(() => columnsFor(phases), [phases]);
   const phaseToColumn = useMemo(() => {
     const map = new Map<string, number>();
@@ -210,13 +213,15 @@ export function PhaseGraph({
   }, [recycleArrows]);
 
   const nodes = useMemo<Node[]>(() => {
-    const maxPhaseHeight = Math.max(...columns.map(estimatedPhaseHeight), estimatedPhaseHeight([]));
+    const phaseHeight = (idx: number, col: PhaseGraphPhase[]) => nodeHeights[`phase:${idx}`] ?? estimatedPhaseHeight(col);
+    const measuredPhaseHeights = columns.map((col, idx) => phaseHeight(idx, col));
+    const maxPhaseHeight = Math.max(...measuredPhaseHeights, estimatedPhaseHeight([]));
     const phaseNodes: Node<PhaseNodeData>[] = columns.map((col, idx) => ({
       id: `phase:${idx}`,
       type: "phase",
       position: {
         x: idx * PHASE_X_GAP,
-        y: PHASE_Y + (maxPhaseHeight - estimatedPhaseHeight(col)) / 2,
+        y: PHASE_Y + (maxPhaseHeight - phaseHeight(idx, col)) / 2,
       },
       draggable: false,
       selectable: false,
@@ -237,14 +242,14 @@ export function PhaseGraph({
         type: "touchpoint",
         position: {
           x: columns.length * PHASE_X_GAP,
-          y: PHASE_Y + (maxPhaseHeight - 55) / 2,
+          y: PHASE_Y + (maxPhaseHeight - (nodeHeights.touchpoint ?? TOUCHPOINT_FALLBACK_HEIGHT)) / 2,
         },
         draggable: false,
         selectable: false,
         data: { renderTouchpoint },
       } satisfies Node<TouchpointNodeData>,
     ];
-  }, [columns, phaseRef, prEnabled, recycleTargetCounts, renderPhase, renderTouchpoint]);
+  }, [columns, nodeHeights, phaseRef, prEnabled, recycleTargetCounts, renderPhase, renderTouchpoint]);
 
   const edges = useMemo<GraphEdge[]>(() => {
     const out: GraphEdge[] = [];
@@ -307,12 +312,51 @@ export function PhaseGraph({
     return out;
   }, [columns, entryPhaseName, phaseToColumn, prEnabled, recycleArrows]);
 
-  const graphHeight = Math.max(...columns.map(estimatedPhaseHeight), estimatedPhaseHeight([])) + 76;
+  useLayoutEffect(() => {
+    const root = graphRef.current;
+    if (!root) return;
+
+    let raf = 0;
+    const measure = () => {
+      const next: Record<string, number> = {};
+      for (let idx = 0; idx < columns.length; idx += 1) {
+        const el = root.querySelector<HTMLElement>(`.react-flow__node[data-id="phase:${idx}"]`);
+        if (el) next[`phase:${idx}`] = el.getBoundingClientRect().height;
+      }
+      const touchpoint = root.querySelector<HTMLElement>('.react-flow__node[data-id="touchpoint"]');
+      if (touchpoint) next.touchpoint = touchpoint.getBoundingClientRect().height;
+
+      setNodeHeights((current) => {
+        const keys = new Set([...Object.keys(current), ...Object.keys(next)]);
+        for (const key of keys) {
+          if (Math.abs((current[key] ?? 0) - (next[key] ?? 0)) > 0.5) return next;
+        }
+        return current;
+      });
+    };
+
+    raf = window.requestAnimationFrame(measure);
+    const observer = new ResizeObserver(() => {
+      window.cancelAnimationFrame(raf);
+      raf = window.requestAnimationFrame(measure);
+    });
+    observer.observe(root);
+    return () => {
+      window.cancelAnimationFrame(raf);
+      observer.disconnect();
+    };
+  }, [columns.length]);
+
+  const graphHeight =
+    Math.max(
+      ...columns.map((col, idx) => nodeHeights[`phase:${idx}`] ?? estimatedPhaseHeight(col)),
+      estimatedPhaseHeight([]),
+    ) + 76;
   const graphWidth = (columns.length + (prEnabled ? 1 : 0)) * PHASE_X_GAP + PHASE_WIDTH;
 
   return (
     <div className={`dag dag-rf${dagClassName ? " " + dagClassName : ""}`} aria-label={ariaLabel}>
-      <div className="dag-rf-surface" style={{ width: graphWidth, height: graphHeight }}>
+      <div ref={graphRef} className="dag-rf-surface" style={{ width: graphWidth, height: graphHeight }}>
         <ReactFlow
           nodes={nodes}
           edges={edges}
