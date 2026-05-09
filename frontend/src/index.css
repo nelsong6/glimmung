@@ -1843,6 +1843,51 @@ h2 .inline-action,
   flex-wrap: wrap;
   margin: 0;
 }
+.dag-rf {
+  display: block;
+  width: 100%;
+  min-height: 220px;
+}
+.dag-rf-surface {
+  position: relative;
+}
+.dag-rf .react-flow {
+  overflow: visible;
+}
+.dag-rf .react-flow__renderer,
+.dag-rf .react-flow__viewport {
+  overflow: visible;
+}
+.dag-rf .react-flow__node {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  padding: 0;
+  width: auto;
+}
+.dag-rf .react-flow__edge-path {
+  stroke: var(--fg-dimmer);
+  stroke-width: 1.5;
+}
+.dag-rf .react-flow__edge.dag-rf-edge.entry .react-flow__edge-path,
+.dag-rf .react-flow__edge.dag-rf-edge.entry marker path,
+.dag-rf .react-flow__edge.dag-rf-edge.fired .react-flow__edge-path,
+.dag-rf .react-flow__edge.dag-rf-edge.fired marker path {
+  stroke: var(--state-success-fg);
+  fill: var(--state-success-fg);
+}
+.dag-rf .react-flow__edge.dag-rf-edge.policy-disabled .react-flow__edge-path {
+  stroke-dasharray: 4 3;
+  opacity: 0.7;
+}
+.dag-rf .react-flow__edge marker path {
+  fill: var(--fg-dimmer);
+  stroke: var(--fg-dimmer);
+}
+.dag-rf-handle {
+  opacity: 0;
+  pointer-events: none;
+}
 .dag-entry,
 .dag-node {
   position: relative;

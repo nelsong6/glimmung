@@ -23,11 +23,11 @@
  * Routed canonically via `/projects/<project>/issues/<number>`. Legacy
  * GitHub-shaped and id-shaped URLs still load so old links can redirect.
  */
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { authedFetch } from "./auth";
 import { PhaseGraph, type PhaseGraphPhase } from "./PhaseGraph";
-import { computeRecyclePaths, type RecycleArrow, type RecyclePathLayout } from "./recycleLayout";
+import type { RecycleArrow } from "./recycleLayout";
 
 type IssueDetail = {
   id: string;
@@ -1279,46 +1279,6 @@ function PipelineDag({
     ? "failed"
     : touchpointState ?? (prNumber ? `#${prNumber}` : prBranch ? prBranch : "pending");
 
-  const bandRef = useRef<HTMLDivElement>(null);
-  const phaseRefs = useRef<Map<string, HTMLDivElement>>(new Map());
-  const tpRef = useRef<HTMLButtonElement | null>(null);
-  const [paths, setPaths] = useState<RecyclePathLayout[]>([]);
-  const [bandHeight, setBandHeight] = useState(0);
-
-  useLayoutEffect(() => {
-    const recycleArrows = workflowGraph?.recycle_arrows ?? [];
-    if (recycleArrows.length === 0) {
-      setPaths([]);
-      setBandHeight(0);
-      return;
-    }
-    const recompute = () => {
-      const band = bandRef.current;
-      if (!band) return;
-      const bandRect = band.getBoundingClientRect();
-      const phaseRects = new Map<string, DOMRect>();
-      phaseRefs.current.forEach((el, name) => {
-        if (el && el.isConnected) phaseRects.set(name, el.getBoundingClientRect());
-      });
-      const tpRect = tpRef.current?.getBoundingClientRect() ?? null;
-      const { paths: nextPaths, bandHeight: nextHeight } = computeRecyclePaths(
-        recycleArrows,
-        phaseRects,
-        tpRect,
-        bandRect.left,
-        bandRect.top,
-      );
-      setPaths(nextPaths);
-      setBandHeight(nextHeight);
-    };
-    recompute();
-    const ro = new ResizeObserver(recompute);
-    if (bandRef.current) ro.observe(bandRef.current);
-    phaseRefs.current.forEach((el) => ro.observe(el));
-    if (tpRef.current) ro.observe(tpRef.current);
-    return () => ro.disconnect();
-  }, [workflowGraph, phasesForLayout]);
-
   // Render-phase callback paints the phase's current job/attempt state.
   // The visible phase container ref is wired on PhaseGraph itself so
   // entry/recycle arrows target the phase surface, not this child job.
@@ -1371,7 +1331,6 @@ function PipelineDag({
 
   const renderTouchpoint = () => (
     <button
-      ref={tpRef}
       type="button"
       className={`dag-node dag-node-pr ${touchpointClass}${selectedNodeId === "pr" ? " selected" : ""}`}
       onClick={() => {
@@ -1399,54 +1358,10 @@ function PipelineDag({
         prEnabled={true}
         renderPhase={renderPhase}
         renderTouchpoint={renderTouchpoint}
-        phaseRef={(phase, el) => {
-          if (el) phaseRefs.current.set(phase.name, el);
-          else phaseRefs.current.delete(phase.name);
-        }}
         ariaLabel="pipeline"
         entryPhaseName={activeEntry}
+        recycleArrows={workflowGraph?.recycle_arrows ?? []}
       />
-      <div
-        ref={bandRef}
-        className="dag-recycle-band"
-        style={{ height: bandHeight }}
-        aria-hidden={paths.length === 0 ? "true" : undefined}
-      >
-        {paths.length > 0 && (
-          <svg
-            className="dag-recycle-svg"
-            width="100%"
-            height={bandHeight}
-            aria-label="recycle policies"
-          >
-            <defs>
-              <marker
-                id="dag-recycle-head"
-                viewBox="0 0 10 10"
-                refX="9"
-                refY="5"
-                markerWidth="7"
-                markerHeight="7"
-                orient="auto-start-reverse"
-              >
-                <path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke" />
-              </marker>
-            </defs>
-            {paths.map((p, i) => (
-              <g key={`${p.arrow.kind}:${p.arrow.source}:${p.arrow.target}:${i}`}>
-                <path d={p.d} className="dag-recycle-hitarea">
-                  <title>{p.title}</title>
-                </path>
-                <path
-                  d={p.d}
-                  className={p.cls}
-                  markerEnd={p.markerEnd === false ? undefined : "url(#dag-recycle-head)"}
-                />
-              </g>
-            ))}
-          </svg>
-        )}
-      </div>
     </div>
   );
 }
