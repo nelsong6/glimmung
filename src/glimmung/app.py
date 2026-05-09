@@ -807,6 +807,7 @@ async def _ensure_test_env_for_lease(lease_doc: dict[str, Any]) -> None:
         if reset and namespace:
             await launcher.delete_test_slot_namespace(namespace)
         await launcher.ensure_test_slot_namespace(lease_doc)
+        await launcher.ensure_playwright_slot(lease_doc)
     except Exception:
         log.exception(
             "failed to ensure test environment for native lease %s",
@@ -833,12 +834,7 @@ async def _reconcile_playwright_slots(app: FastAPI, cosmos: Cosmos) -> None:
     if launcher is None:
         return
     active = await _active_native_lease_docs(cosmos)
-    active_run_leases = [
-        doc
-        for doc in active
-        if (doc.get("metadata") or {}).get("test_slot_checkout") is not True
-    ]
-    await launcher.reconcile_playwright_slots(active_run_leases)
+    await launcher.reconcile_playwright_slots(active)
 
 
 async def _cleanup_native_attempt_secret(run: Run, attempt_index: int) -> None:
