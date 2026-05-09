@@ -18,8 +18,8 @@ export type RecyclePathLayout = {
 const RECYCLE_LANE_HEIGHT = 28;
 const RECYCLE_BAND_TOP_PAD = 8;
 const RECYCLE_BAND_BOTTOM_PAD = 8;
-const RECYCLE_TARGET_OVERSHOOT = 14;
-const RECYCLE_TARGET_ENTRY_OFFSET = 18;
+const RECYCLE_TARGET_OVERSHOOT = 28;
+const RECYCLE_TARGET_ENTRY_OFFSET = 34;
 const RECYCLE_CORNER_RADIUS = 6;
 
 type Point = { x: number; y: number };
@@ -104,7 +104,7 @@ export function computeRecyclePaths(
     const sY = s.bottom;
     const cornerX = t.left - RECYCLE_TARGET_OVERSHOOT;
     const tX = t.left;
-    const tY = t.cy + Math.min(RECYCLE_TARGET_ENTRY_OFFSET, Math.max(0, t.height / 3));
+    const tY = t.cy + Math.min(RECYCLE_TARGET_ENTRY_OFFSET, Math.max(0, t.height / 2 - 16));
     const inactive = r.arrow.max_attempts <= 0;
     const cls = [
       "dag-recycle-path",
