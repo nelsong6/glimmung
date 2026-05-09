@@ -1327,7 +1327,7 @@ function PipelineDag({
       phaseName: graphPhase.name,
       attempts: [],
       latest: run,
-      status: { cls: "info", text: "pending" },
+      status: { cls: "", text: "not run" },
     };
     return (
       <DagPhaseNode
@@ -1452,7 +1452,7 @@ function phaseNodesForRun(graph: IssueGraph, run: GraphNode): PhaseRollup[] {
       phaseName: stringOrNull(run.metadata.workflow) ?? "phase",
       attempts: [],
       latest: run,
-      status: { cls: "info", text: "pending" },
+      status: { cls: "", text: "not run" },
     });
   }
   return out;
@@ -1467,6 +1467,8 @@ function phaseStatus(attempt: GraphNode): { cls: string; text: string } {
   const workflowRunId = meta.workflow_run_id != null ? String(meta.workflow_run_id) : null;
   const nativeJobs = nativeAttemptJobs(meta.jobs);
   const nativeRunning = nativeJobs.some((j) => j.state === "active" || j.steps.some((s) => s.state === "active"));
+  const nativeFailed = nativeJobs.some((j) => j.state === "failed" || j.steps.some((s) => s.state === "failed"));
+  const nativeSucceeded = nativeJobs.length > 0 && nativeJobs.every((j) => j.state === "succeeded" || j.state === "skipped");
   // Resume primitive (#111) — synthesized skip-marks render as "skipped"
   // ahead of any other state since they're never dispatched. No pill
   // (skipped isn't one of {free, busy, drain, info}); the caller renders
@@ -1476,9 +1478,15 @@ function phaseStatus(attempt: GraphNode): { cls: string; text: string } {
     return { cls: "", text: "skipped" };
   }
   if (!completed) {
-    return workflowRunId || nativeRunning
-      ? { cls: "busy", text: "running" }
-      : { cls: "info", text: "dispatching" };
+    if (nativeRunning || (workflowRunId && nativeJobs.length === 0)) {
+      return { cls: "busy", text: "running" };
+    }
+    if (verStatus === "pass") return { cls: "free", text: "pass" };
+    if (verStatus === "fail") return { cls: "drain", text: "fail" };
+    if (verStatus === "error") return { cls: "drain", text: "error" };
+    if (nativeFailed) return { cls: "drain", text: "failed" };
+    if (nativeSucceeded) return { cls: "free", text: "pass" };
+    return { cls: "pending", text: "pending" };
   }
   // Verification status is the authoritative verdict on a verify phase
   // and must beat the k8s conclusion. The job conclusion can be "success"
@@ -2180,19 +2188,19 @@ function AttemptCard({
   const logArchiveUrl = stringOrNull(meta.log_archive_url);
   const nativeJobs = nativeAttemptJobs(meta.jobs);
 
-  // Pre-webhook progression (#83):
-  //   no workflow_run_id, no completed_at  → dispatching
-  //   workflow_run_id, no completed_at     → running
-  //   completed_at                         → terminal (existing logic)
-  // Pre-#79 the wire had a separate `queued` state we got from
-  // workflow_run.requested. Post-#79 the started callback fires from
-  // the workflow's first step, so the "queued at GHA but not yet
-  // running" window is no longer separately observable — collapsed
-  // into `dispatching`. Stuck-in-dispatching past STUCK_DISPATCHING_MS
-  // is visually flagged so the orphan-dispatch shape is obvious.
-  const running = !completedAt;
   const nativeRunning = nativeJobs.some((j) => j.state === "active" || j.steps.some((s) => s.state === "active"));
-  const dispatching = running && !workflowRunId && !nativeRunning;
+  const nativeFailed = nativeJobs.some((j) => j.state === "failed" || j.steps.some((s) => s.state === "failed"));
+  const nativeSucceeded = nativeJobs.length > 0 && nativeJobs.every((j) => j.state === "succeeded" || j.state === "skipped");
+
+  // Pre-start progression:
+  //   no completed_at + no active native step / GHA run → pending
+  //   active native step or started GHA run             → running
+  //   completed_at or terminal native job              → terminal
+  // The native runner can leave completed_at unset if a callback failed;
+  // do not keep showing those terminal jobs as active after the run aborts.
+  const nativeTerminal = nativeFailed || nativeSucceeded;
+  const running = !completedAt && !nativeTerminal && (nativeRunning || Boolean(workflowRunId));
+  const dispatching = !completedAt && !nativeTerminal && !running;
   const elapsedMs = dispatchedAt && running ? now() - parseTs(dispatchedAt) : null;
   const stuckDispatching =
     dispatching && elapsedMs !== null && elapsedMs > STUCK_DISPATCHING_MS;
@@ -2206,11 +2214,13 @@ function AttemptCard({
 
   const statusPill = (() => {
     if (skippedFromRunId) return { cls: "", text: "skipped" };
-    if (dispatching) return { cls: "info", text: "dispatching" };
+    if (dispatching) return { cls: "pending", text: "pending" };
     if (running) return { cls: "busy", text: "running" };
     if (verificationStatus === "pass") return { cls: "free", text: "pass" };
     if (verificationStatus === "fail") return { cls: "drain", text: "fail" };
     if (verificationStatus === "error") return { cls: "drain", text: "error" };
+    if (nativeFailed) return { cls: "drain", text: "failed" };
+    if (nativeSucceeded) return { cls: "free", text: "success" };
     if (conclusion === "success") return { cls: "free", text: "success" };
     if (conclusion === "cancelled") return { cls: "drain", text: "cancelled" };
     if (conclusion) return { cls: "drain", text: conclusion };
@@ -2485,7 +2495,7 @@ function NativeJobInspector({
                   <div className="native-job-label">
                     <span className="mono">{job.name || job.job_id}</span>
                     <span className={`pill ${nativeStatePill(job.state ?? "")}`}>
-                      {job.state || "pending"}
+                      {job.state || "not run"}
                     </span>
                   </div>
                 )}
@@ -2502,7 +2512,7 @@ function NativeJobInspector({
                   <small>
                     {step.exit_code !== null && step.exit_code !== undefined
                       ? `exit ${step.exit_code}`
-                      : step.state || "pending"}
+                      : step.state || "not run"}
                   </small>
                 </button>
               </Fragment>
@@ -2556,7 +2566,8 @@ function preferredNativeStepKey(
 }
 
 function nativeStepRowClass(state: string): string {
-  if (state === "succeeded" || state === "skipped") return "done";
+  if (state === "succeeded") return "done";
+  if (state === "skipped") return "skipped";
   if (state === "active") return "active";
   if (state === "failed") return "failed";
   return "pending";
@@ -2824,7 +2835,7 @@ function nativeStatePill(state: string): string {
   if (state === "succeeded") return "free";
   if (state === "active") return "busy";
   if (state === "failed") return "drain";
-  if (state === "skipped") return "info";
+  if (state === "pending") return "pending";
   return "";
 }
 
@@ -2959,6 +2970,7 @@ function IssueEditForm({
 function runStatePill(state: string): string {
   if (state === "passed") return "free";
   if (state === "in_progress") return "busy";
+  if (state === "pending") return "pending";
   if (state === "review_required") return "info";
   if (state === "aborted") return "drain";
   return "";

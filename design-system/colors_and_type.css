@@ -45,7 +45,7 @@
   --color-green-fg:        #4ade80;
   --color-green-bg-hover:  #166534;
 
-  /* Amber (busy / stale / in-progress) */
+  /* Amber (pending / queued / warming up) */
   --color-amber-bg:        #422006;
   --color-amber-fg:        #fb923c;
 
@@ -86,8 +86,11 @@
   --state-success-bg:      var(--color-green-bg);
   --state-success-fg:      var(--color-green-fg);
 
-  --state-busy-bg:         var(--color-amber-bg);
-  --state-busy-fg:         var(--color-amber-fg);
+  --state-busy-bg:         var(--color-blue-bg);
+  --state-busy-fg:         var(--color-blue-fg);
+
+  --state-pending-bg:      var(--color-amber-bg);
+  --state-pending-fg:      var(--color-amber-fg);
 
   --state-danger-bg:       var(--color-red-bg);
   --state-danger-fg:       var(--color-red-fg);
@@ -257,7 +260,7 @@ td {
    mono lowercase label, faint state-tinted body.
    No border-radius — flat industrial geometry to
    match buttons / tabs / table chrome.
-   Modifier classes: .free / .busy / .drain / .info
+   Modifier classes: .free / .busy / .pending / .drain / .info
    ───────────────────────────────────────────── */
 .pill {
   position: relative;
@@ -308,6 +311,12 @@ td {
   --pill-edge: color-mix(in srgb, var(--state-busy-fg) 32%, var(--border));
   --pill-bg:   color-mix(in srgb, var(--state-busy-bg) 55%, transparent);
   --pill-fg:   var(--state-busy-fg);
+}
+.pill.pending  {
+  --pill-rail: var(--state-pending-fg);
+  --pill-edge: color-mix(in srgb, var(--state-pending-fg) 32%, var(--border));
+  --pill-bg:   color-mix(in srgb, var(--state-pending-bg) 55%, transparent);
+  --pill-fg:   var(--state-pending-fg);
 }
 .pill.drain {
   --pill-rail: var(--state-danger-fg);

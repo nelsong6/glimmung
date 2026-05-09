@@ -406,6 +406,7 @@ export function TouchpointDetailView() {
 function runStatePill(state: string): string {
   if (state === "passed") return "free";
   if (state === "in_progress") return "busy";
+  if (state === "pending") return "pending";
   if (state === "review_required") return "info";
   if (state === "aborted") return "drain";
   return "dim";
