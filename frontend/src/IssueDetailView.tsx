@@ -1546,8 +1546,8 @@ function DagPhaseNode({
       aria-pressed={selected}
     >
       <div className="dag-job-head">
-        <span className="dag-job-kicker">job</span>
         <span className="dag-job-title">{phase.jobLabel}</span>
+        <span className="dag-job-kicker">job</span>
       </div>
       <div className="dag-node-state">
         <span className={`pill ${phase.status.cls}`}>{phase.status.text}</span>

@@ -103,8 +103,8 @@ function defaultPhaseNode(phase: PhaseGraphPhase): ReactNode {
   return (
     <div className="dag-node dag-node-phase dag-node-definition">
       <div className="dag-job-head">
-        <span className="dag-job-kicker">job</span>
         <span className="dag-job-title">{phase.name}</span>
+        <span className="dag-job-kicker">job</span>
       </div>
       <div className="dag-node-meta dim mono">{meta}</div>
     </div>
