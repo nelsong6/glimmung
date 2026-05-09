@@ -12,6 +12,7 @@ export type RecyclePathLayout = {
   d: string;
   cls: string;
   title: string;
+  markerEnd?: boolean;
 };
 
 const RECYCLE_LANE_HEIGHT = 18;
@@ -60,7 +61,7 @@ export function computeRecyclePaths(
     return aSpan - bSpan;
   });
 
-  const paths: RecyclePathLayout[] = renderable.map((r, lane) => {
+  const routed = renderable.map((r, lane) => {
     const { s, t } = r;
     const laneY = RECYCLE_BAND_TOP_PAD + (lane + 0.5) * RECYCLE_LANE_HEIGHT;
     const sX = s.cx;
@@ -68,13 +69,6 @@ export function computeRecyclePaths(
     const cornerX = t.left - RECYCLE_TARGET_OVERSHOOT;
     const tX = t.left;
     const tY = t.cy;
-    const d = [
-      `M ${sX} ${sY}`,
-      `L ${sX} ${laneY}`,
-      `L ${cornerX} ${laneY}`,
-      `L ${cornerX} ${tY}`,
-      `L ${tX} ${tY}`,
-    ].join(" ");
     const inactive = r.arrow.max_attempts <= 0;
     const cls = [
       "dag-recycle-path",
@@ -83,14 +77,90 @@ export function computeRecyclePaths(
     ].join(" ");
     const trigger = r.arrow.trigger || "recycle";
     return {
-      arrow: r.arrow,
-      d,
+      ...r,
+      lane,
+      laneY,
+      sX,
+      sY,
+      cornerX,
+      tX,
+      tY,
+      inactive,
       cls,
       title: `${r.arrow.source} ↻ ${r.arrow.target}: ${trigger}; ${
         inactive ? "no retries (max_attempts: 0)" : `max ${r.arrow.max_attempts}`
       }`,
     };
   });
+
+  const byTarget = new Map<string, typeof routed>();
+  for (const r of routed) {
+    const list = byTarget.get(r.arrow.target) ?? [];
+    list.push(r);
+    byTarget.set(r.arrow.target, list);
+  }
+
+  const paths: RecyclePathLayout[] = [];
+  for (const group of byTarget.values()) {
+    if (group.length === 1) {
+      const r = group[0];
+      const d = [
+        `M ${r.sX} ${r.sY}`,
+        `L ${r.sX} ${r.laneY}`,
+        `L ${r.cornerX} ${r.laneY}`,
+        `L ${r.cornerX} ${r.tY}`,
+        `L ${r.tX} ${r.tY}`,
+      ].join(" ");
+      paths.push({
+        arrow: r.arrow,
+        d,
+        cls: r.cls,
+        title: r.title,
+        markerEnd: true,
+      });
+      continue;
+    }
+
+    const busX = Math.min(...group.map((r) => r.cornerX));
+    const target = group[0];
+    for (const r of group) {
+      const d = [
+        `M ${r.sX} ${r.sY}`,
+        `L ${r.sX} ${r.laneY}`,
+        `L ${busX} ${r.laneY}`,
+      ].join(" ");
+      paths.push({
+        arrow: r.arrow,
+        d,
+        cls: r.cls,
+        title: r.title,
+        markerEnd: false,
+      });
+    }
+
+    const minY = Math.min(target.tY, ...group.map((r) => r.laneY));
+    const maxY = Math.max(target.tY, ...group.map((r) => r.laneY));
+    const anyActive = group.some((r) => r.arrow.active);
+    const allInactive = group.every((r) => r.inactive);
+    const bundleCls = [
+      "dag-recycle-path",
+      anyActive ? "fired" : "registered",
+      allInactive ? "inactive" : "active",
+    ].join(" ");
+    const sources = group.map((r) => r.arrow.source).join(", ");
+    const d = [
+      `M ${busX} ${maxY}`,
+      `L ${busX} ${minY}`,
+      `L ${target.tX} ${target.tY}`,
+    ].join(" ");
+    paths.push({
+      arrow: target.arrow,
+      d,
+      cls: bundleCls,
+      title: `${sources} ↻ ${target.arrow.target}: bundled phase entry`,
+      markerEnd: true,
+    });
+  }
 
   const bandHeight = renderable.length === 0
     ? 0

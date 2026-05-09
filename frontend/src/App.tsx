@@ -1358,7 +1358,7 @@ function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
                   <path
                     d={p.d}
                     className={p.cls}
-                    markerEnd="url(#dag-recycle-head-def)"
+                    markerEnd={p.markerEnd === false ? undefined : "url(#dag-recycle-head-def)"}
                   />
                 </g>
               ))}
