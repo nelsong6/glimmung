@@ -1892,6 +1892,28 @@ h2 .inline-action,
   text-align: right;
   overflow-wrap: anywhere;
 }
+.dag-job-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-height: 18px;
+}
+.dag-job-kicker {
+  color: var(--fg-dimmer);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.dag-job-title {
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
 .dag-phase-body {
   display: flex;
   flex-direction: column;
