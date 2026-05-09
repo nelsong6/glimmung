@@ -500,6 +500,7 @@ async def test_native_dispatch_uses_virtual_capacity_without_registered_host(app
     lease_doc = await _lease_doc_for(app, result.lease_id)
     assert lease_doc["state"] == LeaseState.ACTIVE.value
     assert lease_doc["metadata"]["native_k8s"] is True
+    assert lease_doc["leaseNumber"] == 1
     assert lease_doc["metadata"]["native_slot_index"] == "1"
     assert lease_doc["metadata"]["native_slot_name"] == "ambience-slot-1"
     assert lease_doc["metadata"]["phase_name"] == "agent"
@@ -573,8 +574,10 @@ async def test_native_dispatch_assigns_lowest_available_slot(app):
     second_lease = await _lease_doc_for(app, second.lease_id)
     assert first_lease["metadata"]["native_slot_index"] == "1"
     assert first_lease["metadata"]["native_slot_name"] == "ambience-slot-1"
+    assert first_lease["leaseNumber"] == 1
     assert second_lease["metadata"]["native_slot_index"] == "2"
     assert second_lease["metadata"]["native_slot_name"] == "ambience-slot-2"
+    assert second_lease["leaseNumber"] == 2
 
 
 @pytest.mark.asyncio

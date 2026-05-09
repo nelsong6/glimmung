@@ -586,7 +586,10 @@ async def test_dispatch_resumed_run_records_native_step_boundary(cosmos, app_sta
     assert agent_job["steps"][1]["state"] == "pending"
 
     leases = list(cosmos.leases._items.values())
-    pending = next(d for d in leases if d["id"] != "01KACTIVE_NATIVE")
+    pending = next(
+        d for d in leases
+        if d["id"] != "01KACTIVE_NATIVE" and d.get("kind") != "lease_number_counter"
+    )
     assert pending["state"] == "pending"
     assert pending["metadata"]["entrypoint_job_id"] == "agent"
     assert pending["metadata"]["entrypoint_step_slug"] == "run-agent"
