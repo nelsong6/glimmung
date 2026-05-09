@@ -54,9 +54,64 @@ def default_work_branch(run: Run) -> str:
     mapping (rare; mostly playbook entries that override the branch
     explicitly anyway).
     """
-    if run.issue_number and run.run_number:
-        return f"issue-{run.issue_number}-run-{run.run_number}"
+    display_number = run_display_number(run)
+    if run.issue_number and display_number:
+        return f"issue-{run.issue_number}-run-{display_number}"
     return f"glimmung-run-{run.id.lower()}"
+
+
+def run_display_number(run: Run | dict[str, Any]) -> str:
+    """Human-facing issue-scoped run label.
+
+    `run_number` stays as an integer compatibility key while public
+    cycle identity moves to dotted labels like `1.1`.
+    """
+    getter = run.get if isinstance(run, dict) else lambda k, default=None: getattr(run, k, default)
+    display = getter("run_display_number")
+    if display is not None and str(display).strip():
+        return str(display).strip()
+    number = getter("run_number")
+    return str(number) if number is not None else ""
+
+
+def _cycle_root_display(prior_run: Run) -> str:
+    if prior_run.is_cycle and prior_run.root_run_id:
+        root = prior_run.run_display_number or str(prior_run.run_number or "")
+        return root.split(".", 1)[0]
+    return run_display_number(prior_run)
+
+
+async def next_cycle_display_number(
+    cosmos: Cosmos,
+    *,
+    prior_run: Run,
+) -> tuple[str, int]:
+    """Allocate the next dotted display number under `prior_run`'s root."""
+    root_run_id = prior_run.root_run_id or prior_run.id
+    root_display = _cycle_root_display(prior_run)
+    if not root_display:
+        root_display = str(prior_run.run_number or 1)
+    docs = await issue_run_docs(
+        cosmos,
+        project=prior_run.project,
+        issue_number=prior_run.issue_number,
+        issue_id=prior_run.issue_id,
+    )
+    max_cycle = 0
+    prefix = f"{root_display}."
+    for doc in docs:
+        if doc.get("root_run_id") != root_run_id and doc.get("id") != root_run_id:
+            continue
+        display = str(doc.get("run_display_number") or doc.get("run_number") or "")
+        if not display.startswith(prefix):
+            continue
+        suffix = display[len(prefix):]
+        try:
+            max_cycle = max(max_cycle, int(suffix))
+        except ValueError:
+            continue
+    cycle_number = max_cycle + 1
+    return f"{root_display}.{cycle_number}", cycle_number
 
 
 async def create_run(
@@ -93,11 +148,17 @@ async def create_run(
     run_number = await next_run_number(
         cosmos, project=project, issue_number=issue_number, issue_id=issue_id,
     )
+    run_id = str(ULID())
     run = Run(
-        id=str(ULID()),
+        id=run_id,
         project=project,
         workflow=workflow,
         run_number=run_number,
+        run_display_number=str(run_number),
+        root_run_id=run_id,
+        origin_kind=(trigger_source or {}).get("kind", "dispatch"),
+        is_cycle=False,
+        cycle_number=0,
         issue_id=issue_id,
         issue_repo=issue_repo,
         issue_number=issue_number,
@@ -229,6 +290,46 @@ async def read_run_by_number(
     run = Run.model_validate(_strip_meta(doc))
     if run.run_number is None:
         run = run.model_copy(update={"run_number": run_number})
+    return run, doc["_etag"]
+
+
+async def read_run_by_ref(
+    cosmos: Cosmos,
+    *,
+    project: str,
+    issue_number: int,
+    run_ref: str | int,
+    issue_id: str | None = None,
+) -> tuple[Run, str] | None:
+    """Read a run by either legacy integer number or dotted display label."""
+    ref = str(run_ref).strip()
+    if not ref:
+        return None
+    docs = await issue_run_docs(
+        cosmos, project=project, issue_number=issue_number, issue_id=issue_id,
+    )
+    numbers = run_number_map(docs)
+    selected: dict[str, Any] | None = None
+    for doc in docs:
+        display = str(doc.get("run_display_number") or "").strip()
+        if display and display == ref:
+            selected = doc
+            break
+        if str(numbers.get(doc["id"]) or "") == ref:
+            selected = doc
+            break
+    if selected is None:
+        return None
+    doc = await cosmos.runs.read_item(item=selected["id"], partition_key=project)
+    run = Run.model_validate(_strip_meta(doc))
+    fallback_number = numbers.get(selected["id"])
+    updates: dict[str, Any] = {}
+    if run.run_number is None and fallback_number is not None:
+        updates["run_number"] = fallback_number
+    if not run.run_display_number:
+        updates["run_display_number"] = str(fallback_number) if fallback_number else ref
+    if updates:
+        run = run.model_copy(update=updates)
     return run, doc["_etag"]
 
 
@@ -890,6 +991,18 @@ async def create_resumed_run(
             prior_attempts_by_phase[a.phase] = a
 
     now = _now()
+    run_number = await next_run_number(
+        cosmos,
+        project=prior_run.project,
+        issue_number=prior_run.issue_number,
+        issue_id=prior_run.issue_id,
+    )
+    run_display, cycle_number = await next_cycle_display_number(
+        cosmos,
+        prior_run=prior_run,
+    )
+    run_id = str(ULID())
+    root_run_id = prior_run.root_run_id or prior_run.id
     skipped_attempts: list[PhaseAttempt] = []
     for idx, phase_name in enumerate(skipped_phase_names):
         prior_a = prior_attempts_by_phase.get(phase_name)
@@ -937,9 +1050,16 @@ async def create_resumed_run(
         ))
 
     new_run = Run(
-        id=str(ULID()),
+        id=run_id,
         project=prior_run.project,
         workflow=prior_run.workflow,
+        run_number=run_number,
+        run_display_number=run_display,
+        parent_run_id=prior_run.id,
+        root_run_id=root_run_id,
+        origin_kind=(trigger_source or {}).get("kind", "resume"),
+        is_cycle=True,
+        cycle_number=cycle_number,
         issue_id=prior_run.issue_id,
         issue_repo=prior_run.issue_repo,
         issue_number=prior_run.issue_number,

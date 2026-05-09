@@ -86,6 +86,7 @@ export const mockSnapshot = {
   pending_leases: [
     {
       id: "lease-pending-portfolio-217",
+      lease_number: 12,
       project: "glimmung",
       workflow: "issue-agent",
       host: null,
@@ -99,6 +100,7 @@ export const mockSnapshot = {
     },
     {
       id: "lease-pending-ambience-44",
+      lease_number: 7,
       project: "ambience",
       workflow: "preview-agent",
       host: null,
@@ -114,6 +116,7 @@ export const mockSnapshot = {
   active_leases: [
     {
       id: "lease-active-glimmung-206",
+      lease_number: 11,
       project: "glimmung",
       workflow: "issue-agent",
       host: "nelsonpc",

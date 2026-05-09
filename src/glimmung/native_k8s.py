@@ -78,6 +78,7 @@ class NativeKubernetesLauncher:
                 run_id=run_id,
                 attempt_index=attempt_index,
             )
+            await self.ensure_playwright_slot(lease_doc)
             job_names: list[str] = []
             first_secret_name = ""
             for job_spec in phase.jobs:
@@ -113,6 +114,8 @@ class NativeKubernetesLauncher:
         except Exception:
             with suppress(Exception):
                 await self.delete_attempt_secret(run_id=run_id, attempt_index=attempt_index)
+            with suppress(Exception):
+                await self.delete_playwright_slot(lease_doc)
             raise
         await _stamp_lease_launched(
             cosmos,
@@ -121,6 +124,111 @@ class NativeKubernetesLauncher:
             secret_name=first_secret_name,
         )
         return job_names
+
+    async def ensure_playwright_slot(self, lease_doc: dict[str, Any]) -> str | None:
+        """Ensure a slot-scoped Playwright server exists for an active native lease.
+
+        The worker is keyed by the assigned native slot, not by run or job,
+        so every job using the same validation slot shares exactly one
+        browser server and unrelated slots stay isolated.
+        """
+        if not _playwright_enabled(self._settings):
+            return None
+        slot = _playwright_slot(lease_doc)
+        if slot is None:
+            return None
+
+        namespace = self._settings.native_runner_namespace
+        name = _playwright_resource_name(slot["project"], slot["slot_name"])
+        labels = _playwright_labels(slot)
+        deployment = _playwright_deployment(
+            settings=self._settings,
+            name=name,
+            namespace=namespace,
+            labels=labels,
+        )
+        service = _playwright_service(
+            settings=self._settings,
+            name=name,
+            namespace=namespace,
+            labels=labels,
+        )
+        try:
+            await self._create_deployment(name, deployment)
+            await self._create_service(name, service)
+        except Exception:
+            with suppress(Exception):
+                await self.delete_playwright_slot_by_name(
+                    project=slot["project"],
+                    slot_name=slot["slot_name"],
+                )
+            raise
+        return _playwright_ws_endpoint(self._settings, name)
+
+    async def delete_playwright_slot(self, lease_doc: dict[str, Any]) -> None:
+        slot = _playwright_slot(lease_doc)
+        if slot is None:
+            return
+        await self.delete_playwright_slot_by_name(
+            project=slot["project"],
+            slot_name=slot["slot_name"],
+        )
+
+    async def delete_playwright_slot_by_name(self, *, project: str, slot_name: str) -> None:
+        name = _playwright_resource_name(project, slot_name)
+        namespace = self._settings.native_runner_namespace
+        for path in (
+            f"/apis/apps/v1/namespaces/{namespace}/deployments/{name}",
+            f"/api/v1/namespaces/{namespace}/services/{name}",
+        ):
+            try:
+                await self._request("DELETE", path)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 404:
+                    raise
+
+    async def reconcile_playwright_slots(self, active_native_leases: list[dict[str, Any]]) -> None:
+        """Delete Playwright workers whose native slot lease is no longer active."""
+        if not _playwright_enabled(self._settings):
+            return
+        namespace = self._settings.native_runner_namespace
+        desired = {
+            _playwright_resource_name(slot["project"], slot["slot_name"])
+            for lease_doc in active_native_leases
+            if (slot := _playwright_slot(lease_doc)) is not None
+        }
+        for lease_doc in active_native_leases:
+            await self.ensure_playwright_slot(lease_doc)
+        selector = urlencode({"labelSelector": "glimmung.romaine.life/slot-playwright=true"})
+        try:
+            deployments = await self._request(
+                "GET",
+                f"/apis/apps/v1/namespaces/{namespace}/deployments?{selector}",
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+            deployments = {"items": []}
+        for item in deployments.get("items") or []:
+            metadata = item.get("metadata") or {}
+            name = str(metadata.get("name") or "")
+            if name and name not in desired:
+                try:
+                    await self._request(
+                        "DELETE",
+                        f"/apis/apps/v1/namespaces/{namespace}/deployments/{name}",
+                    )
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code != 404:
+                        raise
+                try:
+                    await self._request(
+                        "DELETE",
+                        f"/api/v1/namespaces/{namespace}/services/{name}",
+                    )
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code != 404:
+                        raise
 
     async def _ensure_attempt_secret(
         self, name: str, *, extra_labels: dict[str, str] | None = None,
@@ -159,6 +267,26 @@ class NativeKubernetesLauncher:
     async def _create_job(self, name: str, manifest: dict[str, Any]) -> None:
         namespace = self._settings.native_runner_namespace
         path = f"/apis/batch/v1/namespaces/{namespace}/jobs"
+        try:
+            await self._request("POST", path, json=manifest)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 409:
+                return
+            raise
+
+    async def _create_deployment(self, name: str, manifest: dict[str, Any]) -> None:
+        namespace = self._settings.native_runner_namespace
+        path = f"/apis/apps/v1/namespaces/{namespace}/deployments"
+        try:
+            await self._request("POST", path, json=manifest)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 409:
+                return
+            raise
+
+    async def _create_service(self, name: str, manifest: dict[str, Any]) -> None:
+        namespace = self._settings.native_runner_namespace
+        path = f"/api/v1/namespaces/{namespace}/services"
         try:
             await self._request("POST", path, json=manifest)
         except httpx.HTTPStatusError as exc:
@@ -276,6 +404,252 @@ class NativeKubernetesLauncher:
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 404:
                 raise
+
+    async def delete_test_slot_namespace(self, namespace: str) -> None:
+        """Delete a checked-out native test-slot namespace."""
+        namespace = namespace.strip()
+        if not _valid_namespace(namespace):
+            raise NativeLaunchError(f"invalid test slot namespace {namespace!r}")
+        body = {
+            "apiVersion": "v1",
+            "kind": "DeleteOptions",
+            "propagationPolicy": "Foreground",
+        }
+        try:
+            await self._request("DELETE", f"/api/v1/namespaces/{namespace}", json=body)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return
+            raise
+
+    async def ensure_test_slot_namespace(self, lease_doc: dict[str, Any]) -> str | None:
+        """Ensure the assigned native slot namespace exists for a lease."""
+        slot = _native_slot(lease_doc)
+        if slot is None:
+            return None
+        labels = {
+            **_managed_labels(),
+            "glimmung.romaine.life/test-slot": "true",
+            "glimmung.romaine.life/project": _label_value(slot["project"]),
+            "glimmung.romaine.life/workflow": _label_value(slot["workflow"]),
+            "glimmung.romaine.life/native-slot-name": _label_value(slot["slot_name"]),
+        }
+        if slot.get("slot_index"):
+            labels["glimmung.romaine.life/native-slot-index"] = _label_value(slot["slot_index"])
+        if slot.get("lease_id"):
+            labels["glimmung.romaine.life/lease-id"] = _label_value(slot["lease_id"])
+        await self._ensure_namespace(slot["slot_name"], labels=labels)
+        return slot["slot_name"]
+
+    async def ensure_test_slot_helm_release(
+        self,
+        *,
+        lease_doc: dict[str, Any],
+        project_doc: dict[str, Any],
+        repo_token: str,
+    ) -> str | None:
+        """Spawn a one-shot Job that renders the project's Helm chart for a
+        slot and applies it to the slot namespace.
+
+        Without this step `checkout_test_slot` only creates the empty slot
+        namespace; nothing in it actually runs. The Job clones the project
+        repo using `repo_token`, runs the project-supplied render command
+        (typically `helm template` against the chart with slot-scoped
+        values), and pipes the output into `kubectl apply` against the
+        slot namespace. Slot teardown deletes the namespace, which removes
+        every applied resource — there is no helm release record to track.
+
+        Reads `metadata.test_slot_helm` from `project_doc`. Skips silently
+        when the project has not opted in or has no `github_repo`. Returns
+        the Job name on success, or None when no Job was launched.
+        """
+        config = _test_slot_helm_config(project_doc)
+        if config is None:
+            return None
+        slot = _native_slot(lease_doc)
+        if slot is None:
+            return None
+        repo = str(
+            project_doc.get("github_repo")
+            or project_doc.get("githubRepo")
+            or ""
+        ).strip()
+        if not repo:
+            return None
+        lease_id = slot.get("lease_id") or ""
+        if not lease_id:
+            return None
+
+        slot_name = slot["slot_name"]
+        slot_index = slot.get("slot_index") or _slot_index_from_name(slot_name)
+        host = _test_slot_host(project_doc, slot_name, self._settings)
+        substitutions = {
+            "slot_name": slot_name,
+            "slot_index": slot_index,
+            "host": host,
+            "project": slot["project"],
+        }
+
+        await self._ensure_slot_admin_binding(slot_name, slot=slot)
+
+        secret_name = _test_slot_install_secret_name(lease_id)
+        await self._ensure_clone_token_secret(secret_name, repo_token, slot=slot)
+
+        job_name = _test_slot_install_job_name(lease_id)
+        manifest = _test_slot_install_manifest(
+            settings=self._settings,
+            config=config,
+            slot=slot,
+            slot_index=slot_index,
+            host=host,
+            repo=repo,
+            substitutions=substitutions,
+            clone_token_secret=secret_name,
+            job_name=job_name,
+        )
+        await self._create_job(job_name, manifest)
+        return job_name
+
+    async def delete_test_slot_helm_release(self, lease_doc: dict[str, Any]) -> None:
+        """Delete the helm-install Job and its clone-token Secret for a slot.
+
+        Idempotent: missing resources are treated as already cleaned up.
+        Called on lease release so a stuck or in-flight install Job from a
+        previous checkout cannot block the next one.
+        """
+        slot = _native_slot(lease_doc)
+        if slot is None:
+            return
+        lease_id = slot.get("lease_id") or ""
+        if not lease_id:
+            return
+        namespace = self._settings.native_runner_namespace
+        job_name = _test_slot_install_job_name(lease_id)
+        secret_name = _test_slot_install_secret_name(lease_id)
+        body = {
+            "apiVersion": "v1",
+            "kind": "DeleteOptions",
+            "propagationPolicy": "Foreground",
+            "gracePeriodSeconds": 30,
+        }
+        try:
+            await self._request(
+                "DELETE",
+                f"/apis/batch/v1/namespaces/{namespace}/jobs/{job_name}",
+                json=body,
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+        try:
+            await self._request(
+                "DELETE",
+                f"/api/v1/namespaces/{namespace}/secrets/{secret_name}",
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+
+    async def _ensure_slot_admin_binding(
+        self,
+        slot_name: str,
+        *,
+        slot: dict[str, str],
+    ) -> None:
+        """Bind the runner SA to admin on a slot namespace so the install
+        Job (which runs under that SA) can apply the rendered chart.
+
+        Mirrors `_ensure_runner_role_binding` but keyed by lease so each
+        checkout owns one binding that goes away with the namespace.
+        """
+        namespace = slot_name
+        labels = {
+            **_managed_labels(),
+            "glimmung.romaine.life/test-slot": "true",
+            "glimmung.romaine.life/project": _label_value(slot["project"]),
+            "glimmung.romaine.life/native-slot-name": _label_value(slot_name),
+        }
+        if slot.get("lease_id"):
+            labels["glimmung.romaine.life/lease-id"] = _label_value(slot["lease_id"])
+        body = {
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "RoleBinding",
+            "metadata": {
+                "name": "glim-test-slot-installer",
+                "namespace": namespace,
+                "labels": labels,
+            },
+            "roleRef": {
+                "apiGroup": "rbac.authorization.k8s.io",
+                "kind": "ClusterRole",
+                "name": self._settings.native_runner_namespace_role,
+            },
+            "subjects": [
+                {
+                    "kind": "ServiceAccount",
+                    "name": self._settings.native_runner_service_account,
+                    "namespace": self._settings.native_runner_namespace,
+                }
+            ],
+        }
+        try:
+            await self._request(
+                "POST",
+                f"/apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/rolebindings",
+                json=body,
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 409:
+                raise
+
+    async def _ensure_clone_token_secret(
+        self,
+        name: str,
+        token: str,
+        *,
+        slot: dict[str, str],
+    ) -> None:
+        """Stash a short-lived GitHub installation token in a Secret the
+        install Job's init container mounts to `git clone` the project repo.
+
+        Token TTL is ~1h (GitHub App installation tokens); the Job is
+        expected to complete in seconds. Replaced on every checkout so a
+        stale token from a prior lease never lingers."""
+        namespace = self._settings.native_runner_namespace
+        path = f"/api/v1/namespaces/{namespace}/secrets"
+        labels = {
+            **_managed_labels(),
+            "glimmung.romaine.life/test-slot-installer": "true",
+            "glimmung.romaine.life/project": _label_value(slot["project"]),
+            "glimmung.romaine.life/native-slot-name": _label_value(slot["slot_name"]),
+        }
+        if slot.get("lease_id"):
+            labels["glimmung.romaine.life/lease-id"] = _label_value(slot["lease_id"])
+        body = {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": name,
+                "namespace": namespace,
+                "labels": labels,
+            },
+            "type": "Opaque",
+            "stringData": {"token": token},
+        }
+        try:
+            await self._request("POST", path, json=body)
+            return
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 409:
+                raise
+        # Pre-existing Secret from a prior checkout would carry a stale token;
+        # replace contents so the install Job sees a fresh one.
+        existing = await self._request("GET", f"{path}/{name}")
+        resource_version = (
+            (existing.get("metadata") or {}).get("resourceVersion") or ""
+        )
+        body.setdefault("metadata", {})["resourceVersion"] = str(resource_version)
+        await self._request("PUT", f"{path}/{name}", json=body)
 
     async def reconcile_standby_dns(self, project_docs: list[dict[str, Any]]) -> None:
         """Reconcile DNSEndpoint records for projects that opt into warm native DNS."""
@@ -792,6 +1166,16 @@ def _universal_env(
             },
         },
     ]
+    if _playwright_enabled(settings):
+        slot_name = str(metadata.get("native_slot_name") or "").strip()
+        if slot_name:
+            service_name = _playwright_resource_name(project, slot_name)
+            endpoint = _playwright_ws_endpoint(settings, service_name)
+            env.extend([
+                {"name": "GLIMMUNG_PLAYWRIGHT_WS_ENDPOINT", "value": endpoint},
+                {"name": "PLAYWRIGHT_WS_ENDPOINT", "value": endpoint},
+                {"name": "PW_TEST_CONNECT_WS_ENDPOINT", "value": endpoint},
+            ])
     for key in (
         "issue_id",
         "issue_repo",
@@ -835,6 +1219,170 @@ def _managed_labels() -> dict[str, str]:
     return {
         "app.kubernetes.io/managed-by": "glimmung",
         "app.kubernetes.io/part-of": "glimmung-native-runner",
+    }
+
+
+def _playwright_enabled(settings: Settings) -> bool:
+    return bool(getattr(settings, "native_runner_playwright_enabled", True))
+
+
+def _native_slot(lease_doc: dict[str, Any]) -> dict[str, str] | None:
+    metadata = lease_doc.get("metadata") or {}
+    slot_name = str(metadata.get("native_slot_name") or "").strip()
+    if not slot_name:
+        return None
+    return {
+        "project": str(lease_doc.get("project") or "").strip(),
+        "workflow": str(lease_doc.get("workflow") or "").strip(),
+        "slot_name": slot_name,
+        "slot_index": str(metadata.get("native_slot_index") or "").strip(),
+        "lease_id": str(lease_doc.get("id") or "").strip(),
+    }
+
+
+def _playwright_slot(lease_doc: dict[str, Any]) -> dict[str, str] | None:
+    return _native_slot(lease_doc)
+
+
+def _playwright_resource_name(project: str, slot_name: str) -> str:
+    base = _dns_label(f"glim-pw-{project}-{slot_name}")
+    if len(base) <= 63:
+        return base
+    digest = hashlib.sha256(base.encode("utf-8")).hexdigest()[:8]
+    return f"{base[:54].rstrip('-')}-{digest}"
+
+
+def _playwright_labels(slot: dict[str, str]) -> dict[str, str]:
+    labels = {
+        **_managed_labels(),
+        "glimmung.romaine.life/slot-playwright": "true",
+        "glimmung.romaine.life/project": _label_value(slot["project"]),
+        "glimmung.romaine.life/native-slot-name": _label_value(slot["slot_name"]),
+    }
+    if slot.get("slot_index"):
+        labels["glimmung.romaine.life/native-slot-index"] = _label_value(slot["slot_index"])
+    if slot.get("lease_id"):
+        labels["glimmung.romaine.life/lease-id"] = _label_value(slot["lease_id"])
+    return labels
+
+
+def _playwright_ws_endpoint(settings: Settings, service_name: str) -> str:
+    namespace = settings.native_runner_namespace
+    port = int(getattr(settings, "native_runner_playwright_port", 3000))
+    return f"ws://{service_name}.{namespace}.svc.cluster.local:{port}/"
+
+
+def _playwright_deployment(
+    *,
+    settings: Settings,
+    name: str,
+    namespace: str,
+    labels: dict[str, str],
+) -> dict[str, Any]:
+    port = int(getattr(settings, "native_runner_playwright_port", 3000))
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+            "labels": labels,
+        },
+        "spec": {
+            "replicas": 1,
+            "selector": {"matchLabels": {"app.kubernetes.io/name": name}},
+            "template": {
+                "metadata": {
+                    "labels": {
+                        **labels,
+                        "app.kubernetes.io/name": name,
+                    },
+                },
+                "spec": {
+                    "containers": [
+                        {
+                            "name": "playwright",
+                            "image": getattr(
+                                settings,
+                                "native_runner_playwright_image",
+                                "romainecr.azurecr.io/agent-container:latest",
+                            ),
+                            "command": [
+                                "npx",
+                                "playwright",
+                                "run-server",
+                                "--host",
+                                "0.0.0.0",
+                                "--port",
+                                str(port),
+                            ],
+                            "ports": [{"name": "ws", "containerPort": port}],
+                            "env": [
+                                {
+                                    "name": "PLAYWRIGHT_BROWSERS_PATH",
+                                    "value": "/ms-playwright",
+                                }
+                            ],
+                            "resources": {
+                                "requests": {
+                                    "cpu": getattr(
+                                        settings,
+                                        "native_runner_playwright_cpu_request",
+                                        "100m",
+                                    ),
+                                    "memory": getattr(
+                                        settings,
+                                        "native_runner_playwright_memory_request",
+                                        "256Mi",
+                                    ),
+                                },
+                                "limits": {
+                                    "cpu": getattr(
+                                        settings,
+                                        "native_runner_playwright_cpu_limit",
+                                        "1000m",
+                                    ),
+                                    "memory": getattr(
+                                        settings,
+                                        "native_runner_playwright_memory_limit",
+                                        "1Gi",
+                                    ),
+                                },
+                            },
+                        }
+                    ]
+                },
+            },
+        },
+    }
+
+
+def _playwright_service(
+    *,
+    settings: Settings,
+    name: str,
+    namespace: str,
+    labels: dict[str, str],
+) -> dict[str, Any]:
+    port = int(getattr(settings, "native_runner_playwright_port", 3000))
+    return {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+            "labels": labels,
+        },
+        "spec": {
+            "selector": {"app.kubernetes.io/name": name},
+            "ports": [
+                {
+                    "name": "ws",
+                    "port": port,
+                    "targetPort": "ws",
+                }
+            ],
+        },
     }
 
 
@@ -1119,6 +1667,238 @@ def _env_name(value: str) -> str:
 
 def _sha256(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+_DEFAULT_INSTALLER_IMAGE = "alpine/k8s:1.30.0"
+_DEFAULT_RENDER_COMMAND: tuple[str, ...] = (
+    "sh",
+    "scripts/render-test-env.sh",
+    "{slot_index}",
+)
+
+
+def _test_slot_helm_config(project_doc: dict[str, Any]) -> dict[str, Any] | None:
+    """Read the test-slot helm-install config off a project doc.
+
+    Returns None when the project hasn't opted in. Defaults the render
+    command to `scripts/render-test-env.sh {slot_index}` (the
+    convention this fix was authored against) so projects that follow
+    the convention can opt in with just `enabled: true`.
+    """
+    metadata = project_doc.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        return None
+    raw = metadata.get("test_slot_helm") or metadata.get("testSlotHelm")
+    if not isinstance(raw, dict) or raw.get("enabled") is not True:
+        return None
+
+    render = raw.get("render_command") or raw.get("renderCommand")
+    if isinstance(render, str):
+        render_command: tuple[str, ...] = ("sh", "-c", render)
+    elif isinstance(render, list) and render:
+        render_command = tuple(str(part) for part in render)
+    else:
+        render_command = _DEFAULT_RENDER_COMMAND
+
+    image = str(
+        raw.get("installer_image")
+        or raw.get("installerImage")
+        or _DEFAULT_INSTALLER_IMAGE
+    ).strip()
+
+    git_ref = str(raw.get("git_ref") or raw.get("gitRef") or "").strip()
+
+    return {
+        "render_command": render_command,
+        "installer_image": image or _DEFAULT_INSTALLER_IMAGE,
+        "git_ref": git_ref,
+    }
+
+
+def _test_slot_host(
+    project_doc: dict[str, Any],
+    slot_name: str,
+    settings: Settings,
+) -> str:
+    """Per-slot ingress hostname, derived from `native_standby_dns.record_base`.
+
+    Empty string when the project doesn't carry a record base — render
+    commands that don't reference `{host}` still work in that case."""
+    standby = _standby_dns_config(project_doc, settings)
+    if standby is None:
+        return ""
+    record_base = str(standby.get("record_base") or "").strip(".")
+    if not record_base:
+        return ""
+    return f"{slot_name}.{record_base}"
+
+
+def _slot_index_from_name(slot_name: str) -> str:
+    """Trailing integer of a slot name (e.g. `tank-slot-3` → `3`).
+
+    Falls back to empty string for non-conforming names; render commands
+    that need a slot index will fail loudly inside the Job in that case."""
+    suffix = slot_name.rsplit("-", 1)[-1]
+    return suffix if suffix.isdigit() else ""
+
+
+def _test_slot_install_job_name(lease_id: str) -> str:
+    return _resource_name("glim-helm-install", lease_id, 0)
+
+
+def _test_slot_install_secret_name(lease_id: str) -> str:
+    return _resource_name("glim-helm-clone", lease_id, 0)
+
+
+def _format_substitutions(template: str, substitutions: dict[str, str]) -> str:
+    """`{slot_name}`-style substitution that tolerates missing keys.
+
+    Used on both the render command and on values flowing into the
+    install Pod's env, so a typo in a project's render config surfaces
+    in the Pod logs rather than masking as a Python KeyError on the
+    glimmung side."""
+    try:
+        return template.format(**substitutions)
+    except (KeyError, IndexError, ValueError):
+        return template
+
+
+def _test_slot_install_manifest(
+    *,
+    settings: Settings,
+    config: dict[str, Any],
+    slot: dict[str, str],
+    slot_index: str,
+    host: str,
+    repo: str,
+    substitutions: dict[str, str],
+    clone_token_secret: str,
+    job_name: str,
+) -> dict[str, Any]:
+    """Build the helm-install Job manifest for a checkout.
+
+    Pod shape:
+      - `clone` initContainer: alpine/git, mounts the clone-token Secret,
+        clones the repo into a shared `workspace` emptyDir.
+      - `install` main container: configurable image (default
+        `alpine/k8s` which carries helm + kubectl + git + yq), runs the
+        project-supplied render command from the cloned repo and pipes
+        the output into `kubectl apply` against the slot namespace.
+    """
+    namespace = settings.native_runner_namespace
+    slot_name = slot["slot_name"]
+    project = slot["project"]
+    lease_id = slot.get("lease_id") or ""
+    git_ref = str(config.get("git_ref") or "").strip()
+    render_command = [
+        _format_substitutions(part, substitutions)
+        for part in config["render_command"]
+    ]
+    quoted_render = " ".join(_shell_quote(part) for part in render_command)
+
+    labels = {
+        **_managed_labels(),
+        "glimmung.romaine.life/test-slot-installer": "true",
+        "glimmung.romaine.life/project": _label_value(project),
+        "glimmung.romaine.life/native-slot-name": _label_value(slot_name),
+    }
+    if lease_id:
+        labels["glimmung.romaine.life/lease-id"] = _label_value(lease_id)
+    if slot.get("slot_index"):
+        labels["glimmung.romaine.life/native-slot-index"] = _label_value(slot["slot_index"])
+
+    clone_script = (
+        "set -eu\n"
+        f"GIT_REF={_shell_quote(git_ref)}\n"
+        "TOKEN=\"$(cat /var/run/glim-clone/token)\"\n"
+        f"REPO_URL=\"https://x-access-token:${{TOKEN}}@github.com/{repo}.git\"\n"
+        "if [ -n \"$GIT_REF\" ]; then\n"
+        "  git clone --depth 1 --branch \"$GIT_REF\" \"$REPO_URL\" /workspace\n"
+        "else\n"
+        "  git clone --depth 1 \"$REPO_URL\" /workspace\n"
+        "fi\n"
+    )
+    install_script = (
+        "set -eu\n"
+        "cd /workspace\n"
+        f"{quoted_render} | kubectl apply -n {_shell_quote(slot_name)} -f -\n"
+    )
+    pod_spec: dict[str, Any] = {
+        "serviceAccountName": settings.native_runner_service_account,
+        "restartPolicy": "Never",
+        "volumes": [
+            {"name": "workspace", "emptyDir": {}},
+            {
+                "name": "glim-clone",
+                "secret": {
+                    "secretName": clone_token_secret,
+                    "defaultMode": 0o400,
+                },
+            },
+        ],
+        "initContainers": [
+            {
+                "name": "clone",
+                "image": "alpine/git:latest",
+                "command": ["sh", "-c", clone_script],
+                "volumeMounts": [
+                    {"name": "workspace", "mountPath": "/workspace"},
+                    {
+                        "name": "glim-clone",
+                        "mountPath": "/var/run/glim-clone",
+                        "readOnly": True,
+                    },
+                ],
+            }
+        ],
+        "containers": [
+            {
+                "name": "install",
+                "image": config["installer_image"],
+                "command": ["sh", "-c", install_script],
+                "env": [
+                    {"name": "GLIM_SLOT_NAME", "value": slot_name},
+                    {"name": "GLIM_SLOT_INDEX", "value": str(slot_index)},
+                    {"name": "GLIM_HOST", "value": host},
+                    {"name": "GLIM_PROJECT", "value": project},
+                ],
+                "volumeMounts": [
+                    {"name": "workspace", "mountPath": "/workspace"},
+                ],
+            }
+        ],
+    }
+
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "name": job_name,
+            "namespace": namespace,
+            "labels": labels,
+            "annotations": {
+                "glimmung.romaine.life/lease-id": lease_id,
+                "glimmung.romaine.life/native-slot-name": slot_name,
+            },
+        },
+        "spec": {
+            "backoffLimit": 1,
+            "ttlSecondsAfterFinished": settings.native_runner_job_ttl_seconds,
+            "template": {
+                "metadata": {"labels": labels},
+                "spec": pod_spec,
+            },
+        },
+    }
+
+
+def _shell_quote(value: str) -> str:
+    """Single-quote `value` for safe substitution into the install script.
+
+    Avoids pulling in `shlex` for one call site. The render command and
+    slot name flow into a `sh -c` script body, so any apostrophe-class
+    metacharacter has to be escaped explicitly."""
+    return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
 async def _stamp_lease_launched(

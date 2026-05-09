@@ -25,6 +25,7 @@ type Host = {
 
 type Lease = {
   id: string;
+  lease_number?: number | null;
   project: string;
   workflow: string | null;
   host: string | null;
@@ -1837,6 +1838,12 @@ function ProjectHostsView({
   const hosts = snap.hosts.filter((h) =>
     nonEmptyReqs.some((reqs) => matchesRequirements(h, reqs))
   );
+  const leaseLabels = new Map(
+    [...snap.active_leases, ...snap.pending_leases].map((lease) => [
+      lease.id,
+      leaseDisplayName(lease),
+    ]),
+  );
 
   return (
     <div className="project-workspace">
@@ -1881,7 +1888,9 @@ function ProjectHostsView({
                     <span className="pill free">free</span>
                   )}
                 </td>
-                <td className="mono dim">{h.current_lease_id ?? "—"}</td>
+                <td className="mono dim">
+                  {h.current_lease_id ? leaseLabels.get(h.current_lease_id) ?? "active lease" : "—"}
+                </td>
                 <td className="mono dim">{relTime(h.last_heartbeat)}</td>
                 <td className="mono dim">{relTime(h.last_used_at)}</td>
               </tr>
@@ -2414,7 +2423,7 @@ function CurrentWorkTable({ leases, emptyText }: { leases: Lease[]; emptyText: s
           const context = leaseContext(l);
           return (
             <tr key={l.id}>
-              <td className="mono">{l.id.slice(0, 8)}…</td>
+              <td className="mono">{leaseDisplayName(l)}</td>
               <td className="mono dim">{l.workflow ?? "—"}</td>
               <td><span className={`pill ${l.state === "active" ? "busy" : "info"}`}>{l.state}</span></td>
               <td className="mono">{l.host ?? "—"}</td>
@@ -2448,6 +2457,21 @@ function leaseContext(lease: Lease): { label: string; title: string } {
     label,
     title: label === "—" ? "No concise context on this lease" : label,
   };
+}
+
+function leaseDisplayName(lease: Lease): string {
+  if (lease.lease_number !== null && lease.lease_number !== undefined) {
+    return `#${lease.lease_number}`;
+  }
+  const slotName = lease.metadata?.native_slot_name;
+  if (typeof slotName === "string" && slotName) {
+    return slotName;
+  }
+  const issueNumber = lease.metadata?.issue_number ?? lease.metadata?.issueNumber;
+  if (typeof issueNumber === "number" || typeof issueNumber === "string") {
+    return `issue #${issueNumber}`;
+  }
+  return "lease";
 }
 type CapacityViewProps = {
   snap: Snapshot | null;
@@ -2484,7 +2508,7 @@ function CapacityView({
       const r = await authedFetch(url, { method: "POST" });
       if (!r.ok) {
         const text = await r.text().catch(() => "");
-        setCancelError(`cancel ${lease.id.slice(0, 8)}…: ${r.status} ${text || r.statusText}`);
+        setCancelError(`cancel ${leaseDisplayName(lease)}: ${r.status} ${text || r.statusText}`);
       }
     } catch (e) {
       setCancelError(String(e));
@@ -2524,7 +2548,7 @@ function CapacityView({
             <tbody>
               {filteredPending.map((l) => (
                 <tr key={l.id}>
-                  <td className="mono">{l.id.slice(0, 8)}…</td>
+                  <td className="mono">{leaseDisplayName(l)}</td>
                   <td>{l.project}</td>
                   <td className="mono dim">{l.workflow ?? "—"}</td>
                   <td className="mono">{JSON.stringify(l.requirements)}</td>
@@ -2558,7 +2582,7 @@ function CapacityView({
             <tbody>
               {filteredActive.map((l) => (
                 <tr key={l.id}>
-                  <td className="mono">{l.id.slice(0, 8)}…</td>
+                  <td className="mono">{leaseDisplayName(l)}</td>
                   <td>{l.project}</td>
                   <td className="mono dim">{l.workflow ?? "—"}</td>
                   <td className="mono">{l.host ?? "—"}</td>

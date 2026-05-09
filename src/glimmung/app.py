@@ -298,6 +298,7 @@ async def _sweep_loop(cosmos: Cosmos, settings: Settings) -> None:
             count = await lease_ops.sweep_expired(cosmos, settings)
             if count:
                 log.info("sweep expired %d leases", count)
+            await _reconcile_playwright_slots(app, cosmos)
         except Exception:
             log.exception("sweep failed; will retry")
         await asyncio.sleep(settings.sweep_interval_seconds)
@@ -638,6 +639,10 @@ async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host
     if not workflow_name:
         log.warning("lease %s has no workflow; skipping dispatch", lease_doc["id"])
         return True
+    try:
+        await _ensure_test_env_for_lease(lease_doc)
+    except Exception:
+        return False
 
     workflow_doc = await _read_workflow(cosmos, lease_doc["project"], workflow_name)
     if not workflow_doc:
@@ -702,6 +707,8 @@ async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host
             if k in _DISPATCH_INPUT_KEYS
         },
     }
+    if lease_doc.get("leaseNumber"):
+        inputs["lease_number"] = str(lease_doc["leaseNumber"])
     # Multi-phase forward dispatch (#101): the substituted phase inputs
     # are stashed on lease metadata so the promote-loop path can pick
     # them up too. Each consumer workflow declares these inputs in its
@@ -753,6 +760,7 @@ async def _release_native_run_leases(cosmos: Cosmos, run: Run) -> int:
     for doc in docs:
         try:
             await lease_ops.release(cosmos, doc["id"], run.project)
+            await _delete_playwright_slot_for_lease(doc)
             released += 1
         except Exception:
             log.exception(
@@ -760,6 +768,119 @@ async def _release_native_run_leases(cosmos: Cosmos, run: Run) -> int:
                 doc.get("id"), run.id,
             )
     return released
+
+
+async def _active_native_lease_docs(cosmos: Cosmos) -> list[dict[str, Any]]:
+    return await query_all(
+        cosmos.leases,
+        "SELECT * FROM c WHERE c.state = @s AND c.metadata.native_k8s = true",
+        parameters=[{"name": "@s", "value": LeaseState.ACTIVE.value}],
+    )
+
+
+async def _ensure_playwright_slot_for_lease(lease_doc: dict[str, Any]) -> None:
+    launcher = getattr(app.state, "native_k8s_launcher", None)
+    if launcher is None:
+        return
+    try:
+        await launcher.ensure_playwright_slot(lease_doc)
+    except Exception:
+        log.exception(
+            "failed to ensure Playwright worker for native lease %s",
+            lease_doc.get("id"),
+        )
+        raise
+
+
+async def _ensure_test_env_for_lease(lease_doc: dict[str, Any]) -> None:
+    metadata = lease_doc.get("metadata") or {}
+    if metadata.get(lease_ops.NATIVE_K8S_METADATA_KEY) is not True:
+        return
+    if not metadata.get(lease_ops.NATIVE_SLOT_NAME_METADATA_KEY):
+        return
+    launcher = getattr(app.state, "native_k8s_launcher", None)
+    if launcher is None:
+        return
+    reset = metadata.get("test_slot_mode") == "clean_slate"
+    namespace = _test_slot_namespace(lease_doc)
+    try:
+        if reset and namespace:
+            await launcher.delete_test_slot_namespace(namespace)
+        await launcher.ensure_test_slot_namespace(lease_doc)
+        await launcher.ensure_playwright_slot(lease_doc)
+        await _ensure_test_slot_helm_release(lease_doc)
+    except Exception:
+        log.exception(
+            "failed to ensure test environment for native lease %s",
+            lease_doc.get("id"),
+        )
+        raise
+
+
+async def _ensure_test_slot_helm_release(lease_doc: dict[str, Any]) -> None:
+    """Provision the project's Helm chart into a freshly-checked-out slot.
+
+    Without this the slot namespace is empty: there's no orchestrator,
+    ingress, or session capacity to test against. The launcher reads
+    `metadata.test_slot_helm` off the project doc — projects that haven't
+    opted in skip silently so this stays inert for non-native flows.
+    """
+    launcher = getattr(app.state, "native_k8s_launcher", None)
+    if launcher is None:
+        return
+    cosmos: Cosmos | None = getattr(app.state, "cosmos", None)
+    if cosmos is None:
+        return
+    project = str(lease_doc.get("project") or "").strip()
+    if not project:
+        return
+    project_doc = await _read_project(cosmos, project)
+    if project_doc is None:
+        return
+    repo = str(
+        project_doc.get("github_repo")
+        or project_doc.get("githubRepo")
+        or ""
+    ).strip()
+    if not repo:
+        return
+    minter: GitHubAppTokenMinter | None = getattr(app.state, "gh_minter", None)
+    if minter is None:
+        return
+    try:
+        token, _ = await minter.repository_token(repo=repo)
+    except Exception:
+        log.exception(
+            "failed to mint repo token for test slot install (lease %s repo %s)",
+            lease_doc.get("id"), repo,
+        )
+        raise
+    await launcher.ensure_test_slot_helm_release(
+        lease_doc=lease_doc,
+        project_doc=project_doc,
+        repo_token=token,
+    )
+
+
+async def _delete_playwright_slot_for_lease(lease_doc: dict[str, Any]) -> None:
+    launcher = getattr(app.state, "native_k8s_launcher", None)
+    if launcher is None:
+        return
+    try:
+        await launcher.delete_playwright_slot(lease_doc)
+    except Exception:
+        log.exception(
+            "failed to delete Playwright worker for native lease %s",
+            lease_doc.get("id"),
+        )
+
+
+async def _reconcile_playwright_slots(app: FastAPI, cosmos: Cosmos) -> None:
+    launcher = getattr(app.state, "native_k8s_launcher", None)
+    if launcher is None:
+        return
+    active = await _active_native_lease_docs(cosmos)
+    await launcher.reconcile_playwright_slots(active)
 
 
 async def _cleanup_native_attempt_secret(run: Run, attempt_index: int) -> None:
@@ -2763,7 +2884,65 @@ async def heartbeat_lease(lease_id: str = Path(...), project: str = "") -> Lease
 async def release_lease(lease_id: str = Path(...), project: str = "") -> Lease:
     if not project:
         raise HTTPException(400, "project query param required")
-    return await lease_ops.release(app.state.cosmos, lease_id, project)
+    return await _release_lease_from_api(app.state.cosmos, lease_id, project)
+
+
+async def _release_lease_from_api(cosmos: Cosmos, lease_id: str, project: str) -> Lease:
+    try:
+        lease_doc = await cosmos.leases.read_item(item=lease_id, partition_key=project)
+    except Exception:
+        raise HTTPException(404, "lease not found")
+    await _cleanup_test_slot_before_release(lease_doc)
+    released = await lease_ops.release(cosmos, lease_id, project)
+    await _delete_playwright_slot_for_lease(lease_doc)
+    return released
+
+
+async def _cleanup_test_slot_before_release(lease_doc: dict[str, Any]) -> None:
+    metadata = lease_doc.get("metadata") or {}
+    if metadata.get("test_slot_checkout") is not True:
+        return
+    if lease_doc.get("state") != LeaseState.ACTIVE.value:
+        return
+    namespace = _test_slot_namespace(lease_doc)
+    if not namespace:
+        raise HTTPException(409, f"test slot lease {lease_doc.get('id')} has no namespace")
+    launcher = getattr(app.state, "native_k8s_launcher", None)
+    if launcher is None:
+        raise HTTPException(503, "native Kubernetes launcher is not configured")
+    try:
+        await launcher.delete_test_slot_namespace(namespace)
+    except native_k8s_ops.NativeLaunchError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except Exception as exc:
+        log.exception(
+            "test slot cleanup failed for lease %s namespace=%s",
+            lease_doc.get("id"), namespace,
+        )
+        raise HTTPException(502, f"test slot cleanup failed for namespace {namespace}") from exc
+    # The install Job + its clone-token Secret live in the runner namespace,
+    # not the slot namespace, so deleting the slot namespace doesn't reclaim
+    # them. A leftover Job would 409 the next checkout's POST.
+    try:
+        await launcher.delete_test_slot_helm_release(lease_doc)
+    except Exception:
+        log.exception(
+            "test slot install-job cleanup failed for lease %s namespace=%s",
+            lease_doc.get("id"), namespace,
+        )
+
+
+def _test_slot_namespace(lease_doc: dict[str, Any]) -> str:
+    metadata = lease_doc.get("metadata") or {}
+    phase_inputs = metadata.get("phase_inputs") if isinstance(metadata.get("phase_inputs"), dict) else {}
+    for value in (
+        phase_inputs.get("namespace"),
+        phase_inputs.get("slot_name"),
+        metadata.get("native_slot_name"),
+    ):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 class CancelLeaseResult(BaseModel):
@@ -2878,6 +3057,7 @@ async def _cancel_lease(
     # 4. Release the lease.
     try:
         await lease_ops.release(cosmos, lease_id, project)
+        await _delete_playwright_slot_for_lease(lease_doc)
     except Exception:
         log.exception("cancel_lease: lease release failed for %s", lease_id)
         raise HTTPException(500, f"lease release failed for {lease_id}")
@@ -2964,6 +3144,7 @@ class AbortRunResult(BaseModel):
     state: str
     run_id: str
     run_number: int | None = None
+    run_display_number: str | None = None
     gh_run_cancelled: bool | None = None
     issue_lock_released: bool | None = None
     pr_lock_released: bool | None = None
@@ -3009,6 +3190,12 @@ class RunReport(BaseModel):
     project: str
     run_id: str
     run_number: int | None = None
+    run_display_number: str | None = None
+    parent_run_id: str | None = None
+    root_run_id: str | None = None
+    origin_kind: str | None = None
+    is_cycle: bool = False
+    cycle_number: int | None = None
     workflow: str
     issue_id: str | None = None
     issue_repo: str | None = None
@@ -3067,14 +3254,14 @@ async def list_project_runs(
 async def get_run_report_by_number(
     project: str = Path(...),
     issue_number: int = Path(...),
-    run_number: int = Path(...),
+    run_number: str = Path(...),
 ) -> RunReport:
-    """Materialized RunReport keyed by issue-scoped run number."""
-    found = await run_ops.read_run_by_number(
+    """Materialized RunReport keyed by issue-scoped run number/display label."""
+    found = await run_ops.read_run_by_ref(
         app.state.cosmos,
         project=project,
         issue_number=issue_number,
-        run_number=run_number,
+        run_ref=run_number,
     )
     if found is None:
         raise HTTPException(
@@ -3196,6 +3383,7 @@ async def _abort_run(
         state="already_terminal" if terminal else "aborted",
         run_id=run.id,
         run_number=run.run_number,
+        run_display_number=run_ops.run_display_number(run),
         gh_run_cancelled=gh_cancelled,
         issue_lock_released=issue_lock_released,
         pr_lock_released=pr_lock_released,
@@ -3295,6 +3483,12 @@ def _run_report_from_run(run: Run) -> RunReport:
         project=run.project,
         run_id=run.id,
         run_number=run.run_number,
+        run_display_number=run_ops.run_display_number(run),
+        parent_run_id=run.parent_run_id,
+        root_run_id=run.root_run_id,
+        origin_kind=run.origin_kind,
+        is_cycle=run.is_cycle,
+        cycle_number=run.cycle_number,
         workflow=run.workflow,
         issue_id=run.issue_id or None,
         issue_repo=run.issue_repo or None,
@@ -3363,15 +3557,15 @@ async def abort_run(
 async def abort_run_by_number(
     project: str = Path(...),
     issue_number: int = Path(...),
-    run_number: int = Path(...),
+    run_number: str = Path(...),
     reason: str = "aborted_via_admin_api",
 ) -> AbortRunResult:
-    """Abort a Run by the issue-scoped human run number."""
-    found = await run_ops.read_run_by_number(
+    """Abort a Run by the issue-scoped human run number/display label."""
+    found = await run_ops.read_run_by_ref(
         app.state.cosmos,
         project=project,
         issue_number=issue_number,
-        run_number=run_number,
+        run_ref=run_number,
     )
     if found is None:
         raise HTTPException(
@@ -3774,16 +3968,16 @@ async def native_run_events(
 async def native_run_events_by_number(
     project: str = Path(...),
     issue_number: int = Path(...),
-    run_number: int = Path(...),
+    run_number: str = Path(...),
     attempt_index: int | None = Query(None, ge=0),
     job_id: str | None = Query(None),
     limit: int | None = Query(None, ge=1, le=1000),
 ) -> NativeRunLogsResponse:
-    found = await run_ops.read_run_by_number(
+    found = await run_ops.read_run_by_ref(
         app.state.cosmos,
         project=project,
         issue_number=issue_number,
-        run_number=run_number,
+        run_ref=run_number,
     )
     if found is None:
         raise HTTPException(
@@ -4269,13 +4463,13 @@ async def replay_run_decision_by_number(
     req: RunReplayRequest,
     project: str = Path(...),
     issue_number: int = Path(...),
-    run_number: int = Path(...),
+    run_number: str = Path(...),
 ) -> ReplayResult:
-    found = await run_ops.read_run_by_number(
+    found = await run_ops.read_run_by_ref(
         app.state.cosmos,
         project=project,
         issue_number=issue_number,
-        run_number=run_number,
+        run_ref=run_number,
     )
     if found is None:
         raise HTTPException(
@@ -4381,13 +4575,13 @@ async def resume_run_by_number(
     req: RunResumeRequest,
     project: str = Path(...),
     issue_number: int = Path(...),
-    run_number: int = Path(...),
+    run_number: str = Path(...),
 ) -> ResumeResult:
-    found = await run_ops.read_run_by_number(
+    found = await run_ops.read_run_by_ref(
         app.state.cosmos,
         project=project,
         issue_number=issue_number,
-        run_number=run_number,
+        run_ref=run_number,
     )
     if found is None:
         raise HTTPException(
@@ -5283,11 +5477,16 @@ def _render_glimmung_pr_body(meta: dict[str, str]) -> str:
         parts.append(_decode_b64(notes_b64))
     if screenshots_b64 := meta.get("screenshots_md_b64"):
         parts.append(_decode_b64(screenshots_b64))
-    if lease_id := meta.get("lease_id"):
+    if meta.get("lease_id"):
         host = meta.get("host", "?")
+        lease_label = (
+            f"#{meta['lease_number']}"
+            if meta.get("lease_number")
+            else str(meta.get("native_slot_name") or "active")
+        )
         parts.append(
             f"Generated by glimmung-leased agent run on host `{host}` "
-            f"(lease `{lease_id}`)."
+            f"(lease `{lease_label}`)."
         )
     return "\n\n".join(p for p in parts if p)
 
@@ -5681,6 +5880,22 @@ class TestSlotCheckoutResult(BaseModel):
     lease_id: str
     host: str | None = None
     detail: str | None = None
+
+
+class TestSlotReturnRequest(BaseModel):
+    project: str
+    lease_id: str | None = None
+    slot_index: int | None = Field(default=None, ge=1)
+    slot_name: str | None = None
+
+
+class TestSlotReturnResult(BaseModel):
+    state: str
+    project: str
+    lease_id: str
+    slot_index: int | None = None
+    slot_name: str | None = None
+    cleanup_started: bool = False
 
 
 def _attempt_graph_metadata(attempt: Any) -> dict[str, Any]:
@@ -6521,17 +6736,26 @@ async def _build_system_graph(
             run_number = run_ops.run_number_map(issue_docs).get(run.id)
             if run_number is not None:
                 run = run.model_copy(update={"run_number": run_number})
+        run_display = run_ops.run_display_number(run) or (
+            str(run_number) if run_number is not None else ""
+        )
         runs.append(run)
         run_node_id = f"run:{run.id}"
         nodes.append(GraphNode(
             id=run_node_id,
             kind="run",
-            label=f"Run {run_number}" if run_number is not None else run.workflow,
+            label=f"Run {run_display}" if run_display else run.workflow,
             state=run.state.value,
             timestamp=run.created_at.isoformat(),
             metadata={
                 "run_id": run.id,
                 "run_number": run_number,
+                "run_display_number": run_display or None,
+                "parent_run_id": run.parent_run_id,
+                "root_run_id": run.root_run_id,
+                "origin_kind": run.origin_kind,
+                "is_cycle": run.is_cycle,
+                "cycle_number": run.cycle_number,
                 "project": run.project,
                 "workflow": run.workflow,
                 "issue_id": run.issue_id,
@@ -7079,11 +7303,11 @@ async def dispatch_run_endpoint(req: DispatchRequest) -> PublicDispatchResult:
     dependencies=[Depends(require_admin_user)],
 )
 async def checkout_test_slot(req: TestSlotCheckoutRequest) -> TestSlotCheckoutResult:
-    """Reserve a native app test slot without starting Glimmung work.
+    """Reserve a native app test slot and prepare its test environment.
 
-    The caller owns provisioning/resetting the slot. Glimmung records the
-    reservation as a native lease so dashboards, sweepers, and other slot
-    users see the capacity as occupied.
+    This records the reservation as a native lease so dashboards, sweepers,
+    and other slot users see the capacity as occupied. It does not create an
+    Issue, create a Run, or dispatch a workflow.
     """
     project = req.project.strip()
     if not project:
@@ -7120,6 +7344,13 @@ async def checkout_test_slot(req: TestSlotCheckoutRequest) -> TestSlotCheckoutRe
         },
         ttl_seconds=req.ttl_seconds,
     )
+    if host is not None:
+        lease_doc = lease_ops._lease_to_doc(lease)
+        try:
+            await _ensure_test_env_for_lease(lease_doc)
+        except Exception:
+            await lease_ops.release(cosmos, lease.id, project)
+            raise HTTPException(500, "failed to prepare test environment for slot")
     actual_slot_index = lease.metadata.get("native_slot_index")
     actual_slot_name = lease.metadata.get("native_slot_name") or slot_name
     return TestSlotCheckoutResult(
@@ -7132,6 +7363,117 @@ async def checkout_test_slot(req: TestSlotCheckoutRequest) -> TestSlotCheckoutRe
         host=host.name if host is not None else None,
         detail=None if host is not None else "slot unavailable; reservation is pending",
     )
+
+
+@app.post(
+    "/v1/test-slots/return",
+    response_model=TestSlotReturnResult,
+    dependencies=[Depends(require_admin_user)],
+)
+async def return_test_slot(req: TestSlotReturnRequest) -> TestSlotReturnResult:
+    project = req.project.strip()
+    if not project:
+        raise HTTPException(400, "project required")
+    cosmos: Cosmos = app.state.cosmos
+    lease_doc = await _resolve_test_slot_lease(
+        cosmos,
+        project=project,
+        lease_id=req.lease_id,
+        slot_index=req.slot_index,
+        slot_name=req.slot_name,
+    )
+    cleanup_started = (
+        lease_doc.get("state") == LeaseState.ACTIVE.value
+        and (lease_doc.get("metadata") or {}).get("test_slot_checkout") is True
+        and bool(_test_slot_namespace(lease_doc))
+    )
+    released = await _release_lease_from_api(cosmos, lease_doc["id"], project)
+    metadata = released.metadata or {}
+    slot_name = metadata.get("native_slot_name") or _test_slot_namespace(lease_doc) or req.slot_name
+    slot_index = None
+    raw_slot_index = metadata.get("native_slot_index")
+    if raw_slot_index is None:
+        phase_inputs = metadata.get("phase_inputs") if isinstance(metadata.get("phase_inputs"), dict) else {}
+        raw_slot_index = phase_inputs.get("validation_slot_index")
+    try:
+        slot_index = int(str(raw_slot_index)) if raw_slot_index is not None else req.slot_index
+    except (TypeError, ValueError):
+        slot_index = req.slot_index
+    return TestSlotReturnResult(
+        state=released.state.value,
+        project=project,
+        lease_id=released.id,
+        slot_index=slot_index,
+        slot_name=str(slot_name) if slot_name is not None else None,
+        cleanup_started=cleanup_started,
+    )
+
+
+async def _resolve_test_slot_lease(
+    cosmos: Cosmos,
+    *,
+    project: str,
+    lease_id: str | None,
+    slot_index: int | None,
+    slot_name: str | None,
+) -> dict[str, Any]:
+    if lease_id:
+        lease_doc = await cosmos.leases.read_item(item=lease_id, partition_key=project)
+        if (lease_doc.get("metadata") or {}).get("test_slot_checkout") is not True:
+            raise HTTPException(409, f"lease {lease_id} is not a test slot checkout")
+        return lease_doc
+    if slot_index is None and not (slot_name or "").strip():
+        raise HTTPException(400, "lease_id, slot_index, or slot_name required")
+
+    target_slot_name = (slot_name or "").strip() or (
+        f"{project}-slot-{slot_index}" if slot_index is not None else ""
+    )
+    docs = await query_all(
+        cosmos.leases,
+        (
+            "SELECT * FROM c WHERE c.project = @p "
+            "AND c.metadata.test_slot_checkout = true"
+        ),
+        parameters=[{"name": "@p", "value": project}],
+    )
+    candidates: list[dict[str, Any]] = []
+    for doc in docs:
+        if doc.get("state") not in (LeaseState.ACTIVE.value, LeaseState.PENDING.value):
+            continue
+        metadata = doc.get("metadata") or {}
+        phase_inputs = metadata.get("phase_inputs") if isinstance(metadata.get("phase_inputs"), dict) else {}
+        names = {
+            str(value).strip()
+            for value in (
+                metadata.get("native_slot_name"),
+                phase_inputs.get("slot_name"),
+                phase_inputs.get("namespace"),
+            )
+            if isinstance(value, str) and value.strip()
+        }
+        indexes = {
+            str(value).strip()
+            for value in (
+                metadata.get("native_slot_index"),
+                phase_inputs.get("validation_slot_index"),
+            )
+            if value is not None and str(value).strip()
+        }
+        if target_slot_name and target_slot_name in names:
+            candidates.append(doc)
+        elif slot_index is not None and str(slot_index) in indexes:
+            candidates.append(doc)
+    if not candidates:
+        detail = target_slot_name or f"slot index {slot_index}"
+        raise HTTPException(404, f"no active or pending test slot lease for {project}/{detail}")
+
+    candidates.sort(
+        key=lambda doc: (
+            0 if doc.get("state") == LeaseState.ACTIVE.value else 1,
+            str(doc.get("requestedAt") or ""),
+        )
+    )
+    return candidates[0]
 
 
 # ─── Design portfolio review surface (#225) ─────────────────────────────────

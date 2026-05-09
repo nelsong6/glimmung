@@ -76,7 +76,8 @@ def test_render_glimmung_pr_body_decodes_b64_payloads():
     assert "did the thing" in rendered
     assert "![one](url1)" in rendered
     assert "glimmung-slot-1" in rendered
-    assert "01JLEASE000" in rendered
+    assert "01JLEASE000" not in rendered
+    assert "lease `active`" in rendered
 
 
 def test_render_glimmung_pr_body_handles_missing_keys():

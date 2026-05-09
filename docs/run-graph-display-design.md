@@ -8,7 +8,7 @@ shown to the user must follow Glimmung's product model:
 
 ```text
 Issue
-  -> Run
+  -> Run[]                  # flat issue-scoped history
     -> Phase
       -> Job
         -> Step
@@ -31,11 +31,12 @@ Suggested mapping:
 
 ```text
 Issue          -> Issue / origin
-Run            -> Continuous lifecycle from one trigger
+Run            -> One durable execution record
+Cycle          -> A run whose origin is recycle/resume/request-changes
 Workflow phase -> Phase
 Native/GHA job -> Job
 Native/GHA step -> Step
-Attempt        -> Executor-level attempt, not the main UI container
+Attempt        -> Display counter or executor-level retry attribute only
 Report         -> Touchpoint / evidence, depending on context
 ```
 
@@ -44,8 +45,11 @@ prefer phase/job/step language unless it is showing raw backend metadata.
 
 The key distinction is **Phase vs Attempt**:
 
-- A **Run** starts from one continuous trigger or origin event and ends
-  when the issue is accepted, abandoned, or otherwise closed out.
+- A **Run** is the durable unit of execution, scheduling, logs, cost,
+  lifecycle, abort, and reporting.
+- A **Cycle** is not a nested object. It is a run whose origin links it to
+  an earlier run, usually because a recycle policy, resume action, or
+  request-changes signal re-entered the workflow.
 - A **Phase** is a workflow column. Phases flow left-to-right according
   to the workflow's `depends_on` graph.
 - A **Job** is a runnable box inside a phase. Multiple jobs in one phase
@@ -54,8 +58,8 @@ The key distinction is **Phase vs Attempt**:
   resumes, and historical execution, but it should not replace phase or
   job as the main UI container.
 
-This lets Glimmung show "the run" as the complete story while preserving
-the pipeline shape: issue -> run -> phase -> job -> step.
+This lets Glimmung show a flat issue run history while preserving the
+pipeline shape inside each run: issue -> run -> phase -> job -> step.
 
 **Touchpoint** replaces the old user-facing `Report` concept. A
 Touchpoint is the issue-level live summary and navigation page: what the
@@ -87,6 +91,7 @@ Glimmung needs to explain things Argo does not own:
 - Issues and issue locks.
 - Leases and scarce agent capacity.
 - Phase attempts and resume/recycle paths.
+- Run cycle lineage.
 - Validation environments.
 - Screenshots and UI review evidence.
 - PR/evidence/touchpoint state.
@@ -133,6 +138,8 @@ The overview should show the high-level execution shape:
 
 ```text
 env-prep -> agent-execute -> verify -> touchpoint
+Run 1:   env-prep -> agent-execute -> touchpoint
+Run 1.1: agent-execute -> verify -> touchpoint
 ```
 
 For more complex runs, the overview should show phase ordering and
@@ -177,7 +184,7 @@ Phase detail should show:
 - phase name,
 - executor kind,
 - state,
-- attempt count,
+- retry count when relevant,
 - duration,
 - cost when known,
 - input/output values,
@@ -275,7 +282,7 @@ top-level tab or an issue-local collection route. The issue workspace should
 surface the current Touchpoint alongside issue context and the run/phase
 graph. Historical or per-Run evidence should live in Run and RunReport views,
 with the Touchpoint linking to the relevant current Run instead of carrying
-its own history. The Touchpoint UI should not enumerate Runs, attempts, or
+its own history. The Touchpoint UI should not enumerate Runs, retries, or
 past PRs as its primary content; those belong in the Runs tab and RunReport
 surfaces.
 
@@ -292,6 +299,7 @@ Add portfolio rows for at least:
 - failed step with log output,
 - resumed run with skipped earlier phases,
 - phase recycle/retry,
+- cycle run created by recycle/retry,
 - pending/no-host state,
 - aborted/cancelled state,
 - Touchpoint evidence checklist.
@@ -326,7 +334,8 @@ PhaseNode
   label
   state
   kind
-  attempts[]
+  retry_count
+  cycle_number
   jobs[]
   inputs
   outputs
