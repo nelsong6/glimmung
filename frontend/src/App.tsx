@@ -42,6 +42,7 @@ type Project = {
   id: string;
   name: string;
   github_repo: string;
+  argocd_app: string;
   metadata: Record<string, unknown>;
   created_at: string;
 };
@@ -1020,6 +1021,19 @@ function ProjectView({
             <a className="link" href={`https://github.com/${project.github_repo}`}>
               {project.github_repo}
             </a>
+            {project.argocd_app && (
+              <>
+                {" · "}
+                <a
+                  className="link"
+                  href={`https://argocd.romaine.life/applications/argocd/${project.argocd_app}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  argocd/{project.argocd_app}
+                </a>
+              </>
+            )}
           </div>
         </div>
         <div className="project-facts">
