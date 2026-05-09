@@ -158,6 +158,11 @@ position to explain structure:
 - directional connectors show flow between phases/jobs,
 - recycle/request-changes paths use secondary/dashed connectors.
 
+Parallel work must be represented as multiple jobs inside one phase column,
+not as multiple sibling phase columns. The workflow uses `phase.jobs[]` for
+this: jobs in the same phase run in parallel, and the phase completes only
+after all sibling jobs have completed.
+
 Clicking a node should pin an inspector panel that explains what is in
 the box. Hover previews can be added later, but click selection is the
 more durable interaction for debugging, sharing, and review. The graph

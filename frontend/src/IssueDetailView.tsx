@@ -1328,8 +1328,34 @@ function PipelineDag({
       attempts: [],
       latest: run,
       status: { cls: "info", text: "pending" },
-      jobLabel: graphPhase.kind,
+      jobLabel: graphPhase.name,
     };
+    const nativeJobs = nativeAttemptJobs(rollup.latest.metadata.jobs);
+    if (nativeJobs.length > 1) {
+      return (
+        <>
+          {nativeJobs.map((job) => (
+            <DagPhaseNode
+              key={job.job_id}
+              phase={{
+                ...rollup,
+                jobLabel: job.name || job.job_id,
+                status: {
+                  cls: nativeStatePill(job.state || ""),
+                  text: job.state || rollup.status.text,
+                },
+              }}
+              selected={selectedNodeId === `phase:${graphPhase.name}`}
+              onSelect={() =>
+                onSelectNode(
+                  selectedNodeId === `phase:${graphPhase.name}` ? null : `phase:${graphPhase.name}`,
+                )
+              }
+            />
+          ))}
+        </>
+      );
+    }
     return (
       <DagPhaseNode
         phase={rollup}
@@ -1448,7 +1474,7 @@ function phaseNodesForRun(graph: IssueGraph, run: GraphNode): PhaseRollup[] {
     const jobs = nativeAttemptJobs(latest.metadata.jobs);
     const jobLabel = jobs.length > 1
       ? `${jobs.length} jobs`
-      : jobs[0]?.name || jobs[0]?.job_id || stringOrNull(latest.metadata.phase_kind) || "job";
+      : jobs[0]?.name || jobs[0]?.job_id || phaseName;
     out.push({ phaseName, attempts: arr, latest, status: phaseStatus(latest), jobLabel });
   }
   if (out.length === 0) {

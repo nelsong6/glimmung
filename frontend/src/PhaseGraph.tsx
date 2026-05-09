@@ -102,7 +102,7 @@ function defaultPhaseNode(phase: PhaseGraphPhase): ReactNode {
   // run-pipeline strip.
   return (
     <div className="dag-node dag-node-phase dag-node-definition">
-      <div className="dag-node-label">{phase.kind || "job"}</div>
+      <div className="dag-node-label">{phase.name}</div>
       <div className="dag-node-meta dim mono">{meta}</div>
     </div>
   );
@@ -163,20 +163,23 @@ export function PhaseGraph({
                 aria-hidden={colHasEntry ? undefined : "true"}
               >→</div>
             )}
-            <div className={`dag-column${col.length > 1 ? " dag-column-parallel" : ""}`}>
-              {col.map((phase) => (
-                <div
-                  key={phase.name}
-                  className="dag-phase"
-                  ref={(el) => phaseRef?.(phase, el)}
-                >
-                  <div className="dag-phase-head">
-                    <span className="dag-phase-kicker">phase</span>
-                    <span className="dag-phase-title">{phase.name}</span>
-                  </div>
-                  <div className="dag-phase-body">{renderPhase(phase)}</div>
-                </div>
-              ))}
+            <div
+              className={`dag-phase dag-phase-column${col.length > 1 ? " dag-phase-parallel" : ""}`}
+              ref={(el) => {
+                for (const phase of col) phaseRef?.(phase, el);
+              }}
+            >
+              <div className="dag-phase-head">
+                <span className="dag-phase-kicker">phase</span>
+                <span className="dag-phase-title">
+                  {col.length > 1 ? `phase ${idx + 1}` : (col[0]?.name ?? `phase ${idx + 1}`)}
+                </span>
+              </div>
+              <div className="dag-phase-body">
+                {col.map((phase) => (
+                  <Fragment key={phase.name}>{renderPhase(phase)}</Fragment>
+                ))}
+              </div>
             </div>
           </Fragment>
         );

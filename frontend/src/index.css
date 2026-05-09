@@ -1868,6 +1868,9 @@ h2 .inline-action,
   border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
   border-radius: 5px;
 }
+.dag-phase-parallel {
+  border-left: 2px solid var(--state-info-fg);
+}
 .dag-phase-head {
   display: flex;
   align-items: baseline;
@@ -2225,18 +2228,6 @@ h2 .inline-action,
   font-size: 0.85rem;
 }
 
-/* Phase graph: depth-grouped columns. Sequential workflows render as
-   1-phase-per-column (visually identical to the historical row).
-   DAG workflows with parallel branches stack the parallel phases in
-   one column. */
-.dag-column {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  align-items: stretch;
-}
-.dag-column-parallel {
-  /* Subtle visual cue that this column has multiple phases running
-     concurrently — matches the existing surface tint convention. */
-  gap: 10px;
-}
+/* Phase graph: depth-grouped phase columns. Sequential workflows render
+   one job in each phase column. Parallel branches at the same depth stack
+   as jobs inside the same visible phase column. */

@@ -1289,7 +1289,7 @@ function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
           : phase.kind;
     return (
       <div className="dag-node dag-node-phase dag-node-definition">
-        <div className="dag-node-label">{phase.kind || "job"}</div>
+        <div className="dag-node-label">{phase.name}</div>
         <div className="dag-node-meta dim mono">{meta}</div>
       </div>
     );
