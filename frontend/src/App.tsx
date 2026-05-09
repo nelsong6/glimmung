@@ -2395,7 +2395,8 @@ function ProjectRunView({
 
 function runStatePill(state: string): string {
   if (state === "passed") return "free";
-  if (state === "in_progress" || state === "pending" || state === "needs_review") return "busy";
+  if (state === "in_progress" || state === "needs_review") return "busy";
+  if (state === "pending") return "pending";
   if (state === "aborted" || state === "failed") return "drain";
   return "info";
 }

@@ -342,9 +342,9 @@ function attentionReason(row: IssueRow): { label: string; detail: string | null;
   }
   if (row.last_run_state === "in_progress" || row.last_run_state === "pending") {
     return {
-      label: "run still active",
+      label: row.last_run_state === "pending" ? "run pending" : "run still active",
       detail: row.last_run_number !== null ? `run ${row.last_run_number} is ${row.last_run_state}` : null,
-      kind: "busy",
+      kind: row.last_run_state === "pending" ? "pending" : "busy",
     };
   }
   if (row.last_run_state === "passed") {
@@ -370,7 +370,7 @@ function attentionReason(row: IssueRow): { label: string; detail: string | null;
 
 function pillClass(state: string): string {
   if (state === "dispatched") return "free";
-  if (state === "pending") return "busy";
+  if (state === "pending") return "pending";
   if (state === "already_running") return "busy";
   return "drain";
 }

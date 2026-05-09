@@ -182,7 +182,8 @@ export function GraphView({
 function nodeClass(node: GraphNode): string {
   if (isStale(node)) return "drain stale";
   if (node.kind === "signal") return "info";
-  if (node.state === "in_progress" || node.state === "pending") return "busy";
+  if (node.state === "in_progress") return "busy";
+  if (node.state === "pending") return "pending";
   if (node.state === "review_required") return "info";
   if (node.state === "aborted" || node.state === "failure") return "drain";
   if (node.state === "open" || node.state === "success" || node.state === "passed") return "free";
