@@ -67,9 +67,8 @@ export async function signIn(): Promise<AccountInfo> {
 export async function signOut(): Promise<void> {
   if (isMockMode()) return;
   if (!_msal) return;
-  const account = currentAccount();
-  if (!account) return;
-  await _msal.logoutPopup({ account });
+  _msal.setActiveAccount(null);
+  await _msal.clearCache();
 }
 
 /** Get a fresh ID token. Backend validates with audience=entra_client_id;
