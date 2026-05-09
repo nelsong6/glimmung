@@ -154,7 +154,7 @@ export function computeRecyclePaths(
         { x: cornerX, y: arcStart.y },
         arcStart,
       ]);
-      const d = `${approach} A ${RECYCLE_ENTRY_ARC_RADIUS} ${RECYCLE_ENTRY_ARC_RADIUS} 0 0 0 ${end.x} ${end.y}`;
+      const d = `${approach} A ${RECYCLE_ENTRY_ARC_RADIUS} ${RECYCLE_ENTRY_ARC_RADIUS} 0 0 1 ${end.x} ${end.y}`;
       paths.push({
         arrow: r.arrow,
         d,
