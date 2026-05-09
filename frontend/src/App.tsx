@@ -1303,14 +1303,11 @@ function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
           ? "verify"
           : phase.kind;
     return (
-      <div
-        className="dag-node dag-node-phase dag-node-definition"
-        ref={(el) => {
-          if (el) phaseRefs.current.set(phase.name, el);
-          else phaseRefs.current.delete(phase.name);
-        }}
-      >
-        <div className="dag-node-label">{phase.name}</div>
+      <div className="dag-node dag-node-phase dag-node-definition">
+        <div className="dag-job-head">
+          <span className="dag-job-title">{phase.name}</span>
+          <span className="dag-job-kicker">job</span>
+        </div>
         <div className="dag-node-meta dim mono">{meta}</div>
       </div>
     );
@@ -1337,6 +1334,10 @@ function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
           ariaLabel={`${workflow.name} workflow graph`}
           renderPhase={renderPhase}
           renderTouchpoint={renderTouchpoint}
+          phaseRef={(phase, el) => {
+            if (el) phaseRefs.current.set(phase.name, el);
+            else phaseRefs.current.delete(phase.name);
+          }}
         />
         <div
           ref={bandRef}
@@ -1361,7 +1362,7 @@ function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
                   markerHeight="7"
                   orient="auto-start-reverse"
                 >
-                  <path d="M 0 0 L 10 5 L 0 10 z" />
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke" />
                 </marker>
               </defs>
               {paths.map((p, i) => (
@@ -1372,7 +1373,7 @@ function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
                   <path
                     d={p.d}
                     className={p.cls}
-                    markerEnd="url(#dag-recycle-head-def)"
+                    markerEnd={p.markerEnd === false ? undefined : "url(#dag-recycle-head-def)"}
                   />
                 </g>
               ))}

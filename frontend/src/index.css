@@ -1840,14 +1840,62 @@ h2 .inline-action,
   margin: 12px 0;
 }
 .dag {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
   margin: 0;
 }
+.dag-rf {
+  display: block;
+  width: 100%;
+  min-height: 220px;
+}
+.dag-rf-surface {
+  position: relative;
+}
+.dag-rf .react-flow {
+  overflow: visible;
+}
+.dag-rf .react-flow__renderer,
+.dag-rf .react-flow__viewport {
+  overflow: visible;
+}
+.dag-rf .react-flow__node {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  padding: 0;
+  width: auto;
+}
+.dag-rf .react-flow__edge-path {
+  stroke: var(--fg-dimmer);
+  stroke-width: 1.5;
+}
+.dag-rf .react-flow__edge.dag-rf-edge.entry .react-flow__edge-path,
+.dag-rf .react-flow__edge.dag-rf-edge.entry marker path,
+.dag-rf .react-flow__edge.dag-rf-edge.fired .react-flow__edge-path,
+.dag-rf .react-flow__edge.dag-rf-edge.fired marker path {
+  stroke: var(--state-success-fg);
+  fill: var(--state-success-fg);
+}
+.dag-rf .react-flow__edge.dag-rf-edge.policy-disabled .react-flow__edge-path {
+  stroke-dasharray: 4 3;
+  opacity: 0.7;
+}
+.dag-rf .react-flow__edge marker path {
+  fill: var(--fg-dimmer);
+  stroke: var(--fg-dimmer);
+}
+.dag-rf-handle {
+  opacity: 0;
+  pointer-events: none;
+}
 .dag-entry,
 .dag-node {
+  position: relative;
+  z-index: 1;
   display: inline-flex;
   flex-direction: column;
   align-items: flex-start;
@@ -1861,6 +1909,73 @@ h2 .inline-action,
   font-family: inherit;
   cursor: pointer;
   text-align: left;
+}
+.dag-phase {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 172px;
+  padding: 8px;
+  background: color-mix(in srgb, var(--surface) 72%, var(--bg));
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  border-radius: 5px;
+}
+.dag-phase-parallel {
+  border-left: 2px solid var(--state-info-fg);
+}
+.dag-phase-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 18px;
+}
+.dag-phase-kicker {
+  color: var(--fg-dimmer);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.dag-phase-title {
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.dag-job-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-height: 18px;
+}
+.dag-job-kicker {
+  color: var(--fg-dimmer);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.dag-job-title {
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.dag-phase-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dag-phase .dag-node {
+  width: 100%;
+  min-width: 0;
 }
 .dag-entry {
   min-width: 96px;
@@ -1911,28 +2026,56 @@ h2 .inline-action,
   border-color: color-mix(in srgb, var(--state-danger-fg) 55%, var(--border));
   background: color-mix(in srgb, var(--state-danger-bg) 22%, var(--surface));
 }
+.dag-edge-spacer {
+  flex: 0 0 44px;
+  width: 44px;
+  height: 16px;
+}
 .dag-edge {
   color: var(--fg-dimmer);
-  font-family: var(--font-mono);
-  font-size: 1.1rem;
+  display: block;
+  flex: 0 0 44px;
+  overflow: visible;
   user-select: none;
+}
+.dag-terminal {
+  position: relative;
+  z-index: 1;
+  display: flex;
+}
+.dag-advance-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+  z-index: 0;
+}
+.dag-advance-path {
+  color: var(--fg-dimmer);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 /* Highlights the arrow leading into the phase a run actually entered
    (default phase[0] for fresh runs; entrypoint_phase for resumed /
    recycle children). Pairs with the "the run entered here" tooltip
    on the same element. Contrasts with the dim recycle arrows in the
    recycle band below. */
-.dag-edge.entry {
+.dag-advance-path.entry {
   color: var(--state-success-fg);
-  cursor: help;
 }
 
 /* Recycle policy band. Sits below the main pipeline row in PipelineDag
-   and renders one orthogonal (L-path) arrow per policy: source phase
-   → target phase, exiting the source's bottom-center, threading a
-   horizontal lane, and approaching the target's left edge. Self-loops
-   land on their own left edge. Inactive policies (`max_attempts: 0`,
-   scaffolded but disabled) draw dashed + dim. */
+   and renders orthogonal paths: source phase → target phase, exiting
+   the source's bottom-center and threading a horizontal lane. Multiple
+   arrows landing on the same phase get separate target ports and
+   approach lanes so directed arrows never collapse into the same stroke.
+   Inactive policies (`max_attempts: 0`, scaffolded but disabled) draw
+   dashed + dim. */
 .dag-recycle-band {
   position: relative;
   width: 100%;
@@ -1959,7 +2102,9 @@ h2 .inline-action,
 .dag-recycle-path {
   fill: none;
   stroke: var(--fg-dimmer);
-  stroke-width: 1.25;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 .dag-recycle-path.inactive {
   stroke-dasharray: 4 3;
@@ -1967,9 +2112,6 @@ h2 .inline-action,
 }
 .dag-recycle-path.fired {
   stroke: var(--state-success-fg);
-}
-.dag-recycle-band marker > path {
-  fill: var(--fg-dimmer);
 }
 .dag-policy-rail {
   display: flex;
@@ -2189,20 +2331,6 @@ h2 .inline-action,
   font-size: 0.85rem;
 }
 
-/* Phase graph: depth-grouped columns. Sequential workflows render as
-   1-phase-per-column (visually identical to the historical row).
-   DAG workflows with parallel branches stack the parallel phases in
-   one column. */
-.dag-column {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  align-items: stretch;
-}
-.dag-column-parallel {
-  /* Subtle visual cue that this column has multiple phases running
-     concurrently — matches the existing surface tint convention. */
-  padding: 4px;
-  background: color-mix(in srgb, var(--surface) 50%, transparent);
-  border-left: 2px solid var(--state-info-fg);
-}
+/* Phase graph: depth-grouped phase columns. Sequential workflows render
+   one job in each phase column. Parallel branches at the same depth stack
+   as jobs inside the same visible phase column. */

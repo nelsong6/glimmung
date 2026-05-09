@@ -24,10 +24,6 @@ variable "test_redirect_uris" {
   type        = list(string)
   default = [
     "https://glimmung.dev.romaine.life/",
-    "https://frontman.glimmung.dev.romaine.life/",
-    "https://frontman-1.glimmung.dev.romaine.life/",
-    "https://frontman-2.glimmung.dev.romaine.life/",
-    "https://frontman-3.glimmung.dev.romaine.life/",
     "https://glimmung-slot-1.glimmung.dev.romaine.life/",
     "https://glimmung-slot-2.glimmung.dev.romaine.life/",
     "https://glimmung-slot-3.glimmung.dev.romaine.life/",

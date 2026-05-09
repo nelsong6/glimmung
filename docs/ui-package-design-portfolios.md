@@ -38,10 +38,11 @@ it does not relax user authorization.
 
 ## Hostnames
 
-Microsoft Entra SPA redirect URIs do not support wildcards. Use a small stable
-pool of UI review hostnames and native app test-slot hostnames, and register
-each one on `glimmung-oauth-test`. The stable hosts can be shared across repos
-as long as the route points at the repo-specific validation environment.
+Microsoft Entra SPA redirect URIs do not support wildcards. Glimmung owns a
+small stable pool of UI review and native app test-slot hostnames, and
+registers each one on `glimmung-oauth-test`. The stable hosts can be shared
+across repos as long as the route points at the repo-specific validation
+environment.
 
 Add more entries through `tofu/variables.tf` `test_redirect_uris`; do not use a
 runtime-generated hostname unless it has been pre-registered in Entra.
@@ -50,7 +51,8 @@ runtime-generated hostname unless it has been pre-registered in Entra.
 
 1. Build the repo's UI package and app bundle with stable review fixtures.
 2. Expose `/_design-portfolio` or `/_styleguide` in the real app bundle.
-3. Use one of the stable `*.glimmung.dev.romaine.life` preview hostnames.
+3. Use one of the Glimmung-managed `glimmung-slot-N.glimmung.dev.romaine.life`
+   preview hostnames.
 4. Confirm `/v1/config` on that hostname returns `ENTRA_TEST_CLIENT_ID`.
 5. Confirm Microsoft login completes without a redirect URI error.
 6. Add screenshot capture for the portfolio route.

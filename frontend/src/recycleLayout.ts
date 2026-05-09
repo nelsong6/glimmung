@@ -12,12 +12,50 @@ export type RecyclePathLayout = {
   d: string;
   cls: string;
   title: string;
+  markerEnd?: boolean;
 };
 
-const RECYCLE_LANE_HEIGHT = 18;
+const RECYCLE_LANE_HEIGHT = 34;
 const RECYCLE_BAND_TOP_PAD = 8;
 const RECYCLE_BAND_BOTTOM_PAD = 8;
-const RECYCLE_TARGET_OVERSHOOT = 14;
+const RECYCLE_ENTRY_ARC_RADIUS = 60;
+const RECYCLE_ENTRY_ARC_SWEEP = 12;
+const RECYCLE_TARGET_ENTRY_OFFSET = 34;
+const RECYCLE_TARGET_PORT_GAP = 20;
+const RECYCLE_CORNER_RADIUS = 6;
+
+type Point = { x: number; y: number };
+
+function roundedOrthogonalPath(points: Point[], radius = RECYCLE_CORNER_RADIUS): string {
+  if (points.length === 0) return "";
+  if (points.length === 1) return `M ${points[0].x} ${points[0].y}`;
+  const parts = [`M ${points[0].x} ${points[0].y}`];
+  for (let i = 1; i < points.length - 1; i += 1) {
+    const prev = points[i - 1];
+    const curr = points[i];
+    const next = points[i + 1];
+    const inLen = Math.hypot(curr.x - prev.x, curr.y - prev.y);
+    const outLen = Math.hypot(next.x - curr.x, next.y - curr.y);
+    const r = Math.min(radius, inLen / 2, outLen / 2);
+    if (r <= 0) {
+      parts.push(`L ${curr.x} ${curr.y}`);
+      continue;
+    }
+    const before = {
+      x: curr.x + ((prev.x - curr.x) / inLen) * r,
+      y: curr.y + ((prev.y - curr.y) / inLen) * r,
+    };
+    const after = {
+      x: curr.x + ((next.x - curr.x) / outLen) * r,
+      y: curr.y + ((next.y - curr.y) / outLen) * r,
+    };
+    parts.push(`L ${before.x} ${before.y}`);
+    parts.push(`Q ${curr.x} ${curr.y} ${after.x} ${after.y}`);
+  }
+  const last = points[points.length - 1];
+  parts.push(`L ${last.x} ${last.y}`);
+  return parts.join(" ");
+}
 
 export function computeRecyclePaths(
   arrows: RecycleArrow[],
@@ -33,6 +71,7 @@ export function computeRecyclePaths(
     bottom: rect.bottom - bandTop,
     cx: (rect.left + rect.right) / 2 - bandLeft,
     cy: (rect.top + rect.bottom) / 2 - bandTop,
+    height: rect.height,
   });
   const sourceRectFor = (arrow: RecycleArrow): DOMRect | null => {
     if (arrow.kind === "report_recycle" || arrow.source === "report") return tpRect;
@@ -60,21 +99,11 @@ export function computeRecyclePaths(
     return aSpan - bSpan;
   });
 
-  const paths: RecyclePathLayout[] = renderable.map((r, lane) => {
-    const { s, t } = r;
+  const routed = renderable.map((r, lane) => {
+    const { s } = r;
     const laneY = RECYCLE_BAND_TOP_PAD + (lane + 0.5) * RECYCLE_LANE_HEIGHT;
     const sX = s.cx;
-    const sY = 0;
-    const cornerX = t.left - RECYCLE_TARGET_OVERSHOOT;
-    const tX = t.left;
-    const tY = 0;
-    const d = [
-      `M ${sX} ${sY}`,
-      `L ${sX} ${laneY}`,
-      `L ${cornerX} ${laneY}`,
-      `L ${cornerX} ${tY}`,
-      `L ${tX} ${tY}`,
-    ].join(" ");
+    const sY = s.bottom;
     const inactive = r.arrow.max_attempts <= 0;
     const cls = [
       "dag-recycle-path",
@@ -83,14 +112,65 @@ export function computeRecyclePaths(
     ].join(" ");
     const trigger = r.arrow.trigger || "recycle";
     return {
-      arrow: r.arrow,
-      d,
+      ...r,
+      lane,
+      laneY,
+      sX,
+      sY,
+      inactive,
       cls,
       title: `${r.arrow.source} ↻ ${r.arrow.target}: ${trigger}; ${
         inactive ? "no retries (max_attempts: 0)" : `max ${r.arrow.max_attempts}`
       }`,
     };
   });
+
+  const byTarget = new Map<string, typeof routed>();
+  for (const r of routed) {
+    const list = byTarget.get(r.arrow.target) ?? [];
+    list.push(r);
+    byTarget.set(r.arrow.target, list);
+  }
+
+  const paths: RecyclePathLayout[] = [];
+  for (const group of byTarget.values()) {
+    group.sort((a, b) => a.lane - b.lane);
+    group.forEach((r, targetPortIndex) => {
+      const maxOffset = Math.min(RECYCLE_ENTRY_ARC_RADIUS - 6, Math.max(0, r.t.height / 2 - 12));
+      const targetOffset = Math.min(
+        maxOffset,
+        RECYCLE_TARGET_ENTRY_OFFSET + targetPortIndex * RECYCLE_TARGET_PORT_GAP,
+      );
+      const arcCenterX = r.t.left - RECYCLE_ENTRY_ARC_RADIUS;
+      const pointOnEntryArc = (offset: number) => ({
+        x: arcCenterX + Math.sqrt(Math.max(0, RECYCLE_ENTRY_ARC_RADIUS ** 2 - offset ** 2)),
+        y: r.t.cy + offset,
+      });
+      const end = pointOnEntryArc(targetOffset);
+      const arcStart = pointOnEntryArc(Math.min(maxOffset, targetOffset + RECYCLE_ENTRY_ARC_SWEEP));
+      const approachX = end.x - 28 - targetPortIndex * 12;
+      const approach = roundedOrthogonalPath([
+        { x: r.sX, y: r.sY },
+        { x: r.sX, y: r.laneY },
+        { x: approachX, y: r.laneY },
+        { x: approachX, y: arcStart.y },
+        arcStart,
+      ]);
+      const d = [
+        approach,
+        `C ${arcStart.x + 8} ${arcStart.y}`,
+        `${end.x - 14} ${end.y}`,
+        `${end.x} ${end.y}`,
+      ].join(" ");
+      paths.push({
+        arrow: r.arrow,
+        d,
+        cls: r.cls,
+        title: r.title,
+        markerEnd: true,
+      });
+    });
+  }
 
   const bandHeight = renderable.length === 0
     ? 0

@@ -59,10 +59,9 @@ resource "azuread_application" "oauth_test" {
     requested_access_token_version = 2
   }
 
-  # Entra SPA redirect URIs do not support wildcards. Frontman/live-design
-  # environments use a small stable hostname pool under
-  # `glimmung.dev.romaine.life` and /v1/config returns this app's client ID
-  # for those hosts only.
+  # Entra SPA redirect URIs do not support wildcards. Glimmung-managed test
+  # slots use a small stable hostname pool under `glimmung.dev.romaine.life`,
+  # and /v1/config returns this app's client ID for those hosts only.
   single_page_application {
     redirect_uris = var.test_redirect_uris
   }
