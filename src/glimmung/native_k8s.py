@@ -405,6 +405,23 @@ class NativeKubernetesLauncher:
             if exc.response.status_code != 404:
                 raise
 
+    async def delete_test_slot_namespace(self, namespace: str) -> None:
+        """Delete a checked-out native test-slot namespace."""
+        namespace = namespace.strip()
+        if not _valid_namespace(namespace):
+            raise NativeLaunchError(f"invalid test slot namespace {namespace!r}")
+        body = {
+            "apiVersion": "v1",
+            "kind": "DeleteOptions",
+            "propagationPolicy": "Foreground",
+        }
+        try:
+            await self._request("DELETE", f"/api/v1/namespaces/{namespace}", json=body)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return
+            raise
+
     async def reconcile_standby_dns(self, project_docs: list[dict[str, Any]]) -> None:
         """Reconcile DNSEndpoint records for projects that opt into warm native DNS."""
         desired = {

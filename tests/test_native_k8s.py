@@ -469,7 +469,6 @@ async def test_delete_attempt_job_label_selects_then_deletes_per_job():
         "json": body,
     }
 
-
 @pytest.mark.asyncio
 async def test_ensure_playwright_slot_creates_deployment_and_service():
     launcher = _RecordingLauncher(_settings())
@@ -576,6 +575,23 @@ async def test_reconcile_playwright_slots_deletes_workers_without_active_lease()
             "json": None,
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_delete_test_slot_namespace_deletes_namespace():
+    launcher = _RecordingLauncher(_settings())
+
+    await launcher.delete_test_slot_namespace("glimmung-slot-2")
+
+    assert launcher.calls == [{
+        "method": "DELETE",
+        "path": "/api/v1/namespaces/glimmung-slot-2",
+        "json": {
+            "apiVersion": "v1",
+            "kind": "DeleteOptions",
+            "propagationPolicy": "Foreground",
+        },
+    }]
 
 
 @pytest.mark.asyncio
