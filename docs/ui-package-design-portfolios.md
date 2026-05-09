@@ -39,9 +39,9 @@ it does not relax user authorization.
 ## Hostnames
 
 Microsoft Entra SPA redirect URIs do not support wildcards. Use a small stable
-pool of UI review hostnames and register each one on `glimmung-oauth-test`.
-The stable hosts can be shared across repos as long as the route points at the
-repo-specific validation environment.
+pool of UI review hostnames and native app test-slot hostnames, and register
+each one on `glimmung-oauth-test`. The stable hosts can be shared across repos
+as long as the route points at the repo-specific validation environment.
 
 Add more entries through `tofu/variables.tf` `test_redirect_uris`; do not use a
 runtime-generated hostname unless it has been pre-registered in Entra.
