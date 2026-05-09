@@ -17,6 +17,7 @@ class Project(BaseModel):
     id: str
     name: str
     github_repo: str = ""
+    argocd_app: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
 
@@ -24,6 +25,7 @@ class Project(BaseModel):
 class ProjectRegister(BaseModel):
     name: str
     github_repo: str
+    argocd_app: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

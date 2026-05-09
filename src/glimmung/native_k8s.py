@@ -451,13 +451,13 @@ class NativeKubernetesLauncher:
         """Spawn a one-shot Job that renders the project's Helm chart for a
         slot and applies it to the slot namespace.
 
-        Without this step `checkout_test_slot` only creates the empty slot
-        namespace; nothing in it actually runs. The Job clones the project
-        repo using `repo_token`, runs the project-supplied render command
-        (typically `helm template` against the chart with slot-scoped
-        values), and pipes the output into `kubectl apply` against the
-        slot namespace. Slot teardown deletes the namespace, which removes
-        every applied resource — there is no helm release record to track.
+        Glimmung looks up the project's ArgoCD Application to discover the
+        chart path (spec.source.path), then constructs a `helm template`
+        command using the slot-scoped values from project metadata.
+        ClusterRoles and ClusterRoleBindings are stripped from the kubectl
+        apply stream; any CRBs in `metadata.test_slot_helm.cluster_role_bindings`
+        are created directly by the glimmung pod (which has that permission)
+        before the Job starts.
 
         Reads `metadata.test_slot_helm` from `project_doc`. Skips silently
         when the project has not opted in or has no `github_repo`. Returns
@@ -490,7 +490,26 @@ class NativeKubernetesLauncher:
             "project": slot["project"],
         }
 
+        # Discover chart path from the project's ArgoCD Application.
+        argocd_app = str(
+            project_doc.get("argocd_app")
+            or project_doc.get("argocdApp")
+            or project_doc.get("name")
+            or ""
+        ).strip()
+        chart_path = _DEFAULT_CHART_PATH
+        if argocd_app:
+            argo = await self._fetch_argocd_app(argocd_app)
+            if argo is not None:
+                chart_path = str(
+                    (argo.get("spec") or {}).get("source", {}).get("path")
+                    or _DEFAULT_CHART_PATH
+                ).strip() or _DEFAULT_CHART_PATH
+
         await self._ensure_slot_admin_binding(slot_name, slot=slot)
+        await self._ensure_slot_cluster_role_bindings(
+            config["cluster_role_bindings"], substitutions, slot_name=slot_name
+        )
 
         secret_name = _test_slot_install_secret_name(lease_id)
         await self._ensure_clone_token_secret(secret_name, repo_token, slot=slot)
@@ -499,6 +518,7 @@ class NativeKubernetesLauncher:
         manifest = _test_slot_install_manifest(
             settings=self._settings,
             config=config,
+            chart_path=chart_path,
             slot=slot,
             slot_index=slot_index,
             host=host,
@@ -511,7 +531,7 @@ class NativeKubernetesLauncher:
         return job_name
 
     async def delete_test_slot_helm_release(self, lease_doc: dict[str, Any]) -> None:
-        """Delete the helm-install Job and its clone-token Secret for a slot.
+        """Delete the helm-install Job, clone-token Secret, and slot CRBs.
 
         Idempotent: missing resources are treated as already cleaned up.
         Called on lease release so a stuck or in-flight install Job from a
@@ -521,6 +541,7 @@ class NativeKubernetesLauncher:
         if slot is None:
             return
         lease_id = slot.get("lease_id") or ""
+        slot_name = slot.get("slot_name") or ""
         if not lease_id:
             return
         namespace = self._settings.native_runner_namespace
@@ -549,6 +570,8 @@ class NativeKubernetesLauncher:
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 404:
                 raise
+        if slot_name:
+            await self._delete_slot_cluster_role_bindings(slot_name)
 
     async def _ensure_slot_admin_binding(
         self,
@@ -601,6 +624,83 @@ class NativeKubernetesLauncher:
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 409:
                 raise
+
+    async def _fetch_argocd_app(self, app_name: str) -> dict[str, Any] | None:
+        """Read an ArgoCD Application CRD from the cluster."""
+        try:
+            return await self._request(
+                "GET",
+                f"/apis/argoproj.io/v1alpha1/namespaces/argocd/applications/{app_name}",
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+
+    async def _ensure_slot_cluster_role_bindings(
+        self,
+        crb_templates: list[Any],
+        substitutions: dict[str, str],
+        *,
+        slot_name: str,
+    ) -> None:
+        """Create cluster-scoped RoleBindings needed by the slot.
+
+        The installer Job SA lacks cluster-scope RBAC write access; the
+        glimmung pod SA (infra-shared) creates these directly.  Each entry
+        in `crb_templates` is a dict with `name`, `subjects`, and `roleRef`
+        fields, all supporting `{slot_name}`/`{host}` substitution.
+        """
+        slot_labels = {
+            **_managed_labels(),
+            "glimmung.romaine.life/test-slot": "true",
+            "glimmung.romaine.life/native-slot-name": _label_value(slot_name),
+        }
+        for template in crb_templates:
+            if not isinstance(template, dict):
+                continue
+            filled = _deep_format(template, substitutions)
+            name = str((filled.get("metadata") or {}).get("name") or filled.get("name") or "").strip()
+            if not name:
+                continue
+            body = {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "ClusterRoleBinding",
+                "metadata": {"name": name, "labels": slot_labels},
+                "subjects": filled.get("subjects") or [],
+                "roleRef": filled.get("roleRef") or {},
+            }
+            try:
+                await self._request(
+                    "POST",
+                    "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings",
+                    json=body,
+                )
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 409:
+                    raise
+
+    async def _delete_slot_cluster_role_bindings(self, slot_name: str) -> None:
+        """Delete all CRBs labelled with the slot name (best-effort)."""
+        label_sel = f"glimmung.romaine.life/native-slot-name={_label_value(slot_name)}"
+        try:
+            resp = await self._request(
+                "GET",
+                f"/apis/rbac.authorization.k8s.io/v1/clusterrolebindings?labelSelector={label_sel}",
+            )
+            for crb in resp.get("items") or []:
+                crb_name = (crb.get("metadata") or {}).get("name") or ""
+                if not crb_name:
+                    continue
+                try:
+                    await self._request(
+                        "DELETE",
+                        f"/apis/rbac.authorization.k8s.io/v1/clusterrolebindings/{crb_name}",
+                    )
+                except httpx.HTTPStatusError:
+                    pass
+        except httpx.HTTPStatusError:
+            pass
 
     async def _ensure_clone_token_secret(
         self,
@@ -1670,20 +1770,18 @@ def _sha256(token: str) -> str:
 
 
 _DEFAULT_INSTALLER_IMAGE = "alpine/k8s:1.30.0"
-_DEFAULT_RENDER_COMMAND: tuple[str, ...] = (
-    "sh",
-    "scripts/render-test-env.sh",
-    "{slot_index}",
-)
+_DEFAULT_CHART_PATH = "k8s"
 
 
 def _test_slot_helm_config(project_doc: dict[str, Any]) -> dict[str, Any] | None:
     """Read the test-slot helm-install config off a project doc.
 
-    Returns None when the project hasn't opted in. Defaults the render
-    command to `scripts/render-test-env.sh {slot_index}` (the
-    convention this fix was authored against) so projects that follow
-    the convention can opt in with just `enabled: true`.
+    Returns None when the project hasn't opted in.  The `values` dict
+    carries helm --set overrides keyed by helm path; values may contain
+    `{slot_name}`, `{host}`, `{slot_index}`, `{project}` placeholders
+    which are substituted at install time.  `cluster_role_bindings` is a
+    list of CRB templates glimmung creates directly (the installer Job SA
+    lacks cluster-scope RBAC write access).
     """
     metadata = project_doc.get("metadata") or {}
     if not isinstance(metadata, dict):
@@ -1692,13 +1790,13 @@ def _test_slot_helm_config(project_doc: dict[str, Any]) -> dict[str, Any] | None
     if not isinstance(raw, dict) or raw.get("enabled") is not True:
         return None
 
-    render = raw.get("render_command") or raw.get("renderCommand")
-    if isinstance(render, str):
-        render_command: tuple[str, ...] = ("sh", "-c", render)
-    elif isinstance(render, list) and render:
-        render_command = tuple(str(part) for part in render)
-    else:
-        render_command = _DEFAULT_RENDER_COMMAND
+    values = raw.get("values") or {}
+    if not isinstance(values, dict):
+        values = {}
+
+    crbs = raw.get("cluster_role_bindings") or raw.get("clusterRoleBindings") or []
+    if not isinstance(crbs, list):
+        crbs = []
 
     image = str(
         raw.get("installer_image")
@@ -1709,10 +1807,22 @@ def _test_slot_helm_config(project_doc: dict[str, Any]) -> dict[str, Any] | None
     git_ref = str(raw.get("git_ref") or raw.get("gitRef") or "").strip()
 
     return {
-        "render_command": render_command,
+        "values": values,
+        "cluster_role_bindings": crbs,
         "installer_image": image or _DEFAULT_INSTALLER_IMAGE,
         "git_ref": git_ref,
     }
+
+
+def _deep_format(obj: Any, substitutions: dict[str, str]) -> Any:
+    """Recursively apply `{key}`-style substitution to strings in obj."""
+    if isinstance(obj, str):
+        return _format_substitutions(obj, substitutions)
+    if isinstance(obj, dict):
+        return {k: _deep_format(v, substitutions) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_deep_format(item, substitutions) for item in obj]
+    return obj
 
 
 def _test_slot_host(
@@ -1767,6 +1877,7 @@ def _test_slot_install_manifest(
     *,
     settings: Settings,
     config: dict[str, Any],
+    chart_path: str,
     slot: dict[str, str],
     slot_index: str,
     host: str,
@@ -1778,23 +1889,24 @@ def _test_slot_install_manifest(
     """Build the helm-install Job manifest for a checkout.
 
     Pod shape:
-      - `clone` initContainer: alpine/git, mounts the clone-token Secret,
-        clones the repo into a shared `workspace` emptyDir.
-      - `install` main container: configurable image (default
-        `alpine/k8s` which carries helm + kubectl + git + yq), runs the
-        project-supplied render command from the cloned repo and pipes
-        the output into `kubectl apply` against the slot namespace.
+      - `clone` initContainer: alpine/git, clones the project repo.
+      - `install` main container: alpine/k8s (carries helm + kubectl + yq),
+        runs `helm template {chart_path}` with slot-scoped values from
+        project metadata, strips ClusterRole/ClusterRoleBinding objects
+        (created directly by the glimmung pod), and pipes the rest into
+        `kubectl apply` against the slot namespace.
     """
     namespace = settings.native_runner_namespace
     slot_name = slot["slot_name"]
     project = slot["project"]
     lease_id = slot.get("lease_id") or ""
     git_ref = str(config.get("git_ref") or "").strip()
-    render_command = [
-        _format_substitutions(part, substitutions)
-        for part in config["render_command"]
-    ]
-    quoted_render = " ".join(_shell_quote(part) for part in render_command)
+
+    # Build --set flags from project metadata values dict.
+    set_flags = " ".join(
+        f"--set {_shell_quote(k + '=' + _format_substitutions(str(v), substitutions))}"
+        for k, v in (config.get("values") or {}).items()
+    )
 
     labels = {
         **_managed_labels(),
@@ -1818,10 +1930,15 @@ def _test_slot_install_manifest(
         "  git clone --depth 1 \"$REPO_URL\" /workspace\n"
         "fi\n"
     )
+    # Glimmung creates ClusterRoles/ClusterRoleBindings directly; strip them
+    # from the stream so the installer SA (namespace-scoped) can apply cleanly.
     install_script = (
         "set -eu\n"
         "cd /workspace\n"
-        f"{quoted_render} | kubectl apply -n {_shell_quote(slot_name)} -f -\n"
+        f"helm template {_shell_quote(slot_name)} {_shell_quote(chart_path)}"
+        f" --namespace {_shell_quote(slot_name)} {set_flags}"
+        " | yq 'select(.kind != \"ClusterRoleBinding\" and .kind != \"ClusterRole\")'"
+        f" | kubectl apply -n {_shell_quote(slot_name)} -f -\n"
     )
     pod_spec: dict[str, Any] = {
         "serviceAccountName": settings.native_runner_service_account,

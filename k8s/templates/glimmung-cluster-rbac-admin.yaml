@@ -1,0 +1,25 @@
+# Grants the glimmung app pod (infra-shared SA) the ability to create and
+# manage ClusterRoleBindings for test slot provisioning.  The native runner
+# SA is intentionally excluded — it executes arbitrary repo scripts and
+# should not carry cluster-scope RBAC write access.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: glimmung-cluster-rbac-admin
+rules:
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterrolebindings"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: glimmung-cluster-rbac-admin
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: glimmung-cluster-rbac-admin
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccount }}
+    namespace: {{ .Values.namespace }}
