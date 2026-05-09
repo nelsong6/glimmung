@@ -280,6 +280,12 @@ async def test_create_resumed_run_synthesizes_skipped_attempts(cosmos):
     )
 
     assert new_run.cloned_from_run_id == prior.id
+    assert new_run.parent_run_id == prior.id
+    assert new_run.root_run_id == prior.id
+    assert new_run.origin_kind == "resume"
+    assert new_run.is_cycle is True
+    assert new_run.cycle_number == 1
+    assert new_run.run_display_number == "1.1"
     assert new_run.entrypoint_phase == "agent-execute"
     assert new_run.state == RunState.IN_PROGRESS
     assert new_run.cumulative_cost_usd == 0.0
@@ -380,6 +386,9 @@ async def test_create_resumed_run_first_phase_no_skipped_attempts(cosmos):
     assert new_run.attempts == []
     assert new_run.entrypoint_phase == "env-prep"
     assert new_run.cloned_from_run_id == prior.id
+    assert new_run.parent_run_id == prior.id
+    assert new_run.root_run_id == prior.id
+    assert new_run.run_display_number == "1.1"
 
 
 # ─── dispatch_resumed_run (orchestration + endpoint) ──────────────────────
@@ -415,6 +424,10 @@ async def test_dispatch_resumed_run_happy_path(cosmos, app_state):
     assert found is not None
     new_run, _ = found
     assert new_run.cloned_from_run_id == prior.id
+    assert new_run.parent_run_id == prior.id
+    assert new_run.root_run_id == prior.id
+    assert new_run.is_cycle is True
+    assert new_run.run_display_number == "1.1"
     assert new_run.entrypoint_phase == "agent-execute"
     # 1 skipped (env-prep) + 1 fresh entrypoint (agent-execute).
     assert len(new_run.attempts) == 2

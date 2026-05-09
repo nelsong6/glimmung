@@ -894,6 +894,19 @@ class Run(BaseModel):
     # The ULID remains the storage key; users should see "run 1" in the
     # issue context and "glimmung#141 run 1" when context is needed.
     run_number: int | None = None
+    # Display identifier scoped to an issue's flat run history. Root runs
+    # use integer strings ("1", "2"). Cycle runs use dotted descendants
+    # ("1.1", "1.2") while keeping `run_number` as an integer compatibility
+    # key for existing routes during migration.
+    run_display_number: str | None = None
+    # Flat run-lineage fields. Cycles/recycles/resumes are represented as
+    # additional Run records linked to their origin, not as a public attempt
+    # layer inside one Run.
+    parent_run_id: str | None = None
+    root_run_id: str | None = None
+    origin_kind: str | None = None
+    is_cycle: bool = False
+    cycle_number: int | None = None
     # Canonical glimmung-issue handle (#28 consumer-PR-1). Optional
     # during transition: pre-#28-consumer Runs predate the issues
     # container and have an empty string here. New Runs always set it.

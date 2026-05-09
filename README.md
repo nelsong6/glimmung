@@ -419,7 +419,7 @@ A `Signal` is a unit of work for the orchestrator. Webhooks (`pull_request_revie
 
 **Triage decision engine** ([`src/glimmung/triage.py`](src/glimmung/triage.py)) is pure: `decide_triage(signal, run) → TriageDecision`. Outputs:
 
-- `DISPATCH_TRIAGE` — re-open the linked Run, append a TRIAGE PhaseAttempt, claim issue + PR locks, dispatch the consumer's `triage_workflow_filename` with `feedback` as input. The PR lock is held through the triage cycle (including any RETRY decisions within); the `workflow_run.completed` terminal handler releases on PASS / ABORT.
+- `DISPATCH_TRIAGE` — create a cycle Run linked to the originating Run, claim issue + PR locks, dispatch the consumer's `triage_workflow_filename` with `feedback` as input. The PR lock is held through the triage cycle; the terminal handler releases on PASS / ABORT.
 - `IGNORE` — non-actionable signal (approved review, empty changes-requested body, etc.).
 - `ABORT_NO_RUN` / `ABORT_BUDGET_*` — posts an explanation comment to the PR; lock released immediately.
 
