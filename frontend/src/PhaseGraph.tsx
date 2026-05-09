@@ -56,9 +56,12 @@ type GraphEdge = Edge & {
 const PHASE_WIDTH = 172;
 const PHASE_X_GAP = 240;
 const PHASE_Y = 12;
-const TOUCHPOINT_Y = 72;
 const JOB_HEIGHT = 70;
 const PHASE_BASE_HEIGHT = 44;
+
+function estimatedPhaseHeight(col: PhaseGraphPhase[]): number {
+  return PHASE_BASE_HEIGHT + Math.max(1, col.length) * JOB_HEIGHT;
+}
 
 function computeDepths(phases: PhaseGraphPhase[]): Map<string, number> {
   const byName = new Map<string, PhaseGraphPhase>();
@@ -207,10 +210,14 @@ export function PhaseGraph({
   }, [recycleArrows]);
 
   const nodes = useMemo<Node[]>(() => {
+    const maxPhaseHeight = Math.max(...columns.map(estimatedPhaseHeight), estimatedPhaseHeight([]));
     const phaseNodes: Node<PhaseNodeData>[] = columns.map((col, idx) => ({
       id: `phase:${idx}`,
       type: "phase",
-      position: { x: idx * PHASE_X_GAP, y: PHASE_Y },
+      position: {
+        x: idx * PHASE_X_GAP,
+        y: PHASE_Y + (maxPhaseHeight - estimatedPhaseHeight(col)) / 2,
+      },
       draggable: false,
       selectable: false,
       data: {
@@ -228,7 +235,10 @@ export function PhaseGraph({
       {
         id: "touchpoint",
         type: "touchpoint",
-        position: { x: columns.length * PHASE_X_GAP, y: TOUCHPOINT_Y },
+        position: {
+          x: columns.length * PHASE_X_GAP,
+          y: PHASE_Y + (maxPhaseHeight - 55) / 2,
+        },
         draggable: false,
         selectable: false,
         data: { renderTouchpoint },
@@ -299,8 +309,7 @@ export function PhaseGraph({
     return out;
   }, [columns, entryPhaseName, phaseToColumn, prEnabled, recycleArrows]);
 
-  const maxJobs = Math.max(1, ...columns.map((col) => col.length));
-  const graphHeight = PHASE_BASE_HEIGHT + maxJobs * JOB_HEIGHT + 76;
+  const graphHeight = Math.max(...columns.map(estimatedPhaseHeight), estimatedPhaseHeight([])) + 76;
   const graphWidth = (columns.length + (prEnabled ? 1 : 0)) * PHASE_X_GAP + PHASE_WIDTH;
 
   return (
