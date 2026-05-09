@@ -64,6 +64,17 @@ class _RecordingAzureLauncher(_RecordingLauncher):
         self.calls.append({"method": method, "path": path, "json": json})
         return {}
 
+    async def _graph_request(self, method: str, path: str, *, json=None):
+        self.calls.append({"method": method, "path": path, "json": json})
+        if method == "GET" and path.startswith("/applications(appId="):
+            return {
+                "id": "app-object-id",
+                "appId": "client-id",
+                "displayName": "test-app",
+                "spa": {"redirectUris": ["https://existing.example/"]},
+            }
+        return {}
+
 
 class _ExistingDnsLauncher(_RecordingLauncher):
     async def _request(self, method: str, path: str, *, json=None):
@@ -427,6 +438,43 @@ async def test_reconcile_standby_workload_identity_upserts_slot_credentials():
     assert launcher.calls[3]["json"]["properties"]["subject"] == (
         "system:serviceaccount:tank-slot-2:claude-api-proxy"
     )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_standby_entra_redirects_upserts_slot_redirect_uris():
+    launcher = _RecordingAzureLauncher(_settings())
+
+    await launcher.reconcile_standby_entra_redirects([
+        {
+            "id": "tank-operator",
+            "name": "tank-operator",
+            "metadata": {
+                "native_standby_dns": {
+                    "enabled": True,
+                    "record_base": "tank.dev.romaine.life",
+                    "slot_prefix": "tank-slot",
+                    "count": 2,
+                },
+                "native_standby_entra_redirects": {
+                    "enabled": True,
+                    "application_app_id": "client-id",
+                },
+            },
+        }
+    ])
+
+    assert [call["method"] for call in launcher.calls] == ["GET", "PATCH"]
+    assert launcher.calls[0]["path"] == "/applications(appId='client-id')"
+    assert launcher.calls[1]["path"] == "/applications/app-object-id"
+    assert launcher.calls[1]["json"] == {
+        "spa": {
+            "redirectUris": [
+                "https://existing.example/",
+                "https://tank-slot-1.tank.dev.romaine.life/",
+                "https://tank-slot-2.tank.dev.romaine.life/",
+            ]
+        }
+    }
 
 
 @pytest.mark.asyncio

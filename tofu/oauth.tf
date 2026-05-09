@@ -53,7 +53,10 @@ resource "azuread_application" "oauth_test" {
   display_name     = "glimmung-oauth-test"
   sign_in_audience = "AzureADandPersonalMicrosoftAccount"
 
-  owners = [data.azuread_client_config.current.object_id]
+  owners = [
+    data.azuread_client_config.current.object_id,
+    azurerm_user_assigned_identity.glimmung_dedicated.principal_id,
+  ]
 
   api {
     requested_access_token_version = 2
@@ -78,6 +81,18 @@ resource "azuread_application" "oauth_test" {
 
 resource "azuread_service_principal" "oauth_test" {
   client_id = azuread_application.oauth_test.client_id
+}
+
+# Lets the Glimmung API pod reconcile SPA redirect URIs for the test app it
+# owns. This is intentionally narrower than Application.ReadWrite.All.
+data "azuread_service_principal" "msgraph" {
+  client_id = "00000003-0000-0000-c000-000000000000"
+}
+
+resource "azuread_app_role_assignment" "glimmung_app_readwrite_owned" {
+  app_role_id         = "18a4783c-866b-4cc7-a460-3d5e5662c884" # Application.ReadWrite.OwnedBy
+  principal_object_id = azurerm_user_assigned_identity.glimmung_dedicated.principal_id
+  resource_object_id  = data.azuread_service_principal.msgraph.object_id
 }
 
 resource "azurerm_key_vault_secret" "oauth_test_client_id" {
