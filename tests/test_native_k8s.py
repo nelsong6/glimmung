@@ -595,6 +595,44 @@ async def test_delete_test_slot_namespace_deletes_namespace():
 
 
 @pytest.mark.asyncio
+async def test_ensure_test_slot_namespace_creates_assigned_slot_namespace():
+    launcher = _RecordingLauncher(_settings())
+
+    result = await launcher.ensure_test_slot_namespace({
+        "id": "01LEASE",
+        "project": "glimmung",
+        "workflow": "manual-slot",
+        "metadata": {
+            "native_slot_index": "2",
+            "native_slot_name": "glimmung-slot-2",
+        },
+    })
+
+    assert result == "glimmung-slot-2"
+    assert launcher.calls == [{
+        "method": "POST",
+        "path": "/api/v1/namespaces",
+        "json": {
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": {
+                "name": "glimmung-slot-2",
+                "labels": {
+                    "app.kubernetes.io/managed-by": "glimmung",
+                    "app.kubernetes.io/part-of": "glimmung-native-runner",
+                    "glimmung.romaine.life/test-slot": "true",
+                    "glimmung.romaine.life/project": "glimmung",
+                    "glimmung.romaine.life/workflow": "manual-slot",
+                    "glimmung.romaine.life/native-slot-name": "glimmung-slot-2",
+                    "glimmung.romaine.life/native-slot-index": "2",
+                    "glimmung.romaine.life/lease-id": "01lease",
+                },
+            },
+        },
+    }]
+
+
+@pytest.mark.asyncio
 async def test_read_attempt_pod_logs_selects_job_pod_and_container_tail():
     launcher = _PodLogLauncher(_settings())
 

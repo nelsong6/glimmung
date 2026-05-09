@@ -422,6 +422,25 @@ class NativeKubernetesLauncher:
                 return
             raise
 
+    async def ensure_test_slot_namespace(self, lease_doc: dict[str, Any]) -> str | None:
+        """Ensure the assigned native slot namespace exists for a lease."""
+        slot = _native_slot(lease_doc)
+        if slot is None:
+            return None
+        labels = {
+            **_managed_labels(),
+            "glimmung.romaine.life/test-slot": "true",
+            "glimmung.romaine.life/project": _label_value(slot["project"]),
+            "glimmung.romaine.life/workflow": _label_value(slot["workflow"]),
+            "glimmung.romaine.life/native-slot-name": _label_value(slot["slot_name"]),
+        }
+        if slot.get("slot_index"):
+            labels["glimmung.romaine.life/native-slot-index"] = _label_value(slot["slot_index"])
+        if slot.get("lease_id"):
+            labels["glimmung.romaine.life/lease-id"] = _label_value(slot["lease_id"])
+        await self._ensure_namespace(slot["slot_name"], labels=labels)
+        return slot["slot_name"]
+
     async def reconcile_standby_dns(self, project_docs: list[dict[str, Any]]) -> None:
         """Reconcile DNSEndpoint records for projects that opt into warm native DNS."""
         desired = {
@@ -997,17 +1016,22 @@ def _playwright_enabled(settings: Settings) -> bool:
     return bool(getattr(settings, "native_runner_playwright_enabled", True))
 
 
-def _playwright_slot(lease_doc: dict[str, Any]) -> dict[str, str] | None:
+def _native_slot(lease_doc: dict[str, Any]) -> dict[str, str] | None:
     metadata = lease_doc.get("metadata") or {}
     slot_name = str(metadata.get("native_slot_name") or "").strip()
     if not slot_name:
         return None
     return {
         "project": str(lease_doc.get("project") or "").strip(),
+        "workflow": str(lease_doc.get("workflow") or "").strip(),
         "slot_name": slot_name,
         "slot_index": str(metadata.get("native_slot_index") or "").strip(),
         "lease_id": str(lease_doc.get("id") or "").strip(),
     }
+
+
+def _playwright_slot(lease_doc: dict[str, Any]) -> dict[str, str] | None:
+    return _native_slot(lease_doc)
 
 
 def _playwright_resource_name(project: str, slot_name: str) -> str:

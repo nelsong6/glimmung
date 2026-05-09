@@ -639,6 +639,10 @@ async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host
     if not workflow_name:
         log.warning("lease %s has no workflow; skipping dispatch", lease_doc["id"])
         return True
+    try:
+        await _ensure_test_env_for_lease(lease_doc)
+    except Exception:
+        return False
 
     workflow_doc = await _read_workflow(cosmos, lease_doc["project"], workflow_name)
     if not workflow_doc:
@@ -783,6 +787,29 @@ async def _ensure_playwright_slot_for_lease(lease_doc: dict[str, Any]) -> None:
     except Exception:
         log.exception(
             "failed to ensure Playwright worker for native lease %s",
+            lease_doc.get("id"),
+        )
+        raise
+
+
+async def _ensure_test_env_for_lease(lease_doc: dict[str, Any]) -> None:
+    metadata = lease_doc.get("metadata") or {}
+    if metadata.get(lease_ops.NATIVE_K8S_METADATA_KEY) is not True:
+        return
+    if not metadata.get(lease_ops.NATIVE_SLOT_NAME_METADATA_KEY):
+        return
+    launcher = getattr(app.state, "native_k8s_launcher", None)
+    if launcher is None:
+        return
+    reset = metadata.get("test_slot_mode") == "clean_slate"
+    namespace = _test_slot_namespace(lease_doc)
+    try:
+        if reset and namespace:
+            await launcher.delete_test_slot_namespace(namespace)
+        await launcher.ensure_test_slot_namespace(lease_doc)
+    except Exception:
+        log.exception(
+            "failed to ensure test environment for native lease %s",
             lease_doc.get("id"),
         )
         raise
@@ -7196,11 +7223,11 @@ async def dispatch_run_endpoint(req: DispatchRequest) -> PublicDispatchResult:
     dependencies=[Depends(require_admin_user)],
 )
 async def checkout_test_slot(req: TestSlotCheckoutRequest) -> TestSlotCheckoutResult:
-    """Reserve a native app test slot without starting Glimmung work.
+    """Reserve a native app test slot and prepare its test environment.
 
-    The caller owns provisioning/resetting the slot. Glimmung records the
-    reservation as a native lease so dashboards, sweepers, and other slot
-    users see the capacity as occupied.
+    This records the reservation as a native lease so dashboards, sweepers,
+    and other slot users see the capacity as occupied. It does not create an
+    Issue, create a Run, or dispatch a workflow.
     """
     project = req.project.strip()
     if not project:
@@ -7240,10 +7267,10 @@ async def checkout_test_slot(req: TestSlotCheckoutRequest) -> TestSlotCheckoutRe
     if host is not None:
         lease_doc = lease_ops._lease_to_doc(lease)
         try:
-            await _ensure_playwright_slot_for_lease(lease_doc)
+            await _ensure_test_env_for_lease(lease_doc)
         except Exception:
             await lease_ops.release(cosmos, lease.id, project)
-            raise HTTPException(500, "failed to prepare Playwright worker for slot")
+            raise HTTPException(500, "failed to prepare test environment for slot")
     actual_slot_index = lease.metadata.get("native_slot_index")
     actual_slot_name = lease.metadata.get("native_slot_name") or slot_name
     return TestSlotCheckoutResult(
