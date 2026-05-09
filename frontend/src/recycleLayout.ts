@@ -19,8 +19,8 @@ const RECYCLE_LANE_HEIGHT = 28;
 const RECYCLE_BAND_TOP_PAD = 8;
 const RECYCLE_BAND_BOTTOM_PAD = 8;
 const RECYCLE_TARGET_OVERSHOOT = 28;
-const RECYCLE_TARGET_ENTRY_OFFSET = 34;
-const RECYCLE_TARGET_PORT_GAP = 18;
+const RECYCLE_ENTRY_ARC_RADIUS = 34;
+const RECYCLE_TARGET_PORT_GAP = 16;
 const RECYCLE_APPROACH_GAP = 12;
 const RECYCLE_CORNER_RADIUS = 6;
 
@@ -100,13 +100,10 @@ export function computeRecyclePaths(
   });
 
   const routed = renderable.map((r, lane) => {
-    const { s, t } = r;
+    const { s } = r;
     const laneY = RECYCLE_BAND_TOP_PAD + (lane + 0.5) * RECYCLE_LANE_HEIGHT;
     const sX = s.cx;
     const sY = s.bottom;
-    const cornerX = t.left - RECYCLE_TARGET_OVERSHOOT;
-    const tX = t.left;
-    const tY = t.cy + Math.min(RECYCLE_TARGET_ENTRY_OFFSET, Math.max(0, t.height / 2 - 16));
     const inactive = r.arrow.max_attempts <= 0;
     const cls = [
       "dag-recycle-path",
@@ -120,9 +117,6 @@ export function computeRecyclePaths(
       laneY,
       sX,
       sY,
-      cornerX,
-      tX,
-      tY,
       inactive,
       cls,
       title: `${r.arrow.source} ↻ ${r.arrow.target}: ${trigger}; ${
@@ -142,20 +136,18 @@ export function computeRecyclePaths(
   for (const group of byTarget.values()) {
     group.sort((a, b) => a.lane - b.lane);
     group.forEach((r, targetPortIndex) => {
-      const maxOffset = Math.max(0, r.t.height / 2 - 12);
-      const baseOffset = Math.min(RECYCLE_TARGET_ENTRY_OFFSET, maxOffset);
-      const availableGap = group.length > 1
-        ? Math.max(8, (maxOffset - baseOffset) / (group.length - 1))
-        : RECYCLE_TARGET_PORT_GAP;
-      const portGap = Math.min(RECYCLE_TARGET_PORT_GAP, availableGap);
-      const tY = r.t.cy + Math.min(maxOffset, baseOffset + targetPortIndex * portGap);
+      const maxOffset = Math.min(RECYCLE_ENTRY_ARC_RADIUS - 4, Math.max(0, r.t.height / 2 - 12));
+      const offset = Math.min(maxOffset, (targetPortIndex + 1) * RECYCLE_TARGET_PORT_GAP);
+      const arcCenterX = r.t.left - RECYCLE_ENTRY_ARC_RADIUS;
+      const tX = arcCenterX + Math.sqrt(Math.max(0, RECYCLE_ENTRY_ARC_RADIUS ** 2 - offset ** 2));
+      const tY = r.t.cy + offset;
       const cornerX = r.t.left - RECYCLE_TARGET_OVERSHOOT - targetPortIndex * RECYCLE_APPROACH_GAP;
       const d = roundedOrthogonalPath([
         { x: r.sX, y: r.sY },
         { x: r.sX, y: r.laneY },
         { x: cornerX, y: r.laneY },
         { x: cornerX, y: tY },
-        { x: r.tX, y: tY },
+        { x: tX, y: tY },
       ]);
       paths.push({
         arrow: r.arrow,
