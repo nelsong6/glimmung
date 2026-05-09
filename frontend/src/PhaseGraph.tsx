@@ -53,6 +53,7 @@ type TouchpointNodeData = {
 
 type RecycleEdgeData = {
   laneIndex: number;
+  laneBaseY: number;
 };
 
 type GraphEdge = Edge<RecycleEdgeData>;
@@ -207,8 +208,9 @@ function RecycleFlowEdge({
   interactionWidth,
 }: EdgeProps<RecycleGraphEdge>) {
   const laneIndex = data?.laneIndex ?? 0;
+  const laneBaseY = data?.laneBaseY ?? Math.max(sourceY, targetY) + 30;
   const radius = 10;
-  const laneY = Math.max(sourceY, targetY) + 30 + laneIndex * 24;
+  const laneY = laneBaseY + laneIndex * 24;
   const approachX = targetX - 30 - laneIndex * 16;
   const path = [
     `M ${sourceX},${sourceY}`,
@@ -304,6 +306,11 @@ export function PhaseGraph({
 
   const edges = useMemo<GraphEdge[]>(() => {
     const out: GraphEdge[] = [];
+    const maxPhaseHeight = Math.max(
+      ...columns.map((col, idx) => nodeHeights[`phase:${idx}`] ?? estimatedPhaseHeight(col)),
+      estimatedPhaseHeight([]),
+    );
+    const recycleLaneBaseY = PHASE_Y + maxPhaseHeight + 8;
     for (let idx = 0; idx < columns.length - 1; idx += 1) {
       const entry = columns[idx + 1].some((phase) => entryPhaseName != null && phase.name === entryPhaseName);
       out.push({
@@ -343,6 +350,7 @@ export function PhaseGraph({
         .slice()
         .sort((a, b) => sourceOrder(a, phaseToColumn, columns.length) - sourceOrder(b, phaseToColumn, columns.length))
         .forEach((arrow, idx) => {
+          const targetHandleIndex = arrows.length - 1 - idx;
           const source = arrow.kind === "report_recycle" || arrow.source === "report"
             ? "touchpoint"
             : `phase:${phaseToColumn.get(arrow.source) ?? 0}`;
@@ -351,17 +359,17 @@ export function PhaseGraph({
             source,
             sourceHandle: "recycle-out",
             target: `phase:${targetCol}`,
-            targetHandle: `recycle-in-${idx}`,
+            targetHandle: `recycle-in-${targetHandleIndex}`,
             type: "recycle",
             markerEnd: { type: MarkerType.ArrowClosed },
             className: `dag-rf-edge dag-rf-recycle${arrow.active ? " fired" : ""}${arrow.max_attempts <= 0 ? " policy-disabled" : ""}`,
-            data: { laneIndex: idx },
+            data: { laneIndex: idx, laneBaseY: recycleLaneBaseY },
             label: "",
           });
         });
     });
     return out;
-  }, [columns, entryPhaseName, phaseToColumn, prEnabled, recycleArrows]);
+  }, [columns, entryPhaseName, nodeHeights, phaseToColumn, prEnabled, recycleArrows]);
 
   useLayoutEffect(() => {
     const root = graphRef.current;
