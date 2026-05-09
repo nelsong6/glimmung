@@ -2810,14 +2810,55 @@ async def heartbeat_lease(lease_id: str = Path(...), project: str = "") -> Lease
 async def release_lease(lease_id: str = Path(...), project: str = "") -> Lease:
     if not project:
         raise HTTPException(400, "project query param required")
-    cosmos: Cosmos = app.state.cosmos
+    return await _release_lease_from_api(app.state.cosmos, lease_id, project)
+
+
+async def _release_lease_from_api(cosmos: Cosmos, lease_id: str, project: str) -> Lease:
     try:
-        doc = await cosmos.leases.read_item(item=lease_id, partition_key=project)
+        lease_doc = await cosmos.leases.read_item(item=lease_id, partition_key=project)
     except Exception:
         raise HTTPException(404, "lease not found")
+    await _cleanup_test_slot_before_release(lease_doc)
     released = await lease_ops.release(cosmos, lease_id, project)
-    await _delete_playwright_slot_for_lease(doc)
+    await _delete_playwright_slot_for_lease(lease_doc)
     return released
+
+
+async def _cleanup_test_slot_before_release(lease_doc: dict[str, Any]) -> None:
+    metadata = lease_doc.get("metadata") or {}
+    if metadata.get("test_slot_checkout") is not True:
+        return
+    if lease_doc.get("state") != LeaseState.ACTIVE.value:
+        return
+    namespace = _test_slot_namespace(lease_doc)
+    if not namespace:
+        raise HTTPException(409, f"test slot lease {lease_doc.get('id')} has no namespace")
+    launcher = getattr(app.state, "native_k8s_launcher", None)
+    if launcher is None:
+        raise HTTPException(503, "native Kubernetes launcher is not configured")
+    try:
+        await launcher.delete_test_slot_namespace(namespace)
+    except native_k8s_ops.NativeLaunchError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except Exception as exc:
+        log.exception(
+            "test slot cleanup failed for lease %s namespace=%s",
+            lease_doc.get("id"), namespace,
+        )
+        raise HTTPException(502, f"test slot cleanup failed for namespace {namespace}") from exc
+
+
+def _test_slot_namespace(lease_doc: dict[str, Any]) -> str:
+    metadata = lease_doc.get("metadata") or {}
+    phase_inputs = metadata.get("phase_inputs") if isinstance(metadata.get("phase_inputs"), dict) else {}
+    for value in (
+        phase_inputs.get("namespace"),
+        phase_inputs.get("slot_name"),
+        metadata.get("native_slot_name"),
+    ):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 class CancelLeaseResult(BaseModel):
@@ -5743,6 +5784,22 @@ class TestSlotCheckoutResult(BaseModel):
     detail: str | None = None
 
 
+class TestSlotReturnRequest(BaseModel):
+    project: str
+    lease_id: str | None = None
+    slot_index: int | None = Field(default=None, ge=1)
+    slot_name: str | None = None
+
+
+class TestSlotReturnResult(BaseModel):
+    state: str
+    project: str
+    lease_id: str
+    slot_index: int | None = None
+    slot_name: str | None = None
+    cleanup_started: bool = False
+
+
 def _attempt_graph_metadata(attempt: Any) -> dict[str, Any]:
     """Stable graph metadata for one PhaseAttempt.
 
@@ -7199,6 +7256,117 @@ async def checkout_test_slot(req: TestSlotCheckoutRequest) -> TestSlotCheckoutRe
         host=host.name if host is not None else None,
         detail=None if host is not None else "slot unavailable; reservation is pending",
     )
+
+
+@app.post(
+    "/v1/test-slots/return",
+    response_model=TestSlotReturnResult,
+    dependencies=[Depends(require_admin_user)],
+)
+async def return_test_slot(req: TestSlotReturnRequest) -> TestSlotReturnResult:
+    project = req.project.strip()
+    if not project:
+        raise HTTPException(400, "project required")
+    cosmos: Cosmos = app.state.cosmos
+    lease_doc = await _resolve_test_slot_lease(
+        cosmos,
+        project=project,
+        lease_id=req.lease_id,
+        slot_index=req.slot_index,
+        slot_name=req.slot_name,
+    )
+    cleanup_started = (
+        lease_doc.get("state") == LeaseState.ACTIVE.value
+        and (lease_doc.get("metadata") or {}).get("test_slot_checkout") is True
+        and bool(_test_slot_namespace(lease_doc))
+    )
+    released = await _release_lease_from_api(cosmos, lease_doc["id"], project)
+    metadata = released.metadata or {}
+    slot_name = metadata.get("native_slot_name") or _test_slot_namespace(lease_doc) or req.slot_name
+    slot_index = None
+    raw_slot_index = metadata.get("native_slot_index")
+    if raw_slot_index is None:
+        phase_inputs = metadata.get("phase_inputs") if isinstance(metadata.get("phase_inputs"), dict) else {}
+        raw_slot_index = phase_inputs.get("validation_slot_index")
+    try:
+        slot_index = int(str(raw_slot_index)) if raw_slot_index is not None else req.slot_index
+    except (TypeError, ValueError):
+        slot_index = req.slot_index
+    return TestSlotReturnResult(
+        state=released.state.value,
+        project=project,
+        lease_id=released.id,
+        slot_index=slot_index,
+        slot_name=str(slot_name) if slot_name is not None else None,
+        cleanup_started=cleanup_started,
+    )
+
+
+async def _resolve_test_slot_lease(
+    cosmos: Cosmos,
+    *,
+    project: str,
+    lease_id: str | None,
+    slot_index: int | None,
+    slot_name: str | None,
+) -> dict[str, Any]:
+    if lease_id:
+        lease_doc = await cosmos.leases.read_item(item=lease_id, partition_key=project)
+        if (lease_doc.get("metadata") or {}).get("test_slot_checkout") is not True:
+            raise HTTPException(409, f"lease {lease_id} is not a test slot checkout")
+        return lease_doc
+    if slot_index is None and not (slot_name or "").strip():
+        raise HTTPException(400, "lease_id, slot_index, or slot_name required")
+
+    target_slot_name = (slot_name or "").strip() or (
+        f"{project}-slot-{slot_index}" if slot_index is not None else ""
+    )
+    docs = await query_all(
+        cosmos.leases,
+        (
+            "SELECT * FROM c WHERE c.project = @p "
+            "AND c.metadata.test_slot_checkout = true"
+        ),
+        parameters=[{"name": "@p", "value": project}],
+    )
+    candidates: list[dict[str, Any]] = []
+    for doc in docs:
+        if doc.get("state") not in (LeaseState.ACTIVE.value, LeaseState.PENDING.value):
+            continue
+        metadata = doc.get("metadata") or {}
+        phase_inputs = metadata.get("phase_inputs") if isinstance(metadata.get("phase_inputs"), dict) else {}
+        names = {
+            str(value).strip()
+            for value in (
+                metadata.get("native_slot_name"),
+                phase_inputs.get("slot_name"),
+                phase_inputs.get("namespace"),
+            )
+            if isinstance(value, str) and value.strip()
+        }
+        indexes = {
+            str(value).strip()
+            for value in (
+                metadata.get("native_slot_index"),
+                phase_inputs.get("validation_slot_index"),
+            )
+            if value is not None and str(value).strip()
+        }
+        if target_slot_name and target_slot_name in names:
+            candidates.append(doc)
+        elif slot_index is not None and str(slot_index) in indexes:
+            candidates.append(doc)
+    if not candidates:
+        detail = target_slot_name or f"slot index {slot_index}"
+        raise HTTPException(404, f"no active or pending test slot lease for {project}/{detail}")
+
+    candidates.sort(
+        key=lambda doc: (
+            0 if doc.get("state") == LeaseState.ACTIVE.value else 1,
+            str(doc.get("requestedAt") or ""),
+        )
+    )
+    return candidates[0]
 
 
 # ─── Design portfolio review surface (#225) ─────────────────────────────────
