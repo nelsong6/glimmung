@@ -195,9 +195,12 @@ class NativeKubernetesLauncher:
         desired = {
             _playwright_resource_name(slot["project"], slot["slot_name"])
             for lease_doc in active_native_leases
-            if (slot := _playwright_slot(lease_doc)) is not None
+            if not _is_test_slot_checkout(lease_doc)
+            and (slot := _playwright_slot(lease_doc)) is not None
         }
         for lease_doc in active_native_leases:
+            if _is_test_slot_checkout(lease_doc):
+                continue
             await self.ensure_playwright_slot(lease_doc)
         selector = urlencode({"labelSelector": "glimmung.romaine.life/slot-playwright=true"})
         try:
@@ -1014,6 +1017,11 @@ def _managed_labels() -> dict[str, str]:
 
 def _playwright_enabled(settings: Settings) -> bool:
     return bool(getattr(settings, "native_runner_playwright_enabled", True))
+
+
+def _is_test_slot_checkout(lease_doc: dict[str, Any]) -> bool:
+    metadata = lease_doc.get("metadata") or {}
+    return metadata.get("test_slot_checkout") is True
 
 
 def _native_slot(lease_doc: dict[str, Any]) -> dict[str, str] | None:

@@ -833,7 +833,12 @@ async def _reconcile_playwright_slots(app: FastAPI, cosmos: Cosmos) -> None:
     if launcher is None:
         return
     active = await _active_native_lease_docs(cosmos)
-    await launcher.reconcile_playwright_slots(active)
+    active_run_leases = [
+        doc
+        for doc in active
+        if (doc.get("metadata") or {}).get("test_slot_checkout") is not True
+    ]
+    await launcher.reconcile_playwright_slots(active_run_leases)
 
 
 async def _cleanup_native_attempt_secret(run: Run, attempt_index: int) -> None:

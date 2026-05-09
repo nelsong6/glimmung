@@ -578,6 +578,34 @@ async def test_reconcile_playwright_slots_deletes_workers_without_active_lease()
 
 
 @pytest.mark.asyncio
+async def test_reconcile_playwright_slots_ignores_test_slot_checkouts():
+    launcher = _ReconcilePlaywrightLauncher(_settings())
+
+    await launcher.reconcile_playwright_slots([
+        {
+            "id": "01LEASE",
+            "project": "ambience",
+            "metadata": {
+                "native_k8s": True,
+                "native_slot_index": "1",
+                "native_slot_name": "ambience-slot-1",
+                "test_slot_checkout": True,
+            },
+        }
+    ])
+
+    assert [call["method"] for call in launcher.calls] == [
+        "GET", "DELETE", "DELETE", "DELETE", "DELETE",
+    ]
+    assert launcher.calls[1]["path"].endswith(
+        "/deployments/glim-pw-ambience-ambience-slot-1"
+    )
+    assert launcher.calls[2]["path"].endswith(
+        "/services/glim-pw-ambience-ambience-slot-1"
+    )
+
+
+@pytest.mark.asyncio
 async def test_delete_test_slot_namespace_deletes_namespace():
     launcher = _RecordingLauncher(_settings())
 
