@@ -221,15 +221,17 @@ function RecycleFlowEdge({
   const radius = 10;
   const laneY = laneBaseY + laneIndex * 24;
   const approachX = targetX - 30 - laneIndex * 16;
+  const finalCurveLead = Math.min(36, Math.abs(laneY - targetY));
+  const finalCurveStartY = targetY + finalCurveLead;
+  const finalControlX = targetX - Math.min(44, Math.max(18, (targetX - approachX) * 0.6));
   const path = [
     `M ${sourceX},${sourceY}`,
     `L ${sourceX},${laneY - radius}`,
     `Q ${sourceX},${laneY} ${sourceX - radius},${laneY}`,
     `L ${approachX + radius},${laneY}`,
     `Q ${approachX},${laneY} ${approachX},${laneY - radius}`,
-    `L ${approachX},${targetY + radius}`,
-    `Q ${approachX},${targetY} ${approachX + radius},${targetY}`,
-    `L ${targetX},${targetY}`,
+    `L ${approachX},${finalCurveStartY}`,
+    `C ${approachX},${targetY} ${finalControlX},${targetY} ${targetX},${targetY}`,
   ].join(" ");
 
   return (
