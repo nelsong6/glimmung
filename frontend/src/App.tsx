@@ -42,7 +42,7 @@ type Project = {
   id: string;
   name: string;
   github_repo: string;
-  argocd_app: string;
+  argocd_app?: string;
   metadata: Record<string, unknown>;
   created_at: string;
 };
