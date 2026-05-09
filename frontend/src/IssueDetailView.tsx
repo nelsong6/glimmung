@@ -1280,7 +1280,7 @@ function PipelineDag({
     : touchpointState ?? (prNumber ? `#${prNumber}` : prBranch ? prBranch : "pending");
 
   const bandRef = useRef<HTMLDivElement>(null);
-  const phaseRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const phaseRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const tpRef = useRef<HTMLButtonElement | null>(null);
   const [paths, setPaths] = useState<RecyclePathLayout[]>([]);
   const [bandHeight, setBandHeight] = useState(0);
@@ -1319,15 +1319,16 @@ function PipelineDag({
     return () => ro.disconnect();
   }, [workflowGraph, phasesForLayout]);
 
-  // Render-phase callback wraps the existing run-state DagPhaseNode and
-  // wires its button ref into `phaseRefs` so the recycle band SVG can
-  // continue to compute orthogonal paths from per-phase bounding rects.
+  // Render-phase callback paints the phase's current job/attempt state.
+  // The visible phase container ref is wired on PhaseGraph itself so
+  // entry/recycle arrows target the phase surface, not this child job.
   const renderPhase = (graphPhase: PhaseGraphPhase) => {
     const rollup = rollupByName.get(graphPhase.name) ?? {
       phaseName: graphPhase.name,
       attempts: [],
       latest: run,
       status: { cls: "info", text: "pending" },
+      jobLabel: graphPhase.kind,
     };
     return (
       <DagPhaseNode
@@ -1338,10 +1339,6 @@ function PipelineDag({
             selectedNodeId === `phase:${graphPhase.name}` ? null : `phase:${graphPhase.name}`,
           )
         }
-        nodeRef={(el) => {
-          if (el) phaseRefs.current.set(graphPhase.name, el);
-          else phaseRefs.current.delete(graphPhase.name);
-        }}
       />
     );
   };
@@ -1376,6 +1373,10 @@ function PipelineDag({
         prEnabled={true}
         renderPhase={renderPhase}
         renderTouchpoint={renderTouchpoint}
+        phaseRef={(phase, el) => {
+          if (el) phaseRefs.current.set(phase.name, el);
+          else phaseRefs.current.delete(phase.name);
+        }}
         ariaLabel="pipeline"
         entryPhaseName={activeEntry}
       />
@@ -1429,6 +1430,7 @@ type PhaseRollup = {
   attempts: GraphNode[];
   latest: GraphNode;
   status: { cls: string; text: string };
+  jobLabel: string;
 };
 
 function phaseNodesForRun(graph: IssueGraph, run: GraphNode): PhaseRollup[] {
@@ -1443,7 +1445,11 @@ function phaseNodesForRun(graph: IssueGraph, run: GraphNode): PhaseRollup[] {
   const out: PhaseRollup[] = [];
   for (const [phaseName, arr] of byPhase) {
     const latest = arr[arr.length - 1];
-    out.push({ phaseName, attempts: arr, latest, status: phaseStatus(latest) });
+    const jobs = nativeAttemptJobs(latest.metadata.jobs);
+    const jobLabel = jobs.length > 1
+      ? `${jobs.length} jobs`
+      : jobs[0]?.name || jobs[0]?.job_id || stringOrNull(latest.metadata.phase_kind) || "job";
+    out.push({ phaseName, attempts: arr, latest, status: phaseStatus(latest), jobLabel });
   }
   if (out.length === 0) {
     // Run exists but no attempts dispatched yet (rare — pre-record_started
@@ -1453,6 +1459,7 @@ function phaseNodesForRun(graph: IssueGraph, run: GraphNode): PhaseRollup[] {
       attempts: [],
       latest: run,
       status: { cls: "info", text: "pending" },
+      jobLabel: "pending",
     });
   }
   return out;
@@ -1500,22 +1507,19 @@ function DagPhaseNode({
   phase,
   selected,
   onSelect,
-  nodeRef,
 }: {
   phase: PhaseRollup;
   selected: boolean;
   onSelect: () => void;
-  nodeRef?: (el: HTMLButtonElement | null) => void;
 }) {
   return (
     <button
-      ref={nodeRef}
       type="button"
       className={`dag-node dag-node-phase${selected ? " selected" : ""}`}
       onClick={onSelect}
       aria-pressed={selected}
     >
-      <div className="dag-node-label">{phase.phaseName}</div>
+      <div className="dag-node-label">{phase.jobLabel}</div>
       <div className="dag-node-state">
         <span className={`pill ${phase.status.cls}`}>{phase.status.text}</span>
       </div>

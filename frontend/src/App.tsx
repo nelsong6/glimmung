@@ -1288,14 +1288,8 @@ function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
           ? "verify"
           : phase.kind;
     return (
-      <div
-        className="dag-node dag-node-phase dag-node-definition"
-        ref={(el) => {
-          if (el) phaseRefs.current.set(phase.name, el);
-          else phaseRefs.current.delete(phase.name);
-        }}
-      >
-        <div className="dag-node-label">{phase.name}</div>
+      <div className="dag-node dag-node-phase dag-node-definition">
+        <div className="dag-node-label">{phase.kind || "job"}</div>
         <div className="dag-node-meta dim mono">{meta}</div>
       </div>
     );
@@ -1322,6 +1316,10 @@ function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
           ariaLabel={`${workflow.name} workflow graph`}
           renderPhase={renderPhase}
           renderTouchpoint={renderTouchpoint}
+          phaseRef={(phase, el) => {
+            if (el) phaseRefs.current.set(phase.name, el);
+            else phaseRefs.current.delete(phase.name);
+          }}
         />
         <div
           ref={bandRef}

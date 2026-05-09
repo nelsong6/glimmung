@@ -64,10 +64,10 @@ export function computeRecyclePaths(
     const { s, t } = r;
     const laneY = RECYCLE_BAND_TOP_PAD + (lane + 0.5) * RECYCLE_LANE_HEIGHT;
     const sX = s.cx;
-    const sY = 0;
+    const sY = s.bottom;
     const cornerX = t.left - RECYCLE_TARGET_OVERSHOOT;
     const tX = t.left;
-    const tY = 0;
+    const tY = t.cy;
     const d = [
       `M ${sX} ${sY}`,
       `L ${sX} ${laneY}`,

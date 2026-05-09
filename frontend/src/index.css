@@ -1858,6 +1858,46 @@ h2 .inline-action,
   cursor: pointer;
   text-align: left;
 }
+.dag-phase {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 172px;
+  padding: 8px;
+  background: color-mix(in srgb, var(--surface) 58%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  border-radius: 5px;
+}
+.dag-phase-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 18px;
+}
+.dag-phase-kicker {
+  color: var(--fg-dimmer);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.dag-phase-title {
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.dag-phase-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dag-phase .dag-node {
+  width: 100%;
+  min-width: 0;
+}
 .dag-entry {
   min-width: 96px;
   cursor: default;
@@ -2198,7 +2238,5 @@ h2 .inline-action,
 .dag-column-parallel {
   /* Subtle visual cue that this column has multiple phases running
      concurrently — matches the existing surface tint convention. */
-  padding: 4px;
-  background: color-mix(in srgb, var(--surface) 50%, transparent);
-  border-left: 2px solid var(--state-info-fg);
+  gap: 10px;
 }

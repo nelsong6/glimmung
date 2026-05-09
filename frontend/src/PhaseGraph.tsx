@@ -39,6 +39,11 @@ export type PhaseGraphProps = {
    * default "definition" rendering is used.
    */
   renderTouchpoint?: () => ReactNode;
+  /**
+   * Ref callback for the visible phase container. Recycle/entry arrows
+   * should target this surface rather than a child job node.
+   */
+  phaseRef?: (phase: PhaseGraphPhase, el: HTMLDivElement | null) => void;
   /** Extra className on the wrapping `.dag` div (e.g. `dag-definition`). */
   dagClassName?: string;
   /** Aria label on the wrapping `.dag` div. */
@@ -97,7 +102,7 @@ function defaultPhaseNode(phase: PhaseGraphPhase): ReactNode {
   // run-pipeline strip.
   return (
     <div className="dag-node dag-node-phase dag-node-definition">
-      <div className="dag-node-label">{phase.name}</div>
+      <div className="dag-node-label">{phase.kind || "job"}</div>
       <div className="dag-node-meta dim mono">{meta}</div>
     </div>
   );
@@ -117,6 +122,7 @@ export function PhaseGraph({
   prEnabled,
   renderPhase = defaultPhaseNode,
   renderTouchpoint = defaultTouchpointNode,
+  phaseRef,
   dagClassName,
   ariaLabel,
   entryPhaseName = null,
@@ -159,7 +165,17 @@ export function PhaseGraph({
             )}
             <div className={`dag-column${col.length > 1 ? " dag-column-parallel" : ""}`}>
               {col.map((phase) => (
-                <Fragment key={phase.name}>{renderPhase(phase)}</Fragment>
+                <div
+                  key={phase.name}
+                  className="dag-phase"
+                  ref={(el) => phaseRef?.(phase, el)}
+                >
+                  <div className="dag-phase-head">
+                    <span className="dag-phase-kicker">phase</span>
+                    <span className="dag-phase-title">{phase.name}</span>
+                  </div>
+                  <div className="dag-phase-body">{renderPhase(phase)}</div>
+                </div>
               ))}
             </div>
           </Fragment>
