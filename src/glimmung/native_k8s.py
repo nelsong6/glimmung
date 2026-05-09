@@ -78,6 +78,7 @@ class NativeKubernetesLauncher:
                 run_id=run_id,
                 attempt_index=attempt_index,
             )
+            await self.ensure_playwright_slot(lease_doc)
             job_names: list[str] = []
             first_secret_name = ""
             for job_spec in phase.jobs:
@@ -113,6 +114,8 @@ class NativeKubernetesLauncher:
         except Exception:
             with suppress(Exception):
                 await self.delete_attempt_secret(run_id=run_id, attempt_index=attempt_index)
+            with suppress(Exception):
+                await self.delete_playwright_slot(lease_doc)
             raise
         await _stamp_lease_launched(
             cosmos,
@@ -121,6 +124,111 @@ class NativeKubernetesLauncher:
             secret_name=first_secret_name,
         )
         return job_names
+
+    async def ensure_playwright_slot(self, lease_doc: dict[str, Any]) -> str | None:
+        """Ensure a slot-scoped Playwright server exists for an active native lease.
+
+        The worker is keyed by the assigned native slot, not by run or job,
+        so every job using the same validation slot shares exactly one
+        browser server and unrelated slots stay isolated.
+        """
+        if not _playwright_enabled(self._settings):
+            return None
+        slot = _playwright_slot(lease_doc)
+        if slot is None:
+            return None
+
+        namespace = self._settings.native_runner_namespace
+        name = _playwright_resource_name(slot["project"], slot["slot_name"])
+        labels = _playwright_labels(slot)
+        deployment = _playwright_deployment(
+            settings=self._settings,
+            name=name,
+            namespace=namespace,
+            labels=labels,
+        )
+        service = _playwright_service(
+            settings=self._settings,
+            name=name,
+            namespace=namespace,
+            labels=labels,
+        )
+        try:
+            await self._create_deployment(name, deployment)
+            await self._create_service(name, service)
+        except Exception:
+            with suppress(Exception):
+                await self.delete_playwright_slot_by_name(
+                    project=slot["project"],
+                    slot_name=slot["slot_name"],
+                )
+            raise
+        return _playwright_ws_endpoint(self._settings, name)
+
+    async def delete_playwright_slot(self, lease_doc: dict[str, Any]) -> None:
+        slot = _playwright_slot(lease_doc)
+        if slot is None:
+            return
+        await self.delete_playwright_slot_by_name(
+            project=slot["project"],
+            slot_name=slot["slot_name"],
+        )
+
+    async def delete_playwright_slot_by_name(self, *, project: str, slot_name: str) -> None:
+        name = _playwright_resource_name(project, slot_name)
+        namespace = self._settings.native_runner_namespace
+        for path in (
+            f"/apis/apps/v1/namespaces/{namespace}/deployments/{name}",
+            f"/api/v1/namespaces/{namespace}/services/{name}",
+        ):
+            try:
+                await self._request("DELETE", path)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 404:
+                    raise
+
+    async def reconcile_playwright_slots(self, active_native_leases: list[dict[str, Any]]) -> None:
+        """Delete Playwright workers whose native slot lease is no longer active."""
+        if not _playwright_enabled(self._settings):
+            return
+        namespace = self._settings.native_runner_namespace
+        desired = {
+            _playwright_resource_name(slot["project"], slot["slot_name"])
+            for lease_doc in active_native_leases
+            if (slot := _playwright_slot(lease_doc)) is not None
+        }
+        for lease_doc in active_native_leases:
+            await self.ensure_playwright_slot(lease_doc)
+        selector = urlencode({"labelSelector": "glimmung.romaine.life/slot-playwright=true"})
+        try:
+            deployments = await self._request(
+                "GET",
+                f"/apis/apps/v1/namespaces/{namespace}/deployments?{selector}",
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+            deployments = {"items": []}
+        for item in deployments.get("items") or []:
+            metadata = item.get("metadata") or {}
+            name = str(metadata.get("name") or "")
+            if name and name not in desired:
+                try:
+                    await self._request(
+                        "DELETE",
+                        f"/apis/apps/v1/namespaces/{namespace}/deployments/{name}",
+                    )
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code != 404:
+                        raise
+                try:
+                    await self._request(
+                        "DELETE",
+                        f"/api/v1/namespaces/{namespace}/services/{name}",
+                    )
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code != 404:
+                        raise
 
     async def _ensure_attempt_secret(
         self, name: str, *, extra_labels: dict[str, str] | None = None,
@@ -159,6 +267,26 @@ class NativeKubernetesLauncher:
     async def _create_job(self, name: str, manifest: dict[str, Any]) -> None:
         namespace = self._settings.native_runner_namespace
         path = f"/apis/batch/v1/namespaces/{namespace}/jobs"
+        try:
+            await self._request("POST", path, json=manifest)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 409:
+                return
+            raise
+
+    async def _create_deployment(self, name: str, manifest: dict[str, Any]) -> None:
+        namespace = self._settings.native_runner_namespace
+        path = f"/apis/apps/v1/namespaces/{namespace}/deployments"
+        try:
+            await self._request("POST", path, json=manifest)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 409:
+                return
+            raise
+
+    async def _create_service(self, name: str, manifest: dict[str, Any]) -> None:
+        namespace = self._settings.native_runner_namespace
+        path = f"/api/v1/namespaces/{namespace}/services"
         try:
             await self._request("POST", path, json=manifest)
         except httpx.HTTPStatusError as exc:
@@ -792,6 +920,16 @@ def _universal_env(
             },
         },
     ]
+    if _playwright_enabled(settings):
+        slot_name = str(metadata.get("native_slot_name") or "").strip()
+        if slot_name:
+            service_name = _playwright_resource_name(project, slot_name)
+            endpoint = _playwright_ws_endpoint(settings, service_name)
+            env.extend([
+                {"name": "GLIMMUNG_PLAYWRIGHT_WS_ENDPOINT", "value": endpoint},
+                {"name": "PLAYWRIGHT_WS_ENDPOINT", "value": endpoint},
+                {"name": "PW_TEST_CONNECT_WS_ENDPOINT", "value": endpoint},
+            ])
     for key in (
         "issue_id",
         "issue_repo",
@@ -835,6 +973,165 @@ def _managed_labels() -> dict[str, str]:
     return {
         "app.kubernetes.io/managed-by": "glimmung",
         "app.kubernetes.io/part-of": "glimmung-native-runner",
+    }
+
+
+def _playwright_enabled(settings: Settings) -> bool:
+    return bool(getattr(settings, "native_runner_playwright_enabled", True))
+
+
+def _playwright_slot(lease_doc: dict[str, Any]) -> dict[str, str] | None:
+    metadata = lease_doc.get("metadata") or {}
+    slot_name = str(metadata.get("native_slot_name") or "").strip()
+    if not slot_name:
+        return None
+    return {
+        "project": str(lease_doc.get("project") or "").strip(),
+        "slot_name": slot_name,
+        "slot_index": str(metadata.get("native_slot_index") or "").strip(),
+        "lease_id": str(lease_doc.get("id") or "").strip(),
+    }
+
+
+def _playwright_resource_name(project: str, slot_name: str) -> str:
+    base = _dns_label(f"glim-pw-{project}-{slot_name}")
+    if len(base) <= 63:
+        return base
+    digest = hashlib.sha256(base.encode("utf-8")).hexdigest()[:8]
+    return f"{base[:54].rstrip('-')}-{digest}"
+
+
+def _playwright_labels(slot: dict[str, str]) -> dict[str, str]:
+    labels = {
+        **_managed_labels(),
+        "glimmung.romaine.life/slot-playwright": "true",
+        "glimmung.romaine.life/project": _label_value(slot["project"]),
+        "glimmung.romaine.life/native-slot-name": _label_value(slot["slot_name"]),
+    }
+    if slot.get("slot_index"):
+        labels["glimmung.romaine.life/native-slot-index"] = _label_value(slot["slot_index"])
+    if slot.get("lease_id"):
+        labels["glimmung.romaine.life/lease-id"] = _label_value(slot["lease_id"])
+    return labels
+
+
+def _playwright_ws_endpoint(settings: Settings, service_name: str) -> str:
+    namespace = settings.native_runner_namespace
+    port = int(getattr(settings, "native_runner_playwright_port", 3000))
+    return f"ws://{service_name}.{namespace}.svc.cluster.local:{port}/"
+
+
+def _playwright_deployment(
+    *,
+    settings: Settings,
+    name: str,
+    namespace: str,
+    labels: dict[str, str],
+) -> dict[str, Any]:
+    port = int(getattr(settings, "native_runner_playwright_port", 3000))
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+            "labels": labels,
+        },
+        "spec": {
+            "replicas": 1,
+            "selector": {"matchLabels": {"app.kubernetes.io/name": name}},
+            "template": {
+                "metadata": {
+                    "labels": {
+                        **labels,
+                        "app.kubernetes.io/name": name,
+                    },
+                },
+                "spec": {
+                    "containers": [
+                        {
+                            "name": "playwright",
+                            "image": getattr(
+                                settings,
+                                "native_runner_playwright_image",
+                                "romainecr.azurecr.io/agent-container:latest",
+                            ),
+                            "command": [
+                                "npx",
+                                "playwright",
+                                "run-server",
+                                "--host",
+                                "0.0.0.0",
+                                "--port",
+                                str(port),
+                            ],
+                            "ports": [{"name": "ws", "containerPort": port}],
+                            "env": [
+                                {
+                                    "name": "PLAYWRIGHT_BROWSERS_PATH",
+                                    "value": "/ms-playwright",
+                                }
+                            ],
+                            "resources": {
+                                "requests": {
+                                    "cpu": getattr(
+                                        settings,
+                                        "native_runner_playwright_cpu_request",
+                                        "100m",
+                                    ),
+                                    "memory": getattr(
+                                        settings,
+                                        "native_runner_playwright_memory_request",
+                                        "256Mi",
+                                    ),
+                                },
+                                "limits": {
+                                    "cpu": getattr(
+                                        settings,
+                                        "native_runner_playwright_cpu_limit",
+                                        "1000m",
+                                    ),
+                                    "memory": getattr(
+                                        settings,
+                                        "native_runner_playwright_memory_limit",
+                                        "1Gi",
+                                    ),
+                                },
+                            },
+                        }
+                    ]
+                },
+            },
+        },
+    }
+
+
+def _playwright_service(
+    *,
+    settings: Settings,
+    name: str,
+    namespace: str,
+    labels: dict[str, str],
+) -> dict[str, Any]:
+    port = int(getattr(settings, "native_runner_playwright_port", 3000))
+    return {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+            "labels": labels,
+        },
+        "spec": {
+            "selector": {"app.kubernetes.io/name": name},
+            "ports": [
+                {
+                    "name": "ws",
+                    "port": port,
+                    "targetPort": "ws",
+                }
+            ],
+        },
     }
 
 

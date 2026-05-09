@@ -96,6 +96,13 @@ class Settings(BaseSettings):
     native_runner_namespace_role: str = "admin"
     native_runner_codex_credentials_secret: str = "codex-credentials"
     native_runner_codex_credentials_mount_path: str = "/etc/codex-creds"
+    native_runner_playwright_enabled: bool = True
+    native_runner_playwright_image: str = "romainecr.azurecr.io/agent-container:latest"
+    native_runner_playwright_port: int = 3000
+    native_runner_playwright_cpu_request: str = "100m"
+    native_runner_playwright_memory_request: str = "256Mi"
+    native_runner_playwright_cpu_limit: str = "1000m"
+    native_runner_playwright_memory_limit: str = "1Gi"
     native_standby_dns_namespace: str = "glimmung"
     native_standby_dns_gateway_namespace: str = "envoy-gateway-system"
     native_standby_dns_gateway_name: str = "main"

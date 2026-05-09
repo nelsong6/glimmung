@@ -36,6 +36,13 @@ def _settings():
         native_standby_dns_gateway_name="main",
         native_standby_dns_target="172.179.163.96",
         native_standby_dns_default_ttl=300,
+        native_runner_playwright_enabled=True,
+        native_runner_playwright_image="romainecr.azurecr.io/agent-container:latest",
+        native_runner_playwright_port=3000,
+        native_runner_playwright_cpu_request="100m",
+        native_runner_playwright_memory_request="256Mi",
+        native_runner_playwright_cpu_limit="1000m",
+        native_runner_playwright_memory_limit="1Gi",
         k8s_sa_token_path="/var/run/token",
         k8s_ca_cert_path="/var/run/ca.crt",
         k8s_api_host="https://kubernetes.default.svc",
@@ -118,6 +125,33 @@ class _PodLogLauncher(_RecordingLauncher):
     async def _request_text(self, method: str, path: str):
         self.calls.append({"method": method, "path": path, "json": None})
         return "line one\nline two\n"
+
+
+class _ExistingPlaywrightLauncher(_RecordingLauncher):
+    async def _request(self, method: str, path: str, *, json=None):
+        self.calls.append({"method": method, "path": path, "json": json})
+        if method == "POST" and (
+            path.endswith("/deployments") or path.endswith("/services")
+        ):
+            request = httpx.Request(method, f"https://kubernetes.default.svc{path}")
+            response = httpx.Response(409, request=request)
+            raise httpx.HTTPStatusError("conflict", request=request, response=response)
+        return {}
+
+
+class _ReconcilePlaywrightLauncher(_RecordingLauncher):
+    async def _request(self, method: str, path: str, *, json=None):
+        self.calls.append({"method": method, "path": path, "json": json})
+        if method == "GET" and path.startswith(
+            "/apis/apps/v1/namespaces/glimmung-runs/deployments?"
+        ):
+            return {
+                "items": [
+                    {"metadata": {"name": "glim-pw-ambience-ambience-slot-1"}},
+                    {"metadata": {"name": "glim-pw-ambience-ambience-slot-2"}},
+                ]
+            }
+        return {}
 
 
 def _cosmos():
@@ -228,6 +262,15 @@ def test_job_manifest_per_job_renders_one_container_pod():
     )
     assert env["GLIMMUNG_NATIVE_SLOT_INDEX"]["value"] == "3"
     assert env["GLIMMUNG_NATIVE_SLOT_NAME"]["value"] == "ambience-slot-3"
+    assert env["GLIMMUNG_PLAYWRIGHT_WS_ENDPOINT"]["value"] == (
+        "ws://glim-pw-ambience-ambience-slot-3.glimmung-runs.svc.cluster.local:3000/"
+    )
+    assert env["PLAYWRIGHT_WS_ENDPOINT"]["value"] == (
+        "ws://glim-pw-ambience-ambience-slot-3.glimmung-runs.svc.cluster.local:3000/"
+    )
+    assert env["PW_TEST_CONNECT_WS_ENDPOINT"]["value"] == (
+        "ws://glim-pw-ambience-ambience-slot-3.glimmung-runs.svc.cluster.local:3000/"
+    )
     assert env["GLIMMUNG_WORK_CONTEXT_ID"]["value"] == "playbook:01PB:shared"
     assert env["GLIMMUNG_WORK_CONTEXT_BRANCH"]["value"] == "glimmung/playbooks/01pb"
     assert env["GLIMMUNG_WORK_CONTEXT_BASE_REF"]["value"] == "main"
@@ -425,6 +468,114 @@ async def test_delete_attempt_job_label_selects_then_deletes_per_job():
         "path": "/apis/batch/v1/namespaces/glimmung-runs/jobs/glim-01krnative0000000000000000-2",
         "json": body,
     }
+
+
+@pytest.mark.asyncio
+async def test_ensure_playwright_slot_creates_deployment_and_service():
+    launcher = _RecordingLauncher(_settings())
+    lease_doc = {
+        "id": "01LEASE",
+        "project": "ambience",
+        "metadata": {
+            "native_k8s": True,
+            "native_slot_index": "1",
+            "native_slot_name": "ambience-slot-1",
+        },
+    }
+
+    endpoint = await launcher.ensure_playwright_slot(lease_doc)
+
+    assert endpoint == (
+        "ws://glim-pw-ambience-ambience-slot-1.glimmung-runs.svc.cluster.local:3000/"
+    )
+    deployment, service = launcher.calls
+    assert deployment["method"] == "POST"
+    assert deployment["path"] == "/apis/apps/v1/namespaces/glimmung-runs/deployments"
+    deployment_body = deployment["json"]
+    assert deployment_body["metadata"]["name"] == "glim-pw-ambience-ambience-slot-1"
+    assert deployment_body["metadata"]["labels"]["glimmung.romaine.life/slot-playwright"] == "true"
+    container = deployment_body["spec"]["template"]["spec"]["containers"][0]
+    assert container["image"] == "romainecr.azurecr.io/agent-container:latest"
+    assert container["command"] == [
+        "npx",
+        "playwright",
+        "run-server",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "3000",
+    ]
+    assert service == {
+        "method": "POST",
+        "path": "/api/v1/namespaces/glimmung-runs/services",
+        "json": {
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {
+                "name": "glim-pw-ambience-ambience-slot-1",
+                "namespace": "glimmung-runs",
+                "labels": deployment_body["metadata"]["labels"],
+            },
+            "spec": {
+                "selector": {"app.kubernetes.io/name": "glim-pw-ambience-ambience-slot-1"},
+                "ports": [{"name": "ws", "port": 3000, "targetPort": "ws"}],
+            },
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_ensure_playwright_slot_is_idempotent_on_existing_resources():
+    launcher = _ExistingPlaywrightLauncher(_settings())
+
+    await launcher.ensure_playwright_slot({
+        "id": "01LEASE",
+        "project": "ambience",
+        "metadata": {
+            "native_k8s": True,
+            "native_slot_index": "1",
+            "native_slot_name": "ambience-slot-1",
+        },
+    })
+
+    assert [call["method"] for call in launcher.calls] == ["POST", "POST"]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_playwright_slots_deletes_workers_without_active_lease():
+    launcher = _ReconcilePlaywrightLauncher(_settings())
+
+    await launcher.reconcile_playwright_slots([
+        {
+            "id": "01LEASE",
+            "project": "ambience",
+            "metadata": {
+                "native_k8s": True,
+                "native_slot_index": "1",
+                "native_slot_name": "ambience-slot-1",
+            },
+        }
+    ])
+
+    assert [call["method"] for call in launcher.calls[:3]] == ["POST", "POST", "GET"]
+    assert launcher.calls[3:] == [
+        {
+            "method": "DELETE",
+            "path": (
+                "/apis/apps/v1/namespaces/glimmung-runs/deployments/"
+                "glim-pw-ambience-ambience-slot-2"
+            ),
+            "json": None,
+        },
+        {
+            "method": "DELETE",
+            "path": (
+                "/api/v1/namespaces/glimmung-runs/services/"
+                "glim-pw-ambience-ambience-slot-2"
+            ),
+            "json": None,
+        },
+    ]
 
 
 @pytest.mark.asyncio

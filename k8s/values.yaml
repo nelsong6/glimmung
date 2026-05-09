@@ -36,6 +36,17 @@ nativeRunner:
     refreshInterval: 1h
     kvKey: codex-credentials
     secretKey: auth.json
+  playwright:
+    enabled: true
+    image: romainecr.azurecr.io/agent-container:latest
+    port: 3000
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 1000m
+        memory: 1Gi
   # Dedicated native runner identity from tofu/identity.tf's
   # `glimmung_native_runner_identity_client_id` output.
   serviceAccountClientId: "a865aa27-e76e-4363-ab53-375712bd6db8"
