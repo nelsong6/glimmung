@@ -8,12 +8,11 @@ shown to the user must follow Glimmung's product model:
 
 ```text
 Issue
-  -> Run
-    -> Cycle
-      -> Stage
-        -> Job
-          -> Step
-      -> Evidence
+  -> Run[]                  # flat issue-scoped history
+    -> Stage
+      -> Job
+        -> Step
+    -> Evidence
   -> Touchpoint
 ```
 
@@ -32,12 +31,12 @@ Suggested mapping:
 
 ```text
 Issue          -> Issue / origin
-Run            -> Continuous lifecycle from one trigger
-Cycle          -> One pass through the graph inside a Run
+Run            -> One durable execution record
+Cycle          -> A run whose origin is recycle/resume/request-changes
 Workflow phase -> Stage
 Native/GHA job -> Job
 Native/GHA step -> Step
-Attempt        -> Executor-level attempt, not the main UI container
+Attempt        -> Display counter or executor-level retry attribute only
 Report         -> Touchpoint / evidence, depending on context
 ```
 
@@ -46,16 +45,17 @@ prefer stage/job/step language unless it is showing raw backend metadata.
 
 The key distinction is **Run vs Cycle**:
 
-- A **Run** starts from one continuous trigger or origin event and ends
-  when the issue is accepted, abandoned, or otherwise closed out.
-- A **Cycle** is one traversal through the run graph. Requesting changes,
-  recycling a stage, or resuming from a later point may create another
-  cycle under the same run.
-- A **Stage attempt** remains a lower-level executor fact. Do not use
-  attempt as the user-facing name for the whole graph pass.
+- A **Run** is the durable unit of execution, scheduling, logs, cost,
+  lifecycle, abort, and reporting.
+- A **Cycle** is not a nested object. It is a run whose origin links it to
+  an earlier run, usually because a recycle policy, resume action, or
+  request-changes signal re-entered the workflow.
+- An **attempt** is not a Glimmung entity. If useful, it is a field on a
+  run or phase execution, such as an issue-scoped display number (`1.2`)
+  or an executor retry counter.
 
-This lets Glimmung show "the run" as the complete story while still
-showing each pass through the graph as a distinct cycle.
+This lets Glimmung show a flat issue run history while still grouping
+related runs into a visible cycle lineage.
 
 **Touchpoint** replaces the old user-facing `Report` concept. A
 Touchpoint is the issue-level live summary and navigation page: what the
@@ -86,7 +86,7 @@ Glimmung needs to explain things Argo does not own:
 
 - Issues and issue locks.
 - Leases and scarce agent capacity.
-- Stage attempts and resume/recycle paths.
+- Run cycle lineage and resume/recycle paths.
 - Validation environments.
 - Screenshots and UI review evidence.
 - PR/evidence/touchpoint state.
@@ -122,7 +122,6 @@ Issues / glimmung / Add design portfolio / Run 01KQ...
 The run page should support deep links to:
 
 - the current run overview,
-- a cycle,
 - a stage,
 - a job,
 - a specific step log,
@@ -133,8 +132,8 @@ The run page should support deep links to:
 The overview should show the high-level execution shape:
 
 ```text
-Cycle 1: env-prep -> agent-execute -> touchpoint
-Cycle 2: agent-execute -> verify -> touchpoint
+Run 1:   env-prep -> agent-execute -> touchpoint
+Run 1.1: agent-execute -> verify -> touchpoint
 ```
 
 For more complex runs, the overview should show stage ordering and
@@ -174,7 +173,7 @@ Stage detail should show:
 - stage name,
 - executor kind,
 - state,
-- attempt count,
+- retry count when relevant,
 - duration,
 - cost when known,
 - input/output values,
@@ -269,10 +268,10 @@ should aggregate the things that need human attention:
 
 Touchpoints are one-to-one with issues. They should not need their own
 top-level tab or an issue-local collection route. The issue workspace should
-surface the current Touchpoint alongside issue context and the run/cycle
+surface the current Touchpoint alongside issue context and the run lineage
 graph. Historical or per-Run evidence should live in Run and RunReport views,
 with the Touchpoint linking to the relevant current Run instead of carrying
-its own history. The Touchpoint UI should not enumerate Runs, attempts, or
+its own history. The Touchpoint UI should not enumerate Runs, retries, or
 past PRs as its primary content; those belong in the Runs tab and RunReport
 surfaces.
 
@@ -288,7 +287,7 @@ Add portfolio rows for at least:
 - native job with step list and selected terminal log,
 - failed step with log output,
 - resumed run with skipped earlier stages,
-- stage recycle/retry,
+- cycle run created by recycle/retry,
 - pending/no-host state,
 - aborted/cancelled state,
 - Touchpoint evidence checklist.
@@ -323,7 +322,8 @@ StageNode
   label
   state
   kind
-  attempts[]
+  retry_count
+  cycle_number
   jobs[]
   inputs
   outputs

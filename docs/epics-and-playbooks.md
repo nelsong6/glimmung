@@ -30,7 +30,7 @@ An Epic should carry:
 - agent-facing background that every entry needs
 
 An Epic is not the execution queue. It should not own dispatch state, lease
-state, run attempts, or report transitions. Those belong below it.
+state, run cycles, or report transitions. Those belong below it.
 
 For now, Epic is a documented boundary rather than a persisted model in the
 codebase. Until the model exists, keep Epic context in the Playbook

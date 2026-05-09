@@ -144,15 +144,28 @@ projects/<project>
 projects/<project>/workflows/<workflow>
 projects/<project>/workflows/<workflow>/phases/<phase>
 projects/<project>/runs/<run_id>
-projects/<project>/runs/<run_id>/attempts/<i>
-projects/<project>/runs/<run_id>/attempts/<i>/jobs/<job_id>
-projects/<project>/runs/<run_id>/attempts/<i>/jobs/<j>/steps/<slug>
+projects/<project>/runs/<run_id>/phases/<phase>
+projects/<project>/runs/<run_id>/phases/<phase>/jobs/<job_id>
+projects/<project>/runs/<run_id>/phases/<phase>/jobs/<job_id>/steps/<slug>
 ```
 
 Logs, MCP tool outputs, error messages, and notification surfaces
 all emit these. Inside a known scope (e.g. inside one run's logs),
-the trailing path can be elided — `attempts/1/jobs/agent-execute`
+the trailing path can be elided — `phases/agent-execute/jobs/agent`
 is enough when the run is implicit.
+
+Runs are the durable execution records. Recycles, resumes, and
+request-changes loops create additional issue-scoped runs, not nested
+attempt entities. A run may carry lineage fields such as
+`parent_run_id`, `root_run_id`, `origin`, `entrypoint_phase`, and
+cycle display numbers (for example `1.1`, `1.2`) so the UI can
+group related runs without inventing an attempt layer. Within one run,
+the workflow is represented by phase/job/step execution records.
+
+Use **attempt** only as an attribute or display counter when an executor
+or recycle policy needs to say "this is the second try of this run or
+phase." It is not a first-class Glimmung entity and should not appear as
+a public hierarchy between run and job.
 
 Never store paths as canonical identifiers — compute at render
 time from the entity's slug + parent context. This avoids

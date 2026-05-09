@@ -3088,6 +3088,7 @@ class AbortRunResult(BaseModel):
     state: str
     run_id: str
     run_number: int | None = None
+    run_display_number: str | None = None
     gh_run_cancelled: bool | None = None
     issue_lock_released: bool | None = None
     pr_lock_released: bool | None = None
@@ -3133,6 +3134,12 @@ class RunReport(BaseModel):
     project: str
     run_id: str
     run_number: int | None = None
+    run_display_number: str | None = None
+    parent_run_id: str | None = None
+    root_run_id: str | None = None
+    origin_kind: str | None = None
+    is_cycle: bool = False
+    cycle_number: int | None = None
     workflow: str
     issue_id: str | None = None
     issue_repo: str | None = None
@@ -3191,14 +3198,14 @@ async def list_project_runs(
 async def get_run_report_by_number(
     project: str = Path(...),
     issue_number: int = Path(...),
-    run_number: int = Path(...),
+    run_number: str = Path(...),
 ) -> RunReport:
-    """Materialized RunReport keyed by issue-scoped run number."""
-    found = await run_ops.read_run_by_number(
+    """Materialized RunReport keyed by issue-scoped run number/display label."""
+    found = await run_ops.read_run_by_ref(
         app.state.cosmos,
         project=project,
         issue_number=issue_number,
-        run_number=run_number,
+        run_ref=run_number,
     )
     if found is None:
         raise HTTPException(
@@ -3320,6 +3327,7 @@ async def _abort_run(
         state="already_terminal" if terminal else "aborted",
         run_id=run.id,
         run_number=run.run_number,
+        run_display_number=run_ops.run_display_number(run),
         gh_run_cancelled=gh_cancelled,
         issue_lock_released=issue_lock_released,
         pr_lock_released=pr_lock_released,
@@ -3419,6 +3427,12 @@ def _run_report_from_run(run: Run) -> RunReport:
         project=run.project,
         run_id=run.id,
         run_number=run.run_number,
+        run_display_number=run_ops.run_display_number(run),
+        parent_run_id=run.parent_run_id,
+        root_run_id=run.root_run_id,
+        origin_kind=run.origin_kind,
+        is_cycle=run.is_cycle,
+        cycle_number=run.cycle_number,
         workflow=run.workflow,
         issue_id=run.issue_id or None,
         issue_repo=run.issue_repo or None,
@@ -3487,15 +3501,15 @@ async def abort_run(
 async def abort_run_by_number(
     project: str = Path(...),
     issue_number: int = Path(...),
-    run_number: int = Path(...),
+    run_number: str = Path(...),
     reason: str = "aborted_via_admin_api",
 ) -> AbortRunResult:
-    """Abort a Run by the issue-scoped human run number."""
-    found = await run_ops.read_run_by_number(
+    """Abort a Run by the issue-scoped human run number/display label."""
+    found = await run_ops.read_run_by_ref(
         app.state.cosmos,
         project=project,
         issue_number=issue_number,
-        run_number=run_number,
+        run_ref=run_number,
     )
     if found is None:
         raise HTTPException(
@@ -3898,16 +3912,16 @@ async def native_run_events(
 async def native_run_events_by_number(
     project: str = Path(...),
     issue_number: int = Path(...),
-    run_number: int = Path(...),
+    run_number: str = Path(...),
     attempt_index: int | None = Query(None, ge=0),
     job_id: str | None = Query(None),
     limit: int | None = Query(None, ge=1, le=1000),
 ) -> NativeRunLogsResponse:
-    found = await run_ops.read_run_by_number(
+    found = await run_ops.read_run_by_ref(
         app.state.cosmos,
         project=project,
         issue_number=issue_number,
-        run_number=run_number,
+        run_ref=run_number,
     )
     if found is None:
         raise HTTPException(
@@ -4393,13 +4407,13 @@ async def replay_run_decision_by_number(
     req: RunReplayRequest,
     project: str = Path(...),
     issue_number: int = Path(...),
-    run_number: int = Path(...),
+    run_number: str = Path(...),
 ) -> ReplayResult:
-    found = await run_ops.read_run_by_number(
+    found = await run_ops.read_run_by_ref(
         app.state.cosmos,
         project=project,
         issue_number=issue_number,
-        run_number=run_number,
+        run_ref=run_number,
     )
     if found is None:
         raise HTTPException(
@@ -4505,13 +4519,13 @@ async def resume_run_by_number(
     req: RunResumeRequest,
     project: str = Path(...),
     issue_number: int = Path(...),
-    run_number: int = Path(...),
+    run_number: str = Path(...),
 ) -> ResumeResult:
-    found = await run_ops.read_run_by_number(
+    found = await run_ops.read_run_by_ref(
         app.state.cosmos,
         project=project,
         issue_number=issue_number,
-        run_number=run_number,
+        run_ref=run_number,
     )
     if found is None:
         raise HTTPException(
@@ -6666,17 +6680,26 @@ async def _build_system_graph(
             run_number = run_ops.run_number_map(issue_docs).get(run.id)
             if run_number is not None:
                 run = run.model_copy(update={"run_number": run_number})
+        run_display = run_ops.run_display_number(run) or (
+            str(run_number) if run_number is not None else ""
+        )
         runs.append(run)
         run_node_id = f"run:{run.id}"
         nodes.append(GraphNode(
             id=run_node_id,
             kind="run",
-            label=f"Run {run_number}" if run_number is not None else run.workflow,
+            label=f"Run {run_display}" if run_display else run.workflow,
             state=run.state.value,
             timestamp=run.created_at.isoformat(),
             metadata={
                 "run_id": run.id,
                 "run_number": run_number,
+                "run_display_number": run_display or None,
+                "parent_run_id": run.parent_run_id,
+                "root_run_id": run.root_run_id,
+                "origin_kind": run.origin_kind,
+                "is_cycle": run.is_cycle,
+                "cycle_number": run.cycle_number,
                 "project": run.project,
                 "workflow": run.workflow,
                 "issue_id": run.issue_id,
