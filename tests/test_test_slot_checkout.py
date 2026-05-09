@@ -32,14 +32,17 @@ def _cosmos() -> SimpleNamespace:
     )
 
 
-class _RecordingPlaywrightLauncher:
+class _RecordingTestSlotLauncher:
     def __init__(self) -> None:
-        self.ensured: list[dict] = []
+        self.ensured_namespaces: list[dict] = []
         self.deleted_namespaces: list[str] = []
         self.deleted_playwright: list[dict] = []
 
+    async def ensure_test_slot_namespace(self, lease_doc: dict) -> None:
+        self.ensured_namespaces.append(lease_doc)
+
     async def ensure_playwright_slot(self, lease_doc: dict) -> None:
-        self.ensured.append(lease_doc)
+        raise AssertionError("checkout must not create Playwright workers")
 
     async def delete_test_slot_namespace(self, namespace: str) -> None:
         self.deleted_namespaces.append(namespace)
@@ -50,7 +53,7 @@ class _RecordingPlaywrightLauncher:
 
 @pytest.fixture
 def app_state():
-    native_k8s_launcher = _RecordingPlaywrightLauncher()
+    native_k8s_launcher = _RecordingTestSlotLauncher()
     state = SimpleNamespace(
         cosmos=_cosmos(),
         settings=_settings(),
@@ -65,8 +68,8 @@ def app_state():
 
 
 @pytest.mark.asyncio
-async def test_checkout_test_slot_reserves_native_slot_with_clean_slate_inputs(app_state):
-    launcher = _RecordingPlaywrightLauncher()
+async def test_checkout_test_slot_prepares_clean_slate_namespace_without_playwright(app_state):
+    launcher = _RecordingTestSlotLauncher()
     app_module.app.state.native_k8s_launcher = launcher
 
     await _register_project(
@@ -110,8 +113,9 @@ async def test_checkout_test_slot_reserves_native_slot_with_clean_slate_inputs(a
     run_docs = list(app_state.cosmos.runs._items.values())
     assert issue_docs == []
     assert run_docs == []
-    assert len(launcher.ensured) == 1
-    assert launcher.ensured[0]["metadata"]["native_slot_name"] == "glimmung-slot-2"
+    assert launcher.deleted_namespaces == ["glimmung-slot-2"]
+    assert len(launcher.ensured_namespaces) == 1
+    assert launcher.ensured_namespaces[0]["metadata"]["native_slot_name"] == "glimmung-slot-2"
 
 
 @pytest.mark.asyncio
