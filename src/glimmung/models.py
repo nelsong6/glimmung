@@ -577,6 +577,7 @@ class Host(BaseModel):
 
 class Lease(BaseModel):
     id: str
+    lease_number: int | None = None
     project: str
     workflow: str | None = None         # workflow name; null on legacy / non-workflow leases
     host: str | None = None

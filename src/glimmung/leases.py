@@ -17,7 +17,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from azure.core import MatchConditions
-from azure.cosmos.exceptions import CosmosAccessConditionFailedError, CosmosResourceNotFoundError
+from azure.cosmos.exceptions import (
+    CosmosAccessConditionFailedError,
+    CosmosResourceExistsError,
+    CosmosResourceNotFoundError,
+)
 from ulid import ULID
 
 from glimmung.db import Cosmos, query_all
@@ -29,10 +33,86 @@ NATIVE_K8S_HOST = "native-k8s"
 NATIVE_K8S_METADATA_KEY = "native_k8s"
 NATIVE_SLOT_INDEX_METADATA_KEY = "native_slot_index"
 NATIVE_SLOT_NAME_METADATA_KEY = "native_slot_name"
+_MAX_CONFLICT_RETRIES = 3
+_COUNTER_PREFIX = "__counter:lease-number:"
 
 
 def _utcnow_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _strip_meta(doc: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in doc.items() if not k.startswith("_")}
+
+
+async def next_lease_number(cosmos: Cosmos, *, project: str) -> int:
+    """Allocate the next human-facing lease number scoped to one project."""
+    counter_id = _counter_id(project)
+    for attempt in range(_MAX_CONFLICT_RETRIES):
+        try:
+            doc = await cosmos.leases.read_item(item=counter_id, partition_key=project)
+        except CosmosResourceNotFoundError:
+            try:
+                seed = await _seed_lease_number_counter(cosmos, project=project)
+                return int(seed["last_allocated"])
+            except CosmosResourceExistsError:
+                continue
+
+        current_next = int(doc.get("next_lease_number") or 1)
+        updated = {
+            **doc,
+            "next_lease_number": current_next + 1,
+            "updated_at": _utcnow_iso(),
+        }
+        try:
+            await cosmos.leases.replace_item(
+                item=counter_id,
+                body=_strip_meta(updated),
+                etag=doc["_etag"],
+                match_condition=MatchConditions.IfNotModified,
+            )
+            return current_next
+        except CosmosAccessConditionFailedError:
+            if attempt == _MAX_CONFLICT_RETRIES - 1:
+                raise
+            continue
+    raise RuntimeError("unreachable")
+
+
+def _counter_id(project: str) -> str:
+    return f"{_COUNTER_PREFIX}{project}"
+
+
+async def _seed_lease_number_counter(cosmos: Cosmos, *, project: str) -> dict[str, Any]:
+    highest = await _highest_lease_number(cosmos, project=project)
+    first = highest + 1
+    now = _utcnow_iso()
+    doc = {
+        "id": _counter_id(project),
+        "project": project,
+        "kind": "lease_number_counter",
+        "last_allocated": first,
+        "next_lease_number": first + 1,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await cosmos.leases.create_item(doc)
+    return doc
+
+
+async def _highest_lease_number(cosmos: Cosmos, *, project: str) -> int:
+    docs = await query_all(
+        cosmos.leases,
+        "SELECT * FROM c WHERE c.project = @p AND IS_DEFINED(c.leaseNumber)",
+        parameters=[{"name": "@p", "value": project}],
+    )
+    highest = 0
+    for doc in docs:
+        try:
+            highest = max(highest, int(doc.get("leaseNumber") or 0))
+        except (TypeError, ValueError):
+            continue
+    return highest
 
 
 def _matches(host_caps: dict[str, Any], required: dict[str, Any]) -> bool:
@@ -64,6 +144,7 @@ async def acquire(
     """
     now = _utcnow_iso()
     lease_id = str(ULID())
+    lease_number = await next_lease_number(cosmos, project=project)
     ttl = ttl_seconds or settings.lease_default_ttl_seconds
 
     # Cross-partition query — hosts container is small, this is cheap.
@@ -91,6 +172,7 @@ async def acquire(
             )
             lease = Lease(
                 id=lease_id,
+                lease_number=lease_number,
                 project=project,
                 workflow=workflow,
                 host=candidate["name"],
@@ -111,6 +193,7 @@ async def acquire(
     # No free host matched. Persist a pending lease so the dashboard sees it.
     pending = Lease(
         id=lease_id,
+        lease_number=lease_number,
         project=project,
         workflow=workflow,
         host=None,
@@ -157,6 +240,7 @@ async def acquire_native(
     """
     now = _utcnow_iso()
     ttl = ttl_seconds or settings.lease_default_ttl_seconds
+    lease_number = await next_lease_number(cosmos, project=project)
     native_metadata = {**metadata, NATIVE_K8S_METADATA_KEY: True}
     slot_index = await _available_native_slot(cosmos, settings, project=project, metadata=metadata)
     if slot_index is not None:
@@ -164,6 +248,7 @@ async def acquire_native(
     state = LeaseState.ACTIVE if slot_index is not None else LeaseState.PENDING
     lease = Lease(
         id=str(ULID()),
+        lease_number=lease_number,
         project=project,
         workflow=workflow,
         host=NATIVE_K8S_HOST if state == LeaseState.ACTIVE else None,
@@ -463,6 +548,7 @@ async def sweep_expired(cosmos: Cosmos, settings: Settings) -> int:
 def _lease_to_doc(lease: Lease) -> dict[str, Any]:
     return {
         "id": lease.id,
+        "leaseNumber": lease.lease_number,
         "project": lease.project,
         "workflow": lease.workflow,
         "host": lease.host,
@@ -488,6 +574,7 @@ def _camel_to_snake(d: dict[str, Any]) -> dict[str, Any]:
         "assignedAt": "assigned_at",
         "releasedAt": "released_at",
         "ttlSeconds": "ttl_seconds",
+        "leaseNumber": "lease_number",
         "githubRepo": "github_repo",
         "workflowFilename": "workflow_filename",
         "workflowRef": "workflow_ref",
