@@ -5657,6 +5657,32 @@ class DispatchRequest(BaseModel):
     workflow: str | None = None
 
 
+class TestSlotCheckoutRequest(BaseModel):
+    """Request a native test slot reservation.
+
+    This does not create an Issue or Run. It is a courtesy reservation so
+    Glimmung knows a native app test slot is occupied while the caller handles
+    the actual provisioning/reset flow outside Glimmung.
+    """
+    project: str
+    workflow: str | None = None
+    slot_index: int | None = Field(default=None, ge=1)
+    mode: str = "provision"
+    phase_inputs: dict[str, str] = Field(default_factory=dict)
+    ttl_seconds: int | None = None
+
+
+class TestSlotCheckoutResult(BaseModel):
+    state: str
+    project: str
+    workflow: str
+    slot_index: int | None = None
+    slot_name: str | None = None
+    lease_id: str
+    host: str | None = None
+    detail: str | None = None
+
+
 def _attempt_graph_metadata(attempt: Any) -> dict[str, Any]:
     """Stable graph metadata for one PhaseAttempt.
 
@@ -7045,6 +7071,67 @@ async def dispatch_run_endpoint(req: DispatchRequest) -> PublicDispatchResult:
         workflow_name=req.workflow,
     )
     return PublicDispatchResult.from_internal(result)
+
+
+@app.post(
+    "/v1/test-slots/checkout",
+    response_model=TestSlotCheckoutResult,
+    dependencies=[Depends(require_admin_user)],
+)
+async def checkout_test_slot(req: TestSlotCheckoutRequest) -> TestSlotCheckoutResult:
+    """Reserve a native app test slot without starting Glimmung work.
+
+    The caller owns provisioning/resetting the slot. Glimmung records the
+    reservation as a native lease so dashboards, sweepers, and other slot
+    users see the capacity as occupied.
+    """
+    project = req.project.strip()
+    if not project:
+        raise HTTPException(400, "project required")
+    mode = req.mode.strip().lower()
+    if mode not in {"provision", "clean_slate"}:
+        raise HTTPException(400, "mode must be 'provision' or 'clean_slate'")
+
+    cosmos: Cosmos = app.state.cosmos
+    project_doc = await _read_project(cosmos, project)
+    if project_doc is None:
+        raise HTTPException(400, f"project {project!r} not registered")
+
+    workflow_name = req.workflow or "test-slot-checkout"
+    slot_name = f"{project}-slot-{req.slot_index}" if req.slot_index is not None else None
+    phase_inputs = {str(k): str(v) for k, v in req.phase_inputs.items()}
+    if req.slot_index is not None:
+        phase_inputs["validation_slot_index"] = str(req.slot_index)
+        phase_inputs.setdefault("slot_name", slot_name or "")
+        phase_inputs.setdefault("namespace", slot_name or "")
+    phase_inputs["test_slot_mode"] = mode
+    phase_inputs["clean_slate"] = "true" if mode == "clean_slate" else "false"
+
+    lease, host = await lease_ops.acquire_native(
+        cosmos,
+        app.state.settings,
+        project=project,
+        workflow=workflow_name,
+        requirements={},
+        metadata={
+            "test_slot_checkout": True,
+            "test_slot_mode": mode,
+            "phase_inputs": phase_inputs,
+        },
+        ttl_seconds=req.ttl_seconds,
+    )
+    actual_slot_index = lease.metadata.get("native_slot_index")
+    actual_slot_name = lease.metadata.get("native_slot_name") or slot_name
+    return TestSlotCheckoutResult(
+        state=lease.state.value,
+        project=project,
+        workflow=workflow_name,
+        slot_index=int(actual_slot_index) if actual_slot_index else req.slot_index,
+        slot_name=str(actual_slot_name) if actual_slot_name is not None else None,
+        lease_id=lease.id,
+        host=host.name if host is not None else None,
+        detail=None if host is not None else "slot unavailable; reservation is pending",
+    )
 
 
 # ─── Design portfolio review surface (#225) ─────────────────────────────────
