@@ -35,6 +35,7 @@ def _cosmos() -> SimpleNamespace:
 class _RecordingTestSlotLauncher:
     def __init__(self) -> None:
         self.ensured_namespaces: list[dict] = []
+        self.ensured_playwright: list[dict] = []
         self.deleted_namespaces: list[str] = []
         self.deleted_playwright: list[dict] = []
         self.reconciled_playwright_leases: list[dict] | None = None
@@ -43,7 +44,7 @@ class _RecordingTestSlotLauncher:
         self.ensured_namespaces.append(lease_doc)
 
     async def ensure_playwright_slot(self, lease_doc: dict) -> None:
-        raise AssertionError("checkout must not create Playwright workers")
+        self.ensured_playwright.append(lease_doc)
 
     async def delete_test_slot_namespace(self, namespace: str) -> None:
         self.deleted_namespaces.append(namespace)
@@ -72,7 +73,7 @@ def app_state():
 
 
 @pytest.mark.asyncio
-async def test_checkout_test_slot_prepares_clean_slate_namespace_without_playwright(app_state):
+async def test_checkout_test_slot_prepares_clean_slate_namespace_and_playwright(app_state):
     launcher = _RecordingTestSlotLauncher()
     app_module.app.state.native_k8s_launcher = launcher
 
@@ -120,6 +121,8 @@ async def test_checkout_test_slot_prepares_clean_slate_namespace_without_playwri
     assert launcher.deleted_namespaces == ["glimmung-slot-2"]
     assert len(launcher.ensured_namespaces) == 1
     assert launcher.ensured_namespaces[0]["metadata"]["native_slot_name"] == "glimmung-slot-2"
+    assert len(launcher.ensured_playwright) == 1
+    assert launcher.ensured_playwright[0]["metadata"]["native_slot_name"] == "glimmung-slot-2"
 
 
 @pytest.mark.asyncio
@@ -208,7 +211,7 @@ async def test_return_test_slot_resolves_by_slot_index(app_state):
 
 
 @pytest.mark.asyncio
-async def test_playwright_reconcile_ignores_checked_out_test_slots(app_state):
+async def test_playwright_reconcile_includes_checked_out_test_slots(app_state):
     await _register_project(
         SimpleNamespace(state=app_state),
         "glimmung",
@@ -223,4 +226,6 @@ async def test_playwright_reconcile_ignores_checked_out_test_slots(app_state):
 
     await app_module._reconcile_playwright_slots(app_module.app, app_state.cosmos)
 
-    assert app_state.native_k8s_launcher.reconciled_playwright_leases == []
+    assert len(app_state.native_k8s_launcher.reconciled_playwright_leases or []) == 1
+    lease_doc = app_state.native_k8s_launcher.reconciled_playwright_leases[0]
+    assert lease_doc["metadata"]["native_slot_name"] == "glimmung-slot-1"
