@@ -20,7 +20,7 @@ variable "key_vault_name" {
 }
 
 variable "test_redirect_uris" {
-  description = "Stable Frontman/dev SPA redirect URIs for glimmung-oauth-test. Entra SPA redirect URIs do not support wildcards."
+  description = "Stable dev/test SPA redirect URIs for glimmung-oauth-test. Entra SPA redirect URIs do not support wildcards."
   type        = list(string)
   default = [
     "https://glimmung.dev.romaine.life/",
@@ -28,5 +28,10 @@ variable "test_redirect_uris" {
     "https://frontman-1.glimmung.dev.romaine.life/",
     "https://frontman-2.glimmung.dev.romaine.life/",
     "https://frontman-3.glimmung.dev.romaine.life/",
+    "https://glimmung-slot-1.glimmung.dev.romaine.life/",
+    "https://glimmung-slot-2.glimmung.dev.romaine.life/",
+    "https://glimmung-slot-3.glimmung.dev.romaine.life/",
+    "https://glimmung-slot-4.glimmung.dev.romaine.life/",
+    "https://glimmung-slot-5.glimmung.dev.romaine.life/",
   ]
 }
