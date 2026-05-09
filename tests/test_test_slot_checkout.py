@@ -37,6 +37,7 @@ class _RecordingTestSlotLauncher:
         self.ensured_namespaces: list[dict] = []
         self.deleted_namespaces: list[str] = []
         self.deleted_playwright: list[dict] = []
+        self.reconciled_playwright_leases: list[dict] | None = None
 
     async def ensure_test_slot_namespace(self, lease_doc: dict) -> None:
         self.ensured_namespaces.append(lease_doc)
@@ -49,6 +50,9 @@ class _RecordingTestSlotLauncher:
 
     async def delete_playwright_slot(self, lease_doc: dict) -> None:
         self.deleted_playwright.append(lease_doc)
+
+    async def reconcile_playwright_slots(self, active_native_leases: list[dict]) -> None:
+        self.reconciled_playwright_leases = active_native_leases
 
 
 @pytest.fixture
@@ -201,3 +205,22 @@ async def test_return_test_slot_resolves_by_slot_index(app_state):
     assert returned.slot_name == "glimmung-slot-1"
     assert returned.cleanup_started is True
     assert app_state.native_k8s_launcher.deleted_namespaces == ["glimmung-slot-1"]
+
+
+@pytest.mark.asyncio
+async def test_playwright_reconcile_ignores_checked_out_test_slots(app_state):
+    await _register_project(
+        SimpleNamespace(state=app_state),
+        "glimmung",
+        "nelsong6/glimmung",
+    )
+    await app_module.checkout_test_slot(
+        app_module.TestSlotCheckoutRequest(
+            project="glimmung",
+            slot_index=1,
+        )
+    )
+
+    await app_module._reconcile_playwright_slots(app_module.app, app_state.cosmos)
+
+    assert app_state.native_k8s_launcher.reconciled_playwright_leases == []
