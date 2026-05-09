@@ -57,6 +57,20 @@ spec:
               value: {{ .Values.nativeRunner.codexCredentials.secretName | quote }}
             - name: NATIVE_RUNNER_CODEX_CREDENTIALS_MOUNT_PATH
               value: {{ .Values.nativeRunner.codexCredentials.mountPath | quote }}
+            - name: NATIVE_RUNNER_PLAYWRIGHT_ENABLED
+              value: {{ .Values.nativeRunner.playwright.enabled | quote }}
+            - name: NATIVE_RUNNER_PLAYWRIGHT_IMAGE
+              value: {{ .Values.nativeRunner.playwright.image | quote }}
+            - name: NATIVE_RUNNER_PLAYWRIGHT_PORT
+              value: {{ .Values.nativeRunner.playwright.port | quote }}
+            - name: NATIVE_RUNNER_PLAYWRIGHT_CPU_REQUEST
+              value: {{ .Values.nativeRunner.playwright.resources.requests.cpu | quote }}
+            - name: NATIVE_RUNNER_PLAYWRIGHT_MEMORY_REQUEST
+              value: {{ .Values.nativeRunner.playwright.resources.requests.memory | quote }}
+            - name: NATIVE_RUNNER_PLAYWRIGHT_CPU_LIMIT
+              value: {{ .Values.nativeRunner.playwright.resources.limits.cpu | quote }}
+            - name: NATIVE_RUNNER_PLAYWRIGHT_MEMORY_LIMIT
+              value: {{ .Values.nativeRunner.playwright.resources.limits.memory | quote }}
             - name: ARTIFACTS_STORAGE_ACCOUNT
               value: {{ .Values.artifacts.storageAccount | quote }}
             - name: ARTIFACTS_CONTAINER

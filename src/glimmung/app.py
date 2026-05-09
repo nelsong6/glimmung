@@ -298,6 +298,7 @@ async def _sweep_loop(cosmos: Cosmos, settings: Settings) -> None:
             count = await lease_ops.sweep_expired(cosmos, settings)
             if count:
                 log.info("sweep expired %d leases", count)
+            await _reconcile_playwright_slots(app, cosmos)
         except Exception:
             log.exception("sweep failed; will retry")
         await asyncio.sleep(settings.sweep_interval_seconds)
@@ -755,6 +756,7 @@ async def _release_native_run_leases(cosmos: Cosmos, run: Run) -> int:
     for doc in docs:
         try:
             await lease_ops.release(cosmos, doc["id"], run.project)
+            await _delete_playwright_slot_for_lease(doc)
             released += 1
         except Exception:
             log.exception(
@@ -762,6 +764,49 @@ async def _release_native_run_leases(cosmos: Cosmos, run: Run) -> int:
                 doc.get("id"), run.id,
             )
     return released
+
+
+async def _active_native_lease_docs(cosmos: Cosmos) -> list[dict[str, Any]]:
+    return await query_all(
+        cosmos.leases,
+        "SELECT * FROM c WHERE c.state = @s AND c.metadata.native_k8s = true",
+        parameters=[{"name": "@s", "value": LeaseState.ACTIVE.value}],
+    )
+
+
+async def _ensure_playwright_slot_for_lease(lease_doc: dict[str, Any]) -> None:
+    launcher = getattr(app.state, "native_k8s_launcher", None)
+    if launcher is None:
+        return
+    try:
+        await launcher.ensure_playwright_slot(lease_doc)
+    except Exception:
+        log.exception(
+            "failed to ensure Playwright worker for native lease %s",
+            lease_doc.get("id"),
+        )
+        raise
+
+
+async def _delete_playwright_slot_for_lease(lease_doc: dict[str, Any]) -> None:
+    launcher = getattr(app.state, "native_k8s_launcher", None)
+    if launcher is None:
+        return
+    try:
+        await launcher.delete_playwright_slot(lease_doc)
+    except Exception:
+        log.exception(
+            "failed to delete Playwright worker for native lease %s",
+            lease_doc.get("id"),
+        )
+
+
+async def _reconcile_playwright_slots(app: FastAPI, cosmos: Cosmos) -> None:
+    launcher = getattr(app.state, "native_k8s_launcher", None)
+    if launcher is None:
+        return
+    active = await _active_native_lease_docs(cosmos)
+    await launcher.reconcile_playwright_slots(active)
 
 
 async def _cleanup_native_attempt_secret(run: Run, attempt_index: int) -> None:
@@ -2765,7 +2810,14 @@ async def heartbeat_lease(lease_id: str = Path(...), project: str = "") -> Lease
 async def release_lease(lease_id: str = Path(...), project: str = "") -> Lease:
     if not project:
         raise HTTPException(400, "project query param required")
-    return await lease_ops.release(app.state.cosmos, lease_id, project)
+    cosmos: Cosmos = app.state.cosmos
+    try:
+        doc = await cosmos.leases.read_item(item=lease_id, partition_key=project)
+    except Exception:
+        raise HTTPException(404, "lease not found")
+    released = await lease_ops.release(cosmos, lease_id, project)
+    await _delete_playwright_slot_for_lease(doc)
+    return released
 
 
 class CancelLeaseResult(BaseModel):
@@ -2880,6 +2932,7 @@ async def _cancel_lease(
     # 4. Release the lease.
     try:
         await lease_ops.release(cosmos, lease_id, project)
+        await _delete_playwright_slot_for_lease(lease_doc)
     except Exception:
         log.exception("cancel_lease: lease release failed for %s", lease_id)
         raise HTTPException(500, f"lease release failed for {lease_id}")
@@ -7127,6 +7180,13 @@ async def checkout_test_slot(req: TestSlotCheckoutRequest) -> TestSlotCheckoutRe
         },
         ttl_seconds=req.ttl_seconds,
     )
+    if host is not None:
+        lease_doc = lease_ops._lease_to_doc(lease)
+        try:
+            await _ensure_playwright_slot_for_lease(lease_doc)
+        except Exception:
+            await lease_ops.release(cosmos, lease.id, project)
+            raise HTTPException(500, "failed to prepare Playwright worker for slot")
     actual_slot_index = lease.metadata.get("native_slot_index")
     actual_slot_name = lease.metadata.get("native_slot_name") or slot_name
     return TestSlotCheckoutResult(

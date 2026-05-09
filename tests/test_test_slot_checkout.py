@@ -32,21 +32,34 @@ def _cosmos() -> SimpleNamespace:
     )
 
 
+class _RecordingPlaywrightLauncher:
+    def __init__(self):
+        self.ensured = []
+
+    async def ensure_playwright_slot(self, lease_doc):
+        self.ensured.append(lease_doc)
+
+
 @pytest.fixture
 def app_state():
     state = SimpleNamespace(
         cosmos=_cosmos(),
         settings=_settings(),
         gh_minter=None,
+        native_k8s_launcher=None,
     )
     app_module.app.state.cosmos = state.cosmos
     app_module.app.state.settings = state.settings
     app_module.app.state.gh_minter = state.gh_minter
+    app_module.app.state.native_k8s_launcher = state.native_k8s_launcher
     return state
 
 
 @pytest.mark.asyncio
 async def test_checkout_test_slot_reserves_native_slot_with_clean_slate_inputs(app_state):
+    launcher = _RecordingPlaywrightLauncher()
+    app_module.app.state.native_k8s_launcher = launcher
+
     await _register_project(
         SimpleNamespace(state=app_state),
         "glimmung",
@@ -88,6 +101,8 @@ async def test_checkout_test_slot_reserves_native_slot_with_clean_slate_inputs(a
     run_docs = list(app_state.cosmos.runs._items.values())
     assert issue_docs == []
     assert run_docs == []
+    assert len(launcher.ensured) == 1
+    assert launcher.ensured[0]["metadata"]["native_slot_name"] == "glimmung-slot-2"
 
 
 @pytest.mark.asyncio
