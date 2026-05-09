@@ -1836,6 +1836,7 @@ h2 .inline-action,
   margin: 12px 0;
 }
 .dag {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -1844,6 +1845,8 @@ h2 .inline-action,
 }
 .dag-entry,
 .dag-node {
+  position: relative;
+  z-index: 1;
   display: inline-flex;
   flex-direction: column;
   align-items: flex-start;
@@ -1859,6 +1862,8 @@ h2 .inline-action,
   text-align: left;
 }
 .dag-phase {
+  position: relative;
+  z-index: 1;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1972,6 +1977,11 @@ h2 .inline-action,
   border-color: color-mix(in srgb, var(--state-danger-fg) 55%, var(--border));
   background: color-mix(in srgb, var(--state-danger-bg) 22%, var(--surface));
 }
+.dag-edge-spacer {
+  flex: 0 0 44px;
+  width: 44px;
+  height: 16px;
+}
 .dag-edge {
   color: var(--fg-dimmer);
   display: block;
@@ -1979,21 +1989,35 @@ h2 .inline-action,
   overflow: visible;
   user-select: none;
 }
-.dag-edge path {
+.dag-terminal {
+  position: relative;
+  z-index: 1;
+  display: flex;
+}
+.dag-advance-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+  z-index: 0;
+}
+.dag-advance-path {
+  color: var(--fg-dimmer);
   fill: none;
   stroke: currentColor;
   stroke-width: 1.5;
-  stroke-linecap: square;
-  stroke-linejoin: miter;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 /* Highlights the arrow leading into the phase a run actually entered
    (default phase[0] for fresh runs; entrypoint_phase for resumed /
    recycle children). Pairs with the "the run entered here" tooltip
    on the same element. Contrasts with the dim recycle arrows in the
    recycle band below. */
-.dag-edge.entry {
+.dag-advance-path.entry {
   color: var(--state-success-fg);
-  cursor: help;
 }
 
 /* Recycle policy band. Sits below the main pipeline row in PipelineDag
@@ -2030,8 +2054,8 @@ h2 .inline-action,
   fill: none;
   stroke: var(--fg-dimmer);
   stroke-width: 1.5;
-  stroke-linecap: square;
-  stroke-linejoin: miter;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 .dag-recycle-path.inactive {
   stroke-dasharray: 4 3;

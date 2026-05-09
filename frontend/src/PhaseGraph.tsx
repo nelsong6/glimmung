@@ -11,7 +11,7 @@
 // matching the historical row layout. DAG workflows with parallel
 // branches stack the parallel phases vertically at the same column.
 
-import { Fragment, ReactNode } from "react";
+import { Fragment, ReactNode, useId, useLayoutEffect, useRef, useState } from "react";
 
 export type PhaseGraphPhase = {
   name: string;
@@ -120,33 +120,14 @@ function defaultTouchpointNode(): ReactNode {
   );
 }
 
-function FlowArrow({ entry }: { entry: boolean }) {
-  return (
-    <svg
-      className={`dag-edge${entry ? " entry" : ""}`}
-      viewBox="0 0 44 16"
-      width="44"
-      height="16"
-      aria-label={entry ? "the run entered here" : undefined}
-      aria-hidden={entry ? undefined : "true"}
-    >
-      {entry && <title>the run entered here</title>}
-      <defs>
-        <marker
-          id="dag-flow-head"
-          viewBox="0 0 10 10"
-          refX="9"
-          refY="5"
-          markerWidth="7"
-          markerHeight="7"
-          orient="auto-start-reverse"
-        >
-          <path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke" />
-        </marker>
-      </defs>
-      <path d="M 1 8 L 40 8" markerEnd="url(#dag-flow-head)" />
-    </svg>
-  );
+type AdvancePath = {
+  d: string;
+  entry: boolean;
+};
+
+function advancePath(sx: number, sy: number, ex: number, ey: number): string {
+  const midX = sx + (ex - sx) / 2;
+  return `M ${sx} ${sy} L ${midX} ${sy} L ${midX} ${ey} L ${ex} ${ey}`;
 }
 
 export function PhaseGraph({
@@ -159,6 +140,11 @@ export function PhaseGraph({
   ariaLabel,
   entryPhaseName = null,
 }: PhaseGraphProps) {
+  const markerId = useId().replace(/:/g, "");
+  const dagRef = useRef<HTMLDivElement | null>(null);
+  const columnRefs = useRef<Array<HTMLDivElement | null>>([]);
+  const terminalRef = useRef<HTMLDivElement | null>(null);
+  const [advancePaths, setAdvancePaths] = useState<AdvancePath[]>([]);
   const depths = computeDepths(phases);
   // Group phases by depth, preserving declared order within each depth.
   const byDepth = new Map<number, PhaseGraphPhase[]>();
@@ -174,25 +160,92 @@ export function PhaseGraph({
   for (let d = 0; d <= maxDepth; d++) {
     columns.push(byDepth.get(d) ?? []);
   }
+  const columnKey = columns.map((col) => col.map((phase) => phase.name).join(",")).join("|");
 
-  return (
-    <div className={`dag${dagClassName ? " " + dagClassName : ""}`} aria-label={ariaLabel}>
-      {columns.map((col, idx) => {
-        // Highlight the arrow leading into a column when any phase in
-        // that column matches `entryPhaseName`. Parallel columns can
-        // have multiple entries; today only one entry phase is
-        // active per run, so at most one column lights up.
-        const colHasEntry = col.some(
+  useLayoutEffect(() => {
+    const recompute = () => {
+      const dag = dagRef.current;
+      if (!dag) return;
+      const dagRect = dag.getBoundingClientRect();
+      const rects = columnRefs.current
+        .slice(0, columns.length)
+        .map((el) => el?.getBoundingClientRect() ?? null);
+      const paths: AdvancePath[] = [];
+      for (let idx = 1; idx < rects.length; idx += 1) {
+        const from = rects[idx - 1];
+        const to = rects[idx];
+        if (!from || !to) continue;
+        const sx = from.right - dagRect.left;
+        const sy = from.top + from.height / 2 - dagRect.top;
+        const ex = to.left - dagRect.left;
+        const ey = to.top + to.height / 2 - dagRect.top;
+        const entry = columns[idx].some(
           (phase) => entryPhaseName != null && phase.name === entryPhaseName,
         );
+        paths.push({ d: advancePath(sx, sy, ex, ey), entry });
+      }
+      const last = rects[rects.length - 1];
+      const terminal = terminalRef.current?.getBoundingClientRect() ?? null;
+      if (prEnabled && last && terminal) {
+        const sx = last.right - dagRect.left;
+        const sy = last.top + last.height / 2 - dagRect.top;
+        const ex = terminal.left - dagRect.left;
+        const ey = terminal.top + terminal.height / 2 - dagRect.top;
+        paths.push({ d: advancePath(sx, sy, ex, ey), entry: false });
+      }
+      setAdvancePaths(paths);
+    };
+    recompute();
+    const ro = new ResizeObserver(recompute);
+    if (dagRef.current) ro.observe(dagRef.current);
+    columnRefs.current.forEach((el) => {
+      if (el) ro.observe(el);
+    });
+    if (terminalRef.current) ro.observe(terminalRef.current);
+    return () => ro.disconnect();
+  }, [columnKey, entryPhaseName, prEnabled]);
+
+  return (
+    <div
+      ref={dagRef}
+      className={`dag${dagClassName ? " " + dagClassName : ""}`}
+      aria-label={ariaLabel}
+    >
+      {advancePaths.length > 0 && (
+        <svg className="dag-advance-layer" aria-hidden="true">
+          <defs>
+            <marker
+              id={`${markerId}-advance-head`}
+              viewBox="0 0 10 10"
+              refX="9"
+              refY="5"
+              markerWidth="7"
+              markerHeight="7"
+              orient="auto-start-reverse"
+            >
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke" />
+            </marker>
+          </defs>
+          {advancePaths.map((path, idx) => (
+            <path
+              key={`${path.d}:${idx}`}
+              d={path.d}
+              className={`dag-advance-path${path.entry ? " entry" : ""}`}
+              markerEnd={`url(#${markerId}-advance-head)`}
+            />
+          ))}
+        </svg>
+      )}
+      {columns.map((col, idx) => {
         return (
           <Fragment key={idx}>
             {idx > 0 && (
-              <FlowArrow entry={colHasEntry} />
+              <div className="dag-edge-spacer" aria-hidden="true" />
             )}
             <div
               className={`dag-phase dag-phase-column${col.length > 1 ? " dag-phase-parallel" : ""}`}
               ref={(el) => {
+                columnRefs.current[idx] = el;
                 for (const phase of col) phaseRef?.(phase, el);
               }}
             >
@@ -213,8 +266,10 @@ export function PhaseGraph({
       })}
       {prEnabled && (
         <>
-          <FlowArrow entry={false} />
-          {renderTouchpoint()}
+          <div className="dag-edge-spacer" aria-hidden="true" />
+          <div className="dag-terminal" ref={terminalRef}>
+            {renderTouchpoint()}
+          </div>
         </>
       )}
     </div>

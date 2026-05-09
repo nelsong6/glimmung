@@ -20,6 +20,40 @@ const RECYCLE_BAND_TOP_PAD = 8;
 const RECYCLE_BAND_BOTTOM_PAD = 8;
 const RECYCLE_TARGET_OVERSHOOT = 14;
 const RECYCLE_TARGET_ENTRY_OFFSET = 18;
+const RECYCLE_CORNER_RADIUS = 6;
+
+type Point = { x: number; y: number };
+
+function roundedOrthogonalPath(points: Point[], radius = RECYCLE_CORNER_RADIUS): string {
+  if (points.length === 0) return "";
+  if (points.length === 1) return `M ${points[0].x} ${points[0].y}`;
+  const parts = [`M ${points[0].x} ${points[0].y}`];
+  for (let i = 1; i < points.length - 1; i += 1) {
+    const prev = points[i - 1];
+    const curr = points[i];
+    const next = points[i + 1];
+    const inLen = Math.hypot(curr.x - prev.x, curr.y - prev.y);
+    const outLen = Math.hypot(next.x - curr.x, next.y - curr.y);
+    const r = Math.min(radius, inLen / 2, outLen / 2);
+    if (r <= 0) {
+      parts.push(`L ${curr.x} ${curr.y}`);
+      continue;
+    }
+    const before = {
+      x: curr.x + ((prev.x - curr.x) / inLen) * r,
+      y: curr.y + ((prev.y - curr.y) / inLen) * r,
+    };
+    const after = {
+      x: curr.x + ((next.x - curr.x) / outLen) * r,
+      y: curr.y + ((next.y - curr.y) / outLen) * r,
+    };
+    parts.push(`L ${before.x} ${before.y}`);
+    parts.push(`Q ${curr.x} ${curr.y} ${after.x} ${after.y}`);
+  }
+  const last = points[points.length - 1];
+  parts.push(`L ${last.x} ${last.y}`);
+  return parts.join(" ");
+}
 
 export function computeRecyclePaths(
   arrows: RecycleArrow[],
@@ -106,13 +140,13 @@ export function computeRecyclePaths(
   for (const group of byTarget.values()) {
     if (group.length === 1) {
       const r = group[0];
-      const d = [
-        `M ${r.sX} ${r.sY}`,
-        `L ${r.sX} ${r.laneY}`,
-        `L ${r.cornerX} ${r.laneY}`,
-        `L ${r.cornerX} ${r.tY}`,
-        `L ${r.tX} ${r.tY}`,
-      ].join(" ");
+      const d = roundedOrthogonalPath([
+        { x: r.sX, y: r.sY },
+        { x: r.sX, y: r.laneY },
+        { x: r.cornerX, y: r.laneY },
+        { x: r.cornerX, y: r.tY },
+        { x: r.tX, y: r.tY },
+      ]);
       paths.push({
         arrow: r.arrow,
         d,
@@ -126,11 +160,11 @@ export function computeRecyclePaths(
     const busX = Math.min(...group.map((r) => r.cornerX));
     const target = group[0];
     for (const r of group) {
-      const d = [
-        `M ${r.sX} ${r.sY}`,
-        `L ${r.sX} ${r.laneY}`,
-        `L ${busX} ${r.laneY}`,
-      ].join(" ");
+      const d = roundedOrthogonalPath([
+        { x: r.sX, y: r.sY },
+        { x: r.sX, y: r.laneY },
+        { x: busX, y: r.laneY },
+      ]);
       paths.push({
         arrow: r.arrow,
         d,
@@ -150,11 +184,11 @@ export function computeRecyclePaths(
       allInactive ? "inactive" : "active",
     ].join(" ");
     const sources = group.map((r) => r.arrow.source).join(", ");
-    const d = [
-      `M ${busX} ${maxY}`,
-      `L ${busX} ${minY}`,
-      `L ${target.tX} ${target.tY}`,
-    ].join(" ");
+    const d = roundedOrthogonalPath([
+      { x: busX, y: maxY },
+      { x: busX, y: minY },
+      { x: target.tX, y: target.tY },
+    ]);
     paths.push({
       arrow: target.arrow,
       d,
