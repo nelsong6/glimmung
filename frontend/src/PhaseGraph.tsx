@@ -382,10 +382,18 @@ export function PhaseGraph({
     orderedByTarget.forEach((arrows, target) => {
       const targetCol = phaseToColumn.get(target);
       if (targetCol == null) return;
-      arrows
+      const orderedArrows = arrows
         .slice()
-        .sort((a, b) => sourceOrder(a, phaseToColumn, columns.length) - sourceOrder(b, phaseToColumn, columns.length))
-        .forEach((arrow, idx) => {
+        .sort((a, b) => sourceOrder(a, phaseToColumn, columns.length) - sourceOrder(b, phaseToColumn, columns.length));
+      const reportArrowIndex = orderedArrows.findIndex((arrow) => arrow.kind === "report_recycle" || arrow.source === "report");
+      orderedArrows.forEach((arrow, idx) => {
+          const targetHandleIndex = reportArrowIndex >= 0
+            ? idx === reportArrowIndex
+              ? 0
+              : idx < reportArrowIndex
+                ? idx + 1
+                : idx
+            : idx;
           const source = arrow.kind === "report_recycle" || arrow.source === "report"
             ? "touchpoint"
             : `phase:${phaseToColumn.get(arrow.source) ?? 0}`;
@@ -394,7 +402,7 @@ export function PhaseGraph({
             source,
             sourceHandle: "recycle-out",
             target: `phase:${targetCol}`,
-            targetHandle: `recycle-in-${idx}`,
+            targetHandle: `recycle-in-${targetHandleIndex}`,
             type: "recycle",
             markerEnd: { type: MarkerType.ArrowClosed },
             className: `dag-rf-edge dag-rf-recycle${arrow.active ? " fired" : ""}${arrow.max_attempts <= 0 ? " policy-disabled" : ""}`,
