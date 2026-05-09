@@ -2023,10 +2023,10 @@ h2 .inline-action,
 /* Recycle policy band. Sits below the main pipeline row in PipelineDag
    and renders orthogonal paths: source phase → target phase, exiting
    the source's bottom-center and threading a horizontal lane. Multiple
-   arrows landing on the same phase bundle into one target-entry
-   arrowhead so the phase has a single visible entry point. Inactive
-   policies (`max_attempts: 0`, scaffolded but disabled) draw dashed +
-   dim. */
+   arrows landing on the same phase get separate target ports and
+   approach lanes so directed arrows never collapse into the same stroke.
+   Inactive policies (`max_attempts: 0`, scaffolded but disabled) draw
+   dashed + dim. */
 .dag-recycle-band {
   position: relative;
   width: 100%;

@@ -20,6 +20,8 @@ const RECYCLE_BAND_TOP_PAD = 8;
 const RECYCLE_BAND_BOTTOM_PAD = 8;
 const RECYCLE_TARGET_OVERSHOOT = 28;
 const RECYCLE_TARGET_ENTRY_OFFSET = 34;
+const RECYCLE_TARGET_PORT_GAP = 18;
+const RECYCLE_APPROACH_GAP = 12;
 const RECYCLE_CORNER_RADIUS = 6;
 
 type Point = { x: number; y: number };
@@ -138,14 +140,22 @@ export function computeRecyclePaths(
 
   const paths: RecyclePathLayout[] = [];
   for (const group of byTarget.values()) {
-    if (group.length === 1) {
-      const r = group[0];
+    group.sort((a, b) => a.lane - b.lane);
+    group.forEach((r, targetPortIndex) => {
+      const maxOffset = Math.max(0, r.t.height / 2 - 12);
+      const baseOffset = Math.min(RECYCLE_TARGET_ENTRY_OFFSET, maxOffset);
+      const availableGap = group.length > 1
+        ? Math.max(8, (maxOffset - baseOffset) / (group.length - 1))
+        : RECYCLE_TARGET_PORT_GAP;
+      const portGap = Math.min(RECYCLE_TARGET_PORT_GAP, availableGap);
+      const tY = r.t.cy + Math.min(maxOffset, baseOffset + targetPortIndex * portGap);
+      const cornerX = r.t.left - RECYCLE_TARGET_OVERSHOOT - targetPortIndex * RECYCLE_APPROACH_GAP;
       const d = roundedOrthogonalPath([
         { x: r.sX, y: r.sY },
         { x: r.sX, y: r.laneY },
-        { x: r.cornerX, y: r.laneY },
-        { x: r.cornerX, y: r.tY },
-        { x: r.tX, y: r.tY },
+        { x: cornerX, y: r.laneY },
+        { x: cornerX, y: tY },
+        { x: r.tX, y: tY },
       ]);
       paths.push({
         arrow: r.arrow,
@@ -154,47 +164,6 @@ export function computeRecyclePaths(
         title: r.title,
         markerEnd: true,
       });
-      continue;
-    }
-
-    const busX = Math.min(...group.map((r) => r.cornerX));
-    const target = group[0];
-    for (const r of group) {
-      const d = roundedOrthogonalPath([
-        { x: r.sX, y: r.sY },
-        { x: r.sX, y: r.laneY },
-        { x: busX, y: r.laneY },
-      ]);
-      paths.push({
-        arrow: r.arrow,
-        d,
-        cls: r.cls,
-        title: r.title,
-        markerEnd: false,
-      });
-    }
-
-    const minY = Math.min(target.tY, ...group.map((r) => r.laneY));
-    const maxY = Math.max(target.tY, ...group.map((r) => r.laneY));
-    const anyActive = group.some((r) => r.arrow.active);
-    const allInactive = group.every((r) => r.inactive);
-    const bundleCls = [
-      "dag-recycle-path",
-      anyActive ? "fired" : "registered",
-      allInactive ? "inactive" : "active",
-    ].join(" ");
-    const sources = group.map((r) => r.arrow.source).join(", ");
-    const d = roundedOrthogonalPath([
-      { x: busX, y: maxY },
-      { x: busX, y: minY },
-      { x: target.tX, y: target.tY },
-    ]);
-    paths.push({
-      arrow: target.arrow,
-      d,
-      cls: bundleCls,
-      title: `${sources} ↻ ${target.arrow.target}: bundled phase entry`,
-      markerEnd: true,
     });
   }
 
