@@ -1344,7 +1344,7 @@ function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
                   markerHeight="7"
                   orient="auto-start-reverse"
                 >
-                  <path d="M 0 0 L 10 5 L 0 10 z" />
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke" />
                 </marker>
               </defs>
               {paths.map((p, i) => (
