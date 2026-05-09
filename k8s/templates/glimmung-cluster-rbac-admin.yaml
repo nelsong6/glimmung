@@ -8,10 +8,10 @@ metadata:
   name: glimmung-cluster-rbac-admin
 rules:
   - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["clusterrolebindings"]
+    resources: ["clusterrolebindings", "rolebindings"]
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
-  # bind lets glimmung create CRBs referencing these roles without requiring
-  # glimmung itself to hold all their permissions (escalation bypass).
+  # bind lets glimmung create CRBs/RoleBindings referencing these roles without
+  # requiring glimmung itself to hold all their permissions (escalation bypass).
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["clusterroles"]
     verbs: ["bind"]
