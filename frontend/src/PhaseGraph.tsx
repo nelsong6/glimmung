@@ -256,10 +256,9 @@ export function PhaseGraph({
         sourceHandle: "advance-out",
         target: `phase:${idx + 1}`,
         targetHandle: "advance-in",
-        type: "smoothstep",
+        type: "straight",
         markerEnd: { type: MarkerType.ArrowClosed },
         className: `dag-rf-edge${entry ? " entry" : ""}`,
-        pathOptions: { borderRadius: 8, offset: 18 },
       });
     }
     if (prEnabled && columns.length > 0) {
@@ -269,10 +268,9 @@ export function PhaseGraph({
         sourceHandle: "advance-out",
         target: "touchpoint",
         targetHandle: "advance-in",
-        type: "smoothstep",
+        type: "straight",
         markerEnd: { type: MarkerType.ArrowClosed },
         className: "dag-rf-edge",
-        pathOptions: { borderRadius: 8, offset: 18 },
       });
     }
 
