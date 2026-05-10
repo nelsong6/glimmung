@@ -133,7 +133,7 @@ export function TouchpointDetailView() {
     if (!feedback.trim() || !detail) return;
     setReject({ kind: "submitting" });
     try {
-      // Public signal shape: target_repo is the project name, target_id is
+      // Public signal shape: target_repo is the project name, target_ref is
       // the human-readable touchpoint ref (`owner/repo#PR`).
       const r = await authedFetch("/v1/signals", {
         method: "POST",
@@ -141,7 +141,7 @@ export function TouchpointDetailView() {
         body: JSON.stringify({
           target_type: "pr",
           target_repo: detail.project,
-          target_id: detail.ref,
+          target_ref: detail.ref,
           source: "glimmung_ui",
           payload: { kind: "reject", feedback: feedback.trim() },
         }),

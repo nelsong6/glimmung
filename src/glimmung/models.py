@@ -1055,7 +1055,8 @@ class Lock(BaseModel):
 # is a free side-effect: while a PR's lock is held by an in-flight
 # triage dispatch, the drain skips subsequent signals on that PR; they
 # stay PENDING and re-evaluate next drain tick. Strict FIFO within a
-# (target_type, target_repo, target_id) keyspace.
+# (target_type, target_repo, target_id) keyspace. `target_id` is the
+# internal storage key; public APIs accept and return `target_ref`.
 
 
 class SignalSource(str, Enum):
@@ -1085,7 +1086,7 @@ class Signal(BaseModel):
     id: str                                  # ULID
     target_type: SignalTargetType
     target_repo: str                         # partition key (`<owner>/<repo>`)
-    target_id: str                           # str(pr_number) | str(issue_number) | run_id
+    target_id: str                           # internal storage target key
     source: SignalSource
     payload: dict[str, Any] = Field(default_factory=dict)
     state: SignalState = SignalState.PENDING
@@ -1099,7 +1100,7 @@ class SignalEnqueueRequest(BaseModel):
     """Body of POST /v1/signals — the UI reject button posts this."""
     target_type: SignalTargetType
     target_repo: str
-    target_id: str
+    target_ref: str
     source: SignalSource = SignalSource.GLIMMUNG_UI
     payload: dict[str, Any] = Field(default_factory=dict)
 
