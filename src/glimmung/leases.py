@@ -345,7 +345,12 @@ def _set_native_slot_metadata(
     slot_index: int,
 ) -> None:
     metadata[NATIVE_SLOT_INDEX_METADATA_KEY] = str(slot_index)
-    metadata[NATIVE_SLOT_NAME_METADATA_KEY] = f"{project}-slot-{slot_index}"
+    existing_slot_name = str(metadata.get(NATIVE_SLOT_NAME_METADATA_KEY) or "").strip()
+    if existing_slot_name:
+        metadata[NATIVE_SLOT_NAME_METADATA_KEY] = existing_slot_name
+        return
+    slot_prefix = str(metadata.get("native_slot_prefix") or f"{project}-slot").strip()
+    metadata[NATIVE_SLOT_NAME_METADATA_KEY] = f"{slot_prefix}-{slot_index}"
 
 
 async def heartbeat(cosmos: Cosmos, lease_id: str, project: str) -> Lease:

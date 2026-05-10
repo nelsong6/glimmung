@@ -7336,7 +7336,8 @@ async def checkout_test_slot(req: TestSlotCheckoutRequest) -> TestSlotCheckoutRe
         raise HTTPException(400, f"project {project!r} not registered")
 
     workflow_name = req.workflow or "test-slot-checkout"
-    slot_name = f"{project}-slot-{req.slot_index}" if req.slot_index is not None else None
+    slot_prefix = _native_slot_prefix(project_doc, project)
+    slot_name = f"{slot_prefix}-{req.slot_index}" if req.slot_index is not None else None
     phase_inputs = {str(k): str(v) for k, v in req.phase_inputs.items()}
     if req.slot_index is not None:
         phase_inputs["validation_slot_index"] = str(req.slot_index)
@@ -7354,6 +7355,7 @@ async def checkout_test_slot(req: TestSlotCheckoutRequest) -> TestSlotCheckoutRe
         metadata={
             "test_slot_checkout": True,
             "test_slot_mode": mode,
+            "native_slot_prefix": slot_prefix,
             "phase_inputs": phase_inputs,
         },
         ttl_seconds=req.ttl_seconds,
@@ -7378,6 +7380,17 @@ async def checkout_test_slot(req: TestSlotCheckoutRequest) -> TestSlotCheckoutRe
         host=host.name if host is not None else None,
         detail=None if host is not None else "slot unavailable; reservation is pending",
     )
+
+
+def _native_slot_prefix(project_doc: dict[str, Any], project: str) -> str:
+    metadata = project_doc.get("metadata") or {}
+    if isinstance(metadata, dict):
+        raw = metadata.get("native_standby_dns") or metadata.get("nativeStandbyDns")
+        if isinstance(raw, dict):
+            value = str(raw.get("slot_prefix") or raw.get("slotPrefix") or "").strip()
+            if value:
+                return value
+    return f"{project}-slot"
 
 
 @app.post(
