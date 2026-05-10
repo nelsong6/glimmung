@@ -16,17 +16,23 @@ Full design + intent: [issue #1](https://github.com/nelsong6/glimmung/issues/1).
 ## Mental model
 
 ```
-Project ──< Workflow ──< Lease ──── Host (venue)
-(repo)     (one trigger,           (matched via
-            one yaml,               capabilities)
-            one set of
-            requirements)
+Project ──< Workflow ──< Run/Lease ──── Native capacity or Host
+(repo)     (database-backed        (k8s_job phases use native
+            runtime shape)          capacity; legacy GHA dispatch
+                                    can still match registered hosts)
 ```
 
 - **Project** = a repo (e.g. `spirelens`), declares the github_repo only.
-- **Workflow** = a specific automation pattern under a project (e.g. `issue-agent`), declares its trigger label, workflow filename, and required capabilities.
+- **Workflow** = a database-backed automation shape under a project. Dispatch reads the Workflow row from Cosmos: phases, native jobs, PR policy, budget, trigger label if any, and requirements.
 - **Lease** = "this workflow wants to run, and got assigned this host." Lifecycle: pending → active → released | expired.
-- **Host** = a virtual venue we invent (named whatever — typically the GHA runner-route label so the workflow's `runs-on` works directly). Capabilities are our own vocabulary; the only thing glimmung uses to decide what venues match what workflows.
+- **Host** = a virtual venue for legacy/self-hosted-runner dispatch. Native `k8s_job` workflows use Glimmung's native capacity path instead of GitHub runner labels.
+
+`.glimmung/workflows/<name>.yaml` files in consumer repos are desired-state
+registration manifests only. They are useful because projects can own and
+review their workflow shape in git, but Glimmung does not execute them from
+GitHub at runtime. `sync_workflow` validates one of those files and writes the
+live Workflow registration into Cosmos; until that sync happens, changing the
+file has no runtime effect.
 
 The "agent" — Claude Code, Codex, whatever runs inside the workflow — is opaque to glimmung. We dispatch a venue to a workflow; the workflow runs an agent on it.
 
