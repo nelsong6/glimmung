@@ -43,16 +43,15 @@ async def test_agent_can_mark_portfolio_element_for_review(app_state, monkeypatc
             screenshot_url="/v1/artifacts/runs/glimmung/run-1/sidebar.png",
             status=PortfolioReviewState.NEEDS_REVIEW,
             notes="Changed spacing and selected state.",
-            last_touched_run_id="run-1",
         )
     )
 
     assert element.project == "glimmung"
     assert element.status == PortfolioReviewState.NEEDS_REVIEW
-    assert element.last_touched_run_id == "run-1"
+    assert element.last_touched_run_ref is None
 
     rows = await list_portfolio_elements(project="glimmung", status=None, limit=None)
-    assert [r.id for r in rows] == [element.id]
+    assert [r.ref for r in rows] == [element.ref]
 
 
 @pytest.mark.asyncio
@@ -73,7 +72,7 @@ async def test_human_review_state_persists_without_dispatch(app_state, monkeypat
             notes="Looks good.",
         ),
         project="glimmung",
-        element_doc_id=element.id,
+        element_ref=element.ref,
     )
 
     assert patched.status == PortfolioReviewState.APPROVED
@@ -84,7 +83,7 @@ async def test_human_review_state_persists_without_dispatch(app_state, monkeypat
         status=PortfolioReviewState.APPROVED,
         limit=None,
     )
-    assert [r.id for r in approved] == [element.id]
+    assert [r.ref for r in approved] == [element.ref]
 
 
 @pytest.mark.asyncio
@@ -103,7 +102,7 @@ async def test_patch_does_not_mutate_issue_documents(app_state, cosmos, monkeypa
         await patch_portfolio_element(
             PortfolioElementPatchRequest(notes="Do not write this."),
             project="glimmung",
-            element_doc_id="issue-1",
+            element_ref="issue-1",
         )
 
     assert exc.value.status_code == 404
@@ -127,7 +126,7 @@ async def test_dispatch_creates_issue_from_selected_portfolio_rows(app_state, co
 
     monkeypatch.setattr("glimmung.app.dispatch_run", fake_dispatch)
 
-    selected = await upsert_portfolio_element(
+    await upsert_portfolio_element(
         PortfolioElementUpsertRequest(
             project="glimmung",
             route="/_design-portfolio",
@@ -177,7 +176,7 @@ async def test_dispatch_creates_issue_from_selected_portfolio_rows(app_state, co
         "portfolio_review": {
             "status": "needs_review",
             "route": None,
-            "element_ids": [selected.id],
+            "element_ids": ["35f9d3e6486cfdde07f92bf5951da935"],
         },
     }
 

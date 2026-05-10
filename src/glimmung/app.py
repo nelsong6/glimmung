@@ -8239,7 +8239,7 @@ class PortfolioElementUpsertRequest(BaseModel):
     preview_url: str | None = None
     status: PortfolioReviewState = PortfolioReviewState.NEEDS_REVIEW
     notes: str = ""
-    last_touched_run_id: str | None = None
+    last_touched_run_ref: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -8249,8 +8249,24 @@ class PortfolioElementPatchRequest(BaseModel):
     preview_url: str | None = None
     status: PortfolioReviewState | None = None
     notes: str | None = None
-    last_touched_run_id: str | None = None
+    last_touched_run_ref: str | None = None
     metadata: dict[str, Any] | None = None
+
+
+class PortfolioElementPublic(BaseModel):
+    ref: str
+    project: str
+    route: str
+    element_id: str
+    title: str = ""
+    screenshot_url: str | None = None
+    preview_url: str | None = None
+    status: PortfolioReviewState = PortfolioReviewState.UNREVIEWED
+    notes: str = ""
+    last_touched_run_ref: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
 
 
 class PortfolioElementsDispatchRequest(BaseModel):
@@ -8262,8 +8278,70 @@ class PortfolioElementsDispatchRequest(BaseModel):
     title: str | None = None
 
 
-@app.get("/v1/portfolio/elements", response_model=list[PortfolioElement])
-async def list_portfolio_elements(
+def _portfolio_element_ref(route: str, element_id: str) -> str:
+    route_slug = re.sub(r"[^a-zA-Z0-9]+", "-", route).strip("-") or "root"
+    element_slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", element_id).strip("-") or "element"
+    return f"{route_slug}--{element_slug}"
+
+
+async def _resolve_run_ref_to_id(cosmos: Cosmos, *, project: str, ref: str | None) -> str | None:
+    if not ref:
+        return None
+    m = re.match(r"^[^#]+#(\d+)/runs/(.+)$", ref)
+    if not m:
+        raise HTTPException(422, "last_touched_run_ref must look like project#issue/runs/run")
+    found = await run_ops.read_run_by_ref(
+        cosmos,
+        project=project,
+        issue_number=int(m.group(1)),
+        run_ref=m.group(2),
+    )
+    if found is None:
+        raise HTTPException(404, f"run {ref!r} not found")
+    return found[0].id
+
+
+async def _portfolio_to_public(cosmos: Cosmos, row: PortfolioElement) -> PortfolioElementPublic:
+    last_ref: str | None = None
+    if row.last_touched_run_id:
+        found = await run_ops.read_run(cosmos, project=row.project, run_id=row.last_touched_run_id)
+        if found is not None:
+            last_ref = _run_public_ref(found[0])
+    return PortfolioElementPublic(
+        ref=_portfolio_element_ref(row.route, row.element_id),
+        project=row.project,
+        route=row.route,
+        element_id=row.element_id,
+        title=row.title,
+        screenshot_url=row.screenshot_url,
+        preview_url=row.preview_url,
+        status=row.status,
+        notes=row.notes,
+        last_touched_run_ref=last_ref,
+        metadata=row.metadata,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+async def _resolve_portfolio_element_ref(cosmos: Cosmos, *, project: str, ref: str) -> str:
+    docs = await query_all(
+        cosmos.issues,
+        "SELECT * FROM c WHERE c.kind = @kind AND c.project = @project",
+        parameters=[
+            {"name": "@kind", "value": "portfolio_element"},
+            {"name": "@project", "value": project},
+        ],
+    )
+    for doc in docs:
+        if _portfolio_element_ref(str(doc.get("route") or ""), str(doc.get("element_id") or "")) == ref:
+            return str(doc["id"])
+    raise HTTPException(404, f"portfolio element {project}/{ref} not found")
+
+
+async def _list_portfolio_element_rows(
+    cosmos: Cosmos,
+    *,
     project: str | None = Query(None),
     status: PortfolioReviewState | None = Query(None),
     limit: Annotated[int | None, Query(ge=1, le=500)] = None,
@@ -8280,7 +8358,7 @@ async def list_portfolio_elements(
     params.insert(0, {"name": "@kind", "value": "portfolio_element"})
     where = f" WHERE {' AND '.join(clauses)}"
     docs = await query_all(
-        app.state.cosmos.issues,
+        cosmos.issues,
         f"SELECT * FROM c{where} ORDER BY c.updated_at DESC",
         parameters=params,
     )
@@ -8288,14 +8366,29 @@ async def list_portfolio_elements(
     return rows[:limit] if limit is not None else rows
 
 
+@app.get("/v1/portfolio/elements", response_model=list[PortfolioElementPublic])
+async def list_portfolio_elements(
+    project: str | None = Query(None),
+    status: PortfolioReviewState | None = Query(None),
+    limit: Annotated[int | None, Query(ge=1, le=500)] = None,
+) -> list[PortfolioElementPublic]:
+    limited = await _list_portfolio_element_rows(
+        app.state.cosmos,
+        project=project,
+        status=status,
+        limit=limit,
+    )
+    return [await _portfolio_to_public(app.state.cosmos, row) for row in limited]
+
+
 @app.post(
     "/v1/portfolio/elements",
-    response_model=PortfolioElement,
+    response_model=PortfolioElementPublic,
     dependencies=[Depends(require_admin_user)],
 )
 async def upsert_portfolio_element(
     req: PortfolioElementUpsertRequest,
-) -> PortfolioElement:
+) -> PortfolioElementPublic:
     """Mark or refresh a design portfolio element for human review.
 
     This persists review state only; it does not enqueue a signal or dispatch
@@ -8308,6 +8401,11 @@ async def upsert_portfolio_element(
     if not req.element_id.strip():
         raise HTTPException(400, "element_id required")
     cosmos: Cosmos = app.state.cosmos
+    last_touched_run_id = await _resolve_run_ref_to_id(
+        cosmos,
+        project=req.project,
+        ref=req.last_touched_run_ref,
+    )
     element_id = _portfolio_element_doc_id(req.project, req.route, req.element_id)
     now = datetime.now(UTC)
     try:
@@ -8329,26 +8427,31 @@ async def upsert_portfolio_element(
         "preview_url": req.preview_url,
         "status": req.status.value,
         "notes": req.notes,
-        "last_touched_run_id": req.last_touched_run_id,
+        "last_touched_run_id": last_touched_run_id,
         "metadata": req.metadata,
         "created_at": created_at,
         "updated_at": now.isoformat(),
     }
     await cosmos.issues.upsert_item(doc)
-    return PortfolioElement.model_validate(doc)
+    return await _portfolio_to_public(cosmos, PortfolioElement.model_validate(doc))
 
 
 @app.patch(
-    "/v1/portfolio/elements/{project}/{element_doc_id}",
-    response_model=PortfolioElement,
+    "/v1/portfolio/elements/{project}/{element_ref}",
+    response_model=PortfolioElementPublic,
     dependencies=[Depends(require_admin_user)],
 )
 async def patch_portfolio_element(
     req: PortfolioElementPatchRequest,
     project: str = Path(...),
-    element_doc_id: str = Path(...),
-) -> PortfolioElement:
+    element_ref: str = Path(...),
+) -> PortfolioElementPublic:
     cosmos: Cosmos = app.state.cosmos
+    element_doc_id = await _resolve_portfolio_element_ref(
+        cosmos,
+        project=project,
+        ref=element_ref,
+    )
     try:
         doc = await cosmos.issues.read_item(
             item=element_doc_id,
@@ -8363,12 +8466,17 @@ async def patch_portfolio_element(
         "screenshot_url",
         "preview_url",
         "notes",
-        "last_touched_run_id",
         "metadata",
     ):
         value = getattr(req, field)
         if value is not None:
             doc[field] = value
+    if req.last_touched_run_ref is not None:
+        doc["last_touched_run_id"] = await _resolve_run_ref_to_id(
+            cosmos,
+            project=project,
+            ref=req.last_touched_run_ref,
+        )
     if req.status is not None:
         doc["status"] = req.status.value
     doc["updated_at"] = datetime.now(UTC).isoformat()
@@ -8376,7 +8484,10 @@ async def patch_portfolio_element(
         item=element_doc_id,
         body=run_ops._strip_meta(doc),
     )
-    return PortfolioElement.model_validate(run_ops._strip_meta(response))
+    return await _portfolio_to_public(
+        cosmos,
+        PortfolioElement.model_validate(run_ops._strip_meta(response)),
+    )
 
 
 @app.post(
@@ -8396,7 +8507,8 @@ async def dispatch_portfolio_elements(
     if not project:
         raise HTTPException(400, "project required")
 
-    rows = await list_portfolio_elements(
+    rows = await _list_portfolio_element_rows(
+        app.state.cosmos,
         project=project,
         status=req.status,
         limit=req.limit,
@@ -8475,8 +8587,6 @@ def _portfolio_review_issue_body(
             lines.append(f"  Preview: {row.preview_url}")
         if row.screenshot_url:
             lines.append(f"  Screenshot: {row.screenshot_url}")
-        if row.last_touched_run_id:
-            lines.append(f"  Last touched run: `{row.last_touched_run_id}`")
     return "\n".join(lines)
 
 
