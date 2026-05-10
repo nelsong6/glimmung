@@ -67,6 +67,7 @@ from glimmung.models import (
     LeasePublic,
     LeaseRequest,
     LeaseResponse,
+    LeaseRequester,
     LeaseState,
     NativeJobSpec,
     NativeJobAttempt,
@@ -2978,6 +2979,33 @@ def _lease_to_public(lease: Lease | dict[str, Any]) -> LeasePublic:
     return LeasePublic.model_validate(public)
 
 
+def _requester_metadata(requester: LeaseRequester) -> dict[str, Any]:
+    requester_doc = requester.model_dump(exclude_none=True)
+    return {
+        "requester": requester_doc,
+        "requester_consumer": requester.consumer,
+        "requester_kind": requester.kind,
+        "requester_ref": requester.ref,
+    }
+
+
+def _test_slot_requester(req: Any) -> LeaseRequester:
+    if req.requester is not None:
+        if req.tank_session_id:
+            req.requester.metadata.setdefault("tank_session_id", req.tank_session_id.strip())
+        return req.requester
+    tank_session_id = (req.tank_session_id or "").strip()
+    if tank_session_id:
+        return LeaseRequester(
+            consumer="tank-operator",
+            kind="tank_session",
+            ref=f"tank-operator/session/{tank_session_id}",
+            label=tank_session_id,
+            metadata={"tank_session_id": tank_session_id},
+        )
+    raise HTTPException(400, "requester required; pass requester or tank_session_id")
+
+
 def _host_to_public(host: Host | dict[str, Any], lease_refs_by_id: dict[str, str]) -> HostPublic:
     if isinstance(host, Host):
         raw = host.model_dump()
@@ -3023,13 +3051,17 @@ async def _read_lease_by_callback_token(cosmos: Cosmos, token: str) -> dict[str,
 
 @app.post("/v1/lease", response_model=LeaseResponse)
 async def create_lease(request: LeaseRequest) -> LeaseResponse:
+    metadata = {
+        **request.metadata,
+        **_requester_metadata(request.requester),
+    }
     lease, host = await lease_ops.acquire(
         app.state.cosmos,
         app.state.settings,
         project=request.project,
         workflow=request.workflow,
         requirements=request.requirements,
-        metadata=request.metadata,
+        metadata=metadata,
         ttl_seconds=request.ttl_seconds,
     )
     public_lease = _lease_to_public(lease)
@@ -6557,6 +6589,8 @@ class TestSlotCheckoutRequest(BaseModel):
     workflow: str | None = None
     slot_index: int | None = Field(default=None, ge=1)
     mode: str = "provision"
+    requester: LeaseRequester | None = None
+    tank_session_id: str | None = None
     phase_inputs: dict[str, str] = Field(default_factory=dict)
     ttl_seconds: int | None = None
 
@@ -8244,6 +8278,7 @@ async def checkout_test_slot(req: TestSlotCheckoutRequest) -> TestSlotCheckoutRe
     workflow_name = req.workflow or "test-slot-checkout"
     slot_prefix = project
     slot_name = f"{slot_prefix}-{req.slot_index}" if req.slot_index is not None else None
+    requester = _test_slot_requester(req)
     phase_inputs = {str(k): str(v) for k, v in req.phase_inputs.items()}
     if req.slot_index is not None:
         phase_inputs["validation_slot_index"] = str(req.slot_index)
@@ -8262,6 +8297,7 @@ async def checkout_test_slot(req: TestSlotCheckoutRequest) -> TestSlotCheckoutRe
             "test_slot_checkout": True,
             "test_slot_mode": mode,
             "phase_inputs": phase_inputs,
+            **_requester_metadata(requester),
         },
         ttl_seconds=req.ttl_seconds,
     )
