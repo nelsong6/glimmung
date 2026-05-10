@@ -68,12 +68,14 @@ async def test_run_report_is_derived_from_one_run(app_state, cosmos, monkeypatch
     )
     await cosmos.runs.create_item(run.model_dump(mode="json"))
 
-    report = await get_run_report(project="glimmung", run_id="run-1")
+    report = await get_run_report_by_number(
+        project="glimmung", issue_number=42, run_number=1,
+    )
 
-    assert report.id == "run-1:report"
+    assert report.ref == "glimmung#42/runs/1/report"
     assert report.project == "glimmung"
-    assert report.run_id == "run-1"
-    assert report.issue_id == "issue-1"
+    assert report.run_ref == "glimmung#42/runs/1"
+    assert report.issue_ref == "glimmung#42"
     assert report.issue_number == 42
     assert report.state == RunState.PASSED
     assert report.current_phase == "verify"
@@ -90,13 +92,13 @@ async def test_run_report_is_derived_from_one_run(app_state, cosmos, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_run_report_404s_for_missing_run(app_state, monkeypatch):
+async def test_run_report_storage_id_route_is_gone(app_state, monkeypatch):
     monkeypatch.setattr("glimmung.app.app", app_state)
 
     with pytest.raises(HTTPException) as exc:
         await get_run_report(project="glimmung", run_id="missing")
 
-    assert exc.value.status_code == 404
+    assert exc.value.status_code == 410
 
 
 @pytest.mark.asyncio
@@ -146,7 +148,10 @@ async def test_list_project_runs_returns_newest_project_reports(app_state, cosmo
 
     reports = await list_project_runs(project="glimmung", limit=10)
 
-    assert [report.run_id for report in reports] == ["new", "old"]
+    assert [report.run_ref for report in reports] == [
+        "glimmung#41/runs/1",
+        "glimmung#40/runs/1",
+    ]
     assert reports[0].state == RunState.IN_PROGRESS
     assert reports[1].state == RunState.PASSED
 
@@ -182,7 +187,7 @@ async def test_run_report_by_number_reads_issue_scoped_run(app_state, cosmos, mo
         project="glimmung", issue_number=141, run_number=1,
     )
 
-    assert report.run_id == "01KQTEST"
+    assert report.run_ref == "glimmung#141/runs/1"
     assert report.run_number == 1
     assert report.issue_number == 141
 
@@ -226,11 +231,11 @@ async def test_run_report_by_number_accepts_cycle_display_label(
         project="glimmung", issue_number=141, run_number="1.1",
     )
 
-    assert report.run_id == "01KQCYCLE"
+    assert report.run_ref == "glimmung#141/runs/1.1"
     assert report.run_number == 2
     assert report.run_display_number == "1.1"
-    assert report.parent_run_id == "01KQROOT"
-    assert report.root_run_id == "01KQROOT"
+    assert report.parent_run_ref is None
+    assert report.root_run_ref is None
     assert report.origin_kind == "resume"
     assert report.is_cycle is True
     assert report.cycle_number == 1
@@ -268,5 +273,5 @@ async def test_run_report_by_number_derives_legacy_run_numbers(
         project="glimmung", issue_number=141, run_number=2,
     )
 
-    assert report.run_id == "old-2"
+    assert report.run_ref == "glimmung#141/runs/2"
     assert report.run_number == 2

@@ -3208,22 +3208,22 @@ class RunReportAttempt(BaseModel):
     decision: str | None = None
     cost_usd: float | None = None
     log_archive_url: str | None = None
-    skipped_from_run_id: str | None = None
+    skipped_from_run_ref: str | None = None
 
 
 class RunReport(BaseModel):
-    id: str
+    ref: str
     project: str
-    run_id: str
+    run_ref: str
     run_number: int | None = None
     run_display_number: str | None = None
-    parent_run_id: str | None = None
-    root_run_id: str | None = None
+    parent_run_ref: str | None = None
+    root_run_ref: str | None = None
     origin_kind: str | None = None
     is_cycle: bool = False
     cycle_number: int | None = None
     workflow: str
-    issue_id: str | None = None
+    issue_ref: str | None = None
     issue_repo: str | None = None
     issue_number: int | None = None
     state: RunState
@@ -3244,12 +3244,11 @@ async def get_run_report(
     project: str = Path(...),
     run_id: str = Path(...),
 ) -> RunReport:
-    """Materialized read model for the factual audit of one Run."""
-    found = await run_ops.read_run(app.state.cosmos, project=project, run_id=run_id)
-    if found is None:
-        raise HTTPException(404, f"run {run_id} not found in project {project!r}")
-    run, _etag = found
-    return _run_report_from_run(run)
+    """Deprecated storage-ID keyed route."""
+    raise HTTPException(
+        410,
+        "Run storage-ID report lookup is disabled; use /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/report",
+    )
 
 
 @app.get("/v1/projects/{project}/runs", response_model=list[RunReport])
@@ -3267,10 +3266,7 @@ async def list_project_runs(
         "SELECT * FROM c WHERE c.project = @project ORDER BY c.updated_at DESC",
         parameters=[{"name": "@project", "value": project}],
     )
-    reports: list[RunReport] = []
-    for doc in docs[:limit]:
-        reports.append(_run_report_from_run(Run.model_validate(run_ops._strip_meta(doc))))
-    return reports
+    return _run_reports_from_docs(docs[:limit])
 
 
 @app.get(
@@ -3294,7 +3290,14 @@ async def get_run_report_by_number(
             404, f"run {run_number} not found for {project}#{issue_number}",
         )
     run, _etag = found
-    return _run_report_from_run(run)
+    docs = await run_ops.issue_run_docs(
+        app.state.cosmos,
+        project=project,
+        issue_number=issue_number,
+        issue_id=run.issue_id,
+    )
+    lineage_by_id = _run_ref_map_from_docs(docs)
+    return _run_report_from_run(run, lineage_by_id=lineage_by_id)
 
 
 async def _abort_run(
@@ -3478,7 +3481,58 @@ async def link_existing_pr_endpoint(
     )
 
 
-def _run_report_from_run(run: Run) -> RunReport:
+def _run_ref_map_from_docs(docs: list[dict[str, Any]]) -> dict[str, str]:
+    run_number_by_id = run_ops.run_number_map(docs)
+    refs: dict[str, str] = {}
+    for doc in docs:
+        run_id = str(doc.get("id") or "")
+        if not run_id:
+            continue
+        issue_number = doc.get("issue_number")
+        issue_number_int = int(issue_number) if issue_number is not None else None
+        run_number = run_number_by_id.get(run_id) or doc.get("run_number")
+        display = doc.get("run_display_number") or run_number
+        refs[run_id] = run_ref(str(doc.get("project") or ""), issue_number_int, display)
+    return refs
+
+
+def _run_reports_from_docs(docs: list[dict[str, Any]]) -> list[RunReport]:
+    docs_by_issue: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    for doc in docs:
+        project = str(doc.get("project") or "")
+        issue_number = doc.get("issue_number")
+        if project and issue_number is not None:
+            docs_by_issue.setdefault((project, int(issue_number)), []).append(doc)
+    lineage_by_id: dict[str, str] = {}
+    for group in docs_by_issue.values():
+        group.sort(key=lambda d: d.get("created_at", ""))
+        lineage_by_id.update(_run_ref_map_from_docs(group))
+    return [
+        _run_report_from_run(
+            Run.model_validate(run_ops._strip_meta(doc)),
+            lineage_by_id=lineage_by_id,
+        )
+        for doc in docs
+    ]
+
+
+def _run_report_from_run(
+    run: Run,
+    *,
+    lineage_by_id: dict[str, str] | None = None,
+) -> RunReport:
+    run_display = run_ops.run_display_number(run)
+    lineage_by_id = lineage_by_id or {}
+    public_run_ref = lineage_by_id.get(run.id) or run_ref(
+        run.project,
+        run.issue_number if run.issue_number > 0 else None,
+        run_display or run.run_number,
+    )
+    public_issue_ref = (
+        issue_ref(run.project, run.issue_number)
+        if run.issue_number > 0
+        else None
+    )
     attempts = [
         RunReportAttempt(
             attempt_index=a.attempt_index,
@@ -3495,7 +3549,7 @@ def _run_report_from_run(run: Run) -> RunReport:
             decision=a.decision,
             cost_usd=_attempt_cost(a),
             log_archive_url=a.log_archive_url,
-            skipped_from_run_id=a.skipped_from_run_id,
+            skipped_from_run_ref=lineage_by_id.get(a.skipped_from_run_id or ""),
         )
         for a in run.attempts
     ]
@@ -3505,18 +3559,18 @@ def _run_report_from_run(run: Run) -> RunReport:
     )
     current_phase = run.attempts[-1].phase if run.attempts else None
     return RunReport(
-        id=f"{run.id}:report",
+        ref=f"{public_run_ref}/report",
         project=run.project,
-        run_id=run.id,
+        run_ref=public_run_ref,
         run_number=run.run_number,
-        run_display_number=run_ops.run_display_number(run),
-        parent_run_id=run.parent_run_id,
-        root_run_id=run.root_run_id,
+        run_display_number=run_display,
+        parent_run_ref=lineage_by_id.get(run.parent_run_id or ""),
+        root_run_ref=lineage_by_id.get(run.root_run_id or ""),
         origin_kind=run.origin_kind,
         is_cycle=run.is_cycle,
         cycle_number=run.cycle_number,
         workflow=run.workflow,
-        issue_id=run.issue_id or None,
+        issue_ref=public_issue_ref,
         issue_repo=run.issue_repo or None,
         issue_number=run.issue_number if run.issue_number > 0 else None,
         state=run.state,

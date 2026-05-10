@@ -114,16 +114,17 @@ type RunReportAttempt = {
   decision: string | null;
   cost_usd: number | null;
   log_archive_url: string | null;
-  skipped_from_run_id: string | null;
+  skipped_from_run_ref: string | null;
 };
 
 type RunReport = {
-  id: string;
+  ref: string;
   project: string;
-  run_id: string;
+  run_ref: string;
   run_number: number | null;
+  run_display_number: string | null;
   workflow: string;
-  issue_id: string | null;
+  issue_ref: string | null;
   issue_repo: string | null;
   issue_number: number | null;
   state: string;
@@ -2126,12 +2127,12 @@ function projectRunGraph(run: ProjectRun, workflow: Workflow | undefined, projec
 
 function projectRunFromReport(report: RunReport): ProjectRun {
   return {
-    id: report.run_id,
+    id: report.run_ref,
     project: report.project,
     workflow: report.workflow,
     run_number: report.run_number,
     issue_number: report.issue_number,
-    title: report.issue_number ? `Issue #${report.issue_number}` : report.issue_id ?? report.run_id,
+    title: report.issue_number ? `Issue #${report.issue_number}` : report.run_ref,
     state: report.state,
     cycles: report.attempts_count,
     current_phase: report.current_phase ?? "pending",
@@ -2173,17 +2174,17 @@ function projectRunReportGraph(report: RunReport, workflow: Workflow | undefined
     },
   } : null;
   const runNode = {
-    id: `run:${report.run_id}`,
+    id: `run:${report.run_ref}`,
     kind: "run" as const,
-    label: report.run_number !== null ? `Run ${report.run_number}` : report.run_id,
+    label: report.run_display_number ?? (report.run_number !== null ? `Run ${report.run_number}` : report.run_ref),
     state: report.state,
     timestamp: report.started_at,
     metadata: {
-      run_id: report.run_id,
+      run_ref: report.run_ref,
       run_number: report.run_number,
       workflow: report.workflow,
       cost_usd: report.cumulative_cost_usd,
-      issue_id: report.issue_id,
+      issue_ref: report.issue_ref,
       issue_number: report.issue_number,
       validation_url: report.validation_url,
       screenshots_markdown: report.screenshots_markdown,
@@ -2200,13 +2201,13 @@ function projectRunReportGraph(report: RunReport, workflow: Workflow | undefined
     },
   };
   const attempts = report.attempts.map((attempt) => ({
-    id: `attempt:${report.run_id}:${attempt.attempt_index}`,
+    id: `attempt:${report.run_ref}:${attempt.attempt_index}`,
     kind: "attempt" as const,
     label: `${attempt.phase} attempt ${attempt.attempt_index}`,
     state: attempt.completed_at ? "completed" : report.state,
     timestamp: attempt.dispatched_at,
     metadata: {
-      run_id: report.run_id,
+      run_ref: report.run_ref,
       attempt_index: attempt.attempt_index,
       phase: attempt.phase,
       phase_kind: attempt.phase_kind,
@@ -2220,7 +2221,7 @@ function projectRunReportGraph(report: RunReport, workflow: Workflow | undefined
       decision: attempt.decision,
       cost_usd: attempt.cost_usd,
       log_archive_url: attempt.log_archive_url,
-      skipped_from_run_id: attempt.skipped_from_run_id,
+      skipped_from_run_ref: attempt.skipped_from_run_ref,
     },
   }));
   return {
@@ -2257,9 +2258,12 @@ function ProjectRunView({
     setLiveError(null);
     setLiveLoading(true);
     const issueScopedRunNumber = issueScopedRunNumberFromSlug(issueNumber, runId);
-    const reportUrl = issueScopedRunNumber !== null
-      ? `/v1/projects/${encodeURIComponent(projectName)}/issues/${issueNumber}/runs/${issueScopedRunNumber}/report`
-      : `/v1/runs/${encodeURIComponent(projectName)}/${encodeURIComponent(runId)}/report`;
+    if (issueScopedRunNumber === null) {
+      setLiveLoading(false);
+      setLiveError("Issue-scoped run number required");
+      return;
+    }
+    const reportUrl = `/v1/projects/${encodeURIComponent(projectName)}/issues/${issueNumber}/runs/${issueScopedRunNumber}/report`;
     fetch(reportUrl)
       .then(async (res) => {
         if (!res.ok) throw new Error(`run report ${res.status}`);
