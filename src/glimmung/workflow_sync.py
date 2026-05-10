@@ -6,13 +6,14 @@ somebody to remember to re-run the script against deployed glimmung. With
 the always-run teardown phase landing (#297) and more projects coming
 online, manual re-registration started actively breaking flows.
 
-This module makes glimmung pull the workflow definition straight from the
-project's GitHub repo. The convention follows GHA's `.github/workflows/*`:
+This module lets glimmung compare a project-owned desired-state manifest
+against the workflow registration stored in Cosmos. The convention is
 `.glimmung/workflows/<workflow-name>.yaml` in the project repo's default
-branch holds the canonical payload (same shape `WorkflowRegister`
-accepts). Glimmung's DB stays the runtime source of truth — the upstream
-file is the *desired* state, and "Install" is the explicit human (or
-agent) action that promotes desired → running.
+branch. That file has the same shape `WorkflowRegister` accepts, but it is
+not the runtime workflow source and it is not a GitHub-backed workflow.
+Glimmung's DB stays the runtime source of truth. The upstream file is only
+the *desired* state, and "Install"/`sync_workflow` is the explicit human
+(or agent) action that promotes desired → running.
 
 Two operations:
 - `fetch_upstream` — read the file, parse YAML, return a `WorkflowRegister`.
