@@ -489,9 +489,18 @@ class NativeKubernetesLauncher:
         ).strip()
         if not repo:
             return None
-        slot_name = slot["slot_name"]
-        slot_index = slot.get("slot_index") or _slot_index_from_name(slot_name)
-        host = _test_slot_host(project_doc, slot_name, self._settings)
+        slot_index = slot.get("slot_index") or _slot_index_from_name(slot["slot_name"])
+        slot_spec = (
+            _test_slot_spec(project_doc, int(slot_index), self._settings)
+            if str(slot_index).isdigit()
+            else None
+        )
+        slot_name = str(slot_spec["slot_name"]) if slot_spec else slot["slot_name"]
+        host = str(slot_spec["host"]) if slot_spec else _test_slot_host(
+            project_doc,
+            slot_name,
+            self._settings,
+        )
         substitutions = {
             "slot_name": slot_name,
             "slot_index": slot_index,
@@ -2102,6 +2111,35 @@ def _test_slot_host(
     if not record_base:
         return ""
     return f"{slot_name}.{record_base}"
+
+
+def _test_slot_prefix(project_doc: dict[str, Any]) -> str:
+    project = str(project_doc.get("name") or project_doc.get("id") or "").strip()
+    metadata = project_doc.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        return project
+    raw = metadata.get("native_standby_dns") or metadata.get("nativeStandbyDns")
+    if not isinstance(raw, dict):
+        return project
+    slot_prefix = str(raw.get("slot_prefix") or raw.get("slotPrefix") or "").strip().strip(".")
+    return slot_prefix or project
+
+
+def _test_slot_spec(
+    project_doc: dict[str, Any],
+    slot_index: int,
+    settings: Settings,
+) -> dict[str, Any]:
+    slot_name = f"{_test_slot_prefix(project_doc)}-{slot_index}"
+    host = _test_slot_host(project_doc, slot_name, settings)
+    return {
+        "slot_index": slot_index,
+        "slot_name": slot_name,
+        "namespace": slot_name,
+        "sessions_namespace": f"{slot_name}-sessions",
+        "host": host,
+        "url": f"https://{host}" if host else None,
+    }
 
 
 def _slot_index_from_name(slot_name: str) -> str:

@@ -371,7 +371,10 @@ async def test_release_test_slot_cleans_up_namespace_before_releasing(app_state)
     released = await app_module.release_lease(lease_doc["id"], project="glimmung")
 
     assert released.state == LeaseState.RELEASED
-    assert app_state.native_k8s_launcher.deleted_namespaces == ["glimmung-2"]
+    assert app_state.native_k8s_launcher.deleted_namespaces == [
+        "glimmung-2",
+        "glimmung-2-sessions",
+    ]
     lease_doc = await app_state.cosmos.leases.read_item(
         item=lease_doc["id"],
         partition_key="glimmung",
@@ -447,7 +450,10 @@ async def test_return_test_slot_resolves_by_slot_index(app_state):
     assert returned.slot_index == 1
     assert returned.slot_name == "glimmung-1"
     assert returned.cleanup_started is True
-    assert app_state.native_k8s_launcher.deleted_namespaces == ["glimmung-1"]
+    assert app_state.native_k8s_launcher.deleted_namespaces == [
+        "glimmung-1",
+        "glimmung-1-sessions",
+    ]
 
 
 @pytest.mark.asyncio

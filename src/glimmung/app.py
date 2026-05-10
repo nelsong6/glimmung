@@ -3272,6 +3272,7 @@ async def _cleanup_test_slot_before_release(lease_doc: dict[str, Any]) -> None:
         raise HTTPException(503, "native Kubernetes launcher is not configured")
     try:
         await launcher.delete_test_slot_namespace(namespace)
+        await launcher.delete_test_slot_namespace(f"{namespace}-sessions")
     except native_k8s_ops.NativeLaunchError as exc:
         raise HTTPException(409, str(exc)) from exc
     except Exception as exc:
@@ -5407,21 +5408,15 @@ def _test_environment_name(
         slot_name = (lease_doc.get("metadata") or {}).get("native_slot_name")
         if isinstance(slot_name, str) and slot_name.strip():
             return slot_name
-    return f"{_project_test_slot_prefix(project, project_doc)}-{slot_index}"
-
-
-def _project_test_slot_prefix(project: str, project_doc: dict[str, Any] | None) -> str:
-    if project_doc and isinstance(project_doc.get("metadata"), dict):
-        metadata = project_doc["metadata"]
-        standby_dns = (
-            metadata.get("native_standby_dns")
-            if isinstance(metadata.get("native_standby_dns"), dict)
-            else {}
+    if project_doc:
+        return str(
+            native_k8s_ops._test_slot_spec(
+                project_doc,
+                slot_index,
+                app.state.settings,
+            )["slot_name"]
         )
-        slot_prefix = standby_dns.get("slot_prefix") or standby_dns.get("slotPrefix")
-        if isinstance(slot_prefix, str) and slot_prefix.strip():
-            return slot_prefix.strip().strip(".")
-    return project
+    return f"{project}-{slot_index}"
 
 
 async def _compute_snapshot(cosmos: Cosmos) -> StateSnapshot:
@@ -8581,12 +8576,13 @@ async def checkout_test_slot(req: TestSlotCheckoutRequest) -> TestSlotCheckoutRe
         raise HTTPException(400, f"project {project!r} not registered")
 
     workflow_name = req.workflow or "test-slot-checkout"
-    slot_name = (
-        _test_environment_name(project, req.slot_index, None, project_doc)
+    requested_slot = (
+        native_k8s_ops._test_slot_spec(project_doc, req.slot_index, app.state.settings)
         if req.slot_index is not None
         else None
     )
-    slot_prefix = _project_test_slot_prefix(project, project_doc)
+    slot_name = str(requested_slot["slot_name"]) if requested_slot else None
+    slot_prefix = native_k8s_ops._test_slot_prefix(project_doc)
     requester = _test_slot_requester(req)
     phase_inputs = {str(k): str(v) for k, v in req.phase_inputs.items()}
     if req.slot_index is not None:
@@ -8638,11 +8634,21 @@ async def checkout_test_slot(req: TestSlotCheckoutRequest) -> TestSlotCheckoutRe
             detail="slot unavailable; checkout request is waiting",
         )
     actual_slot_index = lease.metadata.get("native_slot_index")
-    actual_slot_name = lease.metadata.get("native_slot_name") or slot_name
-    slot_url = None
-    if isinstance(actual_slot_name, str) and actual_slot_name:
-        host_name = native_k8s_ops._test_slot_host(project_doc, actual_slot_name, app.state.settings)
-        slot_url = f"https://{host_name}" if host_name else None
+    actual_slot = (
+        native_k8s_ops._test_slot_spec(
+            project_doc,
+            int(actual_slot_index),
+            app.state.settings,
+        )
+        if actual_slot_index
+        else None
+    )
+    actual_slot_name = (
+        str(actual_slot["slot_name"])
+        if actual_slot
+        else lease.metadata.get("native_slot_name") or slot_name
+    )
+    slot_url = actual_slot["url"] if actual_slot else None
     return TestSlotCheckoutResult(
         state=lease.state.value,
         project=project,
