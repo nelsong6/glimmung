@@ -148,7 +148,7 @@ async def test_checkout_test_slot_prepares_clean_slate_namespace_and_playwright(
 
 
 @pytest.mark.asyncio
-async def test_checkout_test_slot_uses_project_standby_dns_slot_prefix(app_state):
+async def test_checkout_test_slot_ignores_project_standby_dns_slot_prefix(app_state):
     await _register_project(
         SimpleNamespace(state=app_state),
         "tank-operator",
@@ -170,15 +170,15 @@ async def test_checkout_test_slot_uses_project_standby_dns_slot_prefix(app_state
         )
     )
 
-    assert result.slot_name == "tank-slot-1"
+    assert result.slot_name == "tank-operator-1"
     lease_doc = await app_state.cosmos.leases.read_item(
         item=result.lease_id,
         partition_key="tank-operator",
     )
-    assert lease_doc["metadata"]["native_slot_name"] == "tank-slot-1"
-    assert lease_doc["metadata"]["native_slot_prefix"] == "tank-slot"
-    assert lease_doc["metadata"]["phase_inputs"]["slot_name"] == "tank-slot-1"
-    assert lease_doc["metadata"]["phase_inputs"]["namespace"] == "tank-slot-1"
+    assert lease_doc["metadata"]["native_slot_name"] == "tank-operator-1"
+    assert "native_slot_prefix" not in lease_doc["metadata"]
+    assert lease_doc["metadata"]["phase_inputs"]["slot_name"] == "tank-operator-1"
+    assert lease_doc["metadata"]["phase_inputs"]["namespace"] == "tank-operator-1"
     assert app_state.native_k8s_launcher.reconciled_entra_projects is not None
 
 

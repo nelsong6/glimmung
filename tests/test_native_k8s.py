@@ -326,7 +326,7 @@ async def test_reconcile_standby_dns_creates_project_slots():
                 "native_standby_dns": {
                     "enabled": True,
                     "record_base": "ambience.dev.romaine.life",
-                    "slot_prefix": "ambience-slot",
+                    "slot_prefix": "ignored-slot",
                     "count": 2,
                 }
             },
@@ -346,13 +346,13 @@ async def test_reconcile_standby_dns_creates_project_slots():
     assert body["metadata"]["labels"]["glimmung.romaine.life/standby-dns"] == "true"
     assert body["spec"]["endpoints"] == [
         {
-            "dnsName": "ambience-slot-1.ambience.dev.romaine.life",
+            "dnsName": "ambience-1.ambience.dev.romaine.life",
             "recordType": "A",
             "recordTTL": 300,
             "targets": ["172.179.163.96"],
         },
         {
-            "dnsName": "ambience-slot-2.ambience.dev.romaine.life",
+            "dnsName": "ambience-2.ambience.dev.romaine.life",
             "recordType": "A",
             "recordTTL": 300,
             "targets": ["172.179.163.96"],
@@ -372,7 +372,7 @@ async def test_reconcile_standby_dns_puts_existing_resource_version():
                 "native_standby_dns": {
                     "enabled": True,
                     "record_base": "ambience.dev.romaine.life",
-                    "slot_prefix": "ambience-slot",
+                    "slot_prefix": "ignored-slot",
                     "count": 1,
                 }
             },
@@ -401,7 +401,7 @@ async def test_reconcile_standby_workload_identity_upserts_slot_credentials():
                     "subscription": "00000000-0000-0000-0000-000000000000",
                     "resource_group": "infra",
                     "issuer": "https://issuer.invalid/",
-                    "slot_prefix": "tank-slot",
+                    "slot_prefix": "ignored-slot",
                     "count": 2,
                     "credentials": [
                         {
@@ -426,21 +426,21 @@ async def test_reconcile_standby_workload_identity_upserts_slot_credentials():
         "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/infra"
         "/providers/Microsoft.ManagedIdentity/userAssignedIdentities"
         "/claude-credentials-refresher-identity/federatedIdentityCredentials"
-        "/tank-slot-1-orchestrator?api-version=2023-01-31"
+        "/tank-operator-1-orchestrator?api-version=2023-01-31"
     )
     assert first["json"] == {
         "properties": {
             "issuer": "https://issuer.invalid/",
-            "subject": "system:serviceaccount:tank-slot-1:tank-slot-1",
+            "subject": "system:serviceaccount:tank-operator-1:tank-operator-1",
             "audiences": ["api://AzureADTokenExchange"],
         }
     }
     assert launcher.calls[3]["path"].endswith(
         "/claude-api-proxy-identity/federatedIdentityCredentials"
-        "/tank-slot-2-claude-api-proxy?api-version=2023-01-31"
+        "/tank-operator-2-claude-api-proxy?api-version=2023-01-31"
     )
     assert launcher.calls[3]["json"]["properties"]["subject"] == (
-        "system:serviceaccount:tank-slot-2:claude-api-proxy"
+        "system:serviceaccount:tank-operator-2:claude-api-proxy"
     )
 
 
@@ -456,7 +456,7 @@ async def test_reconcile_standby_entra_redirects_upserts_slot_redirect_uris():
                 "native_standby_dns": {
                     "enabled": True,
                     "record_base": "tank.dev.romaine.life",
-                    "slot_prefix": "tank-slot",
+                    "slot_prefix": "ignored-slot",
                     "count": 2,
                 },
                 "native_standby_entra_redirects": {
@@ -474,8 +474,8 @@ async def test_reconcile_standby_entra_redirects_upserts_slot_redirect_uris():
         "spa": {
             "redirectUris": [
                 "https://existing.example/",
-                "https://tank-slot-1.tank.dev.romaine.life/",
-                "https://tank-slot-2.tank.dev.romaine.life/",
+                "https://tank-operator-1.tank.dev.romaine.life/",
+                "https://tank-operator-2.tank.dev.romaine.life/",
             ]
         }
     }
@@ -521,8 +521,9 @@ async def test_reconcile_standby_entra_redirects_prunes_stale_managed_slots():
         redirect_uris=[
             "https://existing.example/",
             "https://tank-slot-1.tank.dev.romaine.life/",
-            "https://tank-slot-2.tank.dev.romaine.life/",
-            "https://tank-slot-3.tank.dev.romaine.life/",
+            "https://tank-operator-1.tank.dev.romaine.life/",
+            "https://tank-operator-2.tank.dev.romaine.life/",
+            "https://tank-operator-3.tank.dev.romaine.life/",
             "https://other-slot-3.tank.dev.romaine.life/",
         ],
     )
@@ -535,7 +536,7 @@ async def test_reconcile_standby_entra_redirects_prunes_stale_managed_slots():
                 "native_standby_dns": {
                     "enabled": True,
                     "record_base": "tank.dev.romaine.life",
-                    "slot_prefix": "tank-slot",
+                    "slot_prefix": "ignored-slot",
                     "count": 2,
                 },
                 "native_standby_entra_redirects": {
@@ -552,7 +553,8 @@ async def test_reconcile_standby_entra_redirects_prunes_stale_managed_slots():
             "redirectUris": [
                 "https://existing.example/",
                 "https://tank-slot-1.tank.dev.romaine.life/",
-                "https://tank-slot-2.tank.dev.romaine.life/",
+                "https://tank-operator-1.tank.dev.romaine.life/",
+                "https://tank-operator-2.tank.dev.romaine.life/",
                 "https://other-slot-3.tank.dev.romaine.life/",
             ]
         }
