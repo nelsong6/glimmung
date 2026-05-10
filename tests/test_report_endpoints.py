@@ -2,8 +2,8 @@
 
 Covers the post-#50 PR endpoints: GET /v1/reports (Cosmos cutover from
 runs container), POST /v1/reports (agent registration + idempotent re-
-register), PATCH /v1/reports/by-id with state transitions (close, merge,
-reopen). Mirrors the test_issue_endpoints style — direct helper
+register), and storage-layer state transitions. Mirrors the
+test_issue_endpoints style — direct helper
 invocation against the in-memory cosmos fake.
 """
 
@@ -25,6 +25,7 @@ from glimmung.app import (
     _list_reports_from_cosmos,
     _list_report_versions_from_cosmos,
     app,
+    create_touchpoint_endpoint,
     issue_touchpoint_detail,
     patch_touchpoint_endpoint,
 )
@@ -40,6 +41,7 @@ def cosmos():
         report_versions=FakeContainer("report_versions", "/project"),
         runs=FakeContainer("runs", "/project"),
         issues=FakeContainer("issues", "/project"),
+        projects=FakeContainer("projects", "/name"),
         locks=FakeContainer("locks", "/scope"),
     )
 
@@ -503,8 +505,60 @@ async def test_create_pr_request_validation():
     )
     assert req.body == ""
     assert req.base_ref == "main"
-    assert req.linked_issue_id is None
-    assert req.linked_run_id is None
+    assert req.linked_issue_ref is None
+    assert req.linked_run_ref is None
+
+
+@pytest.mark.asyncio
+async def test_create_pr_endpoint_resolves_public_link_refs(cosmos, app_state):
+    await cosmos.projects.create_item({
+        "id": "ambience",
+        "name": "ambience",
+        "githubRepo": "nelsong6/ambience",
+        "metadata": {},
+        "createdAt": datetime.now(UTC).isoformat(),
+    })
+    issue = await issue_ops.create_issue(
+        cosmos,
+        project="ambience",
+        number=42,
+        title="linked issue",
+    )
+    await cosmos.runs.create_item({
+        "id": "01JRUNAAAA",
+        "project": "ambience",
+        "workflow": "issue-agent",
+        "issue_id": issue.id,
+        "issue_repo": "nelsong6/ambience",
+        "issue_number": 42,
+        "state": "passed",
+        "attempts": [],
+        "cumulative_cost_usd": 0.0,
+        "created_at": datetime.now(UTC).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
+        "schema_version": 1,
+        "budget": {"total": 25.0},
+    })
+
+    detail = await create_touchpoint_endpoint(ReportCreateRequest(
+        project="ambience",
+        repo="nelsong6/ambience",
+        number=14,
+        title="t",
+        branch="b",
+        linked_issue_ref="ambience#42",
+        linked_run_ref="ambience#42/runs/1",
+    ))
+
+    assert detail.linked_issue_ref == "ambience#42"
+    assert detail.linked_run_ref == "ambience#42/runs/1"
+    found = await report_ops.find_report_by_repo_number(
+        cosmos, repo="nelsong6/ambience", number=14,
+    )
+    assert found is not None
+    pr, _ = found
+    assert pr.linked_issue_id == issue.id
+    assert pr.linked_run_id == "01JRUNAAAA"
 
 
 # ─── PATCH state transitions ──────────────────────────────────────────────────
@@ -558,7 +612,7 @@ async def test_patch_state_merged_stamps_merged_at_and_by(cosmos):
 
 
 @pytest.mark.asyncio
-async def test_patch_state_merged_closes_linked_issue(cosmos, app_state):
+async def test_patch_by_storage_id_is_gone(cosmos, app_state):
     issue = await issue_ops.create_issue(
         cosmos, project="ambience", title="Effect: cave crystals",
     )
@@ -572,17 +626,13 @@ async def test_patch_state_merged_closes_linked_issue(cosmos, app_state):
         linked_issue_id=issue.id,
     )
 
-    await patch_touchpoint_endpoint(
-        ReportUpdateRequest(state="merged", merged_by="nelsong6"),
-        project="ambience",
-        report_id=pr.id,
-    )
-
-    found = await issue_ops.read_issue(cosmos, project="ambience", issue_id=issue.id)
-    assert found is not None
-    closed_issue, _ = found
-    assert closed_issue.state == IssueState.CLOSED
-    assert closed_issue.closed_at is not None
+    with pytest.raises(HTTPException) as exc:
+        await patch_touchpoint_endpoint(
+            ReportUpdateRequest(state="merged", merged_by="nelsong6"),
+            project="ambience",
+            report_id=pr.id,
+        )
+    assert exc.value.status_code == 410
 
 
 @pytest.mark.asyncio
