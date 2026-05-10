@@ -285,16 +285,11 @@ Scope is the glimmung database only; sibling apps on the same Cosmos account
 stay unreachable.
 
 The attended-pickup launch flow ([#127](https://github.com/nelsong6/glimmung/issues/127))
-is dogfooded against real Glimmung PR rows: a Glimmung agent run produces an
-actual PR in this repo, and that PR is the fixture used to exercise
-`session ready` / `launch session` end-to-end before #127 can close.
-
-The dogfood issue carries the `agent-session:warm` label, which
-[`session_launch_intent_from_labels`](src/glimmung/dispatch.py) lifts onto
-the resulting Run so the PR detail surface exposes a `session_launch_url`
-(see [`build_pr_detail`](src/glimmung/app.py)). The launch URL hands the
-glimmung run / issue / PR ids — plus the validation URL embedded in the PR
-body — to tank-operator, which is what gives the warm session its
+is dogfooded against real Glimmung PR rows: a Glimmung run produces an
+actual PR in this repo, and that PR is the fixture used to exercise the
+`start Tank session` flow before #127 can close. The launch URL hands the
+glimmung run / issue / touchpoint refs, plus the validation URL embedded in
+the PR body, to tank-operator, which gives the session its
 `/workspace/GLIMMUNG_CONTEXT.{json,md}` and an mcp-glimmung route.
 
 ## Verify-loop substrate (#18)

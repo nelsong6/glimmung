@@ -33,7 +33,6 @@ type TouchpointDetail = {
   run_state: string | null;
   validation_url: string | null;
   screenshots_markdown: string | null;
-  session_launch_intent: string;
   session_launch_url: string | null;
   run_attempts: number;
   run_cumulative_cost_usd: number;
@@ -230,7 +229,7 @@ export function TouchpointDetailView() {
               </div>
             )}
             <div className="row">
-              <span className="key">session</span>
+              <span className="key">Tank session</span>
               <span className="val">
                 <button
                   type="button"
@@ -243,17 +242,12 @@ export function TouchpointDetailView() {
                   }
                   title={
                     detail.run_ref && detail.linked_issue_ref
-                      ? "Open a tank-operator session with this glimmung context"
+                      ? "Start a Tank session with this Glimmung context"
                       : "Requires a linked glimmung run and issue"
                   }
                 >
-                  {detail.session_launch_intent === "warm" ? "session ready" : "launch session"}
+                  start Tank session
                 </button>
-                {detail.session_launch_intent === "warm" && (
-                  <span className="pill free" style={{ marginLeft: "0.5rem" }}>
-                    warm
-                  </span>
-                )}
               </span>
             </div>
           </div>

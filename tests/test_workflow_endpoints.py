@@ -17,6 +17,7 @@ from fastapi import HTTPException
 from glimmung.app import (
     WorkflowUpdateRequest,
     _read_workflow,
+    delete_workflow,
     patch_workflow_endpoint,
     register_workflow,
 )
@@ -84,6 +85,31 @@ async def _seed_workflow(
 
 def _app_with(cosmos):
     return SimpleNamespace(state=SimpleNamespace(cosmos=cosmos))
+
+
+# ─── DELETE /v1/workflows/{project}/{name} ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_delete_workflow_removes_registration(cosmos, monkeypatch):
+    await _seed_workflow(cosmos, project="ambience", name="agent-run")
+    monkeypatch.setattr("glimmung.app.app", _app_with(cosmos))
+
+    result = await delete_workflow(project="ambience", name="agent-run")
+
+    assert result.project == "ambience"
+    assert result.name == "agent-run"
+    with pytest.raises(Exception):
+        await cosmos.workflows.read_item(item="agent-run", partition_key="ambience")
+
+
+@pytest.mark.asyncio
+async def test_delete_workflow_404_when_missing(cosmos, monkeypatch):
+    monkeypatch.setattr("glimmung.app.app", _app_with(cosmos))
+
+    with pytest.raises(HTTPException) as excinfo:
+        await delete_workflow(project="ambience", name="does-not-exist")
+    assert excinfo.value.status_code == 404
 
 
 # ─── PATCH /v1/workflows/{project}/{name} ──────────────────────────────────
