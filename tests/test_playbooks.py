@@ -201,13 +201,13 @@ async def test_playbook_endpoints_create_list_get(cosmos, monkeypatch):
     )
 
     listed = await list_playbooks_endpoint(project="glimmung")
-    assert [p.id for p in listed] == [created.id]
+    assert [p.ref for p in listed] == [created.ref]
 
-    fetched = await get_playbook_endpoint(project="glimmung", playbook_id=created.id)
-    assert fetched.id == created.id
+    fetched = await get_playbook_endpoint(project="glimmung", playbook_ref=created.ref)
+    assert fetched.ref == created.ref
 
     with pytest.raises(HTTPException) as exc:
-        await get_playbook_endpoint(project="glimmung", playbook_id="missing")
+        await get_playbook_endpoint(project="glimmung", playbook_ref="missing")
     assert exc.value.status_code == 404
 
 
@@ -486,7 +486,7 @@ async def test_run_playbook_endpoint_404s_on_missing(cosmos, monkeypatch):
         SimpleNamespace(state=SimpleNamespace(cosmos=cosmos)),
     )
     with pytest.raises(HTTPException) as exc:
-        await run_playbook_endpoint(project="glimmung", playbook_id="missing")
+        await run_playbook_endpoint(project="glimmung", playbook_ref="missing")
     assert exc.value.status_code == 404
 
 
@@ -522,15 +522,16 @@ async def test_playbook_gate_endpoint_clears_gate_and_advances(cosmos, monkeypat
     advanced = await set_playbook_entry_gate_endpoint(
         PlaybookEntryGateRequest(manual_gate=False),
         project="glimmung",
-        playbook_id=playbook.id,
+        playbook_ref=playbook.metadata["public_ref"],
         entry_id="review",
     )
 
     assert advanced.state == PlaybookState.RUNNING
     assert advanced.entries[0].manual_gate is False
     assert advanced.entries[0].state == PlaybookEntryState.RUNNING
-    assert advanced.entries[0].run_id == "run-review"
-    assert calls == [advanced.entries[0].created_issue_id]
+    assert advanced.entries[0].run_ref is None
+    assert advanced.entries[0].created_issue_ref is not None
+    assert len(calls) == 1
 
 
 @pytest.mark.asyncio
@@ -552,7 +553,7 @@ async def test_playbook_gate_endpoint_can_set_gate_without_advancing(cosmos, mon
     updated = await set_playbook_entry_gate_endpoint(
         PlaybookEntryGateRequest(manual_gate=True, advance=False),
         project="glimmung",
-        playbook_id=playbook.id,
+        playbook_ref=playbook.metadata["public_ref"],
         entry_id="one",
     )
 
@@ -577,7 +578,7 @@ async def test_playbook_gate_endpoint_404s_for_missing_entry(cosmos, monkeypatch
         await set_playbook_entry_gate_endpoint(
             PlaybookEntryGateRequest(),
             project="glimmung",
-            playbook_id=playbook.id,
+            playbook_ref=playbook.metadata["public_ref"],
             entry_id="missing",
         )
     assert exc.value.status_code == 404

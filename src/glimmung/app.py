@@ -80,6 +80,7 @@ from glimmung.models import (
     PlaybookEntry,
     PlaybookEntryState,
     PlaybookIntegrationStrategy,
+    PlaybookIssueSpec,
     PlaybookState,
     PortfolioElement,
     PortfolioReviewState,
@@ -5302,12 +5303,107 @@ class PlaybookEntryGateRequest(BaseModel):
     advance: bool = True
 
 
+class PlaybookEntryPublic(BaseModel):
+    id: str
+    title: str | None = None
+    issue: PlaybookIssueSpec
+    depends_on: list[str] = Field(default_factory=list)
+    manual_gate: bool = False
+    state: PlaybookEntryState = PlaybookEntryState.PENDING
+    created_issue_ref: str | None = None
+    run_ref: str | None = None
+    completed_at: datetime | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PlaybookPublic(BaseModel):
+    schema_version: int = 1
+    ref: str
+    project: str
+    title: str
+    description: str = ""
+    entries: list[PlaybookEntryPublic] = Field(default_factory=list)
+    concurrency_limit: int | None = None
+    integration_strategy: PlaybookIntegrationStrategy = PlaybookIntegrationStrategy.ISOLATED_PRS
+    state: PlaybookState = PlaybookState.DRAFT
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
+def _playbook_public_ref(playbook: Playbook) -> str:
+    public_ref = playbook.metadata.get("public_ref")
+    if isinstance(public_ref, str) and public_ref.strip():
+        return public_ref.strip()
+    return playbook_ops.public_ref_for_title(playbook.title, playbook.created_at)
+
+
+async def _playbook_to_public(cosmos: Cosmos, playbook: Playbook) -> PlaybookPublic:
+    entries: list[PlaybookEntryPublic] = []
+    for entry in playbook.entries:
+        created_issue_ref: str | None = None
+        if entry.created_issue_id:
+            try:
+                issue_doc = await cosmos.issues.read_item(
+                    item=entry.created_issue_id,
+                    partition_key=playbook.project,
+                )
+                created_issue_ref = issue_ref(
+                    playbook.project,
+                    int(issue_doc["number"]) if issue_doc.get("number") is not None else None,
+                )
+            except Exception:
+                created_issue_ref = None
+        public_run_ref: str | None = None
+        if entry.run_id:
+            found = await run_ops.read_run(cosmos, project=playbook.project, run_id=entry.run_id)
+            if found is not None:
+                public_run_ref = _run_public_ref(found[0])
+        entries.append(PlaybookEntryPublic(
+            id=entry.id,
+            title=entry.title,
+            issue=entry.issue,
+            depends_on=entry.depends_on,
+            manual_gate=entry.manual_gate,
+            state=entry.state,
+            created_issue_ref=created_issue_ref,
+            run_ref=public_run_ref,
+            completed_at=entry.completed_at,
+            metadata=entry.metadata,
+        ))
+    metadata = dict(playbook.metadata)
+    metadata.pop("public_ref", None)
+    return PlaybookPublic(
+        schema_version=playbook.schema_version,
+        ref=_playbook_public_ref(playbook),
+        project=playbook.project,
+        title=playbook.title,
+        description=playbook.description,
+        entries=entries,
+        concurrency_limit=playbook.concurrency_limit,
+        integration_strategy=playbook.integration_strategy,
+        state=playbook.state,
+        metadata=metadata,
+        created_at=playbook.created_at,
+        updated_at=playbook.updated_at,
+    )
+
+
+async def _resolve_playbook_ref(cosmos: Cosmos, *, project: str, ref: str) -> tuple[Playbook, str] | None:
+    rows = await playbook_ops.list_playbooks(cosmos, project=project)
+    for playbook in rows:
+        if _playbook_public_ref(playbook) == ref:
+            found = await playbook_ops.read_playbook(cosmos, project=project, playbook_id=playbook.id)
+            return found
+    return None
+
+
 @app.post(
     "/v1/playbooks",
-    response_model=Playbook,
+    response_model=PlaybookPublic,
     dependencies=[Depends(require_admin_user)],
 )
-async def create_playbook_endpoint(req: PlaybookCreate) -> Playbook:
+async def create_playbook_endpoint(req: PlaybookCreate) -> PlaybookPublic:
     """Persist a draft Playbook. Execution is intentionally not part of
     this endpoint; this slice only stores the coordinated issue set."""
     cosmos: Cosmos = app.state.cosmos
@@ -5329,55 +5425,49 @@ async def create_playbook_endpoint(req: PlaybookCreate) -> Playbook:
             )
     if req.concurrency_limit is not None and req.concurrency_limit < 1:
         raise HTTPException(422, "concurrency_limit must be >= 1")
-    return await playbook_ops.create_playbook(cosmos, req)
+    playbook = await playbook_ops.create_playbook(cosmos, req)
+    return await _playbook_to_public(cosmos, playbook)
 
 
-@app.get("/v1/playbooks", response_model=list[Playbook])
+@app.get("/v1/playbooks", response_model=list[PlaybookPublic])
 async def list_playbooks_endpoint(
     project: Annotated[str | None, Query()] = None,
     state: Annotated[PlaybookState | None, Query()] = None,
     limit: Annotated[int | None, Query(ge=1, le=500)] = None,
-) -> list[Playbook]:
-    return await playbook_ops.list_playbooks(
+) -> list[PlaybookPublic]:
+    playbooks = await playbook_ops.list_playbooks(
         app.state.cosmos,
         project=project,
         state=state.value if state is not None else None,
         limit=limit,
     )
+    return [await _playbook_to_public(app.state.cosmos, playbook) for playbook in playbooks]
 
 
-@app.get("/v1/playbooks/{project}/{playbook_id}", response_model=Playbook)
+@app.get("/v1/playbooks/{project}/{playbook_ref}", response_model=PlaybookPublic)
 async def get_playbook_endpoint(
     project: str = Path(...),
-    playbook_id: str = Path(...),
-) -> Playbook:
-    found = await playbook_ops.read_playbook(
-        app.state.cosmos,
-        project=project,
-        playbook_id=playbook_id,
-    )
+    playbook_ref: str = Path(...),
+) -> PlaybookPublic:
+    found = await _resolve_playbook_ref(app.state.cosmos, project=project, ref=playbook_ref)
     if found is None:
-        raise HTTPException(404, f"no playbook {project}/{playbook_id}")
+        raise HTTPException(404, f"no playbook {project}/{playbook_ref}")
     playbook, _etag = found
-    return playbook
+    return await _playbook_to_public(app.state.cosmos, playbook)
 
 
 @app.post(
-    "/v1/playbooks/{project}/{playbook_id}/run",
-    response_model=Playbook,
+    "/v1/playbooks/{project}/{playbook_ref}/run",
+    response_model=PlaybookPublic,
     dependencies=[Depends(require_admin_user)],
 )
 async def run_playbook_endpoint(
     project: str = Path(...),
-    playbook_id: str = Path(...),
-) -> Playbook:
-    found = await playbook_ops.read_playbook(
-        app.state.cosmos,
-        project=project,
-        playbook_id=playbook_id,
-    )
+    playbook_ref: str = Path(...),
+) -> PlaybookPublic:
+    found = await _resolve_playbook_ref(app.state.cosmos, project=project, ref=playbook_ref)
     if found is None:
-        raise HTTPException(404, f"no playbook {project}/{playbook_id}")
+        raise HTTPException(404, f"no playbook {project}/{playbook_ref}")
     playbook, etag = found
     playbook = await _advance_playbook(app, playbook=playbook)
     playbook, _ = await playbook_ops.replace_playbook(
@@ -5385,35 +5475,31 @@ async def run_playbook_endpoint(
         playbook=playbook,
         etag=etag,
     )
-    return playbook
+    return await _playbook_to_public(app.state.cosmos, playbook)
 
 
 @app.post(
-    "/v1/playbooks/{project}/{playbook_id}/entries/{entry_id}/gate",
-    response_model=Playbook,
+    "/v1/playbooks/{project}/{playbook_ref}/entries/{entry_id}/gate",
+    response_model=PlaybookPublic,
     dependencies=[Depends(require_admin_user)],
 )
 async def set_playbook_entry_gate_endpoint(
     req: PlaybookEntryGateRequest,
     project: str = Path(...),
-    playbook_id: str = Path(...),
+    playbook_ref: str = Path(...),
     entry_id: str = Path(...),
-) -> Playbook:
+) -> PlaybookPublic:
     cosmos: Cosmos = app.state.cosmos
-    found = await playbook_ops.read_playbook(
-        cosmos,
-        project=project,
-        playbook_id=playbook_id,
-    )
+    found = await _resolve_playbook_ref(cosmos, project=project, ref=playbook_ref)
     if found is None:
-        raise HTTPException(404, f"no playbook {project}/{playbook_id}")
+        raise HTTPException(404, f"no playbook {project}/{playbook_ref}")
     playbook, etag = found
     entry = next(
         (candidate for candidate in playbook.entries if candidate.id == entry_id),
         None,
     )
     if entry is None:
-        raise HTTPException(404, f"no playbook entry {project}/{playbook_id}/{entry_id}")
+        raise HTTPException(404, f"no playbook entry {project}/{playbook_ref}/{entry_id}")
     entry.manual_gate = req.manual_gate
     entry.metadata = {
         **entry.metadata,
@@ -5426,7 +5512,7 @@ async def set_playbook_entry_gate_endpoint(
         playbook=playbook,
         etag=etag,
     )
-    return playbook
+    return await _playbook_to_public(cosmos, playbook)
 
 
 async def _advance_playbook(app: FastAPI, *, playbook: Playbook) -> Playbook:
