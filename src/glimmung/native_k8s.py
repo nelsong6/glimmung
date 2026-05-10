@@ -454,10 +454,10 @@ class NativeKubernetesLauncher:
         Glimmung looks up the project's ArgoCD Application to discover the
         chart path (spec.source.path), then constructs a `helm template`
         command using the slot-scoped values from project metadata.
-        ClusterRoles and ClusterRoleBindings are stripped from the kubectl
-        apply stream; any CRBs in `metadata.test_slot_helm.cluster_role_bindings`
-        are created directly by the glimmung pod (which has that permission)
-        before the Job starts.
+        The installer Job is generic: Glimmung grants its runner service
+        account temporary cluster-admin for the checked-out slot lease, then
+        applies the chart exactly as rendered. App-specific rendering belongs
+        in the app chart, normally behind `testEnv.enabled=true`.
 
         Reads `metadata.test_slot_helm` from `project_doc`. Skips silently
         when the project has not opted in or has no `github_repo`. Returns
@@ -516,9 +516,7 @@ class NativeKubernetesLauncher:
             "glimmung.romaine.life/native-slot-name": _label_value(slot_name),
         })
         await self._ensure_slot_admin_binding(sessions_ns, slot=slot)
-        await self._ensure_slot_cluster_role_bindings(
-            config["cluster_role_bindings"], substitutions, slot_name=slot_name
-        )
+        await self._ensure_installer_cluster_admin_binding(slot_name, slot=slot)
 
         secret_name = _test_slot_install_secret_name(lease_id)
         await self._ensure_clone_token_secret(secret_name, repo_token, slot=slot)
@@ -580,7 +578,70 @@ class NativeKubernetesLauncher:
             if exc.response.status_code != 404:
                 raise
         if slot_name:
-            await self._delete_slot_cluster_role_bindings(slot_name)
+            await self._delete_installer_cluster_admin_binding(slot_name)
+
+    async def _ensure_installer_cluster_admin_binding(
+        self,
+        slot_name: str,
+        *,
+        slot: dict[str, str],
+    ) -> None:
+        """Temporarily allow the generic installer Job to apply full charts.
+
+        Without this, every project that emits ClusterRoleBinding or other
+        cluster-scoped resources has to teach Glimmung app-specific templates.
+        The binding is labelled by slot and removed on test-slot return.
+        """
+        name = _installer_cluster_admin_binding_name(slot_name)
+        body = {
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "ClusterRoleBinding",
+            "metadata": {
+                "name": name,
+                "labels": {
+                    **_managed_labels(),
+                    "glimmung.romaine.life/test-slot-installer": "true",
+                    "glimmung.romaine.life/project": _label_value(slot["project"]),
+                    "glimmung.romaine.life/native-slot-name": _label_value(slot_name),
+                },
+            },
+            "subjects": [
+                {
+                    "kind": "ServiceAccount",
+                    "name": self._settings.native_runner_service_account,
+                    "namespace": self._settings.native_runner_namespace,
+                }
+            ],
+            "roleRef": {
+                "apiGroup": "rbac.authorization.k8s.io",
+                "kind": "ClusterRole",
+                "name": "cluster-admin",
+            },
+        }
+        if slot.get("lease_id"):
+            body["metadata"]["labels"]["glimmung.romaine.life/lease-id"] = _label_value(
+                slot["lease_id"]
+            )
+        try:
+            await self._request(
+                "POST",
+                "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings",
+                json=body,
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 409:
+                raise
+
+    async def _delete_installer_cluster_admin_binding(self, slot_name: str) -> None:
+        name = _installer_cluster_admin_binding_name(slot_name)
+        try:
+            await self._request(
+                "DELETE",
+                f"/apis/rbac.authorization.k8s.io/v1/clusterrolebindings/{name}",
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
 
     async def _ensure_slot_admin_binding(
         self,
@@ -645,71 +706,6 @@ class NativeKubernetesLauncher:
             if exc.response.status_code == 404:
                 return None
             raise
-
-    async def _ensure_slot_cluster_role_bindings(
-        self,
-        crb_templates: list[Any],
-        substitutions: dict[str, str],
-        *,
-        slot_name: str,
-    ) -> None:
-        """Create cluster-scoped RoleBindings needed by the slot.
-
-        The installer Job SA lacks cluster-scope RBAC write access; the
-        glimmung pod SA (infra-shared) creates these directly.  Each entry
-        in `crb_templates` is a dict with `name`, `subjects`, and `roleRef`
-        fields, all supporting `{slot_name}`/`{host}` substitution.
-        """
-        slot_labels = {
-            **_managed_labels(),
-            "glimmung.romaine.life/test-slot": "true",
-            "glimmung.romaine.life/native-slot-name": _label_value(slot_name),
-        }
-        for template in crb_templates:
-            if not isinstance(template, dict):
-                continue
-            filled = _deep_format(template, substitutions)
-            name = str((filled.get("metadata") or {}).get("name") or filled.get("name") or "").strip()
-            if not name:
-                continue
-            body = {
-                "apiVersion": "rbac.authorization.k8s.io/v1",
-                "kind": "ClusterRoleBinding",
-                "metadata": {"name": name, "labels": slot_labels},
-                "subjects": filled.get("subjects") or [],
-                "roleRef": filled.get("roleRef") or {},
-            }
-            try:
-                await self._request(
-                    "POST",
-                    "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings",
-                    json=body,
-                )
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code != 409:
-                    raise
-
-    async def _delete_slot_cluster_role_bindings(self, slot_name: str) -> None:
-        """Delete all CRBs labelled with the slot name (best-effort)."""
-        label_sel = f"glimmung.romaine.life/native-slot-name={_label_value(slot_name)}"
-        try:
-            resp = await self._request(
-                "GET",
-                f"/apis/rbac.authorization.k8s.io/v1/clusterrolebindings?labelSelector={label_sel}",
-            )
-            for crb in resp.get("items") or []:
-                crb_name = (crb.get("metadata") or {}).get("name") or ""
-                if not crb_name:
-                    continue
-                try:
-                    await self._request(
-                        "DELETE",
-                        f"/apis/rbac.authorization.k8s.io/v1/clusterrolebindings/{crb_name}",
-                    )
-                except httpx.HTTPStatusError:
-                    pass
-        except httpx.HTTPStatusError:
-            pass
 
     async def _ensure_clone_token_secret(
         self,
@@ -1979,9 +1975,8 @@ def _test_slot_helm_config(project_doc: dict[str, Any]) -> dict[str, Any] | None
     Returns None when the project hasn't opted in.  The `values` dict
     carries helm --set overrides keyed by helm path; values may contain
     `{slot_name}`, `{host}`, `{slot_index}`, `{project}` placeholders
-    which are substituted at install time.  `cluster_role_bindings` is a
-    list of CRB templates glimmung creates directly (the installer Job SA
-    lacks cluster-scope RBAC write access).
+    which are substituted at install time. Glimmung always adds
+    `testEnv.enabled=true` so app charts own their test-environment details.
     """
     metadata = project_doc.get("metadata") or {}
     if not isinstance(metadata, dict):
@@ -1993,10 +1988,7 @@ def _test_slot_helm_config(project_doc: dict[str, Any]) -> dict[str, Any] | None
     values = raw.get("values") or {}
     if not isinstance(values, dict):
         values = {}
-
-    crbs = raw.get("cluster_role_bindings") or raw.get("clusterRoleBindings") or []
-    if not isinstance(crbs, list):
-        crbs = []
+    values = {"testEnv.enabled": "true", **values}
 
     image = str(
         raw.get("installer_image")
@@ -2008,21 +2000,9 @@ def _test_slot_helm_config(project_doc: dict[str, Any]) -> dict[str, Any] | None
 
     return {
         "values": values,
-        "cluster_role_bindings": crbs,
         "installer_image": image or _DEFAULT_INSTALLER_IMAGE,
         "git_ref": git_ref,
     }
-
-
-def _deep_format(obj: Any, substitutions: dict[str, str]) -> Any:
-    """Recursively apply `{key}`-style substitution to strings in obj."""
-    if isinstance(obj, str):
-        return _format_substitutions(obj, substitutions)
-    if isinstance(obj, dict):
-        return {k: _deep_format(v, substitutions) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_deep_format(item, substitutions) for item in obj]
-    return obj
 
 
 def _test_slot_host(
@@ -2058,6 +2038,10 @@ def _test_slot_install_job_name(lease_id: str) -> str:
 
 def _test_slot_install_secret_name(lease_id: str) -> str:
     return _resource_name("glim-helm-clone", lease_id, 0)
+
+
+def _installer_cluster_admin_binding_name(slot_name: str) -> str:
+    return _resource_name("glim-test-slot-installer", slot_name, 0)
 
 
 def _format_substitutions(template: str, substitutions: dict[str, str]) -> str:
@@ -2130,14 +2114,11 @@ def _test_slot_install_manifest(
         "  git clone --depth 1 \"$REPO_URL\" /workspace\n"
         "fi\n"
     )
-    # Glimmung creates ClusterRoles/ClusterRoleBindings directly; strip them
-    # from the stream so the installer SA (namespace-scoped) can apply cleanly.
     install_script = (
         "set -eu\n"
         "cd /workspace\n"
         f"helm template {_shell_quote(slot_name)} {_shell_quote(chart_path)}"
         f" --namespace {_shell_quote(slot_name)} {set_flags}"
-        " | yq 'select(.kind != \"ClusterRoleBinding\" and .kind != \"ClusterRole\")'"
         " | kubectl apply -f -\n"
     )
     pod_spec: dict[str, Any] = {
