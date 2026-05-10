@@ -234,7 +234,7 @@ async def _occupy_native_capacity(cosmos, project: str = "ambience") -> None:
         "project": project,
         "workflow": "other-run",
         "host": "native-k8s",
-        "state": "active",
+        "state": "claimed",
         "requirements": {},
         "metadata": {"native_k8s": True, "run_id": "other"},
         "requestedAt": datetime.now(UTC).isoformat(),
