@@ -16,7 +16,7 @@ import type { AccountInfo } from "@azure/msal-browser";
 type Host = {
   name: string;
   capabilities: Record<string, unknown>;
-  current_lease_id: string | null;
+  current_lease_ref: string | null;
   last_heartbeat: string | null;
   last_used_at: string | null;
   drained: boolean;
@@ -24,7 +24,7 @@ type Host = {
 };
 
 type Lease = {
-  id: string;
+  ref: string;
   lease_number?: number | null;
   project: string;
   workflow: string | null;
@@ -1857,7 +1857,7 @@ function ProjectHostsView({
   );
   const leaseLabels = new Map(
     [...snap.active_leases, ...snap.pending_leases].map((lease) => [
-      lease.id,
+      lease.ref,
       leaseDisplayName(lease),
     ]),
   );
@@ -1871,8 +1871,8 @@ function ProjectHostsView({
         </div>
         <div className="project-facts">
           <div className="project-fact"><span>total</span><strong>{hosts.length}</strong></div>
-          <div className="project-fact"><span>free</span><strong>{hosts.filter((h) => !h.drained && !h.current_lease_id).length}</strong></div>
-          <div className="project-fact"><span>busy</span><strong>{hosts.filter((h) => !h.drained && h.current_lease_id).length}</strong></div>
+          <div className="project-fact"><span>free</span><strong>{hosts.filter((h) => !h.drained && !h.current_lease_ref).length}</strong></div>
+          <div className="project-fact"><span>busy</span><strong>{hosts.filter((h) => !h.drained && h.current_lease_ref).length}</strong></div>
           <div className="project-fact"><span>drained</span><strong>{hosts.filter((h) => h.drained).length}</strong></div>
         </div>
       </section>
@@ -1899,14 +1899,14 @@ function ProjectHostsView({
                 <td>
                   {h.drained ? (
                     <span className="pill drain">drained</span>
-                  ) : h.current_lease_id ? (
+                  ) : h.current_lease_ref ? (
                     <span className="pill busy">busy</span>
                   ) : (
                     <span className="pill free">free</span>
                   )}
                 </td>
                 <td className="mono dim">
-                  {h.current_lease_id ? leaseLabels.get(h.current_lease_id) ?? "active lease" : "—"}
+                  {h.current_lease_ref ? leaseLabels.get(h.current_lease_ref) ?? "active lease" : "—"}
                 </td>
                 <td className="mono dim">{relTime(h.last_heartbeat)}</td>
                 <td className="mono dim">{relTime(h.last_used_at)}</td>
@@ -2444,7 +2444,7 @@ function CurrentWorkTable({ leases, emptyText }: { leases: Lease[]; emptyText: s
         {leases.map((l) => {
           const context = leaseContext(l);
           return (
-            <tr key={l.id}>
+            <tr key={l.ref}>
               <td className="mono">{leaseDisplayName(l)}</td>
               <td className="mono dim">{l.workflow ?? "—"}</td>
               <td><span className={`pill ${l.state === "active" ? "busy" : "info"}`}>{l.state}</span></td>
@@ -2523,11 +2523,14 @@ function CapacityView({
   const [cancelError, setCancelError] = useState<string | null>(null);
 
   const fireCancel = async (lease: Lease) => {
-    setBusyId(lease.id);
+    setBusyId(lease.ref);
     setCancelError(null);
     try {
-      const url = `/v1/lease/${encodeURIComponent(lease.id)}/cancel?project=${encodeURIComponent(lease.project)}`;
-      const r = await authedFetch(url, { method: "POST" });
+      const r = await authedFetch("/v1/leases/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project: lease.project, lease_ref: lease.ref }),
+      });
       if (!r.ok) {
         const text = await r.text().catch(() => "");
         setCancelError(`cancel ${leaseDisplayName(lease)}: ${r.status} ${text || r.statusText}`);
@@ -2569,7 +2572,7 @@ function CapacityView({
             </thead>
             <tbody>
               {filteredPending.map((l) => (
-                <tr key={l.id}>
+                <tr key={l.ref}>
                   <td className="mono">{leaseDisplayName(l)}</td>
                   <td>{l.project}</td>
                   <td className="mono dim">{l.workflow ?? "—"}</td>
@@ -2603,7 +2606,7 @@ function CapacityView({
             </thead>
             <tbody>
               {filteredActive.map((l) => (
-                <tr key={l.id}>
+                <tr key={l.ref}>
                   <td className="mono">{leaseDisplayName(l)}</td>
                   <td>{l.project}</td>
                   <td className="mono dim">{l.workflow ?? "—"}</td>
@@ -2612,23 +2615,23 @@ function CapacityView({
                   <td className="mono dim">{relTime(l.assigned_at)}</td>
                   {signedIn && (
                     <td>
-                      {confirmId === l.id ? (
+                      {confirmId === l.ref ? (
                         <>
                           <span className="confirm">
                             <button
                               type="button"
                               className="link danger-text"
                               onClick={() => void fireCancel(l)}
-                              disabled={busyId === l.id}
+                              disabled={busyId === l.ref}
                             >
-                              {busyId === l.id ? "cancelling…" : "cancel?"}
+                              {busyId === l.ref ? "cancelling…" : "cancel?"}
                             </button>
                             <span className="sep">/</span>
                             <button
                               type="button"
                               className="link"
                               onClick={() => setConfirmId(null)}
-                              disabled={busyId === l.id}
+                              disabled={busyId === l.ref}
                             >
                               keep
                             </button>
@@ -2638,7 +2641,7 @@ function CapacityView({
                         <button
                           type="button"
                           className="link"
-                          onClick={() => setConfirmId(l.id)}
+                          onClick={() => setConfirmId(l.ref)}
                         >
                           cancel
                         </button>

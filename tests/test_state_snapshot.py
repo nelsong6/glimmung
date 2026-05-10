@@ -95,3 +95,38 @@ async def test_compute_snapshot_with_no_workflows(cosmos):
     assert snap.hosts == []
     assert snap.pending_leases == []
     assert snap.active_leases == []
+
+
+@pytest.mark.asyncio
+async def test_compute_snapshot_uses_public_lease_refs(cosmos):
+    now = datetime.now(UTC).isoformat()
+    await cosmos.hosts.create_item({
+        "id": "runner-1",
+        "name": "runner-1",
+        "capabilities": {},
+        "currentLeaseId": "01JLEASEBACKING",
+        "lastHeartbeat": now,
+        "lastUsedAt": now,
+        "drained": False,
+        "createdAt": now,
+    })
+    await cosmos.leases.create_item({
+        "id": "01JLEASEBACKING",
+        "leaseNumber": 17,
+        "project": "ambience",
+        "workflow": "agent-run",
+        "host": "runner-1",
+        "state": "active",
+        "requirements": {},
+        "metadata": {},
+        "requestedAt": now,
+        "assignedAt": now,
+        "releasedAt": None,
+        "ttlSeconds": 900,
+    })
+
+    snap = await _compute_snapshot(cosmos)
+
+    assert snap.hosts[0].current_lease_ref == "ambience/leases/17"
+    assert snap.active_leases[0].ref == "ambience/leases/17"
+    assert "01JLEASEBACKING" not in snap.model_dump_json()
