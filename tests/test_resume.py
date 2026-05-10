@@ -185,6 +185,8 @@ async def _seed_aborted_run_at_agent_execute(
         id=run_id,
         project=project,
         workflow="agent-run",
+        run_number=1,
+        run_display_number="1",
         issue_id="01HZRSMRESUMETEST",
         issue_repo="nelsong6/ambience",
         issue_number=116,
@@ -741,5 +743,5 @@ async def test_resume_endpoint_happy_path_returns_dispatched(cosmos, app_state):
         result = await resume_run(req, project=prior.project, run_id=prior.id)
 
     assert result.state in ("dispatched", "pending")
-    assert result.new_run_id and result.new_run_id != prior.id
-    assert result.prior_run_id == prior.id
+    assert result.new_run_ref == "ambience#116/runs/1.1"
+    assert result.prior_run_ref == "ambience#116/runs/1"
