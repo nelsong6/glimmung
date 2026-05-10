@@ -241,11 +241,8 @@ async def dispatch_run(
             detail=f"issue lock held by {busy.lock.held_by} until {busy.lock.expires_at.isoformat()}",
         )
 
-    # 4. Run record (#69): create BEFORE dispatch so run_id can flow into
-    # workflow_dispatch inputs. Glimmung dictates the head ref via run_id
-    # (`glimmung/<run_id>`) and the agent's workflow needs that value at
-    # branch-resolution time. Pre-#69 the Run was created post-dispatch
-    # (fine because branches were agent-named); post-#69 the order matters.
+    # 4. Run record (#69): create BEFORE dispatch so the public run ref and
+    # callback token can flow into workflow_dispatch inputs.
     run_id: str | None = None
     run_number: int | None = None
     phases = workflow_doc.get("phases") or []
@@ -287,26 +284,19 @@ async def dispatch_run(
         metadata["recent_comments"] = _format_recent_comments(issue.comments)
     if run_id is not None:
         metadata["run_id"] = run_id
+        metadata["run_ref"] = f"{project_name}#{issue_number}/runs/{run.run_display_number or run.run_number}"
+        if run.callback_token:
+            metadata["run_callback_token"] = run.callback_token
         metadata["run_number"] = str(run.run_number or "")
         metadata["run_display_number"] = str(run.run_display_number or run.run_number or "")
         metadata["attempt_index"] = "0"
         if initial_phase is not None:
             metadata["phase_name"] = initial_phase["name"]
             # Default the work branch to a human-readable
-            # `issue-<N>-run-<M>` shape. Native runners read this
-            # straight from `GLIMMUNG_WORK_CONTEXT_BRANCH`; GHA-dispatch
-            # consumers need to declare `work_context_branch` as an
-            # input or they'll 422 on the unknown key, so for now we
-            # only stamp the metadata for k8s_job phases and let
-            # gha_dispatch keep the legacy `glimmung/<run_id>` default
-            # in their workflow YAML. Playbooks pass their own
-            # `work_context_branch` via `extra_metadata` (already
-            # merged above) — `setdefault` preserves that override.
-            if initial_phase.get("kind") == "k8s_job":
-                metadata.setdefault(
-                    "work_context_branch",
-                    run_ops.default_work_branch(run),
-                )
+            # `issue-<N>-run-<M>` shape. Playbooks pass their own
+            # `work_context_branch` via `extra_metadata` (already merged
+            # above) — `setdefault` preserves that override.
+            metadata.setdefault("work_context_branch", run_ops.default_work_branch(run))
     metadata["issue_number"] = str(issue_number)
     metadata["issue_id"] = issue.id
     requirements = (

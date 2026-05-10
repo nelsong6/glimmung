@@ -225,7 +225,7 @@ async def test_release_test_slot_cleans_up_namespace_before_releasing(app_state)
         "glimmung",
         "nelsong6/glimmung",
     )
-    result = await app_module.checkout_test_slot(
+    await app_module.checkout_test_slot(
         app_module.TestSlotCheckoutRequest(
             project="glimmung",
             slot_index=2,
@@ -237,6 +237,48 @@ async def test_release_test_slot_cleans_up_namespace_before_releasing(app_state)
 
     assert released.state == LeaseState.RELEASED
     assert app_state.native_k8s_launcher.deleted_namespaces == ["glimmung-2"]
+    lease_doc = await app_state.cosmos.leases.read_item(
+        item=lease_doc["id"],
+        partition_key="glimmung",
+    )
+    assert lease_doc["state"] == LeaseState.RELEASED.value
+
+
+@pytest.mark.asyncio
+async def test_lease_callback_token_reads_heartbeats_and_releases_without_storage_id(app_state):
+    await _register_project(
+        SimpleNamespace(state=app_state),
+        "glimmung",
+        "nelsong6/glimmung",
+    )
+    await app_module.checkout_test_slot(
+        app_module.TestSlotCheckoutRequest(
+            project="glimmung",
+            slot_index=2,
+        )
+    )
+    lease_doc = _lease_doc_by_slot(app_state, "glimmung", "glimmung-2")
+    await app_state.cosmos.hosts.create_item({
+        "id": "native-k8s",
+        "name": "native-k8s",
+        "capabilities": {},
+        "currentLeaseId": lease_doc["id"],
+        "drained": False,
+        "createdAt": "2026-01-01T00:00:00+00:00",
+    })
+    token = lease_doc["metadata"]["lease_callback_token"]
+
+    read = await app_module.read_lease_by_callback_token(token)
+    assert read.ref == "glimmung-2"
+    assert read.state == LeaseState.ACTIVE
+
+    heartbeat = await app_module.heartbeat_lease_by_callback_token(token)
+    assert heartbeat.ref == "glimmung-2"
+    assert heartbeat.state == LeaseState.ACTIVE
+
+    released = await app_module.release_lease_by_callback_token(token)
+    assert released.ref == "glimmung-2"
+    assert released.state == LeaseState.RELEASED
     lease_doc = await app_state.cosmos.leases.read_item(
         item=lease_doc["id"],
         partition_key="glimmung",

@@ -926,6 +926,9 @@ class Run(BaseModel):
     # ("1.1", "1.2") while keeping `run_number` as an integer compatibility
     # key for existing routes during migration.
     run_display_number: str | None = None
+    # Opaque machine callback capability. This is intentionally not a ULID and
+    # is the only value dispatched to workflow callback URLs.
+    callback_token: str | None = None
     # Flat run-lineage fields. Cycles/recycles/resumes are represented as
     # additional Run records linked to their origin, not as a public attempt
     # layer inside one Run.

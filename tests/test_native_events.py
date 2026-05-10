@@ -14,8 +14,10 @@ from glimmung.app import (
     NativeRunFailedRequest,
     _attempt_token_sha256,
     native_github_token,
+    native_github_token_by_callback_token,
     native_run_completed,
     native_run_event,
+    native_run_event_by_callback_token,
     native_run_events,
     native_run_failed,
     native_run_status,
@@ -168,6 +170,7 @@ async def _seed_native_run(cosmos) -> Run:
     })
     run = Run(
         id="01KRNATIVE0000000000000000",
+        callback_token="native-callback-token",
         project="ambience",
         workflow="native-agent",
         issue_id="01KRISSUE0000000000000000",
@@ -892,6 +895,18 @@ async def test_native_callbacks_require_bound_attempt_token(cosmos, monkeypatch)
     )
     assert result.accepted is True
 
+    callback_result = await native_run_event_by_callback_token(
+        NativeRunEventRequest(
+            job_id="agent",
+            seq=2,
+            event=NativeRunEventType.STEP_COMPLETED,
+            step_slug="clone-repo",
+        ),
+        request=_request("secret-token"),
+        callback_token="native-callback-token",
+    )
+    assert callback_result.accepted is True
+
 
 @pytest.mark.asyncio
 async def test_native_github_token_requires_bound_attempt_token_and_mints_repo_token(
@@ -930,6 +945,13 @@ async def test_native_github_token_requires_bound_attempt_token_and_mints_repo_t
     assert result.token == "repo-token"
     assert result.expires_at == "2030-01-01T00:00:00Z"
     assert minter.calls == [{"repo": "nelsong6/ambience", "permissions": None}]
+
+    callback_result = await native_github_token_by_callback_token(
+        request=_request("secret-token"),
+        callback_token="native-callback-token",
+    )
+    assert callback_result.repo == "nelsong6/ambience"
+    assert callback_result.token == "repo-token"
 
 
 @pytest.mark.asyncio

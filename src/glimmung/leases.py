@@ -13,6 +13,7 @@ active native leases instead of registered host rows.
 Called periodically and after every release.
 """
 
+import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -39,6 +40,16 @@ _COUNTER_PREFIX = "__counter:lease-number:"
 
 def _utcnow_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _callback_token() -> str:
+    return secrets.token_urlsafe(24)
+
+
+def _with_callback_token(metadata: dict[str, Any]) -> dict[str, Any]:
+    out = {**metadata}
+    out.setdefault("lease_callback_token", _callback_token())
+    return out
 
 
 def _strip_meta(doc: dict[str, Any]) -> dict[str, Any]:
@@ -146,6 +157,7 @@ async def acquire(
     lease_id = str(ULID())
     lease_number = await next_lease_number(cosmos, project=project)
     ttl = ttl_seconds or settings.lease_default_ttl_seconds
+    metadata = _with_callback_token(metadata)
 
     # Cross-partition query — hosts container is small, this is cheap.
     candidates_raw = await query_all(
@@ -241,7 +253,7 @@ async def acquire_native(
     now = _utcnow_iso()
     ttl = ttl_seconds or settings.lease_default_ttl_seconds
     lease_number = await next_lease_number(cosmos, project=project)
-    native_metadata = {**metadata, NATIVE_K8S_METADATA_KEY: True}
+    native_metadata = _with_callback_token({**metadata, NATIVE_K8S_METADATA_KEY: True})
     slot_index = await _available_native_slot(cosmos, settings, project=project, metadata=metadata)
     if slot_index is not None:
         _set_native_slot_metadata(native_metadata, project=project, slot_index=slot_index)

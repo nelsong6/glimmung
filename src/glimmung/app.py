@@ -634,12 +634,12 @@ async def _reconcile_standby_entra_redirects(
 # `workflow_run_id`, which is the orphan shape `_abort_run` exists to
 # clean up. Allowlist what we forward; everything else stays internal.
 _DISPATCH_INPUT_KEYS = frozenset({
-    "issue_id",
     "issue_number",
     "issue_title",
     "gh_event",
     "gh_action",
-    "run_id",
+    "run_ref",
+    "run_callback_token",
     "attempt_index",
     "prior_verification_artifact_url",
     "feedback",
@@ -682,6 +682,30 @@ async def _run_issue_workflow_metadata(cosmos: Cosmos, run: Run) -> dict[str, st
         except Exception:
             pass
     return metadata
+
+
+def _run_callback_metadata(run: Run) -> dict[str, str]:
+    metadata = {
+        "run_ref": _run_public_ref(run),
+        "work_context_branch": run.pr_branch or run_ops.default_work_branch(run),
+    }
+    if run.callback_token:
+        metadata["run_callback_token"] = run.callback_token
+    return metadata
+
+
+def _lease_callback_inputs(lease: Lease) -> dict[str, str]:
+    inputs = {
+        "lease_ref": lease_ref(
+            lease.project,
+            slot_name=(lease.metadata or {}).get("native_slot_name"),
+            lease_number=lease.lease_number,
+        ),
+    }
+    token = (lease.metadata or {}).get("lease_callback_token")
+    if token:
+        inputs["lease_callback_token"] = str(token)
+    return inputs
 
 
 async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host: Host) -> bool:
@@ -758,12 +782,19 @@ async def _maybe_dispatch_workflow(app: FastAPI, lease_doc: dict[str, Any], host
 
     inputs = {
         "host": host.name,
-        "lease_id": lease_doc["id"],
+        "lease_ref": lease_ref(
+            lease_doc["project"],
+            slot_name=(lease_doc.get("metadata") or {}).get("native_slot_name"),
+            lease_number=lease_doc.get("leaseNumber") or lease_doc.get("lease_number"),
+        ),
         **{
             k: str(v) for k, v in metadata.items()
             if k in _DISPATCH_INPUT_KEYS
         },
     }
+    lease_callback_token = (lease_doc.get("metadata") or {}).get("lease_callback_token")
+    if lease_callback_token:
+        inputs["lease_callback_token"] = str(lease_callback_token)
     if lease_doc.get("leaseNumber"):
         inputs["lease_number"] = str(lease_doc["leaseNumber"])
     # Multi-phase forward dispatch (#101): the substituted phase inputs
@@ -1596,6 +1627,7 @@ async def _dispatch_retry(
     issue_metadata = await _run_issue_workflow_metadata(cosmos, run)
     metadata = {
         **issue_metadata,
+        **_run_callback_metadata(run),
         "run_id": run.id,
         "phase_name": target_phase.name,
         "attempt_index": str(len(run.attempts) - 1),
@@ -1648,13 +1680,16 @@ async def _dispatch_retry(
 
     inputs = {
         "host": host.name,
-        "lease_id": lease.id,
+        **_lease_callback_inputs(lease),
         **{
             k: v for k, v in issue_metadata.items()
             if k in _DISPATCH_INPUT_KEYS
         },
+        **{
+            k: v for k, v in metadata.items()
+            if k in _DISPATCH_INPUT_KEYS
+        },
         **dict(substituted),
-        "run_id": run.id,
         "prior_verification_artifact_url": prior_artifact_url,
         "attempt_index": str(len(run.attempts) - 1),
     }
@@ -2060,6 +2095,7 @@ async def _dispatch_next_phase(
     issue_metadata = await _run_issue_workflow_metadata(cosmos, run)
     metadata = {
         **issue_metadata,
+        **_run_callback_metadata(run),
         "issue_lock_holder_id": run.issue_lock_holder_id or "",
         "run_id": run.id,
         "phase_name": next_phase.name,
@@ -2070,15 +2106,10 @@ async def _dispatch_next_phase(
         # str] cleanly.
         "phase_inputs": dict(substituted),
     }
-    # Carry the work branch forward to native phases. If a PR is
-    # already open for this run, the agent keeps pushing to that
-    # branch; otherwise fall back to the canonical default for the
-    # run. GHA phases keep their YAML-side `glimmung/<run_id>` default
-    # — see the dispatch_run comment for the rationale.
-    if next_phase.kind == "k8s_job":
-        metadata["work_context_branch"] = (
-            run.pr_branch or run_ops.default_work_branch(run)
-        )
+    # Carry the work branch forward. If a PR is already open for this run,
+    # the agent keeps pushing to that branch; otherwise fall back to the
+    # canonical public-ref-derived default for the run.
+    metadata["work_context_branch"] = run.pr_branch or run_ops.default_work_branch(run)
     for key in (
         "entrypoint_job_id",
         "entrypoint_step_slug",
@@ -2129,12 +2160,15 @@ async def _dispatch_next_phase(
 
     inputs = {
         "host": host.name,
-        "lease_id": lease.id,
+        **_lease_callback_inputs(lease),
         **{
             k: v for k, v in issue_metadata.items()
             if k in _DISPATCH_INPUT_KEYS
         },
-        "run_id": run.id,
+        **{
+            k: v for k, v in metadata.items()
+            if k in _DISPATCH_INPUT_KEYS
+        },
         "attempt_index": str(attempt_index),
         **{k: str(v) for k, v in substituted.items()},
     }
@@ -2278,6 +2312,7 @@ async def _dispatch_triage(
     issue_metadata = await _run_issue_workflow_metadata(cosmos, run)
     metadata = {
         **issue_metadata,
+        **_run_callback_metadata(run),
         "run_id": run.id,
         "phase_name": target_phase.name,
         "attempt_index": str(len(run.attempts) - 1),
@@ -2315,13 +2350,16 @@ async def _dispatch_triage(
     feedback = feedback_text(signal)
     inputs = {
         "host": host.name,
-        "lease_id": lease.id,
+        **_lease_callback_inputs(lease),
         **{
             k: v for k, v in issue_metadata.items()
             if k in _DISPATCH_INPUT_KEYS
         },
+        **{
+            k: v for k, v in metadata.items()
+            if k in _DISPATCH_INPUT_KEYS
+        },
         "pr_number": str(run.pr_number) if run.pr_number is not None else "",
-        "run_id": run.id,
         "attempt_index": str(len(run.attempts) - 1),
         "feedback": feedback,
         "prior_verification_artifact_url": "",
@@ -2968,6 +3006,21 @@ async def _resolve_lease_ref(cosmos: Cosmos, *, project: str, ref: str) -> str:
     raise HTTPException(404, f"lease {ref!r} not found in project {project!r}")
 
 
+async def _read_lease_by_callback_token(cosmos: Cosmos, token: str) -> dict[str, Any]:
+    docs = await query_all(cosmos.leases, "SELECT * FROM c")
+    matches = [
+        doc for doc in docs
+        if isinstance(doc.get("metadata"), dict)
+        and doc["metadata"].get("lease_callback_token") == token
+    ]
+    if not matches:
+        raise HTTPException(404, "lease callback token not found")
+    if len(matches) > 1:
+        log.error("multiple leases share callback token; refusing callback")
+        raise HTTPException(409, "lease callback token is ambiguous")
+    return matches[0]
+
+
 @app.post("/v1/lease", response_model=LeaseResponse)
 async def create_lease(request: LeaseRequest) -> LeaseResponse:
     lease, host = await lease_ops.acquire(
@@ -2986,6 +3039,12 @@ async def create_lease(request: LeaseRequest) -> LeaseResponse:
     )
 
 
+@app.get("/v1/lease-callbacks/{callback_token}", response_model=LeasePublic)
+async def read_lease_by_callback_token(callback_token: str = Path(...)) -> LeasePublic:
+    doc = await _read_lease_by_callback_token(app.state.cosmos, callback_token)
+    return _lease_to_public(doc)
+
+
 @app.get("/v1/lease/{lease_id}", response_model=LeasePublic)
 async def read_lease(lease_id: str = Path(...), project: str = "") -> LeasePublic:
     """Read a lease by id. Capability auth: possessing the (ULID) lease_id is
@@ -3001,6 +3060,16 @@ async def read_lease(lease_id: str = Path(...), project: str = "") -> LeasePubli
     return _lease_to_public(doc)
 
 
+@app.post("/v1/lease-callbacks/{callback_token}/heartbeat", response_model=LeasePublic)
+async def heartbeat_lease_by_callback_token(callback_token: str = Path(...)) -> LeasePublic:
+    doc = await _read_lease_by_callback_token(app.state.cosmos, callback_token)
+    try:
+        lease = await lease_ops.heartbeat(app.state.cosmos, str(doc["id"]), str(doc["project"]))
+        return _lease_to_public(lease)
+    except ValueError:
+        raise HTTPException(409, "lease is not active")
+
+
 @app.post("/v1/lease/{lease_id}/heartbeat", response_model=LeasePublic)
 async def heartbeat_lease(lease_id: str = Path(...), project: str = "") -> LeasePublic:
     if not project:
@@ -3010,6 +3079,12 @@ async def heartbeat_lease(lease_id: str = Path(...), project: str = "") -> Lease
         return _lease_to_public(lease)
     except ValueError:
         raise HTTPException(409, "lease is not active")
+
+
+@app.post("/v1/lease-callbacks/{callback_token}/release", response_model=LeasePublic)
+async def release_lease_by_callback_token(callback_token: str = Path(...)) -> LeasePublic:
+    doc = await _read_lease_by_callback_token(app.state.cosmos, callback_token)
+    return _lease_to_public(await _release_lease_from_api(app.state.cosmos, str(doc["id"]), str(doc["project"])))
 
 
 @app.post("/v1/lease/{lease_id}/release", response_model=LeasePublic)
@@ -3853,6 +3928,21 @@ def _run_public_ref(run: Run) -> str:
     return run_ref(run.project, run.issue_number, run.run_display_number or run.run_number)
 
 
+async def _read_run_by_callback_token(cosmos: Cosmos, token: str) -> tuple[Run, str]:
+    docs = await query_all(
+        cosmos.runs,
+        "SELECT * FROM c WHERE c.callback_token = @t",
+        parameters=[{"name": "@t", "value": token}],
+    )
+    if not docs:
+        raise HTTPException(404, "run callback token not found")
+    if len(docs) > 1:
+        log.error("multiple runs share callback token; refusing callback")
+        raise HTTPException(409, "run callback token is ambiguous")
+    doc = docs[0]
+    return Run.model_validate({k: v for k, v in doc.items() if not k.startswith("_")}), doc["_etag"]
+
+
 class NativeRunEventRequest(BaseModel):
     job_id: str
     seq: int
@@ -3951,6 +4041,18 @@ def _native_event_to_public(event_doc: dict[str, Any], *, run: Run) -> NativeRun
 
 
 @app.post(
+    "/v1/run-callbacks/{callback_token}/started",
+    response_model=RunCallbackResult,
+)
+async def run_started_by_callback_token(
+    req: RunStartedRequest,
+    callback_token: str = Path(...),
+) -> RunCallbackResult:
+    run, _etag = await _read_run_by_callback_token(app.state.cosmos, callback_token)
+    return await run_started(req, project=run.project, run_id=run.id)
+
+
+@app.post(
     "/v1/runs/{project}/{run_id}/started",
     response_model=RunCallbackResult,
 )
@@ -3989,6 +4091,18 @@ class RunAbortedRequest(BaseModel):
 
 
 @app.post(
+    "/v1/run-callbacks/{callback_token}/aborted",
+    response_model=AbortRunResult,
+)
+async def run_aborted_by_callback_token(
+    req: RunAbortedRequest,
+    callback_token: str = Path(...),
+) -> AbortRunResult:
+    run, _etag = await _read_run_by_callback_token(app.state.cosmos, callback_token)
+    return await run_aborted(req, project=run.project, run_id=run.id)
+
+
+@app.post(
     "/v1/runs/{project}/{run_id}/aborted",
     response_model=AbortRunResult,
 )
@@ -4008,6 +4122,18 @@ async def run_aborted(
         project=project,
         reason=req.reason,
     )
+
+
+@app.post(
+    "/v1/run-callbacks/{callback_token}/completed",
+    response_model=RunCallbackResult,
+)
+async def run_completed_by_callback_token(
+    req: RunCompletedRequest,
+    callback_token: str = Path(...),
+) -> RunCallbackResult:
+    run, _etag = await _read_run_by_callback_token(app.state.cosmos, callback_token)
+    return await run_completed(req, project=run.project, run_id=run.id)
 
 
 @app.post(
@@ -4315,6 +4441,19 @@ async def native_run_event_by_number(
     return await native_run_event(req, request, project=project, run_id=run.id)
 
 
+@app.post(
+    "/v1/run-callbacks/{callback_token}/native/events",
+    response_model=NativeRunEventResult,
+)
+async def native_run_event_by_callback_token(
+    req: NativeRunEventRequest,
+    request: Request,
+    callback_token: str = Path(...),
+) -> NativeRunEventResult:
+    run, _etag = await _read_run_by_callback_token(app.state.cosmos, callback_token)
+    return await native_run_event(req, request, project=run.project, run_id=run.id)
+
+
 @app.get(
     "/v1/runs/{project}/{run_id}/native/pod-logs",
     response_model=NativePodLogsResponse,
@@ -4444,6 +4583,18 @@ async def native_run_status_by_number(
         run_number=run_number,
     )
     return await native_run_status(request, project=project, run_id=run.id)
+
+
+@app.get(
+    "/v1/run-callbacks/{callback_token}/native/status",
+    response_model=NativeRunStatusResponse,
+)
+async def native_run_status_by_callback_token(
+    request: Request,
+    callback_token: str = Path(...),
+) -> NativeRunStatusResponse:
+    run, _etag = await _read_run_by_callback_token(app.state.cosmos, callback_token)
+    return await native_run_status(request, project=run.project, run_id=run.id)
 
 
 @app.post(
@@ -4594,6 +4745,19 @@ async def native_run_completed_by_number(
     return await native_run_completed(req, request, project=project, run_id=run.id)
 
 
+@app.post(
+    "/v1/run-callbacks/{callback_token}/native/completed",
+    response_model=RunCallbackResult,
+)
+async def native_run_completed_by_callback_token(
+    req: NativeRunCompletedRequest,
+    request: Request,
+    callback_token: str = Path(...),
+) -> RunCallbackResult:
+    run, _etag = await _read_run_by_callback_token(app.state.cosmos, callback_token)
+    return await native_run_completed(req, request, project=run.project, run_id=run.id)
+
+
 async def _advance_playbooks_for_terminal_run(cosmos: Cosmos, run: Run) -> None:
     if not run.issue_id:
         return
@@ -4693,6 +4857,19 @@ async def native_run_failed_by_number(
 
 
 @app.post(
+    "/v1/run-callbacks/{callback_token}/native/failed",
+    response_model=AbortRunResult,
+)
+async def native_run_failed_by_callback_token(
+    req: NativeRunFailedRequest,
+    request: Request,
+    callback_token: str = Path(...),
+) -> AbortRunResult:
+    run, _etag = await _read_run_by_callback_token(app.state.cosmos, callback_token)
+    return await native_run_failed(req, request, project=run.project, run_id=run.id)
+
+
+@app.post(
     "/v1/runs/{project}/{run_id}/native/github-token",
     response_model=NativeGitHubTokenResult,
 )
@@ -4747,6 +4924,18 @@ async def native_github_token_by_number(
         run_number=run_number,
     )
     return await native_github_token(request, project=project, run_id=run.id)
+
+
+@app.post(
+    "/v1/run-callbacks/{callback_token}/native/github-token",
+    response_model=NativeGitHubTokenResult,
+)
+async def native_github_token_by_callback_token(
+    request: Request,
+    callback_token: str = Path(...),
+) -> NativeGitHubTokenResult:
+    run, _etag = await _read_run_by_callback_token(app.state.cosmos, callback_token)
+    return await native_github_token(request, project=run.project, run_id=run.id)
 
 
 # ─── Decision-engine replay (#111 smoke-test substrate) ────────────────────

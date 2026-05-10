@@ -14,6 +14,7 @@ before giving up.
 """
 
 import logging
+import secrets
 from datetime import UTC, datetime
 from typing import Any
 
@@ -43,6 +44,10 @@ _MAX_CONFLICT_RETRIES = 3
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _callback_token() -> str:
+    return secrets.token_urlsafe(24)
 
 
 def default_work_branch(run: Run) -> str:
@@ -155,6 +160,7 @@ async def create_run(
         workflow=workflow,
         run_number=run_number,
         run_display_number=str(run_number),
+        callback_token=_callback_token(),
         root_run_id=run_id,
         origin_kind=(trigger_source or {}).get("kind", "dispatch"),
         is_cycle=False,
@@ -1055,6 +1061,7 @@ async def create_resumed_run(
         workflow=prior_run.workflow,
         run_number=run_number,
         run_display_number=run_display,
+        callback_token=_callback_token(),
         parent_run_id=prior_run.id,
         root_run_id=root_run_id,
         origin_kind=(trigger_source or {}).get("kind", "resume"),

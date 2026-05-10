@@ -1313,12 +1313,13 @@ def _universal_env(
     base_url = settings.native_runner_callback_base_url.rstrip("/")
     project = str(lease_doc["project"])
     run_id = str(metadata.get("run_id") or "")
+    run_callback_token = str(metadata.get("run_callback_token") or "").strip()
     issue_number = str(metadata.get("issue_number") or "").strip()
     run_number = str(metadata.get("run_display_number") or metadata.get("run_number") or "").strip()
     public_run_path = (
         f"/v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native"
         if issue_number and run_number
-        else f"/v1/runs/{project}/{run_id}/native"
+        else f"/v1/run-callbacks/{run_callback_token}/native"
     )
     slot_name = str(metadata.get("native_slot_name") or "").strip()
     lease_ref = slot_name or f"{project}/leases/{lease_doc.get('leaseNumber') or lease_doc.get('lease_number') or 'active'}"
@@ -1376,7 +1377,6 @@ def _universal_env(
                 {"name": "PW_TEST_CONNECT_WS_ENDPOINT", "value": endpoint},
             ])
     for key in (
-        "issue_id",
         "issue_repo",
         "issue_number",
         "issue_title",
