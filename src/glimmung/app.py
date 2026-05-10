@@ -348,9 +348,12 @@ async def _resolve_signal_pr(
     """Resolve a PR-scoped signal's target into `(repo, pr_number, run,
     run_etag)`. Handles both shapes (#50 slice 3 retargeting):
 
-    - Post-#50: `target_repo` is the project name and `target_id` is the
-      glimmung PR id (ULID-shaped). We point-read the PR doc to recover
-      `(repo, number)` + the linked Run.
+    - Current: `target_repo` is the project name and `target_id` is the
+      public PR ref (`owner/repo#123`). We look up the PR doc by GitHub
+      coordinates to recover the linked Run.
+    - Post-#50 compatibility: `target_repo` is the project name and
+      `target_id` is the glimmung PR id (ULID-shaped). In-flight signals
+      enqueued before the public-ref migration still drain cleanly.
     - Pre-#50: `target_repo` is `<owner>/<repo>` and `target_id` is the
       stringified GH PR number. Falls through to the legacy
       find_run_by_pr lookup. Existing in-flight signals enqueued before
@@ -359,6 +362,46 @@ async def _resolve_signal_pr(
     Returns None if neither shape resolves to a usable PR target.
     """
     target_id = signal.target_id
+    if "#" in target_id and "/" in target_id:
+        repo, _, number_raw = target_id.rpartition("#")
+        try:
+            pr_number = int(number_raw)
+        except ValueError:
+            pr_number = 0
+        if repo and pr_number:
+            found = await touchpoint_ops.find_touchpoint_by_repo_number(
+                cosmos, repo=repo, number=pr_number,
+            )
+            if found is None:
+                log.warning(
+                    "triage: signal %s targets public PR ref %s which is missing",
+                    signal.id, target_id,
+                )
+                return None
+            pr, _pr_etag = found
+            run: Run | None = None
+            run_etag: str | None = None
+            if pr.linked_run_id:
+                try:
+                    doc = await cosmos.runs.read_item(
+                        item=pr.linked_run_id, partition_key=pr.project,
+                    )
+                    from glimmung.runs import _strip_meta as _strip
+                    run = Run.model_validate(_strip(doc))
+                    run_etag = doc["_etag"]
+                except Exception:
+                    log.warning(
+                        "triage: linked_run_id=%s on PR %s not readable",
+                        pr.linked_run_id, report_ref(pr.repo, pr.number),
+                    )
+            if run is None:
+                lookup = await run_ops.find_run_by_pr(
+                    cosmos, issue_repo=pr.repo, pr_number=pr.number,
+                )
+                if lookup is not None:
+                    run, run_etag = lookup
+            return pr.repo, pr.number, run, run_etag
+
     # ULID is 26 chars Crockford base32; GH PR numbers are pure digits.
     looks_like_id = len(target_id) == 26 and target_id.isalnum() and not target_id.isdigit()
 
@@ -5715,12 +5758,16 @@ async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
         linked_issue_id=linked_issue_id,
     )
     outcome: dict[str, Any] = {
-        "pr_id": pr.id,
+        "pr_ref": report_ref(pr.repo, pr.number),
         "created": created,
         "action": action,
     }
     if linked_issue_id:
-        outcome["linked_issue_id"] = linked_issue_id
+        issue_lookup = await issue_ops.read_issue(
+            cosmos, project=project, issue_id=linked_issue_id,
+        )
+        if issue_lookup is not None:
+            outcome["linked_issue_ref"] = issue_ref(project, issue_lookup[0].number)
 
     # ensure_report_for_github only honors create-time fields. For an
     # existing PR, patch the user-editable + GH-provided fields so
@@ -5744,7 +5791,11 @@ async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
             cosmos, pr=pr, etag=etag,
             linked_issue_id=linked_issue_id,
         )
-        outcome["linked_issue_id"] = linked_issue_id
+        issue_lookup = await issue_ops.read_issue(
+            cosmos, project=project, issue_id=linked_issue_id,
+        )
+        if issue_lookup is not None:
+            outcome["linked_issue_ref"] = issue_ref(project, issue_lookup[0].number)
 
     # Best-effort run linkage: derive the active Run for this issue +
     # PR coords if the agent didn't pre-attach it. find_run_by_pr is
@@ -5759,7 +5810,7 @@ async def _handle_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
                 cosmos, pr=pr, etag=etag,
                 linked_run_id=run_for_link.id,
             )
-            outcome["linked_run_id"] = run_for_link.id
+            outcome["linked_run_ref"] = await _public_run_ref(cosmos, run_for_link)
 
     if action == "reopened":
         if pr.merged_at is not None:
@@ -5849,7 +5900,7 @@ async def _handle_pull_request_review(payload: dict[str, Any]) -> dict[str, Any]
     if found is not None:
         pr, etag = found
         target_repo = pr.project
-        target_id = pr.id
+        target_id = report_ref(pr.repo, pr.number)
         raw_state = str(review.get("state") or ReportReviewState.COMMENTED.value).lower()
         try:
             review_state = ReportReviewState(raw_state)
@@ -8119,7 +8170,7 @@ def _portfolio_review_issue_body(
 
 class TouchpointRow(BaseModel):
     """One row in the Touchpoints view."""
-    id: str                                # glimmung Report id
+    ref: str                               # public touchpoint ref, usually owner/repo#PR
     project: str
     repo: str
     pr_number: int                         # GH PR number (preserved on seed)
@@ -8128,10 +8179,10 @@ class TouchpointRow(BaseModel):
     state: str = ReportState.READY.value
     merged: bool = False
     html_url: str | None = None
-    linked_issue_id: str | None = None
-    linked_run_id: str | None = None
+    linked_issue_ref: str | None = None
+    linked_run_ref: str | None = None
     issue_number: int | None = None        # legacy convenience for the dashboard
-    run_id: str | None = None
+    run_ref: str | None = None
     run_state: str | None = None
     validation_url: str | None = None
     session_launch_intent: str = "cold"
@@ -8142,7 +8193,7 @@ class TouchpointRow(BaseModel):
 
 
 class TouchpointDetail(BaseModel):
-    id: str
+    ref: str
     project: str
     repo: str
     pr_number: int
@@ -8154,11 +8205,11 @@ class TouchpointDetail(BaseModel):
     base_ref: str = "main"
     head_sha: str = ""
     html_url: str | None = None
-    linked_issue_id: str | None = None
-    linked_run_id: str | None = None
+    linked_issue_ref: str | None = None
+    linked_run_ref: str | None = None
     issue_number: int | None = None
     issue_title: str | None = None
-    run_id: str | None = None
+    run_ref: str | None = None
     run_state: str | None = None
     validation_url: str | None = None
     screenshots_markdown: str | None = None
@@ -8170,6 +8221,16 @@ class TouchpointDetail(BaseModel):
     comments: list[dict[str, Any]] = Field(default_factory=list)
     reviews: list[dict[str, Any]] = Field(default_factory=list)
     pr_lock_held: bool = False
+
+
+class PublicSignal(BaseModel):
+    ref: str
+    target_type: SignalTargetType
+    target_repo: str
+    target_ref: str
+    source: SignalSource
+    state: SignalState
+    enqueued_at: datetime
 
 
 class TouchpointCreateRequest(BaseModel):
@@ -8220,6 +8281,51 @@ ReportUpdateRequest = TouchpointUpdateRequest
 ReportVersionCreateRequest = TouchpointVersionCreateRequest
 
 
+def _run_refs_for_docs(run_docs: list[dict[str, Any]]) -> dict[str, str]:
+    refs: dict[str, str] = {}
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for doc in run_docs:
+        project = str(doc.get("project") or "")
+        issue_key = str(doc.get("issue_id") or doc.get("issue_number") or "")
+        grouped.setdefault((project, issue_key), []).append(doc)
+    for docs in grouped.values():
+        docs.sort(key=lambda d: d.get("created_at", ""))
+        refs.update(_run_ref_map_from_docs(docs))
+    return refs
+
+
+async def _public_run_ref(cosmos: Cosmos, run: Run) -> str:
+    public_ref = run_ref(
+        run.project,
+        run.issue_number if run.issue_number else None,
+        run.run_display_number or run.run_number,
+    )
+    if public_ref.endswith("/runs/unknown") and run.issue_id:
+        related_run_docs = await query_all(
+            cosmos.runs,
+            "SELECT * FROM c WHERE c.issue_id = @i",
+            parameters=[{"name": "@i", "value": run.issue_id}],
+        )
+        public_ref = _run_refs_for_docs(related_run_docs).get(run.id, public_ref)
+    return public_ref
+
+
+def _signal_ref(signal: Signal) -> str:
+    return f"signal:{signal.target_type.value}:{signal.target_repo}:{signal.target_id}:{signal.enqueued_at.isoformat()}"
+
+
+def _public_signal(signal: Signal) -> PublicSignal:
+    return PublicSignal(
+        ref=_signal_ref(signal),
+        target_type=signal.target_type,
+        target_repo=signal.target_repo,
+        target_ref=signal.target_id,
+        source=signal.source,
+        state=signal.state,
+        enqueued_at=signal.enqueued_at,
+    )
+
+
 @app.get(
     "/v1/touchpoints",
     response_model=list[TouchpointRow],
@@ -8268,9 +8374,18 @@ async def _list_touchpoints_from_cosmos(
         for d in issue_docs
         if d.get("id") is not None and d.get("number") is not None
     }
+    issue_ref_by_id = {
+        str(d["id"]): issue_ref(
+            str(d.get("project") or ""),
+            int(d["number"]) if d.get("number") is not None else None,
+        )
+        for d in issue_docs
+        if d.get("id") is not None
+    }
 
     run_docs = await query_all(cosmos.runs, "SELECT * FROM c")
     runs_by_id: dict[str, dict[str, Any]] = {d["id"]: d for d in run_docs}
+    run_ref_by_id = _run_refs_for_docs(run_docs)
     runs_by_repo_pr: dict[tuple[str, int], dict[str, Any]] = {}
     for d in run_docs:
         repo = d.get("issue_repo") or ""
@@ -8304,7 +8419,7 @@ async def _list_touchpoints_from_cosmos(
             pr_lock_held = expires_at > now
 
         row = TouchpointRow(
-            id=pr.id,
+            ref=report_ref(pr.repo, pr.number),
             project=pr.project,
             repo=pr.repo,
             pr_number=pr.number,
@@ -8313,23 +8428,32 @@ async def _list_touchpoints_from_cosmos(
             state=pr.state.value,
             merged=pr.merged_at is not None,
             html_url=pr.html_url or None,
-            linked_issue_id=pr.linked_issue_id,
-            linked_run_id=pr.linked_run_id or (run_doc["id"] if run_doc else None),
+            linked_issue_ref=issue_ref_by_id.get(pr.linked_issue_id or ""),
+            linked_run_ref=run_ref_by_id.get(
+                pr.linked_run_id or (str(run_doc["id"]) if run_doc else ""),
+            ),
             pr_lock_held=pr_lock_held,
         )
         if run_doc is not None:
-            row.run_id = run_doc["id"]
+            row.run_ref = run_ref_by_id.get(str(run_doc["id"]))
             row.run_state = run_doc.get("state")
             row.validation_url = run_doc.get("validation_url")
             row.session_launch_intent = str(
                 run_doc.get("session_launch_intent") or "cold",
             )
             if pr.linked_issue_id and run_doc.get("issue_id"):
+                public_issue_ref = (
+                    issue_ref_by_id.get(str(run_doc["issue_id"]))
+                    or issue_ref(
+                        str(run_doc.get("project") or pr.project),
+                        int(run_doc["issue_number"]) if run_doc.get("issue_number") else None,
+                    )
+                )
                 row.session_launch_url = _tank_session_launch_url_from_fields(
                     settings=getattr(app.state, "settings", get_settings()),
-                    run_id=str(run_doc["id"]),
-                    issue_id=str(run_doc["issue_id"]),
-                    pr_id=pr.id,
+                    run_ref=row.run_ref or run_ref_by_id.get(str(run_doc["id"])) or "",
+                    issue_ref=public_issue_ref,
+                    touchpoint_ref=report_ref(pr.repo, pr.number),
                     validation_url=row.validation_url,
                 )
             row.run_attempts = len(run_doc.get("attempts") or [])
@@ -8363,14 +8487,12 @@ _list_reports_from_cosmos = _list_touchpoints_from_cosmos
 async def touchpoint_detail_by_id(
     project: str = Path(...),
     report_id: str = Path(...),
-) -> TouchpointDetail:
-    """Detail view keyed by canonical Glimmung touchpoint id."""
-    cosmos: Cosmos = app.state.cosmos
-    found = await touchpoint_ops.read_touchpoint(cosmos, project=project, report_id=report_id)
-    if found is None:
-        raise HTTPException(404, f"no glimmung Report {project}/{report_id}")
-    pr, _ = found
-    return await _build_touchpoint_detail(cosmos, pr=pr)
+) -> Response:
+    """Legacy storage-id route. Use PR coordinates or issue-scoped routes."""
+    raise HTTPException(
+        410,
+        "touchpoints are no longer addressable by storage id; use /v1/touchpoints/{owner}/{repo}/{pr_number} or /v1/projects/{project}/issues/{issue_number}/touchpoint",
+    )
 
 
 @app.get(
@@ -8438,13 +8560,11 @@ async def list_touchpoint_versions_endpoint(
     project: str = Path(...),
     report_id: str = Path(...),
     limit: Annotated[int | None, Query(ge=1, le=500)] = None,
-) -> list[ReportVersion]:
-    """List immutable snapshots for a canonical Glimmung touchpoint."""
-    return await _list_touchpoint_versions_from_cosmos(
-        app.state.cosmos,
-        project=project,
-        report_id=report_id,
-        limit=limit,
+) -> Response:
+    """Legacy storage-id route. Version reads need a public route before reuse."""
+    raise HTTPException(
+        410,
+        "touchpoint versions are no longer addressable by storage id",
     )
 
 
@@ -8475,27 +8595,12 @@ async def touchpoint_version_detail_endpoint(
     project: str = Path(...),
     report_id: str = Path(...),
     version: int = Path(...),
-) -> ReportVersion:
-    """Read one immutable touchpoint-version snapshot."""
-    found = await touchpoint_ops.read_touchpoint(
-        cosmos=app.state.cosmos,
-        project=project,
-        report_id=report_id,
+) -> Response:
+    """Legacy storage-id route. Version reads need a public route before reuse."""
+    raise HTTPException(
+        410,
+        "touchpoint versions are no longer addressable by storage id",
     )
-    if found is None:
-        raise HTTPException(404, f"no glimmung Report {project}/{report_id}")
-    version_doc = await touchpoint_ops.read_touchpoint_version(
-        app.state.cosmos,
-        project=project,
-        report_id=report_id,
-        version=version,
-    )
-    if version_doc is None:
-        raise HTTPException(
-            404,
-            f"no glimmung ReportVersion {project}/{report_id}.{version}",
-        )
-    return version_doc
 
 
 async def _find_touchpoint_for_issue(
@@ -8555,8 +8660,9 @@ async def _build_touchpoint_detail(
     issue: Issue | None = None,
 ) -> TouchpointDetail:
     """Render a Report plus linked Run state."""
+    public_touchpoint_ref = report_ref(pr.repo, pr.number)
     detail = TouchpointDetail(
-        id=pr.id,
+        ref=public_touchpoint_ref,
         project=pr.project,
         repo=pr.repo,
         pr_number=pr.number,
@@ -8568,8 +8674,6 @@ async def _build_touchpoint_detail(
         base_ref=pr.base_ref,
         head_sha=pr.head_sha,
         html_url=pr.html_url or None,
-        linked_issue_id=pr.linked_issue_id,
-        linked_run_id=pr.linked_run_id,
         comments=[c.model_dump(mode="json") for c in pr.comments],
         reviews=[r.model_dump(mode="json") for r in pr.reviews],
     )
@@ -8594,7 +8698,9 @@ async def _build_touchpoint_detail(
             run = lookup[0]
 
     if run is not None:
-        detail.run_id = run.id
+        public_run_ref = await _public_run_ref(cosmos, run)
+        detail.run_ref = public_run_ref
+        detail.linked_run_ref = public_run_ref
         detail.run_state = run.state.value
         detail.validation_url = run.validation_url
         detail.screenshots_markdown = run.screenshots_markdown
@@ -8622,13 +8728,20 @@ async def _build_touchpoint_detail(
 
     if issue is None and pr.linked_issue_id:
         try:
-            doc = await cosmos.issues.read_item(
+            issue_doc = await cosmos.issues.read_item(
                 item=pr.linked_issue_id, partition_key=pr.project,
             )
-            issue = Issue.model_validate(run_ops._strip_meta(doc))
+            issue = Issue.model_validate(run_ops._strip_meta(issue_doc))
         except Exception:
-            pass
+            clean = run_ops._strip_meta(issue_doc) if "issue_doc" in locals() else {}
+            detail.linked_issue_ref = issue_ref(
+                str(clean.get("project") or pr.project),
+                int(clean["number"]) if clean.get("number") is not None else None,
+            )
+            if clean:
+                detail.issue_title = str(clean.get("title") or "")
     if issue is not None:
+        detail.linked_issue_ref = issue_ref(issue.project, issue.number)
         if issue.number:
             detail.issue_number = issue.number
         detail.issue_title = issue.title
@@ -8640,11 +8753,13 @@ async def _build_touchpoint_detail(
             detail.issue_title = str(doc.get("title") or "")
         except Exception:
             pass
-    if run is not None and pr.linked_issue_id:
+    if run is not None and detail.linked_issue_ref:
         detail.session_launch_url = _tank_session_launch_url(
             settings=getattr(app.state, "settings", get_settings()),
             run=run,
             pr=pr,
+            issue_ref=detail.linked_issue_ref,
+            run_ref=detail.run_ref or "",
         )
 
     existing_lock = await lock_ops.read_lock(
@@ -8658,12 +8773,19 @@ async def _build_touchpoint_detail(
     return detail
 
 
-def _tank_session_launch_url(*, settings: Settings, run: Run, pr: Report) -> str:
+def _tank_session_launch_url(
+    *,
+    settings: Settings,
+    run: Run,
+    pr: Report,
+    issue_ref: str,
+    run_ref: str,
+) -> str:
     return _tank_session_launch_url_from_fields(
         settings=settings,
-        run_id=run.id,
-        issue_id=run.issue_id,
-        pr_id=pr.id,
+        run_ref=run_ref,
+        issue_ref=issue_ref,
+        touchpoint_ref=report_ref(pr.repo, pr.number),
         validation_url=run.validation_url,
     )
 
@@ -8671,15 +8793,15 @@ def _tank_session_launch_url(*, settings: Settings, run: Run, pr: Report) -> str
 def _tank_session_launch_url_from_fields(
     *,
     settings: Settings,
-    run_id: str,
-    issue_id: str,
-    pr_id: str,
+    run_ref: str,
+    issue_ref: str,
+    touchpoint_ref: str,
     validation_url: str | None,
 ) -> str:
     params: dict[str, str] = {
-        "glimmung_run_id": run_id,
-        "glimmung_issue_id": issue_id,
-        "glimmung_pr_id": pr_id,
+        "glimmung_run_ref": run_ref,
+        "glimmung_issue_ref": issue_ref,
+        "glimmung_touchpoint_ref": touchpoint_ref,
     }
     if validation_url:
         params["validation_url"] = validation_url
@@ -8886,17 +9008,17 @@ patch_report_endpoint = patch_touchpoint_endpoint
 
 @app.post(
     "/v1/signals",
-    response_model=Signal,
+    response_model=PublicSignal,
     dependencies=[Depends(require_admin_user)],
 )
-async def enqueue_signal_endpoint(req: SignalEnqueueRequest) -> Signal:
+async def enqueue_signal_endpoint(req: SignalEnqueueRequest) -> PublicSignal:
     """Enqueue a Signal for the drain loop. Used by the UI reject
     button (POST `{target_type: pr, target_repo, target_id, source:
     glimmung_ui, payload: {kind: "reject", feedback: "..."}}`).
 
     Future trigger sources (CLI, scheduled re-runs) hit this same
     endpoint."""
-    return await signal_ops.enqueue_signal(
+    signal = await signal_ops.enqueue_signal(
         app.state.cosmos,
         target_type=req.target_type,
         target_repo=req.target_repo,
@@ -8904,6 +9026,7 @@ async def enqueue_signal_endpoint(req: SignalEnqueueRequest) -> Signal:
         source=req.source,
         payload=req.payload,
     )
+    return _public_signal(signal)
 
 
 # ─── Static frontend ─────────────────────────────────────────────────────────

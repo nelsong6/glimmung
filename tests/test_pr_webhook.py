@@ -281,12 +281,11 @@ async def test_pr_event_for_unregistered_repo_is_ignored(cosmos, app_state):
 
 
 @pytest.mark.asyncio
-async def test_review_signal_targets_glimmung_pr_id_when_pr_exists(
+async def test_review_signal_targets_public_pr_ref_when_pr_exists(
     cosmos, app_state,
 ):
-    """The post-#50 signal carries `(project, glimmung_pr_id)` — the
-    drain looks up the glimmung PR doc directly rather than going
-    through GH coords."""
+    """Review signals carry `(project, owner/repo#PR)` so public signal
+    payloads do not expose storage IDs."""
     await _register_project(cosmos, "ambience", "nelsong6/ambience")
     pr = await report_ops.create_report(
         cosmos, project="ambience", repo="nelsong6/ambience",
@@ -316,7 +315,7 @@ async def test_review_signal_targets_glimmung_pr_id_when_pr_exists(
     sig = docs[0]
     assert sig["target_type"] == "pr"
     assert sig["target_repo"] == "ambience"        # project name, not GH repo
-    assert sig["target_id"] == pr.id               # glimmung PR id, not GH number
+    assert sig["target_id"] == "nelsong6/ambience#42"
     fetched, _ = await report_ops.read_report(cosmos, project="ambience", report_id=pr.id)
     assert len(fetched.reviews) == 1
     mirrored = fetched.reviews[0]

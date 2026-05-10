@@ -141,7 +141,7 @@ def _agent_payload(*, issue_id: str = "01JABC0000000000000000000A") -> dict:
 
 
 @pytest.mark.asyncio
-async def test_agent_pr_open_attaches_linked_issue_id(cosmos, app_state):
+async def test_agent_pr_open_returns_linked_issue_ref(cosmos, app_state):
     await cosmos.projects.create_item({
         "id": "glimmung",
         "name": "glimmung",
@@ -154,7 +154,8 @@ async def test_agent_pr_open_attaches_linked_issue_id(cosmos, app_state):
         outcome = await _handle_pull_request(_agent_payload())
 
     assert outcome["created"] is True
-    assert outcome.get("linked_issue_id") == "01JABC0000000000000000000A"
+    assert outcome["pr_ref"] == "nelsong6/glimmung#99"
+    assert "linked_issue_id" not in outcome
 
     found = await report_ops.find_report_by_repo_number(
         cosmos, repo="nelsong6/glimmung", number=99,
@@ -209,7 +210,7 @@ async def test_pr_open_without_marker_falls_back_to_raw_body(cosmos, app_state):
 
 
 @pytest.mark.asyncio
-async def test_agent_pr_open_derives_linked_run_when_run_exists(cosmos, app_state):
+async def test_agent_pr_open_returns_linked_run_ref_when_run_exists(cosmos, app_state):
     """The marker doesn't carry run_id (Run is created after dispatch
     fires the workflow). When the Run is already in `runs` keyed off
     `(issue_repo, pr_number)`, the webhook attaches linked_run_id from
@@ -242,7 +243,8 @@ async def test_agent_pr_open_derives_linked_run_when_run_exists(cosmos, app_stat
     with patch("glimmung.app.app", app_state):
         outcome = await _handle_pull_request(_agent_payload())
 
-    assert outcome.get("linked_run_id") == "01JRUN5500000000"
+    assert outcome.get("linked_run_ref") == "glimmung#42/runs/1"
+    assert "linked_run_id" not in outcome
     found = await report_ops.find_report_by_repo_number(
         cosmos, repo="nelsong6/glimmung", number=99,
     )
