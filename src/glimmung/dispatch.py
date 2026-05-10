@@ -47,14 +47,6 @@ from glimmung.models import BudgetConfig, NativeJobSpec, native_job_attempts_fro
 
 log = logging.getLogger(__name__)
 
-SESSION_WARM_LABEL = "agent-session:warm"
-
-
-def session_launch_intent_from_labels(labels: list[str] | None) -> str:
-    normalized = {label.strip().lower() for label in (labels or [])}
-    return "warm" if SESSION_WARM_LABEL in normalized else "cold"
-
-
 _RECENT_COMMENT_LIMIT = 5
 
 
@@ -269,7 +261,6 @@ async def dispatch_run(
             initial_jobs=_native_jobs_from_phase_doc(initial_phase),
             issue_lock_holder_id=holder_id,
             trigger_source=trigger_source,
-            session_launch_intent=session_launch_intent_from_labels(effective_issue_labels),
         )
         run_id = run.id
         run_number = run.run_number

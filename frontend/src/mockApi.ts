@@ -650,7 +650,6 @@ function handleMockRequest(url: URL, init?: RequestInit): Response {
       base_ref: "main",
       head_sha: "c0ffee1234567890",
       validation_url: "https://design-portfolio-pr-216.glimmung.dev.romaine.life/?mock=1",
-      session_launch_intent: row.pr_lock_held ? "warm" : "cold",
       session_launch_url: null,
       run_attempt_history: [
         { attempt_index: 0, phase: "design", workflow_filename: "issue-agent.yaml", workflow_run_id: 9123401, dispatched_at: ago(88), completed_at: ago(75), conclusion: "success", verification_status: "pass", evidence_refs: [], summary_markdown: "Mapped the requested interaction and identified the dashboard route to update.", log_archive_url: null, decision: "continue" },

@@ -5063,6 +5063,21 @@ async def list_workflows(
     return rows
 
 
+@app.delete(
+    "/v1/workflows/{project}/{name}",
+    response_model=Workflow,
+    dependencies=[Depends(require_admin_user)],
+)
+async def delete_workflow(project: str, name: str) -> Workflow:
+    cosmos: Cosmos = app.state.cosmos
+    try:
+        doc = await cosmos.workflows.read_item(item=name, partition_key=project)
+    except Exception:
+        raise HTTPException(404, f"workflow {project}.{name} not found")
+    await cosmos.workflows.delete_item(item=name, partition_key=project)
+    return _doc_to_workflow(doc)
+
+
 class PlaybookEntryGateRequest(BaseModel):
     manual_gate: bool = False
     advance: bool = True
@@ -8185,7 +8200,6 @@ class TouchpointRow(BaseModel):
     run_ref: str | None = None
     run_state: str | None = None
     validation_url: str | None = None
-    session_launch_intent: str = "cold"
     session_launch_url: str | None = None
     run_attempts: int = 0
     run_cumulative_cost_usd: float = 0.0
@@ -8213,7 +8227,6 @@ class TouchpointDetail(BaseModel):
     run_state: str | None = None
     validation_url: str | None = None
     screenshots_markdown: str | None = None
-    session_launch_intent: str = "cold"
     session_launch_url: str | None = None
     run_attempts: int = 0
     run_cumulative_cost_usd: float = 0.0
@@ -8489,9 +8502,6 @@ async def _list_touchpoints_from_cosmos(
             row.run_ref = run_ref_by_id.get(str(run_doc["id"]))
             row.run_state = run_doc.get("state")
             row.validation_url = run_doc.get("validation_url")
-            row.session_launch_intent = str(
-                run_doc.get("session_launch_intent") or "cold",
-            )
             if pr.linked_issue_id and run_doc.get("issue_id"):
                 public_issue_ref = (
                     issue_ref_by_id.get(str(run_doc["issue_id"]))
@@ -8755,7 +8765,6 @@ async def _build_touchpoint_detail(
         detail.run_state = run.state.value
         detail.validation_url = run.validation_url
         detail.screenshots_markdown = run.screenshots_markdown
-        detail.session_launch_intent = run.session_launch_intent
         detail.run_attempts = len(run.attempts)
         detail.run_cumulative_cost_usd = run.cumulative_cost_usd
         if run.issue_number:

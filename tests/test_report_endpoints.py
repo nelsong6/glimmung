@@ -29,7 +29,7 @@ from glimmung.app import (
     issue_touchpoint_detail,
     patch_touchpoint_endpoint,
 )
-from glimmung.models import IssueState, ReportState
+from glimmung.models import ReportState
 
 from tests.cosmos_fake import FakeContainer
 
@@ -165,7 +165,7 @@ async def test_list_prs_joins_run_via_linked_run_id(cosmos):
 
 
 @pytest.mark.asyncio
-async def test_list_prs_surfaces_warm_session_launch_url(cosmos):
+async def test_list_prs_surfaces_session_launch_url(cosmos):
     run_doc = {
         "id": "01JRUNWARM",
         "project": "ambience",
@@ -177,12 +177,11 @@ async def test_list_prs_surfaces_warm_session_launch_url(cosmos):
         "issue_number": 0,
         "issue_id": "01JISSUEZZZ",
         "validation_url": "https://preview.example.test",
-        "session_launch_intent": "warm",
         "created_at": datetime.now(UTC).isoformat(),
     }
     await cosmos.runs.create_item(run_doc)
 
-    pr = await report_ops.create_report(
+    await report_ops.create_report(
         cosmos, project="ambience", repo="nelsong6/ambience",
         number=14, title="t", branch="agent/native",
         linked_issue_id="01JISSUEZZZ",
@@ -193,7 +192,6 @@ async def test_list_prs_surfaces_warm_session_launch_url(cosmos):
     assert len(rows) == 1
     row = rows[0]
     assert row.validation_url == "https://preview.example.test"
-    assert row.session_launch_intent == "warm"
     assert row.session_launch_url is not None
     assert "glimmung_run_ref=ambience%230%2Fruns%2F1" in row.session_launch_url
     assert "glimmung_issue_ref=ambience" in row.session_launch_url
@@ -299,13 +297,13 @@ async def test_issue_touchpoint_detail_reads_one_to_one_touchpoint(cosmos, app_s
 
 
 @pytest.mark.asyncio
-async def test_build_report_detail_surfaces_warm_session_launch_url(cosmos):
+async def test_build_report_detail_surfaces_session_launch_url(cosmos):
     issue_doc = {
         "id": "01JISSUEZZZ",
         "project": "ambience",
         "title": "the linked issue title",
         "body": "",
-        "labels": ["agent-session:warm"],
+        "labels": [],
         "state": "open",
         "metadata": {"source": "manual"},
         "created_at": datetime.now(UTC).isoformat(),
@@ -327,7 +325,6 @@ async def test_build_report_detail_surfaces_warm_session_launch_url(cosmos):
         "trigger_source": {"kind": "glimmung_ui"},
         "validation_url": "https://preview.example.test",
         "screenshots_markdown": "![home](https://preview.example.test/shot.png)",
-        "session_launch_intent": "warm",
         "created_at": datetime.now(UTC).isoformat(),
         "updated_at": datetime.now(UTC).isoformat(),
     }
@@ -340,7 +337,6 @@ async def test_build_report_detail_surfaces_warm_session_launch_url(cosmos):
 
     detail = await _build_report_detail(cosmos, pr=pr)
 
-    assert detail.session_launch_intent == "warm"
     assert detail.validation_url == "https://preview.example.test"
     assert detail.screenshots_markdown == "![home](https://preview.example.test/shot.png)"
     assert detail.session_launch_url is not None
@@ -387,7 +383,6 @@ async def test_build_report_detail_surfaces_attempt_evidence(cosmos):
         }],
         "cumulative_cost_usd": 0.0,
         "trigger_source": {"kind": "glimmung_ui"},
-        "session_launch_intent": "cold",
         "created_at": now,
         "updated_at": now,
     })
