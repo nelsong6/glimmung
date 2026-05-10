@@ -56,11 +56,13 @@ class _RecordingNativeLauncher:
         *,
         run_id: str,
         attempt_index: int,
+        attempt_base: str | None = None,
         grace_period_seconds: int = 60,
     ) -> None:
         self.deleted_jobs.append({
             "run_id": run_id,
             "attempt_index": attempt_index,
+            "attempt_base": attempt_base or "",
             "grace_period_seconds": grace_period_seconds,
         })
 
@@ -336,10 +338,14 @@ async def test_abort_deletes_native_jobs_with_grace_period(cosmos, minter, monke
     )
 
     assert result.state == "aborted"
-    assert launcher.deleted_jobs == [
+    assert [
+        {k: v for k, v in item.items() if k != "attempt_base"}
+        for item in launcher.deleted_jobs
+    ] == [
         {"run_id": "run-1", "attempt_index": 0, "grace_period_seconds": 60},
         {"run_id": "run-1", "attempt_index": 1, "grace_period_seconds": 60},
     ]
+    assert all(item["attempt_base"].startswith("glim-run-") for item in launcher.deleted_jobs)
     run_doc = await cosmos.runs.read_item(item="run-1", partition_key="p")
     assert run_doc["attempts"][1]["cancel_requested_at"] is not None
     assert run_doc["attempts"][1]["cancel_reason"] == "cleanup"

@@ -66,7 +66,13 @@ class _NativeLauncher:
     def __init__(self):
         self.deleted = []
 
-    async def delete_attempt_secret(self, *, run_id: str, attempt_index: int) -> None:
+    async def delete_attempt_secret(
+        self,
+        *,
+        run_id: str,
+        attempt_index: int,
+        attempt_base: str | None = None,
+    ) -> None:
         self.deleted.append((run_id, attempt_index))
 
 

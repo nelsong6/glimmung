@@ -21,11 +21,18 @@ from glimmung.app import (
     IssueUpdateRequest,
     _build_issue_detail,
     archive_issue_by_number_endpoint,
+    archive_issue_endpoint,
     app,
     create_issue_comment_by_number_endpoint,
+    create_issue_comment_endpoint,
     delete_issue_comment_by_number_endpoint,
+    delete_issue_comment_endpoint,
     discard_issue_by_number_endpoint,
+    discard_issue_endpoint,
+    issue_detail_by_id,
+    patch_issue_endpoint,
     update_issue_comment_by_number_endpoint,
+    update_issue_comment_endpoint,
     _list_issues_from_cosmos,
 )
 from glimmung.auth import User
@@ -487,6 +494,55 @@ async def test_patch_state_invalid_value_raises():
         if target not in ("open", "closed"):
             raise HTTPException(400, f"state must be 'open' or 'closed', not {req.state!r}")
     assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_storage_id_issue_routes_are_gone(cosmos, app_state):
+    issue = await issue_ops.create_issue(cosmos, project="ambience", title="hidden id")
+    user = User(sub="admin", email="admin@example.com", name="Admin")
+
+    calls = [
+        issue_detail_by_id(project="ambience", issue_id=issue.id),
+        patch_issue_endpoint(
+            IssueUpdateRequest(title="new"),
+            project="ambience",
+            issue_id=issue.id,
+        ),
+        archive_issue_endpoint(
+            IssueArchiveRequest(reason="old"),
+            project="ambience",
+            issue_id=issue.id,
+            user=user,
+        ),
+        discard_issue_endpoint(
+            IssueArchiveRequest(reason="old"),
+            project="ambience",
+            issue_id=issue.id,
+            user=user,
+        ),
+        create_issue_comment_endpoint(
+            IssueCommentRequest(body="comment"),
+            project="ambience",
+            issue_id=issue.id,
+            user=user,
+        ),
+        update_issue_comment_endpoint(
+            IssueCommentRequest(body="comment"),
+            project="ambience",
+            issue_id=issue.id,
+            comment_id="comment-id",
+            user=user,
+        ),
+        delete_issue_comment_endpoint(
+            project="ambience",
+            issue_id=issue.id,
+            comment_id="comment-id",
+        ),
+    ]
+    for call in calls:
+        with pytest.raises(HTTPException) as exc:
+            await call
+        assert exc.value.status_code == 410
 
 
 @pytest.mark.asyncio

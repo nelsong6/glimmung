@@ -984,6 +984,7 @@ async def _cleanup_native_attempt_secret(run: Run, attempt_index: int) -> None:
         await launcher.delete_attempt_secret(
             run_id=run.id,
             attempt_index=attempt.attempt_index,
+            attempt_base=native_k8s_ops._attempt_base_for_run(run, attempt.attempt_index),
         )
     except Exception:
         log.exception(
@@ -1028,6 +1029,7 @@ async def _cancel_native_attempt_jobs(run: Run, *, reason: str) -> None:
             await launcher.delete_attempt_job(
                 run_id=run.id,
                 attempt_index=attempt.attempt_index,
+                attempt_base=native_k8s_ops._attempt_base_for_run(run, attempt.attempt_index),
                 grace_period_seconds=60,
             )
         except Exception:
@@ -4480,6 +4482,7 @@ async def native_run_pod_logs(
         ).read_attempt_pod_logs(
             run_id=run_id,
             attempt_index=attempt_index,
+            attempt_base=native_k8s_ops._attempt_base_for_run(run, attempt_index),
             job_id=job_id,
             tail_lines=tail_lines,
         )
@@ -7096,9 +7099,9 @@ async def _load_issue_detail(
 
 async def _build_issue_detail(cosmos: Cosmos, *, issue: Issue) -> IssueDetail:
     """Render an `Issue` into the `IssueDetail` API view + stitch in the
-    last-run summary and issue-lock state. Shared by both the URL-keyed
-    (`/v1/issues/{owner}/{repo}/{n}`) and id-keyed (`/v1/issues/by-id/
-    {project}/{id}`) detail endpoints."""
+    last-run summary and issue-lock state. Shared by public issue-number
+    read paths; storage-ID routes intentionally return 410 before reaching
+    this helper."""
     number = issue.number
     detail = IssueDetail(
         ref=issue_ref(issue.project, number),

@@ -113,10 +113,10 @@ class _DeleteAttemptJobLauncher(_RecordingLauncher):
             return {
                 "items": [
                     {"metadata": {
-                        "name": "glim-01krnative0000000000000000-2-plan",
+                        "name": "glim-ambience-117-runs-4-2-plan",
                     }},
                     {"metadata": {
-                        "name": "glim-01krnative0000000000000000-2-impl",
+                        "name": "glim-ambience-117-runs-4-2-impl",
                     }},
                 ]
             }
@@ -252,6 +252,10 @@ def test_job_manifest_per_job_renders_one_container_pod():
     )
     assert manifest["metadata"]["labels"]["glimmung.romaine.life/job-id"] == "agent"
     assert manifest["metadata"]["labels"]["glimmung.romaine.life/attempt-base"] == "glim-01krnative-2"
+    assert manifest["metadata"]["labels"]["glimmung.romaine.life/run-ref"] == "ambience-117-runs-4"
+    assert "glimmung.romaine.life/run-id" not in manifest["metadata"]["labels"]
+    assert manifest["metadata"]["annotations"]["glimmung.romaine.life/lease-ref"] == "ambience-slot-3"
+    assert "01LEASE" not in str(manifest)
     assert manifest["metadata"]["annotations"]["glimmung.romaine.life/job-id"] == "agent"
     assert spec["serviceAccountName"] == "glimmung-native-runner"
     volumes = {item["name"]: item for item in spec["volumes"]}
@@ -306,10 +310,10 @@ def test_job_manifest_per_job_renders_one_container_pod():
     assert env["GLIMMUNG_ARTIFACT_REFS"]["value"] == ('{"source": "blob://artifacts/source.tgz"}')
     assert env["GLIMMUNG_CONTEXT"]["value"] == '{"operator_note": "resume at agent step"}'
     assert env["GLIMMUNG_VALIDATION_NAMESPACE"]["value"] == (
-        "glim-run-01krnative0000000000000000-2"
+        "glim-run-ambience-117-runs-4-2"
     )
     assert env["GLIMMUNG_K8S_NAMESPACES"]["value"] == (
-        "glim-run-01krnative0000000000000000-2,glimmung"
+        "glim-run-ambience-117-runs-4-2,glimmung"
     )
     assert env["GLIMMUNG_GITHUB_TOKEN_URL"]["value"] == (
         "http://glimmung.glimmung.svc.cluster.local"
@@ -620,13 +624,14 @@ async def test_delete_attempt_job_label_selects_then_deletes_per_job():
     await launcher.delete_attempt_job(
         run_id="01KRNATIVE0000000000000000",
         attempt_index=2,
+        attempt_base="glim-ambience-117-runs-4-2",
         grace_period_seconds=60,
     )
 
     list_call, del_a, del_b, legacy_del = launcher.calls
     assert list_call["method"] == "GET"
     assert "labelSelector=" in list_call["path"]
-    assert "glimmung.romaine.life%2Fattempt-base%3Dglim-01krnative0000000000000000-2" in list_call["path"]
+    assert "glimmung.romaine.life%2Fattempt-base%3Dglim-ambience-117-runs-4-2" in list_call["path"]
     body = {
         "apiVersion": "v1",
         "kind": "DeleteOptions",
@@ -635,17 +640,17 @@ async def test_delete_attempt_job_label_selects_then_deletes_per_job():
     }
     assert del_a == {
         "method": "DELETE",
-        "path": "/apis/batch/v1/namespaces/glimmung-runs/jobs/glim-01krnative0000000000000000-2-plan",
+        "path": "/apis/batch/v1/namespaces/glimmung-runs/jobs/glim-ambience-117-runs-4-2-plan",
         "json": body,
     }
     assert del_b == {
         "method": "DELETE",
-        "path": "/apis/batch/v1/namespaces/glimmung-runs/jobs/glim-01krnative0000000000000000-2-impl",
+        "path": "/apis/batch/v1/namespaces/glimmung-runs/jobs/glim-ambience-117-runs-4-2-impl",
         "json": body,
     }
     assert legacy_del == {
         "method": "DELETE",
-        "path": "/apis/batch/v1/namespaces/glimmung-runs/jobs/glim-01krnative0000000000000000-2",
+        "path": "/apis/batch/v1/namespaces/glimmung-runs/jobs/glim-ambience-117-runs-4-2",
         "json": body,
     }
 
@@ -904,10 +909,7 @@ async def test_ensure_test_slot_helm_release_creates_rolebinding_secret_and_job(
 
     secret = launcher.calls[4]["json"]
     assert secret["stringData"] == {"token": "ghs_dummy"}
-    assert (
-        secret["metadata"]["labels"]["glimmung.romaine.life/lease-id"]
-        == "01lease"
-    )
+    assert secret["metadata"]["labels"]["glimmung.romaine.life/lease-ref"] == "tank-slot-1"
 
     job = launcher.calls[5]["json"]
     assert job["kind"] == "Job"
@@ -952,11 +954,11 @@ async def test_delete_test_slot_helm_release_deletes_job_and_secret():
     assert methods_paths == [
         (
             "DELETE",
-            "/apis/batch/v1/namespaces/glimmung-runs/jobs/glim-helm-install-01lease-0",
+            "/apis/batch/v1/namespaces/glimmung-runs/jobs/glim-helm-install-tank-slot-1-0",
         ),
         (
             "DELETE",
-            "/api/v1/namespaces/glimmung-runs/secrets/glim-helm-clone-01lease-0",
+            "/api/v1/namespaces/glimmung-runs/secrets/glim-helm-clone-tank-slot-1-0",
         ),
         (
             "DELETE",
@@ -996,7 +998,7 @@ async def test_ensure_test_slot_namespace_creates_assigned_slot_namespace():
                     "glimmung.romaine.life/workflow": "manual-slot",
                     "glimmung.romaine.life/native-slot-name": "glimmung-slot-2",
                     "glimmung.romaine.life/native-slot-index": "2",
-                    "glimmung.romaine.life/lease-id": "01lease",
+                    "glimmung.romaine.life/lease-ref": "glimmung-slot-2",
                 },
             },
         },
@@ -1067,6 +1069,8 @@ async def test_launch_scaffolds_run_namespaces_and_rbac_before_job():
         id="01KRNATIVE0000000000000000",
         project="ambience",
         workflow="native-agent",
+        run_number=4,
+        run_display_number="4",
         issue_id="01ISSUE",
         issue_repo="nelsong6/ambience",
         issue_number=117,
@@ -1127,7 +1131,7 @@ async def test_launch_scaffolds_run_namespaces_and_rbac_before_job():
         if path.endswith("/rolebindings")
     }
     assert rolebinding_namespaces == {
-        "glim-run-01krnative0000000000000000-0",
+        "glim-run-ambience-117-runs-4-0",
         "glimmung",
     }
     rolebinding = next(
@@ -1167,6 +1171,8 @@ async def test_launch_cleans_attempt_secret_when_scaffolding_fails():
         id="01KRNATIVE0000000000000000",
         project="ambience",
         workflow="native-agent",
+        run_number=4,
+        run_display_number="4",
         issue_id="01ISSUE",
         issue_repo="nelsong6/ambience",
         issue_number=117,
@@ -1216,7 +1222,7 @@ async def test_launch_cleans_attempt_secret_when_scaffolding_fails():
     assert {
         "method": "DELETE",
         "path": (
-            "/api/v1/namespaces/glimmung-runs/secrets/glim-01krnative0000000000000000-0-token"
+            "/api/v1/namespaces/glimmung-runs/secrets/glim-ambience-117-runs-4-0-token"
         ),
         "json": None,
     } in launcher.calls
