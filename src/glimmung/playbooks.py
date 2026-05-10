@@ -9,6 +9,7 @@ starts minting or dispatching issues from playbooks.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -30,8 +31,15 @@ def _strip_meta(doc: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in doc.items() if not k.startswith("_")}
 
 
+def public_ref_for_title(title: str, created_at: datetime) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "playbook"
+    return f"{slug}-{created_at.strftime('%Y%m%d%H%M%S')}"
+
+
 async def create_playbook(cosmos: Cosmos, req: PlaybookCreate) -> Playbook:
     now = _now()
+    metadata = dict(req.metadata)
+    metadata.setdefault("public_ref", public_ref_for_title(req.title, now))
     playbook = Playbook(
         id=str(ULID()),
         project=req.project,
@@ -40,7 +48,7 @@ async def create_playbook(cosmos: Cosmos, req: PlaybookCreate) -> Playbook:
         entries=req.entries,
         concurrency_limit=req.concurrency_limit,
         integration_strategy=req.integration_strategy,
-        metadata=req.metadata,
+        metadata=metadata,
         created_at=now,
         updated_at=now,
     )
