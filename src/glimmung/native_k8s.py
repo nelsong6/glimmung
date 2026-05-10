@@ -67,7 +67,8 @@ class NativeKubernetesLauncher:
             raise NativeLaunchError(f"native run {lease_doc['project']}/{run_id} not found")
         run, etag = found
 
-        attempt_base = _resource_name("glim", run_id, attempt_index)
+        public_run_ref = _run_public_ref(run)
+        attempt_base = _attempt_base_for_run(run, attempt_index)
         if not phase.jobs:
             raise NativeLaunchError(f"phase {phase.name!r} has no native jobs")
         try:
@@ -76,6 +77,7 @@ class NativeKubernetesLauncher:
                 workflow_doc=workflow_doc,
                 phase=phase,
                 run_id=run_id,
+                run_ref=public_run_ref,
                 attempt_index=attempt_index,
             )
             await self.ensure_playwright_slot(lease_doc)
@@ -113,7 +115,11 @@ class NativeKubernetesLauncher:
                 job_names.append(job_name)
         except Exception:
             with suppress(Exception):
-                await self.delete_attempt_secret(run_id=run_id, attempt_index=attempt_index)
+                await self.delete_attempt_secret(
+                    run_id=run_id,
+                    attempt_index=attempt_index,
+                    attempt_base=attempt_base,
+                )
             with suppress(Exception):
                 await self.delete_playwright_slot(lease_doc)
             raise
@@ -294,7 +300,13 @@ class NativeKubernetesLauncher:
                 return
             raise
 
-    async def delete_attempt_secret(self, *, run_id: str, attempt_index: int) -> None:
+    async def delete_attempt_secret(
+        self,
+        *,
+        run_id: str,
+        attempt_index: int,
+        attempt_base: str | None = None,
+    ) -> None:
         """Delete every callback-token Secret belonging to an attempt.
 
         Under per-job dispatch each `phase.jobs[*]` has its own Secret;
@@ -305,7 +317,7 @@ class NativeKubernetesLauncher:
         Idempotent: missing Secrets are treated as already cleaned up.
         """
         namespace = self._settings.native_runner_namespace
-        attempt_base = _resource_name("glim", run_id, attempt_index)
+        attempt_base = attempt_base or _resource_name("glim", run_id, attempt_index)
         selector = urlencode({
             "labelSelector": f"glimmung.romaine.life/attempt-base={attempt_base}",
         })
@@ -347,6 +359,7 @@ class NativeKubernetesLauncher:
         *,
         run_id: str,
         attempt_index: int,
+        attempt_base: str | None = None,
         grace_period_seconds: int = 60,
     ) -> None:
         """Delete every native Kubernetes Job belonging to an attempt.
@@ -359,7 +372,7 @@ class NativeKubernetesLauncher:
         aborts.
         """
         namespace = self._settings.native_runner_namespace
-        attempt_base = _resource_name("glim", run_id, attempt_index)
+        attempt_base = attempt_base or _resource_name("glim", run_id, attempt_index)
         body = {
             "apiVersion": "v1",
             "kind": "DeleteOptions",
@@ -436,8 +449,8 @@ class NativeKubernetesLauncher:
         }
         if slot.get("slot_index"):
             labels["glimmung.romaine.life/native-slot-index"] = _label_value(slot["slot_index"])
-        if slot.get("lease_id"):
-            labels["glimmung.romaine.life/lease-id"] = _label_value(slot["lease_id"])
+        if slot.get("lease_ref"):
+            labels["glimmung.romaine.life/lease-ref"] = _label_value(slot["lease_ref"])
         await self._ensure_namespace(slot["slot_name"], labels=labels)
         return slot["slot_name"]
 
@@ -476,10 +489,6 @@ class NativeKubernetesLauncher:
         ).strip()
         if not repo:
             return None
-        lease_id = slot.get("lease_id") or ""
-        if not lease_id:
-            return None
-
         slot_name = slot["slot_name"]
         slot_index = slot.get("slot_index") or _slot_index_from_name(slot_name)
         host = _test_slot_host(project_doc, slot_name, self._settings)
@@ -518,10 +527,10 @@ class NativeKubernetesLauncher:
         await self._ensure_slot_admin_binding(sessions_ns, slot=slot)
         await self._ensure_installer_cluster_admin_binding(slot_name, slot=slot)
 
-        secret_name = _test_slot_install_secret_name(lease_id)
+        secret_name = _test_slot_install_secret_name(slot_name)
         await self._ensure_clone_token_secret(secret_name, repo_token, slot=slot)
 
-        job_name = _test_slot_install_job_name(lease_id)
+        job_name = _test_slot_install_job_name(slot_name)
         manifest = _test_slot_install_manifest(
             settings=self._settings,
             config=config,
@@ -547,13 +556,12 @@ class NativeKubernetesLauncher:
         slot = _native_slot(lease_doc)
         if slot is None:
             return
-        lease_id = slot.get("lease_id") or ""
         slot_name = slot.get("slot_name") or ""
-        if not lease_id:
+        if not slot_name:
             return
         namespace = self._settings.native_runner_namespace
-        job_name = _test_slot_install_job_name(lease_id)
-        secret_name = _test_slot_install_secret_name(lease_id)
+        job_name = _test_slot_install_job_name(slot_name)
+        secret_name = _test_slot_install_secret_name(slot_name)
         body = {
             "apiVersion": "v1",
             "kind": "DeleteOptions",
@@ -618,9 +626,9 @@ class NativeKubernetesLauncher:
                 "name": "cluster-admin",
             },
         }
-        if slot.get("lease_id"):
-            body["metadata"]["labels"]["glimmung.romaine.life/lease-id"] = _label_value(
-                slot["lease_id"]
+        if slot.get("lease_ref"):
+            body["metadata"]["labels"]["glimmung.romaine.life/lease-ref"] = _label_value(
+                slot["lease_ref"]
             )
         try:
             await self._request(
@@ -662,8 +670,8 @@ class NativeKubernetesLauncher:
             "glimmung.romaine.life/project": _label_value(slot["project"]),
             "glimmung.romaine.life/native-slot-name": _label_value(slot_name),
         }
-        if slot.get("lease_id"):
-            labels["glimmung.romaine.life/lease-id"] = _label_value(slot["lease_id"])
+        if slot.get("lease_ref"):
+            labels["glimmung.romaine.life/lease-ref"] = _label_value(slot["lease_ref"])
         body = {
             "apiVersion": "rbac.authorization.k8s.io/v1",
             "kind": "RoleBinding",
@@ -728,8 +736,8 @@ class NativeKubernetesLauncher:
             "glimmung.romaine.life/project": _label_value(slot["project"]),
             "glimmung.romaine.life/native-slot-name": _label_value(slot["slot_name"]),
         }
-        if slot.get("lease_id"):
-            labels["glimmung.romaine.life/lease-id"] = _label_value(slot["lease_id"])
+        if slot.get("lease_ref"):
+            labels["glimmung.romaine.life/lease-ref"] = _label_value(slot["lease_ref"])
         body = {
             "apiVersion": "v1",
             "kind": "Secret",
@@ -947,6 +955,7 @@ class NativeKubernetesLauncher:
         *,
         run_id: str,
         attempt_index: int,
+        attempt_base: str | None = None,
         job_id: str,
         tail_lines: int = 200,
     ) -> dict[str, Any]:
@@ -958,7 +967,7 @@ class NativeKubernetesLauncher:
         per-job label so the right sibling Pod is selected.
         """
         namespace = self._settings.native_runner_namespace
-        attempt_base = _resource_name("glim", run_id, attempt_index)
+        attempt_base = attempt_base or _resource_name("glim", run_id, attempt_index)
         per_job_name = _job_name_for(attempt_base, job_id)
         # Prefer the per-job label (post-fan-out). Fall back to legacy
         # per-attempt Job name selectors so attempts launched by older
@@ -1015,16 +1024,17 @@ class NativeKubernetesLauncher:
         workflow_doc: dict[str, Any],
         phase: PhaseSpec,
         run_id: str,
+        run_ref: str,
         attempt_index: int,
     ) -> None:
         metadata = lease_doc.get("metadata") or {}
-        validation_namespace = _validation_namespace(run_id, attempt_index)
+        validation_namespace = _validation_namespace(run_ref or run_id, attempt_index)
         access_namespaces = _access_namespaces(validation_namespace, metadata)
         labels = {
             **_managed_labels(),
             "glimmung.romaine.life/project": _label_value(str(lease_doc["project"])),
             "glimmung.romaine.life/workflow": _label_value(str(workflow_doc["name"])),
-            "glimmung.romaine.life/run-id": _label_value(run_id),
+            "glimmung.romaine.life/run-ref": _label_value(run_ref) if run_ref else "unresolved",
             "glimmung.romaine.life/phase": _label_value(phase.name),
             "glimmung.romaine.life/attempt-index": str(attempt_index),
         }
@@ -1197,9 +1207,7 @@ def _job_manifest(
         **_managed_labels(),
         "glimmung.romaine.life/project": _label_value(lease_doc["project"]),
         "glimmung.romaine.life/workflow": _label_value(str(workflow_doc["name"])),
-        "glimmung.romaine.life/run-id": _label_value(
-            str((lease_doc.get("metadata") or {}).get("run_id", "")),
-        ),
+        "glimmung.romaine.life/run-ref": _label_value(_metadata_run_ref(lease_doc)),
         "glimmung.romaine.life/phase": _label_value(phase.name),
         "glimmung.romaine.life/attempt-base": _label_value(attempt_base),
         "glimmung.romaine.life/job-id": _label_value(job_spec.id),
@@ -1249,7 +1257,7 @@ def _job_manifest(
             "namespace": settings.native_runner_namespace,
             "labels": labels,
             "annotations": {
-                "glimmung.romaine.life/lease-id": str(lease_doc["id"]),
+                "glimmung.romaine.life/lease-ref": _lease_public_ref(lease_doc),
                 "glimmung.romaine.life/attempt-index": str(metadata.get("attempt_index", "0")),
                 "glimmung.romaine.life/job-id": str(job_spec.id),
             },
@@ -1324,7 +1332,7 @@ def _universal_env(
     slot_name = str(metadata.get("native_slot_name") or "").strip()
     lease_ref = slot_name or f"{project}/leases/{lease_doc.get('leaseNumber') or lease_doc.get('lease_number') or 'active'}"
     attempt_index = int(str(metadata.get("attempt_index") or "0"))
-    validation_namespace = _validation_namespace(run_id, attempt_index)
+    validation_namespace = _validation_namespace(_metadata_run_ref(lease_doc) or run_id, attempt_index)
     access_namespaces = _access_namespaces(validation_namespace, metadata)
     env: list[dict[str, Any]] = [
         {"name": "GLIMMUNG_BASE_URL", "value": base_url},
@@ -1435,7 +1443,7 @@ def _native_slot(lease_doc: dict[str, Any]) -> dict[str, str] | None:
         "workflow": str(lease_doc.get("workflow") or "").strip(),
         "slot_name": slot_name,
         "slot_index": str(metadata.get("native_slot_index") or "").strip(),
-        "lease_id": str(lease_doc.get("id") or "").strip(),
+        "lease_ref": _lease_public_ref(lease_doc),
     }
 
 
@@ -1460,8 +1468,8 @@ def _playwright_labels(slot: dict[str, str]) -> dict[str, str]:
     }
     if slot.get("slot_index"):
         labels["glimmung.romaine.life/native-slot-index"] = _label_value(slot["slot_index"])
-    if slot.get("lease_id"):
-        labels["glimmung.romaine.life/lease-id"] = _label_value(slot["lease_id"])
+    if slot.get("lease_ref"):
+        labels["glimmung.romaine.life/lease-ref"] = _label_value(slot["lease_ref"])
     return labels
 
 
@@ -1886,8 +1894,73 @@ def _workload_identity_issuer_from_token(settings: Settings) -> str:
     return ""
 
 
+def _compact_resource_name(prefix: str, value: str, attempt_index: int) -> str:
+    base = _dns_label(f"{prefix}-{value}-{attempt_index}")
+    if len(base) <= 63:
+        return base.rstrip("-")
+    digest = hashlib.sha256(base.encode("utf-8")).hexdigest()[:8]
+    return f"{base[:54].rstrip('-')}-{digest}"
+
+
 def _resource_name(prefix: str, run_id: str, attempt_index: int) -> str:
-    return _dns_label(f"{prefix}-{run_id.lower()}-{attempt_index}")[:63].rstrip("-")
+    return _compact_resource_name(prefix, run_id.lower(), attempt_index)
+
+
+def _run_public_ref(run: Any) -> str:
+    project = str(getattr(run, "project", "") or "")
+    issue_number = getattr(run, "issue_number", None)
+    display = (
+        getattr(run, "run_display_number", None)
+        or getattr(run, "run_number", None)
+        or ""
+    )
+    if project and issue_number is not None and str(display).strip():
+        return f"{project}#{issue_number}/runs/{display}"
+    return ""
+
+
+def _metadata_run_ref(lease_doc: dict[str, Any]) -> str:
+    metadata = lease_doc.get("metadata") or {}
+    explicit = str(metadata.get("run_ref") or "").strip()
+    if explicit:
+        return explicit
+    project = str(lease_doc.get("project") or "").strip()
+    issue_number = str(metadata.get("issue_number") or "").strip()
+    run_number = str(
+        metadata.get("run_display_number") or metadata.get("run_number") or ""
+    ).strip()
+    if project and issue_number and run_number:
+        return f"{project}#{issue_number}/runs/{run_number}"
+    return ""
+
+
+def _attempt_base_for_run(run: Any, attempt_index: int) -> str:
+    public_ref = _run_public_ref(run)
+    if public_ref:
+        return _compact_resource_name("glim", public_ref, attempt_index)
+    callback_token = str(getattr(run, "callback_token", "") or "")
+    if callback_token:
+        digest = hashlib.sha256(callback_token.encode("utf-8")).hexdigest()[:12]
+        return _compact_resource_name("glim-cb", digest, attempt_index)
+    synthetic = (
+        f"{getattr(run, 'project', '')}-"
+        f"{getattr(run, 'issue_number', '')}-"
+        f"{getattr(run, 'created_at', '')}"
+    )
+    digest = hashlib.sha256(synthetic.encode("utf-8")).hexdigest()[:12]
+    return _compact_resource_name("glim-run", digest, attempt_index)
+
+
+def _lease_public_ref(lease_doc: dict[str, Any]) -> str:
+    metadata = lease_doc.get("metadata") or {}
+    slot_name = str(metadata.get("native_slot_name") or "").strip()
+    if slot_name:
+        return slot_name
+    project = str(lease_doc.get("project") or "").strip()
+    number = lease_doc.get("leaseNumber") or lease_doc.get("lease_number")
+    if project and number:
+        return f"{project}/leases/{number}"
+    return project or "lease"
 
 
 def _job_name_for(attempt_base: str, job_id: str) -> str:
@@ -2032,12 +2105,12 @@ def _slot_index_from_name(slot_name: str) -> str:
     return suffix if suffix.isdigit() else ""
 
 
-def _test_slot_install_job_name(lease_id: str) -> str:
-    return _resource_name("glim-helm-install", lease_id, 0)
+def _test_slot_install_job_name(slot_name: str) -> str:
+    return _compact_resource_name("glim-helm-install", slot_name, 0)
 
 
-def _test_slot_install_secret_name(lease_id: str) -> str:
-    return _resource_name("glim-helm-clone", lease_id, 0)
+def _test_slot_install_secret_name(slot_name: str) -> str:
+    return _compact_resource_name("glim-helm-clone", slot_name, 0)
 
 
 def _installer_cluster_admin_binding_name(slot_name: str) -> str:
@@ -2083,7 +2156,7 @@ def _test_slot_install_manifest(
     namespace = settings.native_runner_namespace
     slot_name = slot["slot_name"]
     project = slot["project"]
-    lease_id = slot.get("lease_id") or ""
+    lease_ref = slot.get("lease_ref") or ""
     git_ref = str(config.get("git_ref") or "").strip()
 
     # Build --set flags from project metadata values dict.
@@ -2098,8 +2171,8 @@ def _test_slot_install_manifest(
         "glimmung.romaine.life/project": _label_value(project),
         "glimmung.romaine.life/native-slot-name": _label_value(slot_name),
     }
-    if lease_id:
-        labels["glimmung.romaine.life/lease-id"] = _label_value(lease_id)
+    if lease_ref:
+        labels["glimmung.romaine.life/lease-ref"] = _label_value(lease_ref)
     if slot.get("slot_index"):
         labels["glimmung.romaine.life/native-slot-index"] = _label_value(slot["slot_index"])
 
@@ -2175,7 +2248,7 @@ def _test_slot_install_manifest(
             "namespace": namespace,
             "labels": labels,
             "annotations": {
-                "glimmung.romaine.life/lease-id": lease_id,
+                "glimmung.romaine.life/lease-ref": lease_ref,
                 "glimmung.romaine.life/native-slot-name": slot_name,
             },
         },
