@@ -349,7 +349,7 @@ def _set_native_slot_metadata(
     if existing_slot_name:
         metadata[NATIVE_SLOT_NAME_METADATA_KEY] = existing_slot_name
         return
-    slot_prefix = str(metadata.get("native_slot_prefix") or f"{project}-slot").strip()
+    slot_prefix = str(metadata.get("native_slot_prefix") or project).strip()
     metadata[NATIVE_SLOT_NAME_METADATA_KEY] = f"{slot_prefix}-{slot_index}"
 
 

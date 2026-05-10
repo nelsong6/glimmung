@@ -118,7 +118,7 @@ async def test_checkout_test_slot_prepares_clean_slate_namespace_and_playwright(
     assert result.state == LeaseState.ACTIVE.value
     assert result.workflow == "manual-slot"
     assert result.slot_index == 2
-    assert result.slot_name == "glimmung-slot-2"
+    assert result.slot_name == "glimmung-2"
     assert result.lease_id is not None
     assert result.host == "native-k8s"
     lease_doc = await app_state.cosmos.leases.read_item(
@@ -127,12 +127,12 @@ async def test_checkout_test_slot_prepares_clean_slate_namespace_and_playwright(
     )
     assert lease_doc["state"] == LeaseState.ACTIVE.value
     assert lease_doc["metadata"]["native_slot_index"] == "2"
-    assert lease_doc["metadata"]["native_slot_name"] == "glimmung-slot-2"
+    assert lease_doc["metadata"]["native_slot_name"] == "glimmung-2"
     assert lease_doc["metadata"]["test_slot_checkout"] is True
     assert lease_doc["metadata"]["phase_inputs"] == {
         "validation_slot_index": "2",
-        "slot_name": "glimmung-slot-2",
-        "namespace": "glimmung-slot-2",
+        "slot_name": "glimmung-2",
+        "namespace": "glimmung-2",
         "test_slot_mode": "clean_slate",
         "clean_slate": "true",
     }
@@ -140,11 +140,11 @@ async def test_checkout_test_slot_prepares_clean_slate_namespace_and_playwright(
     run_docs = list(app_state.cosmos.runs._items.values())
     assert issue_docs == []
     assert run_docs == []
-    assert launcher.deleted_namespaces == ["glimmung-slot-2"]
+    assert launcher.deleted_namespaces == ["glimmung-2"]
     assert len(launcher.ensured_namespaces) == 1
-    assert launcher.ensured_namespaces[0]["metadata"]["native_slot_name"] == "glimmung-slot-2"
+    assert launcher.ensured_namespaces[0]["metadata"]["native_slot_name"] == "glimmung-2"
     assert len(launcher.ensured_playwright) == 1
-    assert launcher.ensured_playwright[0]["metadata"]["native_slot_name"] == "glimmung-slot-2"
+    assert launcher.ensured_playwright[0]["metadata"]["native_slot_name"] == "glimmung-2"
 
 
 @pytest.mark.asyncio
@@ -233,7 +233,7 @@ async def test_release_test_slot_cleans_up_namespace_before_releasing(app_state)
     released = await app_module.release_lease(result.lease_id, project="glimmung")
 
     assert released.state == LeaseState.RELEASED
-    assert app_state.native_k8s_launcher.deleted_namespaces == ["glimmung-slot-2"]
+    assert app_state.native_k8s_launcher.deleted_namespaces == ["glimmung-2"]
     lease_doc = await app_state.cosmos.leases.read_item(
         item=result.lease_id,
         partition_key="glimmung",
@@ -262,9 +262,9 @@ async def test_return_test_slot_resolves_by_slot_index(app_state):
     assert returned.state == LeaseState.RELEASED.value
     assert returned.lease_id == checked_out.lease_id
     assert returned.slot_index == 1
-    assert returned.slot_name == "glimmung-slot-1"
+    assert returned.slot_name == "glimmung-1"
     assert returned.cleanup_started is True
-    assert app_state.native_k8s_launcher.deleted_namespaces == ["glimmung-slot-1"]
+    assert app_state.native_k8s_launcher.deleted_namespaces == ["glimmung-1"]
 
 
 @pytest.mark.asyncio
@@ -285,4 +285,4 @@ async def test_playwright_reconcile_includes_checked_out_test_slots(app_state):
 
     assert len(app_state.native_k8s_launcher.reconciled_playwright_leases or []) == 1
     lease_doc = app_state.native_k8s_launcher.reconciled_playwright_leases[0]
-    assert lease_doc["metadata"]["native_slot_name"] == "glimmung-slot-1"
+    assert lease_doc["metadata"]["native_slot_name"] == "glimmung-1"

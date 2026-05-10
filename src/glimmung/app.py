@@ -7474,7 +7474,7 @@ def _native_slot_prefix(project_doc: dict[str, Any], project: str) -> str:
             value = str(raw.get("slot_prefix") or raw.get("slotPrefix") or "").strip()
             if value:
                 return value
-    return f"{project}-slot"
+    return project
 
 
 @app.post(
@@ -7538,7 +7538,7 @@ async def _resolve_test_slot_lease(
         raise HTTPException(400, "lease_id, slot_index, or slot_name required")
 
     target_slot_name = (slot_name or "").strip() or (
-        f"{project}-slot-{slot_index}" if slot_index is not None else ""
+        f"{project}-{slot_index}" if slot_index is not None else ""
     )
     docs = await query_all(
         cosmos.leases,
