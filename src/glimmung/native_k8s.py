@@ -1617,9 +1617,7 @@ def _standby_dns_config(project_doc: dict[str, Any], settings: Settings) -> dict
         "namespace": str(
             raw.get("namespace") or getattr(settings, "native_standby_dns_namespace", "glimmung")
         ),
-        "slot_prefix": str(raw.get("slot_prefix") or raw.get("slotPrefix") or project)
-        .strip()
-        .strip("."),
+        "slot_prefix": project.strip("."),
         "record_base": record_base,
         "count": count,
         "ttl": max(1, ttl),
@@ -1710,7 +1708,7 @@ def _standby_workload_identity_config(
     if count < 1:
         return None
 
-    slot_prefix = str(raw.get("slot_prefix") or raw.get("slotPrefix") or project).strip()
+    slot_prefix = project
     if not slot_prefix:
         return None
 
