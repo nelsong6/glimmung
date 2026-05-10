@@ -41,6 +41,7 @@ class _RecordingTestSlotLauncher:
         self.deleted_playwright: list[dict] = []
         self.deleted_helm_releases: list[dict] = []
         self.reconciled_playwright_leases: list[dict] | None = None
+        self.reconciled_entra_projects: list[dict] | None = None
 
     async def ensure_test_slot_namespace(self, lease_doc: dict) -> None:
         self.ensured_namespaces.append(lease_doc)
@@ -72,6 +73,9 @@ class _RecordingTestSlotLauncher:
 
     async def reconcile_playwright_slots(self, active_native_leases: list[dict]) -> None:
         self.reconciled_playwright_leases = active_native_leases
+
+    async def reconcile_standby_entra_redirects(self, project_docs: list[dict]) -> None:
+        self.reconciled_entra_projects = project_docs
 
 
 @pytest.fixture
@@ -141,6 +145,41 @@ async def test_checkout_test_slot_prepares_clean_slate_namespace_and_playwright(
     assert launcher.ensured_namespaces[0]["metadata"]["native_slot_name"] == "glimmung-slot-2"
     assert len(launcher.ensured_playwright) == 1
     assert launcher.ensured_playwright[0]["metadata"]["native_slot_name"] == "glimmung-slot-2"
+
+
+@pytest.mark.asyncio
+async def test_checkout_test_slot_uses_project_standby_dns_slot_prefix(app_state):
+    await _register_project(
+        SimpleNamespace(state=app_state),
+        "tank-operator",
+        "nelsong6/tank-operator",
+        metadata={
+            "native_standby_dns": {
+                "enabled": True,
+                "record_base": "tank.dev.romaine.life",
+                "slot_prefix": "tank-slot",
+                "count": 2,
+            },
+        },
+    )
+
+    result = await app_module.checkout_test_slot(
+        app_module.TestSlotCheckoutRequest(
+            project="tank-operator",
+            slot_index=1,
+        )
+    )
+
+    assert result.slot_name == "tank-slot-1"
+    lease_doc = await app_state.cosmos.leases.read_item(
+        item=result.lease_id,
+        partition_key="tank-operator",
+    )
+    assert lease_doc["metadata"]["native_slot_name"] == "tank-slot-1"
+    assert lease_doc["metadata"]["native_slot_prefix"] == "tank-slot"
+    assert lease_doc["metadata"]["phase_inputs"]["slot_name"] == "tank-slot-1"
+    assert lease_doc["metadata"]["phase_inputs"]["namespace"] == "tank-slot-1"
+    assert app_state.native_k8s_launcher.reconciled_entra_projects is not None
 
 
 @pytest.mark.asyncio
