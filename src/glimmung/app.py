@@ -4934,16 +4934,49 @@ class RunResumeRequest(BaseModel):
     trigger_source: dict[str, Any] = Field(default_factory=dict)
 
 
+class PublicResumeResult(BaseModel):
+    state: str
+    new_run_ref: str | None = None
+    prior_run_ref: str | None = None
+    lease: str | None = None
+    host: str | None = None
+    detail: str | None = None
+
+
+async def _resume_result_to_public(cosmos: Cosmos, result: ResumeResult) -> PublicResumeResult:
+    async def run_public_ref_for(run_id: str | None) -> str | None:
+        if not run_id:
+            return None
+        docs = await query_all(
+            cosmos.runs,
+            "SELECT * FROM c WHERE c.id = @id",
+            parameters=[{"name": "@id", "value": run_id}],
+        )
+        if not docs:
+            return None
+        run = Run.model_validate({k: v for k, v in docs[0].items() if not k.startswith("_")})
+        return _run_public_ref(run)
+
+    return PublicResumeResult(
+        state=result.state,
+        new_run_ref=await run_public_ref_for(result.new_run_id),
+        prior_run_ref=await run_public_ref_for(result.prior_run_id),
+        lease="claimed" if result.lease_id else None,
+        host=result.host,
+        detail=result.detail,
+    )
+
+
 @app.post(
     "/v1/runs/{project}/{run_id}/resume",
-    response_model=ResumeResult,
+    response_model=PublicResumeResult,
     dependencies=[Depends(require_admin_user)],
 )
 async def resume_run(
     req: RunResumeRequest,
     project: str = Path(...),
     run_id: str = Path(...),
-) -> ResumeResult:
+) -> PublicResumeResult:
     """Resume from a prior Run by spawning a new Run that starts at
     `entrypoint_phase` with all earlier phases pre-marked skipped.
 
@@ -4985,12 +5018,12 @@ async def resume_run(
         raise HTTPException(409, result.detail)
     if result.state == "already_running":
         raise HTTPException(409, result.detail)
-    return result
+    return await _resume_result_to_public(app.state.cosmos, result)
 
 
 @app.post(
     "/v1/projects/{project}/issues/{issue_number}/runs/{run_number}/resume",
-    response_model=ResumeResult,
+    response_model=PublicResumeResult,
     dependencies=[Depends(require_admin_user)],
 )
 async def resume_run_by_number(
@@ -4998,7 +5031,7 @@ async def resume_run_by_number(
     project: str = Path(...),
     issue_number: int = Path(...),
     run_number: str = Path(...),
-) -> ResumeResult:
+) -> PublicResumeResult:
     found = await run_ops.read_run_by_ref(
         app.state.cosmos,
         project=project,
