@@ -38,7 +38,7 @@ attachListenerSet: glimmung-wildcard
 gatewayName: main
 gatewayNamespace: envoy-gateway-system
 
-# Surfaced for cleanup-by-label. The agent-run workflow sets
+# Surfaced for cleanup-by-label. The native workflow sets
 # --set prNumber=<N> after the PR opens so the cleanup workflow
 # (agent-pr-cleanup.yml) can find releases by label and uninstall them.
 prNumber: ""
