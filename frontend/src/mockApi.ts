@@ -304,7 +304,7 @@ const mockIssues = [
 
 const mockPortfolioElements = [
   {
-    id: "portfolio-glimmung-sidebar",
+    ref: "design-portfolio--sidebar.nav",
     project: "glimmung",
     route: "/_design-portfolio",
     element_id: "sidebar.nav",
@@ -313,13 +313,13 @@ const mockPortfolioElements = [
     preview_url: "/_design-portfolio?mock=1",
     status: "needs_review",
     notes: "Spacing changed around the active project state.",
-    last_touched_run_id: "run-glimmung-217-review",
+    last_touched_run_ref: "glimmung#217/runs/2",
     metadata: { package: "@glimmung/ui" },
     created_at: ago(180),
     updated_at: ago(38),
   },
   {
-    id: "portfolio-glimmung-toolbar",
+    ref: "design-portfolio--toolbar.actions",
     project: "glimmung",
     route: "/_design-portfolio",
     element_id: "toolbar.actions",
@@ -328,7 +328,7 @@ const mockPortfolioElements = [
     preview_url: "/_design-portfolio?mock=1",
     status: "approved",
     notes: "Matches the review baseline.",
-    last_touched_run_id: "run-glimmung-217-review",
+    last_touched_run_ref: "glimmung#217/runs/2",
     metadata: { package: "@glimmung/ui" },
     created_at: ago(180),
     updated_at: ago(42),

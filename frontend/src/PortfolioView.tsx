@@ -4,7 +4,7 @@ import { authedFetch } from "./auth";
 type PortfolioReviewState = "unreviewed" | "needs_review" | "approved" | "needs_work";
 
 type PortfolioElement = {
-  id: string;
+  ref: string;
   project: string;
   route: string;
   element_id: string;
@@ -13,7 +13,7 @@ type PortfolioElement = {
   preview_url: string | null;
   status: PortfolioReviewState;
   notes: string;
-  last_touched_run_id: string | null;
+  last_touched_run_ref: string | null;
   metadata: Record<string, unknown>;
   created_at: string;
   updated_at: string;
@@ -21,7 +21,7 @@ type PortfolioElement = {
 
 type DispatchResult = {
   state: string;
-  lease_id: string | null;
+  lease: string | null;
   run_number: number | null;
   host: string | null;
   workflow: string | null;
@@ -87,18 +87,18 @@ export function PortfolioView({
   }, [rows]);
 
   const patchStatus = async (row: PortfolioElement, status: PortfolioReviewState) => {
-    setAction({ kind: "saving", key: row.id });
+    setAction({ kind: "saving", key: row.ref });
     try {
-      const r = await authedFetch(`/v1/portfolio/elements/${encodeURIComponent(row.project)}/${encodeURIComponent(row.id)}`, {
+      const r = await authedFetch(`/v1/portfolio/elements/${encodeURIComponent(row.project)}/${encodeURIComponent(row.ref)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status }),
       });
-      if (!r.ok) throw new Error(`/v1/portfolio/elements/${row.project}/${row.id} -> ${r.status}: ${await r.text()}`);
+      if (!r.ok) throw new Error(`/v1/portfolio/elements/${row.project}/${row.ref} -> ${r.status}: ${await r.text()}`);
       setAction({ kind: "idle" });
       void refresh();
     } catch (e) {
-      setAction({ kind: "error", key: row.id, message: String(e) });
+      setAction({ kind: "error", key: row.ref, message: String(e) });
     }
   };
 
@@ -180,9 +180,9 @@ export function PortfolioView({
             </thead>
             <tbody>
               {rows.map((row) => {
-                const current = action.kind !== "idle" && action.key === row.id ? action : null;
+                const current = action.kind !== "idle" && action.key === row.ref ? action : null;
                 return (
-                  <tr key={row.id}>
+                  <tr key={row.ref}>
                     {!projectFilter && <td>{row.project}</td>}
                     <td>
                       <strong>{row.title || row.element_id}</strong>
