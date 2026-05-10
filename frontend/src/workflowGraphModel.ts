@@ -28,6 +28,30 @@ export type WorkflowGraphModel = {
   recycleArrows: RecycleArrow[];
 };
 
+function phaseRecycleArrow(phase: WorkflowGraphPhase, active: boolean): RecycleArrow | null {
+  if (!phase.recycle_policy) return null;
+  return {
+    source: phase.name,
+    target: phase.recycle_policy.lands_at === "self" ? phase.name : phase.recycle_policy.lands_at,
+    trigger: phase.recycle_policy.on.join(" / "),
+    max_attempts: phase.recycle_policy.max_attempts,
+    active,
+    kind: "phase_recycle",
+  };
+}
+
+function reportRecycleArrow(policy: RecyclePolicy | null | undefined, active: boolean): RecycleArrow | null {
+  if (!policy) return null;
+  return {
+    source: "report",
+    target: policy.lands_at,
+    trigger: policy.on.join(" / "),
+    max_attempts: policy.max_attempts,
+    active,
+    kind: "report_recycle",
+  };
+}
+
 export function workflowToPhaseGraphModel(
   workflow: WorkflowGraphSource,
   options: {
@@ -58,28 +82,14 @@ export function workflowToPhaseGraphModel(
     })),
     prEnabled: workflow.pr.enabled,
     recycleArrows: [
-      ...phases.flatMap((phase) => phase.recycle_policy
-        ? phase.recycle_policy.on.map((trigger) => ({
-            source: phase.name,
-            target: phase.recycle_policy!.lands_at,
-            trigger,
-            max_attempts: phase.recycle_policy!.max_attempts,
-            active,
-            kind: "phase_recycle" as const,
-          }))
-        : []
-      ),
-      ...(workflow.pr.recycle_policy
-        ? workflow.pr.recycle_policy.on.map((trigger) => ({
-            source: "report",
-            target: workflow.pr.recycle_policy!.lands_at,
-            trigger,
-            max_attempts: workflow.pr.recycle_policy!.max_attempts,
-            active,
-            kind: "report_recycle" as const,
-          }))
-        : []
-      ),
+      ...phases.flatMap((phase) => {
+        const arrow = phaseRecycleArrow(phase, active);
+        return arrow ? [arrow] : [];
+      }),
+      ...(() => {
+        const arrow = reportRecycleArrow(workflow.pr.recycle_policy, active);
+        return arrow ? [arrow] : [];
+      })(),
     ],
   };
 }

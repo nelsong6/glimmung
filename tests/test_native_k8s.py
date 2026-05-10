@@ -941,6 +941,37 @@ async def test_ensure_test_slot_helm_release_creates_rolebinding_secret_and_job(
 
 
 @pytest.mark.asyncio
+async def test_ensure_test_slot_helm_release_uses_project_chart_path_override():
+    launcher = _RecordingLauncher(_settings())
+
+    await launcher.ensure_test_slot_helm_release(
+        lease_doc={
+            "id": "01LEASE",
+            "project": "glimmung",
+            "metadata": {
+                "native_slot_index": "1",
+                "native_slot_name": "glimmung-1",
+            },
+        },
+        project_doc={
+            "id": "glimmung",
+            "githubRepo": "nelsong6/glimmung",
+            "metadata": {
+                "test_slot_helm": {
+                    "enabled": True,
+                    "chart_path": "k8s/issue",
+                },
+            },
+        },
+        repo_token="ghs_dummy",
+    )
+
+    job = launcher.calls[-1]["json"]
+    install_script = job["spec"]["template"]["spec"]["containers"][0]["command"][2]
+    assert "helm template 'glimmung-1' 'k8s/issue'" in install_script
+
+
+@pytest.mark.asyncio
 async def test_delete_test_slot_helm_release_deletes_job_and_secret():
     launcher = _RecordingLauncher(_settings())
 
