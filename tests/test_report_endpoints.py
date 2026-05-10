@@ -78,7 +78,7 @@ async def test_list_prs_surfaces_prs_from_cosmos(cosmos):
     # Sorted by descending pr_number.
     assert [r.pr_number for r in rows] == [14, 12]
     for row in rows:
-        assert row.id  # ULID always present
+        assert row.ref.startswith("nelsong6/ambience#")
         assert row.state == "ready"
         assert row.merged is False
         assert row.run_state is None  # no run linkage yet
@@ -107,7 +107,7 @@ async def test_list_prs_accepts_filters_and_limit(cosmos):
         limit=1,
     )
 
-    assert [r.id for r in rows] == [target.id]
+    assert [r.ref for r in rows] == [f"{target.repo}#{target.number}"]
 
 
 @pytest.mark.asyncio
@@ -154,7 +154,8 @@ async def test_list_prs_joins_run_via_linked_run_id(cosmos):
     rows = await _list_reports_from_cosmos(cosmos)
     assert len(rows) == 1
     row = rows[0]
-    assert row.linked_run_id == "01JRUNAAAA"
+    assert row.linked_run_ref == "ambience#7/runs/1"
+    assert row.run_ref == "ambience#7/runs/1"
     assert row.run_state == "in_progress"
     assert row.run_attempts == 1
     assert row.run_cumulative_cost_usd == 1.25
@@ -192,9 +193,9 @@ async def test_list_prs_surfaces_warm_session_launch_url(cosmos):
     assert row.validation_url == "https://preview.example.test"
     assert row.session_launch_intent == "warm"
     assert row.session_launch_url is not None
-    assert "glimmung_run_id=01JRUNWARM" in row.session_launch_url
-    assert "glimmung_issue_id=01JISSUEZZZ" in row.session_launch_url
-    assert f"glimmung_pr_id={pr.id}" in row.session_launch_url
+    assert "glimmung_run_ref=ambience%230%2Fruns%2F1" in row.session_launch_url
+    assert "glimmung_issue_ref=ambience" in row.session_launch_url
+    assert "glimmung_touchpoint_ref=nelsong6%2Fambience%2314" in row.session_launch_url
     assert "validation_url=https%3A%2F%2Fpreview.example.test" in row.session_launch_url
 
 
@@ -211,7 +212,7 @@ async def test_build_report_detail_for_manual_pr(cosmos):
     )
 
     detail = await _build_report_detail(cosmos, pr=pr)
-    assert detail.id == pr.id
+    assert detail.ref == "nelsong6/ambience#21"
     assert detail.repo == "nelsong6/ambience"
     assert detail.pr_number == 21
     assert detail.title == "manual"
@@ -221,8 +222,8 @@ async def test_build_report_detail_for_manual_pr(cosmos):
     assert detail.head_sha == "abc123"
     assert detail.run_state is None
     assert detail.run_attempts == 0
-    assert detail.linked_issue_id is None
-    assert detail.linked_run_id is None
+    assert detail.linked_issue_ref is None
+    assert detail.linked_run_ref is None
 
 
 @pytest.mark.asyncio
@@ -249,7 +250,7 @@ async def test_build_report_detail_stitches_linked_issue_title(cosmos):
         linked_issue_id="01JISSUEZZZ",
     )
     detail = await _build_report_detail(cosmos, pr=pr)
-    assert detail.linked_issue_id == "01JISSUEZZZ"
+    assert detail.linked_issue_ref == "ambience"
     assert detail.issue_title == "the linked issue title"
 
 
@@ -289,10 +290,10 @@ async def test_issue_touchpoint_detail_reads_one_to_one_touchpoint(cosmos, app_s
 
     detail = await issue_touchpoint_detail(project="ambience", issue_number=42)
 
-    assert detail.id == pr.id
+    assert detail.ref == f"{pr.repo}#{pr.number}"
     assert detail.project == "ambience"
     assert detail.issue_number == 42
-    assert detail.linked_issue_id == issue.id
+    assert detail.linked_issue_ref == "ambience#42"
 
 
 @pytest.mark.asyncio
@@ -341,9 +342,9 @@ async def test_build_report_detail_surfaces_warm_session_launch_url(cosmos):
     assert detail.validation_url == "https://preview.example.test"
     assert detail.screenshots_markdown == "![home](https://preview.example.test/shot.png)"
     assert detail.session_launch_url is not None
-    assert "glimmung_run_id=01JRUNWARM" in detail.session_launch_url
-    assert "glimmung_issue_id=01JISSUEZZZ" in detail.session_launch_url
-    assert f"glimmung_pr_id={pr.id}" in detail.session_launch_url
+    assert "glimmung_run_ref=ambience%2342%2Fruns%2F1" in detail.session_launch_url
+    assert "glimmung_issue_ref=ambience" in detail.session_launch_url
+    assert "glimmung_touchpoint_ref=nelsong6%2Fambience%2314" in detail.session_launch_url
     assert "validation_url=https%3A%2F%2Fpreview.example.test" in detail.session_launch_url
 
 

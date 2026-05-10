@@ -430,7 +430,7 @@ const issueDetails = mockIssues.map((issue) => ({
 
 const mockReports = [
   {
-    id: "report-glimmung-216",
+    ref: "nelsong6/glimmung#216",
     project: "glimmung",
     repo: "nelsong6/glimmung",
     pr_number: 216,
@@ -439,17 +439,17 @@ const mockReports = [
     state: "ready",
     merged: false,
     html_url: "https://github.com/nelsong6/glimmung/pull/216",
-    linked_issue_id: "issue-glimmung-217",
-    linked_run_id: "run-glimmung-217-review",
+    linked_issue_ref: "glimmung#217",
+    linked_run_ref: "glimmung#217/runs/1",
     issue_number: 217,
-    run_id: "run-glimmung-217-review",
+    run_ref: "glimmung#217/runs/1",
     run_state: "review_required",
     run_attempts: 2,
     run_cumulative_cost_usd: 3.42,
     pr_lock_held: false,
   },
   {
-    id: "report-glimmung-206",
+    ref: "nelsong6/glimmung#218",
     project: "glimmung",
     repo: "nelsong6/glimmung",
     pr_number: 218,
@@ -458,10 +458,10 @@ const mockReports = [
     state: "open",
     merged: false,
     html_url: "https://github.com/nelsong6/glimmung/pull/218",
-    linked_issue_id: "issue-glimmung-206",
-    linked_run_id: "run-glimmung-206-live",
+    linked_issue_ref: "glimmung#206",
+    linked_run_ref: "glimmung#206/runs/1",
     issue_number: 206,
-    run_id: "run-glimmung-206-live",
+    run_ref: "glimmung#206/runs/1",
     run_state: "in_progress",
     run_attempts: 3,
     run_cumulative_cost_usd: 8.91,
@@ -633,7 +633,7 @@ function handleMockRequest(url: URL, init?: RequestInit): Response {
     return json({ state: "dispatched", lease: "claimed", run_number: 1, host: null, workflow: "portfolio-agent", detail: null });
   }
   if (path.startsWith("/v1/lease/") && path.endsWith("/cancel") && method === "POST") return json({ ok: true });
-  if (path === "/v1/signals" && method === "POST") return json({ id: `signal-mock-${Date.now()}`, state: "pending" });
+  if (path === "/v1/signals" && method === "POST") return json({ ref: `signal:mock:${Date.now()}`, state: "pending" });
   if (["/v1/projects", "/v1/workflows", "/v1/hosts", "/v1/issues"].includes(path) && method === "POST") {
     return json({ id: `mock-${Date.now()}`, ok: true }, { status: 201 });
   }

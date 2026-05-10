@@ -13,7 +13,7 @@ import { useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { authedFetch, publicConfig } from "./auth";
 
 type TouchpointDetail = {
-  id: string;
+  ref: string;
   project: string;
   repo: string;
   pr_number: number;
@@ -25,11 +25,11 @@ type TouchpointDetail = {
   base_ref: string;
   head_sha: string;
   html_url: string | null;
-  linked_issue_id: string | null;
-  linked_run_id: string | null;
+  linked_issue_ref: string | null;
+  linked_run_ref: string | null;
   issue_number: number | null;
   issue_title: string | null;
-  run_id: string | null;
+  run_ref: string | null;
   run_state: string | null;
   validation_url: string | null;
   screenshots_markdown: string | null;
@@ -113,16 +113,16 @@ export function TouchpointDetailView() {
   }, []);
 
   const launchSession = () => {
-    if (!detail?.run_id || !detail.linked_issue_id) return;
+    if (!detail?.run_ref || !detail.linked_issue_ref) return;
     if (detail.session_launch_url) {
       window.open(detail.session_launch_url, "_blank", "noopener,noreferrer");
       return;
     }
     if (!tankBaseUrl) return;
     const url = new URL(tankBaseUrl);
-    url.searchParams.set("glimmung_run_id", detail.run_id);
-    url.searchParams.set("glimmung_issue_id", detail.linked_issue_id);
-    url.searchParams.set("glimmung_pr_id", detail.id);
+    url.searchParams.set("glimmung_run_ref", detail.run_ref);
+    url.searchParams.set("glimmung_issue_ref", detail.linked_issue_ref);
+    url.searchParams.set("glimmung_touchpoint_ref", detail.ref);
     if (detail.validation_url) {
       url.searchParams.set("validation_url", detail.validation_url);
     }
@@ -133,16 +133,15 @@ export function TouchpointDetailView() {
     if (!feedback.trim() || !detail) return;
     setReject({ kind: "submitting" });
     try {
-      // Post-#50 signal shape: target_repo is the project name, target_id
-      // is the Glimmung touchpoint id. The drain accepts both shapes for
-      // backwards-compat with in-flight pre-#50 signals.
+      // Public signal shape: target_repo is the project name, target_id is
+      // the human-readable touchpoint ref (`owner/repo#PR`).
       const r = await authedFetch("/v1/signals", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           target_type: "pr",
           target_repo: detail.project,
-          target_id: detail.id,
+          target_id: detail.ref,
           source: "glimmung_ui",
           payload: { kind: "reject", feedback: feedback.trim() },
         }),
@@ -152,7 +151,7 @@ export function TouchpointDetailView() {
         throw new Error(`/v1/signals -> ${r.status}: ${text}`);
       }
       const sig = await r.json();
-      setReject({ kind: "submitted", signalId: sig.id });
+      setReject({ kind: "submitted", signalId: sig.ref });
       setFeedback("");
       // Poll the detail to reflect the new attempt once the drain
       // processes the signal. Fire-and-forget; user can refresh
@@ -238,12 +237,12 @@ export function TouchpointDetailView() {
                   className="link"
                   onClick={launchSession}
                   disabled={
-                    !detail.run_id
-                    || !detail.linked_issue_id
+                    !detail.run_ref
+                    || !detail.linked_issue_ref
                     || (!detail.session_launch_url && !tankBaseUrl)
                   }
                   title={
-                    detail.run_id && detail.linked_issue_id
+                    detail.run_ref && detail.linked_issue_ref
                       ? "Open a tank-operator session with this glimmung context"
                       : "Requires a linked glimmung run and issue"
                   }

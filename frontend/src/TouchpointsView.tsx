@@ -13,7 +13,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 type TouchpointRow = {
-  id: string;
+  ref: string;
   project: string;
   repo: string;
   pr_number: number;
@@ -22,10 +22,10 @@ type TouchpointRow = {
   state: string;
   merged: boolean;
   html_url: string | null;
-  linked_issue_id: string | null;
-  linked_run_id: string | null;
+  linked_issue_ref: string | null;
+  linked_run_ref: string | null;
   issue_number: number | null;
-  run_id: string | null;
+  run_ref: string | null;
   run_state: string | null;
   run_attempts: number;
   run_cumulative_cost_usd: number;
@@ -111,7 +111,7 @@ export function TouchpointsView({
           <tbody>
             {visibleRows.map((row) => (
               <tr
-                key={row.id}
+                key={row.ref}
                 className={row.pr_lock_held ? "eligible" : ""}
                 onClick={() => {
                   if (row.issue_number !== null) {
