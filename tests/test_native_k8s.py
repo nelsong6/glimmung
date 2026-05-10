@@ -209,6 +209,7 @@ def test_job_manifest_per_job_renders_one_container_pod():
         "workflow": "native-agent",
         "metadata": {
             "run_id": "01KRNATIVE0000000000000000",
+            "run_callback_token": "native-callback-token",
             "run_number": "4",
             "run_display_number": "4",
             "attempt_index": "2",
@@ -274,6 +275,7 @@ def test_job_manifest_per_job_renders_one_container_pod():
     env = {item["name"]: item for item in spec["containers"][0]["env"]}
     assert env["APP_ENV"]["value"] == "test"
     assert "GLIMMUNG_RUN_ID" not in env
+    assert "GLIMMUNG_ISSUE_ID" not in env
     assert env["GLIMMUNG_RUN_REF"]["value"] == "ambience#117/runs/4"
     assert env["GLIMMUNG_LEASE_REF"]["value"] == "ambience-slot-3"
     assert env["GLIMMUNG_EVENTS_URL"]["value"].endswith(
@@ -319,6 +321,44 @@ def test_job_manifest_per_job_renders_one_container_pod():
     )
     assert env["GLIMMUNG_ATTEMPT_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == (
         "glim-01krnative-2-token"
+    )
+
+
+def test_job_manifest_uses_callback_token_when_numbered_run_ref_is_unavailable():
+    phase = PhaseSpec(
+        name="agent",
+        kind="k8s_job",
+        jobs=[NativeJobSpec(id="agent", image="runner:agent")],
+    )
+    lease_doc = {
+        "id": "01LEASE",
+        "project": "ambience",
+        "workflow": "native-agent",
+        "metadata": {
+            "run_id": "01KRNATIVE0000000000000000",
+            "run_callback_token": "native-callback-token",
+            "attempt_index": "0",
+        },
+        "requestedAt": datetime.now(UTC).isoformat(),
+    }
+
+    manifest = _job_manifest(
+        settings=_settings(),
+        lease_doc=lease_doc,
+        workflow_doc={"name": "native-agent"},
+        phase=phase,
+        job_spec=phase.jobs[0],
+        job_name="glim-01krnative-0-agent",
+        secret_name="glim-01krnative-0-token",
+        attempt_base="glim-01krnative-0",
+    )
+
+    env = {item["name"]: item for item in manifest["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["GLIMMUNG_EVENTS_URL"]["value"].endswith(
+        "/v1/run-callbacks/native-callback-token/native/events"
+    )
+    assert env["GLIMMUNG_COMPLETED_URL"]["value"].endswith(
+        "/v1/run-callbacks/native-callback-token/native/completed"
     )
 
 

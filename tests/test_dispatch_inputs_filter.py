@@ -103,8 +103,8 @@ async def test_internal_metadata_keys_are_filtered_out_of_inputs(
     """The original orphan-producing bug. Metadata splat used to ship
     internal-only fields (issue_lock_holder_id, issue_repo, phase)
     straight to GH; GH 422s them. Confirm the allowlist drops them
-    before dispatch_workflow ever sees them while preserving canonical
-    native issue_id."""
+    before dispatch_workflow ever sees them while preserving public
+    callback refs and tokens."""
     await _seed(app_state, project="ambience", repo="nelsong6/ambience",
                 workflow_name="agent-run")
 
@@ -125,6 +125,9 @@ async def test_internal_metadata_keys_are_filtered_out_of_inputs(
             "issue_body": "Render cave crystals in the scene.",
             "issue_id": "01ISSUE",
             "run_id": "01RUN",
+            "run_ref": "ambience#124/runs/1",
+            "run_callback_token": "run-token",
+            "lease_callback_token": "lease-token",
             "attempt_index": "0",
             "work_context_id": "playbook:01PB:shared",
             "work_context_branch": "glimmung/playbooks/01pb",
@@ -140,11 +143,12 @@ async def test_internal_metadata_keys_are_filtered_out_of_inputs(
 
     assert captured["inputs"] == {
         "host": "ambience-slot-1",
-        "lease_id": "01ABC",
-        "issue_id": "01ISSUE",
+        "lease_ref": "ambience/lease",
+        "lease_callback_token": "lease-token",
         "issue_number": "124",
         "issue_title": "Cave crystals",
-        "run_id": "01RUN",
+        "run_ref": "ambience#124/runs/1",
+        "run_callback_token": "run-token",
         "attempt_index": "0",
         "work_context_id": "playbook:01PB:shared",
         "work_context_branch": "glimmung/playbooks/01pb",
@@ -153,7 +157,7 @@ async def test_internal_metadata_keys_are_filtered_out_of_inputs(
     }
     # Spot-check each internal key by name so a regression on any one
     # surfaces a precise failure instead of a generic dict mismatch.
-    for forbidden in ("issue_body", "issue_lock_holder_id", "issue_repo", "phase"):
+    for forbidden in ("issue_body", "issue_id", "run_id", "issue_lock_holder_id", "issue_repo", "phase"):
         assert forbidden not in captured["inputs"]
 
 
@@ -162,7 +166,7 @@ async def test_empty_metadata_still_dispatches_with_required_inputs(
     app_state, monkeypatch,
 ):
     """Lease with no metadata still yields a valid dispatch — `host` and
-    `lease_id` are added unconditionally."""
+    `lease_ref` are added unconditionally."""
     await _seed(app_state, project="ambience", repo="nelsong6/ambience",
                 workflow_name="agent-run")
 
@@ -177,14 +181,14 @@ async def test_empty_metadata_still_dispatches_with_required_inputs(
     )
     await _maybe_dispatch_workflow(app_state, lease, _host())
 
-    assert captured["inputs"] == {"host": "ambience-slot-1", "lease_id": "01ABC"}
+    assert captured["inputs"] == {"host": "ambience-slot-1", "lease_ref": "ambience/lease"}
 
 
 @pytest.mark.asyncio
 async def test_triage_metadata_passes_through_workflow_facing_keys(
     app_state, monkeypatch,
 ):
-    """Triage path stamps run_id, attempt_index, pr_number, feedback,
+    """Triage path stamps public run refs, attempt_index, pr_number, feedback,
     prior_verification_artifact_url + the always-internal
     issue_lock_holder_id. Verify the workflow-facing five forward and
     the internal one is dropped."""
@@ -201,6 +205,9 @@ async def test_triage_metadata_passes_through_workflow_facing_keys(
         metadata={
             "issue_number": "124",
             "run_id": "01RUN",
+            "run_ref": "ambience#124/runs/2",
+            "run_callback_token": "run-token",
+            "lease_callback_token": "lease-token",
             "attempt_index": "1",
             "pr_number": "42",
             "feedback": "please address X",
@@ -213,7 +220,8 @@ async def test_triage_metadata_passes_through_workflow_facing_keys(
 
     assert "issue_lock_holder_id" not in captured["inputs"]
     for forwarded in (
-        "issue_number", "run_id", "attempt_index", "pr_number",
+        "issue_number", "run_ref", "run_callback_token", "lease_callback_token",
+        "attempt_index", "pr_number",
         "feedback", "recent_comments", "prior_verification_artifact_url",
     ):
         assert forwarded in captured["inputs"], f"{forwarded} should forward"
@@ -311,12 +319,12 @@ def test_allowlist_is_intentional_not_accidental():
     """If someone widens the allowlist, this assertion forces them to
     update the test too — keeps the contract documented in test code."""
     assert _DISPATCH_INPUT_KEYS == frozenset({
-        "issue_id",
         "issue_number",
         "issue_title",
         "gh_event",
         "gh_action",
-        "run_id",
+        "run_ref",
+        "run_callback_token",
         "attempt_index",
         "prior_verification_artifact_url",
         "feedback",

@@ -308,12 +308,9 @@ async def test_native_dispatch_sets_work_context_branch_to_issue_run_pattern(app
 
 
 @pytest.mark.asyncio
-async def test_gha_dispatch_does_not_set_work_context_branch(app):
-    """GHA-dispatch consumers each declare their own input set; sending
-    `work_context_branch` to a workflow that doesn't declare it would
-    422 the dispatch. Until each consumer is updated, leave the
-    metadata unset and let the YAML-side `glimmung/<run_id>` fallback
-    handle it."""
+async def test_gha_dispatch_sets_callback_safe_work_context_branch(app):
+    """GHA-dispatch consumers declare `work_context_branch`, so dispatch can
+    avoid any YAML-side fallback that would need the backing run id."""
     await _register_project(app, "ambience", "nelsong6/ambience")
     await _register_workflow(
         app,
@@ -332,7 +329,7 @@ async def test_gha_dispatch_does_not_set_work_context_branch(app):
     )
 
     lease_doc = await _lease_doc_for(app, result.lease_id)
-    assert "work_context_branch" not in lease_doc["metadata"]
+    assert lease_doc["metadata"]["work_context_branch"] == "issue-42-run-1"
 
 
 @pytest.mark.asyncio

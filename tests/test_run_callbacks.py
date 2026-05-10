@@ -26,7 +26,9 @@ from glimmung.app import (
     _open_pr_primitive,
     link_existing_pr_endpoint,
     run_completed,
+    run_completed_by_callback_token,
     run_started,
+    run_started_by_callback_token,
 )
 from glimmung.dispatch import DispatchResult
 from glimmung.github_app import PRCreateNoDiff
@@ -140,6 +142,7 @@ async def _seed_run(
     issue_number: int,
     issue_lock_holder_id: str | None = None,
     run_number: int | None = None,
+    callback_token: str | None = None,
 ) -> Run:
     """Mint a Run with a single dispatched-but-uncompleted attempt — the
     state immediately after `_maybe_dispatch_workflow` returns."""
@@ -151,6 +154,7 @@ async def _seed_run(
         issue_repo=issue_repo,
         issue_number=issue_number,
         run_number=run_number,
+        callback_token=callback_token,
         state=RunState.IN_PROGRESS,
         budget=BudgetConfig(total=25.0),
         attempts=[PhaseAttempt(
@@ -333,6 +337,27 @@ async def test_started_stamps_workflow_run_id(cosmos, app_state):
 
 
 @pytest.mark.asyncio
+async def test_started_callback_token_resolves_run_without_storage_id(cosmos, app_state):
+    await _register_project(cosmos, "ambience", "nelsong6/ambience")
+    run = await _seed_run(
+        cosmos, run_id="01KQTEST_RUN_TOK", project="ambience",
+        issue_repo="nelsong6/ambience", issue_number=42,
+        run_number=1, callback_token="run-callback-token",
+    )
+    with patch("glimmung.app.app", app_state):
+        result = await run_started_by_callback_token(
+            RunStartedRequest(workflow_run_id=25255513874),
+            callback_token="run-callback-token",
+        )
+
+    assert result.run_ref == "ambience#42/runs/1"
+    found = await run_ops.read_run(cosmos, project="ambience", run_id=run.id)
+    assert found is not None
+    updated, _ = found
+    assert updated.attempts[-1].workflow_run_id == 25255513874
+
+
+@pytest.mark.asyncio
 async def test_started_is_idempotent_on_redelivery(cosmos, app_state):
     await _register_project(cosmos, "ambience", "nelsong6/ambience")
     run = await _seed_run(
@@ -409,6 +434,43 @@ async def test_completed_pass_advances_run(cosmos, app_state):
         "Implemented the request, ran tests, and opened review evidence."
     )
     assert final.cumulative_cost_usd == pytest.approx(0.42)
+
+
+@pytest.mark.asyncio
+async def test_completed_callback_token_resolves_run_without_storage_id(cosmos, app_state):
+    await _register_project(cosmos, "ambience", "nelsong6/ambience")
+    await _register_workflow_with_recycle(cosmos, "ambience")
+    run = await _seed_run(
+        cosmos, run_id="01KQTEST_RUN_COMPLETE_TOK", project="ambience",
+        issue_repo="nelsong6/ambience", issue_number=45,
+        run_number=2, callback_token="run-complete-token",
+    )
+
+    body = RunCompletedRequest(
+        workflow_run_id=25255513875,
+        conclusion="success",
+        verification={
+            "schema_version": 1,
+            "status": "pass",
+            "reasons": [],
+            "evidence_refs": [],
+            "cost_usd": 0.17,
+            "prompt_version": "ambience-v1",
+            "metadata": {},
+        },
+    )
+    with patch("glimmung.app.app", app_state):
+        result = await run_completed_by_callback_token(
+            body,
+            callback_token="run-complete-token",
+        )
+
+    assert result.run_ref == "ambience#45/runs/2"
+    assert result.decision == "advance"
+    found = await run_ops.read_run(cosmos, project="ambience", run_id=run.id)
+    final, _ = found  # type: ignore[misc]
+    assert final.state == RunState.PASSED
+    assert final.attempts[-1].workflow_run_id == 25255513875
 
 
 @pytest.mark.asyncio
