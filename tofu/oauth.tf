@@ -83,18 +83,6 @@ resource "azuread_service_principal" "oauth_test" {
   client_id = azuread_application.oauth_test.client_id
 }
 
-# Lets the Glimmung API pod reconcile SPA redirect URIs for managed native
-# webapp test environments across app registrations.
-data "azuread_service_principal" "msgraph" {
-  client_id = "00000003-0000-0000-c000-000000000000"
-}
-
-resource "azuread_app_role_assignment" "glimmung_app_readwrite_all" {
-  app_role_id         = data.azuread_service_principal.msgraph.app_role_ids["Application.ReadWrite.All"]
-  principal_object_id = azurerm_user_assigned_identity.glimmung_dedicated.principal_id
-  resource_object_id  = data.azuread_service_principal.msgraph.object_id
-}
-
 resource "azurerm_key_vault_secret" "oauth_test_client_id" {
   name         = "glimmung-oauth-test-client-id"
   value        = azuread_application.oauth_test.client_id
