@@ -15,7 +15,6 @@ import {
   type NodeProps,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import type { RecycleArrow } from "./recycleLayout";
 
 export type PhaseGraphPhase = {
   name: string;
@@ -24,6 +23,15 @@ export type PhaseGraphPhase = {
   always?: boolean;
   evidence_verification_gate?: boolean;
   depends_on?: string[];
+};
+
+export type RecycleArrow = {
+  source: string;
+  target: string;
+  trigger: string;
+  max_attempts: number;
+  active: boolean;
+  kind: "phase_recycle" | "report_recycle";
 };
 
 export type PhaseGraphProps = {

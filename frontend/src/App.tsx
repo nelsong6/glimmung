@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, Navigate, NavLink, Outlet, Route, Routes, useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { AdminPanel } from "./AdminPanel";
 import { IssueDetailView, RunViewer, type AbortState, type DispatchState, type IssueGraph } from "./IssueDetailView";
@@ -8,7 +8,7 @@ import { TouchpointDetailView } from "./TouchpointDetailView";
 import { TouchpointsView } from "./TouchpointsView";
 import { StyleguideView } from "./StyleguideView";
 import { PhaseGraph, type PhaseGraphPhase } from "./PhaseGraph";
-import { computeRecyclePaths, type RecycleArrow, type RecyclePathLayout } from "./recycleLayout";
+import { workflowToPhaseGraphModel } from "./workflowGraphModel";
 import { authedFetch, currentAccount, initAuth, signIn, signOut } from "./auth";
 import { isMockMode, mockRuns, mockSnapshot } from "./mockApi";
 import type { AccountInfo } from "@azure/msal-browser";
@@ -1215,85 +1215,7 @@ function RequirementPills({ requirements }: { requirements: Record<string, unkno
 }
 
 function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
-  const phases = workflow.phases.length > 0
-    ? workflow.phases
-    : [{
-        name: workflow.name,
-        kind: "gha_dispatch",
-        workflow_filename: workflow.workflow_filename ?? "",
-        workflow_ref: workflow.workflow_ref ?? "main",
-        inputs: {},
-        outputs: [],
-        requirements: workflow.default_requirements,
-        verify: false,
-        recycle_policy: null,
-        depends_on: [],
-      }];
-
-  const recycleArrows: RecycleArrow[] = [
-    ...phases.flatMap((phase) => phase.recycle_policy
-      ? phase.recycle_policy.on.map((trigger) => ({
-          source: phase.name,
-          target: phase.recycle_policy!.lands_at,
-          trigger,
-          max_attempts: phase.recycle_policy!.max_attempts,
-          active: false,
-          kind: "phase_recycle" as const,
-        }))
-      : []
-    ),
-    ...(workflow.pr.recycle_policy
-      ? workflow.pr.recycle_policy.on.map((trigger) => ({
-          source: "report",
-          target: workflow.pr.recycle_policy!.lands_at,
-          trigger,
-          max_attempts: workflow.pr.recycle_policy!.max_attempts,
-          active: false,
-          kind: "report_recycle" as const,
-        }))
-      : []
-    ),
-  ];
-
-  const bandRef = useRef<HTMLDivElement>(null);
-  const phaseRefs = useRef<Map<string, HTMLDivElement>>(new Map());
-  const tpRef = useRef<HTMLDivElement | null>(null);
-  const [paths, setPaths] = useState<RecyclePathLayout[]>([]);
-  const [bandHeight, setBandHeight] = useState(0);
-
-  useLayoutEffect(() => {
-    if (recycleArrows.length === 0) {
-      setPaths([]);
-      setBandHeight(0);
-      return;
-    }
-    const recompute = () => {
-      const band = bandRef.current;
-      if (!band) return;
-      const bandRect = band.getBoundingClientRect();
-      const phaseRects = new Map<string, DOMRect>();
-      phaseRefs.current.forEach((el, name) => {
-        if (el && el.isConnected) phaseRects.set(name, el.getBoundingClientRect());
-      });
-      const tpRect = tpRef.current?.getBoundingClientRect() ?? null;
-      const { paths: nextPaths, bandHeight: nextHeight } = computeRecyclePaths(
-        recycleArrows,
-        phaseRects,
-        tpRect,
-        bandRect.left,
-        bandRect.top,
-      );
-      setPaths(nextPaths);
-      setBandHeight(nextHeight);
-    };
-    recompute();
-    const ro = new ResizeObserver(recompute);
-    if (bandRef.current) ro.observe(bandRef.current);
-    phaseRefs.current.forEach((el) => ro.observe(el));
-    if (tpRef.current) ro.observe(tpRef.current);
-    return () => ro.disconnect();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workflow]);
+  const graphModel = workflowToPhaseGraphModel(workflow);
 
   const renderPhase = (phase: PhaseGraphPhase) => {
     const meta = phase.evidence_verification_gate
@@ -1315,10 +1237,7 @@ function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
   };
 
   const renderTouchpoint = () => (
-    <div
-      className="dag-node dag-node-definition dag-node-pr"
-      ref={(el) => { tpRef.current = el; }}
-    >
+    <div className="dag-node dag-node-definition dag-node-pr">
       <div className="dag-node-label">touchpoint</div>
       <div className="dag-node-meta dim mono">PR primitive</div>
     </div>
@@ -1329,58 +1248,14 @@ function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
       <h2>Workflow graph</h2>
       <div className="dag-wrap">
         <PhaseGraph
-          phases={phases as PhaseGraphPhase[]}
-          prEnabled={workflow.pr.enabled}
+          phases={graphModel.phases}
+          prEnabled={graphModel.prEnabled}
           dagClassName="dag-definition"
           ariaLabel={`${workflow.name} workflow graph`}
           renderPhase={renderPhase}
           renderTouchpoint={renderTouchpoint}
-          phaseRef={(phase, el) => {
-            if (el) phaseRefs.current.set(phase.name, el);
-            else phaseRefs.current.delete(phase.name);
-          }}
+          recycleArrows={graphModel.recycleArrows}
         />
-        <div
-          ref={bandRef}
-          className="dag-recycle-band"
-          style={{ height: bandHeight }}
-          aria-hidden={paths.length === 0 ? "true" : undefined}
-        >
-          {paths.length > 0 && (
-            <svg
-              className="dag-recycle-svg"
-              width="100%"
-              height={bandHeight}
-              aria-label="recycle policies"
-            >
-              <defs>
-                <marker
-                  id="dag-recycle-head-def"
-                  viewBox="0 0 10 10"
-                  refX="9"
-                  refY="5"
-                  markerWidth="7"
-                  markerHeight="7"
-                  orient="auto-start-reverse"
-                >
-                  <path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke" />
-                </marker>
-              </defs>
-              {paths.map((p, i) => (
-                <g key={`${p.arrow.kind}:${p.arrow.source}:${p.arrow.target}:${i}`}>
-                  <path d={p.d} className="dag-recycle-hitarea">
-                    <title>{p.title}</title>
-                  </path>
-                  <path
-                    d={p.d}
-                    className={p.cls}
-                    markerEnd={p.markerEnd === false ? undefined : "url(#dag-recycle-head-def)"}
-                  />
-                </g>
-              ))}
-            </svg>
-          )}
-        </div>
       </div>
     </section>
   );
@@ -2054,18 +1929,8 @@ function projectRunGraph(run: ProjectRun, workflow: Workflow | undefined, projec
         },
       }
     : null;
-  const phaseNames = workflow?.phases.map((phase) => phase.name) ?? [run.current_phase];
-  const recycleArrows = workflow?.phases.flatMap((phase) => {
-    if (!phase.recycle_policy) return [];
-    return phase.recycle_policy.on.map((trigger) => ({
-      source: phase.name,
-      target: phase.recycle_policy?.lands_at ?? phase.name,
-      trigger,
-      max_attempts: phase.recycle_policy?.max_attempts ?? 1,
-      active: false,
-      kind: "phase_recycle" as const,
-    }));
-  }) ?? [];
+  const graphModel = workflow ? workflowToPhaseGraphModel(workflow) : null;
+  const phaseNames = graphModel?.phases.map((phase) => phase.name) ?? [run.current_phase];
   const runNode = {
     id: `run:${run.id}`,
     kind: "run" as const,
@@ -2080,8 +1945,8 @@ function projectRunGraph(run: ProjectRun, workflow: Workflow | undefined, projec
       workflow_graph: {
         phases: phaseNames,
         default_entry: { target: phaseNames[0] ?? run.current_phase, active: true, kind: "phase" },
-        recycle_arrows: recycleArrows,
-        terminal: { kind: "report", enabled: workflow?.pr.enabled ?? true },
+        recycle_arrows: graphModel?.recycleArrows ?? [],
+        terminal: { kind: "report", enabled: graphModel?.prEnabled ?? true },
       },
     },
   };
@@ -2144,21 +2009,11 @@ function projectRunFromReport(report: RunReport): ProjectRun {
 
 function projectRunReportGraph(report: RunReport, workflow: Workflow | undefined, project: Project): IssueGraph {
   const run = projectRunFromReport(report);
-  const phaseNames = workflow?.phases.map((phase) => phase.name)
+  const graphModel = workflow ? workflowToPhaseGraphModel(workflow) : null;
+  const phaseNames = graphModel?.phases.map((phase) => phase.name)
     ?? report.attempts.map((attempt) => attempt.phase)
     ?? [run.current_phase];
   const uniquePhases = Array.from(new Set(phaseNames.length > 0 ? phaseNames : [run.current_phase]));
-  const recycleArrows = workflow?.phases.flatMap((phase) => {
-    if (!phase.recycle_policy) return [];
-    return phase.recycle_policy.on.map((trigger) => ({
-      source: phase.name,
-      target: phase.recycle_policy?.lands_at ?? phase.name,
-      trigger,
-      max_attempts: phase.recycle_policy?.max_attempts ?? 1,
-      active: true,
-      kind: "phase_recycle" as const,
-    }));
-  }) ?? [];
   const reportIssueRef = report.issue_number !== null ? `${project.name}#${report.issue_number}` : null;
   const issueNode = reportIssueRef ? {
     id: `issue:${reportIssueRef}`,
@@ -2195,8 +2050,8 @@ function projectRunReportGraph(report: RunReport, workflow: Workflow | undefined
       workflow_graph: {
         phases: uniquePhases,
         default_entry: { target: uniquePhases[0] ?? report.current_phase ?? "phase", active: true, kind: "phase" },
-        recycle_arrows: recycleArrows,
-        terminal: { kind: "pr", enabled: workflow?.pr.enabled ?? false },
+        recycle_arrows: graphModel?.recycleArrows ?? [],
+        terminal: { kind: "pr", enabled: graphModel?.prEnabled ?? false },
       },
     },
   };
@@ -2395,6 +2250,7 @@ function ProjectRunView({
         signedIn={signedIn}
         project={project.name}
         repo={project.github_repo}
+        workflow={workflow}
         inFlight={run.state === "in_progress"}
         dispatchState={RUN_VIEWER_IDLE_DISPATCH}
         onRedispatch={() => undefined}
