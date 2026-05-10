@@ -1911,7 +1911,7 @@ function RunsPane({
             <th>State</th>
             <th>Started</th>
             <th title="How many retries deep this run is. 0 = original.">Retry</th>
-            <th title="The original run this retry chain started from. Blank when the immediate parent IS the origin.">Origin</th>
+            <th title="The original run this retry chain started from.">Origin</th>
             <th title="The run that directly spawned this one. Differs from origin when this is retry ≥ 2.">Kicked off by</th>
             <th>Cost</th>
             <th>Touchpoint</th>
@@ -1928,9 +1928,8 @@ function RunsPane({
             // Walk the cloned_from_run_id chain to compute retry depth +
             // origin. Each retry IS a fresh run (decided model), so
             // "depth" is the chain length back to the run that has no
-            // parent. Origin is rendered only when it differs from the
-            // immediate kicker — depth=1 collapses the columns to avoid
-            // visual noise.
+            // parent. Origin is rendered for every resumed run so first
+            // retries do not leave the column looking unset.
             const lineage = computeRetryLineage(graph, id);
             const entrypointPhase = stringOrNull(meta.entrypoint_phase);
             return (
@@ -1967,7 +1966,7 @@ function RunsPane({
                   {lineage.depth}
                 </td>
                 <td className="mono">
-                  {lineage.depth >= 2 && lineage.origin ? (
+                  {lineage.depth > 0 && lineage.origin ? (
                     <RunRefLink graph={graph} runId={lineage.origin} onSelectRun={onSelectRun} />
                   ) : (
                     <span className="dim">—</span>
@@ -2653,9 +2652,8 @@ type RetryLineage = {
 // Walk the cloned_from_run_id chain to compute retry depth + origin.
 // Each retry is its own Run (decided model — no in-run retries), so
 // "depth" is the chain length back to the run with no parent. The
-// kicker is the immediate parent (depth ≥ 1). Origin is the chain root,
-// surfaced only when it differs from the kicker (depth ≥ 2). Cycles are
-// guarded against malformed graphs.
+// kicker is the immediate parent (depth ≥ 1). Origin is the chain root.
+// Cycles are guarded against malformed graphs.
 function computeRetryLineage(graph: IssueGraph, runId: string): RetryLineage {
   const byId = new Map<string, GraphNode>();
   for (const node of graph.nodes) {
