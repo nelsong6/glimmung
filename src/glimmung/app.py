@@ -567,6 +567,16 @@ async def _reconcile_standby_resources(
         log.exception("standby workload identity reconcile failed")
 
 
+async def _reconcile_standby_entra_redirects(
+    app: FastAPI,
+    project_docs: list[dict[str, Any]],
+) -> None:
+    launcher = getattr(app.state, "native_k8s_launcher", None)
+    if launcher is None:
+        return
+    await launcher.reconcile_standby_entra_redirects(project_docs)
+
+
 # Lease metadata is dual-purpose: glimmung-internal bookkeeping
 # (`issue_lock_holder_id`, `issue_repo`, `phase`) plus
 # workflow-facing inputs the consumer workflow declares in
@@ -4661,6 +4671,10 @@ async def register_project(p: ProjectRegister) -> Project:
         await _reconcile_standby_resources(app, [doc])
     except Exception:
         log.exception("standby resource reconcile failed for project %s; background loop will retry", p.name)
+    try:
+        await _reconcile_standby_entra_redirects(app, [doc])
+    except Exception:
+        log.exception("standby Entra redirect reconcile failed for project %s", p.name)
     return Project.model_validate(lease_ops._camel_to_snake(doc))
 
 
@@ -7347,6 +7361,7 @@ async def checkout_test_slot(req: TestSlotCheckoutRequest) -> TestSlotCheckoutRe
     if host is not None:
         lease_doc = lease_ops._lease_to_doc(lease)
         try:
+            await _reconcile_standby_entra_redirects(app, [project_doc])
             await _ensure_test_env_for_lease(lease_doc)
         except Exception:
             await lease_ops.release(cosmos, lease.id, project)

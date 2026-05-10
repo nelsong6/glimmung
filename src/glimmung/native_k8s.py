@@ -800,6 +800,19 @@ class NativeKubernetesLauncher:
             for credential in _standby_workload_identity_credentials(config):
                 await self._upsert_federated_identity_credential(credential)
 
+    async def reconcile_standby_entra_redirects(
+        self,
+        project_docs: list[dict[str, Any]],
+    ) -> None:
+        """Reconcile Entra SPA redirect URIs for warm native webapp slots."""
+        configs = [
+            config
+            for project_doc in project_docs
+            if (config := _standby_entra_redirect_config(project_doc, self._settings)) is not None
+        ]
+        for config in configs:
+            await self._upsert_spa_redirect_uris(config)
+
     async def _standby_dns_target(self, configs: Any) -> str:
         for config in configs:
             target = str(config.get("target") or "").strip()
@@ -884,6 +897,49 @@ class NativeKubernetesLauncher:
             }
         }
         await self._arm_request("PUT", path, json=body)
+
+    async def _upsert_spa_redirect_uris(self, config: dict[str, Any]) -> None:
+        app = await self._resolve_entra_application(config)
+        app_id = str(app.get("id") or "").strip()
+        if not app_id:
+            raise NativeLaunchError("Entra application response did not include object id")
+
+        current = list(((app.get("spa") or {}).get("redirectUris")) or [])
+        merged = list(current)
+        for uri in config["redirect_uris"]:
+            if uri not in merged:
+                merged.append(uri)
+        if merged == current:
+            return
+        await self._graph_request(
+            "PATCH",
+            f"/applications/{quote(app_id, safe='')}",
+            json={"spa": {"redirectUris": merged}},
+        )
+
+    async def _resolve_entra_application(self, config: dict[str, Any]) -> dict[str, Any]:
+        if config.get("application_object_id"):
+            return await self._graph_request(
+                "GET",
+                f"/applications/{quote(str(config['application_object_id']), safe='')}",
+            )
+        if config.get("application_app_id"):
+            app_id = _graph_filter_literal(str(config["application_app_id"]))
+            return await self._graph_request("GET", f"/applications(appId='{app_id}')")
+        display_name = str(config.get("display_name") or "").strip()
+        if not display_name:
+            raise NativeLaunchError("standby Entra redirects need an application id or display name")
+        result = await self._graph_request(
+            "GET",
+            "/applications?"
+            + urlencode({"$filter": f"displayName eq '{_graph_filter_literal(display_name)}'"}),
+        )
+        values = result.get("value") or []
+        if len(values) != 1:
+            raise NativeLaunchError(
+                f"standby Entra redirect display name {display_name!r} matched {len(values)} apps"
+            )
+        return values[0]
 
     async def read_attempt_pod_logs(
         self,
@@ -1081,6 +1137,30 @@ class NativeKubernetesLauncher:
             token = await credential.get_token("https://management.azure.com/.default")
             async with httpx.AsyncClient(
                 base_url="https://management.azure.com",
+                timeout=20.0,
+                headers={
+                    "Authorization": f"Bearer {token.token}",
+                    "Content-Type": "application/json",
+                },
+            ) as client:
+                response = await client.request(method, path, json=json)
+                response.raise_for_status()
+                return response.json() if response.content else {}
+        finally:
+            await credential.close()
+
+    async def _graph_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        credential = DefaultAzureCredential()
+        try:
+            token = await credential.get_token("https://graph.microsoft.com/.default")
+            async with httpx.AsyncClient(
+                base_url="https://graph.microsoft.com/v1.0",
                 timeout=20.0,
                 headers={
                     "Authorization": f"Bearer {token.token}",
@@ -1678,6 +1758,89 @@ def _standby_workload_identity_credentials(config: dict[str, Any]) -> list[dict[
                 "subject": _format_standby_template(subject_template, values),
             })
     return desired
+
+
+def _standby_entra_redirect_config(
+    project_doc: dict[str, Any],
+    settings: Settings,
+) -> dict[str, Any] | None:
+    metadata = project_doc.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        return None
+    raw = (
+        metadata.get("native_standby_entra_redirects")
+        or metadata.get("nativeStandbyEntraRedirects")
+    )
+    if not isinstance(raw, dict) or raw.get("enabled") is not True:
+        return None
+
+    application_object_id = str(
+        raw.get("application_object_id") or raw.get("applicationObjectId") or ""
+    ).strip()
+    application_app_id = str(
+        raw.get("application_app_id")
+        or raw.get("applicationAppId")
+        or raw.get("client_id")
+        or raw.get("clientId")
+        or ""
+    ).strip()
+    if not application_object_id and not application_app_id:
+        application_app_id = str(getattr(settings, "entra_test_client_id", "") or "").strip()
+    display_name = str(raw.get("display_name") or raw.get("displayName") or "").strip()
+    if not application_object_id and not application_app_id and not display_name:
+        return None
+
+    redirect_uris = _standby_entra_redirect_uris(project_doc, settings, raw)
+    if not redirect_uris:
+        return None
+    return {
+        "application_object_id": application_object_id,
+        "application_app_id": application_app_id,
+        "display_name": display_name,
+        "redirect_uris": redirect_uris,
+    }
+
+
+def _standby_entra_redirect_uris(
+    project_doc: dict[str, Any],
+    settings: Settings,
+    raw: dict[str, Any],
+) -> list[str]:
+    wanted: list[str] = []
+    for key in ("redirect_uris", "redirectUris"):
+        values = raw.get(key)
+        if isinstance(values, list):
+            wanted.extend(str(value) for value in values)
+
+    if not wanted and (dns_config := _standby_dns_config(project_doc, settings)) is not None:
+        wanted.extend(
+            f"https://{dns_config['slot_prefix']}-{slot}.{dns_config['record_base']}/"
+            for slot in range(1, int(dns_config["count"]) + 1)
+        )
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for uri in wanted:
+        value = _normalize_redirect_uri(uri)
+        if value and value not in seen:
+            normalized.append(value)
+            seen.add(value)
+    return normalized
+
+
+def _normalize_redirect_uri(uri: str) -> str:
+    value = str(uri).strip()
+    if not value:
+        return ""
+    if "://" not in value:
+        value = f"https://{value}"
+    if not value.endswith("/"):
+        value = f"{value}/"
+    return value
+
+
+def _graph_filter_literal(value: str) -> str:
+    return value.replace("'", "''")
 
 
 def _format_standby_template(template: str, values: dict[str, str]) -> str:
