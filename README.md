@@ -9,7 +9,11 @@ Agent dispatcher. Owns a queue of "agent runs" and assigns them to a pool of sel
 
 The agentic-CI pattern (issue label → run Claude on a host with GUI / state requirements → produce a PR) repeats across multiple projects (spirelens, ambience, tank-operator, …) and no off-the-shelf CI provider models the actual constraint well: **stateful, host-pinned, scarce-resource leases.** Glimmung owns that primitive.
 
-GitHub Actions remains the execution layer (dumb runner). Glimmung owns the queue, the lease lifecycle, the dashboard, and the cross-project orchestration.
+Native Kubernetes jobs are the default execution layer. Legacy GitHub Actions
+dispatch is still present for older consumers, but new native apps should not
+register app-specific GitHub runner pools or keep repo-backed workflow files.
+Glimmung owns the queue, the lease lifecycle, the dashboard, and the
+cross-project orchestration.
 
 Full design + intent: [issue #1](https://github.com/nelsong6/glimmung/issues/1).
 
@@ -27,12 +31,11 @@ Project ──< Workflow ──< Run/Lease ──── Native capacity or Host
 - **Lease** = "this workflow wants to run, and got assigned this host." Lifecycle: pending → active → released | expired.
 - **Host** = a virtual venue for legacy/self-hosted-runner dispatch. Native `k8s_job` workflows use Glimmung's native capacity path instead of GitHub runner labels.
 
-`.glimmung/workflows/<name>.yaml` files in consumer repos are desired-state
-registration manifests only. They are useful because projects can own and
-review their workflow shape in git, but Glimmung does not execute them from
-GitHub at runtime. `sync_workflow` validates one of those files and writes the
-live Workflow registration into Cosmos; until that sync happens, changing the
-file has no runtime effect.
+Workflow registration is an admin/control-plane operation. Consumer repos do
+not need `.glimmung/workflows/<name>.yaml` files for runtime dispatch; changing
+repo files has no effect unless an operator explicitly writes a new Workflow
+registration into Cosmos. The upstream-sync helper is an import convenience for
+older desired-state flows, not the runtime source of truth.
 
 The "agent" — Claude Code, Codex, whatever runs inside the workflow — is opaque to glimmung. We dispatch a venue to a workflow; the workflow runs an agent on it.
 

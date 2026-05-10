@@ -1,19 +1,13 @@
 """Workflow upstream-sync helpers.
 
-The "register-workflow.sh in each project repo" model worked when there
-were two consumers, but didn't scale: every workflow-shape change required
-somebody to remember to re-run the script against deployed glimmung. With
-the always-run teardown phase landing (#297) and more projects coming
-online, manual re-registration started actively breaking flows.
+Runtime workflow definitions live in Glimmung's Cosmos-backed Workflow
+registration. Dispatch never reads consumer-repo YAML directly.
 
-This module lets glimmung compare a project-owned desired-state manifest
-against the workflow registration stored in Cosmos. The convention is
-`.glimmung/workflows/<workflow-name>.yaml` in the project repo's default
-branch. That file has the same shape `WorkflowRegister` accepts, but it is
-not the runtime workflow source and it is not a GitHub-backed workflow.
-Glimmung's DB stays the runtime source of truth. The upstream file is only
-the *desired* state, and "Install"/`sync_workflow` is the explicit human
-(or agent) action that promotes desired → running.
+This module is only an import/sync convenience for older desired-state flows:
+it can compare `.glimmung/workflows/<workflow-name>.yaml` in a project repo
+against the live Workflow row and promote it through `sync_workflow`.
+Consumers do not need such files, and new native apps should treat the admin
+API/MCP registration as the source of workflow changes.
 
 Two operations:
 - `fetch_upstream` — read the file, parse YAML, return a `WorkflowRegister`.
