@@ -137,6 +137,7 @@ async def test_checkout_test_slot_prepares_clean_slate_namespace_and_playwright(
     assert result.workflow == "manual-slot"
     assert result.slot_index == 2
     assert result.slot_name == "glimmung-2"
+    assert result.url is None
     assert result.lease == "glimmung-2"
     assert result.host == "native-k8s"
     lease_doc = _lease_doc_by_slot(app_state, "glimmung", "glimmung-2")
@@ -196,6 +197,7 @@ async def test_checkout_test_slot_uses_project_standby_dns_slot_prefix(app_state
     )
 
     assert result.slot_name == "tank-slot-1"
+    assert result.url == "https://tank-slot-1.tank.dev.romaine.life"
     lease_doc = _lease_doc_by_slot(app_state, "tank-operator", "tank-slot-1")
     assert lease_doc["metadata"]["native_slot_name"] == "tank-slot-1"
     assert lease_doc["metadata"]["requester"] == {
