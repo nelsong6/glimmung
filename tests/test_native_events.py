@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
+from azure.cosmos.exceptions import CosmosResourceNotFoundError
 from fastapi import HTTPException
 from starlette.requests import Request
 
@@ -71,12 +72,23 @@ class _ArtifactStore:
     def __init__(self, *, fail: bool = False):
         self.fail = fail
         self.uploads = []
+        self.payloads = {}
 
     async def upload_json(self, *, blob_name: str, payload: dict):
         if self.fail:
             raise RuntimeError("archive unavailable")
         self.uploads.append({"blob_name": blob_name, "payload": payload})
+        self.payloads[blob_name] = payload
         return f"blob://artifacts/{blob_name}"
+
+    async def download(self, *, blob_name: str):
+        if blob_name not in self.payloads:
+            from azure.core.exceptions import ResourceNotFoundError
+
+            raise ResourceNotFoundError("not found")
+        import json
+
+        return json.dumps(self.payloads[blob_name]).encode("utf-8"), "application/json"
 
 
 def _app_with(
@@ -231,6 +243,32 @@ async def test_native_step_events_update_run_and_persist_ordered_logs(cosmos, mo
         partition_key=run.project,
     )
     assert log_doc["message"] == "cloned main"
+
+
+@pytest.mark.asyncio
+async def test_native_log_event_does_not_replace_parent_run(cosmos, monkeypatch):
+    run = await _seed_native_run(cosmos)
+    monkeypatch.setattr("glimmung.app.app", _app_with(cosmos))
+
+    await native_run_event(
+        NativeRunEventRequest(
+            job_id="agent",
+            seq=1,
+            event=NativeRunEventType.LOG,
+            step_slug="clone-repo",
+            message="downloaded dependency",
+        ),
+        request=_request(),
+        project=run.project,
+        run_id=run.id,
+    )
+
+    assert cosmos.runs.replace_calls == []
+    log_doc = await cosmos.run_events.read_item(
+        item=f"{run.id}::0000::agent::000000000001",
+        partition_key=run.project,
+    )
+    assert log_doc["message"] == "downloaded dependency"
 
 
 @pytest.mark.asyncio
@@ -502,6 +540,33 @@ async def test_native_completion_drives_decision_and_marks_run_passed(cosmos, mo
     assert [event["seq"] for event in artifact_store.uploads[0]["payload"]["events"]] == [
         1, 2, 3, 4,
     ]
+    with pytest.raises(CosmosResourceNotFoundError):
+        await cosmos.run_events.read_item(
+            item=f"{run.id}::0000::agent::000000000001",
+            partition_key=run.project,
+        )
+
+    logs = await native_run_events(
+        project=run.project,
+        run_id=run.id,
+        attempt_index=0,
+        job_id=None,
+        limit=None,
+    )
+    assert logs.archive_url == (
+        f"blob://artifacts/runs/{run.project}/{run.id}/attempts/0/native-events.json"
+    )
+    assert [event.seq for event in logs.events] == [1, 2, 3, 4]
+
+    all_logs = await native_run_events(
+        project=run.project,
+        run_id=run.id,
+        attempt_index=None,
+        job_id=None,
+        limit=None,
+    )
+    assert all_logs.archive_url is None
+    assert [event.seq for event in all_logs.events] == [1, 2, 3, 4]
 
 
 @pytest.mark.asyncio

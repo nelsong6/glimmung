@@ -102,10 +102,32 @@ resource "azurerm_cosmosdb_sql_container" "run_events" {
   account_name        = data.azurerm_cosmosdb_account.infra.name
   database_name       = azurerm_cosmosdb_sql_database.glimmung.name
   partition_key_paths = ["/project"]
+  default_ttl         = 604800
 
   indexing_policy {
     indexing_mode = "consistent"
     included_path {
+      path = "/project/?"
+    }
+    included_path {
+      path = "/run_id/?"
+    }
+    included_path {
+      path = "/attempt_index/?"
+    }
+    included_path {
+      path = "/job_id/?"
+    }
+    included_path {
+      path = "/seq/?"
+    }
+    included_path {
+      path = "/event/?"
+    }
+    included_path {
+      path = "/created_at/?"
+    }
+    excluded_path {
       path = "/*"
     }
   }

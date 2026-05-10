@@ -179,6 +179,10 @@ class _LiveContainer:
         )
         return self._unprefix_doc(doc)
 
+    async def delete_item(self, item: str, partition_key: str) -> None:
+        container = await self._proxy()
+        await container.delete_item(item=item, partition_key=self._prefix(partition_key))
+
     async def upsert_item(self, body: dict[str, Any]) -> dict[str, Any]:
         container = await self._proxy()
         return self._unprefix_doc(await container.upsert_item(self._prefix_doc(body)))
@@ -187,6 +191,8 @@ class _LiveContainer:
         self,
         query: str,
         parameters: list[dict[str, Any]] | None = None,
+        *,
+        partition_key: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         return _LiveQuery(self, query, parameters)
 
@@ -202,6 +208,7 @@ class FakeContainer:
         # (pk_value, id) -> doc
         self._items: dict[tuple[str, str], dict[str, Any]] = {}
         self._etag_counter = 0
+        self.replace_calls: list[dict[str, Any]] = []
 
     # ─── etag helper ────────────────────────────────────────────
 
@@ -277,7 +284,20 @@ class FakeContainer:
                 )
         stored = {**body, "_etag": self._next_etag()}
         self._items[key] = stored
+        self.replace_calls.append({"item": item, "body": {**body}})
         return self._stored(stored)
+
+    async def delete_item(self, item: str, partition_key: str) -> None:
+        if self._live is not None:
+            await self._live.delete_item(item=item, partition_key=partition_key)
+            return None
+        key = (partition_key, item)
+        if key not in self._items:
+            raise CosmosResourceNotFoundError(
+                message=f"Resource {item!r} not found", response=None,
+            )
+        del self._items[key]
+        return None
 
     async def upsert_item(self, body: dict[str, Any]) -> dict[str, Any]:
         if self._live is not None:
@@ -292,9 +312,15 @@ class FakeContainer:
         self,
         query: str,
         parameters: list[dict[str, Any]] | None = None,
+        *,
+        partition_key: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         if self._live is not None:
-            return self._live.query_items(query, parameters)
+            return self._live.query_items(
+                query,
+                parameters,
+                partition_key=partition_key,
+            )
         """Mirror of `ContainerProxy.query_items`. Returns an async iterator.
 
         We only evaluate a tiny SQL subset — enough for our actual queries.
