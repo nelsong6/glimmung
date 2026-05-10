@@ -367,7 +367,7 @@ export function IssueDetailView() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          issue_id: detail.id,
+          issue_number: detail.number,
           project: detail.project,
           workflow: stringOrNull(detail.metadata?.workflow) ?? undefined,
         }),

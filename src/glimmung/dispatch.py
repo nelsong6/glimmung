@@ -94,7 +94,7 @@ class PublicDispatchResult(BaseModel):
     failsafe identifier; normal UI/MCP surfaces should use `run_number`.
     """
     state: str
-    lease_id: str | None = None
+    lease: str | None = None
     run_number: int | None = None
     host: str | None = None
     workflow: str | None = None
@@ -104,7 +104,7 @@ class PublicDispatchResult(BaseModel):
     def from_internal(cls, result: DispatchResult) -> "PublicDispatchResult":
         return cls(
             state=result.state,
-            lease_id=result.lease_id,
+            lease="claimed" if result.lease_id else None,
             run_number=result.run_number,
             host=result.host,
             workflow=result.workflow,
@@ -161,19 +161,24 @@ async def dispatch_run(
         if issue is None:
             return DispatchResult(state="no_project", detail=f"no glimmung issue {issue_id!r}")
     else:
-        if repo is None or issue_number is None:
-            raise ValueError("dispatch_run requires either issue_id or (repo + issue_number)")
-        projects = await query_all(
-            cosmos.projects,
-            "SELECT * FROM c WHERE c.githubRepo = @r",
-            parameters=[{"name": "@r", "value": repo}],
-        )
-        if not projects:
-            return DispatchResult(
-                state="no_project",
-                detail=f"no project registered for repo {repo}",
+        if issue_number is None:
+            raise ValueError("dispatch_run requires either issue_id or issue_number")
+        if project is not None:
+            project_from_repo = project
+        else:
+            if repo is None:
+                raise ValueError("dispatch_run requires project when repo is omitted")
+            projects = await query_all(
+                cosmos.projects,
+                "SELECT * FROM c WHERE c.githubRepo = @r",
+                parameters=[{"name": "@r", "value": repo}],
             )
-        project_from_repo = str(projects[0].get("name") or "")
+            if not projects:
+                return DispatchResult(
+                    state="no_project",
+                    detail=f"no project registered for repo {repo}",
+                )
+            project_from_repo = str(projects[0].get("name") or "")
         found = await issue_ops.read_issue_by_number(
             cosmos, project=project_from_repo, number=issue_number,
         )

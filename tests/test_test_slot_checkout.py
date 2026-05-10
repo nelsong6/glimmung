@@ -11,6 +11,14 @@ from tests.cosmos_fake import FakeContainer
 from tests.test_dispatch import _register_project
 
 
+def _lease_doc_by_slot(app_state, project: str, slot_name: str) -> dict:
+    for doc in app_state.cosmos.leases._items.values():
+        metadata = doc.get("metadata") or {}
+        if doc.get("project") == project and metadata.get("native_slot_name") == slot_name:
+            return doc
+    raise AssertionError(f"lease for {project}/{slot_name} not found")
+
+
 def _settings() -> SimpleNamespace:
     return SimpleNamespace(
         lease_default_ttl_seconds=14400,
@@ -119,12 +127,9 @@ async def test_checkout_test_slot_prepares_clean_slate_namespace_and_playwright(
     assert result.workflow == "manual-slot"
     assert result.slot_index == 2
     assert result.slot_name == "glimmung-2"
-    assert result.lease_id is not None
+    assert result.lease == "glimmung-2"
     assert result.host == "native-k8s"
-    lease_doc = await app_state.cosmos.leases.read_item(
-        item=result.lease_id,
-        partition_key="glimmung",
-    )
+    lease_doc = _lease_doc_by_slot(app_state, "glimmung", "glimmung-2")
     assert lease_doc["state"] == LeaseState.ACTIVE.value
     assert lease_doc["metadata"]["native_slot_index"] == "2"
     assert lease_doc["metadata"]["native_slot_name"] == "glimmung-2"
@@ -171,10 +176,7 @@ async def test_checkout_test_slot_ignores_project_standby_dns_slot_prefix(app_st
     )
 
     assert result.slot_name == "tank-operator-1"
-    lease_doc = await app_state.cosmos.leases.read_item(
-        item=result.lease_id,
-        partition_key="tank-operator",
-    )
+    lease_doc = _lease_doc_by_slot(app_state, "tank-operator", "tank-operator-1")
     assert lease_doc["metadata"]["native_slot_name"] == "tank-operator-1"
     assert "native_slot_prefix" not in lease_doc["metadata"]
     assert lease_doc["metadata"]["phase_inputs"]["slot_name"] == "tank-operator-1"
@@ -207,9 +209,9 @@ async def test_checkout_test_slot_pending_when_preferred_slot_is_busy(app_state)
     assert second.state == LeaseState.PENDING.value
     assert second.host is None
     assert second.detail == "slot unavailable; reservation is pending"
-    lease_doc = await app_state.cosmos.leases.read_item(
-        item=second.lease_id,
-        partition_key="glimmung",
+    lease_doc = next(
+        doc for doc in app_state.cosmos.leases._items.values()
+        if doc.get("state") == LeaseState.PENDING.value
     )
     assert lease_doc["state"] == LeaseState.PENDING.value
     assert "native_slot_index" not in lease_doc["metadata"]
@@ -230,12 +232,13 @@ async def test_release_test_slot_cleans_up_namespace_before_releasing(app_state)
         )
     )
 
-    released = await app_module.release_lease(result.lease_id, project="glimmung")
+    lease_doc = _lease_doc_by_slot(app_state, "glimmung", "glimmung-2")
+    released = await app_module.release_lease(lease_doc["id"], project="glimmung")
 
     assert released.state == LeaseState.RELEASED
     assert app_state.native_k8s_launcher.deleted_namespaces == ["glimmung-2"]
     lease_doc = await app_state.cosmos.leases.read_item(
-        item=result.lease_id,
+        item=lease_doc["id"],
         partition_key="glimmung",
     )
     assert lease_doc["state"] == LeaseState.RELEASED.value
@@ -260,7 +263,8 @@ async def test_return_test_slot_resolves_by_slot_index(app_state):
     )
 
     assert returned.state == LeaseState.RELEASED.value
-    assert returned.lease_id == checked_out.lease_id
+    assert checked_out.lease == "glimmung-1"
+    assert returned.lease == "glimmung-1"
     assert returned.slot_index == 1
     assert returned.slot_name == "glimmung-1"
     assert returned.cleanup_started is True

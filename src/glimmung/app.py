@@ -103,6 +103,7 @@ from glimmung.models import (
     validate_phase_input_refs,
 )
 from glimmung.replay import ReplayResult, SyntheticCompletion, replay_decision
+from glimmung.public_ids import lease_ref
 from glimmung.triage import abort_explanation as triage_abort_explanation
 from glimmung.triage import decide_triage, feedback_text
 from glimmung.settings import Settings, get_settings
@@ -5945,11 +5946,14 @@ class IssueGraph(BaseModel):
 
 
 class DispatchRequest(BaseModel):
-    """`issue_id` is the canonical handle. `project` is optional — the
-    server cross-partition resolves it from the Issue doc when omitted.
+    """Project-scoped issue dispatch request.
+
+    `issue_number` is the public handle. `issue_id` is accepted only as a
+    temporary compatibility field while older clients migrate off storage IDs.
     `workflow` is optional; dispatch_run picks the project's only
     workflow if there's exactly one."""
-    issue_id: str
+    issue_number: int | None = None
+    issue_id: str | None = None
     project: str | None = None
     workflow: str | None = None
 
@@ -5975,14 +5979,13 @@ class TestSlotCheckoutResult(BaseModel):
     workflow: str
     slot_index: int | None = None
     slot_name: str | None = None
-    lease_id: str
+    lease: str
     host: str | None = None
     detail: str | None = None
 
 
 class TestSlotReturnRequest(BaseModel):
     project: str
-    lease_id: str | None = None
     slot_index: int | None = Field(default=None, ge=1)
     slot_name: str | None = None
 
@@ -5990,7 +5993,7 @@ class TestSlotReturnRequest(BaseModel):
 class TestSlotReturnResult(BaseModel):
     state: str
     project: str
-    lease_id: str
+    lease: str
     slot_index: int | None = None
     slot_name: str | None = None
     cleanup_started: bool = False
@@ -7385,9 +7388,12 @@ async def _build_issue_graph_for_issue(
 async def dispatch_run_endpoint(req: DispatchRequest) -> PublicDispatchResult:
     """UI-initiated dispatch. The trigger source is recorded on the
     resulting Run for W6 observability."""
+    if req.issue_number is None and not req.issue_id:
+        raise HTTPException(400, "issue_number required")
     result = await dispatch_run(
         app,
         issue_id=req.issue_id,
+        issue_number=req.issue_number,
         project=req.project,
         trigger_source={"kind": "glimmung_ui"},
         workflow_name=req.workflow,
@@ -7459,7 +7465,11 @@ async def checkout_test_slot(req: TestSlotCheckoutRequest) -> TestSlotCheckoutRe
         workflow=workflow_name,
         slot_index=int(actual_slot_index) if actual_slot_index else req.slot_index,
         slot_name=str(actual_slot_name) if actual_slot_name is not None else None,
-        lease_id=lease.id,
+        lease=lease_ref(
+            project,
+            slot_name=str(actual_slot_name) if actual_slot_name is not None else None,
+            lease_number=lease.lease_number,
+        ),
         host=host.name if host is not None else None,
         detail=None if host is not None else "slot unavailable; reservation is pending",
     )
@@ -7478,7 +7488,6 @@ async def return_test_slot(req: TestSlotReturnRequest) -> TestSlotReturnResult:
     lease_doc = await _resolve_test_slot_lease(
         cosmos,
         project=project,
-        lease_id=req.lease_id,
         slot_index=req.slot_index,
         slot_name=req.slot_name,
     )
@@ -7502,7 +7511,11 @@ async def return_test_slot(req: TestSlotReturnRequest) -> TestSlotReturnResult:
     return TestSlotReturnResult(
         state=released.state.value,
         project=project,
-        lease_id=released.id,
+        lease=lease_ref(
+            project,
+            slot_name=str(slot_name) if slot_name is not None else None,
+            lease_number=released.lease_number,
+        ),
         slot_index=slot_index,
         slot_name=str(slot_name) if slot_name is not None else None,
         cleanup_started=cleanup_started,
@@ -7513,17 +7526,11 @@ async def _resolve_test_slot_lease(
     cosmos: Cosmos,
     *,
     project: str,
-    lease_id: str | None,
     slot_index: int | None,
     slot_name: str | None,
 ) -> dict[str, Any]:
-    if lease_id:
-        lease_doc = await cosmos.leases.read_item(item=lease_id, partition_key=project)
-        if (lease_doc.get("metadata") or {}).get("test_slot_checkout") is not True:
-            raise HTTPException(409, f"lease {lease_id} is not a test slot checkout")
-        return lease_doc
     if slot_index is None and not (slot_name or "").strip():
-        raise HTTPException(400, "lease_id, slot_index, or slot_name required")
+        raise HTTPException(400, "slot_index or slot_name required")
 
     target_slot_name = (slot_name or "").strip() or (
         f"{project}-{slot_index}" if slot_index is not None else ""
