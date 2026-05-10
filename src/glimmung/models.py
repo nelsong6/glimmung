@@ -617,10 +617,27 @@ class LeasePublic(BaseModel):
     ttl_seconds: int = 900
 
 
+class LeaseRequester(BaseModel):
+    """Structured provenance for the system that requested a lease.
+
+    `ref` is the deterministic handle operators should be able to use to get
+    back to the originating object (for example a Tank session id or a
+    Glimmung run ref). Free-form `metadata` can carry consumer-specific helper
+    fields, but ownership should not depend on parsing it.
+    """
+    consumer: str = Field(min_length=1)
+    kind: str = Field(min_length=1)
+    ref: str = Field(min_length=1)
+    label: str | None = None
+    url: str | None = None
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+
 class LeaseRequest(BaseModel):
     project: str
     workflow: str | None = None
     requirements: dict[str, Any] = Field(default_factory=dict)
+    requester: LeaseRequester
     metadata: dict[str, Any] = Field(default_factory=dict)
     ttl_seconds: int | None = None
 

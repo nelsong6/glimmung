@@ -40,6 +40,14 @@ def _cosmos() -> SimpleNamespace:
     )
 
 
+def _glimmung_requester() -> app_module.LeaseRequester:
+    return app_module.LeaseRequester(
+        consumer="glimmung",
+        kind="test",
+        ref="glimmung/tests/test-slot-checkout",
+    )
+
+
 class _RecordingTestSlotLauncher:
     def __init__(self) -> None:
         self.ensured_namespaces: list[dict] = []
@@ -120,6 +128,7 @@ async def test_checkout_test_slot_prepares_clean_slate_namespace_and_playwright(
             workflow="manual-slot",
             slot_index=2,
             mode="clean_slate",
+            requester=_glimmung_requester(),
         )
     )
 
@@ -134,6 +143,15 @@ async def test_checkout_test_slot_prepares_clean_slate_namespace_and_playwright(
     assert lease_doc["metadata"]["native_slot_index"] == "2"
     assert lease_doc["metadata"]["native_slot_name"] == "glimmung-2"
     assert lease_doc["metadata"]["test_slot_checkout"] is True
+    assert lease_doc["metadata"]["requester"] == {
+        "consumer": "glimmung",
+        "kind": "test",
+        "ref": "glimmung/tests/test-slot-checkout",
+        "metadata": {},
+    }
+    assert lease_doc["metadata"]["requester_ref"] == "glimmung/tests/test-slot-checkout"
+    assert lease_doc["metadata"]["requester_consumer"] == "glimmung"
+    assert lease_doc["metadata"]["requester_kind"] == "test"
     assert lease_doc["metadata"]["phase_inputs"] == {
         "validation_slot_index": "2",
         "slot_name": "glimmung-2",
@@ -172,12 +190,21 @@ async def test_checkout_test_slot_ignores_project_standby_dns_slot_prefix(app_st
         app_module.TestSlotCheckoutRequest(
             project="tank-operator",
             slot_index=1,
+            tank_session_id="abc123",
         )
     )
 
     assert result.slot_name == "tank-operator-1"
     lease_doc = _lease_doc_by_slot(app_state, "tank-operator", "tank-operator-1")
     assert lease_doc["metadata"]["native_slot_name"] == "tank-operator-1"
+    assert lease_doc["metadata"]["requester"] == {
+        "consumer": "tank-operator",
+        "kind": "tank_session",
+        "ref": "tank-operator/session/abc123",
+        "label": "abc123",
+        "metadata": {"tank_session_id": "abc123"},
+    }
+    assert lease_doc["metadata"]["requester_ref"] == "tank-operator/session/abc123"
     assert "native_slot_prefix" not in lease_doc["metadata"]
     assert lease_doc["metadata"]["phase_inputs"]["slot_name"] == "tank-operator-1"
     assert lease_doc["metadata"]["phase_inputs"]["namespace"] == "tank-operator-1"
@@ -195,6 +222,7 @@ async def test_checkout_test_slot_pending_when_preferred_slot_is_busy(app_state)
         app_module.TestSlotCheckoutRequest(
             project="glimmung",
             slot_index=1,
+            requester=_glimmung_requester(),
         )
     )
 
@@ -202,6 +230,7 @@ async def test_checkout_test_slot_pending_when_preferred_slot_is_busy(app_state)
         app_module.TestSlotCheckoutRequest(
             project="glimmung",
             slot_index=1,
+            requester=_glimmung_requester(),
         )
     )
 
@@ -219,6 +248,53 @@ async def test_checkout_test_slot_pending_when_preferred_slot_is_busy(app_state)
 
 
 @pytest.mark.asyncio
+async def test_checkout_test_slot_requires_requester(app_state):
+    await _register_project(
+        SimpleNamespace(state=app_state),
+        "glimmung",
+        "nelsong6/glimmung",
+    )
+
+    with pytest.raises(app_module.HTTPException) as exc_info:
+        await app_module.checkout_test_slot(
+            app_module.TestSlotCheckoutRequest(project="glimmung", slot_index=1)
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "requester required" in str(exc_info.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_create_lease_records_explicit_requester(app_state):
+    result = await app_module.create_lease(
+        app_module.LeaseRequest(
+            project="glimmung",
+            workflow="manual",
+            requester=app_module.LeaseRequester(
+                consumer="glimmung",
+                kind="run",
+                ref="glimmung#12/runs/3",
+                url="https://glimmung.romaine.life/issues/12/runs/3",
+            ),
+            metadata={"purpose": "manual check"},
+        )
+    )
+
+    assert result.lease.state == LeaseState.PENDING
+    lease_doc = next(
+        doc for doc in app_state.cosmos.leases._items.values()
+        if doc.get("project") == "glimmung" and doc.get("kind") != "lease_number_counter"
+    )
+    assert lease_doc["metadata"]["purpose"] == "manual check"
+    assert lease_doc["metadata"]["requester_ref"] == "glimmung#12/runs/3"
+    assert lease_doc["metadata"]["requester_consumer"] == "glimmung"
+    assert lease_doc["metadata"]["requester_kind"] == "run"
+    assert lease_doc["metadata"]["requester"]["url"] == (
+        "https://glimmung.romaine.life/issues/12/runs/3"
+    )
+
+
+@pytest.mark.asyncio
 async def test_release_test_slot_cleans_up_namespace_before_releasing(app_state):
     await _register_project(
         SimpleNamespace(state=app_state),
@@ -229,6 +305,7 @@ async def test_release_test_slot_cleans_up_namespace_before_releasing(app_state)
         app_module.TestSlotCheckoutRequest(
             project="glimmung",
             slot_index=2,
+            requester=_glimmung_requester(),
         )
     )
 
@@ -255,6 +332,7 @@ async def test_lease_callback_token_reads_heartbeats_and_releases_without_storag
         app_module.TestSlotCheckoutRequest(
             project="glimmung",
             slot_index=2,
+            requester=_glimmung_requester(),
         )
     )
     lease_doc = _lease_doc_by_slot(app_state, "glimmung", "glimmung-2")
@@ -297,6 +375,7 @@ async def test_return_test_slot_resolves_by_slot_index(app_state):
         app_module.TestSlotCheckoutRequest(
             project="glimmung",
             slot_index=1,
+            requester=_glimmung_requester(),
         )
     )
 
@@ -324,6 +403,7 @@ async def test_playwright_reconcile_includes_checked_out_test_slots(app_state):
         app_module.TestSlotCheckoutRequest(
             project="glimmung",
             slot_index=1,
+            requester=_glimmung_requester(),
         )
     )
 
