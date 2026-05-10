@@ -482,6 +482,39 @@ async def test_reconcile_standby_entra_redirects_upserts_slot_redirect_uris():
 
 
 @pytest.mark.asyncio
+async def test_reconcile_standby_entra_redirects_defaults_to_project_prefix():
+    launcher = _RecordingAzureLauncher(_settings())
+
+    await launcher.reconcile_standby_entra_redirects([
+        {
+            "id": "tank-operator",
+            "name": "tank-operator",
+            "metadata": {
+                "native_standby_dns": {
+                    "enabled": True,
+                    "record_base": "tank.dev.romaine.life",
+                    "count": 2,
+                },
+                "native_standby_entra_redirects": {
+                    "enabled": True,
+                    "application_app_id": "client-id",
+                },
+            },
+        }
+    ])
+
+    assert launcher.calls[1]["json"] == {
+        "spa": {
+            "redirectUris": [
+                "https://existing.example/",
+                "https://tank-operator-1.tank.dev.romaine.life/",
+                "https://tank-operator-2.tank.dev.romaine.life/",
+            ]
+        }
+    }
+
+
+@pytest.mark.asyncio
 async def test_reconcile_standby_entra_redirects_prunes_stale_managed_slots():
     launcher = _RecordingAzureLauncher(
         _settings(),

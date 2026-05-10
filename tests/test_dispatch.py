@@ -502,7 +502,7 @@ async def test_native_dispatch_uses_virtual_capacity_without_registered_host(app
     assert lease_doc["metadata"]["native_k8s"] is True
     assert lease_doc["leaseNumber"] == 1
     assert lease_doc["metadata"]["native_slot_index"] == "1"
-    assert lease_doc["metadata"]["native_slot_name"] == "ambience-slot-1"
+    assert lease_doc["metadata"]["native_slot_name"] == "ambience-1"
     assert lease_doc["metadata"]["phase_name"] == "agent"
 
     run_doc = await app.state.cosmos.runs.read_item(
@@ -573,10 +573,10 @@ async def test_native_dispatch_assigns_lowest_available_slot(app):
     first_lease = await _lease_doc_for(app, first.lease_id)
     second_lease = await _lease_doc_for(app, second.lease_id)
     assert first_lease["metadata"]["native_slot_index"] == "1"
-    assert first_lease["metadata"]["native_slot_name"] == "ambience-slot-1"
+    assert first_lease["metadata"]["native_slot_name"] == "ambience-1"
     assert first_lease["leaseNumber"] == 1
     assert second_lease["metadata"]["native_slot_index"] == "2"
-    assert second_lease["metadata"]["native_slot_name"] == "ambience-slot-2"
+    assert second_lease["metadata"]["native_slot_name"] == "ambience-2"
     assert second_lease["leaseNumber"] == 2
 
 
