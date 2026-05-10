@@ -548,11 +548,10 @@ async def record_started(
 ) -> tuple[Run, str]:
     """Stamp the GH Actions `workflow_run.id` onto the latest attempt.
 
-    Called by the workflow's first-step curl callback to glimmung
-    (`POST /v1/runs/{project}/{run_id}/started`). This is what
-    establishes the workflow_run_id ↔ glimmung run_id mapping
-    deterministically — GitHub's `POST .../dispatches` returns 204
-    with no body, and the workflow_run webhook payload doesn't echo
+    Called by the workflow's first-step curl callback to glimmung. This
+    is what establishes the workflow_run_id to backing run mapping
+    deterministically: GitHub's `POST .../dispatches` returns 204 with
+    no body, and the workflow_run webhook payload doesn't echo
     workflow_dispatch inputs, so the workflow has to tell us itself.
 
     Optional `validation_url` is the live preview env URL the
