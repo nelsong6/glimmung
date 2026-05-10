@@ -215,6 +215,38 @@ async def test_checkout_test_slot_uses_project_standby_dns_slot_prefix(app_state
 
 
 @pytest.mark.asyncio
+async def test_checkout_test_slot_uses_project_slot_prefix_without_explicit_slot(app_state):
+    await _register_project(
+        SimpleNamespace(state=app_state),
+        "glimmung",
+        "nelsong6/glimmung",
+        metadata={
+            "native_standby_dns": {
+                "enabled": True,
+                "record_base": "glimmung.dev.romaine.life",
+                "slot_prefix": "glimmung-slot",
+                "count": 1,
+            },
+        },
+    )
+
+    result = await app_module.checkout_test_slot(
+        app_module.TestSlotCheckoutRequest(
+            project="glimmung",
+            tank_session_id="abc123",
+        )
+    )
+
+    assert result.slot_index == 1
+    assert result.slot_name == "glimmung-slot-1"
+    assert result.url == "https://glimmung-slot-1.glimmung.dev.romaine.life"
+    lease_doc = _lease_doc_by_slot(app_state, "glimmung", "glimmung-slot-1")
+    assert lease_doc["metadata"]["native_slot_index"] == "1"
+    assert lease_doc["metadata"]["native_slot_name"] == "glimmung-slot-1"
+    assert lease_doc["metadata"]["native_slot_prefix"] == "glimmung-slot"
+
+
+@pytest.mark.asyncio
 async def test_scale_project_test_environments_updates_standby_count(app_state):
     await _register_project(
         SimpleNamespace(state=app_state),

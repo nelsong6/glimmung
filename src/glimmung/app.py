@@ -8586,6 +8586,7 @@ async def checkout_test_slot(req: TestSlotCheckoutRequest) -> TestSlotCheckoutRe
         if req.slot_index is not None
         else None
     )
+    slot_prefix = _project_test_slot_prefix(project, project_doc)
     requester = _test_slot_requester(req)
     phase_inputs = {str(k): str(v) for k, v in req.phase_inputs.items()}
     if req.slot_index is not None:
@@ -8606,6 +8607,7 @@ async def checkout_test_slot(req: TestSlotCheckoutRequest) -> TestSlotCheckoutRe
             "test_slot_mode": mode,
             "phase_inputs": phase_inputs,
             **({lease_ops.NATIVE_SLOT_NAME_METADATA_KEY: slot_name} if slot_name else {}),
+            **({"native_slot_prefix": slot_prefix} if slot_name is None and slot_prefix != project else {}),
             **_requester_metadata(requester),
         },
         ttl_seconds=req.ttl_seconds,
