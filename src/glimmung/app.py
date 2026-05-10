@@ -8244,8 +8244,8 @@ class TouchpointCreateRequest(BaseModel):
     base_ref: str = "main"
     head_sha: str = ""
     html_url: str = ""
-    linked_issue_id: str | None = None
-    linked_run_id: str | None = None
+    linked_issue_ref: str | None = None
+    linked_run_ref: str | None = None
 
 
 class TouchpointUpdateRequest(BaseModel):
@@ -8256,8 +8256,8 @@ class TouchpointUpdateRequest(BaseModel):
     base_ref: str | None = None
     head_sha: str | None = None
     html_url: str | None = None
-    linked_issue_id: str | None = None
-    linked_run_id: str | None = None
+    linked_issue_ref: str | None = None
+    linked_run_ref: str | None = None
     state: str | None = None               # ready | needs_review | failed | closed | merged
     merged_by: str | None = None           # required when state="merged"
 
@@ -8267,7 +8267,7 @@ class TouchpointVersionCreateRequest(BaseModel):
     title: str
     body: str = ""
     state: str = ReportState.READY.value
-    linked_run_id: str | None = None
+    linked_run_ref: str | None = None
     github_repo: str | None = None
     github_pr_number: int | None = None
     github_html_url: str | None = None
@@ -8308,6 +8308,57 @@ async def _public_run_ref(cosmos: Cosmos, run: Run) -> str:
         )
         public_ref = _run_refs_for_docs(related_run_docs).get(run.id, public_ref)
     return public_ref
+
+
+def _parse_issue_ref(value: str, *, default_project: str) -> tuple[str, int]:
+    project, sep, number_raw = value.rpartition("#")
+    if not sep:
+        project = default_project
+        number_raw = value
+    project = project or default_project
+    try:
+        number = int(number_raw)
+    except ValueError:
+        raise HTTPException(400, f"invalid issue ref {value!r}") from None
+    return project, number
+
+
+async def _resolve_linked_issue_id(
+    cosmos: Cosmos,
+    *,
+    default_project: str,
+    linked_issue_ref: str | None,
+) -> str | None:
+    if linked_issue_ref is None:
+        return None
+    project, number = _parse_issue_ref(linked_issue_ref, default_project=default_project)
+    found = await issue_ops.read_issue_by_number(cosmos, project=project, number=number)
+    if found is None:
+        raise HTTPException(404, f"no glimmung issue {project}#{number}")
+    return found[0].id
+
+
+async def _resolve_linked_run_id(
+    cosmos: Cosmos,
+    *,
+    default_project: str,
+    linked_run_ref: str | None,
+) -> str | None:
+    if linked_run_ref is None:
+        return None
+    issue_part, sep, run_part = linked_run_ref.rpartition("/runs/")
+    if not sep or not run_part:
+        raise HTTPException(400, f"invalid run ref {linked_run_ref!r}")
+    project, issue_number = _parse_issue_ref(issue_part, default_project=default_project)
+    found = await run_ops.read_run_by_ref(
+        cosmos,
+        project=project,
+        issue_number=issue_number,
+        run_ref=run_part,
+    )
+    if found is None:
+        raise HTTPException(404, f"no glimmung run {project}#{issue_number}/runs/{run_part}")
+    return found[0].id
 
 
 def _signal_ref(signal: Signal) -> str:
@@ -8829,6 +8880,17 @@ async def create_touchpoint_endpoint(req: TouchpointCreateRequest) -> Touchpoint
     if not req.branch.strip():
         raise HTTPException(400, "branch required")
 
+    linked_issue_id = await _resolve_linked_issue_id(
+        cosmos,
+        default_project=req.project,
+        linked_issue_ref=req.linked_issue_ref,
+    )
+    linked_run_id = await _resolve_linked_run_id(
+        cosmos,
+        default_project=req.project,
+        linked_run_ref=req.linked_run_ref,
+    )
+
     # Idempotent ensure semantics.
     pr, _etag, created = await touchpoint_ops.ensure_touchpoint_for_github(
         cosmos,
@@ -8841,11 +8903,11 @@ async def create_touchpoint_endpoint(req: TouchpointCreateRequest) -> Touchpoint
         base_ref=req.base_ref,
         head_sha=req.head_sha,
         html_url=req.html_url,
-        linked_issue_id=req.linked_issue_id,
-        linked_run_id=req.linked_run_id,
+        linked_issue_id=linked_issue_id,
+        linked_run_id=linked_run_id,
     )
     if not created and (
-        req.linked_issue_id is not None or req.linked_run_id is not None
+        linked_issue_id is not None or linked_run_id is not None
     ):
         # ensure_report_for_github only honors create-time fields. Patch the
         # linkages on after the fact so callers don't have to round-trip
@@ -8856,17 +8918,17 @@ async def create_touchpoint_endpoint(req: TouchpointCreateRequest) -> Touchpoint
         pr, etag = found
         pr, _ = await touchpoint_ops.update_touchpoint(
             cosmos, pr=pr, etag=etag,
-            linked_issue_id=req.linked_issue_id,
-            linked_run_id=req.linked_run_id,
+            linked_issue_id=linked_issue_id,
+            linked_run_id=linked_run_id,
         )
-    elif created and (req.linked_issue_id or req.linked_run_id):
+    elif created and (linked_issue_id or linked_run_id):
         found = await touchpoint_ops.read_touchpoint(cosmos, project=req.project, report_id=pr.id)
         assert found is not None
         pr, etag = found
         pr, _ = await touchpoint_ops.update_touchpoint(
             cosmos, pr=pr, etag=etag,
-            linked_issue_id=req.linked_issue_id,
-            linked_run_id=req.linked_run_id,
+            linked_issue_id=linked_issue_id,
+            linked_run_id=linked_run_id,
         )
     return await _build_touchpoint_detail(cosmos, pr=pr)
 
@@ -8885,37 +8947,12 @@ async def create_touchpoint_version_endpoint(
     req: TouchpointVersionCreateRequest,
     project: str = Path(...),
     report_id: str = Path(...),
-) -> ReportVersion:
-    """Append an immutable touchpoint-version snapshot."""
-    cosmos: Cosmos = app.state.cosmos
-    found = await touchpoint_ops.read_touchpoint(cosmos, project=project, report_id=report_id)
-    if found is None:
-        raise HTTPException(404, f"no glimmung Report {project}/{report_id}")
-    if not req.title.strip():
-        raise HTTPException(400, "title required")
-    try:
-        state = ReportState(req.state)
-    except ValueError:
-        raise HTTPException(
-            400,
-            "state must be 'ready' | 'needs_review' | 'failed' | 'closed' | 'merged'",
-        ) from None
-    try:
-        return await touchpoint_ops.create_touchpoint_version(
-            cosmos,
-            project=project,
-            report_id=report_id,
-            title=req.title,
-            body=req.body,
-            state=state,
-            linked_run_id=req.linked_run_id,
-            github_repo=req.github_repo,
-            github_pr_number=req.github_pr_number,
-            github_html_url=req.github_html_url,
-            version=req.version,
-        )
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+) -> Response:
+    """Legacy storage-id route. Version writes need a public route before reuse."""
+    raise HTTPException(
+        410,
+        "touchpoint versions are no longer addressable by storage id",
+    )
 
 
 @app.patch(
@@ -8932,18 +8969,32 @@ async def patch_touchpoint_endpoint(
     req: TouchpointUpdateRequest,
     project: str = Path(...),
     report_id: str = Path(...),
-) -> TouchpointDetail:
-    """Patch touchpoint fields + state transitions."""
+) -> Response:
+    """Legacy storage-id route. Use public PR/issue-scoped workflows."""
+    raise HTTPException(
+        410,
+        "touchpoints are no longer patchable by storage id",
+    )
     cosmos: Cosmos = app.state.cosmos
     found = await touchpoint_ops.read_touchpoint(cosmos, project=project, report_id=report_id)
     if found is None:
         raise HTTPException(404, f"no glimmung Report {project}/{report_id}")
     pr, etag = found
+    linked_issue_id = await _resolve_linked_issue_id(
+        cosmos,
+        default_project=project,
+        linked_issue_ref=req.linked_issue_ref,
+    )
+    linked_run_id = await _resolve_linked_run_id(
+        cosmos,
+        default_project=project,
+        linked_run_ref=req.linked_run_ref,
+    )
 
     if any(
         f is not None for f in (
             req.title, req.body, req.branch, req.base_ref,
-            req.head_sha, req.html_url, req.linked_issue_id, req.linked_run_id,
+            req.head_sha, req.html_url, req.linked_issue_ref, req.linked_run_ref,
         )
     ):
         pr, etag = await touchpoint_ops.update_touchpoint(
@@ -8954,8 +9005,8 @@ async def patch_touchpoint_endpoint(
             base_ref=req.base_ref,
             head_sha=req.head_sha,
             html_url=req.html_url,
-            linked_issue_id=req.linked_issue_id,
-            linked_run_id=req.linked_run_id,
+            linked_issue_id=linked_issue_id,
+            linked_run_id=linked_run_id,
         )
 
     if req.state is not None:
