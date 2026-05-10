@@ -3045,7 +3045,6 @@ async def read_lease_by_callback_token(callback_token: str = Path(...)) -> Lease
     return _lease_to_public(doc)
 
 
-@app.get("/v1/lease/{lease_id}", response_model=LeasePublic)
 async def read_lease(lease_id: str = Path(...), project: str = "") -> LeasePublic:
     """Read a lease by id. Capability auth: possessing the (ULID) lease_id is
     the proof of authorization. The verify-lease step in consumer workflows
@@ -3070,7 +3069,6 @@ async def heartbeat_lease_by_callback_token(callback_token: str = Path(...)) -> 
         raise HTTPException(409, "lease is not active")
 
 
-@app.post("/v1/lease/{lease_id}/heartbeat", response_model=LeasePublic)
 async def heartbeat_lease(lease_id: str = Path(...), project: str = "") -> LeasePublic:
     if not project:
         raise HTTPException(400, "project query param required")
@@ -3087,7 +3085,6 @@ async def release_lease_by_callback_token(callback_token: str = Path(...)) -> Le
     return _lease_to_public(await _release_lease_from_api(app.state.cosmos, str(doc["id"]), str(doc["project"])))
 
 
-@app.post("/v1/lease/{lease_id}/release", response_model=LeasePublic)
 async def release_lease(lease_id: str = Path(...), project: str = "") -> LeasePublic:
     if not project:
         raise HTTPException(400, "project query param required")
@@ -3321,11 +3318,6 @@ async def _cancel_lease(
     )
 
 
-@app.post(
-    "/v1/lease/{lease_id}/cancel",
-    response_model=CancelLeaseResult,
-    dependencies=[Depends(require_admin_user)],
-)
 async def cancel_lease(lease_id: str = Path(...), project: str = "") -> CancelLeaseResult:
     raise HTTPException(410, "cancel leases by public lease_ref via /v1/leases/cancel")
 
@@ -3351,10 +3343,10 @@ async def cancel_lease_by_ref(request: CancelLeaseRequest) -> CancelLeaseResult:
 
 
 class AbortRunResult(BaseModel):
-    """Outcome of POST /v1/runs/{project}/{run_id}/abort.
+    """Outcome of aborting a run through a public run-ref route.
 
     Sibling of `CancelLeaseResult` — same kind of cleanup, started from a
-    Run id rather than a lease id. Use this when the Run is orphaned (no
+    Run rather than a lease. Use this when the Run is orphaned (no
     lease / no workflow_run): `_cancel_lease` needs a lease to start from
     and 404s otherwise.
 
@@ -3437,7 +3429,6 @@ class RunReport(BaseModel):
     attempts: list[RunReportAttempt] = Field(default_factory=list)
 
 
-@app.get("/v1/runs/{project}/{run_id}/report", response_model=RunReport)
 async def get_run_report(
     project: str = Path(...),
     run_id: str = Path(...),
@@ -3617,11 +3608,6 @@ async def _abort_run(
     )
 
 
-@app.post(
-    "/v1/runs/{project}/{run_id}/link-pr",
-    response_model=LinkExistingPrResult,
-    dependencies=[Depends(require_admin_user)],
-)
 async def link_existing_pr_endpoint(
     req: LinkExistingPrRequest,
     project: str = Path(...),
@@ -3803,11 +3789,6 @@ async def _title_for_run(cosmos: Cosmos, run: Run) -> str:
         return ""
 
 
-@app.post(
-    "/v1/runs/{project}/{run_id}/abort",
-    response_model=AbortRunResult,
-    dependencies=[Depends(require_admin_user)],
-)
 async def abort_run(
     project: str = Path(...),
     run_id: str = Path(...),
@@ -3869,12 +3850,12 @@ async def abort_run_by_number(
 # workflow already curls glimmung at start (lease verify) and end (lease
 # release), so adding two callbacks for run-state is essentially free.
 #
-# Auth is capability-only: `run_id` is an unguessable ULID, same pattern
-# as `/v1/lease/{lease_id}/release`.
+# Auth is capability-only: workflows receive opaque callback tokens, not
+# storage ids.
 
 
 class RunStartedRequest(BaseModel):
-    """`POST /v1/runs/{project}/{run_id}/started` body. The workflow's
+    """Run-started callback body. The workflow's
     first step posts its `${{ github.run_id }}` here so subsequent
     dashboard / cancel paths can deep-link the GH workflow run.
 
@@ -3888,7 +3869,7 @@ class RunStartedRequest(BaseModel):
 
 
 class RunCompletedRequest(BaseModel):
-    """`POST /v1/runs/{project}/{run_id}/completed` body.
+    """Run-completed callback body.
 
     `verification` is the parsed `verification.json` content the
     workflow's verify phase produced (still uploaded as a GHA artifact
@@ -4052,10 +4033,6 @@ async def run_started_by_callback_token(
     return await run_started(req, project=run.project, run_id=run.id)
 
 
-@app.post(
-    "/v1/runs/{project}/{run_id}/started",
-    response_model=RunCallbackResult,
-)
 async def run_started(
     req: RunStartedRequest,
     project: str = Path(...),
@@ -4078,14 +4055,13 @@ async def run_started(
 
 
 class RunAbortedRequest(BaseModel):
-    """`POST /v1/runs/{project}/{run_id}/aborted` body. Lets the dispatched
+    """Run-aborted callback body. Lets the dispatched
     workflow flip its own Run to ABORTED with a typed reason — used by
     contract-violation checks (e.g. #86's `frontend_contract_violation`)
     that need to fail the phase *before* it reaches the verify step.
 
-    Capability-only auth: `run_id` is an unguessable ULID, same pattern
-    as `started` / `completed`. The workflow already has the run id in
-    its inputs, so no new credential plumbing.
+    Capability-only auth: workflows receive opaque callback tokens, not
+    storage ids.
     """
     reason: str
 
@@ -4102,10 +4078,6 @@ async def run_aborted_by_callback_token(
     return await run_aborted(req, project=run.project, run_id=run.id)
 
 
-@app.post(
-    "/v1/runs/{project}/{run_id}/aborted",
-    response_model=AbortRunResult,
-)
 async def run_aborted(
     req: RunAbortedRequest,
     project: str = Path(...),
@@ -4136,10 +4108,6 @@ async def run_completed_by_callback_token(
     return await run_completed(req, project=run.project, run_id=run.id)
 
 
-@app.post(
-    "/v1/runs/{project}/{run_id}/completed",
-    response_model=RunCallbackResult,
-)
 async def run_completed(
     req: RunCompletedRequest,
     project: str = Path(...),
@@ -4151,7 +4119,7 @@ async def run_completed(
     issue lock (and PR lock for triage cycles).
 
     Lease release is NOT done here — the workflow's `release-lease` job
-    handles that via `/v1/lease/{lease_id}/release` directly so capacity
+    handles that via the lease callback-token release route so capacity
     frees independent of run-state outcome.
     """
     cosmos: Cosmos = app.state.cosmos
@@ -4216,10 +4184,6 @@ async def run_completed(
     )
 
 
-@app.post(
-    "/v1/runs/{project}/{run_id}/native/events",
-    response_model=NativeRunEventResult,
-)
 async def native_run_event(
     req: NativeRunEventRequest,
     request: Request,
@@ -4251,10 +4215,6 @@ async def native_run_event(
     return NativeRunEventResult(run_ref=_run_public_ref(run), job_id=req.job_id, seq=req.seq)
 
 
-@app.get(
-    "/v1/runs/{project}/{run_id}/native/events",
-    response_model=NativeRunLogsResponse,
-)
 async def native_run_events(
     project: str = Path(...),
     run_id: str = Path(...),
@@ -4454,10 +4414,6 @@ async def native_run_event_by_callback_token(
     return await native_run_event(req, request, project=run.project, run_id=run.id)
 
 
-@app.get(
-    "/v1/runs/{project}/{run_id}/native/pod-logs",
-    response_model=NativePodLogsResponse,
-)
 async def native_run_pod_logs(
     project: str = Path(...),
     run_id: str = Path(...),
@@ -4536,10 +4492,6 @@ async def native_run_pod_logs_by_number(
     )
 
 
-@app.get(
-    "/v1/runs/{project}/{run_id}/native/status",
-    response_model=NativeRunStatusResponse,
-)
 async def native_run_status(
     request: Request,
     project: str = Path(...),
@@ -4597,10 +4549,6 @@ async def native_run_status_by_callback_token(
     return await native_run_status(request, project=run.project, run_id=run.id)
 
 
-@app.post(
-    "/v1/runs/{project}/{run_id}/native/completed",
-    response_model=RunCallbackResult,
-)
 async def native_run_completed(
     req: NativeRunCompletedRequest,
     request: Request,
@@ -4786,10 +4734,6 @@ async def _advance_playbooks_for_terminal_run(cosmos: Cosmos, run: Run) -> None:
     await playbook_ops.replace_playbook(cosmos, playbook=advanced, etag=etag)
 
 
-@app.post(
-    "/v1/runs/{project}/{run_id}/native/failed",
-    response_model=AbortRunResult,
-)
 async def native_run_failed(
     req: NativeRunFailedRequest,
     request: Request,
@@ -4869,10 +4813,6 @@ async def native_run_failed_by_callback_token(
     return await native_run_failed(req, request, project=run.project, run_id=run.id)
 
 
-@app.post(
-    "/v1/runs/{project}/{run_id}/native/github-token",
-    response_model=NativeGitHubTokenResult,
-)
 async def native_github_token(
     request: Request,
     project: str = Path(...),
@@ -4968,7 +4908,7 @@ class WorkflowReplayOverride(BaseModel):
 
 
 class RunReplayRequest(BaseModel):
-    """`POST /v1/runs/{project}/{run_id}/replay` body.
+    """Replay decision-engine body.
 
     `synthetic_completion` mirrors the live `/completed` callback body —
     copy-paste a real one and tweak fields to ask `what if?`.
@@ -4982,11 +4922,6 @@ class RunReplayRequest(BaseModel):
     override_workflow: WorkflowReplayOverride | None = None
 
 
-@app.post(
-    "/v1/runs/{project}/{run_id}/replay",
-    response_model=ReplayResult,
-    dependencies=[Depends(require_admin_user)],
-)
 async def replay_run_decision(
     req: RunReplayRequest,
     project: str = Path(...),
@@ -5103,7 +5038,7 @@ async def replay_run_decision_by_number(
 
 
 class RunResumeRequest(BaseModel):
-    """`POST /v1/runs/{project}/{run_id}/resume` body.
+    """Resume-run body.
 
     `entrypoint_phase` is the phase the resumed Run will start
     executing at. All phases declared earlier in the workflow's order
@@ -5156,11 +5091,6 @@ async def _resume_result_to_public(cosmos: Cosmos, result: ResumeResult) -> Publ
     )
 
 
-@app.post(
-    "/v1/runs/{project}/{run_id}/resume",
-    response_model=PublicResumeResult,
-    dependencies=[Depends(require_admin_user)],
-)
 async def resume_run(
     req: RunResumeRequest,
     project: str = Path(...),
@@ -6136,8 +6066,7 @@ async def github_webhook(request: Request) -> dict[str, Any]:
     payload = json.loads(body)
 
     # `workflow_run` events are intentionally ignored. The workflow
-    # itself reports lifecycle to glimmung via curl callbacks
-    # (`POST /v1/runs/{project}/{run_id}/started` and `/completed`) —
+    # itself reports lifecycle to glimmung via curl callbacks —
     # GitHub doesn't echo workflow_dispatch inputs on workflow_run
     # webhook payloads, so there's no way to map an inbound webhook to
     # a glimmung Run without help from the workflow side. The workflow
