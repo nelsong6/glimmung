@@ -731,12 +731,17 @@ async def test_ensure_test_slot_helm_release_creates_rolebinding_secret_and_job(
     )
 
     methods_paths = [(call["method"], call["path"]) for call in launcher.calls]
-    # RoleBinding for installer SA in slot namespace, then the clone-token
-    # Secret in the runner namespace, then the install Job.
+    # RoleBinding for installer SA in slot namespace, sessions namespace
+    # setup, then the clone-token Secret in the runner namespace and install Job.
     assert methods_paths == [
         (
             "POST",
             "/apis/rbac.authorization.k8s.io/v1/namespaces/tank-slot-1/rolebindings",
+        ),
+        ("POST", "/api/v1/namespaces"),
+        (
+            "POST",
+            "/apis/rbac.authorization.k8s.io/v1/namespaces/tank-slot-1-sessions/rolebindings",
         ),
         ("POST", "/api/v1/namespaces/glimmung-runs/secrets"),
         ("POST", "/apis/batch/v1/namespaces/glimmung-runs/jobs"),
@@ -751,14 +756,14 @@ async def test_ensure_test_slot_helm_release_creates_rolebinding_secret_and_job(
         "namespace": "glimmung-runs",
     }
 
-    secret = launcher.calls[1]["json"]
+    secret = launcher.calls[3]["json"]
     assert secret["stringData"] == {"token": "ghs_dummy"}
     assert (
         secret["metadata"]["labels"]["glimmung.romaine.life/lease-id"]
         == "01lease"
     )
 
-    job = launcher.calls[2]["json"]
+    job = launcher.calls[4]["json"]
     assert job["kind"] == "Job"
     pod_spec = job["spec"]["template"]["spec"]
     assert pod_spec["serviceAccountName"] == "glimmung-native-runner"
@@ -776,7 +781,7 @@ async def test_ensure_test_slot_helm_release_creates_rolebinding_secret_and_job(
     install_script = install_container["command"][2]
     assert "helm template 'tank-slot-1' 'k8s'" in install_script
     assert 'select(.kind != "ClusterRoleBinding" and .kind != "ClusterRole")' in install_script
-    assert "kubectl apply -n 'tank-slot-1'" in install_script
+    assert "kubectl apply -f -" in install_script
     env = {item["name"]: item["value"] for item in install_container["env"]}
     assert env["GLIM_SLOT_NAME"] == "tank-slot-1"
     assert env["GLIM_SLOT_INDEX"] == "1"
