@@ -7588,6 +7588,12 @@ async def _build_system_graph(
             if sig.target_type == SignalTargetType.RUN
             else str(sig.target_id)
         )
+        if target_ref is None:
+            target_ref = (
+                issue_ref(sig.target_repo, None)
+                if sig.target_type == SignalTargetType.ISSUE
+                else run_ref(sig.target_repo, None, None)
+            )
         sig_node_id = f"signal:{sig.source.value}:{target_ref}:{sig.enqueued_at.isoformat()}"
         nodes.append(GraphNode(
             id=sig_node_id,
@@ -7962,11 +7968,11 @@ async def _build_issue_graph_for_issue(
         target_ref = (
             public_issue_ref
             if target_type == "issue"
-            else run_ref_by_id.get(str(target_id), str(target_id))
+            else run_ref_by_id.get(str(target_id), run_ref(issue.project, issue_number, None))
             if target_type == "run"
             else f"{repo}#{target_id}"
             if target_type == "pr"
-            else str(target_id)
+            else f"{issue.project}/signal"
         )
         sig_node_id = f"signal:{s.get('source') or 'signal'}:{target_ref}:{s.get('created_at') or ''}"
         nodes.append(GraphNode(
@@ -8791,20 +8797,73 @@ async def _resolve_linked_run_id(
     return found[0].id
 
 
-def _signal_ref(signal: Signal) -> str:
-    return f"signal:{signal.target_type.value}:{signal.target_repo}:{signal.target_id}:{signal.enqueued_at.isoformat()}"
+async def _signal_target_ref(cosmos: Cosmos, signal: Signal) -> str:
+    if signal.target_type == SignalTargetType.PR:
+        return signal.target_id
+    if signal.target_type == SignalTargetType.ISSUE:
+        try:
+            doc = await cosmos.issues.read_item(
+                item=signal.target_id,
+                partition_key=signal.target_repo,
+            )
+            return issue_ref(
+                signal.target_repo,
+                int(doc["number"]) if doc.get("number") is not None else None,
+            )
+        except Exception:
+            return issue_ref(signal.target_repo, None)
+    if signal.target_type == SignalTargetType.RUN:
+        found = await run_ops.read_run(
+            cosmos,
+            project=signal.target_repo,
+            run_id=signal.target_id,
+        )
+        if found is not None:
+            return _run_public_ref(found[0])
+        return run_ref(signal.target_repo, None, None)
+    return f"{signal.target_repo}/{signal.target_type.value}"
 
 
-def _public_signal(signal: Signal) -> PublicSignal:
+async def _public_signal(cosmos: Cosmos, signal: Signal) -> PublicSignal:
+    target_ref = await _signal_target_ref(cosmos, signal)
     return PublicSignal(
-        ref=_signal_ref(signal),
+        ref=f"signal:{signal.target_type.value}:{signal.target_repo}:{target_ref}:{signal.enqueued_at.isoformat()}",
         target_type=signal.target_type,
         target_repo=signal.target_repo,
-        target_ref=signal.target_id,
+        target_ref=target_ref,
         source=signal.source,
         state=signal.state,
         enqueued_at=signal.enqueued_at,
     )
+
+
+async def _resolve_signal_target_ref(
+    cosmos: Cosmos,
+    *,
+    target_type: SignalTargetType,
+    target_repo: str,
+    target_ref: str,
+) -> str:
+    if target_type == SignalTargetType.PR:
+        return target_ref
+    if target_type == SignalTargetType.ISSUE:
+        m = re.match(r"^[^#]+#(\d+)$", target_ref)
+        if not m:
+            raise HTTPException(422, "issue signal target_ref must look like project#number")
+        issue = await issue_ops.read_issue_by_number(
+            cosmos,
+            project=target_repo,
+            number=int(m.group(1)),
+        )
+        if issue is None:
+            raise HTTPException(404, f"issue {target_ref!r} not found")
+        return issue.id
+    if target_type == SignalTargetType.RUN:
+        run_id = await _resolve_run_ref_to_id(cosmos, project=target_repo, ref=target_ref)
+        if run_id is None:
+            raise HTTPException(422, "run signal target_ref required")
+        return run_id
+    return target_ref
 
 
 @app.get(
@@ -9494,20 +9553,26 @@ patch_report_endpoint = patch_touchpoint_endpoint
 )
 async def enqueue_signal_endpoint(req: SignalEnqueueRequest) -> PublicSignal:
     """Enqueue a Signal for the drain loop. Used by the UI reject
-    button (POST `{target_type: pr, target_repo, target_id, source:
+    button (POST `{target_type: pr, target_repo, target_ref, source:
     glimmung_ui, payload: {kind: "reject", feedback: "..."}}`).
 
     Future trigger sources (CLI, scheduled re-runs) hit this same
     endpoint."""
+    target_id = await _resolve_signal_target_ref(
+        app.state.cosmos,
+        target_type=req.target_type,
+        target_repo=req.target_repo,
+        target_ref=req.target_ref,
+    )
     signal = await signal_ops.enqueue_signal(
         app.state.cosmos,
         target_type=req.target_type,
         target_repo=req.target_repo,
-        target_id=req.target_id,
+        target_id=target_id,
         source=req.source,
         payload=req.payload,
     )
-    return _public_signal(signal)
+    return await _public_signal(app.state.cosmos, signal)
 
 
 # ─── Static frontend ─────────────────────────────────────────────────────────
