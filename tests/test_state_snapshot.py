@@ -116,7 +116,7 @@ async def test_compute_snapshot_uses_public_lease_refs(cosmos):
         "project": "ambience",
         "workflow": "agent-run",
         "host": "runner-1",
-        "state": "active",
+        "state": "claimed",
         "requirements": {},
         "metadata": {},
         "requestedAt": now,

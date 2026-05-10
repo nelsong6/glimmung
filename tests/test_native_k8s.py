@@ -398,13 +398,13 @@ async def test_reconcile_standby_dns_creates_project_slots():
     assert body["metadata"]["labels"]["glimmung.romaine.life/standby-dns"] == "true"
     assert body["spec"]["endpoints"] == [
         {
-            "dnsName": "ambience-1.ambience.dev.romaine.life",
+            "dnsName": "ignored-slot-1.ambience.dev.romaine.life",
             "recordType": "A",
             "recordTTL": 300,
             "targets": ["172.179.163.96"],
         },
         {
-            "dnsName": "ambience-2.ambience.dev.romaine.life",
+            "dnsName": "ignored-slot-2.ambience.dev.romaine.life",
             "recordType": "A",
             "recordTTL": 300,
             "targets": ["172.179.163.96"],
@@ -526,8 +526,8 @@ async def test_reconcile_standby_entra_redirects_upserts_slot_redirect_uris():
         "spa": {
             "redirectUris": [
                 "https://existing.example/",
-                "https://tank-operator-1.tank.dev.romaine.life/",
-                "https://tank-operator-2.tank.dev.romaine.life/",
+                "https://ignored-slot-1.tank.dev.romaine.life/",
+                "https://ignored-slot-2.tank.dev.romaine.life/",
             ]
         }
     }
@@ -607,7 +607,10 @@ async def test_reconcile_standby_entra_redirects_prunes_stale_managed_slots():
                 "https://tank-slot-1.tank.dev.romaine.life/",
                 "https://tank-operator-1.tank.dev.romaine.life/",
                 "https://tank-operator-2.tank.dev.romaine.life/",
+                "https://tank-operator-3.tank.dev.romaine.life/",
                 "https://other-slot-3.tank.dev.romaine.life/",
+                "https://ignored-slot-1.tank.dev.romaine.life/",
+                "https://ignored-slot-2.tank.dev.romaine.life/",
             ]
         }
     }

@@ -250,7 +250,7 @@ async def test_abort_releases_native_leases_by_run_id_not_attempt_index(cosmos, 
         "project": "p",
         "workflow": "agent-run",
         "host": "native-k8s",
-        "state": LeaseState.ACTIVE.value,
+        "state": LeaseState.CLAIMED.value,
         "requirements": {},
         "metadata": {
             "native_k8s": True,

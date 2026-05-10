@@ -6,6 +6,7 @@ import pytest
 
 import glimmung.app as app_module
 from glimmung.models import LeaseState
+from glimmung.models import TestSlotRequestState as SlotRequestState
 
 from tests.cosmos_fake import FakeContainer
 from tests.test_dispatch import _register_project
@@ -132,14 +133,14 @@ async def test_checkout_test_slot_prepares_clean_slate_namespace_and_playwright(
         )
     )
 
-    assert result.state == LeaseState.ACTIVE.value
+    assert result.state == LeaseState.CLAIMED.value
     assert result.workflow == "manual-slot"
     assert result.slot_index == 2
     assert result.slot_name == "glimmung-2"
     assert result.lease == "glimmung-2"
     assert result.host == "native-k8s"
     lease_doc = _lease_doc_by_slot(app_state, "glimmung", "glimmung-2")
-    assert lease_doc["state"] == LeaseState.ACTIVE.value
+    assert lease_doc["state"] == LeaseState.CLAIMED.value
     assert lease_doc["metadata"]["native_slot_index"] == "2"
     assert lease_doc["metadata"]["native_slot_name"] == "glimmung-2"
     assert lease_doc["metadata"]["test_slot_checkout"] is True
@@ -171,7 +172,7 @@ async def test_checkout_test_slot_prepares_clean_slate_namespace_and_playwright(
 
 
 @pytest.mark.asyncio
-async def test_checkout_test_slot_ignores_project_standby_dns_slot_prefix(app_state):
+async def test_checkout_test_slot_uses_project_standby_dns_slot_prefix(app_state):
     await _register_project(
         SimpleNamespace(state=app_state),
         "tank-operator",
@@ -194,21 +195,44 @@ async def test_checkout_test_slot_ignores_project_standby_dns_slot_prefix(app_st
         )
     )
 
-    assert result.slot_name == "tank-operator-1"
-    lease_doc = _lease_doc_by_slot(app_state, "tank-operator", "tank-operator-1")
-    assert lease_doc["metadata"]["native_slot_name"] == "tank-operator-1"
+    assert result.slot_name == "tank-slot-1"
+    lease_doc = _lease_doc_by_slot(app_state, "tank-operator", "tank-slot-1")
+    assert lease_doc["metadata"]["native_slot_name"] == "tank-slot-1"
     assert lease_doc["metadata"]["requester"] == {
         "consumer": "tank-operator",
         "kind": "tank_session",
         "ref": "tank-operator/session/abc123",
-        "label": "abc123",
+        "label": "tank-operator/session/abc123",
         "metadata": {"tank_session_id": "abc123"},
     }
     assert lease_doc["metadata"]["requester_ref"] == "tank-operator/session/abc123"
     assert "native_slot_prefix" not in lease_doc["metadata"]
-    assert lease_doc["metadata"]["phase_inputs"]["slot_name"] == "tank-operator-1"
-    assert lease_doc["metadata"]["phase_inputs"]["namespace"] == "tank-operator-1"
+    assert lease_doc["metadata"]["phase_inputs"]["slot_name"] == "tank-slot-1"
+    assert lease_doc["metadata"]["phase_inputs"]["namespace"] == "tank-slot-1"
     assert app_state.native_k8s_launcher.reconciled_entra_projects is not None
+
+
+@pytest.mark.asyncio
+async def test_scale_project_test_environments_updates_standby_count(app_state):
+    await _register_project(
+        SimpleNamespace(state=app_state),
+        "tank-operator",
+        "nelsong6/tank-operator",
+        metadata={"native_standby_dns": {"enabled": True, "count": 2}},
+    )
+
+    project = await app_module.scale_project_test_environments(
+        "tank-operator",
+        app_module.TestEnvironmentScaleRequest(count=7),
+    )
+
+    assert project.metadata["native_standby_dns"]["enabled"] is True
+    assert project.metadata["native_standby_dns"]["count"] == 7
+    doc = await app_state.cosmos.projects.read_item(
+        item="tank-operator",
+        partition_key="tank-operator",
+    )
+    assert doc["metadata"]["native_standby_dns"]["count"] == 7
 
 
 @pytest.mark.asyncio
@@ -234,17 +258,17 @@ async def test_checkout_test_slot_pending_when_preferred_slot_is_busy(app_state)
         )
     )
 
-    assert first.state == LeaseState.ACTIVE.value
-    assert second.state == LeaseState.PENDING.value
+    assert first.state == LeaseState.CLAIMED.value
+    assert second.state == SlotRequestState.WAITING.value
     assert second.host is None
-    assert second.detail == "slot unavailable; reservation is pending"
-    lease_doc = next(
+    assert second.detail == "slot unavailable; checkout request is waiting"
+    request_doc = next(
         doc for doc in app_state.cosmos.leases._items.values()
-        if doc.get("state") == LeaseState.PENDING.value
+        if doc.get("kind") == "test_slot_request"
     )
-    assert lease_doc["state"] == LeaseState.PENDING.value
-    assert "native_slot_index" not in lease_doc["metadata"]
-    assert lease_doc["metadata"]["phase_inputs"]["validation_slot_index"] == "1"
+    assert request_doc["state"] == SlotRequestState.WAITING.value
+    assert "native_slot_index" not in request_doc["metadata"]
+    assert request_doc["metadata"]["phase_inputs"]["validation_slot_index"] == "1"
 
 
 @pytest.mark.asyncio
@@ -348,11 +372,11 @@ async def test_lease_callback_token_reads_heartbeats_and_releases_without_storag
 
     read = await app_module.read_lease_by_callback_token(token)
     assert read.ref == "glimmung-2"
-    assert read.state == LeaseState.ACTIVE
+    assert read.state == LeaseState.CLAIMED
 
     heartbeat = await app_module.heartbeat_lease_by_callback_token(token)
     assert heartbeat.ref == "glimmung-2"
-    assert heartbeat.state == LeaseState.ACTIVE
+    assert heartbeat.state == LeaseState.CLAIMED
 
     released = await app_module.release_lease_by_callback_token(token)
     assert released.ref == "glimmung-2"

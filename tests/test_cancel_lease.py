@@ -69,7 +69,7 @@ async def _put_lease(cosmos, *, lease_id: str, project: str, state: LeaseState,
         "requirements": {},
         "metadata": metadata or {},
         "requestedAt": now,
-        "assignedAt": now if state == LeaseState.ACTIVE else None,
+        "assignedAt": now if state == LeaseState.CLAIMED else None,
         "releasedAt": None,
         "ttlSeconds": 14400,
     })
@@ -156,7 +156,7 @@ async def test_cancel_releases_lease_with_no_run_returns_no_active_run(cosmos, m
     GH-side cancel attempted."""
     await _put_host(cosmos, name="laptop", current_lease_id="l1")
     await _put_lease(
-        cosmos, lease_id="l1", project="p", state=LeaseState.ACTIVE,
+        cosmos, lease_id="l1", project="p", state=LeaseState.CLAIMED,
         host="laptop", metadata={"adhoc": "true"},
     )
     result = await _cancel_lease(cosmos, minter, "l1", "p")
@@ -178,7 +178,7 @@ async def test_cancel_returns_no_active_run_when_run_has_no_workflow_run_id(cosm
     the Run, but doesn't try to cancel anything on GH."""
     await _put_host(cosmos, name="laptop", current_lease_id="l1")
     await _put_lease(
-        cosmos, lease_id="l1", project="p", state=LeaseState.ACTIVE, host="laptop",
+        cosmos, lease_id="l1", project="p", state=LeaseState.CLAIMED, host="laptop",
         metadata={"issue_repo": "r/n", "issue_number": "42"},
     )
     await _put_run(
@@ -208,7 +208,7 @@ async def test_cancel_dispatches_gh_cancel_releases_lease_and_aborts_run(
     releases."""
     await _put_host(cosmos, name="laptop", current_lease_id="l1")
     await _put_lease(
-        cosmos, lease_id="l1", project="p", state=LeaseState.ACTIVE, host="laptop",
+        cosmos, lease_id="l1", project="p", state=LeaseState.CLAIMED, host="laptop",
         metadata={
             "issue_repo": "nelsong6/ambience", "issue_number": "42",
             "issue_lock_holder_id": "holder-1",
@@ -264,7 +264,7 @@ async def test_cancel_releases_pr_lock_when_run_holds_one(cosmos, minter, monkey
     releases both."""
     await _put_host(cosmos, name="laptop", current_lease_id="l1")
     await _put_lease(
-        cosmos, lease_id="l1", project="p", state=LeaseState.ACTIVE, host="laptop",
+        cosmos, lease_id="l1", project="p", state=LeaseState.CLAIMED, host="laptop",
         metadata={
             "issue_repo": "r/n", "issue_number": "42",
             "issue_lock_holder_id": "issue-holder",
@@ -308,7 +308,7 @@ async def test_cancel_handles_gh_404_as_already_terminal_on_gh_side(
     processed), but `gh_run_cancelled` records the actual outcome."""
     await _put_host(cosmos, name="laptop", current_lease_id="l1")
     await _put_lease(
-        cosmos, lease_id="l1", project="p", state=LeaseState.ACTIVE, host="laptop",
+        cosmos, lease_id="l1", project="p", state=LeaseState.CLAIMED, host="laptop",
         metadata={"issue_repo": "r/n", "issue_number": "42"},
     )
     await _put_run(

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Link, Navigate, NavLink, Outlet, Route, Routes, useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { AdminPanel } from "./AdminPanel";
 import { IssueDetailView, RunViewer, type AbortState, type DispatchState, type IssueGraph } from "./IssueDetailView";
@@ -29,13 +29,39 @@ type Lease = {
   project: string;
   workflow: string | null;
   host: string | null;
-  state: "pending" | "active" | "released" | "expired";
+  state: "pending" | "active" | "claimed" | "released" | "expired";
   requirements: Record<string, unknown>;
   metadata: Record<string, unknown>;
+  requester: Record<string, unknown> | null;
   requested_at: string;
   assigned_at: string | null;
   released_at: string | null;
   ttl_seconds: number;
+};
+
+type LeaseKind = "test" | "agent";
+
+type TestSlotRequest = {
+  ref: string;
+  project: string;
+  workflow: string;
+  state: "waiting" | "fulfilled" | "cancelled";
+  requested_slot_index: number | null;
+  requester: Record<string, unknown> | null;
+  metadata: Record<string, unknown>;
+  requested_at: string;
+  fulfilled_at: string | null;
+  fulfilled_lease_ref: string | null;
+  ttl_seconds: number;
+};
+
+type TestEnvironment = {
+  project: string;
+  slot_index: number;
+  slot_name: string;
+  state: "available" | "claimed";
+  lease: Lease | null;
+  waiting_requests: TestSlotRequest[];
 };
 
 type Project = {
@@ -149,6 +175,8 @@ type Snapshot = {
   hosts: Host[];
   pending_leases: Lease[];
   active_leases: Lease[];
+  test_environments?: TestEnvironment[];
+  waiting_test_slot_requests?: TestSlotRequest[];
   projects: Project[];
   workflows: Workflow[];
 };
@@ -191,12 +219,22 @@ export function App() {
       <Route path="/_mock/*" element={<MockModeRedirect />} />
       <Route path="/" element={<Layout />}>
         <Route index element={<HomeRoute />} />
-        <Route path="dashboard" element={<DashboardRoute />} />
+        <Route path="dashboard" element={<Navigate to="/leases/test" replace />} />
+        <Route path="leases" element={<Navigate to="/leases/test" replace />} />
+        <Route path="leases/test" element={<GlobalLeaseRoute kind="test" />} />
+        <Route path="leases/test/:leaseId" element={<GlobalLeaseDetailRoute kind="test" />} />
+        <Route path="leases/agent" element={<GlobalLeaseRoute kind="agent" />} />
+        <Route path="leases/agent/:leaseId" element={<GlobalLeaseDetailRoute kind="agent" />} />
         <Route path="needs-attention" element={<NeedsAttentionRoute />} />
-        <Route path="graph" element={<Navigate to="/dashboard" replace />} />
+        <Route path="graph" element={<Navigate to="/leases/test" replace />} />
         <Route path="projects" element={<ProjectsRoute />} />
         <Route path="projects/new" element={<ProjectOnboardingRoute />} />
         <Route path="projects/:project" element={<ProjectRoute />} />
+        <Route path="projects/:project/leases" element={<ProjectLeaseRedirectRoute />} />
+        <Route path="projects/:project/leases/test" element={<ProjectLeaseRoute kind="test" />} />
+        <Route path="projects/:project/leases/test/:leaseId" element={<ProjectLeaseDetailRoute kind="test" />} />
+        <Route path="projects/:project/leases/agent" element={<ProjectLeaseRoute kind="agent" />} />
+        <Route path="projects/:project/leases/agent/:leaseId" element={<ProjectLeaseDetailRoute kind="agent" />} />
         <Route path="projects/:project/workflows" element={<ProjectWorkflowsRoute />} />
         <Route path="projects/:project/workflows/:workflow" element={<ProjectWorkflowRoute />} />
         <Route path="projects/:project/issues" element={<ProjectIssuesRoute />} />
@@ -522,8 +560,11 @@ function Layout() {
 
         {homeRoute && (
             <nav className="dashboard-nav" aria-label="dashboard views">
-              <NavLink to="/dashboard" className={dashboardLinkClass}>
-                dashboard
+              <NavLink to="/leases/test" className={dashboardLinkClass}>
+                test leases
+              </NavLink>
+              <NavLink to="/leases/agent" className={dashboardLinkClass}>
+                agent leases
               </NavLink>
               <NavLink to="/needs-attention" className={dashboardLinkClass}>
                 needs attention
@@ -573,7 +614,13 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
   const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
   if (parts.length === 0) return [{ label: "Home" }];
   if (parts[0] === "dashboard") {
-    return [{ label: "Home", to: "/" }, { label: "Dashboard" }];
+    return [{ label: "Home", to: "/" }, { label: "Test leases" }];
+  }
+  if (parts[0] === "leases") {
+    const kind = parts[1] === "agent" ? "Agent leases" : "Test leases";
+    const crumbs: Breadcrumb[] = [{ label: "Home", to: "/" }, { label: kind, to: `/leases/${parts[1] ?? "test"}` }];
+    if (parts[2]) crumbs.push({ label: `Lease ${parts[2]}` });
+    return crumbs;
   }
   if (parts[0] === "needs-attention") {
     return [{ label: "Home", to: "/" }, { label: "Needs attention" }];
@@ -586,6 +633,13 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
     if (parts[1]) crumbs.push({ label: parts[1], to: `/projects/${encodeURIComponent(parts[1])}` });
     if (parts[1] === "new") {
       crumbs[crumbs.length - 1] = { label: "New project" };
+    } else if (parts[2] === "leases") {
+      const leaseKind = parts[3] === "agent" ? "Agent leases" : "Test leases";
+      crumbs.push({
+        label: leaseKind,
+        to: `/projects/${encodeURIComponent(parts[1] ?? "")}/leases/${parts[3] ?? "test"}`,
+      });
+      if (parts[4]) crumbs.push({ label: `Lease ${parts[4]}` });
     } else if (parts[2] === "workflows") {
       crumbs.push({ label: "Workflows", to: `/projects/${encodeURIComponent(parts[1] ?? "")}/workflows` });
       if (parts[3]) crumbs.push({ label: parts[3] });
@@ -662,9 +716,39 @@ function HomeRoute() {
   return <HomeView {...ctx} />;
 }
 
-function DashboardRoute() {
+function GlobalLeaseRoute({ kind }: { kind: LeaseKind }) {
   const ctx = useOutletContext<LayoutContext>();
-  return <CapacityView {...ctx} />;
+  return <LeaseIndexView {...ctx} kind={kind} />;
+}
+
+function GlobalLeaseDetailRoute({ kind }: { kind: LeaseKind }) {
+  const params = useParams<{ leaseId?: string }>();
+  const ctx = useOutletContext<LayoutContext>();
+  return <LeaseDetailView {...ctx} kind={kind} leaseId={decodeURIComponent(params.leaseId ?? "")} />;
+}
+
+function ProjectLeaseRoute({ kind }: { kind: LeaseKind }) {
+  const params = useParams<{ project?: string }>();
+  const ctx = useOutletContext<LayoutContext>();
+  return <LeaseIndexView {...ctx} kind={kind} projectName={decodeURIComponent(params.project ?? "")} />;
+}
+
+function ProjectLeaseRedirectRoute() {
+  const params = useParams<{ project?: string }>();
+  return <Navigate to={`/projects/${encodeURIComponent(decodeURIComponent(params.project ?? ""))}/leases/test`} replace />;
+}
+
+function ProjectLeaseDetailRoute({ kind }: { kind: LeaseKind }) {
+  const params = useParams<{ project?: string; leaseId?: string }>();
+  const ctx = useOutletContext<LayoutContext>();
+  return (
+    <LeaseDetailView
+      {...ctx}
+      kind={kind}
+      projectName={decodeURIComponent(params.project ?? "")}
+      leaseId={decodeURIComponent(params.leaseId ?? "")}
+    />
+  );
 }
 
 function NeedsAttentionRoute() {
@@ -884,9 +968,13 @@ function HomeView({ snap }: LayoutContext) {
       </section>
 
       <section className="home-links" aria-label="primary destinations">
-        <Link to="/dashboard" className="home-link">
-          <span className="key">Dashboard</span>
-          <strong>System health, hosts, and queue state</strong>
+        <Link to="/leases/test" className="home-link">
+          <span className="key">Test leases</span>
+          <strong>Current test environments and queued checkouts</strong>
+        </Link>
+        <Link to="/leases/agent" className="home-link">
+          <span className="key">Agent leases</span>
+          <strong>Active agent capacity and pending work leases</strong>
         </Link>
         <Link to="/needs-attention" className="home-link">
           <span className="key">Needs attention</span>
@@ -949,7 +1037,8 @@ function ProjectsView({ snap }: LayoutContext) {
               <th>Project</th>
               <th>GitHub</th>
               <th>Workflows</th>
-              <th>Work</th>
+              <th>Test leases</th>
+              <th>Agent leases</th>
               <th>Hosts</th>
             </tr>
           </thead>
@@ -958,6 +1047,10 @@ function ProjectsView({ snap }: LayoutContext) {
               const workflows = snap.workflows.filter((w) => w.project === project.name);
               const pending = snap.pending_leases.filter((l) => l.project === project.name);
               const active = snap.active_leases.filter((l) => l.project === project.name);
+              const leases = [...active, ...pending];
+              const testLeases = leases.filter((l) => leaseKind(l) === "test");
+              const agentLeases = leases.filter((l) => leaseKind(l) === "agent");
+              const isNativeK8sProject = project.metadata.native_webapp === true || project.metadata.app_kind === "native_webapp";
               const activeHosts = new Set(active.flatMap((l) => (l.host ? [l.host] : [])));
               return (
                 <tr key={project.id}>
@@ -975,7 +1068,20 @@ function ProjectsView({ snap }: LayoutContext) {
                     </a>
                   </td>
                   <td className="mono">{workflows.length}</td>
-                  <td className="mono dim">{active.length} active / {pending.length} pending</td>
+                  <td className="mono dim">
+                    <Link className="link mono" to={`/projects/${encodeURIComponent(project.name)}/leases/test`}>
+                      {testLeases.length}
+                    </Link>
+                  </td>
+                  <td className="mono dim">
+                    {isNativeK8sProject ? (
+                      "—"
+                    ) : (
+                      <Link className="link mono" to={`/projects/${encodeURIComponent(project.name)}/leases/agent`}>
+                        {agentLeases.length}
+                      </Link>
+                    )}
+                  </td>
                   <td className="mono dim">
                     {activeHosts.size > 0 ? Array.from(activeHosts).join(", ") : "—"}
                   </td>
@@ -1008,7 +1114,11 @@ function ProjectView({
     .sort((a, b) => a.name.localeCompare(b.name));
   const pending = snap.pending_leases.filter((l) => l.project === project.name);
   const active = snap.active_leases.filter((l) => l.project === project.name);
+  const projectLeases = [...active, ...pending];
+  const testLeases = projectLeases.filter((l) => leaseKind(l) === "test");
+  const agentLeases = projectLeases.filter((l) => leaseKind(l) === "agent");
   const projectPath = `/projects/${encodeURIComponent(project.name)}`;
+  const isNativeK8sProject = project.metadata.native_webapp === true || project.metadata.app_kind === "native_webapp";
 
   const nonEmptyReqs = workflows
     .map((w) => w.default_requirements)
@@ -1059,6 +1169,16 @@ function ProjectView({
       </section>
 
       <section className="home-links" aria-label={`${project.name} destinations`}>
+        <Link to={`${projectPath}/leases/test`} className="home-link">
+          <span className="key">Test leases</span>
+          <strong>{testLeases.length} active or pending test environment lease{testLeases.length === 1 ? "" : "s"}</strong>
+        </Link>
+        {!isNativeK8sProject && (
+          <Link to={`${projectPath}/leases/agent`} className="home-link">
+            <span className="key">Agent leases</span>
+            <strong>{agentLeases.length} active or pending agent lease{agentLeases.length === 1 ? "" : "s"}</strong>
+          </Link>
+        )}
         <Link to={`${projectPath}/workflows`} className="home-link">
           <span className="key">Workflows</span>
           <strong>Definitions, triggers, requirements, and workflow-scoped work</strong>
@@ -2291,6 +2411,347 @@ function runStatePill(state: string): string {
 }
 
 function CurrentWorkTable({ leases, emptyText }: { leases: Lease[]; emptyText: string }) {
+  return (
+    <LeaseTable
+      leases={leases}
+      emptyText={emptyText}
+      detailBasePath={(lease) => `/projects/${encodeURIComponent(lease.project)}/leases/${leaseKind(lease)}`}
+      showProject={false}
+      signedIn={false}
+    />
+  );
+}
+
+function LeaseIndexView({
+  snap,
+  signedIn,
+  isAdmin,
+  kind,
+  projectName,
+}: LayoutContext & { kind: LeaseKind; projectName?: string }) {
+  if (snap === null) return <div className="empty">Connecting…</div>;
+
+  const project = projectName ? snap.projects.find((p) => p.name === projectName) : null;
+  if (projectName && !project) {
+    return <div className="empty">Project {projectName || "(missing)"} was not found.</div>;
+  }
+  if (kind === "test") {
+    return (
+      <TestEnvironmentIndexView
+        snap={snap}
+        projectName={projectName}
+        signedIn={signedIn}
+        isAdmin={isAdmin}
+      />
+    );
+  }
+
+  const leases = leasesFor(snap, kind, projectName);
+  const pending = leases.filter((l) => l.state === "pending");
+  const active = leases.filter((l) => l.state === "active");
+  const basePath = projectName
+    ? `/projects/${encodeURIComponent(projectName)}/leases/${kind}`
+    : `/leases/${kind}`;
+
+  return (
+    <div className="project-workspace">
+      <section className="project-hero">
+        <div className="project-hero-main">
+          <div className="project-kicker mono">{projectName ? `project / ${projectName}` : "global leases"}</div>
+          <h2>{leaseKindTitle(kind)}</h2>
+          <div className="project-repo mono">{leaseKindDescription(kind)}</div>
+        </div>
+        <div className="project-facts">
+          <div className="project-fact">
+            <span>active</span>
+            <strong>{active.length}</strong>
+          </div>
+          <div className="project-fact">
+            <span>pending</span>
+            <strong>{pending.length}</strong>
+          </div>
+        </div>
+      </section>
+
+      <h2>Active ({active.length})</h2>
+      <LeaseTable
+        leases={active}
+        emptyText={`No active ${leaseKindNoun(kind)} leases.`}
+        detailBasePath={basePath}
+        showProject={!projectName}
+        signedIn={signedIn}
+      />
+
+      <h2>Pending ({pending.length})</h2>
+      <LeaseTable
+        leases={pending}
+        emptyText={`No pending ${leaseKindNoun(kind)} leases.`}
+        detailBasePath={basePath}
+        showProject={!projectName}
+        signedIn={signedIn}
+      />
+    </div>
+  );
+}
+
+function LeaseDetailView({
+  snap,
+  signedIn,
+  kind,
+  leaseId,
+  projectName,
+}: LayoutContext & { kind: LeaseKind; leaseId: string; projectName?: string }) {
+  if (snap === null) return <div className="empty">Connecting…</div>;
+
+  const project = projectName ? snap.projects.find((p) => p.name === projectName) : null;
+  if (projectName && !project) {
+    return <div className="empty">Project {projectName || "(missing)"} was not found.</div>;
+  }
+
+  const lease = leasesFor(snap, kind, projectName).find((candidate) =>
+    leaseIdMatches(candidate, leaseId)
+  );
+
+  if (!lease) {
+    return <div className="empty">Lease {leaseId || "(missing)"} was not found.</div>;
+  }
+
+  const requester = leaseRequester(lease);
+  const purpose = leasePurpose(lease);
+  const slot = leaseSlot(lease);
+  const detailRows = leaseDetailRows(lease);
+  const metadata = sanitizeLeaseMetadata(lease.metadata ?? {});
+
+  return (
+    <div className="project-workspace">
+      <section className="project-hero">
+        <div className="project-hero-main">
+          <div className="project-kicker mono">{leaseKindNoun(kind)} lease</div>
+          <h2>{leaseDisplayName(lease)}</h2>
+          <div className="project-repo mono">{lease.ref}</div>
+        </div>
+        <div className="project-facts">
+          <div className="project-fact">
+            <span>state</span>
+            <strong>{lease.state}</strong>
+          </div>
+          <div className="project-fact">
+            <span>project</span>
+            <strong>{lease.project}</strong>
+          </div>
+          <div className="project-fact">
+            <span>workflow</span>
+            <strong>{lease.workflow ?? "none"}</strong>
+          </div>
+        </div>
+      </section>
+
+      <section className="project-focus">
+        <div>
+          <span className="key">requester</span>
+          <strong>{requester.label}</strong>
+        </div>
+        <div>
+          <span className="key">purpose</span>
+          <span className="mono">{purpose}</span>
+        </div>
+        <div>
+          <span className="key">environment</span>
+          <span className="mono">{slot}</span>
+        </div>
+      </section>
+
+      <h2>Lease</h2>
+      <div className="project-info">
+        {detailRows.map((row) => (
+          <div className="row" key={row.key}>
+            <span className="key">{row.key}</span>
+            <span className="val mono">{row.value}</span>
+          </div>
+        ))}
+      </div>
+
+      <h2>Requirements</h2>
+      <pre className="json-block">{formatJson(lease.requirements)}</pre>
+
+      <h2>Consumer metadata</h2>
+      <pre className="json-block">{formatJson(metadata)}</pre>
+
+      {signedIn && (
+        <LeaseCancelAction lease={lease} />
+      )}
+    </div>
+  );
+}
+
+function TestEnvironmentIndexView({
+  snap,
+  projectName,
+  signedIn,
+  isAdmin,
+}: {
+  snap: Snapshot;
+  projectName?: string;
+  signedIn: boolean;
+  isAdmin: boolean;
+}) {
+  const environments = (snap.test_environments ?? [])
+    .filter((env) => !projectName || env.project === projectName);
+  const claimed = environments.filter((env) => env.state === "claimed");
+  const available = environments.filter((env) => env.state === "available");
+  const project = projectName ? snap.projects.find((p) => p.name === projectName) : null;
+
+  return (
+    <div className="project-workspace">
+      <section className="project-hero">
+        <div className="project-hero-main">
+          <div className="project-kicker mono">{projectName ? `project / ${projectName}` : "global test environments"}</div>
+          <h2>Test environments</h2>
+          <div className="project-repo mono">available and claimed slots</div>
+        </div>
+        <div className="project-facts">
+          <div className="project-fact"><span>available</span><strong>{available.length}</strong></div>
+          <div className="project-fact"><span>claimed</span><strong>{claimed.length}</strong></div>
+          {projectName && <div className="project-fact"><span>configured</span><strong>{environments.length}</strong></div>}
+        </div>
+      </section>
+
+      {projectName && project && (
+        <TestEnvironmentScaleControl
+          project={project}
+          currentCount={environments.length}
+          signedIn={signedIn}
+          isAdmin={isAdmin}
+        />
+      )}
+
+      <h2>Environments ({environments.length})</h2>
+      {environments.length === 0 ? (
+        <div className="empty">No test environments are registered.</div>
+      ) : (
+        <table>
+          <thead>
+            <tr>
+              {!projectName && <th>Project</th>}
+              <th>Slot</th>
+              <th>State</th>
+              <th>Lease</th>
+              <th>Requester</th>
+              <th>Purpose</th>
+            </tr>
+          </thead>
+          <tbody>
+            {environments.map((env) => {
+              const requester = env.lease ? leaseRequester(env.lease) : { label: "-", title: "available" };
+              const detailTo = env.lease
+                ? `/projects/${encodeURIComponent(env.project)}/leases/test/${encodeURIComponent(leaseRouteId(env.lease))}`
+                : null;
+              return (
+                <tr key={`${env.project}:${env.slot_index}`}>
+                  {!projectName && (
+                    <td><Link className="link" to={`/projects/${encodeURIComponent(env.project)}`}>{env.project}</Link></td>
+                  )}
+                  <td className="mono">{env.slot_name}</td>
+                  <td><span className={`pill ${env.state === "claimed" ? "busy" : "free"}`}>{env.state}</span></td>
+                  <td className="mono dim">
+                    {env.lease && detailTo ? (
+                      <Link className="link mono" to={detailTo}>{leaseDisplayName(env.lease)}</Link>
+                    ) : "-"}
+                  </td>
+                  <td className="mono dim" title={requester.title}>{requester.label}</td>
+                  <td className="lease-purpose" title={env.lease ? leasePurpose(env.lease) : "-"}>{env.lease ? leasePurpose(env.lease) : "-"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function TestEnvironmentScaleControl({
+  project,
+  currentCount,
+  signedIn,
+  isAdmin,
+}: {
+  project: Project;
+  currentCount: number;
+  signedIn: boolean;
+  isAdmin: boolean;
+}) {
+  const [draft, setDraft] = useState(() => String(projectTestEnvironmentCount(project, currentCount)));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const configuredCount = projectTestEnvironmentCount(project, currentCount);
+  const canSave = signedIn && isAdmin;
+
+  useEffect(() => {
+    if (!saving) setDraft(String(configuredCount));
+  }, [configuredCount, saving]);
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!canSave) return;
+    const count = Number.parseInt(draft, 10);
+    if (!Number.isFinite(count) || count < 0 || count > 50) {
+      setError("Count must be between 0 and 50.");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const response = await authedFetch(`/v1/projects/${encodeURIComponent(project.name)}/test-environments/count`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ count }),
+      });
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        setError(`${response.status} ${text || response.statusText}`);
+      }
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <form className="test-env-scale" onSubmit={submit}>
+      <label htmlFor="test-env-count">Test environment count</label>
+      <input
+        id="test-env-count"
+        type="number"
+        min={0}
+        max={50}
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        disabled={!canSave || saving}
+      />
+      <button type="submit" disabled={!canSave || saving || draft === String(configuredCount)}>
+        {saving ? "saving..." : "apply"}
+      </button>
+      {!canSave && <span className="dim mono">admin sign-in required</span>}
+      {error && <span className="danger-text mono">{error}</span>}
+    </form>
+  );
+}
+
+function LeaseTable({
+  leases,
+  emptyText,
+  detailBasePath,
+  showProject,
+  signedIn,
+}: {
+  leases: Lease[];
+  emptyText: string;
+  detailBasePath: string | ((lease: Lease) => string) | null;
+  showProject: boolean;
+  signedIn: boolean;
+}) {
   if (leases.length === 0) {
     return <div className="empty">{emptyText}</div>;
   }
@@ -2300,24 +2761,50 @@ function CurrentWorkTable({ leases, emptyText }: { leases: Lease[]; emptyText: s
       <thead>
         <tr>
           <th>Lease</th>
+          {showProject && <th>Project</th>}
           <th>Workflow</th>
           <th>State</th>
-          <th>Host</th>
-          <th>Context</th>
+          <th>Environment</th>
+          <th>Requester</th>
+          <th>Purpose</th>
           <th>Requested</th>
+          {signedIn && <th></th>}
         </tr>
       </thead>
       <tbody>
-        {leases.map((l) => {
-          const context = leaseContext(l);
+        {leases.map((lease) => {
+          const requester = leaseRequester(lease);
+          const detailBase = typeof detailBasePath === "function" ? detailBasePath(lease) : detailBasePath;
+          const detailTo = detailBase ? `${detailBase}/${encodeURIComponent(leaseRouteId(lease))}` : null;
           return (
-            <tr key={l.ref}>
-              <td className="mono">{leaseDisplayName(l)}</td>
-              <td className="mono dim">{l.workflow ?? "—"}</td>
-              <td><span className={`pill ${l.state === "active" ? "busy" : "info"}`}>{l.state}</span></td>
-              <td className="mono">{l.host ?? "—"}</td>
-              <td className="mono dim" title={context.title}>{context.label}</td>
-              <td className="mono dim">{relTime(l.requested_at)}</td>
+            <tr key={lease.ref}>
+              <td className="mono">
+                {detailTo ? (
+                  <Link className="link mono" to={detailTo}>
+                    {leaseDisplayName(lease)}
+                  </Link>
+                ) : (
+                  leaseDisplayName(lease)
+                )}
+              </td>
+              {showProject && (
+                <td>
+                  <Link className="link" to={`/projects/${encodeURIComponent(lease.project)}`}>
+                    {lease.project}
+                  </Link>
+                </td>
+              )}
+              <td className="mono dim">{lease.workflow ?? "-"}</td>
+              <td><span className={`pill ${lease.state === "claimed" ? "busy" : "info"}`}>{lease.state}</span></td>
+              <td className="mono dim">{leaseSlot(lease)}</td>
+              <td className="mono dim" title={requester.title}>{requester.label}</td>
+              <td className="lease-purpose" title={leasePurpose(lease)}>{leasePurpose(lease)}</td>
+              <td className="mono dim">{relTime(lease.requested_at)}</td>
+              {signedIn && (
+                <td>
+                  <LeaseCancelAction lease={lease} compact />
+                </td>
+              )}
             </tr>
           );
         })}
@@ -2326,65 +2813,7 @@ function CurrentWorkTable({ leases, emptyText }: { leases: Lease[]; emptyText: s
   );
 }
 
-function leaseContext(lease: Lease): { label: string; title: string } {
-  const metadata = lease.metadata ?? {};
-  const issueNumber = metadata.issue_number ?? metadata.issueNumber;
-  const runId = metadata.run_id ?? metadata.runId;
-  const source = metadata.trigger_source ?? metadata.triggerSource ?? metadata.source;
-  const parts: string[] = [];
-  if (typeof issueNumber === "number" || typeof issueNumber === "string") {
-    parts.push(`#${issueNumber}`);
-  }
-  if (typeof runId === "string" && runId) {
-    parts.push(runId.slice(0, 8));
-  }
-  if (typeof source === "string" && source) {
-    parts.push(source);
-  }
-  const label = parts.length > 0 ? parts.join(" · ") : "—";
-  return {
-    label,
-    title: label === "—" ? "No concise context on this lease" : label,
-  };
-}
-
-function leaseDisplayName(lease: Lease): string {
-  if (lease.lease_number !== null && lease.lease_number !== undefined) {
-    return `#${lease.lease_number}`;
-  }
-  const slotName = lease.metadata?.native_slot_name;
-  if (typeof slotName === "string" && slotName) {
-    return slotName;
-  }
-  const issueNumber = lease.metadata?.issue_number ?? lease.metadata?.issueNumber;
-  if (typeof issueNumber === "number" || typeof issueNumber === "string") {
-    return `issue #${issueNumber}`;
-  }
-  return "lease";
-}
-type CapacityViewProps = {
-  snap: Snapshot | null;
-  signedIn: boolean;
-  filteredPending: Lease[];
-  filteredActive: Lease[];
-  selected: Selection;
-  selectedWorkflow: Workflow | null;
-  selectedProject: Project | null;
-};
-
-function CapacityView({
-  snap,
-  signedIn,
-  filteredPending,
-  filteredActive,
-  selected,
-  selectedWorkflow,
-  selectedProject,
-}: CapacityViewProps) {
-  // Two-click confirm pattern for the cancel button (#30): first click
-  // arms the row (replaces the button with [Cancel?] [Keep]); second
-  // click on Cancel? POSTs. The row drops out via the next /v1/state
-  // SSE snapshot, so no manual list mutation is needed.
+function LeaseCancelAction({ lease, compact = false }: { lease: Lease; compact?: boolean }) {
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [cancelError, setCancelError] = useState<string | null>(null);
@@ -2410,178 +2839,217 @@ function CapacityView({
     }
   };
 
+  if (confirmId === lease.ref) {
+    return (
+      <>
+        <span className="confirm">
+          <button
+            type="button"
+            className="link danger-text"
+            onClick={() => void fireCancel(lease)}
+            disabled={busyId === lease.ref}
+          >
+            {busyId === lease.ref ? "cancelling..." : "cancel?"}
+          </button>
+          <span className="sep">/</span>
+          <button
+            type="button"
+            className="link"
+            onClick={() => setConfirmId(null)}
+            disabled={busyId === lease.ref}
+          >
+            keep
+          </button>
+        </span>
+        {cancelError && !compact && <div className="empty error">{cancelError}</div>}
+      </>
+    );
+  }
+
   return (
     <>
-      {snap !== null && (
-        <div className="kpi-strip">
-          <div className="kpi"><span className="k">pending</span><span className="v">{snap.pending_leases.length}</span></div>
-          <div className="kpi"><span className="k">active</span><span className="v">{snap.active_leases.length}</span></div>
-        </div>
-      )}
-
-        <h2>
-          Pending queue ({filteredPending.length})
-          <FilterHint selected={selected} />
-        </h2>
-        {filteredPending.length === 0 ? (
-          <div className="empty">No leases waiting.</div>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>Lease</th>
-                <th>Project</th>
-                <th>Workflow</th>
-                <th>Requirements</th>
-                <th>Metadata</th>
-                <th>Requested</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredPending.map((l) => (
-                <tr key={l.ref}>
-                  <td className="mono">{leaseDisplayName(l)}</td>
-                  <td>{l.project}</td>
-                  <td className="mono dim">{l.workflow ?? "—"}</td>
-                  <td className="mono">{JSON.stringify(l.requirements)}</td>
-                  <td className="mono dim">{JSON.stringify(l.metadata)}</td>
-                  <td className="mono dim">{relTime(l.requested_at)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-
-        <h2>
-          Active ({filteredActive.length})
-          <FilterHint selected={selected} />
-        </h2>
-        {filteredActive.length === 0 ? (
-          <div className="empty">No active leases.</div>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>Lease</th>
-                <th>Project</th>
-                <th>Workflow</th>
-                <th>Host</th>
-                <th>Metadata</th>
-                <th>Assigned</th>
-                {signedIn && <th></th>}
-              </tr>
-            </thead>
-            <tbody>
-              {filteredActive.map((l) => (
-                <tr key={l.ref}>
-                  <td className="mono">{leaseDisplayName(l)}</td>
-                  <td>{l.project}</td>
-                  <td className="mono dim">{l.workflow ?? "—"}</td>
-                  <td className="mono">{l.host ?? "—"}</td>
-                  <td className="mono dim">{JSON.stringify(l.metadata)}</td>
-                  <td className="mono dim">{relTime(l.assigned_at)}</td>
-                  {signedIn && (
-                    <td>
-                      {confirmId === l.ref ? (
-                        <>
-                          <span className="confirm">
-                            <button
-                              type="button"
-                              className="link danger-text"
-                              onClick={() => void fireCancel(l)}
-                              disabled={busyId === l.ref}
-                            >
-                              {busyId === l.ref ? "cancelling…" : "cancel?"}
-                            </button>
-                            <span className="sep">/</span>
-                            <button
-                              type="button"
-                              className="link"
-                              onClick={() => setConfirmId(null)}
-                              disabled={busyId === l.ref}
-                            >
-                              keep
-                            </button>
-                          </span>
-                        </>
-                      ) : (
-                        <button
-                          type="button"
-                          className="link"
-                          onClick={() => setConfirmId(l.ref)}
-                        >
-                          cancel
-                        </button>
-                      )}
-                    </td>
-                  )}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-        {cancelError && (
-          <div className="empty" style={{ color: "var(--state-danger-fg)" }}>
-            {cancelError}
-          </div>
-        )}
-
-        {selectedWorkflow && (
-          <>
-            <h2>Workflow info</h2>
-            <div className="project-info">
-              <div className="row">
-                <span className="key">project</span>
-                <span className="val mono">{selectedWorkflow.project}</span>
-              </div>
-              <div className="row">
-                <span className="key">workflow</span>
-                <span className="val mono">{selectedWorkflow.name}</span>
-              </div>
-              <div className="row">
-                <span className="key">file</span>
-                <span className="val mono">
-                  {workflowSourceLabel(selectedWorkflow)}
-                </span>
-              </div>
-              <div className="row">
-                <span className="key">trigger label</span>
-                <span className="val mono">{selectedWorkflow.trigger_label}</span>
-              </div>
-              <div className="row">
-                <span className="key">requires</span>
-                <span className="val"><RequirementPills requirements={selectedWorkflow.default_requirements} /></span>
-              </div>
-            </div>
-          </>
-        )}
-
-        {selectedProject && !selectedWorkflow && (
-          <>
-            <h2>Project info</h2>
-            <div className="project-info">
-              <div className="row">
-                <span className="key">name</span>
-                <span className="val mono">{selectedProject.name}</span>
-              </div>
-              <div className="row">
-                <span className="key">github</span>
-                <span className="val mono">{selectedProject.github_repo}</span>
-              </div>
-            </div>
-          </>
-        )}
+      <button type="button" className="link" onClick={() => setConfirmId(lease.ref)}>
+        cancel
+      </button>
+      {cancelError && !compact && <div className="empty error">{cancelError}</div>}
     </>
   );
 }
 
-function FilterHint({ selected }: { selected: Selection }) {
-  if (selected.kind === "all") return null;
-  const text =
-    selected.kind === "project"
-      ? `filtered to ${selected.project}`
-      : `filtered to ${selected.project}.${selected.workflow}`;
-  return <span className="filter-hint"> — {text}</span>;
+function leasesFor(snap: Snapshot, kind: LeaseKind, projectName?: string): Lease[] {
+  return [...snap.active_leases, ...snap.pending_leases]
+    .filter((lease) => leaseKind(lease) === kind)
+    .filter((lease) => !projectName || lease.project === projectName)
+    .sort((a, b) => {
+      if (a.state !== b.state) return a.state === "claimed" ? -1 : 1;
+      return new Date(b.requested_at).getTime() - new Date(a.requested_at).getTime();
+    });
+}
+
+function leaseKind(lease: Lease): LeaseKind {
+  if (lease.workflow === "test-slot-checkout" || lease.metadata?.test_slot_checkout === true) {
+    return "test";
+  }
+  return "agent";
+}
+
+function leaseKindTitle(kind: LeaseKind): string {
+  return kind === "test" ? "Test leases" : "Agent leases";
+}
+
+function leaseKindNoun(kind: LeaseKind): string {
+  return kind === "test" ? "test" : "agent";
+}
+
+function leaseKindDescription(kind: LeaseKind): string {
+  return kind === "test"
+    ? "test environments and native slots"
+    : "agent runners and work leases that are not test environments";
+}
+
+function projectTestEnvironmentCount(project: Project, fallback: number): number {
+  const standby = project.metadata?.native_standby_dns;
+  if (isRecord(standby)) {
+    const count = standby.count;
+    if (typeof count === "number" && Number.isFinite(count)) return count;
+    if (typeof count === "string" && count.trim()) {
+      const parsed = Number.parseInt(count, 10);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
+  return fallback;
+}
+
+function leaseRouteId(lease: Lease): string {
+  if (leaseKind(lease) === "test") {
+    return lease.ref;
+  }
+  if (lease.lease_number !== null && lease.lease_number !== undefined) {
+    return String(lease.lease_number);
+  }
+  return lease.ref;
+}
+
+function leaseIdMatches(lease: Lease, leaseId: string): boolean {
+  return leaseRouteId(lease) === leaseId || lease.ref === leaseId || encodeURIComponent(lease.ref) === leaseId;
+}
+
+function leaseRequester(lease: Lease): { label: string; title: string } {
+  if (isRecord(lease.requester)) {
+    const ref = valueLabel(lease.requester.ref);
+    const label = ref || valueLabel(lease.requester.label) || valueLabel(lease.requester.consumer);
+    const detail = [lease.requester.consumer, lease.requester.kind, lease.requester.ref]
+      .map(valueLabel)
+      .filter(Boolean)
+      .join(" / ");
+    if (label) return { label, title: detail || label };
+  }
+  const metadata = lease.metadata ?? {};
+  const requester = metadata.requester;
+  if (isRecord(requester)) {
+    const ref = valueLabel(requester.ref);
+    const label = ref || valueLabel(requester.label) || valueLabel(requester.consumer);
+    const detail = [requester.consumer, requester.kind, requester.ref]
+      .map(valueLabel)
+      .filter(Boolean)
+      .join(" / ");
+    if (label) return { label, title: detail || label };
+  }
+  const requesterRef = valueLabel(metadata.requester_ref) || valueLabel(metadata.requesterRef);
+  if (requesterRef) return { label: requesterRef, title: requesterRef };
+  const tankSessionId = valueLabel(metadata.tank_session_id) || valueLabel(metadata.tankSessionId);
+  if (tankSessionId) return { label: `tank session ${tankSessionId}`, title: tankSessionId };
+  const issueNumber = metadata.issue_number ?? metadata.issueNumber;
+  if (typeof issueNumber === "number" || typeof issueNumber === "string") {
+    return { label: `issue #${issueNumber}`, title: `issue #${issueNumber}` };
+  }
+  return { label: "-", title: "No requester recorded on this lease" };
+}
+
+function leasePurpose(lease: Lease): string {
+  const metadata = lease.metadata ?? {};
+  const phaseInputs = metadata.phase_inputs;
+  if (isRecord(phaseInputs)) {
+    const purpose = valueLabel(phaseInputs.purpose);
+    if (purpose) return purpose;
+  }
+  return valueLabel(metadata.purpose) || valueLabel(metadata.reason) || "-";
+}
+
+function leaseSlot(lease: Lease): string {
+  const metadata = lease.metadata ?? {};
+  return (
+    valueLabel(metadata.native_slot_name)
+    || valueLabel(metadata.slot_name)
+    || valueLabel(metadata.validation_url)
+    || lease.host
+    || "-"
+  );
+}
+
+function leaseDisplayName(lease: Lease): string {
+  if (leaseKind(lease) === "test") {
+    return lease.ref;
+  }
+  if (lease.lease_number !== null && lease.lease_number !== undefined) {
+    return `#${lease.lease_number}`;
+  }
+  const slotName = lease.metadata?.native_slot_name;
+  if (typeof slotName === "string" && slotName) {
+    return slotName;
+  }
+  const issueNumber = lease.metadata?.issue_number ?? lease.metadata?.issueNumber;
+  if (typeof issueNumber === "number" || typeof issueNumber === "string") {
+    return `issue #${issueNumber}`;
+  }
+  return "lease";
+}
+
+function leaseDetailRows(lease: Lease): Array<{ key: string; value: string }> {
+  return [
+    { key: "ref", value: lease.ref },
+    { key: "type", value: leaseKindTitle(leaseKind(lease)) },
+    { key: "project", value: lease.project },
+    { key: "workflow", value: lease.workflow ?? "-" },
+    { key: "state", value: lease.state },
+    { key: "host", value: lease.host ?? "-" },
+    { key: "requested", value: formatDateTime(lease.requested_at) },
+    { key: "assigned", value: formatDateTime(lease.assigned_at) },
+    { key: "released", value: formatDateTime(lease.released_at) },
+    { key: "ttl", value: `${lease.ttl_seconds}s` },
+  ];
+}
+
+function sanitizeLeaseMetadata(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sanitizeLeaseMetadata);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => {
+      const lowered = key.toLowerCase();
+      if (lowered.includes("token") || lowered.includes("secret") || lowered.includes("password")) {
+        return [key, "[redacted]"];
+      }
+      return [key, sanitizeLeaseMetadata(entry)];
+    })
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function valueLabel(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return "";
+}
+
+function formatJson(value: unknown): string {
+  return JSON.stringify(value, null, 2);
+}
+
+function formatDateTime(iso: string | null): string {
+  return iso ? new Date(iso).toLocaleString() : "-";
 }
 
 function relTime(iso: string | null): string {

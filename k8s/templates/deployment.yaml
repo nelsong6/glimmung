@@ -76,6 +76,8 @@ spec:
             - name: ARTIFACTS_CONTAINER
               value: {{ .Values.artifacts.container | quote }}
           envFrom:
+            - configMapRef:
+                name: {{ .Values.config.name }}
             - secretRef:
                 name: {{ .Values.externalSecret.secretName }}
           readinessProbe:

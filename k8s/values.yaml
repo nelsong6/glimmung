@@ -55,6 +55,14 @@ artifacts:
   storageAccount: romaineglimmungartifacts
   container: artifacts
 
+config:
+  name: glimmung-config
+  allowedEmails:
+    - nelson@romaine.life
+    - nelson-devops-project@outlook.com
+    - Brenden.owens39@gmail.com
+    - gantonski@gmail.com
+
 # In-cluster admin auth via Kubernetes service-account tokens. When enabled,
 # admin endpoints (/v1/projects, /v1/workflows, /v1/hosts) accept a bearer
 # token whose subject — resolved through TokenReview — matches an entry in
@@ -121,5 +129,3 @@ externalSecret:
       kvKey: glimmung-oauth-client-id
     - envVar: ENTRA_TEST_CLIENT_ID
       kvKey: glimmung-oauth-test-client-id
-    - envVar: ALLOWED_EMAILS
-      kvKey: glimmung-oauth-allowed-emails

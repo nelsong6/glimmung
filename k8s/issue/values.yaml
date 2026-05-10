@@ -23,6 +23,7 @@ hostname: ""
 # duplicated here rather than imported because the issue chart has no
 # dependency on the prod chart's release.
 serviceAccount: infra-shared
+configMapName: glimmung-config
 secretName: glimmung-secrets
 cosmos:
   endpoint: https://infra-cosmos-serverless.documents.azure.com:443/

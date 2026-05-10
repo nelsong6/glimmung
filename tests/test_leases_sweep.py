@@ -49,7 +49,7 @@ async def _put_native_lease(
         "id": lease_id,
         "project": project,
         "workflow": "native-agent",
-        "host": lease_ops.NATIVE_K8S_HOST if state == LeaseState.ACTIVE else None,
+        "host": lease_ops.NATIVE_K8S_HOST if state == LeaseState.CLAIMED else None,
         "state": state.value,
         "requirements": {},
         "metadata": base_metadata,
@@ -79,7 +79,7 @@ async def _put_traditional_lease(
         "requirements": {},
         "metadata": {},
         "requestedAt": now.isoformat(),
-        "assignedAt": now.isoformat() if state == LeaseState.ACTIVE else None,
+        "assignedAt": now.isoformat() if state == LeaseState.CLAIMED else None,
         "releasedAt": None,
         "ttlSeconds": 14400,
     })
@@ -117,7 +117,7 @@ async def test_sweep_expires_stale_native_lease():
         cosmos,
         lease_id="01STALENATIVE",
         project="ambience",
-        state=LeaseState.ACTIVE,
+        state=LeaseState.CLAIMED,
         assigned_at=stale_assigned_at,
     )
 
@@ -141,7 +141,7 @@ async def test_sweep_leaves_fresh_native_lease_active():
         cosmos,
         lease_id="01FRESHNATIVE",
         project="ambience",
-        state=LeaseState.ACTIVE,
+        state=LeaseState.CLAIMED,
         assigned_at=fresh_assigned_at,
     )
 
@@ -149,7 +149,7 @@ async def test_sweep_leaves_fresh_native_lease_active():
 
     assert expired == 0
     lease_doc = await cosmos.leases.read_item(item="01FRESHNATIVE", partition_key="ambience")
-    assert lease_doc["state"] == LeaseState.ACTIVE.value
+    assert lease_doc["state"] == LeaseState.CLAIMED.value
 
 
 @pytest.mark.asyncio
@@ -191,7 +191,7 @@ async def test_sweep_ignores_traditional_lease_via_native_path():
         cosmos,
         lease_id="01TRADLEASE",
         project="spirelens",
-        state=LeaseState.ACTIVE,
+        state=LeaseState.CLAIMED,
         host="runner-1",
         assigned_at=stale_assigned_at,
     )
@@ -206,7 +206,7 @@ async def test_sweep_ignores_traditional_lease_via_native_path():
 
     assert expired == 0
     lease_doc = await cosmos.leases.read_item(item="01TRADLEASE", partition_key="spirelens")
-    assert lease_doc["state"] == LeaseState.ACTIVE.value
+    assert lease_doc["state"] == LeaseState.CLAIMED.value
 
 
 @pytest.mark.asyncio
@@ -220,14 +220,14 @@ async def test_sweep_reaps_native_and_traditional_in_one_pass():
         cosmos,
         lease_id="01STALENATIVE",
         project="ambience",
-        state=LeaseState.ACTIVE,
+        state=LeaseState.CLAIMED,
         assigned_at=long_ago,
     )
     await _put_traditional_lease(
         cosmos,
         lease_id="01STALETRAD",
         project="spirelens",
-        state=LeaseState.ACTIVE,
+        state=LeaseState.CLAIMED,
         host="runner-2",
         assigned_at=long_ago,
     )
