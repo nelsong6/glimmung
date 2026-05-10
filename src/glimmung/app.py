@@ -3290,7 +3290,7 @@ class AbortRunResult(BaseModel):
       - `already_terminal`: Run was already PASSED or ABORTED. No-op.
     """
     state: str
-    run_id: str
+    run_ref: str
     run_number: int | None = None
     run_display_number: str | None = None
     gh_run_cancelled: bool | None = None
@@ -3532,7 +3532,7 @@ async def _abort_run(
 
     return AbortRunResult(
         state="already_terminal" if terminal else "aborted",
-        run_id=run.id,
+        run_ref=_run_public_ref(run),
         run_number=run.run_number,
         run_display_number=run_ops.run_display_number(run),
         gh_run_cancelled=gh_cancelled,
@@ -3842,10 +3842,14 @@ class RunCompletedRequest(BaseModel):
 
 
 class RunCallbackResult(BaseModel):
-    run_id: str
+    run_ref: str
     decision: str | None = None
     issue_lock_released: bool | None = None
     pr_lock_released: bool | None = None
+
+
+def _run_public_ref(run: Run) -> str:
+    return run_ref(run.project, run.issue_number, run.run_display_number or run.run_number)
 
 
 class NativeRunEventRequest(BaseModel):
@@ -3859,16 +3863,15 @@ class NativeRunEventRequest(BaseModel):
 
 
 class NativeRunEventResult(BaseModel):
-    run_id: str
+    run_ref: str
     job_id: str
     seq: int
     accepted: bool = True
 
 
 class NativeRunLogEvent(BaseModel):
-    id: str
     project: str
-    run_id: str
+    run_ref: str
     attempt_index: int
     phase: str
     job_id: str
@@ -3883,7 +3886,7 @@ class NativeRunLogEvent(BaseModel):
 
 class NativeRunLogsResponse(BaseModel):
     project: str
-    run_id: str
+    run_ref: str
     attempt_index: int | None = None
     job_id: str | None = None
     events: list[NativeRunLogEvent]
@@ -3892,7 +3895,7 @@ class NativeRunLogsResponse(BaseModel):
 
 class NativePodLogsResponse(BaseModel):
     project: str
-    run_id: str
+    run_ref: str
     attempt_index: int
     job_id: str
     namespace: str
@@ -3905,7 +3908,7 @@ class NativePodLogsResponse(BaseModel):
 
 class NativeRunStatusResponse(BaseModel):
     project: str
-    run_id: str
+    run_ref: str
     state: RunState
     attempt_index: int
     cancel_requested: bool = False
@@ -3938,6 +3941,14 @@ class NativeGitHubTokenResult(BaseModel):
     expires_at: str | None = None
 
 
+def _native_event_to_public(event_doc: dict[str, Any], *, run: Run) -> NativeRunLogEvent:
+    public = dict(event_doc)
+    public.pop("id", None)
+    public.pop("run_id", None)
+    public["run_ref"] = _run_public_ref(run)
+    return NativeRunLogEvent.model_validate(public)
+
+
 @app.post(
     "/v1/runs/{project}/{run_id}/started",
     response_model=RunCallbackResult,
@@ -3960,7 +3971,7 @@ async def run_started(
         workflow_run_id=req.workflow_run_id,
         validation_url=req.validation_url,
     )
-    return RunCallbackResult(run_id=run.id)
+    return RunCallbackResult(run_ref=_run_public_ref(run))
 
 
 class RunAbortedRequest(BaseModel):
@@ -4071,7 +4082,7 @@ async def run_completed(
         await _advance_playbooks_for_terminal_run(cosmos, post_run)
 
     return RunCallbackResult(
-        run_id=run.id,
+        run_ref=_run_public_ref(run),
         decision=decision_value,
         issue_lock_released=result_dict.get("issue_lock_released"),
         pr_lock_released=result_dict.get("pr_lock_released"),
@@ -4110,7 +4121,7 @@ async def native_run_event(
         )
     except native_event_ops.NativeEventError as e:
         raise HTTPException(409, str(e))
-    return NativeRunEventResult(run_id=run_id, job_id=req.job_id, seq=req.seq)
+    return NativeRunEventResult(run_ref=_run_public_ref(run), job_id=req.job_id, seq=req.seq)
 
 
 @app.get(
@@ -4179,10 +4190,10 @@ async def native_run_events(
                 docs = docs[:limit]
     return NativeRunLogsResponse(
         project=project,
-        run_id=run_id,
+        run_ref=_run_public_ref(run),
         attempt_index=attempt_index,
         job_id=job_id,
-        events=[NativeRunLogEvent.model_validate(d) for d in docs],
+        events=[_native_event_to_public(d, run=run) for d in docs],
         archive_url=archive_url,
     )
 
@@ -4264,6 +4275,45 @@ async def native_run_events_by_number(
     )
 
 
+async def _read_run_for_number_route(
+    *,
+    project: str,
+    issue_number: int,
+    run_number: str,
+) -> Run:
+    found = await run_ops.read_run_by_ref(
+        app.state.cosmos,
+        project=project,
+        issue_number=issue_number,
+        run_ref=run_number,
+    )
+    if found is None:
+        raise HTTPException(
+            404, f"run {run_number} not found for {project}#{issue_number}",
+        )
+    run, _etag = found
+    return run
+
+
+@app.post(
+    "/v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/events",
+    response_model=NativeRunEventResult,
+)
+async def native_run_event_by_number(
+    req: NativeRunEventRequest,
+    request: Request,
+    project: str = Path(...),
+    issue_number: int = Path(...),
+    run_number: str = Path(...),
+) -> NativeRunEventResult:
+    run = await _read_run_for_number_route(
+        project=project,
+        issue_number=issue_number,
+        run_number=run_number,
+    )
+    return await native_run_event(req, request, project=project, run_id=run.id)
+
+
 @app.get(
     "/v1/runs/{project}/{run_id}/native/pod-logs",
     response_model=NativePodLogsResponse,
@@ -4308,7 +4358,7 @@ async def native_run_pod_logs(
 
     return NativePodLogsResponse(
         project=project,
-        run_id=run_id,
+        run_ref=_run_public_ref(run),
         attempt_index=attempt_index,
         job_id=job_id,
         namespace=str(result["namespace"]),
@@ -4317,6 +4367,32 @@ async def native_run_pod_logs(
         phase=str(result["phase"]),
         tail_lines=tail_lines,
         logs=str(result["logs"]),
+    )
+
+
+@app.get(
+    "/v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/pod-logs",
+    response_model=NativePodLogsResponse,
+)
+async def native_run_pod_logs_by_number(
+    project: str = Path(...),
+    issue_number: int = Path(...),
+    run_number: str = Path(...),
+    attempt_index: int = Query(..., ge=0),
+    job_id: str = Query(...),
+    tail_lines: int = Query(200, ge=1, le=2000),
+) -> NativePodLogsResponse:
+    run = await _read_run_for_number_route(
+        project=project,
+        issue_number=issue_number,
+        run_number=run_number,
+    )
+    return await native_run_pod_logs(
+        project=project,
+        run_id=run.id,
+        attempt_index=attempt_index,
+        job_id=job_id,
+        tail_lines=tail_lines,
     )
 
 
@@ -4342,13 +4418,31 @@ async def native_run_status(
     attempt = run.attempts[-1]
     return NativeRunStatusResponse(
         project=project,
-        run_id=run_id,
+        run_ref=_run_public_ref(run),
         state=run.state,
         attempt_index=attempt.attempt_index,
         cancel_requested=attempt.cancel_requested_at is not None,
         cancel_requested_at=attempt.cancel_requested_at,
         cancel_reason=attempt.cancel_reason,
     )
+
+
+@app.get(
+    "/v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/status",
+    response_model=NativeRunStatusResponse,
+)
+async def native_run_status_by_number(
+    request: Request,
+    project: str = Path(...),
+    issue_number: int = Path(...),
+    run_number: str = Path(...),
+) -> NativeRunStatusResponse:
+    run = await _read_run_for_number_route(
+        project=project,
+        issue_number=issue_number,
+        run_number=run_number,
+    )
+    return await native_run_status(request, project=project, run_id=run.id)
 
 
 @app.post(
@@ -4413,7 +4507,7 @@ async def native_run_completed(
     if not _attempt_all_jobs_terminal(attempt):
         # Wait for sibling jobs to report before driving the engine.
         return RunCallbackResult(
-            run_id=run.id,
+            run_ref=_run_public_ref(run),
             decision=None,
             issue_lock_released=None,
             pr_lock_released=None,
@@ -4473,11 +4567,30 @@ async def native_run_completed(
         await _advance_playbooks_for_terminal_run(cosmos, post_run)
 
     return RunCallbackResult(
-        run_id=run.id,
+        run_ref=_run_public_ref(run),
         decision=decision_value,
         issue_lock_released=result_dict.get("issue_lock_released"),
         pr_lock_released=result_dict.get("pr_lock_released"),
     )
+
+
+@app.post(
+    "/v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/completed",
+    response_model=RunCallbackResult,
+)
+async def native_run_completed_by_number(
+    req: NativeRunCompletedRequest,
+    request: Request,
+    project: str = Path(...),
+    issue_number: int = Path(...),
+    run_number: str = Path(...),
+) -> RunCallbackResult:
+    run = await _read_run_for_number_route(
+        project=project,
+        issue_number=issue_number,
+        run_number=run_number,
+    )
+    return await native_run_completed(req, request, project=project, run_id=run.id)
 
 
 async def _advance_playbooks_for_terminal_run(cosmos: Cosmos, run: Run) -> None:
@@ -4560,6 +4673,25 @@ async def native_run_failed(
 
 
 @app.post(
+    "/v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/failed",
+    response_model=AbortRunResult,
+)
+async def native_run_failed_by_number(
+    req: NativeRunFailedRequest,
+    request: Request,
+    project: str = Path(...),
+    issue_number: int = Path(...),
+    run_number: str = Path(...),
+) -> AbortRunResult:
+    run = await _read_run_for_number_route(
+        project=project,
+        issue_number=issue_number,
+        run_number=run_number,
+    )
+    return await native_run_failed(req, request, project=project, run_id=run.id)
+
+
+@app.post(
     "/v1/runs/{project}/{run_id}/native/github-token",
     response_model=NativeGitHubTokenResult,
 )
@@ -4596,6 +4728,24 @@ async def native_github_token(
         log.exception("native github-token mint failed for run %s repo %s", run.id, repo)
         raise HTTPException(502, "github token mint failed")
     return NativeGitHubTokenResult(repo=repo, token=token, expires_at=expires_at)
+
+
+@app.post(
+    "/v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/github-token",
+    response_model=NativeGitHubTokenResult,
+)
+async def native_github_token_by_number(
+    request: Request,
+    project: str = Path(...),
+    issue_number: int = Path(...),
+    run_number: str = Path(...),
+) -> NativeGitHubTokenResult:
+    run = await _read_run_for_number_route(
+        project=project,
+        issue_number=issue_number,
+        run_number=run_number,
+    )
+    return await native_github_token(request, project=project, run_id=run.id)
 
 
 # ─── Decision-engine replay (#111 smoke-test substrate) ────────────────────

@@ -287,6 +287,8 @@ async def dispatch_run(
         metadata["recent_comments"] = _format_recent_comments(issue.comments)
     if run_id is not None:
         metadata["run_id"] = run_id
+        metadata["run_number"] = str(run.run_number or "")
+        metadata["run_display_number"] = str(run.run_display_number or run.run_number or "")
         metadata["attempt_index"] = "0"
         if initial_phase is not None:
             metadata["phase_name"] = initial_phase["name"]

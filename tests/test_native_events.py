@@ -304,7 +304,7 @@ async def test_native_run_events_read_hot_logs_in_order(cosmos, monkeypatch):
     )
 
     assert result.project == "ambience"
-    assert result.run_id == run.id
+    assert result.run_ref == "ambience#117/runs/unknown"
     assert result.attempt_index == 0
     assert result.archive_url is None
     assert [e.seq for e in result.events] == [1, 2, 3]

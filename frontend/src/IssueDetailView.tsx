@@ -89,9 +89,8 @@ export type IssueGraph = {
 };
 
 type NativeRunEvent = {
-  id: string;
   project: string;
-  run_id: string;
+  run_ref: string;
   attempt_index: number;
   phase: string;
   job_id: string;
@@ -106,7 +105,7 @@ type NativeRunEvent = {
 
 type NativeRunEventsResponse = {
   project: string;
-  run_id: string;
+  run_ref: string;
   attempt_index: number | null;
   job_id: string | null;
   events: NativeRunEvent[];
@@ -115,7 +114,7 @@ type NativeRunEventsResponse = {
 
 type NativePodLogsResponse = {
   project: string;
-  run_id: string;
+  run_ref: string;
   attempt_index: number;
   job_id: string;
   namespace: string;
@@ -2336,9 +2335,8 @@ function NativeJobInspector({
     setLogs(null);
     setError(null);
     setSelectedKey(defaultSelection);
-    const url =
-      `/v1/runs/${encodeURIComponent(project)}/${encodeURIComponent(runId)}` +
-      `/native/events?attempt_index=${attemptIndex}&limit=200`;
+    const url = `${nativeRunApiBase(project, runId)}` +
+      `/events?attempt_index=${attemptIndex}&limit=200`;
     const load = () => {
       fetch(url)
       .then(async (res) => {
@@ -2363,9 +2361,8 @@ function NativeJobInspector({
     setPodLogs(null);
     setPodLogError(null);
     if (!live || !selected) return () => { cancelled = true; };
-    const url =
-      `/v1/runs/${encodeURIComponent(project)}/${encodeURIComponent(runId)}` +
-      `/native/pod-logs?attempt_index=${attemptIndex}` +
+    const url = `${nativeRunApiBase(project, runId)}` +
+      `/pod-logs?attempt_index=${attemptIndex}` +
       `&job_id=${encodeURIComponent(selected.job.job_id)}&tail_lines=200`;
     const load = () => {
       fetch(url)
@@ -2469,6 +2466,16 @@ function NativeJobInspector({
       </div>
     </div>
   );
+}
+
+function nativeRunApiBase(project: string, runRef: string): string {
+  const parsed = runRef.match(/^[^#]+#(\d+)\/runs\/(.+)$/);
+  if (parsed) {
+    return `/v1/projects/${encodeURIComponent(project)}` +
+      `/issues/${encodeURIComponent(parsed[1])}` +
+      `/runs/${encodeURIComponent(parsed[2])}/native`;
+  }
+  return `/v1/runs/${encodeURIComponent(project)}/${encodeURIComponent(runRef)}/native`;
 }
 
 function nativeStepRefs(jobs: NativeAttemptJob[]): Array<{

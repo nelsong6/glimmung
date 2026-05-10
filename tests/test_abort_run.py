@@ -144,7 +144,7 @@ async def test_abort_returns_already_terminal_for_passed_run(cosmos, minter):
         cosmos, minter, run_id="run-1", project="p", reason="r",
     )
     assert result.state == "already_terminal"
-    assert result.run_id == "run-1"
+    assert result.run_ref == "p#42/runs/unknown"
 
 
 @pytest.mark.asyncio
@@ -199,7 +199,7 @@ async def test_abort_orphan_with_no_workflow_run_id_skips_gh_cancel(cosmos, mint
         cosmos, minter, run_id="run-1", project="p", reason="orphaned",
     )
     assert result.state == "aborted"
-    assert result.run_id == "run-1"
+    assert result.run_ref == "p#42/runs/unknown"
     assert result.gh_run_cancelled is None  # no dispatch happened, so no cancel attempted
 
     run_doc = await cosmos.runs.read_item(item="run-1", partition_key="p")

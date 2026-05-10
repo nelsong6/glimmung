@@ -1317,6 +1317,15 @@ def _universal_env(
     base_url = settings.native_runner_callback_base_url.rstrip("/")
     project = str(lease_doc["project"])
     run_id = str(metadata.get("run_id") or "")
+    issue_number = str(metadata.get("issue_number") or "").strip()
+    run_number = str(metadata.get("run_display_number") or metadata.get("run_number") or "").strip()
+    public_run_path = (
+        f"/v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native"
+        if issue_number and run_number
+        else f"/v1/runs/{project}/{run_id}/native"
+    )
+    slot_name = str(metadata.get("native_slot_name") or "").strip()
+    lease_ref = slot_name or f"{project}/leases/{lease_doc.get('leaseNumber') or lease_doc.get('lease_number') or 'active'}"
     attempt_index = int(str(metadata.get("attempt_index") or "0"))
     validation_namespace = _validation_namespace(run_id, attempt_index)
     access_namespaces = _access_namespaces(validation_namespace, metadata)
@@ -1325,30 +1334,30 @@ def _universal_env(
         {"name": "GLIMMUNG_PROJECT", "value": project},
         {"name": "GLIMMUNG_WORKFLOW", "value": str(workflow_doc["name"])},
         {"name": "GLIMMUNG_PHASE", "value": phase.name},
-        {"name": "GLIMMUNG_RUN_ID", "value": run_id},
-        {"name": "GLIMMUNG_LEASE_ID", "value": str(lease_doc["id"])},
+        {"name": "GLIMMUNG_RUN_REF", "value": f"{project}#{issue_number}/runs/{run_number}" if issue_number and run_number else ""},
+        {"name": "GLIMMUNG_LEASE_REF", "value": lease_ref},
         {"name": "GLIMMUNG_ATTEMPT_INDEX", "value": str(attempt_index)},
         {"name": "GLIMMUNG_VALIDATION_NAMESPACE", "value": validation_namespace},
         {"name": "GLIMMUNG_K8S_NAMESPACES", "value": ",".join(access_namespaces)},
         {
             "name": "GLIMMUNG_EVENTS_URL",
-            "value": f"{base_url}/v1/runs/{project}/{run_id}/native/events",
+            "value": f"{base_url}{public_run_path}/events",
         },
         {
             "name": "GLIMMUNG_STATUS_URL",
-            "value": f"{base_url}/v1/runs/{project}/{run_id}/native/status",
+            "value": f"{base_url}{public_run_path}/status",
         },
         {
             "name": "GLIMMUNG_COMPLETED_URL",
-            "value": f"{base_url}/v1/runs/{project}/{run_id}/native/completed",
+            "value": f"{base_url}{public_run_path}/completed",
         },
         {
             "name": "GLIMMUNG_FAILED_URL",
-            "value": f"{base_url}/v1/runs/{project}/{run_id}/native/failed",
+            "value": f"{base_url}{public_run_path}/failed",
         },
         {
             "name": "GLIMMUNG_GITHUB_TOKEN_URL",
-            "value": f"{base_url}/v1/runs/{project}/{run_id}/native/github-token",
+            "value": f"{base_url}{public_run_path}/github-token",
         },
         {
             "name": "GLIMMUNG_ATTEMPT_TOKEN",
