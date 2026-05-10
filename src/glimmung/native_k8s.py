@@ -497,14 +497,15 @@ class NativeKubernetesLauncher:
             or project_doc.get("name")
             or ""
         ).strip()
-        chart_path = _DEFAULT_CHART_PATH
+        chart_path = str(config.get("chart_path") or "").strip() or _DEFAULT_CHART_PATH
         if argocd_app:
             argo = await self._fetch_argocd_app(argocd_app)
             if argo is not None:
-                chart_path = str(
+                discovered_chart_path = str(
                     (argo.get("spec") or {}).get("source", {}).get("path")
                     or _DEFAULT_CHART_PATH
                 ).strip() or _DEFAULT_CHART_PATH
+                chart_path = str(config.get("chart_path") or "").strip() or discovered_chart_path
 
         await self._ensure_slot_admin_binding(slot_name, slot=slot)
         # Pre-create the sessions namespace and give the runner admin access
@@ -1997,11 +1998,13 @@ def _test_slot_helm_config(project_doc: dict[str, Any]) -> dict[str, Any] | None
     ).strip()
 
     git_ref = str(raw.get("git_ref") or raw.get("gitRef") or "").strip()
+    chart_path = str(raw.get("chart_path") or raw.get("chartPath") or "").strip()
 
     return {
         "values": values,
         "installer_image": image or _DEFAULT_INSTALLER_IMAGE,
         "git_ref": git_ref,
+        "chart_path": chart_path,
     }
 
 
