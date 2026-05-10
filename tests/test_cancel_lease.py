@@ -136,8 +136,8 @@ async def test_cancel_returns_already_terminal_for_released_lease(cosmos, minter
     await _put_lease(cosmos, lease_id="l1", project="p", state=LeaseState.RELEASED)
     result = await _cancel_lease(cosmos, minter, "l1", "p")
     assert result.state == "already_terminal"
-    assert result.lease_id == "l1"
-    assert result.run_id is None
+    assert result.lease_ref == "p/lease"
+    assert result.run_ref is None
 
 
 @pytest.mark.asyncio
@@ -162,7 +162,7 @@ async def test_cancel_releases_lease_with_no_run_returns_no_active_run(cosmos, m
     result = await _cancel_lease(cosmos, minter, "l1", "p")
     assert result.state == "no_active_run"
     assert result.gh_run_cancelled is None
-    assert result.run_id is None
+    assert result.run_ref is None
 
     # Lease released; host freed.
     lease_doc = await cosmos.leases.read_item(item="l1", partition_key="p")
@@ -188,9 +188,9 @@ async def test_cancel_returns_no_active_run_when_run_has_no_workflow_run_id(cosm
     result = await _cancel_lease(cosmos, minter, "l1", "p")
     assert result.state == "no_active_run"
     assert result.gh_run_cancelled is None
-    # Run was found and aborted, so run_id is reported; only the GH-cancel
+    # Run was found and aborted, so run_ref is reported; only the GH-cancel
     # branch was skipped because there was no workflow_run_id to target.
-    assert result.run_id == "run-1"
+    assert result.run_ref == "p#42/runs/unknown"
     run_doc = await cosmos.runs.read_item(item="run-1", partition_key="p")
     assert run_doc["state"] == RunState.ABORTED.value
     assert run_doc["abort_reason"] == "cancelled_via_ui"
@@ -233,7 +233,7 @@ async def test_cancel_dispatches_gh_cancel_releases_lease_and_aborts_run(
 
     result = await _cancel_lease(cosmos, minter, "l1", "p")
     assert result.state == "cancelled"
-    assert result.run_id == "run-1"
+    assert result.run_ref == "p#42/runs/unknown"
     assert result.gh_run_cancelled is True
     assert result.issue_lock_released is True
 

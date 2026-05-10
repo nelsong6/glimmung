@@ -49,7 +49,7 @@ export const mockSnapshot = {
     {
       name: "nelsonpc",
       capabilities: { os: "windows", apps: ["sts2", "visual-studio"], gpu: false },
-      current_lease_id: "lease-active-glimmung-206",
+      current_lease_ref: "glimmung/leases/11",
       last_heartbeat: ago(1),
       last_used_at: ago(4),
       drained: false,
@@ -58,7 +58,7 @@ export const mockSnapshot = {
     {
       name: "buildbox-01",
       capabilities: { os: "linux", apps: ["node", "python", "kubectl"], gpu: false },
-      current_lease_id: null,
+      current_lease_ref: null,
       last_heartbeat: ago(2),
       last_used_at: ago(38),
       drained: false,
@@ -67,7 +67,7 @@ export const mockSnapshot = {
     {
       name: "design-lab",
       capabilities: { os: "linux", apps: ["node", "playwright", "figma-export"], gpu: true },
-      current_lease_id: null,
+      current_lease_ref: null,
       last_heartbeat: ago(5),
       last_used_at: ago(71),
       drained: false,
@@ -76,7 +76,7 @@ export const mockSnapshot = {
     {
       name: "legacy-runner",
       capabilities: { os: "windows", apps: ["sts2"], gpu: false },
-      current_lease_id: null,
+      current_lease_ref: null,
       last_heartbeat: ago(90),
       last_used_at: ago(560),
       drained: true,
@@ -85,7 +85,7 @@ export const mockSnapshot = {
   ],
   pending_leases: [
     {
-      id: "lease-pending-portfolio-217",
+      ref: "glimmung/leases/12",
       lease_number: 12,
       project: "glimmung",
       workflow: "issue-agent",
@@ -99,7 +99,7 @@ export const mockSnapshot = {
       ttl_seconds: 7200,
     },
     {
-      id: "lease-pending-ambience-44",
+      ref: "ambience/leases/7",
       lease_number: 7,
       project: "ambience",
       workflow: "preview-agent",
@@ -115,7 +115,7 @@ export const mockSnapshot = {
   ],
   active_leases: [
     {
-      id: "lease-active-glimmung-206",
+      ref: "glimmung/leases/11",
       lease_number: 11,
       project: "glimmung",
       workflow: "issue-agent",
@@ -632,7 +632,7 @@ function handleMockRequest(url: URL, init?: RequestInit): Response {
   if (path === "/v1/portfolio/elements/dispatch" && method === "POST") {
     return json({ state: "dispatched", lease: "claimed", run_number: 1, host: null, workflow: "portfolio-agent", detail: null });
   }
-  if (path.startsWith("/v1/lease/") && path.endsWith("/cancel") && method === "POST") return json({ ok: true });
+  if (path === "/v1/leases/cancel" && method === "POST") return json({ state: "cancelled", lease_ref: "glimmung/leases/11" });
   if (path === "/v1/signals" && method === "POST") return json({ ref: `signal:mock:${Date.now()}`, state: "pending" });
   if (["/v1/projects", "/v1/workflows", "/v1/hosts", "/v1/issues"].includes(path) && method === "POST") {
     return json({ id: `mock-${Date.now()}`, ok: true }, { status: 201 });

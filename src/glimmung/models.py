@@ -577,11 +577,36 @@ class Host(BaseModel):
     created_at: datetime
 
 
+class HostPublic(BaseModel):
+    name: str
+    capabilities: dict[str, Any] = Field(default_factory=dict)
+    current_lease_ref: str | None = None
+    last_heartbeat: datetime | None = None
+    last_used_at: datetime | None = None
+    drained: bool = False
+    created_at: datetime
+
+
 class Lease(BaseModel):
     id: str
     lease_number: int | None = None
     project: str
     workflow: str | None = None         # workflow name; null on legacy / non-workflow leases
+    host: str | None = None
+    state: LeaseState = LeaseState.PENDING
+    requirements: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    requested_at: datetime
+    assigned_at: datetime | None = None
+    released_at: datetime | None = None
+    ttl_seconds: int = 900
+
+
+class LeasePublic(BaseModel):
+    ref: str
+    lease_number: int | None = None
+    project: str
+    workflow: str | None = None
     host: str | None = None
     state: LeaseState = LeaseState.PENDING
     requirements: dict[str, Any] = Field(default_factory=dict)
@@ -601,14 +626,14 @@ class LeaseRequest(BaseModel):
 
 
 class LeaseResponse(BaseModel):
-    lease: Lease
-    host: Host | None = None
+    lease: LeasePublic
+    host: HostPublic | None = None
 
 
 class StateSnapshot(BaseModel):
-    hosts: list[Host]
-    pending_leases: list[Lease]
-    active_leases: list[Lease]
+    hosts: list[HostPublic]
+    pending_leases: list[LeasePublic]
+    active_leases: list[LeasePublic]
     projects: list[Project] = Field(default_factory=list)
     workflows: list[Workflow] = Field(default_factory=list)
 

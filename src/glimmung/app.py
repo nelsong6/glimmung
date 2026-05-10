@@ -58,11 +58,13 @@ from glimmung.models import (
     ReportVersion,
     BudgetConfig,
     Host,
+    HostPublic,
     Issue,
     IssueComment,
     IssueSource,
     IssueState,
     Lease,
+    LeasePublic,
     LeaseRequest,
     LeaseResponse,
     LeaseState,
@@ -2910,6 +2912,61 @@ async def read_artifact(blob_path: str = Path(...)) -> Response:
 # ─── Lease lifecycle (capability-based via lease_id) ─────────────────────────────
 
 
+def _lease_public_ref(lease_doc: dict[str, Any]) -> str:
+    metadata = lease_doc.get("metadata") if isinstance(lease_doc.get("metadata"), dict) else {}
+    slot_name = metadata.get("native_slot_name")
+    if not isinstance(slot_name, str) or not slot_name.strip():
+        phase_inputs = metadata.get("phase_inputs") if isinstance(metadata.get("phase_inputs"), dict) else {}
+        slot_name = phase_inputs.get("slot_name") if isinstance(phase_inputs.get("slot_name"), str) else None
+    lease_number = lease_doc.get("leaseNumber")
+    if lease_number is None:
+        lease_number = lease_doc.get("lease_number")
+    return lease_ref(
+        str(lease_doc.get("project") or ""),
+        slot_name=slot_name.strip() if isinstance(slot_name, str) and slot_name.strip() else None,
+        lease_number=int(lease_number) if isinstance(lease_number, int) else None,
+    )
+
+
+def _lease_to_public(lease: Lease | dict[str, Any]) -> LeasePublic:
+    if isinstance(lease, Lease):
+        doc = lease_ops._lease_to_doc(lease)
+    else:
+        doc = lease
+    public = lease_ops._camel_to_snake(doc)
+    public.pop("id", None)
+    public["ref"] = _lease_public_ref(doc)
+    return LeasePublic.model_validate(public)
+
+
+def _host_to_public(host: Host | dict[str, Any], lease_refs_by_id: dict[str, str]) -> HostPublic:
+    if isinstance(host, Host):
+        raw = host.model_dump()
+    else:
+        raw = lease_ops._camel_to_snake(host)
+    current_lease_id = raw.pop("current_lease_id", None)
+    raw.pop("id", None)
+    raw["current_lease_ref"] = (
+        lease_refs_by_id.get(current_lease_id) if isinstance(current_lease_id, str) else None
+    )
+    return HostPublic.model_validate(raw)
+
+
+async def _resolve_lease_ref(cosmos: Cosmos, *, project: str, ref: str) -> str:
+    ref = ref.strip()
+    if not ref:
+        raise HTTPException(400, "lease_ref required")
+    docs = await query_all(
+        cosmos.leases,
+        "SELECT * FROM c WHERE c.project = @project",
+        parameters=[{"name": "@project", "value": project}],
+    )
+    for doc in docs:
+        if _lease_public_ref(doc) == ref:
+            return str(doc["id"])
+    raise HTTPException(404, f"lease {ref!r} not found in project {project!r}")
+
+
 @app.post("/v1/lease", response_model=LeaseResponse)
 async def create_lease(request: LeaseRequest) -> LeaseResponse:
     lease, host = await lease_ops.acquire(
@@ -2921,11 +2978,15 @@ async def create_lease(request: LeaseRequest) -> LeaseResponse:
         metadata=request.metadata,
         ttl_seconds=request.ttl_seconds,
     )
-    return LeaseResponse(lease=lease, host=host)
+    public_lease = _lease_to_public(lease)
+    return LeaseResponse(
+        lease=public_lease,
+        host=_host_to_public(host, {lease.id: public_lease.ref}) if host else None,
+    )
 
 
-@app.get("/v1/lease/{lease_id}", response_model=Lease)
-async def read_lease(lease_id: str = Path(...), project: str = "") -> Lease:
+@app.get("/v1/lease/{lease_id}", response_model=LeasePublic)
+async def read_lease(lease_id: str = Path(...), project: str = "") -> LeasePublic:
     """Read a lease by id. Capability auth: possessing the (ULID) lease_id is
     the proof of authorization. The verify-lease step in consumer workflows
     hits this and asserts state=active + host matches inputs.host."""
@@ -2936,24 +2997,25 @@ async def read_lease(lease_id: str = Path(...), project: str = "") -> Lease:
         doc = await cosmos.leases.read_item(item=lease_id, partition_key=project)
     except Exception:
         raise HTTPException(404, "lease not found")
-    return Lease.model_validate(lease_ops._camel_to_snake(doc))
+    return _lease_to_public(doc)
 
 
-@app.post("/v1/lease/{lease_id}/heartbeat", response_model=Lease)
-async def heartbeat_lease(lease_id: str = Path(...), project: str = "") -> Lease:
+@app.post("/v1/lease/{lease_id}/heartbeat", response_model=LeasePublic)
+async def heartbeat_lease(lease_id: str = Path(...), project: str = "") -> LeasePublic:
     if not project:
         raise HTTPException(400, "project query param required")
     try:
-        return await lease_ops.heartbeat(app.state.cosmos, lease_id, project)
-    except ValueError as e:
-        raise HTTPException(409, str(e))
+        lease = await lease_ops.heartbeat(app.state.cosmos, lease_id, project)
+        return _lease_to_public(lease)
+    except ValueError:
+        raise HTTPException(409, "lease is not active")
 
 
-@app.post("/v1/lease/{lease_id}/release", response_model=Lease)
-async def release_lease(lease_id: str = Path(...), project: str = "") -> Lease:
+@app.post("/v1/lease/{lease_id}/release", response_model=LeasePublic)
+async def release_lease(lease_id: str = Path(...), project: str = "") -> LeasePublic:
     if not project:
         raise HTTPException(400, "project query param required")
-    return await _release_lease_from_api(app.state.cosmos, lease_id, project)
+    return _lease_to_public(await _release_lease_from_api(app.state.cosmos, lease_id, project))
 
 
 async def _release_lease_from_api(cosmos: Cosmos, lease_id: str, project: str) -> Lease:
@@ -2975,7 +3037,7 @@ async def _cleanup_test_slot_before_release(lease_doc: dict[str, Any]) -> None:
         return
     namespace = _test_slot_namespace(lease_doc)
     if not namespace:
-        raise HTTPException(409, f"test slot lease {lease_doc.get('id')} has no namespace")
+        raise HTTPException(409, "test slot lease has no namespace")
     launcher = getattr(app.state, "native_k8s_launcher", None)
     if launcher is None:
         raise HTTPException(503, "native Kubernetes launcher is not configured")
@@ -3014,8 +3076,13 @@ def _test_slot_namespace(lease_doc: dict[str, Any]) -> str:
     return ""
 
 
+class CancelLeaseRequest(BaseModel):
+    project: str
+    lease_ref: str
+
+
 class CancelLeaseResult(BaseModel):
-    """Outcome of POST /v1/lease/{lease_id}/cancel.
+    """Outcome of POST /v1/leases/cancel.
 
     `state`:
       - `cancelled`: lease released and (if Run-tracked + GH-dispatched)
@@ -3032,8 +3099,8 @@ class CancelLeaseResult(BaseModel):
         re-read.
     """
     state: str
-    lease_id: str
-    run_id: str | None = None
+    lease_ref: str
+    run_ref: str | None = None
     gh_run_cancelled: bool | None = None
     issue_lock_released: bool | None = None
     pr_lock_released: bool | None = None
@@ -3063,10 +3130,12 @@ async def _cancel_lease(
     try:
         lease_doc = await cosmos.leases.read_item(item=lease_id, partition_key=project)
     except Exception:
-        raise HTTPException(404, f"lease {lease_id} not found in project {project!r}")
+        raise HTTPException(404, "lease not found")
+
+    public_lease_ref = _lease_public_ref(lease_doc)
 
     if lease_doc["state"] in (LeaseState.RELEASED.value, LeaseState.EXPIRED.value):
-        return CancelLeaseResult(state="already_terminal", lease_id=lease_id)
+        return CancelLeaseResult(state="already_terminal", lease_ref=public_lease_ref)
 
     metadata = lease_doc.get("metadata") or {}
     issue_repo: str | None = metadata.get("issue_repo")
@@ -3129,7 +3198,7 @@ async def _cancel_lease(
         await _delete_playwright_slot_for_lease(lease_doc)
     except Exception:
         log.exception("cancel_lease: lease release failed for %s", lease_id)
-        raise HTTPException(500, f"lease release failed for {lease_id}")
+        raise HTTPException(500, "lease release failed")
 
     # 5. Release the issue lock (if held) and PR lock (if Run was holding one).
     issue_lock_released: bool | None = None
@@ -3168,8 +3237,8 @@ async def _cancel_lease(
     state = "cancelled" if (run is not None and gh_cancelled is not None) else "no_active_run"
     return CancelLeaseResult(
         state=state,
-        lease_id=lease_id,
-        run_id=run.id if run is not None else None,
+        lease_ref=public_lease_ref,
+        run_ref=run_ref(run.project, run.issue_number, run.run_display_number or run.run_number) if run is not None else None,
         gh_run_cancelled=gh_cancelled,
         issue_lock_released=issue_lock_released,
         pr_lock_released=pr_lock_released,
@@ -3182,16 +3251,26 @@ async def _cancel_lease(
     dependencies=[Depends(require_admin_user)],
 )
 async def cancel_lease(lease_id: str = Path(...), project: str = "") -> CancelLeaseResult:
-    """Admin-only endpoint that frees a host immediately by cancelling the
-    GH workflow run and releasing the lease + locks. See `_cancel_lease`
-    for the body of the operation."""
-    if not project:
-        raise HTTPException(400, "project query param required")
+    raise HTTPException(410, "cancel leases by public lease_ref via /v1/leases/cancel")
+
+
+@app.post(
+    "/v1/leases/cancel",
+    response_model=CancelLeaseResult,
+    dependencies=[Depends(require_admin_user)],
+)
+async def cancel_lease_by_ref(request: CancelLeaseRequest) -> CancelLeaseResult:
+    """Admin-only endpoint that frees a host by public lease ref."""
+    lease_id = await _resolve_lease_ref(
+        app.state.cosmos,
+        project=request.project,
+        ref=request.lease_ref,
+    )
     return await _cancel_lease(
         app.state.cosmos,
         getattr(app.state, "gh_minter", None),
         lease_id,
-        project,
+        request.project,
     )
 
 
@@ -4797,15 +4876,20 @@ async def _compute_snapshot(cosmos: Cosmos) -> StateSnapshot:
         "SELECT * FROM c WHERE c.state = @s",
         parameters=[{"name": "@s", "value": LeaseState.ACTIVE.value}],
     )
+    lease_refs_by_id = {
+        str(doc["id"]): _lease_public_ref(doc)
+        for doc in [*pending_docs, *active_docs]
+        if doc.get("id")
+    }
     # Workflows have nested phases with camelCase keys; the shallow
     # `_camel_to_snake` doesn't recurse into them, so `model_validate`
     # 500s on `phases.0.workflowFilename` not matching `workflow_filename`.
     # `_doc_to_workflow` walks the nested shape correctly. Same fix as
     # the list_workflows / register_workflow hot-fix in 4babd13.
     return StateSnapshot(
-        hosts=[Host.model_validate(lease_ops._camel_to_snake(h)) for h in host_docs],
-        pending_leases=[Lease.model_validate(lease_ops._camel_to_snake(p)) for p in pending_docs],
-        active_leases=[Lease.model_validate(lease_ops._camel_to_snake(a)) for a in active_docs],
+        hosts=[_host_to_public(h, lease_refs_by_id) for h in host_docs],
+        pending_leases=[_lease_to_public(p) for p in pending_docs],
+        active_leases=[_lease_to_public(a) for a in active_docs],
         projects=[Project.model_validate(lease_ops._camel_to_snake(d)) for d in project_docs],
         workflows=[w for d in workflow_docs if (w := _doc_to_workflow(d)) is not None],
     )
