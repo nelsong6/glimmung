@@ -26,8 +26,8 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { authedFetch } from "./auth";
-import { PhaseGraph, type PhaseGraphPhase } from "./PhaseGraph";
-import type { RecycleArrow } from "./recycleLayout";
+import { PhaseGraph, type PhaseGraphPhase, type RecycleArrow } from "./PhaseGraph";
+import { fallbackPhaseGraphModel, workflowToPhaseGraphModel } from "./workflowGraphModel";
 
 type IssueDetail = {
   ref: string;
@@ -1112,77 +1112,18 @@ function DefinitionDag({
   project: string;
 }) {
   const location = useLocation();
-  const phases = workflow?.phases.length
-    ? workflow.phases
-    : [{
-        name: "phase",
-        kind: "phase",
-        workflow_filename: "",
-        workflow_ref: "main",
-        verify: false,
-        recycle_policy: null,
-      }];
-  const policies = workflow ? [
-    ...phases.flatMap((phase) => phase.recycle_policy ? [{
-      source: phase.name,
-      target: phase.recycle_policy.lands_at,
-      trigger: phase.recycle_policy.on.join(" / ") || "recycle",
-      max: phase.recycle_policy.max_attempts,
-    }] : []),
-    ...(workflow.pr.recycle_policy ? [{
-      source: "touchpoint",
-      target: workflow.pr.recycle_policy.lands_at,
-      trigger: workflow.pr.recycle_policy.on.join(" / ") || "feedback",
-      max: workflow.pr.recycle_policy.max_attempts,
-    }] : []),
-  ] : [];
+  const graphModel = workflow
+    ? workflowToPhaseGraphModel(workflow)
+    : fallbackPhaseGraphModel(["phase"]);
   return (
     <div className="dag-wrap">
-      <div className="dag dag-definition" aria-label="workflow definition">
-        {workflow && (
-          <>
-            <div className="dag-entry">
-              <span className="mono">entry</span>
-              <span className="dim mono">{workflow.trigger_label}</span>
-            </div>
-            <div className="dag-edge" aria-hidden="true">→</div>
-          </>
-        )}
-        {phases.map((phase, index) => (
-          <Fragment key={phase.name}>
-            {index > 0 && <div className="dag-edge" aria-hidden="true">→</div>}
-            <div className="dag-node dag-node-definition">
-              <div className="dag-node-label">{phase.name}</div>
-              <div className="dag-node-meta dim mono">{phase.verify ? "verify" : phase.kind}</div>
-            </div>
-          </Fragment>
-        ))}
-        {(!workflow || workflow.pr.enabled) && (
-          <>
-            <div className="dag-edge" aria-hidden="true">→</div>
-            <div className="dag-node dag-node-definition dag-node-pr">
-              <div className="dag-node-label">touchpoint</div>
-              <div className="dag-node-meta dim mono">PR primitive</div>
-            </div>
-          </>
-        )}
-      </div>
-      {policies.length > 0 && (
-        <div className="dag-policy-rail" aria-label="recycle policies">
-          {policies.map((policy) => (
-            <span
-              className="dag-policy inactive"
-              key={`${policy.source}:${policy.target}:${policy.trigger}`}
-              title={`${policy.trigger}; max ${policy.max}`}
-            >
-              <span className="mono">{policy.source}</span>
-              <span className="dim mono">↻</span>
-              <span className="mono">{policy.target}</span>
-              <span className="dim mono">{policy.trigger}</span>
-            </span>
-          ))}
-        </div>
-      )}
+      <PhaseGraph
+        phases={graphModel.phases}
+        prEnabled={graphModel.prEnabled}
+        dagClassName="dag-definition"
+        ariaLabel="workflow definition"
+        recycleArrows={graphModel.recycleArrows}
+      />
       {!workflow && (
         <div className="dim mono" style={{ marginTop: "0.5rem" }}>
           Workflow definition unavailable in the current snapshot.
@@ -1234,24 +1175,19 @@ function PipelineDag({
     () => workflowGraphMeta(meta.workflow_graph),
     [meta.workflow_graph],
   );
-  // PhaseGraph drives layout from workflow.phases (declared order +
-  // depends_on for column grouping). When the workflow definition isn't
-  // available yet (rare — pre-snapshot window), fall back to the
-  // run-derived rollup names so we still render something.
-  const phasesForLayout: PhaseGraphPhase[] = useMemo(() => {
-    if (workflow?.phases?.length) {
-      return workflow.phases.map((p) => ({
-        name: p.name,
-        kind: p.kind,
-        verify: p.verify,
-        always: p.always,
-        evidence_verification_gate: (p as { evidence_verification_gate?: boolean })
-          .evidence_verification_gate,
-        depends_on: (p as { depends_on?: string[] }).depends_on ?? [],
-      }));
-    }
-    return phaseRollups.map((p) => ({ name: p.phaseName, kind: "phase" }));
-  }, [workflow, phaseRollups]);
+  // Workflow topology comes from the same adapter as the definition page.
+  // Run attempts only paint state onto those phase slots.
+  const graphModel = useMemo(() => {
+    if (workflow) return workflowToPhaseGraphModel(workflow);
+    return fallbackPhaseGraphModel(
+      workflowGraph?.phases.length ? workflowGraph.phases : phaseRollups.map((p) => p.phaseName),
+      {
+        currentPhase: phaseRollups[0]?.phaseName ?? null,
+        prEnabled: workflowGraph?.terminal.enabled ?? true,
+        recycleArrows: workflowGraph?.recycle_arrows ?? [],
+      },
+    );
+  }, [workflow, workflowGraph, phaseRollups]);
   const activeEntry = stringOrNull(meta.entrypoint_phase)
     ?? workflowGraph?.default_entry?.target
     ?? phaseRollups[0]?.phaseName
@@ -1347,13 +1283,13 @@ function PipelineDag({
   return (
     <div className="dag-wrap">
       <PhaseGraph
-        phases={phasesForLayout}
-        prEnabled={true}
+        phases={graphModel.phases}
+        prEnabled={graphModel.prEnabled}
         renderPhase={renderPhase}
         renderTouchpoint={renderTouchpoint}
         ariaLabel="pipeline"
         entryPhaseName={activeEntry}
-        recycleArrows={workflowGraph?.recycle_arrows ?? []}
+        recycleArrows={graphModel.recycleArrows}
       />
     </div>
   );

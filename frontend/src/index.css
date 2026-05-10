@@ -2052,67 +2052,6 @@ h2 .inline-action,
   pointer-events: none;
   z-index: 0;
 }
-.dag-advance-path {
-  color: var(--fg-dimmer);
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.5;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-/* Highlights the arrow leading into the phase a run actually entered
-   (default phase[0] for fresh runs; entrypoint_phase for resumed /
-   recycle children). Pairs with the "the run entered here" tooltip
-   on the same element. Contrasts with the dim recycle arrows in the
-   recycle band below. */
-.dag-advance-path.entry {
-  color: var(--state-success-fg);
-}
-
-/* Recycle policy band. Sits below the main pipeline row in PipelineDag
-   and renders orthogonal paths: source phase → target phase, exiting
-   the source's bottom-center and threading a horizontal lane. Multiple
-   arrows landing on the same phase get separate target ports and
-   approach lanes so directed arrows never collapse into the same stroke.
-   Inactive policies (`max_attempts: 0`, scaffolded but disabled) draw
-   dashed + dim. */
-.dag-recycle-band {
-  position: relative;
-  width: 100%;
-  margin-top: 4px;
-}
-.dag-recycle-band > svg {
-  display: block;
-  overflow: visible;
-}
-/* Wide invisible stroke layered behind each visible path so the
-   browser-native SVG <title> tooltip has a 14px-thick hit zone
-   instead of the 1.25px visible stroke. Without this, hovering
-   reliably onto the path is nearly impossible. */
-.dag-recycle-hitarea {
-  fill: none;
-  stroke: transparent;
-  stroke-width: 14;
-  pointer-events: stroke;
-  cursor: help;
-}
-.dag-recycle-band path {
-  pointer-events: visibleStroke;
-}
-.dag-recycle-path {
-  fill: none;
-  stroke: var(--fg-dimmer);
-  stroke-width: 1.5;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-.dag-recycle-path.inactive {
-  stroke-dasharray: 4 3;
-  stroke: color-mix(in srgb, var(--fg-dimmer) 70%, transparent);
-}
-.dag-recycle-path.fired {
-  stroke: var(--state-success-fg);
-}
 .dag-policy-rail {
   display: flex;
   flex-wrap: wrap;
