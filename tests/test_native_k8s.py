@@ -60,6 +60,10 @@ class _RecordingLauncher(NativeKubernetesLauncher):
 
 
 class _RecordingAzureLauncher(_RecordingLauncher):
+    def __init__(self, settings, *, redirect_uris: list[str] | None = None):
+        super().__init__(settings)
+        self.redirect_uris = redirect_uris or ["https://existing.example/"]
+
     async def _arm_request(self, method: str, path: str, *, json=None):
         self.calls.append({"method": method, "path": path, "json": json})
         return {}
@@ -71,7 +75,7 @@ class _RecordingAzureLauncher(_RecordingLauncher):
                 "id": "app-object-id",
                 "appId": "client-id",
                 "displayName": "test-app",
-                "spa": {"redirectUris": ["https://existing.example/"]},
+                "spa": {"redirectUris": self.redirect_uris},
             }
         return {}
 
@@ -472,6 +476,51 @@ async def test_reconcile_standby_entra_redirects_upserts_slot_redirect_uris():
                 "https://existing.example/",
                 "https://tank-slot-1.tank.dev.romaine.life/",
                 "https://tank-slot-2.tank.dev.romaine.life/",
+            ]
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_reconcile_standby_entra_redirects_prunes_stale_managed_slots():
+    launcher = _RecordingAzureLauncher(
+        _settings(),
+        redirect_uris=[
+            "https://existing.example/",
+            "https://tank-slot-1.tank.dev.romaine.life/",
+            "https://tank-slot-2.tank.dev.romaine.life/",
+            "https://tank-slot-3.tank.dev.romaine.life/",
+            "https://other-slot-3.tank.dev.romaine.life/",
+        ],
+    )
+
+    await launcher.reconcile_standby_entra_redirects([
+        {
+            "id": "tank-operator",
+            "name": "tank-operator",
+            "metadata": {
+                "native_standby_dns": {
+                    "enabled": True,
+                    "record_base": "tank.dev.romaine.life",
+                    "slot_prefix": "tank-slot",
+                    "count": 2,
+                },
+                "native_standby_entra_redirects": {
+                    "enabled": True,
+                    "application_app_id": "client-id",
+                },
+            },
+        }
+    ])
+
+    assert [call["method"] for call in launcher.calls] == ["GET", "PATCH"]
+    assert launcher.calls[1]["json"] == {
+        "spa": {
+            "redirectUris": [
+                "https://existing.example/",
+                "https://tank-slot-1.tank.dev.romaine.life/",
+                "https://tank-slot-2.tank.dev.romaine.life/",
+                "https://other-slot-3.tank.dev.romaine.life/",
             ]
         }
     }

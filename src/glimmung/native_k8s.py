@@ -905,16 +905,21 @@ class NativeKubernetesLauncher:
             raise NativeLaunchError("Entra application response did not include object id")
 
         current = list(((app.get("spa") or {}).get("redirectUris")) or [])
-        merged = list(current)
-        for uri in config["redirect_uris"]:
-            if uri not in merged:
-                merged.append(uri)
-        if merged == current:
+        desired = list(config["redirect_uris"])
+        reconciled = [
+            uri
+            for uri in current
+            if uri in desired or not _is_managed_standby_redirect_uri(uri, config)
+        ]
+        for uri in desired:
+            if uri not in reconciled:
+                reconciled.append(uri)
+        if reconciled == current:
             return
         await self._graph_request(
             "PATCH",
             f"/applications/{quote(app_id, safe='')}",
-            json={"spa": {"redirectUris": merged}},
+            json={"spa": {"redirectUris": reconciled}},
         )
 
     async def _resolve_entra_application(self, config: dict[str, Any]) -> dict[str, Any]:
@@ -1790,21 +1795,25 @@ def _standby_entra_redirect_config(
     if not application_object_id and not application_app_id and not display_name:
         return None
 
-    redirect_uris = _standby_entra_redirect_uris(project_doc, settings, raw)
+    dns_config = _standby_dns_config(project_doc, settings)
+    redirect_uris = _standby_entra_redirect_uris(raw, dns_config)
     if not redirect_uris:
         return None
-    return {
+    config = {
         "application_object_id": application_object_id,
         "application_app_id": application_app_id,
         "display_name": display_name,
         "redirect_uris": redirect_uris,
     }
+    if dns_config is not None:
+        config["managed_slot_prefix"] = dns_config["slot_prefix"]
+        config["managed_record_base"] = dns_config["record_base"]
+    return config
 
 
 def _standby_entra_redirect_uris(
-    project_doc: dict[str, Any],
-    settings: Settings,
     raw: dict[str, Any],
+    dns_config: dict[str, Any] | None,
 ) -> list[str]:
     wanted: list[str] = []
     for key in ("redirect_uris", "redirectUris"):
@@ -1812,7 +1821,7 @@ def _standby_entra_redirect_uris(
         if isinstance(values, list):
             wanted.extend(str(value) for value in values)
 
-    if not wanted and (dns_config := _standby_dns_config(project_doc, settings)) is not None:
+    if not wanted and dns_config is not None:
         wanted.extend(
             f"https://{dns_config['slot_prefix']}-{slot}.{dns_config['record_base']}/"
             for slot in range(1, int(dns_config["count"]) + 1)
@@ -1837,6 +1846,20 @@ def _normalize_redirect_uri(uri: str) -> str:
     if not value.endswith("/"):
         value = f"{value}/"
     return value
+
+
+def _is_managed_standby_redirect_uri(uri: str, config: dict[str, Any]) -> bool:
+    slot_prefix = str(config.get("managed_slot_prefix") or "").strip()
+    record_base = str(config.get("managed_record_base") or "").strip()
+    if not slot_prefix or not record_base:
+        return False
+    value = _normalize_redirect_uri(uri)
+    prefix = f"https://{slot_prefix}-"
+    suffix = f".{record_base}/"
+    if not value.startswith(prefix) or not value.endswith(suffix):
+        return False
+    slot = value[len(prefix):-len(suffix)]
+    return slot.isdigit() and int(slot) > 0
 
 
 def _graph_filter_literal(value: str) -> str:
