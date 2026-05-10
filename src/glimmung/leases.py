@@ -188,7 +188,7 @@ async def acquire(
                 project=project,
                 workflow=workflow,
                 host=candidate["name"],
-                state=LeaseState.ACTIVE,
+                state=LeaseState.CLAIMED,
                 requirements=requirements,
                 metadata=metadata,
                 requested_at=datetime.fromisoformat(now),
@@ -257,22 +257,22 @@ async def acquire_native(
     slot_index = await _available_native_slot(cosmos, settings, project=project, metadata=metadata)
     if slot_index is not None:
         _set_native_slot_metadata(native_metadata, project=project, slot_index=slot_index)
-    state = LeaseState.ACTIVE if slot_index is not None else LeaseState.PENDING
+    state = LeaseState.CLAIMED if slot_index is not None else LeaseState.PENDING
     lease = Lease(
         id=str(ULID()),
         lease_number=lease_number,
         project=project,
         workflow=workflow,
-        host=NATIVE_K8S_HOST if state == LeaseState.ACTIVE else None,
+        host=NATIVE_K8S_HOST if state == LeaseState.CLAIMED else None,
         state=state,
         requirements=requirements,
         metadata=native_metadata,
         requested_at=datetime.fromisoformat(now),
-        assigned_at=datetime.fromisoformat(now) if state == LeaseState.ACTIVE else None,
+        assigned_at=datetime.fromisoformat(now) if state == LeaseState.CLAIMED else None,
         ttl_seconds=ttl,
     )
     await cosmos.leases.create_item(_lease_to_doc(lease))
-    return lease, _native_host(now) if state == LeaseState.ACTIVE else None
+    return lease, _native_host(now) if state == LeaseState.CLAIMED else None
 
 
 async def native_capacity_available(
@@ -318,7 +318,7 @@ async def _active_native_leases(cosmos: Cosmos) -> list[dict[str, Any]]:
     return await query_all(
         cosmos.leases,
         "SELECT * FROM c WHERE c.state = @s AND c.metadata.native_k8s = true",
-        parameters=[{"name": "@s", "value": LeaseState.ACTIVE.value}],
+        parameters=[{"name": "@s", "value": LeaseState.CLAIMED.value}],
     )
 
 
@@ -366,7 +366,7 @@ def _set_native_slot_metadata(
 
 async def heartbeat(cosmos: Cosmos, lease_id: str, project: str) -> Lease:
     lease_doc = await cosmos.leases.read_item(item=lease_id, partition_key=project)
-    if lease_doc["state"] != LeaseState.ACTIVE.value:
+    if lease_doc["state"] != LeaseState.CLAIMED.value:
         raise ValueError(f"lease {lease_id} is in state {lease_doc['state']}, cannot heartbeat")
 
     host_name = lease_doc["host"]
@@ -426,7 +426,7 @@ async def try_assign_pending(cosmos: Cosmos, lease_doc: dict[str, Any]) -> Host 
                 match_condition=MatchConditions.IfNotModified,
             )
             lease_doc["host"] = candidate["name"]
-            lease_doc["state"] = LeaseState.ACTIVE.value
+            lease_doc["state"] = LeaseState.CLAIMED.value
             lease_doc["assignedAt"] = now
             await cosmos.leases.replace_item(item=lease_doc["id"], body=lease_doc)
             return Host.model_validate(_camel_to_snake(updated))
@@ -459,7 +459,7 @@ async def try_activate_native_pending(
     _set_native_slot_metadata(metadata, project=lease_doc["project"], slot_index=slot_index)
     lease_doc["metadata"] = metadata
     lease_doc["host"] = NATIVE_K8S_HOST
-    lease_doc["state"] = LeaseState.ACTIVE.value
+    lease_doc["state"] = LeaseState.CLAIMED.value
     lease_doc["assignedAt"] = now
     await cosmos.leases.replace_item(item=lease_doc["id"], body=lease_doc)
     return _native_host(now)
@@ -548,7 +548,7 @@ async def sweep_expired(cosmos: Cosmos, settings: Settings) -> int:
             "AND c.assignedAt < @cutoff"
         ),
         parameters=[
-            {"name": "@s", "value": LeaseState.ACTIVE.value},
+            {"name": "@s", "value": LeaseState.CLAIMED.value},
             {"name": "@cutoff", "value": cutoff},
         ],
     )

@@ -98,6 +98,10 @@ from glimmung.models import (
     SignalState,
     SignalTargetType,
     StateSnapshot,
+    TestEnvironmentPublic,
+    TestEnvironmentState,
+    TestSlotRequestPublic,
+    TestSlotRequestState,
     TriageDecision,
     VerificationResult,
     Workflow,
@@ -571,6 +575,7 @@ async def _promote_loop(app: FastAPI, settings: Settings) -> None:
     Fires the appropriate runner for each newly-assigned lease."""
     while True:
         try:
+            await _fulfill_waiting_test_slot_requests(app)
             native_assigned = await lease_ops.promote_pending_native(app.state.cosmos, settings)
             for lease_doc, host in native_assigned:
                 await _maybe_dispatch_workflow(app, lease_doc, host)
@@ -580,6 +585,59 @@ async def _promote_loop(app: FastAPI, settings: Settings) -> None:
         except Exception:
             log.exception("promote_pending failed; will retry")
         await asyncio.sleep(settings.sweep_interval_seconds)
+
+
+async def _fulfill_waiting_test_slot_requests(app: FastAPI) -> list[dict[str, Any]]:
+    cosmos: Cosmos = app.state.cosmos
+    waiting = await query_all(
+        cosmos.leases,
+        (
+            "SELECT * FROM c WHERE c.kind = @kind AND c.state = @state "
+            "ORDER BY c.requestedAt ASC"
+        ),
+        parameters=[
+            {"name": "@kind", "value": "test_slot_request"},
+            {"name": "@state", "value": TestSlotRequestState.WAITING.value},
+        ],
+    )
+    fulfilled: list[dict[str, Any]] = []
+    for request_doc in waiting:
+        metadata = dict(request_doc.get("metadata") or {})
+        requested_slot_index = _int_or_none(request_doc.get("requestedSlotIndex"))
+        phase_inputs = metadata.get("phase_inputs") if isinstance(metadata.get("phase_inputs"), dict) else {}
+        if requested_slot_index is not None:
+            phase_inputs = {**phase_inputs, "validation_slot_index": str(requested_slot_index)}
+            metadata["phase_inputs"] = phase_inputs
+        lease, host = await lease_ops.acquire_native(
+            cosmos,
+            app.state.settings,
+            project=str(request_doc["project"]),
+            workflow=str(request_doc.get("workflow") or "test-slot-checkout"),
+            requirements={},
+            metadata=metadata,
+            ttl_seconds=int(request_doc.get("ttlSeconds") or app.state.settings.lease_default_ttl_seconds),
+        )
+        if host is None:
+            try:
+                await cosmos.leases.delete_item(item=lease.id, partition_key=str(request_doc["project"]))
+            except Exception:
+                log.exception("failed to delete unclaimed fulfillment attempt %s", lease.id)
+            continue
+        lease_doc = lease_ops._lease_to_doc(lease)
+        try:
+            project_doc = await _read_project(cosmos, str(request_doc["project"]))
+            await _reconcile_standby_entra_redirects(app, [project_doc] if project_doc else [])
+            await _ensure_test_env_for_lease(lease_doc)
+        except Exception:
+            await lease_ops.release(cosmos, lease.id, str(request_doc["project"]))
+            log.exception("failed to prepare fulfilled test request %s", request_doc.get("id"))
+            continue
+        request_doc["state"] = TestSlotRequestState.FULFILLED.value
+        request_doc["fulfilledAt"] = datetime.now(UTC).isoformat()
+        request_doc["fulfilledLeaseRef"] = _lease_public_ref(lease_doc)
+        await cosmos.leases.replace_item(item=request_doc["id"], body=request_doc)
+        fulfilled.append(lease_doc)
+    return fulfilled
 
 
 async def _standby_dns_loop(app: FastAPI, settings: Settings) -> None:
@@ -840,7 +898,7 @@ async def _release_native_run_leases(cosmos: Cosmos, run: Run) -> int:
         ),
         parameters=[
             {"name": "@p", "value": run.project},
-            {"name": "@active", "value": LeaseState.ACTIVE.value},
+            {"name": "@active", "value": LeaseState.CLAIMED.value},
             {"name": "@pending", "value": LeaseState.PENDING.value},
             {"name": "@r", "value": run.id},
         ],
@@ -863,7 +921,7 @@ async def _active_native_lease_docs(cosmos: Cosmos) -> list[dict[str, Any]]:
     return await query_all(
         cosmos.leases,
         "SELECT * FROM c WHERE c.state = @s AND c.metadata.native_k8s = true",
-        parameters=[{"name": "@s", "value": LeaseState.ACTIVE.value}],
+        parameters=[{"name": "@s", "value": LeaseState.CLAIMED.value}],
     )
 
 
@@ -2978,7 +3036,42 @@ def _lease_to_public(lease: Lease | dict[str, Any]) -> LeasePublic:
     public = lease_ops._camel_to_snake(doc)
     public.pop("id", None)
     public["ref"] = _lease_public_ref(doc)
+    metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+    if isinstance(metadata.get("requester"), dict):
+        public["requester"] = metadata["requester"]
     return LeasePublic.model_validate(public)
+
+
+def _test_request_public_ref(doc: dict[str, Any]) -> str:
+    return f"{doc.get('project', '')}/test-requests/{doc.get('id', '')}"
+
+
+def _test_request_to_public(doc: dict[str, Any]) -> TestSlotRequestPublic:
+    metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+    requester = None
+    if isinstance(metadata.get("requester"), dict):
+        requester = LeaseRequester.model_validate(metadata["requester"])
+    return TestSlotRequestPublic(
+        ref=_test_request_public_ref(doc),
+        project=str(doc["project"]),
+        workflow=str(doc.get("workflow") or "test-slot-checkout"),
+        state=TestSlotRequestState(str(doc["state"])),
+        requested_slot_index=_int_or_none(doc.get("requestedSlotIndex")),
+        requester=requester,
+        metadata=metadata,
+        requested_at=datetime.fromisoformat(str(doc["requestedAt"])),
+        fulfilled_at=datetime.fromisoformat(str(doc["fulfilledAt"])) if doc.get("fulfilledAt") else None,
+        fulfilled_lease_ref=doc.get("fulfilledLeaseRef"),
+        ttl_seconds=int(doc.get("ttlSeconds") or 900),
+    )
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _requester_metadata(requester: LeaseRequester) -> dict[str, Any]:
@@ -3002,10 +3095,39 @@ def _test_slot_requester(req: Any) -> LeaseRequester:
             consumer="tank-operator",
             kind="tank_session",
             ref=f"tank-operator/session/{tank_session_id}",
-            label=tank_session_id,
+            label=f"tank-operator/session/{tank_session_id}",
             metadata={"tank_session_id": tank_session_id},
         )
     raise HTTPException(400, "requester required; pass requester or tank_session_id")
+
+
+async def _convert_unclaimed_test_lease_to_waiting_request(
+    cosmos: Cosmos,
+    lease: Lease,
+    *,
+    requested_slot_index: int | None,
+) -> dict[str, Any]:
+    """Replace the transitional unclaimed lease document with a request.
+
+    `acquire_native` is still the allocator entrypoint. When no concrete env
+    is available, checkout callers should see a waiting request, not a lease.
+    """
+    doc = lease_ops._lease_to_doc(lease)
+    request_doc = {
+        "id": doc["id"],
+        "kind": "test_slot_request",
+        "project": doc["project"],
+        "workflow": doc.get("workflow") or "test-slot-checkout",
+        "state": TestSlotRequestState.WAITING.value,
+        "requestedSlotIndex": requested_slot_index,
+        "metadata": doc.get("metadata") or {},
+        "requestedAt": doc["requestedAt"],
+        "fulfilledAt": None,
+        "fulfilledLeaseRef": None,
+        "ttlSeconds": doc.get("ttlSeconds") or 900,
+    }
+    await cosmos.leases.replace_item(item=doc["id"], body=request_doc)
+    return request_doc
 
 
 def _host_to_public(host: Host | dict[str, Any], lease_refs_by_id: dict[str, str]) -> HostPublic:
@@ -3140,7 +3262,7 @@ async def _cleanup_test_slot_before_release(lease_doc: dict[str, Any]) -> None:
     metadata = lease_doc.get("metadata") or {}
     if metadata.get("test_slot_checkout") is not True:
         return
-    if lease_doc.get("state") != LeaseState.ACTIVE.value:
+    if lease_doc.get("state") != LeaseState.CLAIMED.value:
         return
     namespace = _test_slot_namespace(lease_doc)
     if not namespace:
@@ -5207,6 +5329,101 @@ async def resume_run_by_number(
     return await resume_run(req, project=project, run_id=run.id)
 
 
+def _test_environments_from_snapshot(
+    *,
+    project_docs: list[dict[str, Any]],
+    claimed_lease_docs: list[dict[str, Any]],
+    waiting_requests: list[TestSlotRequestPublic],
+) -> list[TestEnvironmentPublic]:
+    claimed_test_leases = [
+        doc for doc in claimed_lease_docs
+        if isinstance(doc.get("metadata"), dict)
+        and doc["metadata"].get("test_slot_checkout") is True
+    ]
+    projects = {
+        str(doc.get("name") or doc.get("id") or ""): doc
+        for doc in project_docs
+        if str(doc.get("name") or doc.get("id") or "")
+    }
+    project_names = set(projects)
+    project_names.update(str(doc.get("project")) for doc in claimed_test_leases if doc.get("project"))
+    project_names.update(req.project for req in waiting_requests)
+
+    environments: list[TestEnvironmentPublic] = []
+    for project in sorted(project_names):
+        slots_by_index: dict[int, dict[str, Any]] = {}
+        for doc in claimed_test_leases:
+            if doc.get("project") != project:
+                continue
+            slot = _int_or_none((doc.get("metadata") or {}).get("native_slot_index"))
+            if slot is not None:
+                slots_by_index[slot] = doc
+        waiting_by_index: dict[int, list[TestSlotRequestPublic]] = {}
+        for req in waiting_requests:
+            if req.project != project or req.requested_slot_index is None:
+                continue
+            waiting_by_index.setdefault(req.requested_slot_index, []).append(req)
+
+        slot_count = max(
+            _project_test_slot_count(projects.get(project)),
+            *(slots_by_index.keys() or [0]),
+            *(waiting_by_index.keys() or [0]),
+        )
+        if slot_count == 0:
+            continue
+        for slot_index in range(1, slot_count + 1):
+            lease_doc = slots_by_index.get(slot_index)
+            environments.append(TestEnvironmentPublic(
+                project=project,
+                slot_index=slot_index,
+                slot_name=_test_environment_name(project, slot_index, lease_doc, projects.get(project)),
+                state=TestEnvironmentState.CLAIMED if lease_doc else TestEnvironmentState.AVAILABLE,
+                lease=_lease_to_public(lease_doc) if lease_doc else None,
+                waiting_requests=waiting_by_index.get(slot_index, []),
+            ))
+    return environments
+
+
+def _project_test_slot_count(project_doc: dict[str, Any] | None) -> int:
+    if not project_doc:
+        return 0
+    metadata = project_doc.get("metadata") if isinstance(project_doc.get("metadata"), dict) else {}
+    standby_dns = metadata.get("native_standby_dns") if isinstance(metadata.get("native_standby_dns"), dict) else {}
+    explicit_count = _int_or_none(standby_dns.get("count"))
+    if explicit_count is not None:
+        return explicit_count
+    if metadata.get("native_webapp") is True or metadata.get("app_kind") == "native_webapp":
+        return max(1, int(getattr(app.state.settings, "native_runner_project_concurrency", 1)))
+    return 0
+
+
+def _test_environment_name(
+    project: str,
+    slot_index: int,
+    lease_doc: dict[str, Any] | None,
+    project_doc: dict[str, Any] | None = None,
+) -> str:
+    if lease_doc:
+        slot_name = (lease_doc.get("metadata") or {}).get("native_slot_name")
+        if isinstance(slot_name, str) and slot_name.strip():
+            return slot_name
+    return f"{_project_test_slot_prefix(project, project_doc)}-{slot_index}"
+
+
+def _project_test_slot_prefix(project: str, project_doc: dict[str, Any] | None) -> str:
+    if project_doc and isinstance(project_doc.get("metadata"), dict):
+        metadata = project_doc["metadata"]
+        standby_dns = (
+            metadata.get("native_standby_dns")
+            if isinstance(metadata.get("native_standby_dns"), dict)
+            else {}
+        )
+        slot_prefix = standby_dns.get("slot_prefix") or standby_dns.get("slotPrefix")
+        if isinstance(slot_prefix, str) and slot_prefix.strip():
+            return slot_prefix.strip().strip(".")
+    return project
+
+
 async def _compute_snapshot(cosmos: Cosmos) -> StateSnapshot:
     host_docs = await query_all(cosmos.hosts, "SELECT * FROM c")
     project_docs = await query_all(cosmos.projects, "SELECT * FROM c")
@@ -5219,7 +5436,21 @@ async def _compute_snapshot(cosmos: Cosmos) -> StateSnapshot:
     active_docs = await query_all(
         cosmos.leases,
         "SELECT * FROM c WHERE c.state = @s",
-        parameters=[{"name": "@s", "value": LeaseState.ACTIVE.value}],
+        parameters=[{"name": "@s", "value": LeaseState.CLAIMED.value}],
+    )
+    waiting_test_request_docs = await query_all(
+        cosmos.leases,
+        "SELECT * FROM c WHERE c.kind = @kind AND c.state = @state",
+        parameters=[
+            {"name": "@kind", "value": "test_slot_request"},
+            {"name": "@state", "value": TestSlotRequestState.WAITING.value},
+        ],
+    )
+    waiting_test_requests = [_test_request_to_public(doc) for doc in waiting_test_request_docs]
+    test_environments = _test_environments_from_snapshot(
+        project_docs=project_docs,
+        claimed_lease_docs=active_docs,
+        waiting_requests=waiting_test_requests,
     )
     lease_refs_by_id = {
         str(doc["id"]): _lease_public_ref(doc)
@@ -5235,6 +5466,8 @@ async def _compute_snapshot(cosmos: Cosmos) -> StateSnapshot:
         hosts=[_host_to_public(h, lease_refs_by_id) for h in host_docs],
         pending_leases=[_lease_to_public(p) for p in pending_docs],
         active_leases=[_lease_to_public(a) for a in active_docs],
+        test_environments=test_environments,
+        waiting_test_slot_requests=waiting_test_requests,
         projects=[Project.model_validate(lease_ops._camel_to_snake(d)) for d in project_docs],
         workflows=[w for d in workflow_docs if (w := _doc_to_workflow(d)) is not None],
     )
@@ -5309,6 +5542,49 @@ async def list_projects(
         if limit is not None and len(rows) >= limit:
             break
     return rows
+
+
+class TestEnvironmentScaleRequest(BaseModel):
+    count: int = Field(ge=0, le=50)
+
+
+@app.patch(
+    "/v1/projects/{project}/test-environments/count",
+    response_model=Project,
+    dependencies=[Depends(require_admin_user)],
+)
+async def scale_project_test_environments(
+    project: str,
+    req: TestEnvironmentScaleRequest,
+) -> Project:
+    cosmos: Cosmos = app.state.cosmos
+    try:
+        doc = await cosmos.projects.read_item(item=project, partition_key=project)
+    except Exception:
+        raise HTTPException(404, "project not found")
+
+    metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+    standby_dns = (
+        metadata.get("native_standby_dns")
+        if isinstance(metadata.get("native_standby_dns"), dict)
+        else {}
+    )
+    metadata = dict(metadata)
+    metadata["native_standby_dns"] = {**standby_dns, "count": req.count}
+    doc["metadata"] = metadata
+    await cosmos.projects.replace_item(item=project, body=doc)
+    try:
+        await _reconcile_standby_resources(app, [doc])
+    except Exception:
+        log.exception(
+            "standby resource reconcile failed for project %s; background loop will retry",
+            project,
+        )
+    try:
+        await _reconcile_standby_entra_redirects(app, [doc])
+    except Exception:
+        log.exception("standby Entra redirect reconcile failed for project %s", project)
+    return Project.model_validate(lease_ops._camel_to_snake(doc))
 
 
 @app.post("/v1/workflows", response_model=Workflow, dependencies=[Depends(require_admin_user)])
@@ -8290,12 +8566,7 @@ async def dispatch_run_endpoint(req: DispatchRequest) -> PublicDispatchResult:
     dependencies=[Depends(require_admin_user)],
 )
 async def checkout_test_slot(req: TestSlotCheckoutRequest) -> TestSlotCheckoutResult:
-    """Reserve a native app test slot and prepare its test environment.
-
-    This records the reservation as a native lease so dashboards, sweepers,
-    and other slot users see the capacity as occupied. It does not create an
-    Issue, create a Run, or dispatch a workflow.
-    """
+    """Claim a native app test env, or record a waiting checkout request."""
     project = req.project.strip()
     if not project:
         raise HTTPException(400, "project required")
@@ -8309,8 +8580,11 @@ async def checkout_test_slot(req: TestSlotCheckoutRequest) -> TestSlotCheckoutRe
         raise HTTPException(400, f"project {project!r} not registered")
 
     workflow_name = req.workflow or "test-slot-checkout"
-    slot_prefix = project
-    slot_name = f"{slot_prefix}-{req.slot_index}" if req.slot_index is not None else None
+    slot_name = (
+        _test_environment_name(project, req.slot_index, None, project_doc)
+        if req.slot_index is not None
+        else None
+    )
     requester = _test_slot_requester(req)
     phase_inputs = {str(k): str(v) for k, v in req.phase_inputs.items()}
     if req.slot_index is not None:
@@ -8330,6 +8604,7 @@ async def checkout_test_slot(req: TestSlotCheckoutRequest) -> TestSlotCheckoutRe
             "test_slot_checkout": True,
             "test_slot_mode": mode,
             "phase_inputs": phase_inputs,
+            **({lease_ops.NATIVE_SLOT_NAME_METADATA_KEY: slot_name} if slot_name else {}),
             **_requester_metadata(requester),
         },
         ttl_seconds=req.ttl_seconds,
@@ -8342,6 +8617,23 @@ async def checkout_test_slot(req: TestSlotCheckoutRequest) -> TestSlotCheckoutRe
         except Exception:
             await lease_ops.release(cosmos, lease.id, project)
             raise HTTPException(500, "failed to prepare test environment for slot")
+    else:
+        request_doc = await _convert_unclaimed_test_lease_to_waiting_request(
+            cosmos,
+            lease,
+            requested_slot_index=req.slot_index,
+        )
+        request = _test_request_to_public(request_doc)
+        return TestSlotCheckoutResult(
+            state=request.state.value,
+            project=project,
+            workflow=workflow_name,
+            slot_index=req.slot_index,
+            slot_name=slot_name,
+            lease=request.ref,
+            host=None,
+            detail="slot unavailable; checkout request is waiting",
+        )
     actual_slot_index = lease.metadata.get("native_slot_index")
     actual_slot_name = lease.metadata.get("native_slot_name") or slot_name
     return TestSlotCheckoutResult(
@@ -8377,7 +8669,7 @@ async def return_test_slot(req: TestSlotReturnRequest) -> TestSlotReturnResult:
         slot_name=req.slot_name,
     )
     cleanup_started = (
-        lease_doc.get("state") == LeaseState.ACTIVE.value
+        lease_doc.get("state") == LeaseState.CLAIMED.value
         and (lease_doc.get("metadata") or {}).get("test_slot_checkout") is True
         and bool(_test_slot_namespace(lease_doc))
     )
@@ -8430,7 +8722,7 @@ async def _resolve_test_slot_lease(
     )
     candidates: list[dict[str, Any]] = []
     for doc in docs:
-        if doc.get("state") not in (LeaseState.ACTIVE.value, LeaseState.PENDING.value):
+        if doc.get("state") not in (LeaseState.CLAIMED.value, LeaseState.PENDING.value):
             continue
         metadata = doc.get("metadata") or {}
         phase_inputs = metadata.get("phase_inputs") if isinstance(metadata.get("phase_inputs"), dict) else {}
@@ -8461,7 +8753,7 @@ async def _resolve_test_slot_lease(
 
     candidates.sort(
         key=lambda doc: (
-            0 if doc.get("state") == LeaseState.ACTIVE.value else 1,
+            0 if doc.get("state") == LeaseState.CLAIMED.value else 1,
             str(doc.get("requestedAt") or ""),
         )
     )

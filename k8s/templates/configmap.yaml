@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.config.name }}
+  namespace: {{ .Values.namespace }}
+data:
+  ALLOWED_EMAILS: {{ join "," .Values.config.allowedEmails | quote }}

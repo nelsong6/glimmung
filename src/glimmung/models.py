@@ -9,8 +9,20 @@ from pydantic import BaseModel, Field, model_validator
 class LeaseState(str, Enum):
     PENDING = "pending"
     ACTIVE = "active"
+    CLAIMED = "claimed"
     RELEASED = "released"
     EXPIRED = "expired"
+
+
+class TestEnvironmentState(str, Enum):
+    AVAILABLE = "available"
+    CLAIMED = "claimed"
+
+
+class TestSlotRequestState(str, Enum):
+    WAITING = "waiting"
+    FULFILLED = "fulfilled"
+    CANCELLED = "cancelled"
 
 
 class Project(BaseModel):
@@ -593,22 +605,7 @@ class Lease(BaseModel):
     project: str
     workflow: str | None = None         # workflow name; null on legacy / non-workflow leases
     host: str | None = None
-    state: LeaseState = LeaseState.PENDING
-    requirements: dict[str, Any] = Field(default_factory=dict)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-    requested_at: datetime
-    assigned_at: datetime | None = None
-    released_at: datetime | None = None
-    ttl_seconds: int = 900
-
-
-class LeasePublic(BaseModel):
-    ref: str
-    lease_number: int | None = None
-    project: str
-    workflow: str | None = None
-    host: str | None = None
-    state: LeaseState = LeaseState.PENDING
+    state: LeaseState = LeaseState.CLAIMED
     requirements: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
     requested_at: datetime
@@ -633,6 +630,22 @@ class LeaseRequester(BaseModel):
     metadata: dict[str, str] = Field(default_factory=dict)
 
 
+class LeasePublic(BaseModel):
+    ref: str
+    lease_number: int | None = None
+    project: str
+    workflow: str | None = None
+    host: str | None = None
+    state: LeaseState = LeaseState.CLAIMED
+    requirements: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    requester: LeaseRequester | None = None
+    requested_at: datetime
+    assigned_at: datetime | None = None
+    released_at: datetime | None = None
+    ttl_seconds: int = 900
+
+
 class LeaseRequest(BaseModel):
     project: str
     workflow: str | None = None
@@ -647,10 +660,35 @@ class LeaseResponse(BaseModel):
     host: HostPublic | None = None
 
 
+class TestSlotRequestPublic(BaseModel):
+    ref: str
+    project: str
+    workflow: str
+    state: TestSlotRequestState
+    requested_slot_index: int | None = None
+    requester: LeaseRequester | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    requested_at: datetime
+    fulfilled_at: datetime | None = None
+    fulfilled_lease_ref: str | None = None
+    ttl_seconds: int = 900
+
+
+class TestEnvironmentPublic(BaseModel):
+    project: str
+    slot_index: int
+    slot_name: str
+    state: TestEnvironmentState
+    lease: LeasePublic | None = None
+    waiting_requests: list[TestSlotRequestPublic] = Field(default_factory=list)
+
+
 class StateSnapshot(BaseModel):
     hosts: list[HostPublic]
     pending_leases: list[LeasePublic]
     active_leases: list[LeasePublic]
+    test_environments: list[TestEnvironmentPublic] = Field(default_factory=list)
+    waiting_test_slot_requests: list[TestSlotRequestPublic] = Field(default_factory=list)
     projects: list[Project] = Field(default_factory=list)
     workflows: list[Workflow] = Field(default_factory=list)
 

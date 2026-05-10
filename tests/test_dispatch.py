@@ -495,7 +495,7 @@ async def test_native_dispatch_uses_virtual_capacity_without_registered_host(app
     assert result.state == "dispatched"
     assert result.host == "native-k8s"
     lease_doc = await _lease_doc_for(app, result.lease_id)
-    assert lease_doc["state"] == LeaseState.ACTIVE.value
+    assert lease_doc["state"] == LeaseState.CLAIMED.value
     assert lease_doc["metadata"]["native_k8s"] is True
     assert lease_doc["leaseNumber"] == 1
     assert lease_doc["metadata"]["native_slot_index"] == "1"
@@ -613,7 +613,7 @@ async def test_native_acquire_honors_preferred_validation_slot(app):
         metadata={"phase_inputs": {"validation_slot_index": "1"}},
     )
 
-    assert free_preferred.state == LeaseState.ACTIVE
+    assert free_preferred.state == LeaseState.CLAIMED
     assert free_preferred.metadata["native_slot_index"] == "1"
 
 

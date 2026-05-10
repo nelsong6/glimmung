@@ -41,6 +41,8 @@ spec:
             - name: COSMOS_DATABASE
               value: {{ .Values.cosmos.database | quote }}
           envFrom:
+            - configMapRef:
+                name: {{ .Values.configMapName }}
             - secretRef:
                 name: {{ .Values.secretName }}
           readinessProbe:

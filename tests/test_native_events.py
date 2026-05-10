@@ -476,7 +476,7 @@ async def test_native_completion_drives_decision_and_marks_run_passed(cosmos, mo
         "project": run.project,
         "workflow": run.workflow,
         "host": "native-k8s",
-        "state": "active",
+            "state": "claimed",
         "requirements": {},
         "metadata": {
             "native_k8s": True,

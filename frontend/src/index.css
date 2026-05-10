@@ -963,6 +963,26 @@ th {
 }
 td.mono { font-family: var(--font-mono); font-size: 0.85rem; color: #b8b8b8; }
 td.dim { color: #666; }
+.lease-purpose {
+  max-width: 420px;
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.json-block {
+  max-width: 100%;
+  margin: 0 0 8px;
+  padding: 14px 16px;
+  overflow: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
 .attention-reason {
   max-width: 260px;
 }
@@ -2233,6 +2253,25 @@ h2 .inline-action,
 .native-step-terminal {
   max-height: 420px;
   white-space: pre-wrap;
+}
+
+.test-env-scale {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 4px 0 18px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.test-env-scale label {
+  color: var(--fg-muted);
+  font-size: 0.74rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.test-env-scale input {
+  width: 82px;
 }
 
 /* Upstream sync (`.glimmung/workflows/<name>.yaml` -> Cosmos).

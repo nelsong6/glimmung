@@ -100,11 +100,3 @@ resource "azurerm_key_vault_secret" "oauth_test_client_id" {
   value        = azuread_application.oauth_test.client_id
   key_vault_id = data.azurerm_key_vault.main.id
 }
-
-# Comma-joined list — the app splits on `,` and lowercases on startup.
-# KV secrets are flat strings, so this is the simplest stable encoding.
-resource "azurerm_key_vault_secret" "oauth_allowed_emails" {
-  name         = "glimmung-oauth-allowed-emails"
-  value        = join(",", var.allowed_emails)
-  key_vault_id = data.azurerm_key_vault.main.id
-}
