@@ -30,7 +30,7 @@ import { PhaseGraph, type PhaseGraphPhase } from "./PhaseGraph";
 import type { RecycleArrow } from "./recycleLayout";
 
 type IssueDetail = {
-  id: string;
+  ref: string;
   project: string;
   repo: string | null;
   number: number | null;
@@ -41,7 +41,7 @@ type IssueDetail = {
   html_url: string | null;
   metadata: Record<string, unknown>;
   comments: IssueComment[];
-  last_run_id: string | null;
+  last_run_ref: string | null;
   last_run_number: number | null;
   last_run_state: string | null;
   issue_lock_held: boolean;
@@ -57,8 +57,7 @@ type IssueComment = {
 
 export type IssueDetailTarget =
   | { kind: "gh"; repo: string; issue_number: number }
-  | { kind: "number"; project: string; issue_number: number }
-  | { kind: "native"; project: string; issue_id: string };
+  | { kind: "number"; project: string; issue_number: number };
 
 export type GraphNode = {
   id: string;
@@ -70,7 +69,7 @@ export type GraphNode = {
 };
 
 export type IssueGraph = {
-  issue_id: string;
+  issue_ref: string;
   nodes: GraphNode[];
   edges: Array<{
     source: string;
@@ -83,7 +82,7 @@ export type IssueGraph = {
       | "feedback"
       | "re_dispatched"
       // Resume primitive (#111) — links a prior Run to a Run that
-      // resumed from it (cloned_from_run_id). Renders in the runs
+      // resumed from it (cloned_from_run_ref). Renders in the runs
       // table + run-meta panel as "resumed from Run X".
       | "resumed_from";
   }>;
@@ -266,9 +265,8 @@ export function IssueDetailView() {
   const { signedIn, isAdmin, snap } = useOutletContext<AuthContext>();
 
   const projectRouteIssueNumber = params.issueNumber ? parseInt(params.issueNumber, 10) : null;
-  // Three route shapes land here. Project-shaped issue URLs are
-  // canonical for the UI; GitHub-shaped and id-shaped `/issues/...` URLs
-  // remain accepted as compatibility entry points.
+  // Project-shaped issue URLs are canonical for the UI; GitHub-shaped URLs
+  // remain accepted only as compatibility entry points.
   const target: IssueDetailTarget | null = projectRouteIssueNumber !== null
     ? {
         kind: "number",
@@ -281,11 +279,7 @@ export function IssueDetailView() {
         repo: `${params.owner ?? ""}/${params.repo ?? ""}`,
         issue_number: parseInt(params.n, 10),
       }
-    : {
-        kind: "native",
-        project: params.project ?? "",
-        issue_id: params.issueId ?? "",
-      };
+    : null;
 
   const baseUrl =
     projectRouteIssueNumber !== null
@@ -294,8 +288,6 @@ export function IssueDetailView() {
       ? `/issues/${target.repo}/${target.issue_number}`
       : target?.kind === "number"
       ? `/projects/${encodeURIComponent(target.project)}/issues/${target.issue_number}`
-      : target
-      ? `/issues/${encodeURIComponent(target.project)}/${encodeURIComponent(target.issue_id)}`
       : "/issues";
 
   // Tab is URL-driven so each tab is deep-linkable. Bare issue URLs and
@@ -338,8 +330,6 @@ export function IssueDetailView() {
       ? `/v1/issues/${target.repo}/${target.issue_number}`
       : target?.kind === "number"
       ? `/v1/issues/by-number/${encodeURIComponent(target.project)}/${target.issue_number}`
-      : target
-      ? `/v1/issues/by-id/${encodeURIComponent(target.project)}/${encodeURIComponent(target.issue_id)}`
       : null;
   const graphUrl =
     target?.kind === "gh"
@@ -352,8 +342,6 @@ export function IssueDetailView() {
       ? `#${target.issue_number}`
       : target?.kind === "number"
       ? `#${target.issue_number}`
-      : target
-      ? `${target.project} (native)`
       : "";
   const selectTab = (t: Tab) => {
     setTab(t);
@@ -406,7 +394,7 @@ export function IssueDetailView() {
 
   useEffect(() => {
     setAbortState({ kind: "idle" });
-  }, [detail?.id]);
+  }, [detail?.ref]);
 
   useEffect(() => {
     // On a runs/:runNumber URL the last segment is the run number, not a tab slug —
@@ -691,7 +679,10 @@ function IssueComments({
   const [editingBody, setEditingBody] = useState("");
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
-  const commentsUrl = `/v1/issues/by-id/${encodeURIComponent(detail.project)}/${encodeURIComponent(detail.id)}/comments`;
+  const issueNumber = detail.number;
+  const commentsUrl = issueNumber !== null
+    ? `/v1/issues/by-number/${encodeURIComponent(detail.project)}/${issueNumber}/comments`
+    : null;
 
   const postComment = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -700,6 +691,7 @@ function IssueComments({
     setBusy(true);
     setError(null);
     try {
+      if (!commentsUrl) throw new Error("Issue number required for comments");
       const r = await authedFetch(commentsUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -721,6 +713,7 @@ function IssueComments({
     setBusy(true);
     setError(null);
     try {
+      if (!commentsUrl) throw new Error("Issue number required for comments");
       const r = await authedFetch(`${commentsUrl}/${encodeURIComponent(commentId)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -741,6 +734,7 @@ function IssueComments({
     setBusy(true);
     setError(null);
     try {
+      if (!commentsUrl) throw new Error("Issue number required for comments");
       const r = await authedFetch(`${commentsUrl}/${encodeURIComponent(commentId)}`, {
         method: "DELETE",
       });
@@ -1263,7 +1257,7 @@ function PipelineDag({
     ?? workflowGraph?.default_entry?.target
     ?? phaseRollups[0]?.phaseName
     ?? null;
-  const touchpointId = stringOrNull(meta.report_id);
+  const touchpointId = stringOrNull(meta.report_ref);
   const touchpointState = stringOrNull(meta.report_state);
   const touchpointTitle = stringOrNull(meta.report_title);
   const primitiveState = stringOrNull(meta.pr_primitive_state);
@@ -1422,7 +1416,7 @@ function phaseStatus(attempt: GraphNode): { cls: string; text: string } {
   // (skipped isn't one of {free, busy, drain, info}); the caller renders
   // it as dim text. Also propagates upward via the attempt node's
   // `state === "skipped"` value emitted by `_build_issue_graph`.
-  if (attempt.state === "skipped" || stringOrNull(meta.skipped_from_run_id)) {
+  if (attempt.state === "skipped" || stringOrNull(meta.skipped_from_run_ref)) {
     return { cls: "", text: "skipped" };
   }
   if (!completed) {
@@ -1500,7 +1494,7 @@ function DrillIn({
   if (nodeId === null) return null;
   const meta = run.metadata;
   if (nodeId === "pr") {
-    const touchpointId = stringOrNull(meta.report_id);
+    const touchpointId = stringOrNull(meta.report_ref);
     const touchpointState = stringOrNull(meta.report_state);
     const touchpointTitle = stringOrNull(meta.report_title);
     const touchpointUrl = stringOrNull(meta.report_url);
@@ -1621,7 +1615,7 @@ function RunMetaSummary({
   // Resume primitive (#111) — set on the resumed Run so the user
   // sees why earlier phases are pre-satisfied and which prior Run's
   // outputs got carried forward.
-  const clonedFromRunId = stringOrNull(meta.cloned_from_run_id);
+  const clonedFromRunId = stringOrNull(meta.cloned_from_run_ref);
   const entrypointPhase = stringOrNull(meta.entrypoint_phase);
   return (
     <div className="run-panel-meta" style={{ marginTop: "0.5rem" }}>
@@ -1925,7 +1919,7 @@ function RunsPane({
             const meta = r.metadata;
             const cost = numberOrNull(meta.cumulative_cost_usd);
             const prNumber = numberOrNull(meta.pr_number);
-            // Walk the cloned_from_run_id chain to compute retry depth +
+            // Walk the cloned_from_run_ref chain to compute retry depth +
             // origin. Each retry IS a fresh run (decided model), so
             // "depth" is the chain length back to the run that has no
             // parent. Origin is rendered only when it differs from the
@@ -2121,7 +2115,7 @@ function AttemptCard({
   // wasn't actually dispatched; outputs were carried from the named
   // prior Run. Renders the card in a dim/dashed style so it reads as
   // "this slot was satisfied, no work happened here."
-  const skippedFromRunId = stringOrNull(meta.skipped_from_run_id);
+  const skippedFromRunId = stringOrNull(meta.skipped_from_run_ref);
   // Cost prefers the phase-reported top-level cost_usd (#69 — non-verify
   // LLM phases set this directly without a verification.json) and falls
   // back to verification.cost_usd for verify phases that emit the artifact.
@@ -2176,9 +2170,9 @@ function AttemptCard({
   })();
 
   // Fallback link for the dispatching window: GHA's actions-by-workflow
-  // page filtered to our branch (glimmung/<run_id>) lets the user find
+  // page filtered to the public run ref lets the user find
   // their run when the started callback hasn't landed yet. Derives
-  // run_id from the attempt id (`attempt:<run_id>:<idx>`).
+  // the run ref from the attempt id (`attempt:<run_ref>:<idx>`).
   const runIdFromAttempt = attempt.id.startsWith("attempt:")
     ? attempt.id.split(":")[1] ?? ""
     : "";
@@ -2611,7 +2605,7 @@ function findLastCompletedRun(graph: IssueGraph): GraphNode | null {
 }
 
 function attemptsForRun(graph: IssueGraph, runNodeId: string): GraphNode[] {
-  // run node id is `run:<run_id>`; attempt ids are `attempt:<run_id>:<index>`.
+  // run node id is `run:<run_ref>`; attempt ids are `attempt:<run_ref>:<index>`.
   const runId = runNodeId.startsWith("run:") ? runNodeId.slice(4) : runNodeId;
   const prefix = `attempt:${runId}:`;
   return graph.nodes
@@ -2623,8 +2617,7 @@ function attemptsForRun(graph: IssueGraph, runNodeId: string): GraphNode[] {
     });
 }
 
-// Run nodes are keyed `run:<run_id>` in the graph endpoint; the abort
-// endpoint and selection state both take the bare ULID.
+// Run nodes are keyed `run:<run_ref>` in the graph endpoint.
 function runIdFromNode(n: GraphNode): string {
   return n.id.startsWith("run:") ? n.id.slice(4) : n.id;
 }
@@ -2650,7 +2643,7 @@ type RetryLineage = {
   origin: string | null;
 };
 
-// Walk the cloned_from_run_id chain to compute retry depth + origin.
+// Walk the cloned_from_run_ref chain to compute retry depth + origin.
 // Each retry is its own Run (decided model — no in-run retries), so
 // "depth" is the chain length back to the run with no parent. The
 // kicker is the immediate parent (depth ≥ 1). Origin is the chain root,
@@ -2671,7 +2664,7 @@ function computeRetryLineage(graph: IssueGraph, runId: string): RetryLineage {
     visited.add(cursor);
     const node = byId.get(cursor);
     if (!node) break;
-    const parent = stringOrNull(node.metadata.cloned_from_run_id);
+    const parent = stringOrNull(node.metadata.cloned_from_run_ref);
     if (!parent) {
       origin = depth === 0 ? null : cursor;
       break;
@@ -2707,7 +2700,7 @@ function RunRefLink({
 }
 
 function runDisplayName(run: GraphNode): string {
-  return runSlugDisplay(issueRunSlug({ issue_id: "", nodes: [run], edges: [] }, run));
+  return runSlugDisplay(issueRunSlug({ issue_ref: "", nodes: [run], edges: [] }, run));
 }
 
 function isRecord(x: unknown): x is Record<string, unknown> {
@@ -2853,7 +2846,11 @@ function IssueEditForm({
         .split(",")
         .map((s) => s.trim())
         .filter((s) => s.length > 0);
-      const url = `/v1/issues/by-id/${encodeURIComponent(detail.project)}/${encodeURIComponent(detail.id)}`;
+      if (detail.number === null) {
+        setError("Issue number required for edits");
+        return;
+      }
+      const url = `/v1/issues/by-number/${encodeURIComponent(detail.project)}/${detail.number}`;
       const r = await authedFetch(url, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },

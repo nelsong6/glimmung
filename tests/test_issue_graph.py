@@ -252,19 +252,20 @@ async def test_system_graph_renders_open_issues_inflight_runs_prs_and_signals(co
     assert "attempt" in node_kinds
     assert "pr" in node_kinds
     assert "signal" in node_kinds
-    assert graph.issue_id == "system"
-    assert any(e.kind == "spawned" and e.source == f"issue:{issue_id}" for e in graph.edges)
-    assert any(e.kind == "opened" and e.source == f"run:{run.id}" for e in graph.edges)
-    assert any(e.kind == "feedback" and e.source == f"run:{run.id}" for e in graph.edges)
-    native_attempt = next(n for n in graph.nodes if n.id == f"attempt:{run.id}:1")
+    run_ref = "ambience#116/runs/1"
+    assert graph.issue_ref == "system"
+    assert any(e.kind == "spawned" and e.source == "issue:ambience#116" for e in graph.edges)
+    assert any(e.kind == "opened" and e.source == f"run:{run_ref}" for e in graph.edges)
+    assert any(e.kind == "feedback" and e.source == f"run:{run_ref}" for e in graph.edges)
+    native_attempt = next(n for n in graph.nodes if n.id == f"attempt:{run_ref}:1")
     assert native_attempt.metadata["phase_kind"] == "k8s_job"
     assert native_attempt.metadata["jobs_count"] == 1
     assert native_attempt.metadata["steps_count"] == 2
     assert native_attempt.metadata["jobs"][0]["steps"][0]["slug"] == "clone"
     assert native_attempt.metadata["log_archive_url"].endswith("/native-events.json")
-    run_node = next(n for n in graph.nodes if n.id == f"run:{run.id}")
+    run_node = next(n for n in graph.nodes if n.id == f"run:{run_ref}")
     run_graph = run_node.metadata["run_graph"]
-    assert run_graph["run_id"] == run.id
+    assert run_graph["run_ref"] == run_ref
     assert [c["cycle_index"] for c in run_graph["cycles"]] == [0, 1]
     assert run_graph["cycles"][1]["stages"][0]["kind"] == "k8s_job"
     assert run_graph["cycles"][1]["stages"][0]["jobs"][0]["steps"][0]["slug"] == "clone"
@@ -351,7 +352,7 @@ async def test_graph_renders_issue_run_attempts(cosmos, app_state):
     run_node = next(n for n in graph.nodes if n.kind == "run")
     # Resume metadata is None on a non-resumed Run — the dashboard
     # branches on these to decide whether to render the lineage arrow.
-    assert run_node.metadata["cloned_from_run_id"] is None
+    assert run_node.metadata["cloned_from_run_ref"] is None
     assert run_node.metadata["entrypoint_phase"] is None
     workflow_graph = run_node.metadata["workflow_graph"]
     assert workflow_graph["phases"] == ["env-prep", "agent-execute"]
@@ -381,7 +382,7 @@ async def test_graph_renders_issue_run_attempts(cosmos, app_state):
     ]
     run_graph = run_node.metadata["run_graph"]
     assert run_graph["lineage"] == {
-        "cloned_from_run_id": None,
+        "cloned_from_run_ref": None,
         "entrypoint_phase": None,
     }
     assert [c["cycle_index"] for c in run_graph["cycles"]] == [0, 1]
@@ -390,7 +391,7 @@ async def test_graph_renders_issue_run_attempts(cosmos, app_state):
     assert run_graph["cycles"][1]["stages"][0]["jobs"][0]["job_id"] == "agent"
     assert run_graph["cycles"][1]["stages"][0]["jobs"][0]["steps"][1]["slug"] == "edit"
 
-    native_attempt = next(n for n in graph.nodes if n.id == f"attempt:{run.id}:1")
+    native_attempt = next(n for n in graph.nodes if n.id == "attempt:ambience#116/runs/1:1")
     assert native_attempt.metadata["phase_kind"] == "k8s_job"
     assert native_attempt.metadata["jobs_count"] == 1
     assert native_attempt.metadata["steps_count"] == 2
@@ -448,16 +449,16 @@ async def test_graph_renders_report_terminal_node_for_run(cosmos, app_state):
         cosmos, repo="nelsong6/ambience", issue_number=116,
     )
 
-    report_node = next(n for n in graph.nodes if n.id == "pr:01KQREPORTNODE")
+    report_node = next(n for n in graph.nodes if n.id == "pr:nelsong6/ambience#42")
     assert report_node.kind == "pr"
     assert report_node.label == "PR #42"
-    assert report_node.metadata["report_id"] == "01KQREPORTNODE"
-    run_node = next(n for n in graph.nodes if n.id == f"run:{run.id}")
-    assert run_node.metadata["report_id"] == "01KQREPORTNODE"
+    assert report_node.metadata["report_ref"] == "nelsong6/ambience#42"
+    run_node = next(n for n in graph.nodes if n.id == "run:ambience#116/runs/1")
+    assert run_node.metadata["report_ref"] == "nelsong6/ambience#42"
     assert run_node.metadata["report_state"] == "ready"
     assert any(
-        e.source == f"run:{run.id}"
-        and e.target == "pr:01KQREPORTNODE"
+        e.source == "run:ambience#116/runs/1"
+        and e.target == "pr:nelsong6/ambience#42"
         and e.kind == "opened"
         for e in graph.edges
     )
@@ -497,7 +498,7 @@ async def test_issue_graph_surfaces_pr_primitive_failure_on_run(cosmos):
         cosmos, repo="nelsong6/ambience", issue_number=116,
     )
 
-    run_node = next(n for n in graph.nodes if n.id == f"run:{run.id}")
+    run_node = next(n for n in graph.nodes if n.id == "run:ambience#116/runs/1")
     assert run_node.metadata["pr_primitive_state"] == "failed"
     assert run_node.metadata["pr_primitive_error"] == (
         "PR primitive: touchpoint prepare failed: duplicate report id"
@@ -510,8 +511,8 @@ async def test_issue_graph_surfaces_pr_primitive_failure_on_run(cosmos):
 @pytest.mark.asyncio
 async def test_graph_surfaces_resume_lineage(cosmos, app_state):
     """A prior aborted Run + a resumed Run on the same issue should
-    render with: cloned_from_run_id metadata on the new Run, a
-    `resumed_from` edge, and skipped_from_run_id on the synthesized
+    render with cloned-from metadata on the new Run, a
+    `resumed_from` edge, and skipped-from metadata on the synthesized
     attempt with state="skipped"."""
     issue_id = await _seed_issue(cosmos)
     now = _now()
@@ -578,36 +579,36 @@ async def test_graph_surfaces_resume_lineage(cosmos, app_state):
 
     # Resumed Run carries cloned_from + entrypoint_phase metadata.
     resumed_node = next(
-        n for n in graph.nodes if n.id == f"run:{resumed.id}"
+        n for n in graph.nodes if n.id == "run:ambience#116/runs/2"
     )
-    assert resumed_node.metadata["cloned_from_run_id"] == prior.id
+    assert resumed_node.metadata["cloned_from_run_ref"] == "ambience#116/runs/1"
     assert resumed_node.metadata["entrypoint_phase"] == "agent-execute"
 
     # Prior Run renders with no resume metadata.
-    prior_node = next(n for n in graph.nodes if n.id == f"run:{prior.id}")
-    assert prior_node.metadata["cloned_from_run_id"] is None
+    prior_node = next(n for n in graph.nodes if n.id == "run:ambience#116/runs/1")
+    assert prior_node.metadata["cloned_from_run_ref"] is None
 
     # Lineage edge prior → resumed exists with kind="resumed_from".
     lineage_edges = [e for e in graph.edges if e.kind == "resumed_from"]
     assert len(lineage_edges) == 1
-    assert lineage_edges[0].source == f"run:{prior.id}"
-    assert lineage_edges[0].target == f"run:{resumed.id}"
+    assert lineage_edges[0].source == "run:ambience#116/runs/1"
+    assert lineage_edges[0].target == "run:ambience#116/runs/2"
 
     # Skipped attempt: state="skipped", metadata.skipped_from_run_id set.
     skipped_attempt = next(
         n for n in graph.nodes
-        if n.id == f"attempt:{resumed.id}:0"
+        if n.id == "attempt:ambience#116/runs/2:0"
     )
     assert skipped_attempt.state == "skipped"
-    assert skipped_attempt.metadata["skipped_from_run_id"] == prior.id
+    assert skipped_attempt.metadata["skipped_from_run_ref"] == "ambience#116/runs/1"
 
     # The fresh entrypoint attempt is NOT skipped.
     fresh_attempt = next(
         n for n in graph.nodes
-        if n.id == f"attempt:{resumed.id}:1"
+        if n.id == "attempt:ambience#116/runs/2:1"
     )
     assert fresh_attempt.state != "skipped"
-    assert fresh_attempt.metadata["skipped_from_run_id"] is None
+    assert fresh_attempt.metadata["skipped_from_run_ref"] is None
 
 
 @pytest.mark.asyncio

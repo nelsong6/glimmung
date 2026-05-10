@@ -1644,15 +1644,17 @@ function IssueOnboardingView({
         }),
       });
       if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
-      const detail = (await r.json()) as { id: string; number: number | null };
+      const detail = (await r.json()) as { ref: string; number: number | null };
       if (startRun) {
+        if (detail.number === null) throw new Error("Created issue did not receive a project issue number");
         await authedFetch("/v1/runs/dispatch", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ issue_id: detail.id, project: project.name, workflow: workflow || undefined }),
+          body: JSON.stringify({ issue_number: detail.number, project: project.name, workflow: workflow || undefined }),
         });
       }
-      navigate(`/projects/${encodeURIComponent(project.name)}/issues/${detail.number ?? detail.id}/summary`);
+      if (detail.number === null) throw new Error("Created issue did not receive a project issue number");
+      navigate(`/projects/${encodeURIComponent(project.name)}/issues/${detail.number}/summary`);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -2038,7 +2040,7 @@ const RUN_VIEWER_IDLE_ABORT: AbortState = { kind: "idle" };
 function projectRunGraph(run: ProjectRun, workflow: Workflow | undefined, project: Project): IssueGraph {
   const issueNode = run.issue_number
     ? {
-        id: `issue:${project.name}-${run.issue_number}`,
+        id: `issue:${project.name}#${run.issue_number}`,
         kind: "issue" as const,
         label: `#${run.issue_number}`,
         state: "open",
@@ -2047,7 +2049,7 @@ function projectRunGraph(run: ProjectRun, workflow: Workflow | undefined, projec
           project: project.name,
           repo: project.github_repo,
           number: run.issue_number,
-          issue_id: `${project.name}-${run.issue_number}`,
+          issue_ref: `${project.name}#${run.issue_number}`,
         },
       }
     : null;
@@ -2113,7 +2115,7 @@ function projectRunGraph(run: ProjectRun, workflow: Workflow | undefined, projec
     ...attempts,
   ];
   return {
-    issue_id: issueNode?.metadata.issue_id ?? run.id,
+    issue_ref: String(issueNode?.metadata.issue_ref ?? run.id),
     nodes,
     edges: [
       ...(issueNode ? [{ source: issueNode.id, target: runNode.id, kind: "spawned" as const }] : []),
@@ -2156,16 +2158,17 @@ function projectRunReportGraph(report: RunReport, workflow: Workflow | undefined
       kind: "phase_recycle" as const,
     }));
   }) ?? [];
-  const issueNode = report.issue_id || report.issue_number ? {
-    id: `issue:${report.issue_id ?? report.issue_number}`,
+  const reportIssueRef = report.issue_number !== null ? `${project.name}#${report.issue_number}` : null;
+  const issueNode = reportIssueRef ? {
+    id: `issue:${reportIssueRef}`,
     kind: "issue" as const,
-    label: report.issue_number ? `#${report.issue_number}` : report.issue_id ?? "issue",
+    label: report.issue_number ? `#${report.issue_number}` : "issue",
     state: null,
     timestamp: report.started_at,
     metadata: {
       project: project.name,
       repo: report.issue_repo ?? project.github_repo,
-      issue_id: report.issue_id,
+      issue_ref: reportIssueRef,
       issue_number: report.issue_number,
     },
   } : null;
@@ -2221,7 +2224,7 @@ function projectRunReportGraph(report: RunReport, workflow: Workflow | undefined
     },
   }));
   return {
-    issue_id: report.issue_id ?? report.run_id,
+    issue_ref: reportIssueRef ?? `${report.project}/runs/${report.run_number ?? "unknown"}`,
     nodes: [
       ...(issueNode ? [issueNode] : []),
       runNode,
