@@ -103,7 +103,7 @@ from glimmung.models import (
     validate_phase_input_refs,
 )
 from glimmung.replay import ReplayResult, SyntheticCompletion, replay_decision
-from glimmung.public_ids import lease_ref
+from glimmung.public_ids import issue_ref, lease_ref, report_ref, run_ref
 from glimmung.triage import abort_explanation as triage_abort_explanation
 from glimmung.triage import decide_triage, feedback_text
 from glimmung.settings import Settings, get_settings
@@ -5855,7 +5855,7 @@ async def _handle_pull_request_review(payload: dict[str, Any]) -> dict[str, Any]
 class IssueRow(BaseModel):
     """One row in the Issues view. Issues live in glimmung's `issues`
     container; `number` is the project-scoped Glimmung issue number."""
-    id: str
+    ref: str
     project: str
     workflow: str | None = None
     repo: str | None = None
@@ -5864,7 +5864,7 @@ class IssueRow(BaseModel):
     state: str = "open"
     labels: list[str] = Field(default_factory=list)
     html_url: str | None = None
-    last_run_id: str | None = None
+    last_run_ref: str | None = None
     last_run_number: int | None = None
     last_run_state: str | None = None  # "in_progress" | "passed" | "aborted" | None
     last_run_abort_reason: str | None = None
@@ -5872,7 +5872,7 @@ class IssueRow(BaseModel):
 
 
 class IssueDetail(BaseModel):
-    id: str
+    ref: str
     project: str
     repo: str | None = None
     number: int | None = None
@@ -5882,7 +5882,7 @@ class IssueDetail(BaseModel):
     labels: list[str] = Field(default_factory=list)
     html_url: str | None = None
     comments: list[IssueComment] = Field(default_factory=list)
-    last_run_id: str | None = None
+    last_run_ref: str | None = None
     last_run_number: int | None = None
     last_run_state: str | None = None
     issue_lock_held: bool = False
@@ -5940,7 +5940,7 @@ class GraphEdge(BaseModel):
 
 
 class IssueGraph(BaseModel):
-    issue_id: str
+    issue_ref: str
     nodes: list[GraphNode] = Field(default_factory=list)
     edges: list[GraphEdge] = Field(default_factory=list)
 
@@ -5948,12 +5948,9 @@ class IssueGraph(BaseModel):
 class DispatchRequest(BaseModel):
     """Project-scoped issue dispatch request.
 
-    `issue_number` is the public handle. `issue_id` is accepted only as a
-    temporary compatibility field while older clients migrate off storage IDs.
-    `workflow` is optional; dispatch_run picks the project's only
-    workflow if there's exactly one."""
+    `issue_number` is the public handle. `workflow` is optional; dispatch_run
+    picks the project's only workflow if there's exactly one."""
     issue_number: int | None = None
-    issue_id: str | None = None
     project: str | None = None
     workflow: str | None = None
 
@@ -6016,7 +6013,6 @@ def _attempt_graph_metadata(attempt: Any) -> dict[str, Any]:
         if isinstance(job, dict):
             step_count += len(job.get("steps") or [])
     return {
-        "run_id": data.get("run_id"),
         "attempt_index": data.get("attempt_index"),
         "phase": data.get("phase"),
         "phase_kind": data.get("phase_kind"),
@@ -6024,7 +6020,6 @@ def _attempt_graph_metadata(attempt: Any) -> dict[str, Any]:
         "workflow_run_id": data.get("workflow_run_id"),
         "completed_at": data.get("completed_at"),
         "decision": data.get("decision"),
-        "skipped_from_run_id": data.get("skipped_from_run_id"),
         "verification": data.get("verification"),
         "cost_usd": data.get("cost_usd"),
         "conclusion": data.get("conclusion"),
@@ -6037,7 +6032,13 @@ def _attempt_graph_metadata(attempt: Any) -> dict[str, Any]:
     }
 
 
-def _run_graph_metadata(run: Any) -> dict[str, Any]:
+def _run_graph_metadata(
+    run: Any,
+    *,
+    issue_number: int | None = None,
+    run_display: str | int | None = None,
+    lineage_by_id: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Explicit Run -> Cycle -> Stage -> Job -> Step graph contract.
 
     Attempts remain in the graph as compatibility nodes, but UI surfaces should
@@ -6075,11 +6076,20 @@ def _run_graph_metadata(run: Any) -> dict[str, Any]:
                 "jobs": jobs,
             }],
         })
+    project = str(data.get("project") or "")
+    display = run_display or data.get("run_display_number") or data.get("run_number")
+    if issue_number is None:
+        raw_issue_number = data.get("issue_number")
+        issue_number = int(raw_issue_number) if raw_issue_number is not None else None
+    cloned_from = data.get("cloned_from_run_id")
+    cloned_from_ref = None
+    if cloned_from and lineage_by_id is not None:
+        cloned_from_ref = lineage_by_id.get(str(cloned_from))
     return {
-        "run_id": data.get("id"),
+        "run_ref": run_ref(project, issue_number, display),
         "run_number": data.get("run_number"),
         "lineage": {
-            "cloned_from_run_id": data.get("cloned_from_run_id"),
+            "cloned_from_run_ref": cloned_from_ref,
             "entrypoint_phase": data.get("entrypoint_phase"),
         },
         "cycles": cycles,
@@ -6335,7 +6345,7 @@ async def _list_issues_from_cosmos(
         if workflow is not None and issue_workflow != workflow:
             continue
         row = IssueRow(
-            id=issue.id,
+            ref=issue_ref(issue.project, number),
             project=issue.project,
             workflow=issue_workflow,
             repo=None,
@@ -6346,8 +6356,13 @@ async def _list_issues_from_cosmos(
             html_url=None,
         )
         if run_doc is not None:
-            row.last_run_id = run_doc["id"]
-            row.last_run_number = run_numbers.get(run_doc["id"]) or run_doc.get("run_number")
+            run_number = run_numbers.get(run_doc["id"]) or run_doc.get("run_number")
+            row.last_run_number = run_number
+            row.last_run_ref = run_ref(
+                issue.project,
+                number,
+                run_doc.get("run_display_number") or run_number,
+            )
             row.last_run_state = run_doc["state"]
             row.last_run_abort_reason = run_doc.get("abort_reason")
         lock_key = (
@@ -6366,7 +6381,7 @@ async def _list_issues_from_cosmos(
     rows.sort(key=lambda r: (
         r.project,
         -(r.number or 0),
-        r.id,
+        r.ref,
     ))
     if limit is not None:
         rows = rows[:limit]
@@ -6380,7 +6395,7 @@ def _issue_row_needs_attention(row: IssueRow) -> bool:
     already being handled. There is not yet an inspected/acknowledged marker,
     so all failed terminal states stay visible for now.
     """
-    if row.issue_lock_held or row.last_run_id is None:
+    if row.issue_lock_held or row.last_run_ref is None:
         return False
     return row.last_run_state in {
         RunState.ABORTED.value,
@@ -6399,21 +6414,11 @@ async def issue_detail_by_id(
     project: str = Path(...),
     issue_id: str = Path(...),
 ) -> IssueDetail:
-    """Detail view keyed by glimmung issue id. Used for glimmung-native
-    issues (which have no GH coords to slot into the URL-keyed path)
-    and as the canonical handle for any caller that already has an id.
-
-    Keep this route above the legacy three-segment GH route. Otherwise
-    FastAPI attempts to parse `/v1/issues/by-id/{project}/{issue_id}` as
-    `{repo_owner}/{repo_name}/{issue_number}` and returns a 422 before
-    this handler can run.
-    """
-    cosmos: Cosmos = app.state.cosmos
-    found = await issue_ops.read_issue(cosmos, project=project, issue_id=issue_id)
-    if found is None:
-        raise HTTPException(404, f"no glimmung issue {project}/{issue_id}")
-    issue, _ = found
-    return await _build_issue_detail(cosmos, issue=issue)
+    """Deprecated storage-ID route."""
+    raise HTTPException(
+        410,
+        "Issue storage-ID lookup is disabled; use /v1/issues/by-number/{project}/{issue_number}",
+    )
 
 
 @app.get(
@@ -6464,7 +6469,7 @@ async def _build_issue_detail(cosmos: Cosmos, *, issue: Issue) -> IssueDetail:
     {project}/{id}`) detail endpoints."""
     number = issue.number
     detail = IssueDetail(
-        id=issue.id,
+        ref=issue_ref(issue.project, number),
         project=issue.project,
         repo=None,
         number=number,
@@ -6481,7 +6486,6 @@ async def _build_issue_detail(cosmos: Cosmos, *, issue: Issue) -> IssueDetail:
             cosmos, project=issue.project, issue_number=number,
         )
     if latest_run is not None:
-        detail.last_run_id = latest_run.id
         if latest_run.run_number is not None:
             detail.last_run_number = latest_run.run_number
         else:
@@ -6492,6 +6496,13 @@ async def _build_issue_detail(cosmos: Cosmos, *, issue: Issue) -> IssueDetail:
                 issue_id=issue.id,
             )
             detail.last_run_number = run_ops.run_number_map(docs).get(latest_run.id)
+        detail.last_run_ref = run_ref(
+            issue.project,
+            number,
+            run_ops.run_display_number(
+                latest_run.model_copy(update={"run_number": detail.last_run_number})
+            ) or detail.last_run_number,
+        )
         detail.last_run_state = latest_run.state.value
     lock_key = f"{issue.project}#{number}"
     existing_lock = await lock_ops.read_lock(
@@ -6538,24 +6549,15 @@ async def create_issue_endpoint(req: IssueCreateRequest) -> IssueDetail:
     )
     return await _build_issue_detail(cosmos, issue=issue)
 
-
-@app.patch(
-    "/v1/issues/by-id/{project}/{issue_id}",
-    response_model=IssueDetail,
-    dependencies=[Depends(require_admin_user)],
-)
-async def patch_issue_endpoint(
+async def _patch_issue(
+    cosmos: Cosmos,
+    *,
+    issue: Issue,
+    etag: str,
     req: IssueUpdateRequest,
-    project: str = Path(...),
-    issue_id: str = Path(...),
 ) -> IssueDetail:
     """Patch title / body / labels / state. State transitions go through
     `close_issue` / `reopen_issue` so `closed_at` is stamped consistently."""
-    cosmos: Cosmos = app.state.cosmos
-    found = await issue_ops.read_issue(cosmos, project=project, issue_id=issue_id)
-    if found is None:
-        raise HTTPException(404, f"no glimmung issue {project}/{issue_id}")
-    issue, etag = found
     if req.title is not None or req.body is not None or req.labels is not None:
         issue, etag = await issue_ops.update_issue(
             cosmos, issue=issue, etag=etag,
@@ -6572,6 +6574,51 @@ async def patch_issue_endpoint(
         elif target not in ("open", "closed"):
             raise HTTPException(400, f"state must be 'open' or 'closed', not {req.state!r}")
     return await _build_issue_detail(cosmos, issue=issue)
+
+
+async def _read_issue_by_public_number(
+    cosmos: Cosmos,
+    *,
+    project: str,
+    issue_number: int,
+) -> tuple[Issue, str]:
+    found = await issue_ops.read_issue_by_number(cosmos, project=project, number=issue_number)
+    if found is None:
+        raise HTTPException(404, f"no glimmung issue {project}#{issue_number}")
+    return found
+
+
+@app.patch(
+    "/v1/issues/by-number/{project}/{issue_number}",
+    response_model=IssueDetail,
+    dependencies=[Depends(require_admin_user)],
+)
+async def patch_issue_by_number_endpoint(
+    req: IssueUpdateRequest,
+    project: str = Path(...),
+    issue_number: int = Path(...),
+) -> IssueDetail:
+    cosmos: Cosmos = app.state.cosmos
+    issue, etag = await _read_issue_by_public_number(
+        cosmos, project=project, issue_number=issue_number,
+    )
+    return await _patch_issue(cosmos, issue=issue, etag=etag, req=req)
+
+
+@app.patch(
+    "/v1/issues/by-id/{project}/{issue_id}",
+    response_model=IssueDetail,
+    dependencies=[Depends(require_admin_user)],
+)
+async def patch_issue_endpoint(
+    req: IssueUpdateRequest,
+    project: str = Path(...),
+    issue_id: str = Path(...),
+) -> IssueDetail:
+    raise HTTPException(
+        410,
+        "Issue storage-ID mutation is disabled; use /v1/issues/by-number/{project}/{issue_number}",
+    )
 
 
 async def _archive_issue(
@@ -6602,6 +6649,54 @@ async def _archive_issue(
     return await _build_issue_detail(cosmos, issue=issue)
 
 
+async def _archive_issue_by_number(
+    cosmos: Cosmos,
+    *,
+    project: str,
+    issue_number: int,
+    user: User,
+    action: str,
+    reason: str,
+) -> IssueDetail:
+    issue, etag = await _read_issue_by_public_number(
+        cosmos, project=project, issue_number=issue_number,
+    )
+    note = action.capitalize()
+    if reason.strip():
+        note = f"{note}: {reason.strip()}"
+    issue, etag, _ = await issue_ops.add_comment(
+        cosmos,
+        issue=issue,
+        etag=etag,
+        author=user.email,
+        body=note,
+    )
+    if issue.state == IssueState.OPEN:
+        issue, _ = await issue_ops.close_issue(cosmos, issue=issue, etag=etag)
+    return await _build_issue_detail(cosmos, issue=issue)
+
+
+@app.post(
+    "/v1/issues/by-number/{project}/{issue_number}/archive",
+    response_model=IssueDetail,
+)
+async def archive_issue_by_number_endpoint(
+    req: IssueArchiveRequest,
+    project: str = Path(...),
+    issue_number: int = Path(...),
+    user: User = Depends(require_admin_user),
+) -> IssueDetail:
+    """Archive an issue by closing it and leaving an audit comment."""
+    return await _archive_issue_by_number(
+        app.state.cosmos,
+        project=project,
+        issue_number=issue_number,
+        user=user,
+        action="archived",
+        reason=req.reason,
+    )
+
+
 @app.post(
     "/v1/issues/by-id/{project}/{issue_id}/archive",
     response_model=IssueDetail,
@@ -6612,13 +6707,29 @@ async def archive_issue_endpoint(
     issue_id: str = Path(...),
     user: User = Depends(require_admin_user),
 ) -> IssueDetail:
-    """Archive an issue by closing it and leaving an audit comment."""
-    return await _archive_issue(
+    raise HTTPException(
+        410,
+        "Issue storage-ID mutation is disabled; use /v1/issues/by-number/{project}/{issue_number}/archive",
+    )
+
+
+@app.post(
+    "/v1/issues/by-number/{project}/{issue_number}/discard",
+    response_model=IssueDetail,
+)
+async def discard_issue_by_number_endpoint(
+    req: IssueArchiveRequest,
+    project: str = Path(...),
+    issue_number: int = Path(...),
+    user: User = Depends(require_admin_user),
+) -> IssueDetail:
+    """Discard an issue by closing it and leaving an audit comment."""
+    return await _archive_issue_by_number(
         app.state.cosmos,
         project=project,
-        issue_id=issue_id,
+        issue_number=issue_number,
         user=user,
-        action="archived",
+        action="discarded",
         reason=req.reason,
     )
 
@@ -6633,14 +6744,49 @@ async def discard_issue_endpoint(
     issue_id: str = Path(...),
     user: User = Depends(require_admin_user),
 ) -> IssueDetail:
-    """Discard an issue by closing it and leaving an audit comment."""
-    return await _archive_issue(
-        app.state.cosmos,
-        project=project,
-        issue_id=issue_id,
-        user=user,
-        action="discarded",
-        reason=req.reason,
+    raise HTTPException(
+        410,
+        "Issue storage-ID mutation is disabled; use /v1/issues/by-number/{project}/{issue_number}/discard",
+    )
+
+
+async def _create_issue_comment(
+    *,
+    cosmos: Cosmos,
+    issue: Issue,
+    etag: str,
+    user: User,
+    body: str,
+) -> IssueComment:
+    if not body.strip():
+        raise HTTPException(400, "body required")
+    _, _, comment = await issue_ops.add_comment(
+        cosmos,
+        issue=issue,
+        etag=etag,
+        author=user.email,
+        body=body,
+    )
+    return comment
+
+
+@app.post(
+    "/v1/issues/by-number/{project}/{issue_number}/comments",
+    response_model=IssueComment,
+)
+async def create_issue_comment_by_number_endpoint(
+    req: IssueCommentRequest,
+    project: str = Path(...),
+    issue_number: int = Path(...),
+    user: User = Depends(require_admin_user),
+) -> IssueComment:
+    """Append a glimmung-authored Issue comment."""
+    cosmos: Cosmos = app.state.cosmos
+    issue, etag = await _read_issue_by_public_number(
+        cosmos, project=project, issue_number=issue_number,
+    )
+    return await _create_issue_comment(
+        cosmos=cosmos, issue=issue, etag=etag, user=user, body=req.body,
     )
 
 
@@ -6654,32 +6800,20 @@ async def create_issue_comment_endpoint(
     issue_id: str = Path(...),
     user: User = Depends(require_admin_user),
 ) -> IssueComment:
-    """Append a glimmung-authored Issue comment."""
-    if not req.body.strip():
-        raise HTTPException(400, "body required")
-    cosmos: Cosmos = app.state.cosmos
-    found = await issue_ops.read_issue(cosmos, project=project, issue_id=issue_id)
-    if found is None:
-        raise HTTPException(404, f"no glimmung issue {project}/{issue_id}")
-    issue, etag = found
-    _, _, comment = await issue_ops.add_comment(
-        cosmos,
-        issue=issue,
-        etag=etag,
-        author=user.email,
-        body=req.body,
+    raise HTTPException(
+        410,
+        "Issue storage-ID comments are disabled; use /v1/issues/by-number/{project}/{issue_number}/comments",
     )
-    return comment
 
 
 @app.patch(
-    "/v1/issues/by-id/{project}/{issue_id}/comments/{comment_id}",
+    "/v1/issues/by-number/{project}/{issue_number}/comments/{comment_id}",
     response_model=IssueComment,
 )
-async def update_issue_comment_endpoint(
+async def update_issue_comment_by_number_endpoint(
     req: IssueCommentRequest,
     project: str = Path(...),
-    issue_id: str = Path(...),
+    issue_number: int = Path(...),
     comment_id: str = Path(...),
     user: User = Depends(require_admin_user),
 ) -> IssueComment:
@@ -6687,10 +6821,9 @@ async def update_issue_comment_endpoint(
     if not req.body.strip():
         raise HTTPException(400, "body required")
     cosmos: Cosmos = app.state.cosmos
-    found = await issue_ops.read_issue(cosmos, project=project, issue_id=issue_id)
-    if found is None:
-        raise HTTPException(404, f"no glimmung issue {project}/{issue_id}")
-    issue, etag = found
+    issue, etag = await _read_issue_by_public_number(
+        cosmos, project=project, issue_number=issue_number,
+    )
     existing = next((c for c in issue.comments if c.id == comment_id), None)
     if existing is None:
         raise HTTPException(404, f"no issue comment {comment_id}")
@@ -6710,21 +6843,20 @@ async def update_issue_comment_endpoint(
 
 
 @app.delete(
-    "/v1/issues/by-id/{project}/{issue_id}/comments/{comment_id}",
+    "/v1/issues/by-number/{project}/{issue_number}/comments/{comment_id}",
     response_model=IssueDetail,
     dependencies=[Depends(require_admin_user)],
 )
-async def delete_issue_comment_endpoint(
+async def delete_issue_comment_by_number_endpoint(
     project: str = Path(...),
-    issue_id: str = Path(...),
+    issue_number: int = Path(...),
     comment_id: str = Path(...),
 ) -> IssueDetail:
     """Delete an Issue comment. Admin-auth gated."""
     cosmos: Cosmos = app.state.cosmos
-    found = await issue_ops.read_issue(cosmos, project=project, issue_id=issue_id)
-    if found is None:
-        raise HTTPException(404, f"no glimmung issue {project}/{issue_id}")
-    issue, etag = found
+    issue, etag = await _read_issue_by_public_number(
+        cosmos, project=project, issue_number=issue_number,
+    )
     removed = await issue_ops.remove_comment(
         cosmos,
         issue=issue,
@@ -6735,6 +6867,39 @@ async def delete_issue_comment_endpoint(
         raise HTTPException(404, f"no issue comment {comment_id}")
     issue, _ = removed
     return await _build_issue_detail(cosmos, issue=issue)
+
+
+@app.patch(
+    "/v1/issues/by-id/{project}/{issue_id}/comments/{comment_id}",
+    response_model=IssueComment,
+)
+async def update_issue_comment_endpoint(
+    req: IssueCommentRequest,
+    project: str = Path(...),
+    issue_id: str = Path(...),
+    comment_id: str = Path(...),
+    user: User = Depends(require_admin_user),
+) -> IssueComment:
+    raise HTTPException(
+        410,
+        "Issue storage-ID comments are disabled; use /v1/issues/by-number/{project}/{issue_number}/comments/{comment_id}",
+    )
+
+
+@app.delete(
+    "/v1/issues/by-id/{project}/{issue_id}/comments/{comment_id}",
+    response_model=IssueDetail,
+    dependencies=[Depends(require_admin_user)],
+)
+async def delete_issue_comment_endpoint(
+    project: str = Path(...),
+    issue_id: str = Path(...),
+    comment_id: str = Path(...),
+) -> IssueDetail:
+    raise HTTPException(
+        410,
+        "Issue storage-ID comments are disabled; use /v1/issues/by-number/{project}/{issue_number}/comments/{comment_id}",
+    )
 
 
 @app.get(
@@ -6788,18 +6953,21 @@ async def _build_system_graph(
     issues = await issue_ops.list_open_issues(cosmos, project=project)
     issue_ids = {i.id for i in issues}
     issue_project_by_id = {i.id: i.project for i in issues}
+    issue_ref_by_id = {i.id: issue_ref(i.project, i.number) for i in issues}
+    issue_node_by_id = {i.id: f"issue:{issue_ref_by_id[i.id]}" for i in issues}
     nodes: list[GraphNode] = []
     edges: list[GraphEdge] = []
 
     for issue in issues:
+        public_issue_ref = issue_ref_by_id[issue.id]
         nodes.append(GraphNode(
-            id=f"issue:{issue.id}",
+            id=f"issue:{public_issue_ref}",
             kind="issue",
             label=issue.title,
             state=issue.state.value,
             timestamp=issue.updated_at.isoformat(),
             metadata={
-                "issue_id": issue.id,
+                "issue_ref": public_issue_ref,
                 "project": issue.project,
                 "repo": None,
                 "number": issue.number,
@@ -6814,6 +6982,8 @@ async def _build_system_graph(
         parameters=[{"name": "@s", "value": RunState.IN_PROGRESS.value}],
     )
     runs: list[Run] = []
+    run_ref_by_id: dict[str, str] = {}
+    run_node_by_id: dict[str, str] = {}
     workflow_meta_cache: dict[tuple[str, str], dict[str, Any]] = {}
     for doc in run_docs:
         run = Run.model_validate({k: v for k, v in doc.items() if not k.startswith("_")})
@@ -6840,8 +7010,11 @@ async def _build_system_graph(
         run_display = run_ops.run_display_number(run) or (
             str(run_number) if run_number is not None else ""
         )
+        public_run_ref = run_ref(run.project, run.issue_number, run_display)
+        run_ref_by_id[run.id] = public_run_ref
+        run_node_by_id[run.id] = f"run:{public_run_ref}"
         runs.append(run)
-        run_node_id = f"run:{run.id}"
+        run_node_id = f"run:{public_run_ref}"
         nodes.append(GraphNode(
             id=run_node_id,
             kind="run",
@@ -6849,35 +7022,40 @@ async def _build_system_graph(
             state=run.state.value,
             timestamp=run.created_at.isoformat(),
             metadata={
-                "run_id": run.id,
+                "run_ref": public_run_ref,
                 "run_number": run_number,
                 "run_display_number": run_display or None,
-                "parent_run_id": run.parent_run_id,
-                "root_run_id": run.root_run_id,
+                "parent_run_ref": run_ref_by_id.get(run.parent_run_id or ""),
+                "root_run_ref": run_ref_by_id.get(run.root_run_id or ""),
                 "origin_kind": run.origin_kind,
                 "is_cycle": run.is_cycle,
                 "cycle_number": run.cycle_number,
                 "project": run.project,
                 "workflow": run.workflow,
-                "issue_id": run.issue_id,
+                "issue_ref": issue_ref_by_id.get(run.issue_id),
                 "validation_url": run.validation_url,
                 "cumulative_cost_usd": run.cumulative_cost_usd,
-                "cloned_from_run_id": run.cloned_from_run_id,
+                "cloned_from_run_ref": run_ref_by_id.get(run.cloned_from_run_id or ""),
                 "entrypoint_phase": run.entrypoint_phase,
                 "workflow_graph": workflow_meta_cache[workflow_key],
-                "run_graph": _run_graph_metadata(run),
+                "run_graph": _run_graph_metadata(
+                    run,
+                    issue_number=run.issue_number,
+                    run_display=run_display,
+                    lineage_by_id=run_ref_by_id,
+                ),
             },
         ))
         edges.append(GraphEdge(
-            source=f"issue:{run.issue_id}",
+            source=issue_node_by_id[run.issue_id],
             target=run_node_id,
             kind="spawned",
         ))
         previous_attempt_node: str | None = None
         for attempt in run.attempts:
-            attempt_node_id = f"attempt:{run.id}:{attempt.attempt_index}"
+            attempt_node_id = f"attempt:{public_run_ref}:{attempt.attempt_index}"
             metadata = _attempt_graph_metadata(attempt)
-            metadata["run_id"] = run.id
+            metadata["run_ref"] = public_run_ref
             metadata["run_number"] = run_number
             nodes.append(GraphNode(
                 id=attempt_node_id,
@@ -6913,6 +7091,8 @@ async def _build_system_graph(
         if project is not None and pr.project != project:
             continue
         pr_node_id = f"pr:{pr.id}"
+        public_report_ref = report_ref(pr.repo, pr.number)
+        pr_node_id = f"pr:{public_report_ref}"
         nodes.append(GraphNode(
             id=pr_node_id,
             kind="pr",
@@ -6920,22 +7100,22 @@ async def _build_system_graph(
             state=pr.state.value,
             timestamp=pr.updated_at.isoformat(),
             metadata={
-                "pr_id": pr.id,
+                "report_ref": public_report_ref,
                 "project": pr.project,
                 "repo": pr.repo,
                 "number": pr.number,
                 "title": pr.title,
                 "html_url": pr.html_url,
-                "linked_issue_id": pr.linked_issue_id,
-                "linked_run_id": pr.linked_run_id,
+                "linked_issue_ref": issue_ref_by_id.get(pr.linked_issue_id or ""),
+                "linked_run_ref": run_ref_by_id.get(pr.linked_run_id or ""),
                 "review_count": len(pr.reviews),
                 "comment_count": len(pr.comments),
             },
         ))
         if pr.linked_run_id in run_ids:
-            edges.append(GraphEdge(source=f"run:{pr.linked_run_id}", target=pr_node_id, kind="opened"))
+            edges.append(GraphEdge(source=run_node_by_id[pr.linked_run_id], target=pr_node_id, kind="opened"))
         elif pr.linked_issue_id in issue_ids:
-            edges.append(GraphEdge(source=f"issue:{pr.linked_issue_id}", target=pr_node_id, kind="opened"))
+            edges.append(GraphEdge(source=issue_node_by_id[pr.linked_issue_id], target=pr_node_id, kind="opened"))
 
     signal_docs = await query_all(
         cosmos.signals,
@@ -6948,11 +7128,11 @@ async def _build_system_graph(
         target_node: str | None = None
         if sig.target_type == SignalTargetType.ISSUE and sig.target_id in issue_ids:
             target_issue_id = sig.target_id
-            target_node = f"issue:{sig.target_id}"
+            target_node = issue_node_by_id[sig.target_id]
         elif sig.target_type == SignalTargetType.RUN and sig.target_id in run_ids:
             run = next(r for r in runs if r.id == sig.target_id)
             target_issue_id = run.issue_id
-            target_node = f"run:{sig.target_id}"
+            target_node = run_node_by_id[sig.target_id]
         elif (
             sig.target_type == SignalTargetType.PR
             and sig.target_repo in issue_project_by_id.values()
@@ -6976,7 +7156,14 @@ async def _build_system_graph(
         if project is not None and target_issue_id is not None:
             if issue_project_by_id.get(target_issue_id) != project:
                 continue
-        sig_node_id = f"signal:{sig.id}"
+        target_ref = (
+            issue_ref_by_id.get(sig.target_id)
+            if sig.target_type == SignalTargetType.ISSUE
+            else run_ref_by_id.get(sig.target_id)
+            if sig.target_type == SignalTargetType.RUN
+            else str(sig.target_id)
+        )
+        sig_node_id = f"signal:{sig.source.value}:{target_ref}:{sig.enqueued_at.isoformat()}"
         nodes.append(GraphNode(
             id=sig_node_id,
             kind="signal",
@@ -6984,16 +7171,16 @@ async def _build_system_graph(
             state=sig.state.value,
             timestamp=sig.enqueued_at.isoformat(),
             metadata={
-                "signal_id": sig.id,
+                "signal_ref": sig_node_id.removeprefix("signal:"),
                 "target_type": sig.target_type.value,
                 "target_repo": sig.target_repo,
-                "target_id": sig.target_id,
+                "target_ref": target_ref,
                 "payload": sig.payload,
             },
         ))
         edges.append(GraphEdge(source=target_node, target=sig_node_id, kind="feedback"))
 
-    return IssueGraph(issue_id="system", nodes=nodes, edges=edges)
+    return IssueGraph(issue_ref="system", nodes=nodes, edges=edges)
 
 
 async def _build_issue_graph(
@@ -7062,6 +7249,17 @@ async def _build_issue_graph_for_issue(
             seen_run_ids.add(doc["id"])
     run_docs.sort(key=lambda d: d.get("created_at", ""))
     run_number_by_id = run_ops.run_number_map(run_docs)
+    run_ref_by_id: dict[str, str] = {}
+    run_node_by_id: dict[str, str] = {}
+    for d in run_docs:
+        rid = str(d["id"])
+        rn = run_number_by_id.get(rid) or d.get("run_number")
+        display = run_ops.run_display_number(
+            Run.model_validate(run_ops._strip_meta({**d, "run_number": rn}))
+        ) if rn is not None else rn
+        public_run_ref = run_ref(issue.project, issue_number, display or rn)
+        run_ref_by_id[rid] = public_run_ref
+        run_node_by_id[rid] = f"run:{public_run_ref}"
 
     pr_numbers = {
         int(d["pr_number"]) for d in run_docs
@@ -7131,7 +7329,8 @@ async def _build_issue_graph_for_issue(
     nodes: list[GraphNode] = []
     edges: list[GraphEdge] = []
 
-    issue_node_id = f"issue:{issue.id}"
+    public_issue_ref = issue_ref(issue.project, issue_number)
+    issue_node_id = f"issue:{public_issue_ref}"
     nodes.append(GraphNode(
         id=issue_node_id,
         kind="issue",
@@ -7139,7 +7338,7 @@ async def _build_issue_graph_for_issue(
         state=issue.state.value,
         timestamp=issue.created_at.isoformat(),
         metadata={
-            "issue_id": issue.id,
+            "issue_ref": public_issue_ref,
             "project": issue.project,
             "number": issue_number,
             "labels": list(issue.labels),
@@ -7150,7 +7349,8 @@ async def _build_issue_graph_for_issue(
     pr_node_by_run_id: dict[str, str] = {}
     issue_report_nodes: list[str] = []
     for pr in reports:
-        pr_id = f"pr:{pr.id}"
+        public_report_ref = report_ref(pr.repo, pr.number)
+        pr_id = f"pr:{public_report_ref}"
         nodes.append(GraphNode(
             id=pr_id,
             kind="pr",
@@ -7158,7 +7358,7 @@ async def _build_issue_graph_for_issue(
             state=pr.state.value,
             timestamp=pr.updated_at.isoformat(),
             metadata={
-                "report_id": pr.id,
+                "report_ref": public_report_ref,
                 "project": pr.project,
                 "repo": pr.repo,
                 "number": pr.number,
@@ -7167,8 +7367,8 @@ async def _build_issue_graph_for_issue(
                 "base_ref": pr.base_ref,
                 "head_sha": pr.head_sha,
                 "html_url": pr.html_url,
-                "linked_issue_id": pr.linked_issue_id,
-                "linked_run_id": pr.linked_run_id,
+                "linked_issue_ref": public_issue_ref if pr.linked_issue_id == issue.id else None,
+                "linked_run_ref": run_ref_by_id.get(pr.linked_run_id or ""),
                 "review_count": len(pr.reviews),
                 "comment_count": len(pr.comments),
             },
@@ -7204,7 +7404,8 @@ async def _build_issue_graph_for_issue(
         run_number = run_number_by_id.get(run_id) or d.get("run_number")
         if d.get("run_number") is None and run_number is not None:
             d = {**d, "run_number": run_number}
-        run_node_id = f"run:{run_id}"
+        public_run_ref = run_ref_by_id[run_id]
+        run_node_id = run_node_by_id[run_id]
         linked_report = report_by_run_id.get(run_id)
         if linked_report is None and d.get("pr_number") is not None:
             linked_report = report_by_number.get(int(d["pr_number"]))
@@ -7217,7 +7418,7 @@ async def _build_issue_graph_for_issue(
         nodes.append(GraphNode(
             id=run_node_id,
             kind="run",
-            label=f"Run {run_number}" if run_number is not None else f"Run {run_id[:8]}",
+            label=f"Run {run_number}" if run_number is not None else "Run unknown",
             state=d.get("state"),
             timestamp=d.get("created_at"),
             metadata={
@@ -7231,7 +7432,9 @@ async def _build_issue_graph_for_issue(
                 "issue_lock_holder_id": d.get("issue_lock_holder_id"),
                 "pr_number": d.get("pr_number"),
                 "pr_branch": d.get("pr_branch"),
-                "report_id": linked_report.id if linked_report else None,
+                "run_ref": public_run_ref,
+                "issue_ref": public_issue_ref,
+                "report_ref": report_ref(linked_report.repo, linked_report.number) if linked_report else None,
                 "report_state": linked_report.state.value if linked_report else None,
                 "report_title": linked_report.title if linked_report else None,
                 "report_url": linked_report.html_url if linked_report else None,
@@ -7240,10 +7443,17 @@ async def _build_issue_graph_for_issue(
                 # so the dashboard can render the Run-lineage tree
                 # (parent-child across resume-spawned Runs) and the
                 # entrypoint-arrow highlight on resumed Runs.
-                "cloned_from_run_id": d.get("cloned_from_run_id"),
+                "cloned_from_run_ref": run_ref_by_id.get(str(d.get("cloned_from_run_id") or "")),
                 "entrypoint_phase": d.get("entrypoint_phase"),
                 "workflow_graph": workflow_meta_cache[workflow_key],
-                "run_graph": _run_graph_metadata(d),
+                "run_graph": _run_graph_metadata(
+                    d,
+                    issue_number=issue_number,
+                    run_display=run_ops.run_display_number(
+                        Run.model_validate(run_ops._strip_meta(d))
+                    ) or run_number,
+                    lineage_by_id=run_ref_by_id,
+                ),
             },
         ))
         edges.append(GraphEdge(
@@ -7258,7 +7468,7 @@ async def _build_issue_graph_for_issue(
         cloned_from = d.get("cloned_from_run_id")
         if cloned_from and cloned_from in run_ids:
             edges.append(GraphEdge(
-                source=f"run:{cloned_from}",
+                source=run_node_by_id[cloned_from],
                 target=run_node_id,
                 kind="resumed_from",
             ))
@@ -7266,7 +7476,7 @@ async def _build_issue_graph_for_issue(
         prev_attempt_node: str | None = None
         for a in d.get("attempts") or []:
             ai = a.get("attempt_index")
-            attempt_node_id = f"attempt:{run_id}:{ai}"
+            attempt_node_id = f"attempt:{public_run_ref}:{ai}"
             verification = a.get("verification") or {}
             skipped_from = a.get("skipped_from_run_id")
             # Synthesized skip-marks (#111) take priority over the
@@ -7287,12 +7497,12 @@ async def _build_issue_graph_for_issue(
                 timestamp=a.get("dispatched_at"),
                 metadata={
                     **_attempt_graph_metadata(a),
-                    "run_id": run_id,
+                    "run_ref": public_run_ref,
                     "run_number": run_number,
                     # Resume primitive (#111) — set on synthesized
                     # skip-marks so the dashboard can render "satisfied
                     # by Run X" tooltips and grey out skipped attempts.
-                    "skipped_from_run_id": skipped_from,
+                    "skipped_from_run_ref": run_ref_by_id.get(str(skipped_from or "")),
                     "verification": verification or None,
                 },
             ))
@@ -7321,10 +7531,19 @@ async def _build_issue_graph_for_issue(
         edges.append(GraphEdge(source=issue_node_id, target=pr_id, kind="opened"))
 
     for s in relevant_signals:
-        sig_node_id = f"signal:{s['id']}"
         target_type = s.get("target_type")
         target_id = s.get("target_id")
         payload = s.get("payload") or {}
+        target_ref = (
+            public_issue_ref
+            if target_type == "issue"
+            else run_ref_by_id.get(str(target_id), str(target_id))
+            if target_type == "run"
+            else f"{repo}#{target_id}"
+            if target_type == "pr"
+            else str(target_id)
+        )
+        sig_node_id = f"signal:{s.get('source') or 'signal'}:{target_ref}:{s.get('created_at') or ''}"
         nodes.append(GraphNode(
             id=sig_node_id,
             kind="signal",
@@ -7334,7 +7553,7 @@ async def _build_issue_graph_for_issue(
             metadata={
                 "source": s.get("source"),
                 "target_type": target_type,
-                "target_id": target_id,
+                "target_ref": target_ref,
                 "decision": s.get("decision"),
                 "payload": payload,
                 "failure_reason": s.get("failure_reason"),
@@ -7358,7 +7577,7 @@ async def _build_issue_graph_for_issue(
         elif target_type == "run":
             if target_id in run_ids:
                 edges.append(GraphEdge(
-                    source=f"run:{target_id}",
+                    source=run_node_by_id[target_id],
                     target=sig_node_id,
                     kind="feedback",
                 ))
@@ -7372,12 +7591,12 @@ async def _build_issue_graph_for_issue(
             if d.get("created_at", "") > sig_ts:
                 edges.append(GraphEdge(
                     source=sig_node_id,
-                    target=f"run:{d['id']}",
+                    target=run_node_by_id[d["id"]],
                     kind="re_dispatched",
                 ))
                 break
 
-    return IssueGraph(issue_id=issue.id, nodes=nodes, edges=edges)
+    return IssueGraph(issue_ref=public_issue_ref, nodes=nodes, edges=edges)
 
 
 @app.post(
@@ -7388,11 +7607,11 @@ async def _build_issue_graph_for_issue(
 async def dispatch_run_endpoint(req: DispatchRequest) -> PublicDispatchResult:
     """UI-initiated dispatch. The trigger source is recorded on the
     resulting Run for W6 observability."""
-    if req.issue_number is None and not req.issue_id:
+    if req.issue_number is None:
         raise HTTPException(400, "issue_number required")
     result = await dispatch_run(
         app,
-        issue_id=req.issue_id,
+        issue_id=None,
         issue_number=req.issue_number,
         project=req.project,
         trigger_source={"kind": "glimmung_ui"},

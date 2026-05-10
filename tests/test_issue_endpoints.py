@@ -20,12 +20,12 @@ from glimmung.app import (
     IssueCommentRequest,
     IssueUpdateRequest,
     _build_issue_detail,
-    archive_issue_endpoint,
+    archive_issue_by_number_endpoint,
     app,
-    create_issue_comment_endpoint,
-    delete_issue_comment_endpoint,
-    discard_issue_endpoint,
-    update_issue_comment_endpoint,
+    create_issue_comment_by_number_endpoint,
+    delete_issue_comment_by_number_endpoint,
+    discard_issue_by_number_endpoint,
+    update_issue_comment_by_number_endpoint,
     _list_issues_from_cosmos,
 )
 from glimmung.auth import User
@@ -59,7 +59,7 @@ def app_state(cosmos):
 
 @pytest.mark.asyncio
 async def test_list_surfaces_native_issues(cosmos):
-    """The row carries `id` always; `number` is the Glimmung
+    """The row carries a public `ref`; `number` is the Glimmung
     project-scoped issue number."""
     await issue_ops.create_issue(
         cosmos, project="ambience", title="native one",
@@ -71,7 +71,7 @@ async def test_list_surfaces_native_issues(cosmos):
     assert row.number == 1
     assert row.repo is None
     assert row.html_url is None
-    assert row.id
+    assert row.ref == "ambience#1"
 
 
 @pytest.mark.asyncio
@@ -110,8 +110,11 @@ async def test_list_can_include_closed_issues_for_audit(cosmos):
     closed_rows = await _list_issues_from_cosmos(cosmos, state="closed")
     all_rows = await _list_issues_from_cosmos(cosmos, state="all")
 
-    assert [r.id for r in closed_rows] == [closed_issue.id]
-    assert {r.id for r in all_rows} == {open_issue.id, closed_issue.id}
+    assert [r.ref for r in closed_rows] == [f"ambience#{closed_issue.number}"]
+    assert {r.ref for r in all_rows} == {
+        f"ambience#{open_issue.number}",
+        f"ambience#{closed_issue.number}",
+    }
 
 
 @pytest.mark.asyncio
@@ -128,10 +131,10 @@ async def test_archive_issue_closes_and_comments(cosmos, app_state):
         cosmos, project="ambience", title="stale idea",
     )
 
-    detail = await archive_issue_endpoint(
+    detail = await archive_issue_by_number_endpoint(
         IssueArchiveRequest(reason="superseded"),
         project="ambience",
-        issue_id=issue.id,
+        issue_number=issue.number,
         user=User(sub="admin", email="admin@example.com", name="Admin"),
     )
 
@@ -148,10 +151,10 @@ async def test_discard_issue_closes_and_comments(cosmos, app_state):
         cosmos, project="ambience", title="not actionable",
     )
 
-    detail = await discard_issue_endpoint(
+    detail = await discard_issue_by_number_endpoint(
         IssueArchiveRequest(),
         project="ambience",
-        issue_id=issue.id,
+        issue_number=issue.number,
         user=User(sub="admin", email="admin@example.com", name="Admin"),
     )
 
@@ -198,7 +201,7 @@ async def test_list_surfaces_and_filters_issue_workflow(cosmos):
     )
 
     assert len(rows) == 1
-    assert rows[0].id == issue_agent.id
+    assert rows[0].ref == f"ambience#{issue_agent.number}"
     assert rows[0].workflow == "issue-agent"
 
 
@@ -232,7 +235,7 @@ async def test_list_derives_issue_workflow_from_latest_run(cosmos):
 
     assert len(rows) == 1
     assert rows[0].workflow == "issue-agent"
-    assert rows[0].last_run_id == "run-new"
+    assert rows[0].last_run_ref == f"ambience#{issue.number}/runs/2"
 
 
 @pytest.mark.asyncio
@@ -281,9 +284,9 @@ async def test_needs_attention_omits_runnable_and_active_issues(cosmos):
 
     rows = await _list_issues_from_cosmos(cosmos, needs_attention=True)
 
-    assert {r.id for r in rows} == {failed.id, ready.id}
-    assert runnable.id not in [r.id for r in rows]
-    assert active.id not in [r.id for r in rows]
+    assert {r.ref for r in rows} == {f"ambience#{failed.number}", f"ambience#{ready.number}"}
+    assert f"ambience#{runnable.number}" not in [r.ref for r in rows]
+    assert f"ambience#{active.number}" not in [r.ref for r in rows]
 
 
 # ─── _build_issue_detail: shared rendering ──────────────────────────────
@@ -298,7 +301,7 @@ async def test_build_detail_for_native_issue_omits_gh_fields(cosmos):
     )
 
     detail = await _build_issue_detail(cosmos, issue=issue)
-    assert detail.id == issue.id
+    assert detail.ref == "ambience#1"
     assert detail.project == "ambience"
     assert detail.title == "rewrite the dispatcher"
     assert detail.body == "we should split it"
@@ -308,7 +311,7 @@ async def test_build_detail_for_native_issue_omits_gh_fields(cosmos):
     assert detail.repo is None
     assert detail.number == 1
     assert detail.html_url is None
-    assert detail.last_run_id is None
+    assert detail.last_run_ref is None
     assert detail.issue_lock_held is False
 
 
@@ -330,7 +333,7 @@ async def test_build_detail_accepts_legacy_run_without_issue_repo(cosmos):
 
     detail = await _build_issue_detail(cosmos, issue=issue)
 
-    assert detail.last_run_id == "run-legacy"
+    assert detail.last_run_ref == "ambience#1/runs/1"
     assert detail.last_run_state == RunState.IN_PROGRESS.value
 
 
@@ -390,28 +393,28 @@ async def test_issue_comment_endpoints_create_update_delete(cosmos, monkeypatch)
     )
     user = User(sub="u", email="nelson@example.com", name="Nelson")
 
-    comment = await create_issue_comment_endpoint(
+    comment = await create_issue_comment_by_number_endpoint(
         IssueCommentRequest(body="first"),
         project="ambience",
-        issue_id=issue.id,
+        issue_number=issue.number,
         user=user,
     )
     assert comment.author == "nelson@example.com"
     assert comment.body == "first"
 
-    edited = await update_issue_comment_endpoint(
+    edited = await update_issue_comment_by_number_endpoint(
         IssueCommentRequest(body="edited"),
         project="ambience",
-        issue_id=issue.id,
+        issue_number=issue.number,
         comment_id=comment.id,
         user=user,
     )
     assert edited.id == comment.id
     assert edited.body == "edited"
 
-    detail = await delete_issue_comment_endpoint(
+    detail = await delete_issue_comment_by_number_endpoint(
         project="ambience",
-        issue_id=issue.id,
+        issue_number=issue.number,
         comment_id=comment.id,
     )
     assert detail.comments == []
@@ -437,10 +440,10 @@ async def test_update_issue_comment_rejects_other_author(cosmos, monkeypatch):
     user = User(sub="u", email="other@example.com", name="Other")
 
     with pytest.raises(HTTPException) as exc:
-        await update_issue_comment_endpoint(
-            IssueCommentRequest(body="edited"),
-            project="ambience",
-            issue_id=issue.id,
+            await update_issue_comment_by_number_endpoint(
+                IssueCommentRequest(body="edited"),
+                project="ambience",
+                issue_number=issue.number,
             comment_id=comment.id,
             user=user,
         )

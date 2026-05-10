@@ -16,7 +16,7 @@ import { useNavigate } from "react-router-dom";
 import { authedFetch } from "./auth";
 
 type IssueRow = {
-  id: string;
+  ref: string;
   project: string;
   workflow: string | null;
   repo: string | null;
@@ -25,7 +25,7 @@ type IssueRow = {
   state: string;
   labels: string[];
   html_url: string | null;
-  last_run_id: string | null;
+  last_run_ref: string | null;
   last_run_number: number | null;
   last_run_state: string | null;
   last_run_abort_reason: string | null;
@@ -34,7 +34,7 @@ type IssueRow = {
 
 type DispatchResult = {
   state: string;
-  lease_id: string | null;
+  lease: string | null;
   run_number: number | null;
   host: string | null;
   workflow: string | null;
@@ -102,6 +102,7 @@ export function IssuesView({
   }, [signedIn, projectFilter, workflowFilter, needsAttentionOnly]);
 
   const dispatch = async (row: IssueRow) => {
+    if (row.number === null) return;
     const key = rowKey(row);
     setDispatchStatus({ kind: "dispatching", key });
     try {
@@ -109,7 +110,7 @@ export function IssuesView({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          issue_id: row.id,
+          issue_number: row.number,
           project: row.project,
           workflow: workflowFilter ?? row.workflow ?? undefined,
         }),
@@ -135,13 +136,14 @@ export function IssuesView({
   };
 
   const discard = async (row: IssueRow) => {
+    if (row.number === null) return;
     const key = rowKey(row);
     const reason = window.prompt("Discard reason", "");
     if (reason === null) return;
     setIssueActionStatus({ kind: "discarding", key });
     try {
       const r = await authedFetch(
-        `/v1/issues/by-id/${encodeURIComponent(row.project)}/${encodeURIComponent(row.id)}/discard`,
+        `/v1/issues/by-number/${encodeURIComponent(row.project)}/${row.number}/discard`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -150,7 +152,7 @@ export function IssuesView({
       );
       if (!r.ok) {
         const text = await r.text();
-        throw new Error(`/v1/issues/by-id/${row.project}/${row.id}/discard -> ${r.status}: ${text}`);
+        throw new Error(`/v1/issues/by-number/${row.project}/${row.number}/discard -> ${r.status}: ${text}`);
       }
       setIssueActionStatus({ kind: "idle" });
       void refresh();
@@ -298,11 +300,11 @@ export function IssuesView({
 }
 
 function rowKey(row: IssueRow): string {
-  return row.number !== null ? `${row.project}#${row.number}` : `glimmung/${row.id}`;
+  return row.ref;
 }
 
 function renderLastRun(row: IssueRow): string {
-  if (!row.last_run_id) return "—";
+  if (!row.last_run_ref) return "—";
   const label = row.last_run_number !== null ? `run ${row.last_run_number}` : row.last_run_state ?? "?";
   if (row.issue_lock_held) return `${label} (in flight)`;
   return label;
@@ -326,7 +328,7 @@ function attentionReason(row: IssueRow): { label: string; detail: string | null;
       kind: "busy",
     };
   }
-  if (!row.last_run_id) {
+  if (!row.last_run_ref) {
     return {
       label: "not dispatched",
       detail: "open issue has not had an agent run yet",
