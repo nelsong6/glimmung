@@ -275,3 +275,68 @@ async def test_run_report_by_number_derives_legacy_run_numbers(
 
     assert report.run_ref == "glimmung#141/runs/2"
     assert report.run_number == 2
+
+
+@pytest.mark.asyncio
+async def test_run_report_derives_legacy_resume_lineage_from_cloned_from(
+    app_state, cosmos, monkeypatch,
+):
+    monkeypatch.setattr("glimmung.app.app", app_state)
+    now = datetime(2026, 5, 6, 2, 20, tzinfo=UTC)
+    prior = Run(
+        id="old-1",
+        project="glimmung",
+        workflow="issue-agent",
+        run_number=1,
+        issue_id="issue-1",
+        issue_repo="nelsong6/glimmung",
+        issue_number=141,
+        state=RunState.ABORTED,
+        budget=BudgetConfig(total=10),
+        attempts=[
+            PhaseAttempt(
+                attempt_index=0,
+                phase="env-prep",
+                workflow_filename="",
+                dispatched_at=now,
+                completed_at=now,
+                conclusion="cancelled",
+            ),
+        ],
+        created_at=now,
+        updated_at=now,
+    )
+    child = Run(
+        id="old-2",
+        project="glimmung",
+        workflow="issue-agent",
+        run_number=2,
+        issue_id="issue-1",
+        issue_repo="nelsong6/glimmung",
+        issue_number=141,
+        state=RunState.IN_PROGRESS,
+        budget=BudgetConfig(total=10),
+        attempts=[
+            PhaseAttempt(
+                attempt_index=0,
+                phase="env-prep",
+                workflow_filename="",
+                dispatched_at=now + timedelta(minutes=1),
+            ),
+        ],
+        trigger_source={"kind": "resume_via_mcp"},
+        cloned_from_run_id=prior.id,
+        entrypoint_phase="env-prep",
+        created_at=now + timedelta(minutes=1),
+        updated_at=now + timedelta(minutes=1),
+    )
+    await cosmos.runs.create_item(prior.model_dump(mode="json"))
+    await cosmos.runs.create_item(child.model_dump(mode="json"))
+
+    report = await get_run_report_by_number(
+        project="glimmung", issue_number=141, run_number=2,
+    )
+
+    assert report.parent_run_ref == "glimmung#141/runs/1"
+    assert report.root_run_ref == "glimmung#141/runs/1"
+    assert report.origin_kind == "resume_via_mcp"

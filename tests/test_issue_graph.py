@@ -582,6 +582,9 @@ async def test_graph_surfaces_resume_lineage(cosmos, app_state):
         n for n in graph.nodes if n.id == "run:ambience#116/runs/2"
     )
     assert resumed_node.metadata["cloned_from_run_ref"] == "ambience#116/runs/1"
+    assert resumed_node.metadata["parent_run_ref"] == "ambience#116/runs/1"
+    assert resumed_node.metadata["root_run_ref"] == "ambience#116/runs/1"
+    assert resumed_node.metadata["origin_kind"] == "resume"
     assert resumed_node.metadata["entrypoint_phase"] == "agent-execute"
 
     # Prior Run renders with no resume metadata.

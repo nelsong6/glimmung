@@ -123,6 +123,11 @@ type RunReport = {
   run_ref: string;
   run_number: number | null;
   run_display_number: string | null;
+  parent_run_ref: string | null;
+  root_run_ref: string | null;
+  origin_kind: string | null;
+  is_cycle: boolean;
+  cycle_number: number | null;
   workflow: string;
   issue_ref: string | null;
   issue_repo: string | null;
@@ -2037,6 +2042,12 @@ function projectRunReportGraph(report: RunReport, workflow: Workflow | undefined
     metadata: {
       run_ref: report.run_ref,
       run_number: report.run_number,
+      run_display_number: report.run_display_number,
+      parent_run_ref: report.parent_run_ref,
+      root_run_ref: report.root_run_ref,
+      origin_kind: report.origin_kind,
+      is_cycle: report.is_cycle,
+      cycle_number: report.cycle_number,
       workflow: report.workflow,
       cost_usd: report.cumulative_cost_usd,
       issue_ref: report.issue_ref,

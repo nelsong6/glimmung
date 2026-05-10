@@ -3742,15 +3742,22 @@ def _run_report_from_run(
         default=None,
     )
     current_phase = run.attempts[-1].phase if run.attempts else None
+    parent_run_id = run.parent_run_id or run.cloned_from_run_id
+    root_run_id = run.root_run_id
+    if not root_run_id and parent_run_id:
+        root_run_id = parent_run_id
+    origin_kind = run.origin_kind
+    if not origin_kind and parent_run_id:
+        origin_kind = (run.trigger_source or {}).get("kind") or "resume"
     return RunReport(
         ref=f"{public_run_ref}/report",
         project=run.project,
         run_ref=public_run_ref,
         run_number=run.run_number,
         run_display_number=run_display,
-        parent_run_ref=lineage_by_id.get(run.parent_run_id or ""),
-        root_run_ref=lineage_by_id.get(run.root_run_id or ""),
-        origin_kind=run.origin_kind,
+        parent_run_ref=lineage_by_id.get(parent_run_id or ""),
+        root_run_ref=lineage_by_id.get(root_run_id or ""),
+        origin_kind=origin_kind,
         is_cycle=run.is_cycle,
         cycle_number=run.cycle_number,
         workflow=run.workflow,
@@ -7606,6 +7613,13 @@ async def _build_system_graph(
         run_node_by_id[run.id] = f"run:{public_run_ref}"
         runs.append(run)
         run_node_id = f"run:{public_run_ref}"
+        parent_run_id = run.parent_run_id or run.cloned_from_run_id
+        root_run_id = run.root_run_id
+        if not root_run_id and parent_run_id:
+            root_run_id = parent_run_id
+        origin_kind = run.origin_kind
+        if not origin_kind and parent_run_id:
+            origin_kind = (run.trigger_source or {}).get("kind") or "resume"
         nodes.append(GraphNode(
             id=run_node_id,
             kind="run",
@@ -7616,9 +7630,9 @@ async def _build_system_graph(
                 "run_ref": public_run_ref,
                 "run_number": run_number,
                 "run_display_number": run_display or None,
-                "parent_run_ref": run_ref_by_id.get(run.parent_run_id or ""),
-                "root_run_ref": run_ref_by_id.get(run.root_run_id or ""),
-                "origin_kind": run.origin_kind,
+                "parent_run_ref": run_ref_by_id.get(parent_run_id or ""),
+                "root_run_ref": run_ref_by_id.get(root_run_id or ""),
+                "origin_kind": origin_kind,
                 "is_cycle": run.is_cycle,
                 "cycle_number": run.cycle_number,
                 "project": run.project,
@@ -8040,6 +8054,22 @@ async def _build_issue_graph_for_issue(
                 # so the dashboard can render the Run-lineage tree
                 # (parent-child across resume-spawned Runs) and the
                 # entrypoint-arrow highlight on resumed Runs.
+                "parent_run_ref": run_ref_by_id.get(
+                    str(d.get("parent_run_id") or d.get("cloned_from_run_id") or "")
+                ),
+                "root_run_ref": run_ref_by_id.get(
+                    str(
+                        d.get("root_run_id")
+                        or d.get("parent_run_id")
+                        or d.get("cloned_from_run_id")
+                        or ""
+                    )
+                ),
+                "origin_kind": d.get("origin_kind") or (
+                    ((d.get("trigger_source") or {}).get("kind") or "resume")
+                    if (d.get("parent_run_id") or d.get("cloned_from_run_id"))
+                    else None
+                ),
                 "cloned_from_run_ref": run_ref_by_id.get(str(d.get("cloned_from_run_id") or "")),
                 "entrypoint_phase": d.get("entrypoint_phase"),
                 "workflow_graph": workflow_meta_cache[workflow_key],
