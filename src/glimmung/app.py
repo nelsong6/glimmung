@@ -6887,6 +6887,7 @@ class TestSlotCheckoutResult(BaseModel):
     workflow: str
     slot_index: int | None = None
     slot_name: str | None = None
+    url: str | None = None
     lease: str
     host: str | None = None
     detail: str | None = None
@@ -8636,12 +8637,17 @@ async def checkout_test_slot(req: TestSlotCheckoutRequest) -> TestSlotCheckoutRe
         )
     actual_slot_index = lease.metadata.get("native_slot_index")
     actual_slot_name = lease.metadata.get("native_slot_name") or slot_name
+    slot_url = None
+    if isinstance(actual_slot_name, str) and actual_slot_name:
+        host_name = native_k8s_ops._test_slot_host(project_doc, actual_slot_name, app.state.settings)
+        slot_url = f"https://{host_name}" if host_name else None
     return TestSlotCheckoutResult(
         state=lease.state.value,
         project=project,
         workflow=workflow_name,
         slot_index=int(actual_slot_index) if actual_slot_index else req.slot_index,
         slot_name=str(actual_slot_name) if actual_slot_name is not None else None,
+        url=slot_url,
         lease=lease_ref(
             project,
             slot_name=str(actual_slot_name) if actual_slot_name is not None else None,
