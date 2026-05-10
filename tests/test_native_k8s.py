@@ -209,7 +209,10 @@ def test_job_manifest_per_job_renders_one_container_pod():
         "workflow": "native-agent",
         "metadata": {
             "run_id": "01KRNATIVE0000000000000000",
+            "run_number": "4",
+            "run_display_number": "4",
             "attempt_index": "2",
+            "issue_number": "117",
             "issue_id": "01ISSUE",
             "issue_body": "Use the validation URL and make the requested change.",
             "native_slot_index": "3",
@@ -270,7 +273,12 @@ def test_job_manifest_per_job_renders_one_container_pod():
     }
     env = {item["name"]: item for item in spec["containers"][0]["env"]}
     assert env["APP_ENV"]["value"] == "test"
-    assert env["GLIMMUNG_RUN_ID"]["value"] == "01KRNATIVE0000000000000000"
+    assert "GLIMMUNG_RUN_ID" not in env
+    assert env["GLIMMUNG_RUN_REF"]["value"] == "ambience#117/runs/4"
+    assert env["GLIMMUNG_LEASE_REF"]["value"] == "ambience-slot-3"
+    assert env["GLIMMUNG_EVENTS_URL"]["value"].endswith(
+        "/v1/projects/ambience/issues/117/runs/4/native/events"
+    )
     assert env["GLIMMUNG_JOB_ID"]["value"] == "agent"
     assert env["GLIMMUNG_ISSUE_BODY"]["value"] == (
         "Use the validation URL and make the requested change."
@@ -303,11 +311,11 @@ def test_job_manifest_per_job_renders_one_container_pod():
     )
     assert env["GLIMMUNG_GITHUB_TOKEN_URL"]["value"] == (
         "http://glimmung.glimmung.svc.cluster.local"
-        "/v1/runs/ambience/01KRNATIVE0000000000000000/native/github-token"
+        "/v1/projects/ambience/issues/117/runs/4/native/github-token"
     )
     assert env["GLIMMUNG_STATUS_URL"]["value"] == (
         "http://glimmung.glimmung.svc.cluster.local"
-        "/v1/runs/ambience/01KRNATIVE0000000000000000/native/status"
+        "/v1/projects/ambience/issues/117/runs/4/native/status"
     )
     assert env["GLIMMUNG_ATTEMPT_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == (
         "glim-01krnative-2-token"

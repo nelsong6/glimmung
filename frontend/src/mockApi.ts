@@ -586,7 +586,7 @@ const systemGraph = {
 
 const nativeEvents = {
   project: "glimmung",
-  run_id: "run-glimmung-206-live",
+  run_ref: "glimmung#206/runs/1",
   attempt_index: 2,
   job_id: null,
   archive_url: "mock://artifacts/run-glimmung-206-live/verify.log",
@@ -688,6 +688,7 @@ function handleMockRequest(url: URL, init?: RequestInit): Response {
   if (path.includes("/comments")) return json({ id: `comment-mock-${Date.now()}`, ok: true });
 
   if (path.match(/^\/v1\/runs\/[^/]+\/[^/]+\/native\/events$/)) return json(nativeEvents);
+  if (path.match(/^\/v1\/projects\/[^/]+\/issues\/\d+\/runs\/[^/]+\/native\/events$/)) return json(nativeEvents);
   if (path.match(/^\/v1\/runs\/[^/]+\/[^/]+\/abort$/) && method === "POST") return json({ ok: true });
 
   return json({ error: `mock route not implemented: ${method} ${path}` }, { status: 404 });
@@ -778,9 +779,8 @@ function step(slug: string, title: string, state: string, message: string | null
 
 function event(seq: number, jobId: string, stepSlug: string, eventName: string, message: string, exitCode: number | null) {
   return {
-    id: `event-${seq}`,
     project: "glimmung",
-    run_id: "run-glimmung-206-live",
+    run_ref: "glimmung#206/runs/1",
     attempt_index: 2,
     phase: "verify",
     job_id: jobId,

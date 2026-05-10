@@ -324,7 +324,7 @@ async def test_started_stamps_workflow_run_id(cosmos, app_state):
             RunStartedRequest(workflow_run_id=25255513874),
             project="ambience", run_id=run.id,
         )
-    assert result.run_id == run.id
+    assert result.run_ref == "ambience#42/runs/unknown"
 
     found = await run_ops.read_run(cosmos, project="ambience", run_id=run.id)
     assert found is not None
@@ -917,7 +917,7 @@ async def test_completed_aborts_when_phase_renamed_in_workflow(
 
     # Completion was accepted (no 400 raised) and the run is aborted
     # with a reason that points the operator at the registration drift.
-    assert result.run_id == run.id
+    assert result.run_ref == "ambience#200/runs/unknown"
     assert result.decision == "abort_no_workflow"
     found = await run_ops.read_run(cosmos, project="ambience", run_id=run.id)
     final, _ = found  # type: ignore[misc]
