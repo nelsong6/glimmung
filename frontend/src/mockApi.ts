@@ -627,10 +627,10 @@ function handleMockRequest(url: URL, init?: RequestInit): Response {
   }
   if (path === "/v1/graph" && method === "GET") return json(filterGraph(url.searchParams.get("project")));
   if (path === "/v1/runs/dispatch" && method === "POST") {
-    return json({ state: "dispatched", lease_id: "lease-mock-dispatch", run_number: 1, host: null, workflow: "issue-agent", detail: null });
+    return json({ state: "dispatched", lease: "claimed", run_number: 1, host: null, workflow: "issue-agent", detail: null });
   }
   if (path === "/v1/portfolio/elements/dispatch" && method === "POST") {
-    return json({ state: "dispatched", lease_id: "lease-mock-portfolio", run_number: 1, host: null, workflow: "portfolio-agent", detail: null });
+    return json({ state: "dispatched", lease: "claimed", run_number: 1, host: null, workflow: "portfolio-agent", detail: null });
   }
   if (path.startsWith("/v1/lease/") && path.endsWith("/cancel") && method === "POST") return json({ ok: true });
   if (path === "/v1/signals" && method === "POST") return json({ id: `signal-mock-${Date.now()}`, state: "pending" });
