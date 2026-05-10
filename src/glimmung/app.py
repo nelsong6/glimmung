@@ -987,6 +987,7 @@ async def _archive_native_attempt_logs(
             {"name": "@r", "value": run.id},
             {"name": "@a", "value": attempt_index},
         ],
+        partition_key=run.project,
     )
     docs.sort(key=lambda d: (str(d.get("job_id") or ""), int(d.get("seq") or 0)))
     events = [
@@ -1021,13 +1022,27 @@ async def _archive_native_attempt_logs(
             502,
             f"failed to archive native logs for run {run.id}",
         )
-    return await run_ops.record_log_archive_url(
+    updated_run, updated_etag = await run_ops.record_log_archive_url(
         cosmos,
         run=run,
         etag=etag,
         attempt_index=attempt_index,
         log_archive_url=archive_url,
     )
+    for doc in docs:
+        try:
+            await cosmos.run_events.delete_item(
+                item=doc["id"],
+                partition_key=run.project,
+            )
+        except Exception:
+            log.exception(
+                "native log archive cleanup failed for run %s attempt %d event %s",
+                run.id,
+                attempt_index,
+                doc.get("id"),
+            )
+    return updated_run, updated_etag
 
 
 async def _release_locks_on_terminal(
@@ -3932,11 +3947,11 @@ async def native_run_events(
     job_id: str | None = Query(None),
     limit: int | None = Query(None, ge=1, le=1000),
 ) -> NativeRunLogsResponse:
-    """Read hot native step/log events for a Run.
+    """Read native step/log events for a Run.
 
-    This is intentionally a read-only dashboard/MCP surface over the
-    `run_events` hot store. Older archived attempts are advertised via
-    `archive_url`; archive hydration remains a separate path.
+    Active attempts are served from the `run_events` hot store. Completed
+    attempts may have already been archived to Blob and evicted from Cosmos;
+    when an attempt is selected, hydrate that archive on demand.
     """
     cosmos: Cosmos = app.state.cosmos
     found = await run_ops.read_run(cosmos, project=project, run_id=run_id)
@@ -3961,6 +3976,30 @@ async def native_run_events(
         job_id=job_id,
         limit=limit,
     )
+    if not docs:
+        if attempt_index is not None and archive_url:
+            docs = await _read_archived_native_attempt_events(
+                archive_url=archive_url,
+                job_id=job_id,
+                limit=limit,
+            )
+        elif attempt_index is None:
+            docs = []
+            for attempt in run.attempts:
+                if not attempt.log_archive_url:
+                    continue
+                docs.extend(await _read_archived_native_attempt_events(
+                    archive_url=attempt.log_archive_url,
+                    job_id=job_id,
+                    limit=None,
+                ))
+            docs.sort(key=lambda d: (
+                int(d.get("attempt_index") or 0),
+                str(d.get("job_id") or ""),
+                int(d.get("seq") or 0),
+            ))
+            if limit is not None:
+                docs = docs[:limit]
     return NativeRunLogsResponse(
         project=project,
         run_id=run_id,
@@ -3969,6 +4008,51 @@ async def native_run_events(
         events=[NativeRunLogEvent.model_validate(d) for d in docs],
         archive_url=archive_url,
     )
+
+
+async def _read_archived_native_attempt_events(
+    *,
+    archive_url: str,
+    job_id: str | None,
+    limit: int | None,
+) -> list[dict[str, Any]]:
+    artifact_store = getattr(app.state, "artifact_store", None)
+    if artifact_store is None:
+        raise HTTPException(503, "artifact store is not configured")
+    blob_name = _blob_name_from_artifact_ref(archive_url)
+    try:
+        body, _content_type = await artifact_store.download(blob_name=blob_name)
+    except ResourceNotFoundError:
+        raise HTTPException(404, "native log archive not found")
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except Exception:
+        log.exception("native log archive %s is not valid JSON", archive_url)
+        raise HTTPException(502, "native log archive is invalid")
+    events = [
+        event
+        for event in payload.get("events", [])
+        if job_id is None or event.get("job_id") == job_id
+    ]
+    events.sort(key=lambda d: (
+        int(d.get("attempt_index") or 0),
+        str(d.get("job_id") or ""),
+        int(d.get("seq") or 0),
+    ))
+    if limit is not None:
+        events = events[:limit]
+    return events
+
+
+def _blob_name_from_artifact_ref(ref: str) -> str:
+    prefix = "blob://"
+    if not ref.startswith(prefix):
+        raise HTTPException(404, "artifact not found")
+    path = ref[len(prefix):]
+    parts = path.split("/", 1)
+    if len(parts) != 2:
+        raise HTTPException(404, "artifact not found")
+    return _serving_artifact_blob_name(parts[1])
 
 
 @app.get(

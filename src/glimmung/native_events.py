@@ -95,6 +95,9 @@ async def record_native_event(
                 "has a different payload"
             )
 
+    if event == NativeRunEventType.LOG:
+        return run, etag
+
     def apply(r: Run) -> Run:
         attempt = r.attempts[-1]
         job = next((j for j in attempt.jobs if j.job_id == job_id), None)
@@ -103,9 +106,6 @@ async def record_native_event(
             # concurrently replaced with a different attempt shape.
             raise NativeEventError(f"run {r.id} latest attempt has no job {job_id!r}")
         job.last_seq = max(job.last_seq, seq)
-
-        if event == NativeRunEventType.LOG:
-            return r.model_copy(update={"updated_at": _now()})
 
         step = next((s for s in job.steps if s.slug == step_slug), None)
         if step is None:
@@ -218,6 +218,7 @@ async def assert_native_completion_ready(
                 {"name": "@a", "value": attempt.attempt_index},
                 {"name": "@j", "value": job.job_id},
             ],
+            partition_key=run.project,
         )
         seqs = [int(d["seq"]) for d in docs]
         if not seqs:
@@ -263,6 +264,7 @@ async def list_native_events(
         cosmos.run_events,
         f"SELECT * FROM c WHERE {' AND '.join(where)}",
         parameters=parameters,
+        partition_key=project,
     )
     docs.sort(key=lambda d: (
         int(d.get("attempt_index") or 0),

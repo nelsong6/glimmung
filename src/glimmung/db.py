@@ -72,8 +72,17 @@ class Cosmos:
             await self._credential.close()
 
 
-async def query_all(container: ContainerProxy, query: str, parameters: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+async def query_all(
+    container: ContainerProxy,
+    query: str,
+    parameters: list[dict[str, Any]] | None = None,
+    *,
+    partition_key: str | None = None,
+) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    async for item in container.query_items(query=query, parameters=parameters or []):
+    kwargs: dict[str, Any] = {"query": query, "parameters": parameters or []}
+    if partition_key is not None:
+        kwargs["partition_key"] = partition_key
+    async for item in container.query_items(**kwargs):
         items.append(item)
     return items
