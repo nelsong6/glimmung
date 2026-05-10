@@ -62,10 +62,6 @@ jobs:
       - name: ACR login
         run: az acr login --name romainecr
 
-      - name: Compute tag
-        id: tag
-        run: echo "tag=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-
       - uses: docker/setup-buildx-action@v3
 
       - name: Compute image fingerprint
@@ -82,64 +78,39 @@ jobs:
             | awk -F= '$1 == "fingerprint" { print $2 }')"
           echo "ALIAS_TAG=app-${fingerprint}" >> "$GITHUB_ENV"
 
-      - name: Check existing image aliases
+      - name: Check existing image
         id: image
         shell: bash
         run: |
           set -euo pipefail
-          tag="${{ steps.tag.outputs.tag }}"
-          if az acr repository show-tags \
-              --name romainecr \
-              --repository "${IMAGE}" \
-              --query "[?@=='${tag}'] | [0]" \
-              --output tsv | grep -qx "${tag}"; then
-            echo "target_exists=true" >>"${GITHUB_OUTPUT}"
-          else
-            echo "target_exists=false" >>"${GITHUB_OUTPUT}"
-          fi
-
           if az acr repository show-tags \
               --name romainecr \
               --repository "${IMAGE}" \
               --query "[?@=='${ALIAS_TAG}'] | [0]" \
               --output tsv | grep -qx "${ALIAS_TAG}"; then
-            echo "alias_exists=true" >>"${GITHUB_OUTPUT}"
+            echo "exists=true" >>"${GITHUB_OUTPUT}"
             echo "Found reusable image ${REGISTRY}/${IMAGE}:${ALIAS_TAG}"
           else
-            echo "alias_exists=false" >>"${GITHUB_OUTPUT}"
+            echo "exists=false" >>"${GITHUB_OUTPUT}"
             echo "No reusable image found for app fingerprint ${{ steps.fingerprint.outputs.fingerprint }}"
           fi
 
-      - name: Retag existing fingerprint image
-        if: steps.image.outputs.target_exists != 'true' && steps.image.outputs.alias_exists == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          az acr import \
-            --name romainecr \
-            --source "${REGISTRY}/${IMAGE}:${ALIAS_TAG}" \
-            --image "${IMAGE}:${{ steps.tag.outputs.tag }}" \
-            --force
-
       - name: Build and push image
-        if: steps.image.outputs.target_exists != 'true' && steps.image.outputs.alias_exists != 'true'
+        if: steps.image.outputs.exists != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ env.ALIAS_TAG }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ env.ALIAS_TAG }}
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE }}-build-cache:app
           cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE }}-build-cache:app,mode=max
 
       - name: Bump chart image tag
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          tag="${{ steps.tag.outputs.tag }}"
+          tag="${ALIAS_TAG}"
           # Targeted sed: only the line beginning with two spaces + `tag:` under image.
-          # Quote the value so all-digit short-SHAs (e.g. 6432731) aren't parsed as
-          # numbers by YAML and emitted as scientific notation.
+          # Quote the value so YAML never reinterprets image tags.
           bump() {
             sed -i -E "s|^(  tag: ).*$|\1\"${tag}\"|" k8s/values.yaml
           }
@@ -152,7 +123,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add k8s/values.yaml
-          git commit -m "chart: bump image tag to ${tag} [skip ci]"
+          git commit -m "chart: bump image tag to fingerprint ${tag} [skip ci]"
           # Concurrent builds race on this same line. On rebase conflict the
           # latest tag wins — re-apply our sed against the post-rebase tree
           # and continue.
