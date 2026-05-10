@@ -67,7 +67,7 @@ const DESIGN_SYSTEM_ITEMS: PortfolioItem[] = [
         <div className="portfolio-type-stack">
           <p>Primary foreground text for dense operational surfaces.</p>
           <p className="dim">Dim body copy for metadata, hints, and secondary context.</p>
-          <p className="mono">01KQSXNCNBWHTSFSC6DRHG87H2</p>
+          <p className="mono">ambience#172/runs/3</p>
           <p><code>code: refs, paths, ids, and compact JSON</code></p>
         </div>
       </Specimen>
