@@ -1,0 +1,86 @@
+[
+  {
+    "name": "issue with number",
+    "function": "issue_ref",
+    "project": "ambience",
+    "number": 42,
+    "want": "ambience#42"
+  },
+  {
+    "name": "issue without number",
+    "function": "issue_ref",
+    "project": "ambience",
+    "number": null,
+    "want": "ambience"
+  },
+  {
+    "name": "run with issue and display",
+    "function": "run_ref",
+    "project": "ambience",
+    "issue_number": 42,
+    "run_display": "1.1",
+    "want": "ambience#42/runs/1.1"
+  },
+  {
+    "name": "run with issue and blank display",
+    "function": "run_ref",
+    "project": "ambience",
+    "issue_number": 42,
+    "run_display": "  ",
+    "want": "ambience#42/runs/unknown"
+  },
+  {
+    "name": "run without issue",
+    "function": "run_ref",
+    "project": "ambience",
+    "issue_number": null,
+    "run_display": "2",
+    "want": "ambience/runs/2"
+  },
+  {
+    "name": "run without issue or display",
+    "function": "run_ref",
+    "project": "ambience",
+    "issue_number": null,
+    "run_display": "",
+    "want": "ambience/runs/unknown"
+  },
+  {
+    "name": "report with number",
+    "function": "report_ref",
+    "repo": "nelsong6/ambience",
+    "number": 42,
+    "want": "nelsong6/ambience#42"
+  },
+  {
+    "name": "report without number",
+    "function": "report_ref",
+    "repo": "nelsong6/ambience",
+    "number": null,
+    "want": "nelsong6/ambience"
+  },
+  {
+    "name": "lease slot wins",
+    "function": "lease_ref",
+    "project": "ambience",
+    "slot_name": "ambience-slot-1",
+    "lease_number": 17,
+    "want": "ambience-slot-1"
+  },
+  {
+    "name": "lease with number",
+    "function": "lease_ref",
+    "project": "ambience",
+    "slot_name": "",
+    "lease_number": 17,
+    "want": "ambience/leases/17"
+  },
+  {
+    "name": "lease without number",
+    "function": "lease_ref",
+    "project": "ambience",
+    "slot_name": "",
+    "lease_number": null,
+    "want": "ambience/lease"
+  }
+]
