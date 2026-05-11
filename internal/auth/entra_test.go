@@ -135,7 +135,20 @@ func TestNewEntraAuthenticatorRequiresConfig(t *testing.T) {
 	_, err := NewEntraAuthenticator(EntraConfig{AllowedEmails: "person@example.com"})
 	assertAuthStatus(t, err, http.StatusServiceUnavailable, "ENTRA_CLIENT_ID")
 
-	_, err = NewEntraAuthenticator(EntraConfig{Audiences: []string{"client-id"}})
+	authenticator, err := NewEntraAuthenticator(EntraConfig{Audiences: []string{"client-id"}})
+	if err != nil {
+		t.Fatalf("empty allowlist should be allowed for /auth/me resolver: %v", err)
+	}
+	key := mustRSAKey(t)
+	jwks := newJWKSServer(t, key)
+	defer jwks.Close()
+	authenticator.jwksURL = jwks.URL
+	_, err = authenticator.RequireAdmin(context.Background(), signEntraToken(t, key, map[string]any{
+		"aud":   "client-id",
+		"iss":   "https://login.microsoftonline.com/tenant/v2.0",
+		"email": "person@example.com",
+		"exp":   time.Now().Add(time.Hour).Unix(),
+	}))
 	assertAuthStatus(t, err, http.StatusServiceUnavailable, "ALLOWED_EMAILS")
 }
 

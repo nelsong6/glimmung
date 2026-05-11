@@ -130,6 +130,15 @@ func (a *K8sAuthenticator) RequireAdmin(ctx context.Context, token string) (User
 	return User{Sub: username, Email: username, Name: username}, nil
 }
 
+func (a *K8sAuthenticator) Resolve(ctx context.Context, token string) (User, bool, error) {
+	username, err := a.VerifyToken(ctx, token)
+	if err != nil {
+		return User{}, false, err
+	}
+	_, isAdmin := a.allowed[username]
+	return User{Sub: username, Email: username, Name: username}, isAdmin, nil
+}
+
 func (a *K8sAuthenticator) VerifyToken(ctx context.Context, token string) (string, error) {
 	review := tokenReviewRequest{
 		APIVersion: "authentication.k8s.io/v1",
