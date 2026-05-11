@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/data/azcosmos"
 
 	"github.com/nelsong6/glimmung/internal/domain/budget"
+	"github.com/nelsong6/glimmung/internal/domain/publicids"
 	"github.com/nelsong6/glimmung/internal/server"
 )
 
@@ -22,6 +24,7 @@ type Store struct {
 	workflows *azcosmos.ContainerClient
 	hosts     *azcosmos.ContainerClient
 	leases    *azcosmos.ContainerClient
+	runs      *azcosmos.ContainerClient
 }
 
 func NewFromSettings(settings server.Settings) (*Store, error) {
@@ -52,7 +55,11 @@ func NewFromSettings(settings server.Settings) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create leases container client: %w", err)
 	}
-	return &Store{projects: projects, workflows: workflows, hosts: hosts, leases: leases}, nil
+	runs, err := client.NewContainer(settings.CosmosDatabase, "runs")
+	if err != nil {
+		return nil, fmt.Errorf("create runs container client: %w", err)
+	}
+	return &Store{projects: projects, workflows: workflows, hosts: hosts, leases: leases, runs: runs}, nil
 }
 
 func (s *Store) ListProjects(ctx context.Context) ([]server.Project, error) {
@@ -417,6 +424,23 @@ func (s *Store) ReleaseLeaseByCallbackToken(ctx context.Context, token string) (
 	return leaseFromDoc(doc), nil
 }
 
+func (s *Store) ListProjectRuns(ctx context.Context, project string, limit int) ([]server.RunReport, error) {
+	var docs []runDoc
+	if err := queryAllWhere(
+		ctx,
+		s.runs,
+		"SELECT * FROM c WHERE c.project = @project ORDER BY c.updated_at DESC",
+		[]azcosmos.QueryParameter{{Name: "@project", Value: project}},
+		&docs,
+	); err != nil {
+		return nil, err
+	}
+	if limit < len(docs) {
+		docs = docs[:limit]
+	}
+	return runReportsFromDocs(docs), nil
+}
+
 func (s *Store) readLeaseDocByCallbackToken(ctx context.Context, token string) (leaseDoc, error) {
 	var docs []leaseDoc
 	if err := queryAllWhere(
@@ -576,6 +600,55 @@ type leaseDoc struct {
 	FulfilledLeaseRef  *string        `json:"fulfilledLeaseRef"`
 }
 
+type runDoc struct {
+	ID                  string         `json:"id"`
+	Project             string         `json:"project"`
+	Workflow            string         `json:"workflow"`
+	RunNumber           *int           `json:"run_number"`
+	RunDisplayNumber    *string        `json:"run_display_number"`
+	ParentRunID         *string        `json:"parent_run_id"`
+	RootRunID           *string        `json:"root_run_id"`
+	OriginKind          *string        `json:"origin_kind"`
+	IsCycle             bool           `json:"is_cycle"`
+	CycleNumber         *int           `json:"cycle_number"`
+	IssueID             string         `json:"issue_id"`
+	IssueRepo           string         `json:"issue_repo"`
+	IssueNumber         int            `json:"issue_number"`
+	State               string         `json:"state"`
+	Attempts            []attemptDoc   `json:"attempts"`
+	CumulativeCostUSD   float64        `json:"cumulative_cost_usd"`
+	ValidationURL       *string        `json:"validation_url"`
+	ScreenshotsMarkdown *string        `json:"screenshots_markdown"`
+	AbortReason         *string        `json:"abort_reason"`
+	ClonedFromRunID     *string        `json:"cloned_from_run_id"`
+	TriggerSource       map[string]any `json:"trigger_source"`
+	CreatedAt           string         `json:"created_at"`
+	UpdatedAt           string         `json:"updated_at"`
+}
+
+type attemptDoc struct {
+	AttemptIndex     int              `json:"attempt_index"`
+	Phase            string           `json:"phase"`
+	PhaseKind        string           `json:"phase_kind"`
+	WorkflowFilename string           `json:"workflow_filename"`
+	WorkflowRunID    *int64           `json:"workflow_run_id"`
+	DispatchedAt     string           `json:"dispatched_at"`
+	CompletedAt      string           `json:"completed_at"`
+	Conclusion       *string          `json:"conclusion"`
+	Verification     *verificationDoc `json:"verification"`
+	SummaryMarkdown  *string          `json:"summary_markdown"`
+	CostUSD          *float64         `json:"cost_usd"`
+	Decision         *string          `json:"decision"`
+	LogArchiveURL    *string          `json:"log_archive_url"`
+	SkippedFromRunID *string          `json:"skipped_from_run_id"`
+}
+
+type verificationDoc struct {
+	Status       string   `json:"status"`
+	EvidenceRefs []string `json:"evidence_refs"`
+	CostUSD      float64  `json:"cost_usd"`
+}
+
 type phaseDoc struct {
 	Name                     string            `json:"name"`
 	Kind                     string            `json:"kind"`
@@ -711,6 +784,211 @@ func leaseFromDoc(doc leaseDoc) server.Lease {
 		FulfilledAt:        parseOptionalTime(doc.FulfilledAt),
 		FulfilledLeaseRef:  doc.FulfilledLeaseRef,
 	}
+}
+
+func runReportsFromDocs(docs []runDoc) []server.RunReport {
+	docsByIssue := map[string][]runDoc{}
+	for _, doc := range docs {
+		if doc.Project == "" || doc.IssueNumber == 0 {
+			continue
+		}
+		key := fmt.Sprintf("%s#%d", doc.Project, doc.IssueNumber)
+		docsByIssue[key] = append(docsByIssue[key], doc)
+	}
+	lineageByID := map[string]string{}
+	for _, group := range docsByIssue {
+		sort.SliceStable(group, func(i, j int) bool {
+			return group[i].CreatedAt < group[j].CreatedAt
+		})
+		for id, ref := range runRefMapFromDocs(group) {
+			lineageByID[id] = ref
+		}
+	}
+	reports := make([]server.RunReport, 0, len(docs))
+	for _, doc := range docs {
+		reports = append(reports, runReportFromDoc(doc, lineageByID))
+	}
+	return reports
+}
+
+func runRefMapFromDocs(docs []runDoc) map[string]string {
+	numbers := runNumberMap(docs)
+	refs := map[string]string{}
+	for _, doc := range docs {
+		if doc.ID == "" {
+			continue
+		}
+		display := runDisplayNumber(doc, numbers[doc.ID])
+		refs[doc.ID] = publicids.RunRef(doc.Project, positiveIssueNumberPtr(doc.IssueNumber), display)
+	}
+	return refs
+}
+
+func runNumberMap(docs []runDoc) map[string]int {
+	assigned := map[string]int{}
+	used := map[int]bool{}
+	for _, doc := range docs {
+		if doc.RunNumber == nil || *doc.RunNumber <= 0 || used[*doc.RunNumber] {
+			continue
+		}
+		assigned[doc.ID] = *doc.RunNumber
+		used[*doc.RunNumber] = true
+	}
+	next := 1
+	for _, doc := range docs {
+		if _, ok := assigned[doc.ID]; ok {
+			continue
+		}
+		for used[next] {
+			next++
+		}
+		assigned[doc.ID] = next
+		used[next] = true
+	}
+	return assigned
+}
+
+func runReportFromDoc(doc runDoc, lineageByID map[string]string) server.RunReport {
+	numbers := runNumberMap([]runDoc{doc})
+	display := runDisplayNumber(doc, numbers[doc.ID])
+	runRef := lineageByID[doc.ID]
+	if runRef == "" {
+		runRef = publicids.RunRef(doc.Project, positiveIssueNumberPtr(doc.IssueNumber), display)
+	}
+	attempts := make([]server.RunReportAttempt, 0, len(doc.Attempts))
+	var completed *time.Time
+	for _, attempt := range doc.Attempts {
+		reportAttempt := runReportAttemptFromDoc(attempt, lineageByID)
+		if reportAttempt.CompletedAt != nil && (completed == nil || reportAttempt.CompletedAt.After(*completed)) {
+			value := *reportAttempt.CompletedAt
+			completed = &value
+		}
+		attempts = append(attempts, reportAttempt)
+	}
+	if doc.State == "in_progress" {
+		completed = nil
+	}
+	var currentPhase *string
+	if len(doc.Attempts) > 0 {
+		currentPhase = optionalNonEmptyStringPtr(doc.Attempts[len(doc.Attempts)-1].Phase)
+	}
+	parentID := doc.ParentRunID
+	if parentID == nil || *parentID == "" {
+		parentID = doc.ClonedFromRunID
+	}
+	rootID := doc.RootRunID
+	if (rootID == nil || *rootID == "") && parentID != nil && *parentID != "" {
+		rootID = parentID
+	}
+	originKind := doc.OriginKind
+	if (originKind == nil || *originKind == "") && parentID != nil && *parentID != "" {
+		if value := stringValue(doc.TriggerSource["kind"]); value != "" {
+			originKind = optionalNonEmptyStringPtr(value)
+		} else {
+			originKind = optionalNonEmptyStringPtr("resume")
+		}
+	}
+	return server.RunReport{
+		Ref:                 runRef + "/report",
+		Project:             doc.Project,
+		RunRef:              runRef,
+		RunNumber:           doc.RunNumber,
+		RunDisplayNumber:    optionalNonEmptyStringPtr(display),
+		ParentRunRef:        refPtr(lineageByID, parentID),
+		RootRunRef:          refPtr(lineageByID, rootID),
+		OriginKind:          emptyStringNil(originKind),
+		IsCycle:             doc.IsCycle,
+		CycleNumber:         doc.CycleNumber,
+		Workflow:            doc.Workflow,
+		IssueRef:            optionalNonEmptyStringPtr(publicids.IssueRef(doc.Project, positiveIssueNumberPtr(doc.IssueNumber))),
+		IssueRepo:           optionalNonEmptyStringPtr(doc.IssueRepo),
+		IssueNumber:         positiveIssueNumberPtr(doc.IssueNumber),
+		State:               firstNonEmpty(doc.State, "in_progress"),
+		CurrentPhase:        currentPhase,
+		AttemptsCount:       len(doc.Attempts),
+		CumulativeCostUSD:   doc.CumulativeCostUSD,
+		ValidationURL:       emptyStringNil(doc.ValidationURL),
+		ScreenshotsMarkdown: emptyStringNil(doc.ScreenshotsMarkdown),
+		AbortReason:         emptyStringNil(doc.AbortReason),
+		StartedAt:           parseTimeOrNow(doc.CreatedAt),
+		CompletedAt:         completed,
+		UpdatedAt:           parseTimeOrNow(doc.UpdatedAt),
+		Attempts:            attempts,
+	}
+}
+
+func runReportAttemptFromDoc(doc attemptDoc, lineageByID map[string]string) server.RunReportAttempt {
+	var verificationStatus *string
+	evidenceRefs := []string{}
+	var cost *float64
+	if doc.Verification != nil {
+		verificationStatus = optionalNonEmptyStringPtr(doc.Verification.Status)
+		evidenceRefs = sliceOrEmpty(doc.Verification.EvidenceRefs)
+		if doc.CostUSD == nil {
+			cost = &doc.Verification.CostUSD
+		}
+	}
+	if doc.CostUSD != nil {
+		cost = doc.CostUSD
+	}
+	return server.RunReportAttempt{
+		AttemptIndex:       doc.AttemptIndex,
+		Phase:              doc.Phase,
+		PhaseKind:          firstNonEmpty(doc.PhaseKind, "gha_dispatch"),
+		WorkflowFilename:   doc.WorkflowFilename,
+		WorkflowRunID:      doc.WorkflowRunID,
+		DispatchedAt:       parseTimeOrNow(doc.DispatchedAt),
+		CompletedAt:        parseOptionalTime(doc.CompletedAt),
+		Conclusion:         emptyStringNil(doc.Conclusion),
+		VerificationStatus: verificationStatus,
+		EvidenceRefs:       evidenceRefs,
+		SummaryMarkdown:    emptyStringNil(doc.SummaryMarkdown),
+		Decision:           emptyStringNil(doc.Decision),
+		CostUSD:            cost,
+		LogArchiveURL:      emptyStringNil(doc.LogArchiveURL),
+		SkippedFromRunRef:  refPtr(lineageByID, doc.SkippedFromRunID),
+	}
+}
+
+func runDisplayNumber(doc runDoc, fallback int) string {
+	if doc.RunDisplayNumber != nil && strings.TrimSpace(*doc.RunDisplayNumber) != "" {
+		return strings.TrimSpace(*doc.RunDisplayNumber)
+	}
+	if doc.RunNumber != nil {
+		return fmt.Sprintf("%d", *doc.RunNumber)
+	}
+	if fallback > 0 {
+		return fmt.Sprintf("%d", fallback)
+	}
+	return ""
+}
+
+func positiveIssueNumberPtr(value int) *int {
+	if value <= 0 {
+		return nil
+	}
+	return &value
+}
+
+func optionalNonEmptyStringPtr(value string) *string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return &value
+}
+
+func emptyStringNil(value *string) *string {
+	if value == nil || strings.TrimSpace(*value) == "" {
+		return nil
+	}
+	return value
+}
+
+func refPtr(refs map[string]string, id *string) *string {
+	if id == nil || *id == "" {
+		return nil
+	}
+	return optionalNonEmptyStringPtr(refs[*id])
 }
 
 func workflowDocFromRegister(req server.WorkflowRegister, createdAt string) workflowDoc {
