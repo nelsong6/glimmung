@@ -968,6 +968,10 @@ function HomeView({ snap }: LayoutContext) {
       </section>
 
       <section className="home-links" aria-label="primary destinations">
+        <Link to="/projects" className="home-link">
+          <span className="key">Projects</span>
+          <strong>Project workspaces, workflows, and scoped issues</strong>
+        </Link>
         <Link to="/leases/test" className="home-link">
           <span className="key">Test leases</span>
           <strong>Current test environments and queued checkouts</strong>
@@ -979,10 +983,6 @@ function HomeView({ snap }: LayoutContext) {
         <Link to="/needs-attention" className="home-link">
           <span className="key">Needs attention</span>
           <strong>Open work that needs a decision or follow-up</strong>
-        </Link>
-        <Link to="/projects" className="home-link">
-          <span className="key">Projects</span>
-          <strong>Project workspaces, workflows, and scoped issues</strong>
         </Link>
       </section>
     </div>
