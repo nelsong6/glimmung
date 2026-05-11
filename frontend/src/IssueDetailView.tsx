@@ -203,11 +203,12 @@ type AuthContext = {
   } | null;
 };
 
-type Tab = "summary" | "runs" | "touchpoint";
+type Tab = "summary" | "runs" | "workflow" | "touchpoint";
 
 const TAB_SLUGS: Record<Tab, string> = {
   summary: "summary",
   runs: "runs",
+  workflow: "workflow",
   touchpoint: "touchpoint",
 };
 
@@ -221,6 +222,7 @@ const SLUG_TO_TAB: Record<string, Tab> = {
   "in-progress": "runs",
   runs: "runs",
   lineage: "runs",
+  workflow: "workflow",
   touchpoint: "touchpoint",
 };
 
@@ -256,6 +258,7 @@ type IssueDetailRouteParams = {
   issueId?: string;
   issueNumber?: string;
   runId?: string;
+  workflowRunId?: string;
 };
 
 export function IssueDetailView() {
@@ -294,13 +297,14 @@ export function IssueDetailView() {
   // legacy slugs are normalized to `/summary` so the breadcrumb leaf
   // and address bar stay aligned.
   const lastSeg = location.pathname.split("/").filter(Boolean).pop() ?? "";
-  // params.runId holds the user-facing run number (e.g. "3"), not the internal ID.
-  // Tab is "runs" whenever params.runId is set, independent of graph load state.
-  const tab: Tab = params.runId ? "runs" : (SLUG_TO_TAB[lastSeg] ?? "summary");
+  // params.runId / workflowRunId hold user-facing run numbers (e.g. "3"),
+  // not internal IDs. They force their owning tab independent of graph load.
+  const tab: Tab = params.workflowRunId ? "workflow" : params.runId ? "runs" : (SLUG_TO_TAB[lastSeg] ?? "summary");
   const setTab = (t: Tab) => navigate(`${baseUrl}/${TAB_SLUGS[t]}`);
 
   const [detail, setDetail] = useState<IssueDetail | null>(null);
   const [graph, setGraph] = useState<IssueGraph | null>(null);
+  const [projectWorkflows, setProjectWorkflows] = useState<Workflow[]>([]);
 
   // Resolve the URL run-number slug to the internal graph node ID so RunViewer
   // can look it up. Null while graph is loading; tab is still "runs" via params.runId.
@@ -309,6 +313,13 @@ export function IssueDetailView() {
     const node = graph.nodes
       .filter((n) => n.kind === "run")
       .find((n) => issueRunSlug(graph, n) === params.runId);
+    return node ? runIdFromNode(node) : null;
+  })();
+  const selectedWorkflowRunId = (() => {
+    if (!params.workflowRunId || !graph) return null;
+    const node = graph.nodes
+      .filter((n) => n.kind === "run")
+      .find((n) => issueRunSlug(graph, n) === params.workflowRunId);
     return node ? runIdFromNode(node) : null;
   })();
 
@@ -320,23 +331,37 @@ export function IssueDetailView() {
     const slug = node && graph ? issueRunSlug(graph, node) : runId;
     navigate(`${baseUrl}/runs/${slug}`);
   };
+  const selectWorkflowRun = (runId: string | null) => {
+    if (!runId) { navigate(`${baseUrl}/workflow`); return; }
+    const node = graph?.nodes.find((n) => n.kind === "run" && runIdFromNode(n) === runId);
+    const slug = node && graph ? issueRunSlug(graph, node) : runId;
+    navigate(`${baseUrl}/workflow/${slug}`);
+  };
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
   const [dispatchState, setDispatchState] = useState<DispatchState>({ kind: "idle" });
   const [abortState, setAbortState] = useState<AbortState>({ kind: "idle" });
-  const issueWorkflow = useMemo(() => (
-    detail
-      ? resolveProjectWorkflow(
-          snap?.workflows ?? [],
-          detail.project,
-          [
-            stringOrNull(detail.metadata?.workflow),
-            ...runNodesByRecency(graph).map((run) => stringOrNull(run.metadata.workflow)),
-          ],
-        )
-      : null
-  ), [detail, graph, snap?.workflows]);
+  const issueWorkflowCandidates = useMemo(
+    () => mergeWorkflows(snap?.workflows ?? [], projectWorkflows),
+    [projectWorkflows, snap?.workflows],
+  );
+  const currentWorkflowDefinition = useMemo(
+    () => detail ? singleProjectWorkflow(issueWorkflowCandidates, detail.project) : null,
+    [detail, issueWorkflowCandidates],
+  );
+  const selectedWorkflowRun = useMemo(
+    () => graph && selectedWorkflowRunId
+      ? graph.nodes.find((n) => n.kind === "run" && runIdFromNode(n) === selectedWorkflowRunId) ?? null
+      : null,
+    [graph, selectedWorkflowRunId],
+  );
+  const selectedWorkflowRunWorkflow = useMemo(
+    () => detail && selectedWorkflowRun
+      ? resolveRunWorkflow(issueWorkflowCandidates, detail.project, selectedWorkflowRun)
+      : null,
+    [detail, issueWorkflowCandidates, selectedWorkflowRun],
+  );
   const detailUrl =
     target?.kind === "gh"
       ? `/v1/issues/${target.repo}/${target.issue_number}`
@@ -409,9 +434,9 @@ export function IssueDetailView() {
   }, [detail?.ref]);
 
   useEffect(() => {
-    // On a runs/:runNumber URL the last segment is the run number, not a tab slug —
+    // On a runs/:runNumber or workflow/:runNumber URL the last segment is the run number, not a tab slug —
     // skip slug normalization so we don't strip it from the URL.
-    if (params.runId) return;
+    if (params.runId || params.workflowRunId) return;
     const canonicalSlug = TAB_SLUGS[tab];
     if (lastSeg !== canonicalSlug) {
       navigate(`${baseUrl}/${canonicalSlug}`, { replace: true });
@@ -425,18 +450,18 @@ export function IssueDetailView() {
       `/projects/${encodeURIComponent(project.name)}/issues/${target.issue_number}/${canonicalSlug}`,
       { replace: true },
     );
-  }, [baseUrl, lastSeg, navigate, params.runId, projectRouteIssueNumber, snap?.projects, tab, target]);
+  }, [baseUrl, lastSeg, navigate, params.runId, params.workflowRunId, projectRouteIssueNumber, snap?.projects, tab, target]);
 
   useEffect(() => {
     if (!detail?.number) return;
     if (projectRouteIssueNumber !== null) return;
     const canonicalSlug = TAB_SLUGS[tab];
-    const runSuffix = params.runId ? `/${params.runId}` : "";
+    const runSuffix = params.runId ? `/${params.runId}` : params.workflowRunId ? `/${params.workflowRunId}` : "";
     navigate(
       `/projects/${encodeURIComponent(detail.project)}/issues/${detail.number}/${canonicalSlug}${runSuffix}`,
       { replace: true },
     );
-  }, [detail, navigate, params.runId, projectRouteIssueNumber, tab]);
+  }, [detail, navigate, params.runId, params.workflowRunId, projectRouteIssueNumber, tab]);
 
   useEffect(() => {
     let cancelled = false;
@@ -467,6 +492,29 @@ export function IssueDetailView() {
       cancelled = true;
     };
   }, [detailUrl, graphUrl, refreshTick]);
+
+  useEffect(() => {
+    const project = detail?.project;
+    if (!project) {
+      setProjectWorkflows([]);
+      return;
+    }
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const r = await fetch(`/v1/workflows?project=${encodeURIComponent(project)}`);
+        if (!r.ok) throw new Error(`/v1/workflows?project=${project} -> ${r.status}`);
+        const workflows = (await r.json()) as Workflow[];
+        if (!cancelled) setProjectWorkflows(workflows);
+      } catch {
+        if (!cancelled) setProjectWorkflows([]);
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [detail?.project]);
 
   // While the run tab is open and a run is actually in flight, poll
   // detail+graph so DAG nodes fill in as conclusions / verification /
@@ -504,6 +552,9 @@ export function IssueDetailView() {
               runs
               {isInFlight && <span className="tab-dot" aria-label="active" />}
             </TabButton>
+            <TabButton current={tab} value="workflow" onSelect={selectTab}>
+              workflow
+            </TabButton>
             <TabButton current={tab} value="touchpoint" onSelect={selectTab}>
               touchpoint
             </TabButton>
@@ -531,7 +582,7 @@ export function IssueDetailView() {
                 project={detail.project}
                 repo={detail.repo}
                 detail={detail}
-                workflow={issueWorkflow}
+                currentWorkflow={currentWorkflowDefinition}
                 signedIn={signedIn}
                 isAdmin={isAdmin}
                 dispatchState={dispatchState}
@@ -541,7 +592,22 @@ export function IssueDetailView() {
                 onConfirmAbort={(runId) => void abortRun(runId)}
                 selectedRunId={selectedRunId}
                 onSelectRun={selectRun}
+                onViewRunWorkflow={selectWorkflowRun}
                 onDispatch={() => void dispatchRun()}
+                onOpenTouchpoint={() => setTab("touchpoint")}
+              />
+            )}
+            {tab === "workflow" && (
+              <WorkflowPane
+                graph={graph}
+                graphAvailable={!!graphUrl}
+                project={detail.project}
+                repo={detail.repo}
+                currentWorkflow={currentWorkflowDefinition}
+                selectedRun={selectedWorkflowRun}
+                selectedRunWorkflow={selectedWorkflowRunWorkflow}
+                selectedRunRequested={Boolean(params.workflowRunId)}
+                onBackToDefinition={() => selectWorkflowRun(null)}
                 onOpenTouchpoint={() => setTab("touchpoint")}
               />
             )}
@@ -1185,19 +1251,38 @@ function PipelineDag({
     () => workflowGraphMeta(meta.workflow_graph),
     [meta.workflow_graph],
   );
+  const hasStoredWorkflowGraph = (workflowGraph?.phases.length ?? 0) > 0;
   // Workflow topology comes from the same adapter as the definition page.
   // Run attempts only paint state onto those phase slots.
   const graphModel = useMemo(() => {
     if (workflow) return workflowToPhaseGraphModel(workflow);
+    if (!hasStoredWorkflowGraph) return null;
     return fallbackPhaseGraphModel(
-      workflowGraph?.phases.length ? workflowGraph.phases : phaseRollups.map((p) => p.phaseName),
+      workflowGraph?.phases ?? [],
       {
         currentPhase: phaseRollups[0]?.phaseName ?? null,
         prEnabled: workflowGraph?.terminal.enabled ?? true,
         recycleArrows: workflowGraph?.recycle_arrows ?? [],
       },
     );
-  }, [workflow, workflowGraph, phaseRollups]);
+  }, [hasStoredWorkflowGraph, workflow, workflowGraph, phaseRollups]);
+  const unavailableWorkflowName = stringOrNull(meta.workflow);
+  if (!graphModel) {
+    return (
+      <div className="dag-wrap">
+        <div className="empty">
+          Workflow definition unavailable
+          {unavailableWorkflowName ? (
+            <>
+              {" "}
+              for <span className="mono">{unavailableWorkflowName}</span>
+            </>
+          ) : null}
+          .
+        </div>
+      </div>
+    );
+  }
   const activeEntry = stringOrNull(meta.entrypoint_phase)
     ?? workflowGraph?.default_entry?.target
     ?? phaseRollups[0]?.phaseName
@@ -1626,7 +1711,7 @@ function RunsPane({
   project,
   repo,
   detail,
-  workflow,
+  currentWorkflow,
   signedIn,
   isAdmin,
   dispatchState,
@@ -1636,6 +1721,7 @@ function RunsPane({
   onConfirmAbort,
   selectedRunId,
   onSelectRun,
+  onViewRunWorkflow,
   onDispatch,
   onOpenTouchpoint,
 }: {
@@ -1644,7 +1730,7 @@ function RunsPane({
   project: string;
   repo: string | null;
   detail: IssueDetail;
-  workflow: Workflow | null;
+  currentWorkflow: Workflow | null;
   signedIn: boolean;
   isAdmin: boolean;
   dispatchState: DispatchState;
@@ -1654,10 +1740,10 @@ function RunsPane({
   onConfirmAbort: (runId: string) => void;
   selectedRunId: string | null;
   onSelectRun: (runId: string | null) => void;
+  onViewRunWorkflow: (runId: string) => void;
   onDispatch: () => void;
   onOpenTouchpoint: () => void;
 }) {
-  const location = useLocation();
   const dispatching = dispatchState.kind === "dispatching";
   // Disable for non-admins so a 403 is impossible by clicking. The server
   // is still authoritative — disabling is purely a UX layer.
@@ -1769,79 +1855,28 @@ function RunsPane({
     return (
       <>
         {newRunButton}
-        <section>
-          <div className="run-section-header">
-            <h2>Template preview</h2>
-          </div>
-          <DefinitionDag workflow={workflow} project={project} />
-        </section>
+        <div className="empty">No runs yet.</div>
       </>
     );
   }
   if (selectedRunId) {
+    const run = graph.nodes.find((n) => n.kind === "run" && runIdFromNode(n) === selectedRunId) ?? null;
     return (
-      <>
-        <button type="button" className="link" onClick={() => onSelectRun(null)}>
-          ← runs
-        </button>
-        <RunViewer
-          graph={graph}
-          graphAvailable={graphAvailable}
-          signedIn={false}
-          project={project}
-          repo={repo}
-          workflow={workflow}
-          inFlight={runs.some((run) => run.state === "in_progress")}
-          dispatchState={RUN_VIEWER_IDLE_DISPATCH}
-          onRedispatch={() => undefined}
-          abortState={RUN_VIEWER_IDLE_ABORT}
-          onArmAbort={() => undefined}
-          onCancelAbort={() => undefined}
-          onConfirmAbort={() => undefined}
-          selectedRunId={selectedRunId}
-          onBackToRuns={() => onSelectRun(null)}
-          onOpenTouchpoint={onOpenTouchpoint}
-          actionsVisible={false}
-        />
-      </>
+      <RunDetailView
+        graph={graph}
+        run={run}
+        project={project}
+        repo={repo}
+        currentWorkflow={currentWorkflow}
+        onBackToRuns={() => onSelectRun(null)}
+        onViewRunWorkflow={() => onViewRunWorkflow(selectedRunId)}
+        onOpenTouchpoint={onOpenTouchpoint}
+      />
     );
   }
   return (
     <>
       {newRunButton}
-      <section>
-        <div className="run-section-header">
-          <h2>Latest run</h2>
-          {workflow && (
-            <Link
-              className="link"
-              to={`/projects/${encodeURIComponent(project)}/workflows/${encodeURIComponent(workflow.name)}`}
-              state={{ returnTo: location.pathname, returnLabel: "issue" }}
-            >
-              view workflow definition
-            </Link>
-          )}
-        </div>
-        <RunViewer
-          graph={graph}
-          graphAvailable={graphAvailable}
-          signedIn={false}
-          project={project}
-          repo={repo}
-          workflow={workflow}
-          inFlight={runs.some((run) => run.state === "in_progress")}
-          dispatchState={RUN_VIEWER_IDLE_DISPATCH}
-          onRedispatch={() => undefined}
-          abortState={RUN_VIEWER_IDLE_ABORT}
-          onArmAbort={() => undefined}
-          onCancelAbort={() => undefined}
-          onConfirmAbort={() => undefined}
-          selectedRunId={runIdFromNode(runs[0])}
-          onBackToRuns={() => undefined}
-          onOpenTouchpoint={onOpenTouchpoint}
-          actionsVisible={false}
-        />
-      </section>
       <h2>Run history</h2>
       <table>
         <thead>
@@ -1934,6 +1969,219 @@ function RunsPane({
           })}
         </tbody>
       </table>
+    </>
+  );
+}
+
+function WorkflowPane({
+  graph,
+  graphAvailable,
+  project,
+  repo,
+  currentWorkflow,
+  selectedRun,
+  selectedRunWorkflow,
+  selectedRunRequested,
+  onBackToDefinition,
+  onOpenTouchpoint,
+}: {
+  graph: IssueGraph | null;
+  graphAvailable: boolean;
+  project: string;
+  repo: string | null;
+  currentWorkflow: Workflow | null;
+  selectedRun: GraphNode | null;
+  selectedRunWorkflow: Workflow | null;
+  selectedRunRequested: boolean;
+  onBackToDefinition: () => void;
+  onOpenTouchpoint: () => void;
+}) {
+  if (!graphAvailable) {
+    return (
+      <div className="empty">
+        Workflow state isn't available for native issues yet.
+      </div>
+    );
+  }
+  if (selectedRunRequested && !graph) {
+    return <div className="empty">Loading run workflow…</div>;
+  }
+  if (selectedRunRequested && !selectedRun) {
+    return (
+      <>
+        <button type="button" className="link" onClick={onBackToDefinition}>
+          back to workflow definition
+        </button>
+        <div className="empty">Run workflow was not found.</div>
+      </>
+    );
+  }
+  if (selectedRun && graph) {
+    return (
+      <>
+        <div className="run-section-header">
+          <h2>{runDisplayName(selectedRun)} workflow</h2>
+          <button type="button" className="link" onClick={onBackToDefinition}>
+            back to workflow definition
+          </button>
+        </div>
+        <RunViewer
+          graph={graph}
+          graphAvailable={graphAvailable}
+          signedIn={false}
+          project={project}
+          repo={repo}
+          workflow={selectedRunWorkflow}
+          inFlight={selectedRun.state === "in_progress"}
+          dispatchState={RUN_VIEWER_IDLE_DISPATCH}
+          onRedispatch={() => undefined}
+          abortState={RUN_VIEWER_IDLE_ABORT}
+          onArmAbort={() => undefined}
+          onCancelAbort={() => undefined}
+          onConfirmAbort={() => undefined}
+          selectedRunId={runIdFromNode(selectedRun)}
+          onBackToRuns={onBackToDefinition}
+          onOpenTouchpoint={onOpenTouchpoint}
+          actionsVisible={false}
+        />
+      </>
+    );
+  }
+  return (
+    <section>
+      <div className="run-section-header">
+        <h2>Workflow definition</h2>
+      </div>
+      <DefinitionDag workflow={currentWorkflow} project={project} />
+    </section>
+  );
+}
+
+function RunDetailView({
+  graph,
+  run,
+  project,
+  repo,
+  currentWorkflow,
+  onBackToRuns,
+  onViewRunWorkflow,
+  onOpenTouchpoint,
+}: {
+  graph: IssueGraph;
+  run: GraphNode | null;
+  project: string;
+  repo: string | null;
+  currentWorkflow: Workflow | null;
+  onBackToRuns: () => void;
+  onViewRunWorkflow: () => void;
+  onOpenTouchpoint: () => void;
+}) {
+  if (!run) {
+    return (
+      <>
+        <button type="button" className="link" onClick={onBackToRuns}>
+          ← runs
+        </button>
+        <div className="empty">Run detail was not found.</div>
+      </>
+    );
+  }
+  const attempts = attemptsForRun(graph, run.id);
+  const meta = run.metadata;
+  const workflow = stringOrNull(meta.workflow);
+  const entrypointPhase = stringOrNull(meta.entrypoint_phase);
+  const abortReason = stringOrNull(meta.abort_reason);
+  const cumulativeCost = numberOrNull(meta.cumulative_cost_usd);
+  const prNumber = numberOrNull(meta.pr_number);
+  const lineage = computeRetryLineage(graph, runIdFromNode(run));
+  return (
+    <>
+      <div className="run-section-header">
+        <button type="button" className="link" onClick={onBackToRuns}>
+          ← runs
+        </button>
+        <button type="button" className="link" onClick={onViewRunWorkflow}>
+          view run workflow
+        </button>
+      </div>
+      <section>
+        <div className="run-section-header">
+          <h2>{runDisplayName(run)} detail</h2>
+          <span className={`pill ${runStatePill(run.state ?? "")}`}>{run.state ?? "—"}</span>
+        </div>
+        <div className="project-info">
+          <div className="row">
+            <span className="key">project</span>
+            <span className="val mono">{project}</span>
+          </div>
+          <div className="row">
+            <span className="key">workflow</span>
+            <span className="val mono">{workflow ?? "—"}</span>
+          </div>
+          <div className="row">
+            <span className="key">current definition</span>
+            <span className="val mono">{currentWorkflow?.name ?? "unavailable"}</span>
+          </div>
+          <div className="row">
+            <span className="key">started</span>
+            <span className="val mono">{run.timestamp ? formatTime(run.timestamp) : "—"}</span>
+          </div>
+          <div className="row">
+            <span className="key">retry depth</span>
+            <span className="val mono">{lineage.depth}</span>
+          </div>
+          <div className="row">
+            <span className="key">origin</span>
+            <span className="val mono">
+              {lineage.origin ? (
+                <RunRefLink graph={graph} runId={lineage.origin} onSelectRun={() => undefined} />
+              ) : "—"}
+            </span>
+          </div>
+          <div className="row">
+            <span className="key">entrypoint</span>
+            <span className="val mono">{entrypointPhase ?? "default"}</span>
+          </div>
+          <div className="row">
+            <span className="key">attempts</span>
+            <span className="val mono">{attempts.length}</span>
+          </div>
+          <div className="row">
+            <span className="key">cost</span>
+            <span className="val mono">{cumulativeCost !== null ? `$${cumulativeCost.toFixed(4)}` : "—"}</span>
+          </div>
+          <div className="row">
+            <span className="key">touchpoint</span>
+            <span className="val">
+              {prNumber !== null && repo ? (
+                <a className="mono" href={`https://github.com/${repo}/pull/${prNumber}`} target="_blank" rel="noreferrer">
+                  #{prNumber}
+                </a>
+              ) : (
+                <button type="button" className="link" onClick={onOpenTouchpoint}>
+                  view touchpoint
+                </button>
+              )}
+            </span>
+          </div>
+          {abortReason && (
+            <div className="row">
+              <span className="key">abort</span>
+              <span className="val mono">{abortReason}</span>
+            </div>
+          )}
+        </div>
+      </section>
+      <h2>Attempts</h2>
+      {attempts.length > 0 ? (
+        <div className="attempt-list">
+          {attempts.map((attempt) => (
+            <AttemptCard key={attempt.id} attempt={attempt} project={project} repo={repo} />
+          ))}
+        </div>
+      ) : (
+        <div className="empty">No attempts recorded for this run.</div>
+      )}
     </>
   );
 }
@@ -2655,13 +2903,26 @@ function runDisplayName(run: GraphNode): string {
   return runSlugDisplay(issueRunSlug({ issue_ref: "", nodes: [run], edges: [] }, run));
 }
 
-function runNodesByRecency(graph: IssueGraph | null): GraphNode[] {
-  return graph
-    ? graph.nodes
-        .filter((n) => n.kind === "run")
-        .slice()
-        .sort((a, b) => (b.timestamp ?? "").localeCompare(a.timestamp ?? ""))
-    : [];
+function mergeWorkflows(primary: Workflow[], fallback: Workflow[]): Workflow[] {
+  const seen = new Set<string>();
+  const merged: Workflow[] = [];
+  for (const workflow of [...primary, ...fallback]) {
+    const key = `${workflow.project}/${workflow.name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(workflow);
+  }
+  return merged;
+}
+
+function singleProjectWorkflow(workflows: Workflow[], project: string): Workflow | null {
+  const projectWorkflows = workflows.filter((workflow) => workflow.project === project);
+  return projectWorkflows.length === 1 ? projectWorkflows[0] : null;
+}
+
+function resolveRunWorkflow(workflows: Workflow[], project: string, run: GraphNode | null): Workflow | null {
+  if (!run) return null;
+  return resolveProjectWorkflow(workflows, project, [stringOrNull(run.metadata.workflow)]);
 }
 
 function isRecord(x: unknown): x is Record<string, unknown> {

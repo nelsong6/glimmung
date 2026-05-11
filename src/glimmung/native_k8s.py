@@ -526,6 +526,7 @@ class NativeKubernetesLauncher:
                 chart_path = str(config.get("chart_path") or "").strip() or discovered_chart_path
 
         await self._ensure_slot_admin_binding(slot_name, slot=slot)
+        await self.delete_conflicting_test_slot_routes(slot_name, host)
         # Pre-create the sessions namespace and give the runner admin access
         # there too so kubectl apply can write cross-namespace manifests.
         sessions_ns = f"{slot_name}-sessions"
@@ -555,6 +556,49 @@ class NativeKubernetesLauncher:
         )
         await self._create_job(job_name, manifest)
         return job_name
+
+    async def delete_conflicting_test_slot_routes(self, slot_name: str, host: str) -> None:
+        """Remove stale HTTPRoutes that already claim this slot hostname.
+
+        Clean-slate checkouts create the slot app in a namespace named after
+        the slot. Older chart installs could leave a same-host HTTPRoute in a
+        different namespace, and Envoy may continue routing the public hostname
+        there even after the fresh slot is healthy.
+        """
+        slot_name = slot_name.strip()
+        host = host.strip()
+        if not _valid_namespace(slot_name) or not host:
+            return
+        try:
+            routes = await self._request(
+                "GET",
+                "/apis/gateway.networking.k8s.io/v1/httproutes",
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return
+            raise
+        body = {
+            "apiVersion": "v1",
+            "kind": "DeleteOptions",
+            "propagationPolicy": "Foreground",
+        }
+        for item in routes.get("items") or []:
+            metadata = item.get("metadata") or {}
+            namespace = str(metadata.get("namespace") or "").strip()
+            name = str(metadata.get("name") or "").strip()
+            hostnames = item.get("spec", {}).get("hostnames") or []
+            if namespace == slot_name or host not in hostnames or not namespace or not name:
+                continue
+            try:
+                await self._request(
+                    "DELETE",
+                    f"/apis/gateway.networking.k8s.io/v1/namespaces/{namespace}/httproutes/{name}",
+                    json=body,
+                )
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 404:
+                    raise
 
     async def delete_test_slot_helm_release(self, lease_doc: dict[str, Any]) -> None:
         """Delete the helm-install Job, clone-token Secret, and slot CRBs.

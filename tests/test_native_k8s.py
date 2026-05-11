@@ -123,6 +123,29 @@ class _DeleteAttemptJobLauncher(_RecordingLauncher):
         return {}
 
 
+class _ConflictingRouteLauncher(_RecordingLauncher):
+    async def _request(self, method: str, path: str, *, json=None):
+        self.calls.append({"method": method, "path": path, "json": json})
+        if method == "GET" and path == "/apis/gateway.networking.k8s.io/v1/httproutes":
+            return {
+                "items": [
+                    {
+                        "metadata": {"namespace": "glimmung", "name": "glimmung-slot-1"},
+                        "spec": {"hostnames": ["glimmung-slot-1.glimmung.dev.romaine.life"]},
+                    },
+                    {
+                        "metadata": {"namespace": "glimmung-slot-1", "name": "glimmung-slot-1"},
+                        "spec": {"hostnames": ["glimmung-slot-1.glimmung.dev.romaine.life"]},
+                    },
+                    {
+                        "metadata": {"namespace": "other", "name": "other-slot"},
+                        "spec": {"hostnames": ["other.glimmung.dev.romaine.life"]},
+                    },
+                ]
+            }
+        return {}
+
+
 class _PodLogLauncher(_RecordingLauncher):
     async def _request(self, method: str, path: str, *, json=None):
         self.calls.append({"method": method, "path": path, "json": json})
@@ -879,6 +902,7 @@ async def test_ensure_test_slot_helm_release_creates_rolebinding_secret_and_job(
             "POST",
             "/apis/rbac.authorization.k8s.io/v1/namespaces/tank-slot-1/rolebindings",
         ),
+        ("GET", "/apis/gateway.networking.k8s.io/v1/httproutes"),
         ("POST", "/api/v1/namespaces"),
         (
             "POST",
@@ -901,7 +925,7 @@ async def test_ensure_test_slot_helm_release_creates_rolebinding_secret_and_job(
         "namespace": "glimmung-runs",
     }
 
-    installer_crb = launcher.calls[3]["json"]
+    installer_crb = launcher.calls[4]["json"]
     assert installer_crb["metadata"]["name"] == "glim-test-slot-installer-tank-slot-1-0"
     assert installer_crb["roleRef"]["name"] == "cluster-admin"
     assert installer_crb["subjects"][0] == {
@@ -910,11 +934,11 @@ async def test_ensure_test_slot_helm_release_creates_rolebinding_secret_and_job(
         "namespace": "glimmung-runs",
     }
 
-    secret = launcher.calls[4]["json"]
+    secret = launcher.calls[5]["json"]
     assert secret["stringData"] == {"token": "ghs_dummy"}
     assert secret["metadata"]["labels"]["glimmung.romaine.life/lease-ref"] == "tank-slot-1"
 
-    job = launcher.calls[5]["json"]
+    job = launcher.calls[6]["json"]
     assert job["kind"] == "Job"
     pod_spec = job["spec"]["template"]["spec"]
     assert pod_spec["serviceAccountName"] == "glimmung-native-runner"
@@ -969,6 +993,25 @@ async def test_ensure_test_slot_helm_release_uses_project_chart_path_override():
     job = launcher.calls[-1]["json"]
     install_script = job["spec"]["template"]["spec"]["containers"][0]["command"][2]
     assert "helm template 'glimmung-1' 'k8s/issue'" in install_script
+
+
+@pytest.mark.asyncio
+async def test_delete_conflicting_test_slot_routes_removes_same_host_outside_slot_namespace():
+    launcher = _ConflictingRouteLauncher(_settings())
+
+    await launcher.delete_conflicting_test_slot_routes(
+        "glimmung-slot-1",
+        "glimmung-slot-1.glimmung.dev.romaine.life",
+    )
+
+    assert [(call["method"], call["path"]) for call in launcher.calls] == [
+        ("GET", "/apis/gateway.networking.k8s.io/v1/httproutes"),
+        (
+            "DELETE",
+            "/apis/gateway.networking.k8s.io/v1/namespaces/glimmung/httproutes/glimmung-slot-1",
+        ),
+    ]
+    assert launcher.calls[1]["json"]["propagationPolicy"] == "Foreground"
 
 
 @pytest.mark.asyncio
