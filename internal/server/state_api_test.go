@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"net/http"
@@ -146,6 +147,64 @@ func TestStateSnapshotStoreErrorsReturn500(t *testing.T) {
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/state", nil))
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status=%d, want 500", rec.Code)
+	}
+}
+
+func TestStateEventsRequiresStateStore(t *testing.T) {
+	handler := NewWithStore(Settings{}, fakeReadStore{})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/events", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d, want 503", rec.Code)
+	}
+}
+
+func TestStateEventsStreamsInitialStateEvent(t *testing.T) {
+	now := time.Date(2026, 5, 11, 3, 0, 0, 0, time.UTC)
+	store := fakeStateStore{
+		leases: []Lease{{
+			ID:          "lease-1",
+			Project:     "ambience",
+			State:       "claimed",
+			Metadata:    map[string]any{"native_slot_name": "ambience-slot-1"},
+			RequestedAt: now,
+		}},
+	}
+	server := httptest.NewServer(NewWithStore(Settings{}, store))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/v1/events")
+	if err != nil {
+		t.Fatalf("GET /v1/events: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	if contentType := resp.Header.Get("content-type"); !strings.HasPrefix(contentType, "text/event-stream") {
+		t.Fatalf("content-type=%q", contentType)
+	}
+
+	reader := bufio.NewReader(resp.Body)
+	var lines []string
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read SSE line: %v", err)
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			break
+		}
+		lines = append(lines, line)
+	}
+	event := strings.Join(lines, "\n")
+	if !strings.Contains(event, "event: state") {
+		t.Fatalf("event=%q", event)
+	}
+	if !strings.Contains(event, `"ref":"ambience-slot-1"`) {
+		t.Fatalf("event=%q, missing state payload", event)
 	}
 }
 
