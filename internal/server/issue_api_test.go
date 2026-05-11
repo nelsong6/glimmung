@@ -11,9 +11,19 @@ import (
 type fakeIssueStore struct {
 	fakeReadStore
 	detail  IssueDetail
+	rows    []IssueRow
 	err     error
 	project string
 	number  int
+	filter  IssueListFilter
+}
+
+func (s *fakeIssueStore) ListIssues(_ context.Context, filter IssueListFilter) ([]IssueRow, error) {
+	s.filter = filter
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.rows, nil
 }
 
 func (s *fakeIssueStore) GetIssueDetailByNumber(_ context.Context, project string, number int) (IssueDetail, error) {
@@ -23,6 +33,47 @@ func (s *fakeIssueStore) GetIssueDetailByNumber(_ context.Context, project strin
 		return IssueDetail{}, s.err
 	}
 	return s.detail, nil
+}
+
+func TestListIssues(t *testing.T) {
+	store := &fakeIssueStore{rows: []IssueRow{{
+		Ref:     "glimmung#17",
+		Project: "glimmung",
+		Number:  intPtr(17),
+		Title:   "Fix dashboard",
+		State:   "open",
+		Labels:  []string{"bug"},
+	}}}
+	handler := NewWithStore(Settings{}, store)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/issues?project=glimmung&workflow=issue-agent&limit=10&needs_attention=true", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.filter.Project != "glimmung" || store.filter.Workflow != "issue-agent" || store.filter.Limit == nil || *store.filter.Limit != 10 || !store.filter.NeedsAttention {
+		t.Fatalf("filter=%#v", store.filter)
+	}
+	if !strings.Contains(rec.Body.String(), `"ref":"glimmung#17"`) {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
+func TestListIssuesValidatesFilters(t *testing.T) {
+	handler := NewWithStore(Settings{}, &fakeIssueStore{})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/issues?repo=nelsong6/glimmung", nil))
+	if rec.Code != http.StatusGone {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/issues?limit=0", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
 }
 
 func TestIssueDetailByNumber(t *testing.T) {

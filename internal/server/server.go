@@ -85,6 +85,7 @@ func NewWithDependencies(settings Settings, store ReadStore, authResolver AuthRe
 		"GET /v1/issues/by-id/{project}/{issue_id}",
 		storageIDGone("Issue storage-ID lookup is disabled; use /v1/issues/by-number/{project}/{issue_number}"),
 	)
+	mux.HandleFunc("GET /v1/issues", listIssues(store))
 	mux.HandleFunc(
 		"PATCH /v1/issues/by-id/{project}/{issue_id}",
 		storageIDGone("Issue storage-ID mutation is disabled; use /v1/issues/by-number/{project}/{issue_number}"),
