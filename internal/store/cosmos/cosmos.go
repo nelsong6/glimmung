@@ -17,6 +17,8 @@ import (
 type Store struct {
 	projects  *azcosmos.ContainerClient
 	workflows *azcosmos.ContainerClient
+	hosts     *azcosmos.ContainerClient
+	leases    *azcosmos.ContainerClient
 }
 
 func NewFromSettings(settings server.Settings) (*Store, error) {
@@ -39,7 +41,15 @@ func NewFromSettings(settings server.Settings) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create workflows container client: %w", err)
 	}
-	return &Store{projects: projects, workflows: workflows}, nil
+	hosts, err := client.NewContainer(settings.CosmosDatabase, "hosts")
+	if err != nil {
+		return nil, fmt.Errorf("create hosts container client: %w", err)
+	}
+	leases, err := client.NewContainer(settings.CosmosDatabase, "leases")
+	if err != nil {
+		return nil, fmt.Errorf("create leases container client: %w", err)
+	}
+	return &Store{projects: projects, workflows: workflows, hosts: hosts, leases: leases}, nil
 }
 
 func (s *Store) ListProjects(ctx context.Context) ([]server.Project, error) {
@@ -66,8 +76,38 @@ func (s *Store) ListWorkflows(ctx context.Context) ([]server.Workflow, error) {
 	return rows, nil
 }
 
+func (s *Store) ListHosts(ctx context.Context) ([]server.Host, error) {
+	var docs []hostDoc
+	if err := queryAll(ctx, s.hosts, &docs); err != nil {
+		return nil, err
+	}
+	rows := make([]server.Host, 0, len(docs))
+	for _, doc := range docs {
+		rows = append(rows, hostFromDoc(doc))
+	}
+	return rows, nil
+}
+
+func (s *Store) ListLeases(ctx context.Context) ([]server.Lease, error) {
+	var docs []leaseDoc
+	if err := queryAll(ctx, s.leases, &docs); err != nil {
+		return nil, err
+	}
+	rows := make([]server.Lease, 0, len(docs))
+	for _, doc := range docs {
+		rows = append(rows, leaseFromDoc(doc))
+	}
+	return rows, nil
+}
+
 func queryAll[T any](ctx context.Context, container *azcosmos.ContainerClient, target *[]T) error {
-	pager := container.NewQueryItemsPager("SELECT * FROM c", azcosmos.NewPartitionKey(), &azcosmos.QueryOptions{})
+	return queryAllWhere(ctx, container, "SELECT * FROM c", nil, target)
+}
+
+func queryAllWhere[T any](ctx context.Context, container *azcosmos.ContainerClient, query string, parameters []azcosmos.QueryParameter, target *[]T) error {
+	pager := container.NewQueryItemsPager(query, azcosmos.NewPartitionKey(), &azcosmos.QueryOptions{
+		QueryParameters: parameters,
+	})
 	for pager.More() {
 		page, err := pager.NextPage(ctx)
 		if err != nil {
@@ -104,6 +144,36 @@ type workflowDoc struct {
 	DefaultRequirements map[string]any `json:"defaultRequirements"`
 	Metadata            map[string]any `json:"metadata"`
 	CreatedAt           string         `json:"createdAt"`
+}
+
+type hostDoc struct {
+	ID             string         `json:"id"`
+	Name           string         `json:"name"`
+	Capabilities   map[string]any `json:"capabilities"`
+	CurrentLeaseID *string        `json:"currentLeaseId"`
+	LastHeartbeat  string         `json:"lastHeartbeat"`
+	LastUsedAt     string         `json:"lastUsedAt"`
+	Drained        bool           `json:"drained"`
+	CreatedAt      string         `json:"createdAt"`
+}
+
+type leaseDoc struct {
+	ID                 string         `json:"id"`
+	Kind               string         `json:"kind"`
+	LeaseNumber        *int           `json:"leaseNumber"`
+	Project            string         `json:"project"`
+	Workflow           *string        `json:"workflow"`
+	Host               *string        `json:"host"`
+	State              string         `json:"state"`
+	Requirements       map[string]any `json:"requirements"`
+	Metadata           map[string]any `json:"metadata"`
+	RequestedAt        string         `json:"requestedAt"`
+	AssignedAt         string         `json:"assignedAt"`
+	ReleasedAt         string         `json:"releasedAt"`
+	TTLSeconds         int            `json:"ttlSeconds"`
+	RequestedSlotIndex *int           `json:"requestedSlotIndex"`
+	FulfilledAt        string         `json:"fulfilledAt"`
+	FulfilledLeaseRef  *string        `json:"fulfilledLeaseRef"`
 }
 
 type phaseDoc struct {
@@ -182,6 +252,40 @@ func workflowFromDoc(doc workflowDoc) server.Workflow {
 		DefaultRequirements: mapOrEmpty(doc.DefaultRequirements),
 		Metadata:            mapOrEmpty(doc.Metadata),
 		CreatedAt:           parseTimeOrNow(doc.CreatedAt),
+	}
+}
+
+func hostFromDoc(doc hostDoc) server.Host {
+	return server.Host{
+		ID:             firstNonEmpty(doc.ID, doc.Name),
+		Name:           doc.Name,
+		Capabilities:   mapOrEmpty(doc.Capabilities),
+		CurrentLeaseID: doc.CurrentLeaseID,
+		LastHeartbeat:  parseOptionalTime(doc.LastHeartbeat),
+		LastUsedAt:     parseOptionalTime(doc.LastUsedAt),
+		Drained:        doc.Drained,
+		CreatedAt:      parseTimeOrNow(doc.CreatedAt),
+	}
+}
+
+func leaseFromDoc(doc leaseDoc) server.Lease {
+	return server.Lease{
+		ID:                 doc.ID,
+		Kind:               doc.Kind,
+		LeaseNumber:        doc.LeaseNumber,
+		Project:            doc.Project,
+		Workflow:           doc.Workflow,
+		Host:               doc.Host,
+		State:              firstNonEmpty(doc.State, "claimed"),
+		Requirements:       mapOrEmpty(doc.Requirements),
+		Metadata:           mapOrEmpty(doc.Metadata),
+		RequestedAt:        parseTimeOrNow(doc.RequestedAt),
+		AssignedAt:         parseOptionalTime(doc.AssignedAt),
+		ReleasedAt:         parseOptionalTime(doc.ReleasedAt),
+		TTLSeconds:         defaultTTLSeconds(doc.TTLSeconds),
+		RequestedSlotIndex: doc.RequestedSlotIndex,
+		FulfilledAt:        parseOptionalTime(doc.FulfilledAt),
+		FulfilledLeaseRef:  doc.FulfilledLeaseRef,
 	}
 }
 
@@ -283,11 +387,29 @@ func parseTimeOrNow(value string) time.Time {
 	return parsed
 }
 
+func parseOptionalTime(value string) *time.Time {
+	if value == "" {
+		return nil
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return nil
+	}
+	return &parsed
+}
+
 func defaultBudgetTotal(total float64) float64 {
 	if total == 0 {
 		return 25
 	}
 	return total
+}
+
+func defaultTTLSeconds(ttl int) int {
+	if ttl == 0 {
+		return 900
+	}
+	return ttl
 }
 
 func firstNonEmpty(values ...string) string {

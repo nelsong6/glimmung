@@ -126,3 +126,73 @@ func TestWorkflowFromDocRespectsExplicitDependsOn(t *testing.T) {
 		t.Fatalf("verify depends_on=%#v", workflow.Phases[2].DependsOn)
 	}
 }
+
+func TestHostFromDocConvertsLeaseAndTimes(t *testing.T) {
+	raw := []byte(`{
+		"id": "runner-1",
+		"name": "runner-1",
+		"capabilities": {"gpu": "none"},
+		"currentLeaseId": "lease-1",
+		"lastHeartbeat": "2026-05-11T03:00:00Z",
+		"lastUsedAt": "2026-05-11T02:00:00Z",
+		"drained": true,
+		"createdAt": "2026-05-10T03:00:00Z"
+	}`)
+	var doc hostDoc
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("decode doc: %v", err)
+	}
+
+	host := hostFromDoc(doc)
+
+	if host.CurrentLeaseID == nil || *host.CurrentLeaseID != "lease-1" {
+		t.Fatalf("CurrentLeaseID=%v", host.CurrentLeaseID)
+	}
+	if host.LastHeartbeat == nil || host.LastUsedAt == nil {
+		t.Fatalf("host times=%#v", host)
+	}
+	if !host.Drained {
+		t.Fatal("Drained=false, want true")
+	}
+}
+
+func TestLeaseFromDocConvertsStateSnapshotShape(t *testing.T) {
+	raw := []byte(`{
+		"id": "lease-1",
+		"leaseNumber": 17,
+		"project": "ambience",
+		"workflow": "agent-run",
+		"host": "runner-1",
+		"state": "claimed",
+		"requirements": {"size": "large"},
+		"metadata": {
+			"native_slot_name": "ambience-slot-1",
+			"requester": {
+				"consumer": "glimmung",
+				"kind": "run",
+				"ref": "glimmung#1/runs/2",
+				"metadata": {"run_id": "2"}
+			}
+		},
+		"requestedAt": "2026-05-11T03:00:00Z",
+		"assignedAt": "2026-05-11T03:01:00Z",
+		"releasedAt": null,
+		"ttlSeconds": 900
+	}`)
+	var doc leaseDoc
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("decode doc: %v", err)
+	}
+
+	lease := leaseFromDoc(doc)
+
+	if lease.LeaseNumber == nil || *lease.LeaseNumber != 17 {
+		t.Fatalf("LeaseNumber=%v", lease.LeaseNumber)
+	}
+	if lease.AssignedAt == nil || lease.ReleasedAt != nil {
+		t.Fatalf("lease times=%#v", lease)
+	}
+	if lease.Metadata["native_slot_name"] != "ambience-slot-1" {
+		t.Fatalf("metadata=%#v", lease.Metadata)
+	}
+}
