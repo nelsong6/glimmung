@@ -2,6 +2,7 @@ package decision
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/nelsong6/glimmung/internal/domain/budget"
 )
@@ -25,7 +26,8 @@ const (
 )
 
 type Verification struct {
-	Status VerificationStatus
+	Status  VerificationStatus
+	Reasons []string
 }
 
 type Attempt struct {
@@ -43,6 +45,7 @@ type PhaseSpec struct {
 	Name                     string
 	Verify                   bool
 	EvidenceVerificationGate bool
+	Always                   bool
 	RecyclePolicy            *RecyclePolicy
 }
 
@@ -129,6 +132,72 @@ func Decide(run Run, workflow Workflow, attemptIndex ...int) (RunDecision, error
 	}
 
 	return Retry, nil
+}
+
+// AbortExplanation returns the human-readable abort comment body for a terminal decision.
+func AbortExplanation(run Run, workflow Workflow, decision RunDecision) (string, error) {
+	last := primaryAttemptForExplanation(run, workflow)
+	reasons := []string{}
+	if last != nil && last.Verification != nil {
+		reasons = last.Verification.Reasons
+	}
+
+	detail := ""
+	if len(reasons) > 0 {
+		lines := make([]string, 0, len(reasons))
+		for _, reason := range reasons {
+			lines = append(lines, "- "+reason)
+		}
+		detail = "\n\nMost recent verification reasons:\n" + strings.Join(lines, "\n")
+	}
+
+	switch decision {
+	case AbortBudgetAttempts:
+		if last == nil {
+			return "Aborting verify-loop on phase '?': no retry path available for the latest verification result." + detail, nil
+		}
+		phaseSpec, ok := phaseByName(workflow, last.Phase)
+		attempts := attemptsInPhase(run.Attempts, last.Phase)
+		if ok && phaseSpec.RecyclePolicy != nil {
+			return fmt.Sprintf(
+				"Aborting verify-loop after %d attempt(s) on phase %q; reached max_attempts=%d.%s",
+				attempts,
+				last.Phase,
+				phaseSpec.RecyclePolicy.MaxAttempts,
+				detail,
+			), nil
+		}
+		return fmt.Sprintf(
+			"Aborting verify-loop on phase %q: no retry path available for the latest verification result.%s",
+			last.Phase,
+			detail,
+		), nil
+	case AbortBudgetCost:
+		return fmt.Sprintf(
+			"Aborting verify-loop after cumulative cost $%.2f >= budget $%.2f.%s",
+			run.CumulativeCostUSD,
+			run.Budget.Total,
+			detail,
+		), nil
+	case AbortMalformed:
+		return "Aborting verify-loop: the latest workflow run did not produce a well-formed `verification.json` artifact, or the failure mode is not in this phase's recycle policy. The decision engine cannot retry against a missing or invalid producer contract.", nil
+	default:
+		return "", fmt.Errorf("abort explanation called with non-abort decision %q", decision)
+	}
+}
+
+func primaryAttemptForExplanation(run Run, workflow Workflow) *Attempt {
+	for i := len(run.Attempts) - 1; i >= 0; i-- {
+		attempt := &run.Attempts[i]
+		phase, ok := phaseByName(workflow, attempt.Phase)
+		if !ok || !phase.Always {
+			return attempt
+		}
+	}
+	if len(run.Attempts) > 0 {
+		return &run.Attempts[len(run.Attempts)-1]
+	}
+	return nil
 }
 
 func phaseByName(workflow Workflow, name string) (PhaseSpec, bool) {
