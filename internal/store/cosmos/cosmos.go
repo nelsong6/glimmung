@@ -364,6 +364,30 @@ func (s *Store) ListLeases(ctx context.Context) ([]server.Lease, error) {
 }
 
 func (s *Store) ReadLeaseByCallbackToken(ctx context.Context, token string) (server.Lease, error) {
+	doc, err := s.readLeaseDocByCallbackToken(ctx, token)
+	if err != nil {
+		return server.Lease{}, err
+	}
+	return leaseFromDoc(doc), nil
+}
+
+func (s *Store) HeartbeatLeaseByCallbackToken(ctx context.Context, token string) (server.Lease, error) {
+	doc, err := s.readLeaseDocByCallbackToken(ctx, token)
+	if err != nil {
+		return server.Lease{}, err
+	}
+	if doc.State != "claimed" {
+		return server.Lease{}, server.ErrInactive
+	}
+	if doc.Host != nil && *doc.Host != "" && *doc.Host != "native-k8s" {
+		if err := s.touchHostHeartbeat(ctx, *doc.Host); err != nil {
+			return server.Lease{}, err
+		}
+	}
+	return leaseFromDoc(doc), nil
+}
+
+func (s *Store) readLeaseDocByCallbackToken(ctx context.Context, token string) (leaseDoc, error) {
 	var docs []leaseDoc
 	if err := queryAllWhere(
 		ctx,
@@ -372,15 +396,34 @@ func (s *Store) ReadLeaseByCallbackToken(ctx context.Context, token string) (ser
 		[]azcosmos.QueryParameter{{Name: "@token", Value: token}},
 		&docs,
 	); err != nil {
-		return server.Lease{}, err
+		return leaseDoc{}, err
 	}
 	if len(docs) == 0 {
-		return server.Lease{}, server.ErrNotFound
+		return leaseDoc{}, server.ErrNotFound
 	}
 	if len(docs) > 1 {
-		return server.Lease{}, server.ErrConflict
+		return leaseDoc{}, server.ErrConflict
 	}
-	return leaseFromDoc(docs[0]), nil
+	return docs[0], nil
+}
+
+func (s *Store) touchHostHeartbeat(ctx context.Context, hostName string) error {
+	partitionKey := azcosmos.NewPartitionKeyString(hostName)
+	response, err := s.hosts.ReadItem(ctx, partitionKey, hostName, nil)
+	if err != nil {
+		return err
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(response.Value, &doc); err != nil {
+		return err
+	}
+	doc["lastHeartbeat"] = time.Now().UTC().Format(time.RFC3339Nano)
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	_, err = s.hosts.ReplaceItem(ctx, partitionKey, hostName, payload, nil)
+	return err
 }
 
 func queryAll[T any](ctx context.Context, container *azcosmos.ContainerClient, target *[]T) error {
