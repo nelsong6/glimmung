@@ -68,6 +68,8 @@ See [Repo UI Packages And Design Portfolios](docs/ui-package-design-portfolios.m
 
 ```
 src/glimmung/         # FastAPI app, Cosmos client, lease lifecycle, GH webhook
+cmd/glimmung-go/      # Shadow Go HTTP entrypoint for migrated surfaces
+internal/             # Go domain/server packages used by migration pilots
 frontend/             # Vite + React dashboard (live SSE state, MSAL admin)
 k8s/                  # Helm chart, ArgoCD-synced from main
 tofu/                 # Cosmos database + containers + Entra app reg

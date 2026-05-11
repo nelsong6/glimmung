@@ -11,6 +11,8 @@ large backend path.
   `/v1/*` API surface.
 - Runtime entrypoint: `src/glimmung/__main__.py` runs uvicorn on the configured
   host and port.
+- Shadow Go entrypoint: `cmd/glimmung-go` runs a local/dev HTTP server for
+  migrated surfaces. It is not wired into Docker, Helm, or production traffic.
 - Persistence boundary: `src/glimmung/db.py` owns Cosmos containers and document
   access helpers.
 - Auth boundary: `src/glimmung/auth.py` handles Entra JWKS auth and Kubernetes
@@ -68,6 +70,29 @@ Start with modules that are deterministic and have low runtime coupling:
 - Make local development support both processes: Python remains the default
   `python -m glimmung` path, while Go pilots expose explicit commands and tests.
 
+## Shadow Go dev loop
+
+The Go server can be run locally without replacing the Python service:
+
+```sh
+PORT=8001 \
+ENTRA_CLIENT_ID=local-client \
+TANK_OPERATOR_BASE_URL=https://tank.romaine.life \
+GLIMMUNG_STATIC_DIR=frontend/dist \
+go run ./cmd/glimmung-go
+```
+
+The shadow server currently owns only:
+
+- `GET /healthz`
+- `GET /v1/config`
+- Static frontend assets and SPA fallback when `GLIMMUNG_STATIC_DIR` points at
+  a built frontend directory.
+
+Do not route MCP, native-runner callbacks, lease lifecycle, dispatch, webhooks,
+or write endpoints to the Go server until the matching auth, storage, and
+runtime parity tests exist.
+
 ## Recommended first slice
 
 The first PR should be a contract baseline only:
@@ -78,8 +103,9 @@ The first PR should be a contract baseline only:
 - Run the existing pure-domain tests so later Go ports have a known Python
   reference.
 
-After that, the lowest-risk Go pilot is a pure library port of one small domain
-helper package, with golden tests generated from the Python implementation. Good
-initial candidates are path normalization, public ID generation, phase input
-reference parsing, and decision summarization. Those modules do not need to own
-Cosmos, Kubernetes, auth, webhooks, or MCP compatibility on day one.
+The initial pure-domain and shadow-server pilots now cover path normalization,
+public ID generation, budget parsing, phase input references, decision routing,
+abort explanations, health/config endpoints, and static frontend serving. The
+next migration slices should move toward read-only API handlers behind explicit
+interfaces, starting with JSON model parity and fake-store tests before any
+Cosmos-backed production traffic is served by Go.
