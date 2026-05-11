@@ -7,6 +7,8 @@ import (
 	"github.com/nelsong6/glimmung/internal/auth"
 )
 
+type adminUserContextKey struct{}
+
 type AdminAuthenticator interface {
 	RequireAdmin(ctx context.Context, authorization string) (auth.User, error)
 }
@@ -17,7 +19,8 @@ func requireAdmin(authenticator AdminAuthenticator, next http.Handler) http.Hand
 			writeProblem(w, http.StatusServiceUnavailable, "admin auth not configured")
 			return
 		}
-		if _, err := authenticator.RequireAdmin(r.Context(), r.Header.Get("Authorization")); err != nil {
+		user, err := authenticator.RequireAdmin(r.Context(), r.Header.Get("Authorization"))
+		if err != nil {
 			if authErr, ok := err.(auth.AuthError); ok {
 				writeProblem(w, authErr.Status, authErr.Message)
 				return
@@ -25,6 +28,12 @@ func requireAdmin(authenticator AdminAuthenticator, next http.Handler) http.Hand
 			writeProblem(w, http.StatusUnauthorized, err.Error())
 			return
 		}
-		next.ServeHTTP(w, r)
+		ctx := context.WithValue(r.Context(), adminUserContextKey{}, user)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func adminUser(ctx context.Context) (auth.User, bool) {
+	user, ok := ctx.Value(adminUserContextKey{}).(auth.User)
+	return user, ok
 }

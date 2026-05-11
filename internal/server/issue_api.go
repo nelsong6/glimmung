@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -11,6 +13,7 @@ import (
 type IssueStore interface {
 	ListIssues(ctx context.Context, filter IssueListFilter) ([]IssueRow, error)
 	GetIssueDetailByNumber(ctx context.Context, project string, number int) (IssueDetail, error)
+	ArchiveIssueByNumber(ctx context.Context, req IssueArchive) (IssueDetail, error)
 }
 
 type IssueListFilter struct {
@@ -19,6 +22,18 @@ type IssueListFilter struct {
 	Workflow       string
 	NeedsAttention bool
 	Limit          *int
+}
+
+type IssueArchive struct {
+	Project string
+	Number  int
+	Action  string
+	Reason  string
+	Author  string
+}
+
+type IssueArchiveRequest struct {
+	Reason string `json:"reason"`
 }
 
 type IssueRow struct {
@@ -118,6 +133,44 @@ func issueDetailByNumber(store ReadStore) http.HandlerFunc {
 			return
 		case err != nil:
 			writeProblem(w, http.StatusInternalServerError, "get issue detail failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, detail)
+	}
+}
+
+func archiveIssueByNumber(store ReadStore, action string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		issueStore, ok := store.(IssueStore)
+		if !ok || issueStore == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "issue store not configured")
+			return
+		}
+		number, err := strconv.Atoi(r.PathValue("issue_number"))
+		if err != nil || number < 1 {
+			writeProblem(w, http.StatusBadRequest, "issue_number must be a positive integer")
+			return
+		}
+		var body IssueArchiveRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeProblem(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		user, _ := adminUser(r.Context())
+		author := firstNonEmpty(user.Email, user.Name, user.Sub, "admin")
+		detail, err := issueStore.ArchiveIssueByNumber(r.Context(), IssueArchive{
+			Project: r.PathValue("project"),
+			Number:  number,
+			Action:  action,
+			Reason:  body.Reason,
+			Author:  author,
+		})
+		switch {
+		case errors.Is(err, ErrNotFound):
+			writeProblem(w, http.StatusNotFound, "issue not found")
+			return
+		case err != nil:
+			writeProblem(w, http.StatusInternalServerError, "archive issue failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, detail)

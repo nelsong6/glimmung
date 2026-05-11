@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/nelsong6/glimmung/internal/auth"
 )
 
 type fakeIssueStore struct {
@@ -16,6 +18,7 @@ type fakeIssueStore struct {
 	project string
 	number  int
 	filter  IssueListFilter
+	archive IssueArchive
 }
 
 func (s *fakeIssueStore) ListIssues(_ context.Context, filter IssueListFilter) ([]IssueRow, error) {
@@ -33,6 +36,16 @@ func (s *fakeIssueStore) GetIssueDetailByNumber(_ context.Context, project strin
 		return IssueDetail{}, s.err
 	}
 	return s.detail, nil
+}
+
+func (s *fakeIssueStore) ArchiveIssueByNumber(_ context.Context, req IssueArchive) (IssueDetail, error) {
+	s.archive = req
+	if s.err != nil {
+		return IssueDetail{}, s.err
+	}
+	detail := s.detail
+	detail.State = "closed"
+	return detail, nil
 }
 
 func TestListIssues(t *testing.T) {
@@ -123,5 +136,48 @@ func TestIssueDetailByNumberRequiresStore(t *testing.T) {
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/issues/by-number/glimmung/17", nil))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestArchiveIssueByNumberRequiresAdminAndAddsAuthor(t *testing.T) {
+	store := &fakeIssueStore{detail: IssueDetail{
+		Ref:     "glimmung#17",
+		Project: "glimmung",
+		Number:  intPtr(17),
+		Title:   "Fix dashboard",
+		State:   "open",
+	}}
+	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin", Email: "admin@example.com"}})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/issues/by-number/glimmung/17/archive", strings.NewReader(`{"reason":"done"}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.archive.Project != "glimmung" || store.archive.Number != 17 || store.archive.Action != "archived" || store.archive.Reason != "done" {
+		t.Fatalf("archive=%#v", store.archive)
+	}
+	if store.archive.Author != "admin@example.com" {
+		t.Fatalf("author=%q", store.archive.Author)
+	}
+}
+
+func TestDiscardIssueByNumberUsesDiscardedAction(t *testing.T) {
+	store := &fakeIssueStore{detail: IssueDetail{Ref: "glimmung#17", Project: "glimmung", Number: intPtr(17), Title: "Fix", State: "open"}}
+	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin", Email: "admin@example.com"}})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/issues/by-number/glimmung/17/discard", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.archive.Action != "discarded" {
+		t.Fatalf("archive=%#v", store.archive)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/data/azcosmos"
+	"github.com/google/uuid"
 
 	"github.com/nelsong6/glimmung/internal/domain/budget"
 	"github.com/nelsong6/glimmung/internal/domain/publicids"
@@ -591,6 +592,38 @@ func (s *Store) GetIssueDetailByNumber(ctx context.Context, project string, numb
 	return detail, nil
 }
 
+func (s *Store) ArchiveIssueByNumber(ctx context.Context, req server.IssueArchive) (server.IssueDetail, error) {
+	doc, err := s.readIssueByNumber(ctx, req.Project, req.Number)
+	if err != nil {
+		return server.IssueDetail{}, err
+	}
+	note := capitalize(req.Action)
+	if reason := strings.TrimSpace(req.Reason); reason != "" {
+		note = note + ": " + reason
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	doc.Comments = append(doc.Comments, issueCommentDoc{
+		ID:        uuid.NewString(),
+		Author:    req.Author,
+		Body:      note,
+		CreatedAt: now,
+		UpdatedAt: now,
+	})
+	doc.UpdatedAt = now
+	if doc.State == "open" || doc.State == "" {
+		doc.State = "closed"
+		doc.ClosedAt = &now
+	}
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return server.IssueDetail{}, err
+	}
+	if _, err := s.issues.ReplaceItem(ctx, azcosmos.NewPartitionKeyString(doc.Project), doc.ID, payload, nil); err != nil {
+		return server.IssueDetail{}, err
+	}
+	return s.GetIssueDetailByNumber(ctx, doc.Project, doc.Number)
+}
+
 func (s *Store) readIssueByNumber(ctx context.Context, project string, number int) (issueDoc, error) {
 	var docs []issueDoc
 	if err := queryAllWhere(
@@ -915,6 +948,7 @@ type issueDoc struct {
 	Comments  []issueCommentDoc `json:"comments"`
 	CreatedAt string            `json:"created_at"`
 	UpdatedAt string            `json:"updated_at"`
+	ClosedAt  *string           `json:"closed_at,omitempty"`
 }
 
 type issueMetadataDoc struct {
@@ -1213,6 +1247,14 @@ func issueRowNeedsAttention(row server.IssueRow) bool {
 	default:
 		return false
 	}
+}
+
+func capitalize(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	return strings.ToUpper(value[:1]) + value[1:]
 }
 
 func runRefMapFromDocs(docs []runDoc) map[string]string {

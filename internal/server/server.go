@@ -159,6 +159,14 @@ func NewWithDependencies(settings Settings, store ReadStore, authResolver AuthRe
 	mux.HandleFunc("GET /v1/projects", listProjects(store))
 	mux.Handle("POST /v1/projects", requireAdmin(adminAuthenticator, http.HandlerFunc(registerProject(store))))
 	mux.Handle(
+		"POST /v1/issues/by-number/{project}/{issue_number}/archive",
+		requireAdmin(adminAuthenticator, http.HandlerFunc(archiveIssueByNumber(store, "archived"))),
+	)
+	mux.Handle(
+		"POST /v1/issues/by-number/{project}/{issue_number}/discard",
+		requireAdmin(adminAuthenticator, http.HandlerFunc(archiveIssueByNumber(store, "discarded"))),
+	)
+	mux.Handle(
 		"PATCH /v1/projects/{project}/test-environments/count",
 		requireAdmin(adminAuthenticator, http.HandlerFunc(scaleProjectTestEnvironments(store))),
 	)
