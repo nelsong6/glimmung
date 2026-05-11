@@ -58,6 +58,8 @@ class _RecordingTestSlotLauncher:
         self.deleted_playwright: list[dict] = []
         self.deleted_helm_releases: list[dict] = []
         self.reconciled_playwright_leases: list[dict] | None = None
+        self.reconciled_standby_dns_projects: list[dict] | None = None
+        self.reconciled_standby_workload_identity_projects: list[dict] | None = None
         self.reconciled_entra_projects: list[dict] | None = None
 
     async def ensure_test_slot_namespace(self, lease_doc: dict) -> None:
@@ -90,6 +92,12 @@ class _RecordingTestSlotLauncher:
 
     async def reconcile_playwright_slots(self, active_native_leases: list[dict]) -> None:
         self.reconciled_playwright_leases = active_native_leases
+
+    async def reconcile_standby_dns(self, project_docs: list[dict]) -> None:
+        self.reconciled_standby_dns_projects = project_docs
+
+    async def reconcile_standby_workload_identity(self, project_docs: list[dict]) -> None:
+        self.reconciled_standby_workload_identity_projects = project_docs
 
     async def reconcile_standby_entra_redirects(self, project_docs: list[dict]) -> None:
         self.reconciled_entra_projects = project_docs
@@ -211,6 +219,8 @@ async def test_checkout_test_slot_uses_project_standby_dns_slot_prefix(app_state
     assert "native_slot_prefix" not in lease_doc["metadata"]
     assert lease_doc["metadata"]["phase_inputs"]["slot_name"] == "tank-slot-1"
     assert lease_doc["metadata"]["phase_inputs"]["namespace"] == "tank-slot-1"
+    assert app_state.native_k8s_launcher.reconciled_standby_dns_projects is not None
+    assert app_state.native_k8s_launcher.reconciled_standby_workload_identity_projects is not None
     assert app_state.native_k8s_launcher.reconciled_entra_projects is not None
 
 

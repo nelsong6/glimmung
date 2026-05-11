@@ -18,16 +18,45 @@ image:
 # listener is needed.
 hostname: ""
 
-# Existing infrastructure in the glimmung namespace that this chart's
-# resources reference. These match prod's k8s/values.yaml; they're
-# duplicated here rather than imported because the issue chart has no
-# dependency on the prod chart's release.
+# Existing infrastructure that this chart's workload references. In normal
+# per-issue installs these already exist in the shared glimmung namespace. In
+# test-slot installs (`testEnv.enabled=true`) this chart creates slot-scoped
+# copies in the release namespace.
 serviceAccount: infra-shared
+serviceAccountClientId: "3644b9f0-2eb0-42dd-92a4-696f9a3ca090"
 configMapName: glimmung-config
 secretName: glimmung-secrets
 cosmos:
   endpoint: https://infra-cosmos-serverless.documents.azure.com:443/
   database: glimmung
+
+testEnv:
+  enabled: false
+
+config:
+  allowedEmails:
+    - nelson@romaine.life
+    - nelson-devops-project@outlook.com
+    - Brenden.owens39@gmail.com
+    - gantonski@gmail.com
+
+externalSecret:
+  storeName: romaine-kv
+  storeKind: ClusterSecretStore
+  refreshInterval: 1h
+  keys:
+    - envVar: GITHUB_APP_ID
+      kvKey: glimmung-github-app-id
+    - envVar: GITHUB_APP_INSTALLATION_ID
+      kvKey: glimmung-github-app-installation-id
+    - envVar: GITHUB_APP_PRIVATE_KEY
+      kvKey: glimmung-github-app-private-key
+    - envVar: GITHUB_WEBHOOK_SECRET
+      kvKey: glimmung-github-webhook-secret
+    - envVar: ENTRA_CLIENT_ID
+      kvKey: glimmung-oauth-client-id
+    - envVar: ENTRA_TEST_CLIENT_ID
+      kvKey: glimmung-oauth-test-client-id
 
 # The wildcard XListenerSet that per-install HTTPRoutes attach to (in
 # the same `glimmung` namespace where this chart installs).
