@@ -6,6 +6,7 @@ import (
 )
 
 var ErrNotFound = errors.New("not found")
+var ErrConflict = errors.New("conflict")
 
 type ValidationError struct {
 	Message string
