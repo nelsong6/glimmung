@@ -31,6 +31,7 @@ type Store struct {
 	locks     *azcosmos.ContainerClient
 	reports   *azcosmos.ContainerClient
 	playbooks *azcosmos.ContainerClient
+	signals   *azcosmos.ContainerClient
 }
 
 func NewFromSettings(settings server.Settings) (*Store, error) {
@@ -81,7 +82,11 @@ func NewFromSettings(settings server.Settings) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create playbooks container client: %w", err)
 	}
-	return &Store{projects: projects, workflows: workflows, hosts: hosts, leases: leases, runs: runs, issues: issues, locks: locks, reports: reports, playbooks: playbooks}, nil
+	signals, err := client.NewContainer(settings.CosmosDatabase, "signals")
+	if err != nil {
+		return nil, fmt.Errorf("create signals container client: %w", err)
+	}
+	return &Store{projects: projects, workflows: workflows, hosts: hosts, leases: leases, runs: runs, issues: issues, locks: locks, reports: reports, playbooks: playbooks, signals: signals}, nil
 }
 
 func (s *Store) ListProjects(ctx context.Context) ([]server.Project, error) {
@@ -2389,13 +2394,36 @@ func (s *Store) resolveIssueIDByRef(ctx context.Context, project, ref string) *s
 	return &doc.ID
 }
 
-func (s *Store) resolveRunIDByRef(_ context.Context, _ string, ref string) *string {
-	// run ref format: "{project}#<issue_number>/runs/<run_number>" — we can't
-	// easily resolve this to a run ID without a DB lookup, so skip for now.
-	// Callers that have the run ID will pass it directly via linked_run_id if
-	// we ever need to support that path.
-	if ref == "" {
+func (s *Store) resolveRunIDByRef(ctx context.Context, project, ref string) *string {
+	// ref format: "{project}#{issue_number}/runs/{run_part}"
+	hashIdx := strings.Index(ref, "#")
+	slashRuns := strings.Index(ref, "/runs/")
+	if hashIdx < 0 || slashRuns < 0 || slashRuns <= hashIdx {
 		return nil
+	}
+	issueNum, err := strconv.Atoi(ref[hashIdx+1 : slashRuns])
+	if err != nil {
+		return nil
+	}
+	runPart := ref[slashRuns+len("/runs/"):]
+	if runPart == "" {
+		return nil
+	}
+	docs, err := s.issueRunDocs(ctx, project, issueNum)
+	if err != nil {
+		return nil
+	}
+	numbers := runNumberMap(docs)
+	for _, doc := range docs {
+		display := ""
+		if doc.RunDisplayNumber != nil {
+			display = strings.TrimSpace(*doc.RunDisplayNumber)
+		}
+		if (display != "" && display == strings.TrimSpace(runPart)) ||
+			fmt.Sprintf("%d", numbers[doc.ID]) == strings.TrimSpace(runPart) {
+			id := doc.ID
+			return &id
+		}
 	}
 	return nil
 }
@@ -2794,4 +2822,76 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+type signalDoc struct {
+	ID                string         `json:"id"`
+	SchemaVersion     int            `json:"schema_version"`
+	TargetType        string         `json:"target_type"`
+	TargetRepo        string         `json:"target_repo"`
+	TargetID          string         `json:"target_id"`
+	Source            string         `json:"source"`
+	Payload           map[string]any `json:"payload"`
+	State             string         `json:"state"`
+	EnqueuedAt        string         `json:"enqueued_at"`
+	ProcessedAt       *string        `json:"processed_at,omitempty"`
+	ProcessedDecision *string        `json:"processed_decision,omitempty"`
+	FailureReason     *string        `json:"failure_reason,omitempty"`
+}
+
+func (s *Store) EnqueueSignal(ctx context.Context, req server.SignalEnqueue) (server.PublicSignal, error) {
+	var targetID string
+	switch req.TargetType {
+	case "pr":
+		targetID = req.TargetRef
+	case "issue":
+		id := s.resolveIssueIDByRef(ctx, req.TargetRepo, req.TargetRef)
+		if id == nil {
+			return server.PublicSignal{}, server.ErrNotFound
+		}
+		targetID = *id
+	case "run":
+		id := s.resolveRunIDByRef(ctx, req.TargetRepo, req.TargetRef)
+		if id == nil {
+			return server.PublicSignal{}, server.ErrNotFound
+		}
+		targetID = *id
+	default:
+		return server.PublicSignal{}, fmt.Errorf("unknown target_type: %s", req.TargetType)
+	}
+
+	now := time.Now().UTC()
+	payload := req.Payload
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	doc := signalDoc{
+		ID:            uuid.NewString(),
+		SchemaVersion: 1,
+		TargetType:    req.TargetType,
+		TargetRepo:    req.TargetRepo,
+		TargetID:      targetID,
+		Source:        req.Source,
+		Payload:       payload,
+		State:         "pending",
+		EnqueuedAt:    now.Format(time.RFC3339Nano),
+	}
+	data, err := json.Marshal(doc)
+	if err != nil {
+		return server.PublicSignal{}, fmt.Errorf("marshal signal: %w", err)
+	}
+	pk := azcosmos.NewPartitionKeyString(doc.TargetRepo)
+	if _, err := s.signals.CreateItem(ctx, pk, data, nil); err != nil {
+		return server.PublicSignal{}, fmt.Errorf("create signal: %w", err)
+	}
+	ref := fmt.Sprintf("signal:%s:%s:%s:%s", doc.TargetType, doc.TargetRepo, req.TargetRef, now.Format(time.RFC3339Nano))
+	return server.PublicSignal{
+		Ref:        ref,
+		TargetType: doc.TargetType,
+		TargetRepo: doc.TargetRepo,
+		TargetRef:  req.TargetRef,
+		Source:     doc.Source,
+		State:      doc.State,
+		EnqueuedAt: now,
+	}, nil
 }
