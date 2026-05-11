@@ -183,6 +183,45 @@ func (s *Store) DeleteWorkflow(ctx context.Context, project string, name string)
 	return workflowFromDoc(doc), nil
 }
 
+func (s *Store) PatchWorkflow(ctx context.Context, project string, name string, req server.WorkflowPatchRequest) (server.Workflow, error) {
+	pk := azcosmos.NewPartitionKeyString(project)
+	read, err := s.workflows.ReadItem(ctx, pk, name, nil)
+	if isCosmosStatus(err, http.StatusNotFound) {
+		return server.Workflow{}, server.ErrNotFound
+	}
+	if err != nil {
+		return server.Workflow{}, err
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(read.Value, &doc); err != nil {
+		return server.Workflow{}, err
+	}
+	if req.PREnabled != nil {
+		pr, _ := doc["pr"].(map[string]any)
+		if pr == nil {
+			pr = map[string]any{}
+		}
+		pr["enabled"] = *req.PREnabled
+		doc["pr"] = pr
+	}
+	if req.BudgetTotal != nil {
+		budget, _ := doc["budget"].(map[string]any)
+		if budget == nil {
+			budget = map[string]any{}
+		}
+		budget["total"] = *req.BudgetTotal
+		doc["budget"] = budget
+	}
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return server.Workflow{}, err
+	}
+	if _, err := s.workflows.ReplaceItem(ctx, pk, name, payload, nil); err != nil {
+		return server.Workflow{}, err
+	}
+	return workflowFromMap(doc)
+}
+
 func (s *Store) ListHosts(ctx context.Context) ([]server.Host, error) {
 	var docs []hostDoc
 	if err := queryAll(ctx, s.hosts, &docs); err != nil {
@@ -495,6 +534,18 @@ func leaseFromDoc(doc leaseDoc) server.Lease {
 		FulfilledAt:        parseOptionalTime(doc.FulfilledAt),
 		FulfilledLeaseRef:  doc.FulfilledLeaseRef,
 	}
+}
+
+func workflowFromMap(doc map[string]any) (server.Workflow, error) {
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return server.Workflow{}, err
+	}
+	var typed workflowDoc
+	if err := json.Unmarshal(payload, &typed); err != nil {
+		return server.Workflow{}, err
+	}
+	return workflowFromDoc(typed), nil
 }
 
 func phaseFromDoc(doc phaseDoc) server.PhaseSpec {
