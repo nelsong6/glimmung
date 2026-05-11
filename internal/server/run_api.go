@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -9,6 +10,7 @@ import (
 
 type RunStore interface {
 	ListProjectRuns(ctx context.Context, project string, limit int) ([]RunReport, error)
+	GetRunReportByNumber(ctx context.Context, project string, issueNumber int, runNumber string) (RunReport, error)
 }
 
 type RunReportAttempt struct {
@@ -74,6 +76,36 @@ func listProjectRuns(store ReadStore) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, rows)
+	}
+}
+
+func getRunReportByNumber(store ReadStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		runStore, ok := store.(RunStore)
+		if !ok || runStore == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "run store not configured")
+			return
+		}
+		issueNumber, err := strconv.Atoi(r.PathValue("issue_number"))
+		if err != nil || issueNumber < 1 {
+			writeProblem(w, http.StatusBadRequest, "issue_number must be a positive integer")
+			return
+		}
+		report, err := runStore.GetRunReportByNumber(
+			r.Context(),
+			r.PathValue("project"),
+			issueNumber,
+			r.PathValue("run_number"),
+		)
+		switch {
+		case errors.Is(err, ErrNotFound):
+			writeProblem(w, http.StatusNotFound, "run not found")
+			return
+		case err != nil:
+			writeProblem(w, http.StatusInternalServerError, "get run report failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, report)
 	}
 }
 

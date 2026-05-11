@@ -441,6 +441,47 @@ func (s *Store) ListProjectRuns(ctx context.Context, project string, limit int) 
 	return runReportsFromDocs(docs), nil
 }
 
+func (s *Store) GetRunReportByNumber(ctx context.Context, project string, issueNumber int, runNumber string) (server.RunReport, error) {
+	docs, err := s.issueRunDocs(ctx, project, issueNumber)
+	if err != nil {
+		return server.RunReport{}, err
+	}
+	numbers := runNumberMap(docs)
+	for _, doc := range docs {
+		display := ""
+		if doc.RunDisplayNumber != nil {
+			display = strings.TrimSpace(*doc.RunDisplayNumber)
+		}
+		if display != "" && display == strings.TrimSpace(runNumber) {
+			return runReportFromDoc(doc, runRefMapFromDocs(docs)), nil
+		}
+		if fmt.Sprintf("%d", numbers[doc.ID]) == strings.TrimSpace(runNumber) {
+			return runReportFromDoc(doc, runRefMapFromDocs(docs)), nil
+		}
+	}
+	return server.RunReport{}, server.ErrNotFound
+}
+
+func (s *Store) issueRunDocs(ctx context.Context, project string, issueNumber int) ([]runDoc, error) {
+	var docs []runDoc
+	if err := queryAllWhere(
+		ctx,
+		s.runs,
+		"SELECT * FROM c WHERE c.project = @project AND c.issue_number = @issue_number ORDER BY c.created_at ASC",
+		[]azcosmos.QueryParameter{
+			{Name: "@project", Value: project},
+			{Name: "@issue_number", Value: issueNumber},
+		},
+		&docs,
+	); err != nil {
+		return nil, err
+	}
+	sort.SliceStable(docs, func(i, j int) bool {
+		return docs[i].CreatedAt < docs[j].CreatedAt
+	})
+	return docs, nil
+}
+
 func (s *Store) readLeaseDocByCallbackToken(ctx context.Context, token string) (leaseDoc, error) {
 	var docs []leaseDoc
 	if err := queryAllWhere(
