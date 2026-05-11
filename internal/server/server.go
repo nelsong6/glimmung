@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -19,6 +20,8 @@ type Settings struct {
 	EntraClientID       string
 	EntraTestClientID   string
 	TankOperatorBaseURL string
+	StaticDir           string
+	StaticOverrideDir   string
 }
 
 func SettingsFromEnv() Settings {
@@ -27,6 +30,8 @@ func SettingsFromEnv() Settings {
 		EntraClientID:       os.Getenv("ENTRA_CLIENT_ID"),
 		EntraTestClientID:   os.Getenv("ENTRA_TEST_CLIENT_ID"),
 		TankOperatorBaseURL: envOrDefault("TANK_OPERATOR_BASE_URL", defaultTankOperatorBaseURL),
+		StaticDir:           os.Getenv("GLIMMUNG_STATIC_DIR"),
+		StaticOverrideDir:   os.Getenv("GLIMMUNG_STATIC_OVERRIDE_DIR"),
 	}
 }
 
@@ -34,6 +39,10 @@ func New(settings Settings) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
 	mux.HandleFunc("GET /v1/config", publicConfig(settings))
+	if staticRoots(settings).enabled() {
+		mux.HandleFunc("GET /assets/", serveAsset(settings))
+		mux.HandleFunc("GET /", serveSPA(settings))
+	}
 	return mux
 }
 
@@ -93,6 +102,101 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+type roots struct {
+	override string
+	base     string
+}
+
+func staticRoots(settings Settings) roots {
+	return roots{override: settings.StaticOverrideDir, base: settings.StaticDir}
+}
+
+func (r roots) enabled() bool {
+	for _, root := range []string{r.override, r.base} {
+		if root == "" {
+			continue
+		}
+		if info, err := os.Stat(root); err == nil && info.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
+func serveAsset(settings Settings) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		assetPath := strings.TrimPrefix(r.URL.Path, "/assets/")
+		found, ok := staticFile(staticRoots(settings), "assets", filepath.FromSlash(assetPath))
+		if !ok {
+			http.Error(w, "static asset not found", http.StatusNotFound)
+			return
+		}
+		http.ServeFile(w, r, found)
+	}
+}
+
+func serveSPA(settings Settings) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rel := strings.TrimPrefix(r.URL.Path, "/")
+		if rel != "" {
+			if found, ok := staticFile(staticRoots(settings), filepath.FromSlash(rel)); ok {
+				http.ServeFile(w, r, found)
+				return
+			}
+		}
+		index, ok := staticFile(staticRoots(settings), "index.html")
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		http.ServeFile(w, r, index)
+	}
+}
+
+func staticFile(r roots, parts ...string) (string, bool) {
+	for _, root := range []string{r.override, r.base} {
+		if root == "" {
+			continue
+		}
+		found, ok := staticFileInRoot(root, parts...)
+		if ok {
+			return found, true
+		}
+	}
+	return "", false
+}
+
+func staticFileInRoot(root string, parts ...string) (string, bool) {
+	for _, part := range parts {
+		if part == "" || filepath.IsAbs(part) {
+			return "", false
+		}
+		for _, segment := range strings.Split(filepath.Clean(part), string(filepath.Separator)) {
+			if segment == ".." {
+				return "", false
+			}
+		}
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", false
+	}
+	candidate := filepath.Join(append([]string{rootAbs}, parts...)...)
+	candidateAbs, err := filepath.Abs(candidate)
+	if err != nil {
+		return "", false
+	}
+	rel, err := filepath.Rel(rootAbs, candidateAbs)
+	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
+		return "", false
+	}
+	info, err := os.Stat(candidateAbs)
+	if err != nil || info.IsDir() {
+		return "", false
+	}
+	return candidateAbs, true
 }
 
 func envOrDefault(name, fallback string) string {
