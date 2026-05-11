@@ -8611,6 +8611,7 @@ async def checkout_test_slot(req: TestSlotCheckoutRequest) -> TestSlotCheckoutRe
     if host is not None:
         lease_doc = lease_ops._lease_to_doc(lease)
         try:
+            await _reconcile_standby_resources(app, [project_doc])
             await _reconcile_standby_entra_redirects(app, [project_doc])
             await _ensure_test_env_for_lease(lease_doc)
         except Exception:
