@@ -472,6 +472,94 @@ func (s *Store) GetRunReportByNumber(ctx context.Context, project string, issueN
 	return server.RunReport{}, server.ErrNotFound
 }
 
+func (s *Store) ListIssues(ctx context.Context, filter server.IssueListFilter) ([]server.IssueRow, error) {
+	state := strings.ToLower(strings.TrimSpace(firstNonEmpty(filter.State, "open")))
+	if state != "open" && state != "closed" && state != "all" {
+		return nil, server.ValidationError{Message: fmt.Sprintf("state must be 'open', 'closed', or 'all', not %q", filter.State)}
+	}
+	issues, err := s.listIssueDocs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	runDocs, err := s.listRunDocs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	locks, err := s.listIssueLockDocs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	runContext := issueRunContext(runDocs)
+	locksByKey := map[string]lockDoc{}
+	for _, lock := range locks {
+		locksByKey[lock.Key] = lock
+	}
+
+	now := time.Now().UTC()
+	rows := make([]server.IssueRow, 0, len(issues))
+	for _, issue := range issues {
+		if filter.Project != "" && issue.Project != filter.Project {
+			continue
+		}
+		if state != "all" && firstNonEmpty(issue.State, "open") != state {
+			continue
+		}
+		row := issueRowFromDoc(issue)
+		run := runContext.latestByIssueID[issue.ID]
+		if run == nil {
+			run = runContext.latestByProjectNumber[fmt.Sprintf("%s#%d", issue.Project, issue.Number)]
+		}
+		if run != nil {
+			numbers := runContext.numbersByIssue[fmt.Sprintf("%s#%d", run.Project, run.IssueNumber)]
+			runNumber := run.RunNumber
+			if runNumber == nil {
+				if value := numbers[run.ID]; value > 0 {
+					runNumber = &value
+				}
+			}
+			display := runDisplayNumber(*run, numbers[run.ID])
+			row.LastRunNumber = runNumber
+			row.LastRunRef = optionalNonEmptyStringPtr(publicids.RunRef(issue.Project, &issue.Number, display))
+			row.LastRunState = optionalNonEmptyStringPtr(run.State)
+			row.LastRunAbortReason = emptyStringNil(run.AbortReason)
+			if row.Workflow == nil {
+				row.Workflow = optionalNonEmptyStringPtr(run.Workflow)
+			}
+		}
+		if filter.Workflow != "" && (row.Workflow == nil || *row.Workflow != filter.Workflow) {
+			continue
+		}
+		if lock, ok := locksByKey[fmt.Sprintf("%s#%d", issue.Project, issue.Number)]; ok {
+			expiresAt := parseOptionalTime(lock.ExpiresAt)
+			row.IssueLockHeld = lock.State == "held" && expiresAt != nil && expiresAt.After(now)
+		}
+		if filter.NeedsAttention && !issueRowNeedsAttention(row) {
+			continue
+		}
+		rows = append(rows, row)
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].Project != rows[j].Project {
+			return rows[i].Project < rows[j].Project
+		}
+		left, right := 0, 0
+		if rows[i].Number != nil {
+			left = *rows[i].Number
+		}
+		if rows[j].Number != nil {
+			right = *rows[j].Number
+		}
+		if left != right {
+			return left > right
+		}
+		return rows[i].Ref < rows[j].Ref
+	})
+	if filter.Limit != nil && *filter.Limit < len(rows) {
+		rows = rows[:*filter.Limit]
+	}
+	return rows, nil
+}
+
 func (s *Store) GetIssueDetailByNumber(ctx context.Context, project string, number int) (server.IssueDetail, error) {
 	issue, err := s.readIssueByNumber(ctx, project, number)
 	if err != nil {
@@ -521,6 +609,36 @@ func (s *Store) readIssueByNumber(ctx context.Context, project string, number in
 		return issueDoc{}, server.ErrNotFound
 	}
 	return docs[0], nil
+}
+
+func (s *Store) listIssueDocs(ctx context.Context) ([]issueDoc, error) {
+	var docs []issueDoc
+	if err := queryAll(ctx, s.issues, &docs); err != nil {
+		return nil, err
+	}
+	return docs, nil
+}
+
+func (s *Store) listRunDocs(ctx context.Context) ([]runDoc, error) {
+	var docs []runDoc
+	if err := queryAll(ctx, s.runs, &docs); err != nil {
+		return nil, err
+	}
+	return docs, nil
+}
+
+func (s *Store) listIssueLockDocs(ctx context.Context) ([]lockDoc, error) {
+	var docs []lockDoc
+	if err := queryAllWhere(
+		ctx,
+		s.locks,
+		"SELECT * FROM c WHERE c.scope = @scope",
+		[]azcosmos.QueryParameter{{Name: "@scope", Value: "issue"}},
+		&docs,
+	); err != nil {
+		return nil, err
+	}
+	return docs, nil
 }
 
 func (s *Store) latestRunForIssue(ctx context.Context, issue issueDoc) (*runDoc, []runDoc, error) {
@@ -793,9 +911,14 @@ type issueDoc struct {
 	Body      string            `json:"body"`
 	Labels    []string          `json:"labels"`
 	State     string            `json:"state"`
+	Metadata  issueMetadataDoc  `json:"metadata"`
 	Comments  []issueCommentDoc `json:"comments"`
 	CreatedAt string            `json:"created_at"`
 	UpdatedAt string            `json:"updated_at"`
+}
+
+type issueMetadataDoc struct {
+	Workflow *string `json:"workflow"`
 }
 
 type issueCommentDoc struct {
@@ -1022,6 +1145,73 @@ func issueDetailFromDoc(doc issueDoc) server.IssueDetail {
 		Labels:   sliceOrEmpty(doc.Labels),
 		HTMLURL:  nil,
 		Comments: comments,
+	}
+}
+
+func issueRowFromDoc(doc issueDoc) server.IssueRow {
+	number := doc.Number
+	return server.IssueRow{
+		Ref:      publicids.IssueRef(doc.Project, &number),
+		Project:  doc.Project,
+		Workflow: emptyStringNil(doc.Metadata.Workflow),
+		Repo:     nil,
+		Number:   &number,
+		Title:    doc.Title,
+		State:    firstNonEmpty(doc.State, "open"),
+		Labels:   sliceOrEmpty(doc.Labels),
+		HTMLURL:  nil,
+	}
+}
+
+type issueRuns struct {
+	latestByIssueID       map[string]*runDoc
+	latestByProjectNumber map[string]*runDoc
+	numbersByIssue        map[string]map[string]int
+}
+
+func issueRunContext(docs []runDoc) issueRuns {
+	ctx := issueRuns{
+		latestByIssueID:       map[string]*runDoc{},
+		latestByProjectNumber: map[string]*runDoc{},
+		numbersByIssue:        map[string]map[string]int{},
+	}
+	groups := map[string][]runDoc{}
+	for _, doc := range docs {
+		if doc.IssueID != "" {
+			current := ctx.latestByIssueID[doc.IssueID]
+			if current == nil || doc.CreatedAt > current.CreatedAt {
+				value := doc
+				ctx.latestByIssueID[doc.IssueID] = &value
+			}
+		}
+		if doc.Project != "" && doc.IssueNumber > 0 {
+			key := fmt.Sprintf("%s#%d", doc.Project, doc.IssueNumber)
+			groups[key] = append(groups[key], doc)
+			current := ctx.latestByProjectNumber[key]
+			if current == nil || doc.CreatedAt > current.CreatedAt {
+				value := doc
+				ctx.latestByProjectNumber[key] = &value
+			}
+		}
+	}
+	for key, group := range groups {
+		sort.SliceStable(group, func(i, j int) bool {
+			return group[i].CreatedAt < group[j].CreatedAt
+		})
+		ctx.numbersByIssue[key] = runNumberMap(group)
+	}
+	return ctx
+}
+
+func issueRowNeedsAttention(row server.IssueRow) bool {
+	if row.IssueLockHeld || row.LastRunRef == nil || row.LastRunState == nil {
+		return false
+	}
+	switch *row.LastRunState {
+	case "aborted", "review_required", "passed", "failed", "needs_review":
+		return true
+	default:
+		return false
 	}
 }
 

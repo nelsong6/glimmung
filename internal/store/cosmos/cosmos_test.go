@@ -3,6 +3,8 @@ package cosmos
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/nelsong6/glimmung/internal/server"
 )
 
 func TestProjectFromDocConvertsCamelCaseFields(t *testing.T) {
@@ -288,10 +290,61 @@ func TestIssueDetailFromDocBuildsPublicShape(t *testing.T) {
 	}
 }
 
+func TestIssueRunContextMapsLatestRunAndNeedsAttention(t *testing.T) {
+	runNumber := 2
+	docs := []runDoc{
+		{
+			ID:          "old",
+			Project:     "glimmung",
+			Workflow:    "issue-agent",
+			IssueID:     "issue-1",
+			IssueNumber: 17,
+			State:       "in_progress",
+			CreatedAt:   "2026-05-11T04:00:00Z",
+		},
+		{
+			ID:          "new",
+			Project:     "glimmung",
+			Workflow:    "issue-agent",
+			RunNumber:   &runNumber,
+			IssueID:     "issue-1",
+			IssueNumber: 17,
+			State:       "review_required",
+			CreatedAt:   "2026-05-11T05:00:00Z",
+		},
+	}
+
+	ctx := issueRunContext(docs)
+	latest := ctx.latestByIssueID["issue-1"]
+	if latest == nil || latest.ID != "new" {
+		t.Fatalf("latest=%#v", latest)
+	}
+	row := serverIssueRowForTest("glimmung#17", "review_required")
+	if !issueRowNeedsAttention(row) {
+		t.Fatalf("row should need attention: %#v", row)
+	}
+	row.IssueLockHeld = true
+	if issueRowNeedsAttention(row) {
+		t.Fatalf("locked row should not need attention: %#v", row)
+	}
+}
+
 func intPtr(value int) *int {
 	return &value
 }
 
 func stringPtr(value string) *string {
 	return &value
+}
+
+func serverIssueRowForTest(ref string, state string) server.IssueRow {
+	return server.IssueRow{
+		Ref:          ref,
+		Project:      "glimmung",
+		Number:       intPtr(17),
+		Title:        "Fix",
+		State:        "open",
+		LastRunRef:   &ref,
+		LastRunState: &state,
+	}
 }
