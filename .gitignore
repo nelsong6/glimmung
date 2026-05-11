@@ -8,6 +8,7 @@ dist/
 build/
 node_modules/
 package-lock.json
+!frontend/package-lock.json
 .env
 .env.*
 !.env.example
