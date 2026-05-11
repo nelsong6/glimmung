@@ -72,3 +72,54 @@ func TestCompositeResolverTreatsRejectedK8sTokenAsUnsigned(t *testing.T) {
 		t.Fatal("rejected token should not resolve")
 	}
 }
+
+func TestCompositeRequireAdminRoutesMissingAndUnconfigured(t *testing.T) {
+	resolver := CompositeAuthenticator{}
+
+	_, err := resolver.RequireAdmin(context.Background(), "")
+	assertAuthStatus(t, err, http.StatusUnauthorized, "missing bearer")
+
+	_, err = resolver.RequireAdmin(context.Background(), "Bearer plain-token")
+	assertAuthStatus(t, err, http.StatusServiceUnavailable, "entra auth not configured")
+
+	_, err = resolver.RequireAdmin(context.Background(), "Bearer "+jwtWithClaims(t, map[string]any{
+		"kubernetes.io": map[string]any{"namespace": "ns"},
+	}))
+	assertAuthStatus(t, err, http.StatusServiceUnavailable, "k8s auth not configured")
+}
+
+func TestCompositeRequireAdminRoutesEntraAndK8s(t *testing.T) {
+	key := mustRSAKey(t)
+	jwks := newJWKSServer(t, key)
+	defer jwks.Close()
+	entra := newTestEntraAuthenticator(t, jwks.URL, "client-id", "admin@example.com")
+	entraToken := signEntraToken(t, key, map[string]any{
+		"aud":   "client-id",
+		"iss":   "https://login.microsoftonline.com/tenant/v2.0",
+		"sub":   "subject",
+		"email": "admin@example.com",
+		"exp":   time.Now().Add(time.Hour).Unix(),
+	})
+
+	tokenReview := newTokenReviewServer(t, http.StatusOK, tokenReviewResponse{
+		Status: tokenReviewStatus{
+			Authenticated: true,
+			User:          tokenReviewUser{Username: "system:serviceaccount:ns:sa"},
+		},
+	})
+	defer tokenReview.Close()
+	k8s := newTestAuthenticator(t, tokenReview.URL, "ns/sa")
+
+	resolver := CompositeAuthenticator{Entra: entra, K8s: k8s}
+	user, err := resolver.RequireAdmin(context.Background(), "Bearer "+entraToken)
+	if err != nil || user.Email != "admin@example.com" {
+		t.Fatalf("entra user=%#v err=%v", user, err)
+	}
+
+	user, err = resolver.RequireAdmin(context.Background(), "Bearer "+jwtWithClaims(t, map[string]any{
+		"kubernetes.io": map[string]any{"namespace": "ns"},
+	}))
+	if err != nil || user.Email != "system:serviceaccount:ns:sa" {
+		t.Fatalf("k8s user=%#v err=%v", user, err)
+	}
+}
