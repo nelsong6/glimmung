@@ -71,6 +71,7 @@ func NewWithDependencies(settings Settings, store ReadStore, authResolver AuthRe
 	mux.HandleFunc("GET /v1/projects", listProjects(store))
 	mux.HandleFunc("GET /v1/workflows", listWorkflows(store))
 	mux.HandleFunc("GET /v1/state", stateSnapshot(settings, store))
+	mux.HandleFunc("GET /v1/events", stateEvents(settings, store))
 	if staticRoots(settings).enabled() {
 		mux.HandleFunc("GET /assets/", serveAsset(settings))
 		mux.HandleFunc("GET /", serveSPA(settings))

@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
@@ -117,36 +119,95 @@ type TestEnvironmentPublic struct {
 
 func stateSnapshot(settings Settings, store ReadStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		stateStore, ok := store.(StateStore)
-		if !ok || stateStore == nil {
-			writeProblem(w, http.StatusServiceUnavailable, "state store not configured")
-			return
-		}
-
-		projects, err := stateStore.ListProjects(r.Context())
+		snapshot, err := loadStateSnapshot(r.Context(), settings, store)
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "list projects failed")
+			writeStateSnapshotError(w, err)
 			return
 		}
-		workflows, err := stateStore.ListWorkflows(r.Context())
-		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "list workflows failed")
-			return
-		}
-		hosts, err := stateStore.ListHosts(r.Context())
-		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "list hosts failed")
-			return
-		}
-		leases, err := stateStore.ListLeases(r.Context())
-		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "list leases failed")
-			return
-		}
-
-		snapshot := computeStateSnapshot(settings, projects, workflows, hosts, leases)
 		writeJSON(w, http.StatusOK, snapshot)
 	}
+}
+
+func stateEvents(settings Settings, store ReadStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			writeProblem(w, http.StatusInternalServerError, "streaming unsupported")
+			return
+		}
+		snapshot, err := loadStateSnapshot(r.Context(), settings, store)
+		if err != nil {
+			writeStateSnapshotError(w, err)
+			return
+		}
+
+		w.Header().Set("content-type", "text/event-stream")
+		w.Header().Set("cache-control", "no-cache")
+		w.Header().Set("connection", "keep-alive")
+
+		for {
+			payload, err := json.Marshal(snapshot)
+			if err != nil {
+				writeProblem(w, http.StatusInternalServerError, "encode state snapshot failed")
+				return
+			}
+			_, _ = fmt.Fprintf(w, "event: state\ndata: %s\n\n", payload)
+			flusher.Flush()
+
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(2 * time.Second):
+			}
+			snapshot, err = loadStateSnapshot(r.Context(), settings, store)
+			if err != nil {
+				return
+			}
+		}
+	}
+}
+
+type stateSnapshotError struct {
+	status  int
+	message string
+}
+
+func (e stateSnapshotError) Error() string {
+	return e.message
+}
+
+func loadStateSnapshot(ctx context.Context, settings Settings, store ReadStore) (StateSnapshot, error) {
+	stateStore, ok := store.(StateStore)
+	if !ok || stateStore == nil {
+		return StateSnapshot{}, stateSnapshotError{status: http.StatusServiceUnavailable, message: "state store not configured"}
+	}
+
+	projects, err := stateStore.ListProjects(ctx)
+	if err != nil {
+		return StateSnapshot{}, stateSnapshotError{status: http.StatusInternalServerError, message: "list projects failed"}
+	}
+	workflows, err := stateStore.ListWorkflows(ctx)
+	if err != nil {
+		return StateSnapshot{}, stateSnapshotError{status: http.StatusInternalServerError, message: "list workflows failed"}
+	}
+	hosts, err := stateStore.ListHosts(ctx)
+	if err != nil {
+		return StateSnapshot{}, stateSnapshotError{status: http.StatusInternalServerError, message: "list hosts failed"}
+	}
+	leases, err := stateStore.ListLeases(ctx)
+	if err != nil {
+		return StateSnapshot{}, stateSnapshotError{status: http.StatusInternalServerError, message: "list leases failed"}
+	}
+
+	return computeStateSnapshot(settings, projects, workflows, hosts, leases), nil
+}
+
+func writeStateSnapshotError(w http.ResponseWriter, err error) {
+	if snapshotErr, ok := err.(stateSnapshotError); ok {
+		writeProblem(w, snapshotErr.status, snapshotErr.message)
+		return
+	}
+	writeProblem(w, http.StatusInternalServerError, "load state snapshot failed")
 }
 
 func computeStateSnapshot(
