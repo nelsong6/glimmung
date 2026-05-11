@@ -5,10 +5,28 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
+
+	"github.com/nelsong6/glimmung/internal/domain/budget"
 )
 
-type WorkflowWriteStore interface {
+type WorkflowRegisterStore interface {
+	UpsertWorkflow(ctx context.Context, req WorkflowRegister) (Workflow, error)
+}
+
+type WorkflowDeleteStore interface {
 	DeleteWorkflow(ctx context.Context, project string, name string) (Workflow, error)
+}
+
+type WorkflowRegister struct {
+	Project             string         `json:"project"`
+	Name                string         `json:"name"`
+	Phases              []PhaseSpec    `json:"phases"`
+	PR                  PrPrimitive    `json:"pr"`
+	Budget              budget.Config  `json:"budget"`
+	TriggerLabel        *string        `json:"trigger_label"`
+	DefaultRequirements map[string]any `json:"default_requirements"`
+	Metadata            map[string]any `json:"metadata"`
 }
 
 type WorkflowPatchStore interface {
@@ -18,6 +36,49 @@ type WorkflowPatchStore interface {
 type WorkflowPatchRequest struct {
 	PREnabled   *bool    `json:"pr_enabled"`
 	BudgetTotal *float64 `json:"budget_total"`
+}
+
+func registerWorkflow(store ReadStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		writer, ok := store.(WorkflowRegisterStore)
+		if !ok || writer == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "workflow writer not configured")
+			return
+		}
+		var req WorkflowRegister
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeProblem(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		normalizeWorkflowRegister(&req)
+		project, ok, err := lookupProject(r.Context(), store, req.Project)
+		if err != nil {
+			writeProblem(w, http.StatusInternalServerError, "read project failed")
+			return
+		}
+		if !ok {
+			writeProblem(w, http.StatusBadRequest, "project "+req.Project+" does not exist; register it first")
+			return
+		}
+		if err := validateWorkflowAllowedForProject(project, req); err != nil {
+			writeProblem(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := validateMandatoryPhases(req); err != nil {
+			writeProblem(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		workflow, err := writer.UpsertWorkflow(r.Context(), req)
+		if validationErr, ok := err.(ValidationError); ok {
+			writeProblem(w, http.StatusBadRequest, validationErr.Message)
+			return
+		}
+		if err != nil {
+			writeProblem(w, http.StatusInternalServerError, "register workflow failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, workflow)
+	}
 }
 
 func patchWorkflow(store ReadStore) http.HandlerFunc {
@@ -50,7 +111,7 @@ func patchWorkflow(store ReadStore) http.HandlerFunc {
 
 func deleteWorkflow(store ReadStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		writer, ok := store.(WorkflowWriteStore)
+		writer, ok := store.(WorkflowDeleteStore)
 		if !ok || writer == nil {
 			writeProblem(w, http.StatusServiceUnavailable, "workflow writer not configured")
 			return
@@ -68,4 +129,85 @@ func deleteWorkflow(store ReadStore) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, workflow)
 	}
+}
+
+func normalizeWorkflowRegister(req *WorkflowRegister) {
+	if req.Budget.Total == 0 {
+		req.Budget = budget.DefaultConfig()
+	}
+	req.DefaultRequirements = mapOrEmpty(req.DefaultRequirements)
+	req.Metadata = mapOrEmpty(req.Metadata)
+	for i := range req.Phases {
+		if req.Phases[i].Kind == "" {
+			req.Phases[i].Kind = "gha_dispatch"
+		}
+		if req.Phases[i].WorkflowRef == "" {
+			req.Phases[i].WorkflowRef = "main"
+		}
+		if req.Phases[i].Inputs == nil {
+			req.Phases[i].Inputs = map[string]string{}
+		}
+		req.Phases[i].Outputs = sliceOrEmpty(req.Phases[i].Outputs)
+		req.Phases[i].DependsOn = sliceOrEmpty(req.Phases[i].DependsOn)
+		req.Phases[i].Jobs = sliceOrEmpty(req.Phases[i].Jobs)
+	}
+}
+
+func lookupProject(ctx context.Context, store ReadStore, name string) (Project, bool, error) {
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		return Project{}, false, err
+	}
+	for _, project := range projects {
+		if firstNonEmpty(project.Name, project.ID) == name {
+			return project, true, nil
+		}
+	}
+	return Project{}, false, nil
+}
+
+func validateWorkflowAllowedForProject(project Project, req WorkflowRegister) error {
+	if !projectRequiresNativeWorkflows(project) {
+		return nil
+	}
+	for _, phase := range req.Phases {
+		if phase.Kind != "k8s_job" {
+			return ValidationError{Message: "project is marked native_webapp; workflow phases must use kind='k8s_job' instead of GitHub Actions dispatch"}
+		}
+	}
+	return nil
+}
+
+func projectRequiresNativeWorkflows(project Project) bool {
+	metadata := project.Metadata
+	if boolFromMap(metadata, "native_webapp") || boolFromMap(metadata, "nativeWebapp") {
+		return true
+	}
+	kind := strings.ToLower(firstNonEmpty(
+		stringValue(metadata["app_kind"]),
+		stringValue(metadata["appKind"]),
+		stringValue(metadata["kind"]),
+	))
+	return kind == "native_webapp" || kind == "native-webapp" || kind == "native webapp"
+}
+
+func validateMandatoryPhases(req WorkflowRegister) error {
+	hasEntry := false
+	hasTesting := false
+	hasCleanup := false
+	for _, phase := range req.Phases {
+		if len(phase.DependsOn) == 0 {
+			hasEntry = true
+		}
+		if phase.Verify || phase.EvidenceVerificationGate {
+			hasTesting = true
+		}
+		if phase.Always {
+			hasCleanup = true
+		}
+	}
+	if hasEntry && hasTesting && hasCleanup {
+		return nil
+	}
+	return ValidationError{Message: "workflow " + req.Name + " is missing required phases"}
 }

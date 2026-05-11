@@ -15,8 +15,17 @@ type fakeWorkflowWriteStore struct {
 	workflow Workflow
 	project  string
 	name     string
+	upsert   WorkflowRegister
 	patchReq WorkflowPatchRequest
 	err      error
+}
+
+func (s *fakeWorkflowWriteStore) UpsertWorkflow(_ context.Context, req WorkflowRegister) (Workflow, error) {
+	s.upsert = req
+	if s.err != nil {
+		return Workflow{}, s.err
+	}
+	return s.workflow, nil
 }
 
 func (s *fakeWorkflowWriteStore) DeleteWorkflow(_ context.Context, project string, name string) (Workflow, error) {
@@ -36,6 +45,91 @@ func (s *fakeWorkflowWriteStore) PatchWorkflow(_ context.Context, project string
 		return Workflow{}, s.err
 	}
 	return s.workflow, nil
+}
+
+func TestRegisterWorkflowRequiresAdmin(t *testing.T) {
+	handler := NewWithDependencies(Settings{}, &fakeWorkflowWriteStore{}, nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/workflows", strings.NewReader(`{"project":"ambience","name":"agent-run","phases":[]}`)))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d, want 503", rec.Code)
+	}
+}
+
+func TestRegisterWorkflowUpsertsWorkflow(t *testing.T) {
+	store := &fakeWorkflowWriteStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{ID: "ambience", Name: "ambience"}}},
+		workflow: Workflow{
+			ID:        "agent-run",
+			Project:   "ambience",
+			Name:      "agent-run",
+			CreatedAt: time.Date(2026, 5, 11, 3, 0, 0, 0, time.UTC),
+		},
+	}
+	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/workflows", strings.NewReader(`{"project":"ambience","name":"agent-run","phases":[{"name":"prep"},{"name":"verify","verify":true},{"name":"cleanup","always":true}]}`))
+	req.Header.Set("Authorization", "Bearer token")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.upsert.Project != "ambience" || store.upsert.Name != "agent-run" {
+		t.Fatalf("upsert=%#v", store.upsert)
+	}
+	if len(store.upsert.Phases) != 3 {
+		t.Fatalf("phases=%#v", store.upsert.Phases)
+	}
+	if store.upsert.Phases[0].Kind != "gha_dispatch" || store.upsert.Phases[0].WorkflowRef != "main" {
+		t.Fatalf("phase defaults=%#v", store.upsert.Phases[0])
+	}
+}
+
+func TestRegisterWorkflowRequiresProject(t *testing.T) {
+	handler := NewWithDependencies(Settings{}, &fakeWorkflowWriteStore{}, fakeAdminAuthenticator{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/workflows", strings.NewReader(`{"project":"ambience","name":"agent-run","phases":[]}`))
+	req.Header.Set("Authorization", "Bearer token")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", rec.Code)
+	}
+}
+
+func TestRegisterWorkflowRejectsNativeWebappGHA(t *testing.T) {
+	store := &fakeWorkflowWriteStore{fakeReadStore: fakeReadStore{projects: []Project{{
+		ID:       "glimmung",
+		Name:     "glimmung",
+		Metadata: map[string]any{"native_webapp": true},
+	}}}}
+	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/workflows", strings.NewReader(`{"project":"glimmung","name":"agent-run","phases":[{"name":"prep"},{"name":"verify","verify":true},{"name":"cleanup","always":true}]}`))
+	req.Header.Set("Authorization", "Bearer token")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", rec.Code)
+	}
+}
+
+func TestRegisterWorkflowRequiresMandatoryPhases(t *testing.T) {
+	store := &fakeWorkflowWriteStore{fakeReadStore: fakeReadStore{projects: []Project{{ID: "ambience", Name: "ambience"}}}}
+	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/workflows", strings.NewReader(`{"project":"ambience","name":"agent-run","phases":[{"name":"verify","verify":true}]}`))
+	req.Header.Set("Authorization", "Bearer token")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", rec.Code)
+	}
 }
 
 func TestPatchWorkflowRequiresAdmin(t *testing.T) {
