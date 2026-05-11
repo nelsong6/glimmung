@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/nelsong6/glimmung/internal/domain/budget"
+	"github.com/nelsong6/glimmung/internal/domain/phaserefs"
 	"github.com/nelsong6/glimmung/internal/domain/publicids"
 	"github.com/nelsong6/glimmung/internal/server"
 )
@@ -1230,6 +1231,7 @@ type runDoc struct {
 	ScreenshotsMarkdown *string        `json:"screenshots_markdown"`
 	AbortReason         *string        `json:"abort_reason"`
 	ClonedFromRunID     *string        `json:"cloned_from_run_id"`
+	EntrypointPhase     *string        `json:"entrypoint_phase,omitempty"`
 	TriggerSource       map[string]any `json:"trigger_source"`
 	CreatedAt           string         `json:"created_at"`
 	UpdatedAt           string         `json:"updated_at"`
@@ -1279,23 +1281,24 @@ type lockDoc struct {
 }
 
 type attemptDoc struct {
-	AttemptIndex          int              `json:"attempt_index"`
-	Phase                 string           `json:"phase"`
-	PhaseKind             string           `json:"phase_kind"`
-	WorkflowFilename      string           `json:"workflow_filename"`
-	WorkflowRunID         *int64           `json:"workflow_run_id"`
-	DispatchedAt          string           `json:"dispatched_at"`
-	CompletedAt           string           `json:"completed_at"`
-	Conclusion            *string          `json:"conclusion"`
-	Verification          *verificationDoc `json:"verification"`
-	SummaryMarkdown       *string          `json:"summary_markdown"`
-	CostUSD               *float64         `json:"cost_usd"`
-	Decision              *string          `json:"decision"`
-	LogArchiveURL         *string          `json:"log_archive_url"`
-	SkippedFromRunID      *string          `json:"skipped_from_run_id"`
-	CancelRequestedAt     *string          `json:"cancel_requested_at,omitempty"`
-	CancelReason          *string          `json:"cancel_reason,omitempty"`
-	CapabilityTokenSHA256 *string          `json:"capability_token_sha256,omitempty"`
+	AttemptIndex          int               `json:"attempt_index"`
+	Phase                 string            `json:"phase"`
+	PhaseKind             string            `json:"phase_kind"`
+	WorkflowFilename      string            `json:"workflow_filename"`
+	WorkflowRunID         *int64            `json:"workflow_run_id"`
+	DispatchedAt          string            `json:"dispatched_at"`
+	CompletedAt           string            `json:"completed_at"`
+	Conclusion            *string           `json:"conclusion"`
+	Verification          *verificationDoc  `json:"verification"`
+	SummaryMarkdown       *string           `json:"summary_markdown"`
+	CostUSD               *float64          `json:"cost_usd"`
+	Decision              *string           `json:"decision"`
+	LogArchiveURL         *string           `json:"log_archive_url"`
+	SkippedFromRunID      *string           `json:"skipped_from_run_id"`
+	PhaseOutputs          map[string]string `json:"phase_outputs,omitempty"`
+	CancelRequestedAt     *string           `json:"cancel_requested_at,omitempty"`
+	CancelReason          *string           `json:"cancel_reason,omitempty"`
+	CapabilityTokenSHA256 *string           `json:"capability_token_sha256,omitempty"`
 }
 
 type nativeEventDoc struct {
@@ -4471,4 +4474,288 @@ func (s *Store) CreateRun(ctx context.Context, req server.CreateRunRequest) (ser
 		RunDisplay:    runDisplay,
 		CallbackToken: callbackToken,
 	}, nil
+}
+
+// ReadRunByNumber resolves a run by (project, issueNumber, runNumber display string)
+// and returns the run ID. Returns server.ErrNotFound if no match.
+func (s *Store) ReadRunByNumber(ctx context.Context, project string, issueNumber int, runNumber string) (string, error) {
+	docs, err := s.issueRunDocs(ctx, project, issueNumber)
+	if err != nil {
+		return "", err
+	}
+	numbers := runNumberMap(docs)
+	runNumber = strings.TrimSpace(runNumber)
+	for _, doc := range docs {
+		display := ""
+		if doc.RunDisplayNumber != nil {
+			display = strings.TrimSpace(*doc.RunDisplayNumber)
+		}
+		if display != "" && display == runNumber {
+			return doc.ID, nil
+		}
+		if fmt.Sprintf("%d", numbers[doc.ID]) == runNumber {
+			return doc.ID, nil
+		}
+	}
+	return "", server.ErrNotFound
+}
+
+// ReadRunForResume reads a run by ID and returns the minimal shape needed for resume dispatch.
+func (s *Store) ReadRunForResume(ctx context.Context, project, runID string) (server.RunForResume, error) {
+	pk := azcosmos.NewPartitionKeyString(project)
+	resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
+	if isCosmosStatus(err, http.StatusNotFound) {
+		return server.RunForResume{}, server.ErrNotFound
+	}
+	if err != nil {
+		return server.RunForResume{}, err
+	}
+	var doc runDoc
+	if err := json.Unmarshal(resp.Value, &doc); err != nil {
+		return server.RunForResume{}, err
+	}
+	attempts := make([]server.AttemptForResume, 0, len(doc.Attempts))
+	for _, a := range doc.Attempts {
+		attempts = append(attempts, server.AttemptForResume{
+			Phase:        a.Phase,
+			PhaseOutputs: a.PhaseOutputs,
+		})
+	}
+	var bdg budget.Config
+	if doc.Budget != nil {
+		bdg.Total = doc.Budget.Total
+	}
+	return server.RunForResume{
+		ID:               doc.ID,
+		Project:          doc.Project,
+		Workflow:         doc.Workflow,
+		State:            doc.State,
+		IssueID:          doc.IssueID,
+		IssueRepo:        doc.IssueRepo,
+		IssueNumber:      doc.IssueNumber,
+		ValidationURL:    doc.ValidationURL,
+		Budget:           bdg,
+		RootRunID:        doc.RootRunID,
+		RunDisplayNumber: doc.RunDisplayNumber,
+		IsCycle:          doc.IsCycle,
+		Attempts:         attempts,
+	}, nil
+}
+
+// CreateResumedRun creates a new run from priorRun, skipping phases before entrypoint.
+// Skipped phases carry their phase_outputs forward. The entrypoint phase gets a fresh
+// attempt (attempt_index = entrypoint_index) with dispatched_at set.
+// Returns an error wrapping server.ErrOutputsMissing if a skipped phase has no outputs.
+func (s *Store) CreateResumedRun(ctx context.Context, req server.CreateResumedRunRequest) (server.CreatedRun, error) {
+	prior := req.PriorRun
+	wf := req.Workflow
+
+	// Find entrypoint phase index and validate.
+	entrypointIndex := -1
+	for i, p := range wf.Phases {
+		if p.Name == req.EntrypointPhase {
+			entrypointIndex = i
+			break
+		}
+	}
+	if entrypointIndex < 0 {
+		return server.CreatedRun{}, fmt.Errorf("entrypoint phase %q not found in workflow", req.EntrypointPhase)
+	}
+
+	// Collect last attempt per phase from prior run.
+	priorAttemptByPhase := map[string]server.AttemptForResume{}
+	for _, a := range prior.Attempts {
+		priorAttemptByPhase[a.Phase] = a
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	// Build skipped attempts for all phases before the entrypoint.
+	skippedAttempts := make([]attemptDoc, 0, entrypointIndex)
+	for idx, phase := range wf.Phases[:entrypointIndex] {
+		prior, ok := priorAttemptByPhase[phase.Name]
+		if !ok {
+			return server.CreatedRun{}, fmt.Errorf(
+				"%w: phase %q (skipped before entrypoint %q) has no attempts on prior run %s",
+				server.ErrOutputsMissing, phase.Name, req.EntrypointPhase, req.PriorRun.ID,
+			)
+		}
+		wfFilename := phase.WorkflowFilename
+		if wfFilename == "" {
+			phaseKind := phase.Kind
+			if phaseKind == "" {
+				phaseKind = "gha_dispatch"
+			}
+			wfFilename = fmt.Sprintf("%s:%s", phaseKind, phase.Name)
+		}
+		conclusion := "success"
+		priorRunID := req.PriorRun.ID
+		skippedAttempts = append(skippedAttempts, attemptDoc{
+			AttemptIndex:     idx,
+			Phase:            phase.Name,
+			PhaseKind:        phase.Kind,
+			WorkflowFilename: wfFilename,
+			DispatchedAt:     now,
+			CompletedAt:      now,
+			Conclusion:       &conclusion,
+			PhaseOutputs:     prior.PhaseOutputs,
+			SkippedFromRunID: &priorRunID,
+		})
+	}
+
+	// Entrypoint phase attempt.
+	entryPhase := wf.Phases[entrypointIndex]
+	entryKind := entryPhase.Kind
+	if entryKind == "" {
+		entryKind = "gha_dispatch"
+	}
+	entryFilename := entryPhase.WorkflowFilename
+	if entryFilename == "" {
+		entryFilename = fmt.Sprintf("%s:%s", entryKind, entryPhase.Name)
+	}
+	entrypointAttempt := attemptDoc{
+		AttemptIndex:     entrypointIndex,
+		Phase:            entryPhase.Name,
+		PhaseKind:        entryKind,
+		WorkflowFilename: entryFilename,
+		DispatchedAt:     now,
+	}
+	allAttempts := append(skippedAttempts, entrypointAttempt)
+
+	// Allocate run number and cycle display number.
+	docs, err := s.issueRunDocs(ctx, prior.Project, prior.IssueNumber)
+	if err != nil {
+		return server.CreatedRun{}, fmt.Errorf("query issue runs: %w", err)
+	}
+	numbers := runNumberMap(docs)
+	runNumber := 1
+	for _, n := range numbers {
+		if n >= runNumber {
+			runNumber = n + 1
+		}
+	}
+
+	// Cycle display: "{rootDisplay}.{cycleN}".
+	rootRunID := prior.ID
+	if prior.RootRunID != nil && *prior.RootRunID != "" {
+		rootRunID = *prior.RootRunID
+	}
+	rootDisplay := ""
+	if prior.RunDisplayNumber != nil {
+		rootDisplay = *prior.RunDisplayNumber
+	}
+	if prior.IsCycle && rootDisplay != "" {
+		// Strip any existing suffix (e.g. "3.2" → "3").
+		if i := strings.Index(rootDisplay, "."); i >= 0 {
+			rootDisplay = rootDisplay[:i]
+		}
+	}
+	if rootDisplay == "" {
+		rootDisplay = strconv.Itoa(runNumber - 1)
+	}
+	prefix := rootDisplay + "."
+	maxCycle := 0
+	for _, doc := range docs {
+		if doc.RootRunID == nil && doc.ID != rootRunID {
+			continue
+		}
+		if doc.RootRunID != nil && *doc.RootRunID != rootRunID && doc.ID != rootRunID {
+			continue
+		}
+		display := ""
+		if doc.RunDisplayNumber != nil {
+			display = *doc.RunDisplayNumber
+		}
+		if !strings.HasPrefix(display, prefix) {
+			continue
+		}
+		suffix := display[len(prefix):]
+		if n, err2 := strconv.Atoi(suffix); err2 == nil && n > maxCycle {
+			maxCycle = n
+		}
+	}
+	cycleNumber := maxCycle + 1
+	runDisplay := fmt.Sprintf("%s.%d", rootDisplay, cycleNumber)
+
+	runID := uuid.New().String()
+	callbackToken := uuid.New().String()[:32]
+	originKind := "resume"
+	if req.TriggerSource != nil {
+		if k, ok := req.TriggerSource["kind"].(string); ok && k != "" {
+			originKind = k
+		}
+	}
+	parentRunID := prior.ID
+	entrypointPhase := req.EntrypointPhase
+	bdg := &budgetDoc{Total: prior.Budget.Total}
+
+	doc := runDoc{
+		ID:               runID,
+		Project:          prior.Project,
+		Workflow:         prior.Workflow,
+		RunNumber:        &runNumber,
+		RunDisplayNumber: &runDisplay,
+		ParentRunID:      &parentRunID,
+		RootRunID:        &rootRunID,
+		OriginKind:       &originKind,
+		IsCycle:          true,
+		CycleNumber:      &cycleNumber,
+		IssueID:          prior.IssueID,
+		IssueRepo:        prior.IssueRepo,
+		IssueNumber:      prior.IssueNumber,
+		State:            "in_progress",
+		Budget:           bdg,
+		ValidationURL:    prior.ValidationURL,
+		ClonedFromRunID:  &parentRunID,
+		EntrypointPhase:  &entrypointPhase,
+		Attempts:         allAttempts,
+		CumulativeCostUSD: 0.0,
+		TriggerSource:    req.TriggerSource,
+		CallbackToken:    &callbackToken,
+		IssueLockHolderID: &req.IssueLockHolderID,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return server.CreatedRun{}, err
+	}
+	pk := azcosmos.NewPartitionKeyString(prior.Project)
+	if _, err := s.runs.CreateItem(ctx, pk, payload, nil); err != nil {
+		return server.CreatedRun{}, fmt.Errorf("create resumed run doc: %w", err)
+	}
+	return server.CreatedRun{
+		ID:            runID,
+		RunNumber:     runNumber,
+		RunDisplay:    runDisplay,
+		CallbackToken: callbackToken,
+	}, nil
+}
+
+// collectPriorOutputs builds a map[phaseName]map[outputKey]value from all attempts.
+// Last attempt per phase wins (matches Python's _collect_phase_outputs).
+func collectPriorOutputs(attempts []server.AttemptForResume) map[string]map[string]string {
+	result := map[string]map[string]string{}
+	for _, a := range attempts {
+		if len(a.PhaseOutputs) > 0 {
+			result[a.Phase] = a.PhaseOutputs
+		}
+	}
+	return result
+}
+
+// SubstitutePhaseInputs resolves a phase's inputs against prior run outputs.
+// Exposed for use by the resume handler; delegates to phaserefs.Substitute.
+func SubstitutePhaseInputs(phase server.PhaseSpec, priorOutputs map[string]map[string]string) (map[string]string, error) {
+	return phaserefs.Substitute(phaserefs.Phase{
+		Name:    phase.Name,
+		Inputs:  phase.Inputs,
+		Outputs: phase.Outputs,
+	}, priorOutputs)
+}
+
+// CollectPriorOutputs is the exported wrapper around collectPriorOutputs.
+func CollectPriorOutputs(attempts []server.AttemptForResume) map[string]map[string]string {
+	return collectPriorOutputs(attempts)
 }
