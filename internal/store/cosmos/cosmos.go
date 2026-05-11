@@ -1225,6 +1225,7 @@ type runDoc struct {
 	State               string         `json:"state"`
 	Attempts            []attemptDoc   `json:"attempts"`
 	CumulativeCostUSD   float64        `json:"cumulative_cost_usd"`
+	Budget              *budgetDoc     `json:"budget,omitempty"`
 	ValidationURL       *string        `json:"validation_url"`
 	ScreenshotsMarkdown *string        `json:"screenshots_markdown"`
 	AbortReason         *string        `json:"abort_reason"`
@@ -1266,12 +1267,15 @@ type issueCommentDoc struct {
 }
 
 type lockDoc struct {
-	ID        string  `json:"id"`
-	Scope     string  `json:"scope"`
-	Key       string  `json:"key"`
-	State     string  `json:"state"`
-	ExpiresAt string  `json:"expires_at"`
-	HeldBy    *string `json:"held_by,omitempty"`
+	ID              string         `json:"id"`
+	Scope           string         `json:"scope"`
+	Key             string         `json:"key"`
+	State           string         `json:"state"`
+	HeldBy          *string        `json:"held_by,omitempty"`
+	ClaimedAt       string         `json:"claimed_at,omitempty"`
+	ExpiresAt       string         `json:"expires_at"`
+	LastHeartbeatAt string         `json:"last_heartbeat_at,omitempty"`
+	Metadata        map[string]any `json:"metadata,omitempty"`
 }
 
 type attemptDoc struct {
@@ -4261,4 +4265,210 @@ func (s *Store) AppendRunAttempt(ctx context.Context, project, runID, phase, pha
 		return nextIdx, nil
 	}
 	return 0, fmt.Errorf("append run attempt: too many etag conflicts")
+}
+
+// ---------------------------------------------------------------------------
+// RunDispatchStore implementation
+// ---------------------------------------------------------------------------
+
+// ClaimIssueLock atomically claims the issue-scoped lock for dispatch serialization.
+// Returns server.ErrAlreadyRunning (wrapped in *server.AlreadyRunningError) if currently held.
+func (s *Store) ClaimIssueLock(ctx context.Context, project string, issueNumber int, holderID string, ttlSeconds int) error {
+	key := fmt.Sprintf("%s#%d", project, issueNumber)
+	docID := lockDocID("issue", key)
+	pk := azcosmos.NewPartitionKeyString("issue")
+
+	const maxRetries = 5
+	for i := 0; i < maxRetries; i++ {
+		now := time.Now().UTC()
+		newDoc := lockDoc{
+			ID:              docID,
+			Scope:           "issue",
+			Key:             key,
+			State:           "held",
+			HeldBy:          &holderID,
+			ClaimedAt:       now.Format(time.RFC3339Nano),
+			ExpiresAt:       now.Add(time.Duration(ttlSeconds) * time.Second).Format(time.RFC3339Nano),
+			LastHeartbeatAt: now.Format(time.RFC3339Nano),
+			Metadata:        map[string]any{},
+		}
+		payload, err := json.Marshal(newDoc)
+		if err != nil {
+			return err
+		}
+
+		resp, readErr := s.locks.ReadItem(ctx, pk, docID, nil)
+		if isCosmosStatus(readErr, http.StatusNotFound) {
+			// No existing lock — try to create.
+			if _, createErr := s.locks.CreateItem(ctx, pk, payload, nil); createErr == nil {
+				return nil
+			} else if isCosmosStatus(createErr, http.StatusConflict) {
+				continue // lost the race; retry
+			} else {
+				return createErr
+			}
+		}
+		if readErr != nil {
+			return readErr
+		}
+
+		// Lock exists. Check if held and unexpired.
+		var existing lockDoc
+		if err := json.Unmarshal(resp.Value, &existing); err != nil {
+			return err
+		}
+		expiresAt := parseOptionalTime(existing.ExpiresAt)
+		if existing.State == "held" && expiresAt != nil && expiresAt.After(time.Now().UTC()) {
+			heldBy := stringOrEmpty(existing.HeldBy)
+			return &server.AlreadyRunningError{HeldBy: heldBy, ExpiresAt: *expiresAt}
+		}
+
+		// Take over: expired, released, or expired-held.
+		etag := azcore.ETag(resp.ETag)
+		if _, replaceErr := s.locks.ReplaceItem(ctx, pk, docID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); replaceErr == nil {
+			return nil
+		} else if isCosmosStatus(replaceErr, http.StatusPreconditionFailed) {
+			continue // CAS conflict; retry
+		} else {
+			return replaceErr
+		}
+	}
+	return fmt.Errorf("claim issue lock: too many retries for %s#%d", project, issueNumber)
+}
+
+// ReleaseIssueLock releases the issue lock if held by holderID. Best-effort (ignores errors).
+func (s *Store) ReleaseIssueLock(ctx context.Context, project string, issueNumber int, holderID string) {
+	key := fmt.Sprintf("%s#%d", project, issueNumber)
+	s.releaseLock(ctx, "issue", key, holderID)
+}
+
+// ReadProjectGitHubRepo returns the githubRepo field for a registered project.
+func (s *Store) ReadProjectGitHubRepo(ctx context.Context, project string) (string, error) {
+	doc, err := s.readProjectDoc(ctx, project)
+	if errors.Is(err, server.ErrNotFound) {
+		return "", server.ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	return doc.GitHubRepo, nil
+}
+
+// ReadIssueForDispatch returns the minimal issue data needed to build dispatch metadata.
+func (s *Store) ReadIssueForDispatch(ctx context.Context, project string, issueNumber int) (server.IssueDispatchData, error) {
+	doc, err := s.readIssueByNumber(ctx, project, issueNumber)
+	if errors.Is(err, server.ErrNotFound) {
+		return server.IssueDispatchData{}, server.ErrNotFound
+	}
+	if err != nil {
+		return server.IssueDispatchData{}, err
+	}
+	labels := doc.Labels
+	if labels == nil {
+		labels = []string{}
+	}
+	return server.IssueDispatchData{
+		ID:     doc.ID,
+		Title:  doc.Title,
+		Body:   doc.Body,
+		Labels: labels,
+	}, nil
+}
+
+// ListProjectWorkflows returns all workflows registered for a project.
+func (s *Store) ListProjectWorkflows(ctx context.Context, project string) ([]server.Workflow, error) {
+	var docs []workflowDoc
+	if err := queryAllWhere(
+		ctx,
+		s.workflows,
+		"SELECT * FROM c WHERE c.project = @p",
+		[]azcosmos.QueryParameter{{Name: "@p", Value: project}},
+		&docs,
+	); err != nil {
+		return nil, err
+	}
+	rows := make([]server.Workflow, 0, len(docs))
+	for _, doc := range docs {
+		rows = append(rows, workflowFromDoc(doc))
+	}
+	return rows, nil
+}
+
+// CreateRun creates a new run document with its first PhaseAttempt. The caller must
+// hold the issue lock before calling this so the run-number allocation is serialized.
+func (s *Store) CreateRun(ctx context.Context, req server.CreateRunRequest) (server.CreatedRun, error) {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	// Allocate next run number under the issue lock.
+	docs, err := s.issueRunDocs(ctx, req.Project, req.IssueNumber)
+	if err != nil {
+		return server.CreatedRun{}, fmt.Errorf("query issue runs: %w", err)
+	}
+	numbers := runNumberMap(docs)
+	runNumber := 1
+	for _, n := range numbers {
+		if n >= runNumber {
+			runNumber = n + 1
+		}
+	}
+
+	runID := uuid.New().String()
+	callbackToken := uuid.New().String()[:32]
+	runDisplay := strconv.Itoa(runNumber)
+	cycleNum := 0
+	budgetDoc := &budgetDoc{Total: req.Budget.Total}
+
+	originKind := "dispatch"
+	if req.TriggerSource != nil {
+		if k, ok := req.TriggerSource["kind"].(string); ok && k != "" {
+			originKind = k
+		}
+	}
+
+	doc := runDoc{
+		ID:               runID,
+		Project:          req.Project,
+		Workflow:         req.Workflow,
+		RunNumber:        &runNumber,
+		RunDisplayNumber: &runDisplay,
+		RootRunID:        &runID,
+		OriginKind:       &originKind,
+		IsCycle:          false,
+		CycleNumber:      &cycleNum,
+		IssueID:          req.IssueID,
+		IssueRepo:        req.IssueRepo,
+		IssueNumber:      req.IssueNumber,
+		State:            "in_progress",
+		Budget:           budgetDoc,
+		Attempts: []attemptDoc{
+			{
+				AttemptIndex:     0,
+				Phase:            req.InitialPhaseName,
+				PhaseKind:        req.InitialPhaseKind,
+				WorkflowFilename: req.InitialWorkflowFilename,
+				DispatchedAt:     now,
+			},
+		},
+		CumulativeCostUSD: 0.0,
+		TriggerSource:     req.TriggerSource,
+		CallbackToken:     &callbackToken,
+		IssueLockHolderID: &req.IssueLockHolderID,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return server.CreatedRun{}, err
+	}
+	pk := azcosmos.NewPartitionKeyString(req.Project)
+	if _, err := s.runs.CreateItem(ctx, pk, payload, nil); err != nil {
+		return server.CreatedRun{}, fmt.Errorf("create run doc: %w", err)
+	}
+	return server.CreatedRun{
+		ID:            runID,
+		RunNumber:     runNumber,
+		RunDisplay:    runDisplay,
+		CallbackToken: callbackToken,
+	}, nil
 }
