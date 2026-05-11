@@ -6875,12 +6875,21 @@ class TestSlotCheckoutRequest(BaseModel):
 
 
 class TestSlotCheckoutResult(BaseModel):
+    # `state` is retained for compatibility with existing callers. New callers
+    # should use `lease_state` and `environment_state` so lease ownership is not
+    # confused with test-environment readiness.
     state: str
+    lease_state: str | None = None
+    environment_state: str | None = None
     project: str
     workflow: str
     slot_index: int | None = None
     slot_name: str | None = None
+    namespace: str | None = None
+    sessions_namespace: str | None = None
     url: str | None = None
+    status_url: str | None = None
+    environment_checks: list[dict[str, Any]] = Field(default_factory=list)
     lease: str
     host: str | None = None
     detail: str | None = None
@@ -8624,45 +8633,182 @@ async def checkout_test_slot(req: TestSlotCheckoutRequest) -> TestSlotCheckoutRe
         request = _test_request_to_public(request_doc)
         return TestSlotCheckoutResult(
             state=request.state.value,
+            lease_state=request.state.value,
+            environment_state="waiting",
             project=project,
             workflow=workflow_name,
             slot_index=req.slot_index,
             slot_name=slot_name,
+            namespace=slot_name,
+            sessions_namespace=f"{slot_name}-sessions" if slot_name else None,
+            status_url=_test_slot_status_url(project=project, slot_index=req.slot_index, slot_name=slot_name),
             lease=request.ref,
             host=None,
             detail="slot unavailable; checkout request is waiting",
         )
-    actual_slot_index = lease.metadata.get("native_slot_index")
+    lease_doc = lease_ops._lease_to_doc(lease)
+    return await _test_slot_checkout_result(
+        lease_doc,
+        project_doc=project_doc,
+        requested_slot_index=req.slot_index,
+        requested_slot_name=slot_name,
+        host_name=host.name if host is not None else None,
+    )
+
+
+@app.get(
+    "/v1/test-slots/status",
+    response_model=TestSlotCheckoutResult,
+    dependencies=[Depends(require_admin_user)],
+)
+async def test_slot_status(
+    project: str = Query(...),
+    slot_index: int | None = Query(default=None, ge=1),
+    slot_name: str | None = Query(default=None),
+) -> TestSlotCheckoutResult:
+    """Return lease ownership and async environment readiness for a test slot."""
+    normalized_project = project.strip()
+    if not normalized_project:
+        raise HTTPException(400, "project required")
+    cosmos: Cosmos = app.state.cosmos
+    lease_doc = await _resolve_test_slot_lease(
+        cosmos,
+        project=normalized_project,
+        slot_index=slot_index,
+        slot_name=slot_name,
+    )
+    project_doc = await _read_project(cosmos, normalized_project)
+    if project_doc is None:
+        raise HTTPException(400, f"project {normalized_project!r} not registered")
+    return await _test_slot_checkout_result(
+        lease_doc,
+        project_doc=project_doc,
+        requested_slot_index=slot_index,
+        requested_slot_name=slot_name,
+        host_name=lease_doc.get("host"),
+    )
+
+
+async def _test_slot_checkout_result(
+    lease_doc: dict[str, Any],
+    *,
+    project_doc: dict[str, Any],
+    requested_slot_index: int | None,
+    requested_slot_name: str | None,
+    host_name: str | None,
+) -> TestSlotCheckoutResult:
+    metadata = lease_doc.get("metadata") or {}
+    project = str(lease_doc.get("project") or project_doc.get("name") or "").strip()
+    workflow = str(lease_doc.get("workflow") or "test-slot-checkout")
+    raw_slot_index = metadata.get("native_slot_index")
     actual_slot = (
         native_k8s_ops._test_slot_spec(
             project_doc,
-            int(actual_slot_index),
+            int(raw_slot_index),
             app.state.settings,
         )
-        if actual_slot_index
+        if raw_slot_index
         else None
     )
-    actual_slot_name = (
+    slot_index = int(raw_slot_index) if raw_slot_index else requested_slot_index
+    slot_name = (
         str(actual_slot["slot_name"])
         if actual_slot
-        else lease.metadata.get("native_slot_name") or slot_name
+        else metadata.get("native_slot_name") or requested_slot_name
     )
     slot_url = actual_slot["url"] if actual_slot else None
-    return TestSlotCheckoutResult(
-        state=lease.state.value,
+    lease_state = str(lease_doc.get("state") or "")
+    env_status = await _test_slot_environment_status(lease_doc, project_doc=project_doc)
+    status_url = _test_slot_status_url(
         project=project,
-        workflow=workflow_name,
-        slot_index=int(actual_slot_index) if actual_slot_index else req.slot_index,
-        slot_name=str(actual_slot_name) if actual_slot_name is not None else None,
-        url=slot_url,
-        lease=lease_ref(
-            project,
-            slot_name=str(actual_slot_name) if actual_slot_name is not None else None,
-            lease_number=lease.lease_number,
-        ),
-        host=host.name if host is not None else None,
-        detail=None if host is not None else "slot unavailable; reservation is pending",
+        slot_index=slot_index,
+        slot_name=str(slot_name) if slot_name is not None else None,
     )
+    public_ref = lease_ref(
+        project,
+        slot_name=str(slot_name) if slot_name is not None else None,
+        lease_number=lease_doc.get("leaseNumber") or lease_doc.get("lease_number"),
+    )
+    return TestSlotCheckoutResult(
+        state=lease_state,
+        lease_state=lease_state,
+        environment_state=env_status["state"],
+        environment_checks=env_status["checks"],
+        project=project,
+        workflow=workflow,
+        slot_index=slot_index,
+        slot_name=str(slot_name) if slot_name is not None else None,
+        namespace=str(slot_name) if slot_name is not None else None,
+        sessions_namespace=f"{slot_name}-sessions" if slot_name is not None else None,
+        url=slot_url,
+        status_url=status_url,
+        lease=public_ref,
+        host=host_name,
+        detail=None if host_name is not None else "slot unavailable; reservation is pending",
+    )
+
+
+async def _test_slot_environment_status(
+    lease_doc: dict[str, Any],
+    *,
+    project_doc: dict[str, Any],
+) -> dict[str, Any]:
+    if lease_doc.get("state") != LeaseState.CLAIMED.value:
+        return {
+            "state": "waiting",
+            "checks": [{
+                "name": "lease_claimed",
+                "ok": False,
+                "reason": str(lease_doc.get("state") or "not_claimed"),
+            }],
+        }
+    metadata = lease_doc.get("metadata") or {}
+    if metadata.get("test_slot_checkout") is not True:
+        return {
+            "state": "unknown",
+            "checks": [{
+                "name": "test_slot_checkout",
+                "ok": False,
+                "reason": "LeaseIsNotTestSlotCheckout",
+            }],
+        }
+    if native_k8s_ops._test_slot_helm_config(project_doc) is None:
+        return {
+            "state": "ready",
+            "checks": [{
+                "name": "helm_install",
+                "ok": True,
+                "reason": "NotConfigured",
+            }],
+        }
+    launcher = getattr(app.state, "native_k8s_launcher", None)
+    if launcher is None or not hasattr(launcher, "test_slot_helm_status"):
+        return {
+            "state": "provisioning",
+            "checks": [{
+                "name": "helm_install",
+                "ok": False,
+                "reason": "StatusUnavailable",
+            }],
+        }
+    return await launcher.test_slot_helm_status(
+        lease_doc=lease_doc,
+        project_doc=project_doc,
+    )
+
+
+def _test_slot_status_url(
+    *,
+    project: str,
+    slot_index: int | None,
+    slot_name: str | None,
+) -> str:
+    params: dict[str, str] = {"project": project}
+    if slot_index is not None:
+        params["slot_index"] = str(slot_index)
+    elif slot_name:
+        params["slot_name"] = slot_name
+    return f"/v1/test-slots/status?{urlencode(params)}"
 
 
 @app.post(

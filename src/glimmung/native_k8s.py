@@ -556,6 +556,100 @@ class NativeKubernetesLauncher:
         await self._create_job(job_name, manifest)
         return job_name
 
+    async def test_slot_helm_status(
+        self,
+        *,
+        lease_doc: dict[str, Any],
+        project_doc: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return the asynchronous installer Job status for a test slot.
+
+        The lease is claimed before this Job finishes. This status is the
+        readiness boundary exposed to API callers so they can distinguish
+        reservation ownership from a usable test environment.
+        """
+        if _test_slot_helm_config(project_doc) is None:
+            return {
+                "state": "ready",
+                "checks": [{
+                    "name": "helm_install",
+                    "ok": True,
+                    "reason": "NotConfigured",
+                }],
+            }
+        slot = _native_slot(lease_doc)
+        if slot is None:
+            return {
+                "state": "unknown",
+                "checks": [{
+                    "name": "helm_install",
+                    "ok": False,
+                    "reason": "SlotMetadataMissing",
+                }],
+            }
+        job_name = _test_slot_install_job_name(slot["slot_name"])
+        try:
+            job = await self._request(
+                "GET",
+                f"/apis/batch/v1/namespaces/{self._settings.native_runner_namespace}/jobs/{job_name}",
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return {
+                    "state": "provisioning",
+                    "checks": [{
+                        "name": "helm_install",
+                        "ok": False,
+                        "reason": "JobNotCreated",
+                    }],
+                }
+            raise
+
+        status = job.get("status") or {}
+        conditions = status.get("conditions") if isinstance(status.get("conditions"), list) else []
+        failed_condition = next(
+            (
+                condition for condition in conditions
+                if condition.get("type") == "Failed" and condition.get("status") == "True"
+            ),
+            None,
+        )
+        complete_condition = next(
+            (
+                condition for condition in conditions
+                if condition.get("type") == "Complete" and condition.get("status") == "True"
+            ),
+            None,
+        )
+        if failed_condition is not None:
+            return {
+                "state": "failed",
+                "checks": [{
+                    "name": "helm_install",
+                    "ok": False,
+                    "reason": str(failed_condition.get("reason") or "JobFailed"),
+                    "message": str(failed_condition.get("message") or ""),
+                }],
+            }
+        if complete_condition is not None or int(status.get("succeeded") or 0) > 0:
+            return {
+                "state": "ready",
+                "checks": [{
+                    "name": "helm_install",
+                    "ok": True,
+                    "reason": str((complete_condition or {}).get("reason") or "JobComplete"),
+                }],
+            }
+        return {
+            "state": "provisioning",
+            "checks": [{
+                "name": "helm_install",
+                "ok": False,
+                "reason": "JobRunning",
+                "active": int(status.get("active") or 0),
+            }],
+        }
+
     async def delete_test_slot_helm_release(self, lease_doc: dict[str, Any]) -> None:
         """Delete the helm-install Job, clone-token Secret, and slot CRBs.
 
