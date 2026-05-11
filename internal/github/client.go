@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -121,6 +122,38 @@ func (c *Client) FetchFileContents(ctx context.Context, repo, path, ref string) 
 		return nil, fmt.Errorf("GitHub contents returned %d: %s", resp.StatusCode, body)
 	}
 	return io.ReadAll(resp.Body)
+}
+
+// DispatchWorkflow triggers a workflow_dispatch event on the given workflow file and ref.
+func (c *Client) DispatchWorkflow(ctx context.Context, repo, filename, ref string, inputs map[string]string) error {
+	token, err := c.InstallationToken(ctx)
+	if err != nil {
+		return fmt.Errorf("get installation token: %w", err)
+	}
+	body := map[string]any{"ref": ref, "inputs": inputs}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	url := fmt.Sprintf("https://api.github.com/repos/%s/actions/workflows/%s/dispatches", repo, filename)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("workflow_dispatch returned %d: %s", resp.StatusCode, respBody)
+	}
+	return nil
 }
 
 // CancelWorkflowRun cancels a GitHub Actions workflow run. Returns true if the run was cancelled (202).
