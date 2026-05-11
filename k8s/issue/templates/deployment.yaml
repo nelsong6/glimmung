@@ -40,6 +40,10 @@ spec:
               value: {{ .Values.cosmos.endpoint | quote }}
             - name: COSMOS_DATABASE
               value: {{ .Values.cosmos.database | quote }}
+            {{- if .Values.testEnv.enabled }}
+            - name: CONTROL_PLANE_LOOPS_ENABLED
+              value: "false"
+            {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ .Values.configMapName }}

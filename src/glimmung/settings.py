@@ -72,6 +72,7 @@ class Settings(BaseSettings):
 
     # Sweep job cadence
     sweep_interval_seconds: int = 60
+    control_plane_loops_enabled: bool = True
 
     # Browser launch target for attended tank-operator sessions. Glimmung
     # passes canonical ids as URL params; tank-operator creates the session on
