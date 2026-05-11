@@ -61,6 +61,10 @@ class _RecordingTestSlotLauncher:
         self.reconciled_standby_dns_projects: list[dict] | None = None
         self.reconciled_standby_workload_identity_projects: list[dict] | None = None
         self.reconciled_entra_projects: list[dict] | None = None
+        self.helm_status: dict = {
+            "state": "provisioning",
+            "checks": [{"name": "helm_install", "ok": False, "reason": "JobRunning"}],
+        }
 
     async def ensure_test_slot_namespace(self, lease_doc: dict) -> None:
         self.ensured_namespaces.append(lease_doc)
@@ -80,6 +84,9 @@ class _RecordingTestSlotLauncher:
             "project_doc": project_doc,
             "repo_token": repo_token,
         })
+
+    async def test_slot_helm_status(self, *, lease_doc: dict, project_doc: dict) -> dict:
+        return self.helm_status
 
     async def delete_test_slot_namespace(self, namespace: str) -> None:
         self.deleted_namespaces.append(namespace)
@@ -101,6 +108,11 @@ class _RecordingTestSlotLauncher:
 
     async def reconcile_standby_entra_redirects(self, project_docs: list[dict]) -> None:
         self.reconciled_entra_projects = project_docs
+
+
+class _FakeGitHubMinter:
+    async def repository_token(self, *, repo: str) -> tuple[str, object]:
+        return "repo-token", object()
 
 
 @pytest.fixture
@@ -142,9 +154,14 @@ async def test_checkout_test_slot_prepares_clean_slate_namespace_and_playwright(
     )
 
     assert result.state == LeaseState.CLAIMED.value
+    assert result.lease_state == LeaseState.CLAIMED.value
+    assert result.environment_state == "ready"
+    assert result.status_url == "/v1/test-slots/status?project=glimmung&slot_index=2"
     assert result.workflow == "manual-slot"
     assert result.slot_index == 2
     assert result.slot_name == "glimmung-2"
+    assert result.namespace == "glimmung-2"
+    assert result.sessions_namespace == "glimmung-2-sessions"
     assert result.url is None
     assert result.lease == "glimmung-2"
     assert result.host == "native-k8s"
@@ -222,6 +239,63 @@ async def test_checkout_test_slot_uses_project_standby_dns_slot_prefix(app_state
     assert app_state.native_k8s_launcher.reconciled_standby_dns_projects is not None
     assert app_state.native_k8s_launcher.reconciled_standby_workload_identity_projects is not None
     assert app_state.native_k8s_launcher.reconciled_entra_projects is not None
+
+
+@pytest.mark.asyncio
+async def test_checkout_test_slot_reports_async_environment_provisioning(app_state):
+    app_state.gh_minter = _FakeGitHubMinter()
+    app_module.app.state.gh_minter = app_state.gh_minter
+    await _register_project(
+        SimpleNamespace(state=app_state),
+        "tank-operator",
+        "nelsong6/tank-operator",
+        metadata={
+            "native_standby_dns": {
+                "enabled": True,
+                "record_base": "tank.dev.romaine.life",
+                "slot_prefix": "tank-slot",
+                "count": 2,
+            },
+            "test_slot_helm": {
+                "enabled": True,
+                "installer_image": "alpine/k8s:latest",
+                "values": {"testEnv.enabled": "true"},
+            },
+        },
+    )
+
+    result = await app_module.checkout_test_slot(
+        app_module.TestSlotCheckoutRequest(
+            project="tank-operator",
+            slot_index=1,
+            tank_session_id="abc123",
+        )
+    )
+
+    assert result.state == LeaseState.CLAIMED.value
+    assert result.lease_state == LeaseState.CLAIMED.value
+    assert result.environment_state == "provisioning"
+    assert result.environment_checks == [
+        {"name": "helm_install", "ok": False, "reason": "JobRunning"}
+    ]
+    assert result.status_url == "/v1/test-slots/status?project=tank-operator&slot_index=1"
+    assert app_state.native_k8s_launcher.ensured_helm_releases
+
+    app_state.native_k8s_launcher.helm_status = {
+        "state": "ready",
+        "checks": [{"name": "helm_install", "ok": True, "reason": "JobComplete"}],
+    }
+    status = await app_module.test_slot_status(
+        project="tank-operator",
+        slot_index=1,
+        slot_name=None,
+    )
+
+    assert status.lease_state == LeaseState.CLAIMED.value
+    assert status.environment_state == "ready"
+    assert status.environment_checks == [
+        {"name": "helm_install", "ok": True, "reason": "JobComplete"}
+    ]
 
 
 @pytest.mark.asyncio
@@ -304,6 +378,9 @@ async def test_checkout_test_slot_pending_when_preferred_slot_is_busy(app_state)
 
     assert first.state == LeaseState.CLAIMED.value
     assert second.state == SlotRequestState.WAITING.value
+    assert second.lease_state == SlotRequestState.WAITING.value
+    assert second.environment_state == "waiting"
+    assert second.status_url == "/v1/test-slots/status?project=glimmung&slot_index=1"
     assert second.host is None
     assert second.detail == "slot unavailable; checkout request is waiting"
     request_doc = next(
