@@ -624,6 +624,281 @@ func (s *Store) ArchiveIssueByNumber(ctx context.Context, req server.IssueArchiv
 	return s.GetIssueDetailByNumber(ctx, doc.Project, doc.Number)
 }
 
+const issueCounterPrefix = "__counter:issue-number:"
+
+type issueNumberCounterDoc struct {
+	ID              string `json:"id"`
+	Project         string `json:"project"`
+	Kind            string `json:"kind"`
+	NextIssueNumber int    `json:"next_issue_number"`
+	CreatedAt       string `json:"created_at"`
+	UpdatedAt       string `json:"updated_at"`
+}
+
+func (s *Store) nextIssueNumber(ctx context.Context, project string) (int, error) {
+	counterID := issueCounterPrefix + project
+	pk := azcosmos.NewPartitionKeyString(project)
+	for range 3 {
+		resp, err := s.issues.ReadItem(ctx, pk, counterID, nil)
+		if isCosmosStatus(err, http.StatusNotFound) {
+			// seed from highest existing number
+			highest, seedErr := s.highestIssueNumber(ctx, project)
+			if seedErr != nil {
+				return 0, seedErr
+			}
+			now := time.Now().UTC().Format(time.RFC3339Nano)
+			seed := issueNumberCounterDoc{
+				ID:              counterID,
+				Project:         project,
+				Kind:            "issue_number_counter",
+				NextIssueNumber: highest + 2,
+				CreatedAt:       now,
+				UpdatedAt:       now,
+			}
+			payload, marshalErr := json.Marshal(seed)
+			if marshalErr != nil {
+				return 0, marshalErr
+			}
+			_, createErr := s.issues.CreateItem(ctx, pk, payload, nil)
+			if isCosmosStatus(createErr, http.StatusConflict) {
+				continue
+			}
+			if createErr != nil {
+				return 0, createErr
+			}
+			return highest + 1, nil
+		}
+		if err != nil {
+			return 0, err
+		}
+		var counter issueNumberCounterDoc
+		if unmarshalErr := json.Unmarshal(resp.Value, &counter); unmarshalErr != nil {
+			return 0, unmarshalErr
+		}
+		allocated := counter.NextIssueNumber - 1
+		if allocated < 1 {
+			allocated = 1
+		}
+		counter.NextIssueNumber = allocated + 2
+		counter.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		payload, marshalErr := json.Marshal(counter)
+		if marshalErr != nil {
+			return 0, marshalErr
+		}
+		etag := resp.ETag
+		_, replErr := s.issues.ReplaceItem(ctx, pk, counterID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag})
+		if isCosmosStatus(replErr, http.StatusPreconditionFailed) {
+			continue
+		}
+		if replErr != nil {
+			return 0, replErr
+		}
+		return allocated + 1, nil
+	}
+	return 0, errors.New("issue number counter conflict after retries")
+}
+
+func (s *Store) highestIssueNumber(ctx context.Context, project string) (int, error) {
+	var docs []issueDoc
+	if err := queryAllWhere(
+		ctx,
+		s.issues,
+		"SELECT * FROM c WHERE c.project = @project AND IS_DEFINED(c.number) AND c.kind != 'issue_number_counter'",
+		[]azcosmos.QueryParameter{{Name: "@project", Value: project}},
+		&docs,
+	); err != nil {
+		return 0, err
+	}
+	highest := 0
+	for _, d := range docs {
+		if d.Number > highest {
+			highest = d.Number
+		}
+	}
+	return highest, nil
+}
+
+func (s *Store) CreateIssue(ctx context.Context, req server.IssueCreate) (server.IssueDetail, error) {
+	number, err := s.nextIssueNumber(ctx, req.Project)
+	if err != nil {
+		return server.IssueDetail{}, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	doc := issueDoc{
+		ID:      uuid.NewString(),
+		Number:  number,
+		Project: req.Project,
+		Title:   req.Title,
+		Body:    req.Body,
+		Labels:  sliceOrEmpty(req.Labels),
+		State:   "open",
+		Metadata: issueMetadataDoc{
+			Workflow: req.Workflow,
+		},
+		Comments:  []issueCommentDoc{},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return server.IssueDetail{}, err
+	}
+	if _, err := s.issues.CreateItem(ctx, azcosmos.NewPartitionKeyString(req.Project), payload, nil); err != nil {
+		return server.IssueDetail{}, err
+	}
+	return s.GetIssueDetailByNumber(ctx, req.Project, number)
+}
+
+func (s *Store) PatchIssueByNumber(ctx context.Context, req server.IssuePatch) (server.IssueDetail, error) {
+	doc, err := s.readIssueByNumber(ctx, req.Project, req.Number)
+	if err != nil {
+		return server.IssueDetail{}, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if req.Title != nil {
+		doc.Title = *req.Title
+	}
+	if req.Body != nil {
+		doc.Body = *req.Body
+	}
+	if req.Labels != nil {
+		doc.Labels = *req.Labels
+	}
+	if req.State != nil {
+		target := strings.ToLower(*req.State)
+		switch target {
+		case "closed":
+			if doc.State != "closed" {
+				doc.State = "closed"
+				doc.ClosedAt = &now
+			}
+		case "open":
+			if doc.State == "closed" {
+				doc.State = "open"
+				doc.ClosedAt = nil
+			}
+		default:
+			return server.IssueDetail{}, server.ValidationError{Message: "state must be 'open' or 'closed'"}
+		}
+	}
+	doc.UpdatedAt = now
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return server.IssueDetail{}, err
+	}
+	if _, err := s.issues.ReplaceItem(ctx, azcosmos.NewPartitionKeyString(doc.Project), doc.ID, payload, nil); err != nil {
+		return server.IssueDetail{}, err
+	}
+	return s.GetIssueDetailByNumber(ctx, doc.Project, doc.Number)
+}
+
+func (s *Store) AddIssueComment(ctx context.Context, req server.IssueCommentAdd) (server.IssueComment, error) {
+	doc, err := s.readIssueByNumber(ctx, req.Project, req.Number)
+	if err != nil {
+		return server.IssueComment{}, err
+	}
+	if strings.TrimSpace(req.Body) == "" {
+		return server.IssueComment{}, server.ValidationError{Message: "body required"}
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	comment := issueCommentDoc{
+		ID:        uuid.NewString(),
+		Author:    req.Author,
+		Body:      req.Body,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	doc.Comments = append(doc.Comments, comment)
+	doc.UpdatedAt = now
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return server.IssueComment{}, err
+	}
+	if _, err := s.issues.ReplaceItem(ctx, azcosmos.NewPartitionKeyString(doc.Project), doc.ID, payload, nil); err != nil {
+		return server.IssueComment{}, err
+	}
+	t, _ := time.Parse(time.RFC3339Nano, comment.CreatedAt)
+	return server.IssueComment{
+		ID:        comment.ID,
+		Author:    comment.Author,
+		Body:      comment.Body,
+		CreatedAt: t,
+		UpdatedAt: t,
+	}, nil
+}
+
+func (s *Store) UpdateIssueComment(ctx context.Context, req server.IssueCommentUpdate) (server.IssueComment, error) {
+	doc, err := s.readIssueByNumber(ctx, req.Project, req.Number)
+	if err != nil {
+		return server.IssueComment{}, err
+	}
+	if strings.TrimSpace(req.Body) == "" {
+		return server.IssueComment{}, server.ValidationError{Message: "body required"}
+	}
+	idx := -1
+	for i, c := range doc.Comments {
+		if c.ID == req.CommentID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return server.IssueComment{}, server.ErrNotFound
+	}
+	if doc.Comments[idx].Author != req.Author {
+		return server.IssueComment{}, server.ErrForbidden
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	doc.Comments[idx].Body = req.Body
+	doc.Comments[idx].UpdatedAt = now
+	doc.UpdatedAt = now
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return server.IssueComment{}, err
+	}
+	if _, err := s.issues.ReplaceItem(ctx, azcosmos.NewPartitionKeyString(doc.Project), doc.ID, payload, nil); err != nil {
+		return server.IssueComment{}, err
+	}
+	createdAt, _ := time.Parse(time.RFC3339Nano, doc.Comments[idx].CreatedAt)
+	updatedAt, _ := time.Parse(time.RFC3339Nano, now)
+	return server.IssueComment{
+		ID:        doc.Comments[idx].ID,
+		Author:    doc.Comments[idx].Author,
+		Body:      doc.Comments[idx].Body,
+		CreatedAt: createdAt,
+		UpdatedAt: updatedAt,
+	}, nil
+}
+
+func (s *Store) DeleteIssueComment(ctx context.Context, req server.IssueCommentDelete) (server.IssueDetail, error) {
+	doc, err := s.readIssueByNumber(ctx, req.Project, req.Number)
+	if err != nil {
+		return server.IssueDetail{}, err
+	}
+	found := false
+	filtered := doc.Comments[:0]
+	for _, c := range doc.Comments {
+		if c.ID == req.CommentID {
+			found = true
+			continue
+		}
+		filtered = append(filtered, c)
+	}
+	if !found {
+		return server.IssueDetail{}, server.ErrNotFound
+	}
+	doc.Comments = filtered
+	doc.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return server.IssueDetail{}, err
+	}
+	if _, err := s.issues.ReplaceItem(ctx, azcosmos.NewPartitionKeyString(doc.Project), doc.ID, payload, nil); err != nil {
+		return server.IssueDetail{}, err
+	}
+	return s.GetIssueDetailByNumber(ctx, doc.Project, doc.Number)
+}
+
 func (s *Store) readIssueByNumber(ctx context.Context, project string, number int) (issueDoc, error) {
 	var docs []issueDoc
 	if err := queryAllWhere(

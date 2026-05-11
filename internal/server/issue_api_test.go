@@ -48,6 +48,45 @@ func (s *fakeIssueStore) ArchiveIssueByNumber(_ context.Context, req IssueArchiv
 	return detail, nil
 }
 
+func (s *fakeIssueStore) CreateIssue(_ context.Context, req IssueCreate) (IssueDetail, error) {
+	if s.err != nil {
+		return IssueDetail{}, s.err
+	}
+	return IssueDetail{Project: req.Project, Title: req.Title, Body: req.Body, State: "open"}, nil
+}
+
+func (s *fakeIssueStore) PatchIssueByNumber(_ context.Context, req IssuePatch) (IssueDetail, error) {
+	if s.err != nil {
+		return IssueDetail{}, s.err
+	}
+	detail := s.detail
+	if req.Title != nil {
+		detail.Title = *req.Title
+	}
+	return detail, nil
+}
+
+func (s *fakeIssueStore) AddIssueComment(_ context.Context, req IssueCommentAdd) (IssueComment, error) {
+	if s.err != nil {
+		return IssueComment{}, s.err
+	}
+	return IssueComment{ID: "c1", Author: req.Author, Body: req.Body}, nil
+}
+
+func (s *fakeIssueStore) UpdateIssueComment(_ context.Context, req IssueCommentUpdate) (IssueComment, error) {
+	if s.err != nil {
+		return IssueComment{}, s.err
+	}
+	return IssueComment{ID: req.CommentID, Author: req.Author, Body: req.Body}, nil
+}
+
+func (s *fakeIssueStore) DeleteIssueComment(_ context.Context, req IssueCommentDelete) (IssueDetail, error) {
+	if s.err != nil {
+		return IssueDetail{}, s.err
+	}
+	return s.detail, nil
+}
+
 func TestListIssues(t *testing.T) {
 	store := &fakeIssueStore{rows: []IssueRow{{
 		Ref:     "glimmung#17",
@@ -179,5 +218,115 @@ func TestDiscardIssueByNumberUsesDiscardedAction(t *testing.T) {
 	}
 	if store.archive.Action != "discarded" {
 		t.Fatalf("archive=%#v", store.archive)
+	}
+}
+
+func TestCreateIssueRequiresAdmin(t *testing.T) {
+	handler := NewWithStore(Settings{}, &fakeIssueStore{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/issues", strings.NewReader(`{"project":"glimmung","title":"New issue"}`))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateIssue(t *testing.T) {
+	store := &fakeIssueStore{}
+	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin", Email: "admin@example.com"}})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/issues", strings.NewReader(`{"project":"glimmung","title":"New issue","body":"details","labels":["bug"]}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"title":"New issue"`) {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
+func TestCreateIssueValidatesBody(t *testing.T) {
+	handler := NewWithDependencies(Settings{}, &fakeIssueStore{}, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}})
+
+	for _, body := range []string{
+		`{"title":"missing project"}`,
+		`{"project":"glimmung"}`,
+		`not json`,
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/issues", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer admin")
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("body=%q status=%d response=%s", body, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestPatchIssueByNumber(t *testing.T) {
+	store := &fakeIssueStore{detail: IssueDetail{Ref: "glimmung#17", Project: "glimmung", Number: intPtr(17), Title: "Old title", State: "open"}}
+	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin", Email: "admin@example.com"}})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/v1/issues/by-number/glimmung/17", strings.NewReader(`{"title":"New title"}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"title":"New title"`) {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
+func TestCreateIssueComment(t *testing.T) {
+	store := &fakeIssueStore{}
+	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin", Email: "admin@example.com"}})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/issues/by-number/glimmung/17/comments", strings.NewReader(`{"body":"great issue"}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"body":"great issue"`) {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
+func TestUpdateIssueComment(t *testing.T) {
+	store := &fakeIssueStore{}
+	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin", Email: "admin@example.com"}})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/v1/issues/by-number/glimmung/17/comments/c1", strings.NewReader(`{"body":"edited"}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"body":"edited"`) {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
+func TestDeleteIssueComment(t *testing.T) {
+	store := &fakeIssueStore{detail: IssueDetail{Ref: "glimmung#17", Project: "glimmung", Number: intPtr(17), Title: "Fix", State: "open"}}
+	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin", Email: "admin@example.com"}})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/v1/issues/by-number/glimmung/17/comments/c1", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }

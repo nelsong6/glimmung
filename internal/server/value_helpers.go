@@ -9,6 +9,7 @@ var ErrNotFound = errors.New("not found")
 var ErrConflict = errors.New("conflict")
 var ErrInactive = errors.New("inactive")
 var ErrUnsupported = errors.New("unsupported")
+var ErrForbidden = errors.New("forbidden")
 
 type ValidationError struct {
 	Message string
