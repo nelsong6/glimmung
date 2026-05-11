@@ -280,23 +280,22 @@ async def lifespan(app: FastAPI):
         app.state.gh_minter = None
         log.warning("github app credentials not configured; webhook + dispatch disabled")
 
-    sweep_task = asyncio.create_task(_sweep_loop(cosmos, settings))
-    promote_task = asyncio.create_task(_promote_loop(app, settings))
-    standby_dns_task = asyncio.create_task(_standby_dns_loop(app, settings))
-    lock_sweep_task = asyncio.create_task(_lock_sweep_loop(cosmos, settings))
-    drain_task = asyncio.create_task(_signal_drain_loop(app, settings))
+    control_plane_tasks: list[asyncio.Task] = []
+    if settings.control_plane_loops_enabled:
+        control_plane_tasks = [
+            asyncio.create_task(_sweep_loop(cosmos, settings)),
+            asyncio.create_task(_promote_loop(app, settings)),
+            asyncio.create_task(_standby_dns_loop(app, settings)),
+            asyncio.create_task(_lock_sweep_loop(cosmos, settings)),
+            asyncio.create_task(_signal_drain_loop(app, settings)),
+        ]
     try:
         yield
     finally:
-        sweep_task.cancel()
-        promote_task.cancel()
-        standby_dns_task.cancel()
-        lock_sweep_task.cancel()
-        drain_task.cancel()
-        await asyncio.gather(
-            sweep_task, promote_task, standby_dns_task, lock_sweep_task, drain_task,
-            return_exceptions=True,
-        )
+        for task in control_plane_tasks:
+            task.cancel()
+        if control_plane_tasks:
+            await asyncio.gather(*control_plane_tasks, return_exceptions=True)
         await app.state.artifact_store.close()
         await cosmos.stop()
 
