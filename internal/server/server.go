@@ -70,6 +70,10 @@ func NewWithDependencies(settings Settings, store ReadStore, authResolver AuthRe
 	mux.HandleFunc("GET /v1/auth/me", authMe(authResolver))
 	adminAuthenticator, _ := authResolver.(AdminAuthenticator)
 	mux.HandleFunc("GET /v1/projects/{project}/runs", listProjectRuns(store))
+	mux.HandleFunc(
+		"GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/report",
+		getRunReportByNumber(store),
+	)
 	mux.HandleFunc("GET /v1/projects", listProjects(store))
 	mux.Handle("POST /v1/projects", requireAdmin(adminAuthenticator, http.HandlerFunc(registerProject(store))))
 	mux.Handle(
