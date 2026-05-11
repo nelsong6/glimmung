@@ -36,9 +36,15 @@ func SettingsFromEnv() Settings {
 }
 
 func New(settings Settings) http.Handler {
+	return NewWithStore(settings, nil)
+}
+
+func NewWithStore(settings Settings, store ReadStore) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
 	mux.HandleFunc("GET /v1/config", publicConfig(settings))
+	mux.HandleFunc("GET /v1/projects", listProjects(store))
+	mux.HandleFunc("GET /v1/workflows", listWorkflows(store))
 	if staticRoots(settings).enabled() {
 		mux.HandleFunc("GET /assets/", serveAsset(settings))
 		mux.HandleFunc("GET /", serveSPA(settings))

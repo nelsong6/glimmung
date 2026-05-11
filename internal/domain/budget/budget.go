@@ -12,7 +12,7 @@ const (
 
 // Config is the run-cumulative cost cap.
 type Config struct {
-	Total float64
+	Total float64 `json:"total"`
 }
 
 // DefaultConfig returns the global fallback budget.
