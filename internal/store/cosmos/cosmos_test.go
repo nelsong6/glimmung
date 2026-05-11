@@ -196,3 +196,71 @@ func TestLeaseFromDocConvertsStateSnapshotShape(t *testing.T) {
 		t.Fatalf("metadata=%#v", lease.Metadata)
 	}
 }
+
+func TestRunReportsFromDocsBuildsPublicRefsAndAttempts(t *testing.T) {
+	cost := 1.25
+	workflowRunID := int64(123)
+	completed := "2026-05-11T03:05:00Z"
+	docs := []runDoc{
+		{
+			ID:                "new",
+			Project:           "glimmung",
+			Workflow:          "issue-agent",
+			RunNumber:         intPtr(2),
+			IssueRepo:         "nelsong6/glimmung",
+			IssueNumber:       141,
+			State:             "passed",
+			CumulativeCostUSD: 3.5,
+			CreatedAt:         "2026-05-11T03:00:00Z",
+			UpdatedAt:         "2026-05-11T03:06:00Z",
+			Attempts: []attemptDoc{{
+				AttemptIndex:     0,
+				Phase:            "implement",
+				PhaseKind:        "gha_dispatch",
+				WorkflowFilename: "agent.yml",
+				WorkflowRunID:    &workflowRunID,
+				DispatchedAt:     "2026-05-11T03:01:00Z",
+				CompletedAt:      completed,
+				Conclusion:       stringPtr("success"),
+				Verification:     &verificationDoc{Status: "pass", EvidenceRefs: []string{"blob://evidence"}, CostUSD: 2.5},
+				CostUSD:          &cost,
+			}},
+		},
+		{
+			ID:          "old",
+			Project:     "glimmung",
+			Workflow:    "issue-agent",
+			IssueRepo:   "nelsong6/glimmung",
+			IssueNumber: 141,
+			State:       "in_progress",
+			CreatedAt:   "2026-05-11T02:00:00Z",
+			UpdatedAt:   "2026-05-11T02:00:00Z",
+		},
+	}
+
+	reports := runReportsFromDocs(docs)
+
+	if reports[0].RunRef != "glimmung#141/runs/2" || reports[0].Ref != "glimmung#141/runs/2/report" {
+		t.Fatalf("new refs=%#v", reports[0])
+	}
+	if reports[1].RunRef != "glimmung#141/runs/1" {
+		t.Fatalf("legacy fallback ref=%#v", reports[1])
+	}
+	if reports[0].AttemptsCount != 1 || reports[0].CurrentPhase == nil || *reports[0].CurrentPhase != "implement" {
+		t.Fatalf("attempt summary=%#v", reports[0])
+	}
+	if reports[0].Attempts[0].VerificationStatus == nil || *reports[0].Attempts[0].VerificationStatus != "pass" {
+		t.Fatalf("verification=%#v", reports[0].Attempts[0])
+	}
+	if reports[0].CompletedAt == nil {
+		t.Fatalf("completed_at missing: %#v", reports[0])
+	}
+}
+
+func intPtr(value int) *int {
+	return &value
+}
+
+func stringPtr(value string) *string {
+	return &value
+}
