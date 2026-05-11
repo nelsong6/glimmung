@@ -363,6 +363,26 @@ func (s *Store) ListLeases(ctx context.Context) ([]server.Lease, error) {
 	return rows, nil
 }
 
+func (s *Store) ReadLeaseByCallbackToken(ctx context.Context, token string) (server.Lease, error) {
+	var docs []leaseDoc
+	if err := queryAllWhere(
+		ctx,
+		s.leases,
+		"SELECT * FROM c WHERE c.metadata.lease_callback_token = @token",
+		[]azcosmos.QueryParameter{{Name: "@token", Value: token}},
+		&docs,
+	); err != nil {
+		return server.Lease{}, err
+	}
+	if len(docs) == 0 {
+		return server.Lease{}, server.ErrNotFound
+	}
+	if len(docs) > 1 {
+		return server.Lease{}, server.ErrConflict
+	}
+	return leaseFromDoc(docs[0]), nil
+}
+
 func queryAll[T any](ctx context.Context, container *azcosmos.ContainerClient, target *[]T) error {
 	return queryAllWhere(ctx, container, "SELECT * FROM c", nil, target)
 }
