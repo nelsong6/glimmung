@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -16,19 +17,20 @@ const (
 )
 
 type Settings struct {
-	Port                string
-	CosmosEndpoint      string
-	CosmosDatabase      string
-	EntraClientID       string
-	EntraTestClientID   string
-	AllowedEmails       string
-	K8sSAAllowlist      string
-	K8sAPIHost          string
-	K8sSATokenPath      string
-	K8sCACertPath       string
-	TankOperatorBaseURL string
-	StaticDir           string
-	StaticOverrideDir   string
+	Port                           string
+	CosmosEndpoint                 string
+	CosmosDatabase                 string
+	EntraClientID                  string
+	EntraTestClientID              string
+	AllowedEmails                  string
+	K8sSAAllowlist                 string
+	K8sAPIHost                     string
+	K8sSATokenPath                 string
+	K8sCACertPath                  string
+	TankOperatorBaseURL            string
+	StaticDir                      string
+	StaticOverrideDir              string
+	NativeRunnerProjectConcurrency int
 }
 
 func SettingsFromEnv() Settings {
@@ -46,6 +48,10 @@ func SettingsFromEnv() Settings {
 		TankOperatorBaseURL: envOrDefault("TANK_OPERATOR_BASE_URL", defaultTankOperatorBaseURL),
 		StaticDir:           os.Getenv("GLIMMUNG_STATIC_DIR"),
 		StaticOverrideDir:   os.Getenv("GLIMMUNG_STATIC_OVERRIDE_DIR"),
+		NativeRunnerProjectConcurrency: envIntOrDefault(
+			"NATIVE_RUNNER_PROJECT_CONCURRENCY",
+			5,
+		),
 	}
 }
 
@@ -64,6 +70,7 @@ func NewWithDependencies(settings Settings, store ReadStore, authResolver AuthRe
 	mux.HandleFunc("GET /v1/auth/me", authMe(authResolver))
 	mux.HandleFunc("GET /v1/projects", listProjects(store))
 	mux.HandleFunc("GET /v1/workflows", listWorkflows(store))
+	mux.HandleFunc("GET /v1/state", stateSnapshot(settings, store))
 	if staticRoots(settings).enabled() {
 		mux.HandleFunc("GET /assets/", serveAsset(settings))
 		mux.HandleFunc("GET /", serveSPA(settings))
@@ -230,4 +237,16 @@ func envOrDefault(name, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func envIntOrDefault(name string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
