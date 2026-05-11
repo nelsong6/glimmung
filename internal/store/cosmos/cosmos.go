@@ -30,6 +30,7 @@ type Store struct {
 	issues    *azcosmos.ContainerClient
 	locks     *azcosmos.ContainerClient
 	reports   *azcosmos.ContainerClient
+	playbooks *azcosmos.ContainerClient
 }
 
 func NewFromSettings(settings server.Settings) (*Store, error) {
@@ -76,7 +77,11 @@ func NewFromSettings(settings server.Settings) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create reports container client: %w", err)
 	}
-	return &Store{projects: projects, workflows: workflows, hosts: hosts, leases: leases, runs: runs, issues: issues, locks: locks, reports: reports}, nil
+	playbooks, err := client.NewContainer(settings.CosmosDatabase, "playbooks")
+	if err != nil {
+		return nil, fmt.Errorf("create playbooks container client: %w", err)
+	}
+	return &Store{projects: projects, workflows: workflows, hosts: hosts, leases: leases, runs: runs, issues: issues, locks: locks, reports: reports, playbooks: playbooks}, nil
 }
 
 func (s *Store) ListProjects(ctx context.Context) ([]server.Project, error) {
@@ -2547,4 +2552,246 @@ func ptrString(s string) *string {
 func parseTimeOrZero(s string) time.Time {
 	t, _ := time.Parse(time.RFC3339Nano, s)
 	return t
+}
+
+// ── Playbook store ────────────────────────────────────────────────────────────
+
+type playbookEntryDoc struct {
+	ID             string         `json:"id"`
+	Title          *string        `json:"title"`
+	Issue          map[string]any `json:"issue"`
+	DependsOn      []string       `json:"depends_on"`
+	ManualGate     bool           `json:"manual_gate"`
+	State          string         `json:"state"`
+	CreatedIssueID *string        `json:"created_issue_id"`
+	RunID          *string        `json:"run_id"`
+	CompletedAt    *string        `json:"completed_at"`
+	Metadata       map[string]any `json:"metadata"`
+}
+
+type playbookDoc struct {
+	ID                  string             `json:"id"`
+	SchemaVersion       int                `json:"schema_version"`
+	Project             string             `json:"project"`
+	Title               string             `json:"title"`
+	Description         string             `json:"description"`
+	Entries             []playbookEntryDoc `json:"entries"`
+	ConcurrencyLimit    *int               `json:"concurrency_limit"`
+	IntegrationStrategy string             `json:"integration_strategy"`
+	State               string             `json:"state"`
+	Metadata            map[string]any     `json:"metadata"`
+	CreatedAt           string             `json:"created_at"`
+	UpdatedAt           string             `json:"updated_at"`
+}
+
+func (s *Store) ListPlaybooks(ctx context.Context, filter server.PlaybookListFilter) ([]server.PlaybookPublic, error) {
+	query := "SELECT * FROM c"
+	var params []azcosmos.QueryParameter
+	var predicates []string
+	if filter.Project != "" {
+		predicates = append(predicates, "c.project = @project")
+		params = append(params, azcosmos.QueryParameter{Name: "@project", Value: filter.Project})
+	}
+	if filter.State != "" {
+		predicates = append(predicates, "c.state = @state")
+		params = append(params, azcosmos.QueryParameter{Name: "@state", Value: filter.State})
+	}
+	if len(predicates) > 0 {
+		query = "SELECT * FROM c WHERE " + strings.Join(predicates, " AND ")
+	}
+	query += " ORDER BY c.created_at DESC"
+	var docs []playbookDoc
+	if err := queryAllWhere(ctx, s.playbooks, query, params, &docs); err != nil {
+		return nil, err
+	}
+	if filter.Limit != nil && *filter.Limit < len(docs) {
+		docs = docs[:*filter.Limit]
+	}
+	out := make([]server.PlaybookPublic, 0, len(docs))
+	for _, doc := range docs {
+		out = append(out, s.playbookToPublic(ctx, doc))
+	}
+	return out, nil
+}
+
+func (s *Store) GetPlaybook(ctx context.Context, project, ref string) (server.PlaybookPublic, error) {
+	var docs []playbookDoc
+	if err := queryAllWhere(ctx, s.playbooks,
+		"SELECT * FROM c WHERE c.project = @project ORDER BY c.created_at DESC",
+		[]azcosmos.QueryParameter{{Name: "@project", Value: project}},
+		&docs,
+	); err != nil {
+		return server.PlaybookPublic{}, err
+	}
+	for _, doc := range docs {
+		if playbookPublicRef(doc) == ref {
+			return s.playbookToPublic(ctx, doc), nil
+		}
+	}
+	return server.PlaybookPublic{}, server.ErrNotFound
+}
+
+func (s *Store) CreatePlaybook(ctx context.Context, req server.PlaybookCreate) (server.PlaybookPublic, error) {
+	// Verify project exists.
+	if _, err := s.readProjectDoc(ctx, req.Project); err != nil {
+		return server.PlaybookPublic{}, server.ErrNotFound
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	metadata := mapOrEmpty(req.Metadata)
+	if _, hasRef := metadata["public_ref"]; !hasRef {
+		t, _ := time.Parse(time.RFC3339Nano, now)
+		metadata["public_ref"] = playbookSlug(req.Title) + "-" + t.UTC().Format("20060102150405")
+	}
+	entries := make([]playbookEntryDoc, 0, len(req.Entries))
+	for _, e := range req.Entries {
+		entries = append(entries, playbookEntryDoc{
+			ID:         e.ID,
+			Title:      e.Title,
+			Issue:      playbookIssueSpecToMap(e.Issue),
+			DependsOn:  sliceOrEmpty(e.DependsOn),
+			ManualGate: e.ManualGate,
+			State:      "pending",
+			Metadata:   mapOrEmpty(e.Metadata),
+		})
+	}
+	doc := playbookDoc{
+		ID:                  uuid.New().String(),
+		SchemaVersion:       1,
+		Project:             req.Project,
+		Title:               req.Title,
+		Description:         req.Description,
+		Entries:             entries,
+		ConcurrencyLimit:    req.ConcurrencyLimit,
+		IntegrationStrategy: firstNonEmpty(req.IntegrationStrategy, "isolated_prs"),
+		State:               "draft",
+		Metadata:            metadata,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return server.PlaybookPublic{}, err
+	}
+	if _, err := s.playbooks.CreateItem(ctx, azcosmos.NewPartitionKeyString(req.Project), payload, nil); err != nil {
+		return server.PlaybookPublic{}, err
+	}
+	return s.playbookToPublic(ctx, doc), nil
+}
+
+func (s *Store) playbookToPublic(ctx context.Context, doc playbookDoc) server.PlaybookPublic {
+	entries := make([]server.PlaybookEntryPublic, 0, len(doc.Entries))
+	for _, e := range doc.Entries {
+		pub := server.PlaybookEntryPublic{
+			ID:          e.ID,
+			Title:       e.Title,
+			Issue:       playbookIssueSpecFromMap(e.Issue),
+			DependsOn:   sliceOrEmpty(e.DependsOn),
+			ManualGate:  e.ManualGate,
+			State:       firstNonEmpty(e.State, "pending"),
+			CompletedAt: e.CompletedAt,
+			Metadata:    mapOrEmpty(e.Metadata),
+		}
+		// Resolve created_issue_ref from created_issue_id.
+		if e.CreatedIssueID != nil && *e.CreatedIssueID != "" {
+			var issueDocs []issueDoc
+			if err := queryAllWhere(ctx, s.issues,
+				"SELECT * FROM c WHERE c.id = @id",
+				[]azcosmos.QueryParameter{{Name: "@id", Value: *e.CreatedIssueID}},
+				&issueDocs,
+			); err == nil && len(issueDocs) > 0 {
+				ref := publicids.IssueRef(issueDocs[0].Project, &issueDocs[0].Number)
+				pub.CreatedIssueRef = &ref
+			}
+		}
+		entries = append(entries, pub)
+	}
+	metadata := mapOrEmpty(doc.Metadata)
+	delete(metadata, "public_ref")
+	return server.PlaybookPublic{
+		SchemaVersion:       max(doc.SchemaVersion, 1),
+		Ref:                 playbookPublicRef(doc),
+		Project:             doc.Project,
+		Title:               doc.Title,
+		Description:         doc.Description,
+		Entries:             entries,
+		ConcurrencyLimit:    doc.ConcurrencyLimit,
+		IntegrationStrategy: firstNonEmpty(doc.IntegrationStrategy, "isolated_prs"),
+		State:               firstNonEmpty(doc.State, "draft"),
+		Metadata:            metadata,
+		CreatedAt:           doc.CreatedAt,
+		UpdatedAt:           doc.UpdatedAt,
+	}
+}
+
+func playbookPublicRef(doc playbookDoc) string {
+	if ref, ok := doc.Metadata["public_ref"].(string); ok && strings.TrimSpace(ref) != "" {
+		return strings.TrimSpace(ref)
+	}
+	t, _ := time.Parse(time.RFC3339Nano, doc.CreatedAt)
+	return playbookSlug(doc.Title) + "-" + t.UTC().Format("20060102150405")
+}
+
+func playbookSlug(title string) string {
+	slug := strings.ToLower(title)
+	var b strings.Builder
+	prev := false
+	for _, ch := range slug {
+		alnum := (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')
+		if alnum {
+			b.WriteRune(ch)
+			prev = false
+		} else if !prev {
+			b.WriteByte('-')
+			prev = true
+		}
+	}
+	result := strings.Trim(b.String(), "-")
+	if result == "" {
+		return "playbook"
+	}
+	return result
+}
+
+func playbookIssueSpecToMap(spec server.PlaybookIssueSpec) map[string]any {
+	m := map[string]any{
+		"title":  spec.Title,
+		"body":   spec.Body,
+		"labels": sliceOrEmpty(spec.Labels),
+	}
+	if spec.Workflow != nil {
+		m["workflow"] = *spec.Workflow
+	}
+	if spec.Metadata != nil {
+		m["metadata"] = spec.Metadata
+	}
+	return m
+}
+
+func playbookIssueSpecFromMap(m map[string]any) server.PlaybookIssueSpec {
+	spec := server.PlaybookIssueSpec{
+		Title:    stringValue(m["title"]),
+		Body:     stringValue(m["body"]),
+		Metadata: mapOrEmpty(nil),
+	}
+	if labels, ok := m["labels"].([]any); ok {
+		for _, l := range labels {
+			if s, ok := l.(string); ok {
+				spec.Labels = append(spec.Labels, s)
+			}
+		}
+	}
+	if wf, ok := m["workflow"].(string); ok && wf != "" {
+		spec.Workflow = &wf
+	}
+	if meta, ok := m["metadata"].(map[string]any); ok {
+		spec.Metadata = meta
+	}
+	return spec
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

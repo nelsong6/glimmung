@@ -169,6 +169,9 @@ func NewWithDependencies(settings Settings, store ReadStore, authResolver AuthRe
 		storageIDGone("GitHub Issue graph lookup is disabled; use /v1/issues/by-number/{project}/{issue_number}/graph"),
 	)
 	mux.HandleFunc("GET /v1/graph", storageIDGone("system graph is not supported in the Go backend yet"))
+	mux.HandleFunc("GET /v1/playbooks", listPlaybooks(store))
+	mux.Handle("POST /v1/playbooks", requireAdmin(adminAuthenticator, http.HandlerFunc(createPlaybook(store))))
+	mux.HandleFunc("GET /v1/playbooks/{project}/{playbook_ref}", getPlaybook(store))
 	mux.HandleFunc("GET /v1/touchpoints", listTouchpoints(store))
 	mux.HandleFunc("GET /v1/reports", listTouchpoints(store))
 	mux.HandleFunc("GET /v1/touchpoints/{repo_owner}/{repo_name}/{pr_number}", touchpointDetailByRepoPR(store))
