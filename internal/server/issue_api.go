@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -14,6 +15,11 @@ type IssueStore interface {
 	ListIssues(ctx context.Context, filter IssueListFilter) ([]IssueRow, error)
 	GetIssueDetailByNumber(ctx context.Context, project string, number int) (IssueDetail, error)
 	ArchiveIssueByNumber(ctx context.Context, req IssueArchive) (IssueDetail, error)
+	CreateIssue(ctx context.Context, req IssueCreate) (IssueDetail, error)
+	PatchIssueByNumber(ctx context.Context, req IssuePatch) (IssueDetail, error)
+	AddIssueComment(ctx context.Context, req IssueCommentAdd) (IssueComment, error)
+	UpdateIssueComment(ctx context.Context, req IssueCommentUpdate) (IssueComment, error)
+	DeleteIssueComment(ctx context.Context, req IssueCommentDelete) (IssueDetail, error)
 }
 
 type IssueListFilter struct {
@@ -171,6 +177,266 @@ func archiveIssueByNumber(store ReadStore, action string) http.HandlerFunc {
 			return
 		case err != nil:
 			writeProblem(w, http.StatusInternalServerError, "archive issue failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, detail)
+	}
+}
+
+// IssueCreate is the store-level request for creating a new issue.
+type IssueCreate struct {
+	Project  string
+	Title    string
+	Body     string
+	Labels   []string
+	Workflow *string
+}
+
+// IssuePatch is the store-level request for patching an issue.
+type IssuePatch struct {
+	Project string
+	Number  int
+	Title   *string
+	Body    *string
+	Labels  *[]string
+	State   *string
+}
+
+// IssueCommentAdd is the store-level request for adding a comment.
+type IssueCommentAdd struct {
+	Project string
+	Number  int
+	Author  string
+	Body    string
+}
+
+// IssueCommentUpdate is the store-level request for editing a comment.
+type IssueCommentUpdate struct {
+	Project   string
+	Number    int
+	CommentID string
+	Author    string
+	Body      string
+}
+
+// IssueCommentDelete is the store-level request for deleting a comment.
+type IssueCommentDelete struct {
+	Project   string
+	Number    int
+	CommentID string
+}
+
+// HTTP request bodies
+
+type IssueCreateRequest struct {
+	Project  string   `json:"project"`
+	Title    string   `json:"title"`
+	Body     string   `json:"body"`
+	Labels   []string `json:"labels"`
+	Workflow *string  `json:"workflow"`
+}
+
+type IssuePatchRequest struct {
+	Title  *string   `json:"title"`
+	Body   *string   `json:"body"`
+	Labels *[]string `json:"labels"`
+	State  *string   `json:"state"`
+}
+
+type IssueCommentRequest struct {
+	Body string `json:"body"`
+}
+
+func createIssue(store ReadStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		issueStore, ok := store.(IssueStore)
+		if !ok || issueStore == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "issue store not configured")
+			return
+		}
+		var body IssueCreateRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeProblem(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		if body.Project == "" {
+			writeProblem(w, http.StatusBadRequest, "project required")
+			return
+		}
+		if strings.TrimSpace(body.Title) == "" {
+			writeProblem(w, http.StatusBadRequest, "title required")
+			return
+		}
+		detail, err := issueStore.CreateIssue(r.Context(), IssueCreate{
+			Project:  body.Project,
+			Title:    body.Title,
+			Body:     body.Body,
+			Labels:   body.Labels,
+			Workflow: body.Workflow,
+		})
+		var validationErr ValidationError
+		switch {
+		case errors.As(err, &validationErr):
+			writeProblem(w, http.StatusBadRequest, err.Error())
+			return
+		case err != nil:
+			writeProblem(w, http.StatusInternalServerError, "create issue failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, detail)
+	}
+}
+
+func patchIssueByNumber(store ReadStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		issueStore, ok := store.(IssueStore)
+		if !ok || issueStore == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "issue store not configured")
+			return
+		}
+		number, err := strconv.Atoi(r.PathValue("issue_number"))
+		if err != nil || number < 1 {
+			writeProblem(w, http.StatusBadRequest, "issue_number must be a positive integer")
+			return
+		}
+		var body IssuePatchRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeProblem(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		detail, err := issueStore.PatchIssueByNumber(r.Context(), IssuePatch{
+			Project: r.PathValue("project"),
+			Number:  number,
+			Title:   body.Title,
+			Body:    body.Body,
+			Labels:  body.Labels,
+			State:   body.State,
+		})
+		var validationErr ValidationError
+		switch {
+		case errors.Is(err, ErrNotFound):
+			writeProblem(w, http.StatusNotFound, "issue not found")
+			return
+		case errors.As(err, &validationErr):
+			writeProblem(w, http.StatusBadRequest, err.Error())
+			return
+		case err != nil:
+			writeProblem(w, http.StatusInternalServerError, "patch issue failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, detail)
+	}
+}
+
+func createIssueComment(store ReadStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		issueStore, ok := store.(IssueStore)
+		if !ok || issueStore == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "issue store not configured")
+			return
+		}
+		number, err := strconv.Atoi(r.PathValue("issue_number"))
+		if err != nil || number < 1 {
+			writeProblem(w, http.StatusBadRequest, "issue_number must be a positive integer")
+			return
+		}
+		var body IssueCommentRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeProblem(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		user, _ := adminUser(r.Context())
+		author := firstNonEmpty(user.Email, user.Name, user.Sub, "admin")
+		comment, err := issueStore.AddIssueComment(r.Context(), IssueCommentAdd{
+			Project: r.PathValue("project"),
+			Number:  number,
+			Author:  author,
+			Body:    body.Body,
+		})
+		var validationErr ValidationError
+		switch {
+		case errors.Is(err, ErrNotFound):
+			writeProblem(w, http.StatusNotFound, "issue not found")
+			return
+		case errors.As(err, &validationErr):
+			writeProblem(w, http.StatusBadRequest, err.Error())
+			return
+		case err != nil:
+			writeProblem(w, http.StatusInternalServerError, "add comment failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, comment)
+	}
+}
+
+func updateIssueComment(store ReadStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		issueStore, ok := store.(IssueStore)
+		if !ok || issueStore == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "issue store not configured")
+			return
+		}
+		number, err := strconv.Atoi(r.PathValue("issue_number"))
+		if err != nil || number < 1 {
+			writeProblem(w, http.StatusBadRequest, "issue_number must be a positive integer")
+			return
+		}
+		var body IssueCommentRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeProblem(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		user, _ := adminUser(r.Context())
+		author := firstNonEmpty(user.Email, user.Name, user.Sub, "admin")
+		comment, err := issueStore.UpdateIssueComment(r.Context(), IssueCommentUpdate{
+			Project:   r.PathValue("project"),
+			Number:    number,
+			CommentID: r.PathValue("comment_id"),
+			Author:    author,
+			Body:      body.Body,
+		})
+		var validationErr ValidationError
+		switch {
+		case errors.Is(err, ErrNotFound):
+			writeProblem(w, http.StatusNotFound, "comment not found")
+			return
+		case errors.Is(err, ErrForbidden):
+			writeProblem(w, http.StatusForbidden, "cannot edit another author's comment")
+			return
+		case errors.As(err, &validationErr):
+			writeProblem(w, http.StatusBadRequest, err.Error())
+			return
+		case err != nil:
+			writeProblem(w, http.StatusInternalServerError, "update comment failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, comment)
+	}
+}
+
+func deleteIssueComment(store ReadStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		issueStore, ok := store.(IssueStore)
+		if !ok || issueStore == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "issue store not configured")
+			return
+		}
+		number, err := strconv.Atoi(r.PathValue("issue_number"))
+		if err != nil || number < 1 {
+			writeProblem(w, http.StatusBadRequest, "issue_number must be a positive integer")
+			return
+		}
+		detail, err := issueStore.DeleteIssueComment(r.Context(), IssueCommentDelete{
+			Project:   r.PathValue("project"),
+			Number:    number,
+			CommentID: r.PathValue("comment_id"),
+		})
+		switch {
+		case errors.Is(err, ErrNotFound):
+			writeProblem(w, http.StatusNotFound, "issue or comment not found")
+			return
+		case err != nil:
+			writeProblem(w, http.StatusInternalServerError, "delete comment failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, detail)

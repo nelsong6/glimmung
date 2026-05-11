@@ -156,8 +156,26 @@ func NewWithDependencies(settings Settings, store ReadStore, authResolver AuthRe
 		getRunReportByNumber(store),
 	)
 	mux.HandleFunc("GET /v1/issues/by-number/{project}/{issue_number}", issueDetailByNumber(store))
+	mux.HandleFunc(
+		"GET /v1/issues/{repo_owner}/{repo_name}/{issue_number}",
+		storageIDGone("GitHub Issue lookup is disabled; use /v1/issues/by-number/{project}/{issue_number}"),
+	)
+	mux.HandleFunc(
+		"GET /v1/issues/by-number/{project}/{issue_number}/graph",
+		storageIDGone("use /v1/issues/by-number/{project}/{issue_number}/graph is not supported in the Go backend yet"),
+	)
+	mux.HandleFunc(
+		"GET /v1/issues/{repo_owner}/{repo_name}/{issue_number}/graph",
+		storageIDGone("GitHub Issue graph lookup is disabled; use /v1/issues/by-number/{project}/{issue_number}/graph"),
+	)
+	mux.HandleFunc("GET /v1/graph", storageIDGone("system graph is not supported in the Go backend yet"))
 	mux.HandleFunc("GET /v1/projects", listProjects(store))
 	mux.Handle("POST /v1/projects", requireAdmin(adminAuthenticator, http.HandlerFunc(registerProject(store))))
+	mux.Handle("POST /v1/issues", requireAdmin(adminAuthenticator, http.HandlerFunc(createIssue(store))))
+	mux.Handle(
+		"PATCH /v1/issues/by-number/{project}/{issue_number}",
+		requireAdmin(adminAuthenticator, http.HandlerFunc(patchIssueByNumber(store))),
+	)
 	mux.Handle(
 		"POST /v1/issues/by-number/{project}/{issue_number}/archive",
 		requireAdmin(adminAuthenticator, http.HandlerFunc(archiveIssueByNumber(store, "archived"))),
@@ -165,6 +183,18 @@ func NewWithDependencies(settings Settings, store ReadStore, authResolver AuthRe
 	mux.Handle(
 		"POST /v1/issues/by-number/{project}/{issue_number}/discard",
 		requireAdmin(adminAuthenticator, http.HandlerFunc(archiveIssueByNumber(store, "discarded"))),
+	)
+	mux.Handle(
+		"POST /v1/issues/by-number/{project}/{issue_number}/comments",
+		requireAdmin(adminAuthenticator, http.HandlerFunc(createIssueComment(store))),
+	)
+	mux.Handle(
+		"PATCH /v1/issues/by-number/{project}/{issue_number}/comments/{comment_id}",
+		requireAdmin(adminAuthenticator, http.HandlerFunc(updateIssueComment(store))),
+	)
+	mux.Handle(
+		"DELETE /v1/issues/by-number/{project}/{issue_number}/comments/{comment_id}",
+		requireAdmin(adminAuthenticator, http.HandlerFunc(deleteIssueComment(store))),
 	)
 	mux.Handle(
 		"PATCH /v1/projects/{project}/test-environments/count",
