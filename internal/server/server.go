@@ -154,6 +154,7 @@ func NewWithDependencies(settings Settings, store ReadStore, authResolver AuthRe
 		"GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/report",
 		getRunReportByNumber(store),
 	)
+	mux.HandleFunc("GET /v1/issues/by-number/{project}/{issue_number}", issueDetailByNumber(store))
 	mux.HandleFunc("GET /v1/projects", listProjects(store))
 	mux.Handle("POST /v1/projects", requireAdmin(adminAuthenticator, http.HandlerFunc(registerProject(store))))
 	mux.Handle(

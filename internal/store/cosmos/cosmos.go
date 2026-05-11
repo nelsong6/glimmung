@@ -25,6 +25,8 @@ type Store struct {
 	hosts     *azcosmos.ContainerClient
 	leases    *azcosmos.ContainerClient
 	runs      *azcosmos.ContainerClient
+	issues    *azcosmos.ContainerClient
+	locks     *azcosmos.ContainerClient
 }
 
 func NewFromSettings(settings server.Settings) (*Store, error) {
@@ -59,7 +61,15 @@ func NewFromSettings(settings server.Settings) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create runs container client: %w", err)
 	}
-	return &Store{projects: projects, workflows: workflows, hosts: hosts, leases: leases, runs: runs}, nil
+	issues, err := client.NewContainer(settings.CosmosDatabase, "issues")
+	if err != nil {
+		return nil, fmt.Errorf("create issues container client: %w", err)
+	}
+	locks, err := client.NewContainer(settings.CosmosDatabase, "locks")
+	if err != nil {
+		return nil, fmt.Errorf("create locks container client: %w", err)
+	}
+	return &Store{projects: projects, workflows: workflows, hosts: hosts, leases: leases, runs: runs, issues: issues, locks: locks}, nil
 }
 
 func (s *Store) ListProjects(ctx context.Context) ([]server.Project, error) {
@@ -462,6 +472,114 @@ func (s *Store) GetRunReportByNumber(ctx context.Context, project string, issueN
 	return server.RunReport{}, server.ErrNotFound
 }
 
+func (s *Store) GetIssueDetailByNumber(ctx context.Context, project string, number int) (server.IssueDetail, error) {
+	issue, err := s.readIssueByNumber(ctx, project, number)
+	if err != nil {
+		return server.IssueDetail{}, err
+	}
+	detail := issueDetailFromDoc(issue)
+	latestRun, runDocs, err := s.latestRunForIssue(ctx, issue)
+	if err != nil {
+		return server.IssueDetail{}, err
+	}
+	if latestRun != nil {
+		numbers := runNumberMap(runDocs)
+		runNumber := latestRun.RunNumber
+		if runNumber == nil {
+			if value := numbers[latestRun.ID]; value > 0 {
+				runNumber = &value
+			}
+		}
+		display := runDisplayNumber(*latestRun, numbers[latestRun.ID])
+		detail.LastRunNumber = runNumber
+		detail.LastRunRef = optionalNonEmptyStringPtr(publicids.RunRef(issue.Project, &issue.Number, display))
+		detail.LastRunState = optionalNonEmptyStringPtr(latestRun.State)
+	}
+	held, err := s.issueLockHeld(ctx, issue.Project, issue.Number)
+	if err != nil {
+		return server.IssueDetail{}, err
+	}
+	detail.IssueLockHeld = held
+	return detail, nil
+}
+
+func (s *Store) readIssueByNumber(ctx context.Context, project string, number int) (issueDoc, error) {
+	var docs []issueDoc
+	if err := queryAllWhere(
+		ctx,
+		s.issues,
+		"SELECT * FROM c WHERE c.project = @project AND c.number = @number",
+		[]azcosmos.QueryParameter{
+			{Name: "@project", Value: project},
+			{Name: "@number", Value: number},
+		},
+		&docs,
+	); err != nil {
+		return issueDoc{}, err
+	}
+	if len(docs) == 0 {
+		return issueDoc{}, server.ErrNotFound
+	}
+	return docs[0], nil
+}
+
+func (s *Store) latestRunForIssue(ctx context.Context, issue issueDoc) (*runDoc, []runDoc, error) {
+	var docs []runDoc
+	if issue.ID != "" {
+		if err := queryAllWhere(
+			ctx,
+			s.runs,
+			"SELECT * FROM c WHERE c.project = @project AND c.issue_id = @issue_id",
+			[]azcosmos.QueryParameter{
+				{Name: "@project", Value: issue.Project},
+				{Name: "@issue_id", Value: issue.ID},
+			},
+			&docs,
+		); err != nil {
+			return nil, nil, err
+		}
+	}
+	if len(docs) == 0 {
+		var err error
+		docs, err = s.issueRunDocs(ctx, issue.Project, issue.Number)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	if len(docs) == 0 {
+		return nil, docs, nil
+	}
+	sort.SliceStable(docs, func(i, j int) bool {
+		return docs[i].CreatedAt < docs[j].CreatedAt
+	})
+	latest := docs[len(docs)-1]
+	return &latest, docs, nil
+}
+
+func (s *Store) issueLockHeld(ctx context.Context, project string, number int) (bool, error) {
+	var docs []lockDoc
+	if err := queryAllWhere(
+		ctx,
+		s.locks,
+		"SELECT * FROM c WHERE c.scope = @scope AND c.key = @key",
+		[]azcosmos.QueryParameter{
+			{Name: "@scope", Value: "issue"},
+			{Name: "@key", Value: fmt.Sprintf("%s#%d", project, number)},
+		},
+		&docs,
+	); err != nil {
+		return false, err
+	}
+	now := time.Now().UTC()
+	for _, doc := range docs {
+		expiresAt := parseOptionalTime(doc.ExpiresAt)
+		if doc.State == "held" && expiresAt != nil && expiresAt.After(now) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *Store) issueRunDocs(ctx context.Context, project string, issueNumber int) ([]runDoc, error) {
 	var docs []runDoc
 	if err := queryAllWhere(
@@ -667,6 +785,35 @@ type runDoc struct {
 	UpdatedAt           string         `json:"updated_at"`
 }
 
+type issueDoc struct {
+	ID        string            `json:"id"`
+	Number    int               `json:"number"`
+	Project   string            `json:"project"`
+	Title     string            `json:"title"`
+	Body      string            `json:"body"`
+	Labels    []string          `json:"labels"`
+	State     string            `json:"state"`
+	Comments  []issueCommentDoc `json:"comments"`
+	CreatedAt string            `json:"created_at"`
+	UpdatedAt string            `json:"updated_at"`
+}
+
+type issueCommentDoc struct {
+	ID        string `json:"id"`
+	Author    string `json:"author"`
+	Body      string `json:"body"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+type lockDoc struct {
+	ID        string `json:"id"`
+	Scope     string `json:"scope"`
+	Key       string `json:"key"`
+	State     string `json:"state"`
+	ExpiresAt string `json:"expires_at"`
+}
+
 type attemptDoc struct {
 	AttemptIndex     int              `json:"attempt_index"`
 	Phase            string           `json:"phase"`
@@ -850,6 +997,32 @@ func runReportsFromDocs(docs []runDoc) []server.RunReport {
 		reports = append(reports, runReportFromDoc(doc, lineageByID))
 	}
 	return reports
+}
+
+func issueDetailFromDoc(doc issueDoc) server.IssueDetail {
+	comments := make([]server.IssueComment, 0, len(doc.Comments))
+	for _, comment := range doc.Comments {
+		comments = append(comments, server.IssueComment{
+			ID:        comment.ID,
+			Author:    comment.Author,
+			Body:      comment.Body,
+			CreatedAt: parseTimeOrNow(comment.CreatedAt),
+			UpdatedAt: parseTimeOrNow(comment.UpdatedAt),
+		})
+	}
+	number := doc.Number
+	return server.IssueDetail{
+		Ref:      publicids.IssueRef(doc.Project, &number),
+		Project:  doc.Project,
+		Repo:     nil,
+		Number:   &number,
+		Title:    doc.Title,
+		Body:     doc.Body,
+		State:    firstNonEmpty(doc.State, "open"),
+		Labels:   sliceOrEmpty(doc.Labels),
+		HTMLURL:  nil,
+		Comments: comments,
+	}
 }
 
 func runRefMapFromDocs(docs []runDoc) map[string]string {
