@@ -17,7 +17,7 @@ type RunReplayStore interface {
 	GetWorkflowByName(ctx context.Context, project, name string) (*Workflow, error)
 }
 
-// RunReplayData is the minimal run state required by the decision engine replay.
+// RunReplayData is the minimal run state required by the decision engine replay and completion handling.
 type RunReplayData struct {
 	ID                string
 	Project           string
@@ -25,6 +25,11 @@ type RunReplayData struct {
 	Attempts          []RunAttemptData
 	CumulativeCostUSD float64
 	IssueNumber       int
+	IssueRepo         string
+	CallbackToken     *string
+	IssueLockHolderID *string
+	PRNumber          *int
+	PRLockHolderID    *string
 }
 
 // RunAttemptData holds one attempt's decision-engine-relevant fields.

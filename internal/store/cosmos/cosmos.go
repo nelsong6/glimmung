@@ -3545,6 +3545,11 @@ func (s *Store) ReadRunForReplay(ctx context.Context, project, runID string) (se
 		Attempts:          attempts,
 		CumulativeCostUSD: doc.CumulativeCostUSD,
 		IssueNumber:       doc.IssueNumber,
+		IssueRepo:         doc.IssueRepo,
+		CallbackToken:     doc.CallbackToken,
+		IssueLockHolderID: doc.IssueLockHolderID,
+		PRNumber:          doc.PRNumber,
+		PRLockHolderID:    doc.PRLockHolderID,
 	}, nil
 }
 
@@ -4019,4 +4024,241 @@ func stringOrEmpty(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// StampRunCompletion records completion data on the latest (or specified) attempt and
+// increments the run's cumulative_cost_usd. Returns the updated run data.
+func (s *Store) StampRunCompletion(ctx context.Context, project, runID string, p server.CompletionPayload) (server.RunReplayData, error) {
+	pk := azcosmos.NewPartitionKeyString(project)
+	const maxRetries = 5
+	for i := 0; i < maxRetries; i++ {
+		resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
+		if isCosmosStatus(err, http.StatusNotFound) {
+			return server.RunReplayData{}, server.ErrNotFound
+		}
+		if err != nil {
+			return server.RunReplayData{}, err
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(resp.Value, &raw); err != nil {
+			return server.RunReplayData{}, err
+		}
+		attempts, _ := raw["attempts"].([]any)
+		if len(attempts) == 0 {
+			return server.RunReplayData{}, fmt.Errorf("run has no attempts")
+		}
+
+		idx := len(attempts) - 1
+		if p.AttemptIndex != nil && *p.AttemptIndex >= 0 && *p.AttemptIndex < len(attempts) {
+			idx = *p.AttemptIndex
+		}
+		attempt, ok := attempts[idx].(map[string]any)
+		if !ok {
+			return server.RunReplayData{}, fmt.Errorf("invalid attempt at index %d", idx)
+		}
+
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		attempt["completed_at"] = now
+		attempt["conclusion"] = p.Conclusion
+		if p.WorkflowRunID != nil {
+			if _, alreadySet := attempt["workflow_run_id"]; !alreadySet || attempt["workflow_run_id"] == nil {
+				attempt["workflow_run_id"] = *p.WorkflowRunID
+			}
+		}
+		if p.SummaryMarkdown != nil {
+			attempt["summary_markdown"] = *p.SummaryMarkdown
+		}
+		if p.PhaseOutputs != nil {
+			attempt["phase_outputs"] = p.PhaseOutputs
+		}
+		if p.VerificationStatus != "" {
+			attempt["verification"] = map[string]any{
+				"status":  p.VerificationStatus,
+				"reasons": p.VerificationReasons,
+				"cost_usd": p.CostUSD,
+			}
+		}
+		attempt["cost_usd"] = p.CostUSD
+		attempts[idx] = attempt
+		raw["attempts"] = attempts
+
+		// Increment cumulative cost.
+		prior, _ := raw["cumulative_cost_usd"].(float64)
+		raw["cumulative_cost_usd"] = prior + p.CostUSD
+		raw["updated_at"] = now
+		// First-arrival wins for screenshots_markdown.
+		if p.ScreenshotsMarkdown != nil && (raw["screenshots_markdown"] == nil || raw["screenshots_markdown"] == "") {
+			raw["screenshots_markdown"] = *p.ScreenshotsMarkdown
+		}
+
+		payload, err := json.Marshal(raw)
+		if err != nil {
+			return server.RunReplayData{}, err
+		}
+		etag := azcore.ETag(resp.ETag)
+		if _, err := s.runs.ReplaceItem(ctx, pk, runID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
+			if isCosmosStatus(err, http.StatusPreconditionFailed) {
+				continue
+			}
+			return server.RunReplayData{}, err
+		}
+		// Re-read to return the updated RunReplayData.
+		return s.ReadRunForReplay(ctx, project, runID)
+	}
+	return server.RunReplayData{}, fmt.Errorf("stamp run completion: too many etag conflicts")
+}
+
+// StampRunDecision stamps the decision string on the latest attempt of a run.
+func (s *Store) StampRunDecision(ctx context.Context, project, runID, decision string) error {
+	pk := azcosmos.NewPartitionKeyString(project)
+	const maxRetries = 5
+	for i := 0; i < maxRetries; i++ {
+		resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
+		if isCosmosStatus(err, http.StatusNotFound) {
+			return server.ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(resp.Value, &raw); err != nil {
+			return err
+		}
+		attempts, _ := raw["attempts"].([]any)
+		if len(attempts) == 0 {
+			return nil
+		}
+		attempt, ok := attempts[len(attempts)-1].(map[string]any)
+		if !ok {
+			return nil
+		}
+		attempt["decision"] = decision
+		attempts[len(attempts)-1] = attempt
+		raw["attempts"] = attempts
+		raw["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+
+		payload, err := json.Marshal(raw)
+		if err != nil {
+			return err
+		}
+		etag := azcore.ETag(resp.ETag)
+		if _, err := s.runs.ReplaceItem(ctx, pk, runID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
+			if isCosmosStatus(err, http.StatusPreconditionFailed) {
+				continue
+			}
+			return err
+		}
+		return nil
+	}
+	return fmt.Errorf("stamp run decision: too many etag conflicts")
+}
+
+// SetRunTerminalState sets the run's state (passed, review_required, or aborted) and
+// best-effort releases issue/PR locks. Mirrors AbortRunByID but for non-abort terminal states.
+func (s *Store) SetRunTerminalState(ctx context.Context, project, runID, state string, abortReason *string) (server.AbortRunResult, error) {
+	pk := azcosmos.NewPartitionKeyString(project)
+	resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
+	if isCosmosStatus(err, http.StatusNotFound) {
+		return server.AbortRunResult{}, server.ErrNotFound
+	}
+	if err != nil {
+		return server.AbortRunResult{}, err
+	}
+	var doc runDoc
+	if err := json.Unmarshal(resp.Value, &doc); err != nil {
+		return server.AbortRunResult{}, err
+	}
+
+	siblings, _ := s.issueRunDocs(ctx, project, doc.IssueNumber)
+	numbers := runNumberMap(siblings)
+	runRef := publicids.RunRef(doc.Project, positiveIssueNumberPtr(doc.IssueNumber), runDisplayNumber(doc, numbers[doc.ID]))
+
+	var raw map[string]any
+	if err := json.Unmarshal(resp.Value, &raw); err != nil {
+		return server.AbortRunResult{}, err
+	}
+	raw["state"] = state
+	raw["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	if abortReason != nil {
+		raw["abort_reason"] = *abortReason
+	}
+	payload, err := json.Marshal(raw)
+	if err != nil {
+		return server.AbortRunResult{}, err
+	}
+	etag := azcore.ETag(resp.ETag)
+	if _, err := s.runs.ReplaceItem(ctx, pk, runID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
+		return server.AbortRunResult{}, err
+	}
+
+	var issueLockReleased, prLockReleased *bool
+	if doc.IssueLockHolderID != nil && *doc.IssueLockHolderID != "" && doc.IssueNumber > 0 {
+		released := s.releaseLock(ctx, "issue", fmt.Sprintf("%s#%d", project, doc.IssueNumber), *doc.IssueLockHolderID)
+		issueLockReleased = &released
+	}
+	if doc.PRLockHolderID != nil && *doc.PRLockHolderID != "" && doc.PRNumber != nil && doc.IssueRepo != "" {
+		released := s.releaseLock(ctx, "pr", fmt.Sprintf("%s#%d", doc.IssueRepo, *doc.PRNumber), *doc.PRLockHolderID)
+		prLockReleased = &released
+	}
+
+	return server.AbortRunResult{
+		State:             state,
+		RunRef:            runRef,
+		RunNumber:         doc.RunNumber,
+		RunDisplayNumber:  doc.RunDisplayNumber,
+		IssueLockReleased: issueLockReleased,
+		PRLockReleased:    prLockReleased,
+	}, nil
+}
+
+// AppendRunAttempt appends a new PhaseAttempt to an in-progress run before retry dispatch.
+// Returns the new attempt's index.
+func (s *Store) AppendRunAttempt(ctx context.Context, project, runID, phase, phaseKind, workflowFilename string) (int, error) {
+	pk := azcosmos.NewPartitionKeyString(project)
+	const maxRetries = 5
+	for i := 0; i < maxRetries; i++ {
+		resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
+		if isCosmosStatus(err, http.StatusNotFound) {
+			return 0, server.ErrNotFound
+		}
+		if err != nil {
+			return 0, err
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(resp.Value, &raw); err != nil {
+			return 0, err
+		}
+		attempts, _ := raw["attempts"].([]any)
+		nextIdx := len(attempts)
+		if len(attempts) > 0 {
+			if last, ok := attempts[len(attempts)-1].(map[string]any); ok {
+				if ai, ok := last["attempt_index"].(float64); ok {
+					nextIdx = int(ai) + 1
+				}
+			}
+		}
+		newAttempt := map[string]any{
+			"attempt_index":     nextIdx,
+			"phase":             phase,
+			"phase_kind":        phaseKind,
+			"workflow_filename": workflowFilename,
+			"dispatched_at":     time.Now().UTC().Format(time.RFC3339Nano),
+		}
+		raw["attempts"] = append(attempts, newAttempt)
+		raw["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+
+		payload, err := json.Marshal(raw)
+		if err != nil {
+			return 0, err
+		}
+		etag := azcore.ETag(resp.ETag)
+		if _, err := s.runs.ReplaceItem(ctx, pk, runID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
+			if isCosmosStatus(err, http.StatusPreconditionFailed) {
+				continue
+			}
+			return 0, err
+		}
+		return nextIdx, nil
+	}
+	return 0, fmt.Errorf("append run attempt: too many etag conflicts")
 }
