@@ -12,6 +12,7 @@ type PlaybookStore interface {
 	ListPlaybooks(ctx context.Context, filter PlaybookListFilter) ([]PlaybookPublic, error)
 	GetPlaybook(ctx context.Context, project, ref string) (PlaybookPublic, error)
 	CreatePlaybook(ctx context.Context, req PlaybookCreate) (PlaybookPublic, error)
+	PatchPlaybookEntryGate(ctx context.Context, project, ref, entryID string, manualGate bool) (PlaybookPublic, error)
 }
 
 type PlaybookListFilter struct {
@@ -173,6 +174,38 @@ func createPlaybook(store ReadStore) http.HandlerFunc {
 			return
 		case err != nil:
 			writeProblem(w, http.StatusInternalServerError, "create playbook failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, pb)
+	}
+}
+
+type PlaybookEntryGateRequest struct {
+	ManualGate bool `json:"manual_gate"`
+}
+
+func patchPlaybookEntryGate(store ReadStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		pbStore, ok := store.(PlaybookStore)
+		if !ok || pbStore == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "playbook store not configured")
+			return
+		}
+		project := r.PathValue("project")
+		playbookRef := r.PathValue("playbook_ref")
+		entryID := r.PathValue("entry_id")
+		var body PlaybookEntryGateRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeProblem(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		pb, err := pbStore.PatchPlaybookEntryGate(r.Context(), project, playbookRef, entryID, body.ManualGate)
+		switch {
+		case errors.Is(err, ErrNotFound):
+			writeProblem(w, http.StatusNotFound, "playbook or entry not found")
+			return
+		case err != nil:
+			writeProblem(w, http.StatusInternalServerError, "patch playbook entry gate failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, pb)
