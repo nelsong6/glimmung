@@ -28,6 +28,7 @@ type Store struct {
 	hosts     *azcosmos.ContainerClient
 	leases    *azcosmos.ContainerClient
 	runs      *azcosmos.ContainerClient
+	runEvents *azcosmos.ContainerClient
 	issues    *azcosmos.ContainerClient
 	locks     *azcosmos.ContainerClient
 	reports   *azcosmos.ContainerClient
@@ -67,6 +68,10 @@ func NewFromSettings(settings server.Settings) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create runs container client: %w", err)
 	}
+	runEvents, err := client.NewContainer(settings.CosmosDatabase, "run_events")
+	if err != nil {
+		return nil, fmt.Errorf("create run_events container client: %w", err)
+	}
 	issues, err := client.NewContainer(settings.CosmosDatabase, "issues")
 	if err != nil {
 		return nil, fmt.Errorf("create issues container client: %w", err)
@@ -87,7 +92,7 @@ func NewFromSettings(settings server.Settings) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create signals container client: %w", err)
 	}
-	return &Store{projects: projects, workflows: workflows, hosts: hosts, leases: leases, runs: runs, issues: issues, locks: locks, reports: reports, playbooks: playbooks, signals: signals}, nil
+	return &Store{projects: projects, workflows: workflows, hosts: hosts, leases: leases, runs: runs, runEvents: runEvents, issues: issues, locks: locks, reports: reports, playbooks: playbooks, signals: signals}, nil
 }
 
 func (s *Store) ListProjects(ctx context.Context) ([]server.Project, error) {
@@ -1227,6 +1232,10 @@ type runDoc struct {
 	TriggerSource       map[string]any `json:"trigger_source"`
 	CreatedAt           string         `json:"created_at"`
 	UpdatedAt           string         `json:"updated_at"`
+	// Fields for mutation operations (populated from Cosmos documents as needed).
+	CallbackToken     *string `json:"callback_token,omitempty"`
+	IssueLockHolderID *string `json:"issue_lock_holder_id,omitempty"`
+	PRLockHolderID    *string `json:"pr_lock_holder_id,omitempty"`
 }
 
 type issueDoc struct {
@@ -1257,28 +1266,48 @@ type issueCommentDoc struct {
 }
 
 type lockDoc struct {
-	ID        string `json:"id"`
-	Scope     string `json:"scope"`
-	Key       string `json:"key"`
-	State     string `json:"state"`
-	ExpiresAt string `json:"expires_at"`
+	ID        string  `json:"id"`
+	Scope     string  `json:"scope"`
+	Key       string  `json:"key"`
+	State     string  `json:"state"`
+	ExpiresAt string  `json:"expires_at"`
+	HeldBy    *string `json:"held_by,omitempty"`
 }
 
 type attemptDoc struct {
-	AttemptIndex     int              `json:"attempt_index"`
-	Phase            string           `json:"phase"`
-	PhaseKind        string           `json:"phase_kind"`
-	WorkflowFilename string           `json:"workflow_filename"`
-	WorkflowRunID    *int64           `json:"workflow_run_id"`
-	DispatchedAt     string           `json:"dispatched_at"`
-	CompletedAt      string           `json:"completed_at"`
-	Conclusion       *string          `json:"conclusion"`
-	Verification     *verificationDoc `json:"verification"`
-	SummaryMarkdown  *string          `json:"summary_markdown"`
-	CostUSD          *float64         `json:"cost_usd"`
-	Decision         *string          `json:"decision"`
-	LogArchiveURL    *string          `json:"log_archive_url"`
-	SkippedFromRunID *string          `json:"skipped_from_run_id"`
+	AttemptIndex          int              `json:"attempt_index"`
+	Phase                 string           `json:"phase"`
+	PhaseKind             string           `json:"phase_kind"`
+	WorkflowFilename      string           `json:"workflow_filename"`
+	WorkflowRunID         *int64           `json:"workflow_run_id"`
+	DispatchedAt          string           `json:"dispatched_at"`
+	CompletedAt           string           `json:"completed_at"`
+	Conclusion            *string          `json:"conclusion"`
+	Verification          *verificationDoc `json:"verification"`
+	SummaryMarkdown       *string          `json:"summary_markdown"`
+	CostUSD               *float64         `json:"cost_usd"`
+	Decision              *string          `json:"decision"`
+	LogArchiveURL         *string          `json:"log_archive_url"`
+	SkippedFromRunID      *string          `json:"skipped_from_run_id"`
+	CancelRequestedAt     *string          `json:"cancel_requested_at,omitempty"`
+	CancelReason          *string          `json:"cancel_reason,omitempty"`
+	CapabilityTokenSHA256 *string          `json:"capability_token_sha256,omitempty"`
+}
+
+type nativeEventDoc struct {
+	ID           string         `json:"id"`
+	Project      string         `json:"project"`
+	RunID        string         `json:"run_id"`
+	AttemptIndex int            `json:"attempt_index"`
+	Phase        string         `json:"phase"`
+	JobID        string         `json:"job_id"`
+	Seq          int            `json:"seq"`
+	Event        string         `json:"event"`
+	StepSlug     string         `json:"step_slug"`
+	Message      string         `json:"message"`
+	ExitCode     *int           `json:"exit_code"`
+	Metadata     map[string]any `json:"metadata"`
+	CreatedAt    string         `json:"created_at"`
 }
 
 type verificationDoc struct {
@@ -3532,4 +3561,416 @@ func (s *Store) EnqueueSignal(ctx context.Context, req server.SignalEnqueue) (se
 		State:      doc.State,
 		EnqueuedAt: now,
 	}, nil
+}
+
+// ---- RunMutationStore implementation ----
+
+// ReadRunIDForNumber resolves an issue-scoped run number to (runID, runRef).
+func (s *Store) ReadRunIDForNumber(ctx context.Context, project string, issueNumber int, runNumber string) (string, string, error) {
+	docs, err := s.issueRunDocs(ctx, project, issueNumber)
+	if err != nil {
+		return "", "", err
+	}
+	numbers := runNumberMap(docs)
+	for _, doc := range docs {
+		display := ""
+		if doc.RunDisplayNumber != nil {
+			display = strings.TrimSpace(*doc.RunDisplayNumber)
+		}
+		if (display != "" && display == strings.TrimSpace(runNumber)) ||
+			fmt.Sprintf("%d", numbers[doc.ID]) == strings.TrimSpace(runNumber) {
+			ref := publicids.RunRef(doc.Project, positiveIssueNumberPtr(doc.IssueNumber), runDisplayNumber(doc, numbers[doc.ID]))
+			return doc.ID, ref, nil
+		}
+	}
+	return "", "", server.ErrNotFound
+}
+
+// ReadRunIDForCallbackToken resolves a run callback token to (runID, project, runRef).
+func (s *Store) ReadRunIDForCallbackToken(ctx context.Context, token string) (string, string, string, error) {
+	var docs []runDoc
+	if err := queryAllWhere(
+		ctx, s.runs,
+		"SELECT * FROM c WHERE c.callback_token = @token",
+		[]azcosmos.QueryParameter{{Name: "@token", Value: token}},
+		&docs,
+	); err != nil {
+		return "", "", "", err
+	}
+	if len(docs) == 0 {
+		return "", "", "", server.ErrNotFound
+	}
+	doc := docs[0]
+	sibling, _ := s.issueRunDocs(ctx, doc.Project, doc.IssueNumber)
+	numbers := runNumberMap(sibling)
+	ref := publicids.RunRef(doc.Project, positiveIssueNumberPtr(doc.IssueNumber), runDisplayNumber(doc, numbers[doc.ID]))
+	return doc.ID, doc.Project, ref, nil
+}
+
+// AbortRunByID marks a run as aborted, best-effort releases issue/PR locks.
+func (s *Store) AbortRunByID(ctx context.Context, project, runID, reason string) (server.AbortRunResult, error) {
+	pk := azcosmos.NewPartitionKeyString(project)
+	resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
+	if isCosmosStatus(err, http.StatusNotFound) {
+		return server.AbortRunResult{}, server.ErrNotFound
+	}
+	if err != nil {
+		return server.AbortRunResult{}, err
+	}
+
+	var doc runDoc
+	if err := json.Unmarshal(resp.Value, &doc); err != nil {
+		return server.AbortRunResult{}, err
+	}
+
+	terminal := doc.State == "passed" || doc.State == "review_required" || doc.State == "aborted"
+
+	// Compute run_ref for the result.
+	siblings, _ := s.issueRunDocs(ctx, project, doc.IssueNumber)
+	numbers := runNumberMap(siblings)
+	runRef := publicids.RunRef(doc.Project, positiveIssueNumberPtr(doc.IssueNumber), runDisplayNumber(doc, numbers[doc.ID]))
+
+	if terminal {
+		return server.AbortRunResult{
+			State:            "already_terminal",
+			RunRef:           runRef,
+			RunNumber:        doc.RunNumber,
+			RunDisplayNumber: doc.RunDisplayNumber,
+		}, nil
+	}
+
+	// Patch the run doc to aborted state.
+	var raw map[string]any
+	if err := json.Unmarshal(resp.Value, &raw); err != nil {
+		return server.AbortRunResult{}, err
+	}
+	raw["state"] = "aborted"
+	raw["abort_reason"] = reason
+	raw["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+
+	payload, err := json.Marshal(raw)
+	if err != nil {
+		return server.AbortRunResult{}, err
+	}
+	etag := azcore.ETag(resp.ETag)
+	if _, err := s.runs.ReplaceItem(ctx, pk, runID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
+		return server.AbortRunResult{}, err
+	}
+
+	// Best-effort lock releases.
+	var issueLockReleased, prLockReleased *bool
+	if doc.IssueLockHolderID != nil && *doc.IssueLockHolderID != "" && doc.IssueNumber > 0 {
+		released := s.releaseLock(ctx, "issue", fmt.Sprintf("%s#%d", project, doc.IssueNumber), *doc.IssueLockHolderID)
+		issueLockReleased = &released
+	}
+	if doc.PRLockHolderID != nil && *doc.PRLockHolderID != "" && doc.PRNumber != nil && doc.IssueRepo != "" {
+		released := s.releaseLock(ctx, "pr", fmt.Sprintf("%s#%d", doc.IssueRepo, *doc.PRNumber), *doc.PRLockHolderID)
+		prLockReleased = &released
+	}
+
+	return server.AbortRunResult{
+		State:             "aborted",
+		RunRef:            runRef,
+		RunNumber:         doc.RunNumber,
+		RunDisplayNumber:  doc.RunDisplayNumber,
+		IssueLockReleased: issueLockReleased,
+		PRLockReleased:    prLockReleased,
+	}, nil
+}
+
+// releaseLock releases a held lock by scope+key if held_by matches holderID. Returns true if released.
+func (s *Store) releaseLock(ctx context.Context, scope, key, holderID string) bool {
+	docID := lockDocID(scope, key)
+	pk := azcosmos.NewPartitionKeyString(scope)
+	resp, err := s.locks.ReadItem(ctx, pk, docID, nil)
+	if err != nil {
+		return false
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(resp.Value, &raw); err != nil {
+		return false
+	}
+	if stringValue(raw["held_by"]) != holderID {
+		return false
+	}
+	if stringValue(raw["state"]) != "held" {
+		return false
+	}
+	raw["state"] = "released"
+	payload, err := json.Marshal(raw)
+	if err != nil {
+		return false
+	}
+	etag := azcore.ETag(resp.ETag)
+	_, err = s.locks.ReplaceItem(ctx, pk, docID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag})
+	return err == nil
+}
+
+// lockDocID returns the Cosmos document ID for a lock, matching Python's lock_ops._doc_id.
+func lockDocID(scope, key string) string {
+	// Python: f"{scope}::{quote(key, safe='')}"
+	// We URL-encode the key's '#' character as %23.
+	encoded := strings.ReplaceAll(key, "#", "%23")
+	encoded = strings.ReplaceAll(encoded, "/", "%2F")
+	return scope + "::" + encoded
+}
+
+// RecordRunStarted stamps the workflow_run_id on the latest PhaseAttempt of the run.
+func (s *Store) RecordRunStarted(ctx context.Context, project, runID string, req server.RunStartedRequest) (string, error) {
+	pk := azcosmos.NewPartitionKeyString(project)
+	const maxRetries = 3
+	for i := 0; i < maxRetries; i++ {
+		resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
+		if isCosmosStatus(err, http.StatusNotFound) {
+			return "", server.ErrNotFound
+		}
+		if err != nil {
+			return "", err
+		}
+
+		var raw map[string]any
+		if err := json.Unmarshal(resp.Value, &raw); err != nil {
+			return "", err
+		}
+
+		attempts, _ := raw["attempts"].([]any)
+		if len(attempts) == 0 {
+			return "", fmt.Errorf("run has no attempts")
+		}
+		// Stamp workflow_run_id on the latest attempt if not already set.
+		latest, ok := attempts[len(attempts)-1].(map[string]any)
+		if !ok {
+			return "", fmt.Errorf("invalid attempt document")
+		}
+		if _, alreadySet := latest["workflow_run_id"]; !alreadySet || latest["workflow_run_id"] == nil {
+			latest["workflow_run_id"] = req.WorkflowRunID
+		}
+		if req.ValidationURL != nil && *req.ValidationURL != "" {
+			if _, alreadySet := raw["validation_url"]; !alreadySet || raw["validation_url"] == nil {
+				raw["validation_url"] = *req.ValidationURL
+			}
+		}
+		attempts[len(attempts)-1] = latest
+		raw["attempts"] = attempts
+		raw["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+
+		payload, err := json.Marshal(raw)
+		if err != nil {
+			return "", err
+		}
+		etag := azcore.ETag(resp.ETag)
+		if _, err := s.runs.ReplaceItem(ctx, pk, runID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
+			if isCosmosStatus(err, http.StatusPreconditionFailed) {
+				continue
+			}
+			return "", err
+		}
+
+		// Compute runRef from the updated doc.
+		var doc runDoc
+		if err := json.Unmarshal(resp.Value, &doc); err != nil {
+			return "", err
+		}
+		siblings, _ := s.issueRunDocs(ctx, project, doc.IssueNumber)
+		numbers := runNumberMap(siblings)
+		return publicids.RunRef(doc.Project, positiveIssueNumberPtr(doc.IssueNumber), runDisplayNumber(doc, numbers[doc.ID])), nil
+	}
+	return "", fmt.Errorf("record run started: too many conflicts")
+}
+
+// ---- NativeRunStore implementation ----
+
+// GetNativeRunStatusByID returns the native run status for the latest in-progress k8s_job attempt.
+func (s *Store) GetNativeRunStatusByID(ctx context.Context, project, runID string) (server.NativeRunStatusResponse, error) {
+	pk := azcosmos.NewPartitionKeyString(project)
+	resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
+	if isCosmosStatus(err, http.StatusNotFound) {
+		return server.NativeRunStatusResponse{}, server.ErrNotFound
+	}
+	if err != nil {
+		return server.NativeRunStatusResponse{}, err
+	}
+
+	var doc runDoc
+	if err := json.Unmarshal(resp.Value, &doc); err != nil {
+		return server.NativeRunStatusResponse{}, err
+	}
+
+	if len(doc.Attempts) == 0 {
+		return server.NativeRunStatusResponse{}, server.ErrConflict
+	}
+	latest := doc.Attempts[len(doc.Attempts)-1]
+	if latest.PhaseKind != "k8s_job" {
+		return server.NativeRunStatusResponse{}, server.ErrConflict
+	}
+
+	siblings, _ := s.issueRunDocs(ctx, project, doc.IssueNumber)
+	numbers := runNumberMap(siblings)
+	runRef := publicids.RunRef(doc.Project, positiveIssueNumberPtr(doc.IssueNumber), runDisplayNumber(doc, numbers[doc.ID]))
+
+	return server.NativeRunStatusResponse{
+		Project:           project,
+		RunRef:            runRef,
+		State:             doc.State,
+		AttemptIndex:      latest.AttemptIndex,
+		CancelRequested:   latest.CancelRequestedAt != nil && *latest.CancelRequestedAt != "",
+		CancelRequestedAt: parseOptionalTime(stringOrEmpty(latest.CancelRequestedAt)),
+		CancelReason:      latest.CancelReason,
+	}, nil
+}
+
+// RecordNativeEventByID writes one idempotent native event for the run's latest in-progress attempt.
+func (s *Store) RecordNativeEventByID(ctx context.Context, project, runID string, req server.NativeRunEventRequest) (server.NativeRunEventResult, error) {
+	// Read run to get the latest attempt index + phase.
+	pk := azcosmos.NewPartitionKeyString(project)
+	resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
+	if isCosmosStatus(err, http.StatusNotFound) {
+		return server.NativeRunEventResult{}, server.ErrNotFound
+	}
+	if err != nil {
+		return server.NativeRunEventResult{}, err
+	}
+
+	var doc runDoc
+	if err := json.Unmarshal(resp.Value, &doc); err != nil {
+		return server.NativeRunEventResult{}, err
+	}
+
+	attemptIndex := 0
+	phase := ""
+	if len(doc.Attempts) > 0 {
+		latest := doc.Attempts[len(doc.Attempts)-1]
+		attemptIndex = latest.AttemptIndex
+		phase = latest.Phase
+	}
+
+	// Build the idempotency key.
+	docID := fmt.Sprintf("%s::%04d::%s::%012d", runID, attemptIndex, req.JobID, req.Seq)
+
+	stepSlug := ""
+	if req.StepSlug != nil {
+		stepSlug = *req.StepSlug
+	}
+	message := ""
+	if req.Message != nil {
+		message = *req.Message
+	}
+
+	eventDoc := nativeEventDoc{
+		ID:           docID,
+		Project:      project,
+		RunID:        runID,
+		AttemptIndex: attemptIndex,
+		Phase:        phase,
+		JobID:        req.JobID,
+		Seq:          req.Seq,
+		Event:        req.Event,
+		StepSlug:     stepSlug,
+		Message:      message,
+		ExitCode:     req.ExitCode,
+		Metadata:     mapOrEmpty(req.Metadata),
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+	}
+
+	payload, err := json.Marshal(eventDoc)
+	if err != nil {
+		return server.NativeRunEventResult{}, err
+	}
+
+	eventPK := azcosmos.NewPartitionKeyString(project)
+	if _, err := s.runEvents.CreateItem(ctx, eventPK, payload, nil); err != nil {
+		// Idempotent: a 409 Conflict means the doc already exists.
+		if isCosmosStatus(err, http.StatusConflict) {
+			// Read back the existing doc to verify same payload; for now accept the replay.
+		} else {
+			return server.NativeRunEventResult{}, err
+		}
+	}
+
+	// Compute run_ref for the response.
+	siblings, _ := s.issueRunDocs(ctx, project, doc.IssueNumber)
+	numbers := runNumberMap(siblings)
+	runRef := publicids.RunRef(doc.Project, positiveIssueNumberPtr(doc.IssueNumber), runDisplayNumber(doc, numbers[doc.ID]))
+
+	return server.NativeRunEventResult{
+		RunRef:   runRef,
+		JobID:    req.JobID,
+		Seq:      req.Seq,
+		Accepted: true,
+	}, nil
+}
+
+// ListNativeEventsByID returns ordered native events for a run.
+func (s *Store) ListNativeEventsByID(ctx context.Context, project, runID string, attemptIndex *int, jobID *string, limit *int) (server.NativeRunLogsResponse, error) {
+	// Validate that the run exists first.
+	pk := azcosmos.NewPartitionKeyString(project)
+	resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
+	if isCosmosStatus(err, http.StatusNotFound) {
+		return server.NativeRunLogsResponse{}, server.ErrNotFound
+	}
+	if err != nil {
+		return server.NativeRunLogsResponse{}, err
+	}
+	var doc runDoc
+	if err := json.Unmarshal(resp.Value, &doc); err != nil {
+		return server.NativeRunLogsResponse{}, err
+	}
+
+	query := "SELECT * FROM c WHERE c.run_id = @run_id"
+	params := []azcosmos.QueryParameter{{Name: "@run_id", Value: runID}}
+	if attemptIndex != nil {
+		query += " AND c.attempt_index = @attempt_index"
+		params = append(params, azcosmos.QueryParameter{Name: "@attempt_index", Value: *attemptIndex})
+	}
+	if jobID != nil {
+		query += " AND c.job_id = @job_id"
+		params = append(params, azcosmos.QueryParameter{Name: "@job_id", Value: *jobID})
+	}
+	query += " ORDER BY c.attempt_index, c.job_id, c.seq"
+
+	var eventDocs []nativeEventDoc
+	if err := queryAllWhere(ctx, s.runEvents, query, params, &eventDocs); err != nil {
+		return server.NativeRunLogsResponse{}, err
+	}
+
+	if limit != nil && *limit > 0 && len(eventDocs) > *limit {
+		eventDocs = eventDocs[:*limit]
+	}
+
+	siblings, _ := s.issueRunDocs(ctx, project, doc.IssueNumber)
+	numbers := runNumberMap(siblings)
+	runRef := publicids.RunRef(doc.Project, positiveIssueNumberPtr(doc.IssueNumber), runDisplayNumber(doc, numbers[doc.ID]))
+
+	events := make([]server.NativeRunLogEvent, 0, len(eventDocs))
+	for _, e := range eventDocs {
+		events = append(events, server.NativeRunLogEvent{
+			Project:      project,
+			RunRef:       runRef,
+			AttemptIndex: e.AttemptIndex,
+			Phase:        e.Phase,
+			JobID:        e.JobID,
+			Seq:          e.Seq,
+			Event:        e.Event,
+			StepSlug:     e.StepSlug,
+			Message:      e.Message,
+			ExitCode:     e.ExitCode,
+			Metadata:     mapOrEmpty(e.Metadata),
+			CreatedAt:    e.CreatedAt,
+		})
+	}
+
+	return server.NativeRunLogsResponse{
+		Project:      project,
+		RunRef:       runRef,
+		AttemptIndex: attemptIndex,
+		JobID:        jobID,
+		Events:       events,
+	}, nil
+}
+
+func stringOrEmpty(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
