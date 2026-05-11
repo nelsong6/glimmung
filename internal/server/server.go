@@ -76,6 +76,7 @@ func NewWithDependencies(settings Settings, store ReadStore, authResolver AuthRe
 		requireAdmin(adminAuthenticator, http.HandlerFunc(scaleProjectTestEnvironments(store))),
 	)
 	mux.HandleFunc("GET /v1/workflows", listWorkflows(store))
+	mux.Handle("PATCH /v1/workflows/{project}/{name}", requireAdmin(adminAuthenticator, http.HandlerFunc(patchWorkflow(store))))
 	mux.Handle("DELETE /v1/workflows/{project}/{name}", requireAdmin(adminAuthenticator, http.HandlerFunc(deleteWorkflow(store))))
 	mux.HandleFunc("GET /v1/state", stateSnapshot(settings, store))
 	mux.HandleFunc("GET /v1/events", stateEvents(settings, store))
