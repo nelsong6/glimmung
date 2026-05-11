@@ -30,6 +30,8 @@ type Settings struct {
 	TankOperatorBaseURL            string
 	StaticDir                      string
 	StaticOverrideDir              string
+	ArtifactsStorageAccount        string
+	ArtifactsContainer             string
 	NativeRunnerProjectConcurrency int
 }
 
@@ -48,6 +50,11 @@ func SettingsFromEnv() Settings {
 		TankOperatorBaseURL: envOrDefault("TANK_OPERATOR_BASE_URL", defaultTankOperatorBaseURL),
 		StaticDir:           os.Getenv("GLIMMUNG_STATIC_DIR"),
 		StaticOverrideDir:   os.Getenv("GLIMMUNG_STATIC_OVERRIDE_DIR"),
+		ArtifactsStorageAccount: envOrDefault(
+			"ARTIFACTS_STORAGE_ACCOUNT",
+			"romaineglimmungartifacts",
+		),
+		ArtifactsContainer: envOrDefault("ARTIFACTS_CONTAINER", "artifacts"),
 		NativeRunnerProjectConcurrency: envIntOrDefault(
 			"NATIVE_RUNNER_PROJECT_CONCURRENCY",
 			5,
@@ -63,11 +70,16 @@ func NewWithStore(settings Settings, store ReadStore) http.Handler {
 	return NewWithDependencies(settings, store, nil)
 }
 
-func NewWithDependencies(settings Settings, store ReadStore, authResolver AuthResolver) http.Handler {
+func NewWithDependencies(settings Settings, store ReadStore, authResolver AuthResolver, artifactStores ...ArtifactStore) http.Handler {
+	var artifactStore ArtifactStore
+	if len(artifactStores) > 0 {
+		artifactStore = artifactStores[0]
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
 	mux.HandleFunc("GET /v1/config", publicConfig(settings))
 	mux.HandleFunc("GET /v1/auth/me", authMe(authResolver))
+	mux.HandleFunc("GET /v1/artifacts/{blob_path...}", readArtifact(artifactStore))
 	adminAuthenticator, _ := authResolver.(AdminAuthenticator)
 	mux.HandleFunc(
 		"GET /v1/issues/by-id/{project}/{issue_id}",
@@ -162,7 +174,7 @@ func NewWithDependencies(settings Settings, store ReadStore, authResolver AuthRe
 		mux.HandleFunc("GET /assets/", serveAsset(settings))
 		mux.HandleFunc("GET /", serveSPA(settings))
 	}
-	return mux
+	return rejectUnsafeArtifactPaths(mux)
 }
 
 func healthz(w http.ResponseWriter, _ *http.Request) {

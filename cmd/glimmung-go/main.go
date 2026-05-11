@@ -9,6 +9,7 @@ import (
 
 	"github.com/nelsong6/glimmung/internal/auth"
 	"github.com/nelsong6/glimmung/internal/server"
+	artifactstore "github.com/nelsong6/glimmung/internal/store/artifacts"
 	cosmosstore "github.com/nelsong6/glimmung/internal/store/cosmos"
 )
 
@@ -18,12 +19,16 @@ func main() {
 	if err != nil {
 		log.Printf("cosmos read store disabled: %v", err)
 	}
+	artifacts, err := artifactstore.NewFromSettings(settings)
+	if err != nil {
+		log.Printf("artifact store disabled: %v", err)
+	}
 	authenticator := buildAuthenticator(settings)
 	addr := ":" + settings.Port
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           server.NewWithDependencies(settings, store, authenticator),
+		Handler:           server.NewWithDependencies(settings, store, authenticator, artifacts),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
