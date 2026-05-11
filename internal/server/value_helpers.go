@@ -1,6 +1,11 @@
 package server
 
-import "strconv"
+import (
+	"errors"
+	"strconv"
+)
+
+var ErrNotFound = errors.New("not found")
 
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
