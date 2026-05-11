@@ -1,0 +1,18 @@
+type WorkflowLookupItem = {
+  project: string;
+  name: string;
+};
+
+export function resolveProjectWorkflow<T extends WorkflowLookupItem>(
+  workflows: T[],
+  project: string,
+  candidateNames: Array<string | null | undefined>,
+): T | null {
+  const projectWorkflows = workflows.filter((workflow) => workflow.project === project);
+  for (const name of candidateNames) {
+    if (!name) continue;
+    const exact = projectWorkflows.find((workflow) => workflow.name === name);
+    if (exact) return exact;
+  }
+  return projectWorkflows.length === 1 ? projectWorkflows[0] : null;
+}

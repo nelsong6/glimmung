@@ -28,6 +28,7 @@ import { Link, useLocation, useNavigate, useOutletContext, useParams } from "rea
 import { authedFetch } from "./auth";
 import { PhaseGraph, type PhaseGraphPhase, type RecycleArrow } from "./PhaseGraph";
 import { fallbackPhaseGraphModel, workflowToPhaseGraphModel } from "./workflowGraphModel";
+import { resolveProjectWorkflow } from "./workflowLookup";
 
 type IssueDetail = {
   ref: string;
@@ -324,6 +325,18 @@ export function IssueDetailView() {
   const [refreshTick, setRefreshTick] = useState(0);
   const [dispatchState, setDispatchState] = useState<DispatchState>({ kind: "idle" });
   const [abortState, setAbortState] = useState<AbortState>({ kind: "idle" });
+  const issueWorkflow = useMemo(() => (
+    detail
+      ? resolveProjectWorkflow(
+          snap?.workflows ?? [],
+          detail.project,
+          [
+            stringOrNull(detail.metadata?.workflow),
+            ...runNodesByRecency(graph).map((run) => stringOrNull(run.metadata.workflow)),
+          ],
+        )
+      : null
+  ), [detail, graph, snap?.workflows]);
   const detailUrl =
     target?.kind === "gh"
       ? `/v1/issues/${target.repo}/${target.issue_number}`
@@ -518,10 +531,7 @@ export function IssueDetailView() {
                 project={detail.project}
                 repo={detail.repo}
                 detail={detail}
-                workflow={snap?.workflows.find((w) => (
-                  w.project === detail.project
-                  && w.name === (stringOrNull(detail.metadata?.workflow) ?? stringOrNull(graph?.nodes.find((n) => n.kind === "run")?.metadata.workflow))
-                )) ?? null}
+                workflow={issueWorkflow}
                 signedIn={signedIn}
                 isAdmin={isAdmin}
                 dispatchState={dispatchState}
@@ -2643,6 +2653,15 @@ function RunRefLink({
 
 function runDisplayName(run: GraphNode): string {
   return runSlugDisplay(issueRunSlug({ issue_ref: "", nodes: [run], edges: [] }, run));
+}
+
+function runNodesByRecency(graph: IssueGraph | null): GraphNode[] {
+  return graph
+    ? graph.nodes
+        .filter((n) => n.kind === "run")
+        .slice()
+        .sort((a, b) => (b.timestamp ?? "").localeCompare(a.timestamp ?? ""))
+    : [];
 }
 
 function isRecord(x: unknown): x is Record<string, unknown> {
