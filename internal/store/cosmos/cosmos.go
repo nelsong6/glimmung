@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/data/azcosmos"
 
@@ -64,6 +66,56 @@ func (s *Store) ListProjects(ctx context.Context) ([]server.Project, error) {
 	return rows, nil
 }
 
+func (s *Store) UpsertProject(ctx context.Context, req server.ProjectRegister) (server.Project, error) {
+	doc := projectWriteDoc{
+		ID:         req.Name,
+		Name:       req.Name,
+		GitHubRepo: req.GitHubRepo,
+		Metadata:   mapOrEmpty(req.Metadata),
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	partitionKey := azcosmos.NewPartitionKeyString(req.Name)
+	existing, err := s.projects.ReadItem(ctx, partitionKey, req.Name, nil)
+	if err == nil {
+		var existingDoc projectDoc
+		if err := json.Unmarshal(existing.Value, &existingDoc); err == nil && existingDoc.CreatedAt != "" {
+			doc.CreatedAt = existingDoc.CreatedAt
+		}
+		payload, err := json.Marshal(doc)
+		if err != nil {
+			return server.Project{}, err
+		}
+		if _, err := s.projects.ReplaceItem(ctx, partitionKey, req.Name, payload, nil); err != nil {
+			return server.Project{}, err
+		}
+		return projectFromDoc(projectDoc{
+			ID:         doc.ID,
+			Name:       doc.Name,
+			GitHubRepo: doc.GitHubRepo,
+			Metadata:   doc.Metadata,
+			CreatedAt:  doc.CreatedAt,
+		}), nil
+	}
+	if !isCosmosStatus(err, http.StatusNotFound) {
+		return server.Project{}, err
+	}
+
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return server.Project{}, err
+	}
+	if _, err := s.projects.CreateItem(ctx, partitionKey, payload, nil); err != nil {
+		return server.Project{}, err
+	}
+	return projectFromDoc(projectDoc{
+		ID:         doc.ID,
+		Name:       doc.Name,
+		GitHubRepo: doc.GitHubRepo,
+		Metadata:   doc.Metadata,
+		CreatedAt:  doc.CreatedAt,
+	}), nil
+}
+
 func (s *Store) ListWorkflows(ctx context.Context) ([]server.Workflow, error) {
 	var docs []workflowDoc
 	if err := queryAll(ctx, s.workflows, &docs); err != nil {
@@ -86,6 +138,64 @@ func (s *Store) ListHosts(ctx context.Context) ([]server.Host, error) {
 		rows = append(rows, hostFromDoc(doc))
 	}
 	return rows, nil
+}
+
+func (s *Store) UpsertHost(ctx context.Context, input server.HostRegistration) (server.Host, error) {
+	pk := azcosmos.NewPartitionKeyString(input.Name)
+	read, err := s.hosts.ReadItem(ctx, pk, input.Name, nil)
+	if err == nil {
+		var doc map[string]any
+		if err := json.Unmarshal(read.Value, &doc); err != nil {
+			return server.Host{}, err
+		}
+		if input.Capabilities != nil {
+			doc["capabilities"] = input.Capabilities
+		} else if _, ok := doc["capabilities"]; !ok {
+			doc["capabilities"] = map[string]any{}
+		}
+		if input.Drained != nil {
+			doc["drained"] = *input.Drained
+		}
+		body, err := json.Marshal(doc)
+		if err != nil {
+			return server.Host{}, err
+		}
+		if _, err := s.hosts.ReplaceItem(ctx, pk, input.Name, body, nil); err != nil {
+			return server.Host{}, err
+		}
+		return hostFromMap(doc)
+	}
+	if !isCosmosStatus(err, http.StatusNotFound) {
+		return server.Host{}, err
+	}
+
+	doc := hostWriteDoc{
+		ID:             input.Name,
+		Name:           input.Name,
+		Capabilities:   mapOrEmpty(input.Capabilities),
+		CurrentLeaseID: nil,
+		LastHeartbeat:  nil,
+		LastUsedAt:     nil,
+		Drained:        boolPtrValue(input.Drained),
+		CreatedAt:      time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	body, err := json.Marshal(doc)
+	if err != nil {
+		return server.Host{}, err
+	}
+	if _, err := s.hosts.CreateItem(ctx, pk, body, nil); err != nil {
+		return server.Host{}, err
+	}
+	return hostFromMap(map[string]any{
+		"id":             doc.ID,
+		"name":           doc.Name,
+		"capabilities":   doc.Capabilities,
+		"currentLeaseId": doc.CurrentLeaseID,
+		"lastHeartbeat":  doc.LastHeartbeat,
+		"lastUsedAt":     doc.LastUsedAt,
+		"drained":        doc.Drained,
+		"createdAt":      doc.CreatedAt,
+	})
 }
 
 func (s *Store) ListLeases(ctx context.Context) ([]server.Lease, error) {
@@ -133,6 +243,14 @@ type projectDoc struct {
 	CreatedAt  string         `json:"createdAt"`
 }
 
+type projectWriteDoc struct {
+	ID         string         `json:"id"`
+	Name       string         `json:"name"`
+	GitHubRepo string         `json:"githubRepo"`
+	Metadata   map[string]any `json:"metadata"`
+	CreatedAt  string         `json:"createdAt"`
+}
+
 type workflowDoc struct {
 	ID                  string         `json:"id"`
 	Project             string         `json:"project"`
@@ -153,6 +271,17 @@ type hostDoc struct {
 	CurrentLeaseID *string        `json:"currentLeaseId"`
 	LastHeartbeat  string         `json:"lastHeartbeat"`
 	LastUsedAt     string         `json:"lastUsedAt"`
+	Drained        bool           `json:"drained"`
+	CreatedAt      string         `json:"createdAt"`
+}
+
+type hostWriteDoc struct {
+	ID             string         `json:"id"`
+	Name           string         `json:"name"`
+	Capabilities   map[string]any `json:"capabilities"`
+	CurrentLeaseID *string        `json:"currentLeaseId"`
+	LastHeartbeat  *string        `json:"lastHeartbeat"`
+	LastUsedAt     *string        `json:"lastUsedAt"`
 	Drained        bool           `json:"drained"`
 	CreatedAt      string         `json:"createdAt"`
 }
@@ -266,6 +395,18 @@ func hostFromDoc(doc hostDoc) server.Host {
 		Drained:        doc.Drained,
 		CreatedAt:      parseTimeOrNow(doc.CreatedAt),
 	}
+}
+
+func hostFromMap(doc map[string]any) (server.Host, error) {
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return server.Host{}, err
+	}
+	var typed hostDoc
+	if err := json.Unmarshal(payload, &typed); err != nil {
+		return server.Host{}, err
+	}
+	return hostFromDoc(typed), nil
 }
 
 func leaseFromDoc(doc leaseDoc) server.Lease {
@@ -410,6 +551,15 @@ func defaultTTLSeconds(ttl int) int {
 		return 900
 	}
 	return ttl
+}
+
+func boolPtrValue(value *bool) bool {
+	return value != nil && *value
+}
+
+func isCosmosStatus(err error, status int) bool {
+	var responseErr *azcore.ResponseError
+	return errors.As(err, &responseErr) && responseErr.StatusCode == status
 }
 
 func firstNonEmpty(values ...string) string {

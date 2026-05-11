@@ -18,6 +18,13 @@ func (a fakeAdminAuthenticator) RequireAdmin(context.Context, string) (auth.User
 	return a.user, a.err
 }
 
+func (a fakeAdminAuthenticator) ResolveCaller(context.Context, string) (auth.User, bool, bool) {
+	if a.err != nil {
+		return auth.User{}, false, false
+	}
+	return a.user, true, true
+}
+
 func TestRequireAdminAllowsAdmin(t *testing.T) {
 	handler := requireAdmin(
 		fakeAdminAuthenticator{user: auth.User{Sub: "admin"}},
