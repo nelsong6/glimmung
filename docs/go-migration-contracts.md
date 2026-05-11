@@ -86,6 +86,8 @@ The shadow server currently owns only:
 
 - `GET /healthz`
 - `GET /v1/config`
+- `GET /v1/projects` and `GET /v1/workflows` when a Cosmos read store is
+  configured with `COSMOS_ENDPOINT` and `COSMOS_DATABASE`.
 - Static frontend assets and SPA fallback when `GLIMMUNG_STATIC_DIR` points at
   a built frontend directory.
 
