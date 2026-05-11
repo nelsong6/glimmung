@@ -12,9 +12,11 @@ import (
 
 type fakeLeaseCallbackStore struct {
 	fakeReadStore
-	lease Lease
-	err   error
-	token string
+	lease        Lease
+	err          error
+	heartbeatErr error
+	token        string
+	heartbeats   []string
 }
 
 func (s fakeLeaseCallbackStore) ReadLeaseByCallbackToken(_ context.Context, token string) (Lease, error) {
@@ -23,6 +25,23 @@ func (s fakeLeaseCallbackStore) ReadLeaseByCallbackToken(_ context.Context, toke
 	}
 	if token != s.token {
 		return Lease{}, ErrNotFound
+	}
+	return s.lease, nil
+}
+
+func (s *fakeLeaseCallbackStore) HeartbeatLeaseByCallbackToken(_ context.Context, token string) (Lease, error) {
+	s.heartbeats = append(s.heartbeats, token)
+	if s.heartbeatErr != nil {
+		return Lease{}, s.heartbeatErr
+	}
+	if s.err != nil {
+		return Lease{}, s.err
+	}
+	if token != s.token {
+		return Lease{}, ErrNotFound
+	}
+	if s.lease.State != "claimed" {
+		return Lease{}, ErrInactive
 	}
 	return s.lease, nil
 }
@@ -70,6 +89,72 @@ func TestReadLeaseByCallbackTokenReturnsPublicLease(t *testing.T) {
 	}
 	if strings.Contains(body, "01JLEASEBACKING") {
 		t.Fatalf("body leaks backing lease id: %s", body)
+	}
+}
+
+func TestHeartbeatLeaseByCallbackTokenReturnsPublicLease(t *testing.T) {
+	now := time.Date(2026, 5, 11, 4, 45, 0, 0, time.UTC)
+	store := &fakeLeaseCallbackStore{
+		token: "callback-token",
+		lease: Lease{
+			ID:           "01JLEASEBACKING",
+			LeaseNumber:  intPtr(7),
+			Project:      "glimmung",
+			Workflow:     stringPtr("native-run"),
+			Host:         stringPtr("native-k8s"),
+			State:        "claimed",
+			Requirements: map[string]any{},
+			Metadata:     map[string]any{"lease_callback_token": "callback-token"},
+			RequestedAt:  now,
+			AssignedAt:   &now,
+			TTLSeconds:   900,
+		},
+	}
+	handler := NewWithStore(Settings{}, store)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/lease-callbacks/callback-token/heartbeat", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(store.heartbeats) != 1 || store.heartbeats[0] != "callback-token" {
+		t.Fatalf("heartbeats=%#v", store.heartbeats)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"ref":"glimmung/leases/7"`) || strings.Contains(body, "01JLEASEBACKING") {
+		t.Fatalf("body=%s", body)
+	}
+}
+
+func TestHeartbeatLeaseByCallbackTokenRequiresStore(t *testing.T) {
+	handler := NewWithStore(Settings{}, fakeReadStore{})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/lease-callbacks/missing/heartbeat", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHeartbeatLeaseByCallbackTokenMapsErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "not found", err: ErrNotFound, want: http.StatusNotFound},
+		{name: "conflict", err: ErrConflict, want: http.StatusConflict},
+		{name: "inactive", err: ErrInactive, want: http.StatusConflict},
+		{name: "generic", err: errors.New("boom"), want: http.StatusInternalServerError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := NewWithStore(Settings{}, &fakeLeaseCallbackStore{heartbeatErr: tc.err})
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/lease-callbacks/token/heartbeat", nil))
+			if rec.Code != tc.want {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 
