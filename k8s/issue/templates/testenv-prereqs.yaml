@@ -14,8 +14,7 @@ kind: ConfigMap
 metadata:
   name: {{ .Values.configMapName }}
   namespace: {{ .Release.Namespace }}
-data:
-  ALLOWED_EMAILS: {{ join "," .Values.config.allowedEmails | quote }}
+data: {}
 ---
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret

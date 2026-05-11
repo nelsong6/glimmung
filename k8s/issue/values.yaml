@@ -40,12 +40,7 @@ staticOverride:
   writerImage: alpine:3.20
   writerImagePullPolicy: IfNotPresent
 
-config:
-  allowedEmails:
-    - nelson@romaine.life
-    - nelson-devops-project@outlook.com
-    - Brenden.owens39@gmail.com
-    - gantonski@gmail.com
+config: {}
 
 externalSecret:
   storeName: romaine-kv
@@ -64,6 +59,8 @@ externalSecret:
       kvKey: glimmung-oauth-client-id
     - envVar: ENTRA_TEST_CLIENT_ID
       kvKey: glimmung-oauth-test-client-id
+    - envVar: ALLOWED_EMAILS
+      kvKey: romaine-life-admin-emails
 
 # The wildcard XListenerSet that per-install HTTPRoutes attach to. Production
 # and legacy per-issue releases install in `glimmung`; native test slots install
