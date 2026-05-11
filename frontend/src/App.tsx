@@ -9,6 +9,7 @@ import { TouchpointsView } from "./TouchpointsView";
 import { StyleguideView } from "./StyleguideView";
 import { PhaseGraph, type PhaseGraphPhase } from "./PhaseGraph";
 import { workflowToPhaseGraphModel } from "./workflowGraphModel";
+import { resolveProjectWorkflow } from "./workflowLookup";
 import { authedFetch, currentAccount, initAuth, signIn, signOut } from "./auth";
 import { isMockMode, mockRuns, mockSnapshot } from "./mockApi";
 import type { AccountInfo } from "@azure/msal-browser";
@@ -2277,8 +2278,12 @@ function ProjectRunView({
     ? mockRuns.filter((candidate) => candidate.project === project.name)
     : [];
   const run = isMockMode() ? resolveProjectRun(runs, runId) : liveReport ? projectRunFromReport(liveReport) : null;
-  const workflow = snap.workflows.find((w) => w.project === (run?.project ?? project.name) && w.name === run?.workflow);
-  const graph = liveReport ? projectRunReportGraph(liveReport, workflow, project) : run ? projectRunGraph(run, workflow, project) : null;
+  const workflow = resolveProjectWorkflow(
+    snap.workflows,
+    run?.project ?? project.name,
+    [run?.workflow],
+  );
+  const graph = liveReport ? projectRunReportGraph(liveReport, workflow ?? undefined, project) : run ? projectRunGraph(run, workflow ?? undefined, project) : null;
 
   if (!run) {
     return (
@@ -2350,10 +2355,10 @@ function ProjectRunView({
           <strong>
             <Link
               className="link"
-              to={`/projects/${encodeURIComponent(project.name)}/workflows/${encodeURIComponent(run.workflow)}`}
+              to={`/projects/${encodeURIComponent(project.name)}/workflows/${encodeURIComponent(workflow?.name ?? run.workflow)}`}
               state={{ returnTo: location.pathname, returnLabel: "run" }}
             >
-              {run.workflow}
+              {workflow?.name ?? run.workflow}
             </Link>
           </strong>
         </div>
