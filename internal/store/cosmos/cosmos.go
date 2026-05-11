@@ -116,6 +116,42 @@ func (s *Store) UpsertProject(ctx context.Context, req server.ProjectRegister) (
 	}), nil
 }
 
+func (s *Store) SetProjectTestEnvironmentCount(ctx context.Context, project string, count int) (server.Project, error) {
+	partitionKey := azcosmos.NewPartitionKeyString(project)
+	read, err := s.projects.ReadItem(ctx, partitionKey, project, nil)
+	if err != nil {
+		if isCosmosStatus(err, http.StatusNotFound) {
+			return server.Project{}, server.ErrNotFound
+		}
+		return server.Project{}, err
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(read.Value, &doc); err != nil {
+		return server.Project{}, err
+	}
+	metadata, _ := doc["metadata"].(map[string]any)
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	standbyDNS, _ := metadata["native_standby_dns"].(map[string]any)
+	if standbyDNS == nil {
+		standbyDNS = map[string]any{}
+	}
+	standbyDNS["count"] = count
+	metadata["native_standby_dns"] = standbyDNS
+	doc["metadata"] = metadata
+
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return server.Project{}, err
+	}
+	if _, err := s.projects.ReplaceItem(ctx, partitionKey, project, payload, nil); err != nil {
+		return server.Project{}, err
+	}
+	return projectFromMap(doc)
+}
+
 func (s *Store) ListWorkflows(ctx context.Context) ([]server.Workflow, error) {
 	var docs []workflowDoc
 	if err := queryAll(ctx, s.workflows, &docs); err != nil {
@@ -126,6 +162,25 @@ func (s *Store) ListWorkflows(ctx context.Context) ([]server.Workflow, error) {
 		rows = append(rows, workflowFromDoc(doc))
 	}
 	return rows, nil
+}
+
+func (s *Store) DeleteWorkflow(ctx context.Context, project string, name string) (server.Workflow, error) {
+	pk := azcosmos.NewPartitionKeyString(project)
+	read, err := s.workflows.ReadItem(ctx, pk, name, nil)
+	if isCosmosStatus(err, http.StatusNotFound) {
+		return server.Workflow{}, server.ErrNotFound
+	}
+	if err != nil {
+		return server.Workflow{}, err
+	}
+	var doc workflowDoc
+	if err := json.Unmarshal(read.Value, &doc); err != nil {
+		return server.Workflow{}, err
+	}
+	if _, err := s.workflows.DeleteItem(ctx, pk, name, nil); err != nil {
+		return server.Workflow{}, err
+	}
+	return workflowFromDoc(doc), nil
 }
 
 func (s *Store) ListHosts(ctx context.Context) ([]server.Host, error) {
@@ -361,6 +416,18 @@ func projectFromDoc(doc projectDoc) server.Project {
 		Metadata:   mapOrEmpty(doc.Metadata),
 		CreatedAt:  parseTimeOrNow(doc.CreatedAt),
 	}
+}
+
+func projectFromMap(doc map[string]any) (server.Project, error) {
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return server.Project{}, err
+	}
+	var typed projectDoc
+	if err := json.Unmarshal(payload, &typed); err != nil {
+		return server.Project{}, err
+	}
+	return projectFromDoc(typed), nil
 }
 
 func workflowFromDoc(doc workflowDoc) server.Workflow {
