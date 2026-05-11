@@ -15,7 +15,6 @@ import httpx
 from azure.core.exceptions import ResourceNotFoundError
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request
 from fastapi.responses import FileResponse, Response
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 from ulid import ULID
@@ -10125,14 +10124,46 @@ async def enqueue_signal_endpoint(req: SignalEnqueueRequest) -> PublicSignal:
 
 _static_env = os.environ.get("GLIMMUNG_STATIC_DIR")
 _static = FsPath(_static_env) if _static_env else FsPath(__file__).resolve().parent / "static"
+_static_override_env = os.environ.get("GLIMMUNG_STATIC_OVERRIDE_DIR")
+_static_override = FsPath(_static_override_env) if _static_override_env else None
+
+
+def _static_file(*parts: str) -> FsPath | None:
+    for root in (_static_override, _static):
+        if root is None or not root.exists():
+            continue
+        try:
+            candidate = root.joinpath(*parts).resolve()
+            candidate.relative_to(root.resolve())
+        except ValueError:
+            continue
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _static_index() -> FsPath:
+    found = _static_file("index.html")
+    if found is not None:
+        return found
+    return _static / "index.html"
+
+
 if _static.exists():
-    if (_static / "assets").exists():
-        app.mount("/assets", StaticFiles(directory=_static / "assets"), name="assets")
+    @app.get("/assets/{asset_path:path}")
+    async def serve_asset(asset_path: str) -> FileResponse:
+        found = _static_file("assets", asset_path)
+        if found is None:
+            raise HTTPException(404, "static asset not found")
+        return FileResponse(found)
 
     @app.get("/")
     async def serve_index() -> FileResponse:
-        return FileResponse(_static / "index.html")
+        return FileResponse(_static_index())
 
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str) -> FileResponse:
-        return FileResponse(_static / "index.html")
+        found = _static_file(full_path)
+        if found is not None:
+            return FileResponse(found)
+        return FileResponse(_static_index())
