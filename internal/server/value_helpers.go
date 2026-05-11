@@ -8,6 +8,7 @@ import (
 var ErrNotFound = errors.New("not found")
 var ErrConflict = errors.New("conflict")
 var ErrInactive = errors.New("inactive")
+var ErrUnsupported = errors.New("unsupported")
 
 type ValidationError struct {
 	Message string

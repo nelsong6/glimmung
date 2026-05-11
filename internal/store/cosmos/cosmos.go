@@ -387,6 +387,36 @@ func (s *Store) HeartbeatLeaseByCallbackToken(ctx context.Context, token string)
 	return leaseFromDoc(doc), nil
 }
 
+func (s *Store) ReleaseLeaseByCallbackToken(ctx context.Context, token string) (server.Lease, error) {
+	doc, err := s.readLeaseDocByCallbackToken(ctx, token)
+	if err != nil {
+		return server.Lease{}, err
+	}
+	if doc.State == "released" || doc.State == "expired" {
+		return leaseFromDoc(doc), nil
+	}
+	if boolValue(doc.Metadata["test_slot_checkout"]) {
+		return server.Lease{}, server.ErrUnsupported
+	}
+	if doc.Host != nil && *doc.Host != "" && *doc.Host != "native-k8s" {
+		if err := s.clearHostLease(ctx, *doc.Host, doc.ID); err != nil {
+			return server.Lease{}, err
+		}
+	}
+
+	doc.State = "released"
+	doc.ReleasedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return server.Lease{}, err
+	}
+	partitionKey := azcosmos.NewPartitionKeyString(doc.Project)
+	if _, err := s.leases.ReplaceItem(ctx, partitionKey, doc.ID, payload, nil); err != nil {
+		return server.Lease{}, err
+	}
+	return leaseFromDoc(doc), nil
+}
+
 func (s *Store) readLeaseDocByCallbackToken(ctx context.Context, token string) (leaseDoc, error) {
 	var docs []leaseDoc
 	if err := queryAllWhere(
@@ -418,6 +448,31 @@ func (s *Store) touchHostHeartbeat(ctx context.Context, hostName string) error {
 		return err
 	}
 	doc["lastHeartbeat"] = time.Now().UTC().Format(time.RFC3339Nano)
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	_, err = s.hosts.ReplaceItem(ctx, partitionKey, hostName, payload, nil)
+	return err
+}
+
+func (s *Store) clearHostLease(ctx context.Context, hostName string, leaseID string) error {
+	partitionKey := azcosmos.NewPartitionKeyString(hostName)
+	response, err := s.hosts.ReadItem(ctx, partitionKey, hostName, nil)
+	if isCosmosStatus(err, http.StatusNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(response.Value, &doc); err != nil {
+		return err
+	}
+	if stringValue(doc["currentLeaseId"]) != leaseID {
+		return nil
+	}
+	doc["currentLeaseId"] = nil
 	payload, err := json.Marshal(doc)
 	if err != nil {
 		return err

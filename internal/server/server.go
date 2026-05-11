@@ -81,6 +81,7 @@ func NewWithDependencies(settings Settings, store ReadStore, authResolver AuthRe
 	mux.Handle("DELETE /v1/workflows/{project}/{name}", requireAdmin(adminAuthenticator, http.HandlerFunc(deleteWorkflow(store))))
 	mux.HandleFunc("GET /v1/lease-callbacks/{callback_token}", readLeaseByCallbackToken(store))
 	mux.HandleFunc("POST /v1/lease-callbacks/{callback_token}/heartbeat", heartbeatLeaseByCallbackToken(store))
+	mux.HandleFunc("POST /v1/lease-callbacks/{callback_token}/release", releaseLeaseByCallbackToken(store))
 	mux.HandleFunc("GET /v1/state", stateSnapshot(settings, store))
 	mux.HandleFunc("GET /v1/events", stateEvents(settings, store))
 	mux.Handle("POST /v1/hosts", requireAdmin(adminAuthenticator, http.HandlerFunc(registerHost(store))))
