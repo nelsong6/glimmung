@@ -254,6 +254,9 @@ func newHandler(settings Settings, store ReadStore, authResolver AuthResolver, g
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/events", nativeRunEventWriteByCallbackToken(store))
 	mux.HandleFunc("GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/status", nativeRunStatusByNumber(store))
 	mux.HandleFunc("GET /v1/run-callbacks/{callback_token}/native/status", nativeRunStatusByCallbackToken(store))
+	mux.HandleFunc("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/failed", nativeRunFailedByNumber(store))
+	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/failed", nativeRunFailedByCallbackToken(store))
+	mux.Handle("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/replay", requireAdmin(adminAuthenticator, http.HandlerFunc(replayRunDecisionByNumber(store))))
 	mux.HandleFunc("POST /v1/webhook/github", githubWebhook(settings))
 	if staticRoots(settings).enabled() {
 		mux.HandleFunc("GET /assets/", serveAsset(settings))

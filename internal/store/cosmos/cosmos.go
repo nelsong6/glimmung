@@ -1312,6 +1312,7 @@ type nativeEventDoc struct {
 
 type verificationDoc struct {
 	Status       string   `json:"status"`
+	Reasons      []string `json:"reasons"`
 	EvidenceRefs []string `json:"evidence_refs"`
 	CostUSD      float64  `json:"cost_usd"`
 }
@@ -3500,6 +3501,51 @@ func (s *Store) GetWorkflowByName(ctx context.Context, project, name string) (*s
 	}
 	w := workflowFromDoc(doc)
 	return &w, nil
+}
+
+// ReadRunForReplay reads a run document and returns the minimal fields
+// needed by the replay decision engine.
+func (s *Store) ReadRunForReplay(ctx context.Context, project, runID string) (server.RunReplayData, error) {
+	pk := azcosmos.NewPartitionKeyString(project)
+	resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
+	if isCosmosStatus(err, http.StatusNotFound) {
+		return server.RunReplayData{}, server.ErrNotFound
+	}
+	if err != nil {
+		return server.RunReplayData{}, err
+	}
+	var doc runDoc
+	if err := json.Unmarshal(resp.Value, &doc); err != nil {
+		return server.RunReplayData{}, err
+	}
+	attempts := make([]server.RunAttemptData, 0, len(doc.Attempts))
+	for _, a := range doc.Attempts {
+		conclusion := ""
+		if a.Conclusion != nil {
+			conclusion = *a.Conclusion
+		}
+		var verif *server.RunVerificationData
+		if a.Verification != nil {
+			verif = &server.RunVerificationData{
+				Status:  a.Verification.Status,
+				Reasons: a.Verification.Reasons,
+			}
+		}
+		attempts = append(attempts, server.RunAttemptData{
+			AttemptIndex: a.AttemptIndex,
+			Phase:        a.Phase,
+			Conclusion:   conclusion,
+			Verification: verif,
+		})
+	}
+	return server.RunReplayData{
+		ID:                doc.ID,
+		Project:           doc.Project,
+		WorkflowName:      doc.Workflow,
+		Attempts:          attempts,
+		CumulativeCostUSD: doc.CumulativeCostUSD,
+		IssueNumber:       doc.IssueNumber,
+	}, nil
 }
 
 func (s *Store) UpsertWorkflowFromRegister(ctx context.Context, reg server.WorkflowRegister) (server.Workflow, error) {
