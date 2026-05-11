@@ -7,6 +7,14 @@ import (
 
 var ErrNotFound = errors.New("not found")
 
+type ValidationError struct {
+	Message string
+}
+
+func (e ValidationError) Error() string {
+	return e.Message
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if value != "" {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -152,6 +153,21 @@ func (s *Store) SetProjectTestEnvironmentCount(ctx context.Context, project stri
 	return projectFromMap(doc)
 }
 
+func (s *Store) readProjectDoc(ctx context.Context, project string) (projectDoc, error) {
+	read, err := s.projects.ReadItem(ctx, azcosmos.NewPartitionKeyString(project), project, nil)
+	if err != nil {
+		if isCosmosStatus(err, http.StatusNotFound) {
+			return projectDoc{}, server.ErrNotFound
+		}
+		return projectDoc{}, err
+	}
+	var doc projectDoc
+	if err := json.Unmarshal(read.Value, &doc); err != nil {
+		return projectDoc{}, err
+	}
+	return doc, nil
+}
+
 func (s *Store) ListWorkflows(ctx context.Context) ([]server.Workflow, error) {
 	var docs []workflowDoc
 	if err := queryAll(ctx, s.workflows, &docs); err != nil {
@@ -162,6 +178,49 @@ func (s *Store) ListWorkflows(ctx context.Context) ([]server.Workflow, error) {
 		rows = append(rows, workflowFromDoc(doc))
 	}
 	return rows, nil
+}
+
+func (s *Store) UpsertWorkflow(ctx context.Context, req server.WorkflowRegister) (server.Workflow, error) {
+	projectDoc, err := s.readProjectDoc(ctx, req.Project)
+	if errors.Is(err, server.ErrNotFound) {
+		return server.Workflow{}, server.ValidationError{Message: "project " + req.Project + " does not exist; register it first"}
+	}
+	if err != nil {
+		return server.Workflow{}, err
+	}
+	if err := validateWorkflowForProject(projectDoc, req); err != nil {
+		return server.Workflow{}, err
+	}
+
+	doc := workflowDocFromRegister(req, time.Now().UTC().Format(time.RFC3339Nano))
+	pk := azcosmos.NewPartitionKeyString(req.Project)
+	existing, err := s.workflows.ReadItem(ctx, pk, req.Name, nil)
+	if err == nil {
+		var existingDoc workflowDoc
+		if err := json.Unmarshal(existing.Value, &existingDoc); err == nil && existingDoc.CreatedAt != "" {
+			doc.CreatedAt = existingDoc.CreatedAt
+		}
+		payload, err := json.Marshal(doc)
+		if err != nil {
+			return server.Workflow{}, err
+		}
+		if _, err := s.workflows.ReplaceItem(ctx, pk, req.Name, payload, nil); err != nil {
+			return server.Workflow{}, err
+		}
+		return workflowFromDoc(doc), nil
+	}
+	if !isCosmosStatus(err, http.StatusNotFound) {
+		return server.Workflow{}, err
+	}
+
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return server.Workflow{}, err
+	}
+	if _, err := s.workflows.CreateItem(ctx, pk, payload, nil); err != nil {
+		return server.Workflow{}, err
+	}
+	return workflowFromDoc(doc), nil
 }
 
 func (s *Store) DeleteWorkflow(ctx context.Context, project string, name string) (server.Workflow, error) {
@@ -536,6 +595,79 @@ func leaseFromDoc(doc leaseDoc) server.Lease {
 	}
 }
 
+func workflowDocFromRegister(req server.WorkflowRegister, createdAt string) workflowDoc {
+	phases := make([]phaseDoc, 0, len(req.Phases))
+	for _, phase := range req.Phases {
+		phases = append(phases, phaseDocFromSpec(phase))
+	}
+	return workflowDoc{
+		ID:                  req.Name,
+		Project:             req.Project,
+		Name:                req.Name,
+		Phases:              phases,
+		PR:                  prDocFromSpec(req.PR),
+		Budget:              budgetDoc{Total: defaultBudgetTotal(req.Budget.Total)},
+		TriggerLabel:        req.TriggerLabel,
+		DefaultRequirements: mapOrEmpty(req.DefaultRequirements),
+		Metadata:            mapOrEmpty(req.Metadata),
+		CreatedAt:           createdAt,
+	}
+}
+
+func phaseDocFromSpec(phase server.PhaseSpec) phaseDoc {
+	jobs := make([]nativeJobDoc, 0, len(phase.Jobs))
+	for _, job := range phase.Jobs {
+		jobs = append(jobs, nativeJobDocFromSpec(job))
+	}
+	return phaseDoc{
+		Name:                     phase.Name,
+		Kind:                     firstNonEmpty(phase.Kind, "gha_dispatch"),
+		WorkflowFilename:         phase.WorkflowFilename,
+		WorkflowRef:              firstNonEmpty(phase.WorkflowRef, "main"),
+		Inputs:                   stringMapOrEmpty(phase.Inputs),
+		Outputs:                  sliceOrEmpty(phase.Outputs),
+		Requirements:             mapOrEmpty(phase.Requirements),
+		Verify:                   phase.Verify,
+		RecyclePolicy:            recyclePolicyDocFromSpec(phase.RecyclePolicy),
+		Always:                   phase.Always,
+		EvidenceVerificationGate: phase.EvidenceVerificationGate,
+		DependsOn:                sliceOrEmpty(phase.DependsOn),
+		Jobs:                     jobs,
+	}
+}
+
+func nativeJobDocFromSpec(job server.NativeJobSpec) nativeJobDoc {
+	steps := make([]nativeStepDoc, 0, len(job.Steps))
+	for _, step := range job.Steps {
+		steps = append(steps, nativeStepDoc{Slug: step.Slug, Title: step.Title})
+	}
+	return nativeJobDoc{
+		ID:             job.ID,
+		Name:           job.Name,
+		Image:          job.Image,
+		Command:        sliceOrEmpty(job.Command),
+		Args:           sliceOrEmpty(job.Args),
+		Env:            stringMapOrEmpty(job.Env),
+		Steps:          steps,
+		TimeoutSeconds: job.TimeoutSeconds,
+	}
+}
+
+func prDocFromSpec(pr server.PrPrimitive) prDoc {
+	return prDoc{Enabled: pr.Enabled, RecyclePolicy: recyclePolicyDocFromSpec(pr.RecyclePolicy)}
+}
+
+func recyclePolicyDocFromSpec(policy *server.RecyclePolicy) *recyclePolicyDoc {
+	if policy == nil {
+		return nil
+	}
+	return &recyclePolicyDoc{
+		MaxAttempts: policy.MaxAttempts,
+		On:          sliceOrEmpty(policy.On),
+		LandsAt:     policy.LandsAt,
+	}
+}
+
 func workflowFromMap(doc map[string]any) (server.Workflow, error) {
 	payload, err := json.Marshal(doc)
 	if err != nil {
@@ -546,6 +678,73 @@ func workflowFromMap(doc map[string]any) (server.Workflow, error) {
 		return server.Workflow{}, err
 	}
 	return workflowFromDoc(typed), nil
+}
+
+func validateWorkflowForProject(project projectDoc, req server.WorkflowRegister) error {
+	if projectRequiresNativeWorkflows(project) {
+		ghaPhases := make([]string, 0)
+		for _, phase := range req.Phases {
+			if firstNonEmpty(phase.Kind, "gha_dispatch") == "gha_dispatch" {
+				ghaPhases = append(ghaPhases, phase.Name)
+			}
+		}
+		if len(ghaPhases) > 0 {
+			return server.ValidationError{
+				Message: "project is marked native_webapp; workflow phases must use kind='k8s_job' (gha_dispatch phases: " + strings.Join(ghaPhases, ", ") + ")",
+			}
+		}
+	}
+
+	hasEntry := false
+	hasTesting := false
+	hasCleanup := false
+	for _, phase := range req.Phases {
+		if len(phase.DependsOn) == 0 {
+			hasEntry = true
+		}
+		if phase.Verify || phase.EvidenceVerificationGate {
+			hasTesting = true
+		}
+		if phase.Always {
+			hasCleanup = true
+		}
+	}
+	missing := make([]string, 0)
+	if !hasEntry {
+		missing = append(missing, "prepare")
+	}
+	if !hasTesting {
+		missing = append(missing, "testing")
+	}
+	if !hasCleanup {
+		missing = append(missing, "cleanup")
+	}
+	if len(missing) > 0 {
+		return server.ValidationError{Message: "workflow " + req.Name + " is missing required phases: " + strings.Join(missing, ", ")}
+	}
+	return nil
+}
+
+func projectRequiresNativeWorkflows(project projectDoc) bool {
+	metadata := project.Metadata
+	if boolValue(metadata["native_webapp"]) || boolValue(metadata["nativeWebapp"]) {
+		return true
+	}
+	appKind := strings.ToLower(strings.TrimSpace(stringValue(metadata["app_kind"])))
+	return appKind == "native_webapp" || appKind == "native-webapp" || appKind == "native webapp"
+}
+
+func boolValue(value any) bool {
+	typed, ok := value.(bool)
+	return ok && typed
+}
+
+func stringValue(value any) string {
+	typed, ok := value.(string)
+	if !ok {
+		return ""
+	}
+	return typed
 }
 
 func phaseFromDoc(doc phaseDoc) server.PhaseSpec {
