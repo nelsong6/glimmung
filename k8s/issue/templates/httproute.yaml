@@ -22,6 +22,7 @@ spec:
     - group: gateway.networking.x-k8s.io
       kind: XListenerSet
       name: {{ .Values.attachListenerSet }}
+      namespace: {{ .Values.attachListenerSetNamespace }}
   rules:
     - matches:
         - path:

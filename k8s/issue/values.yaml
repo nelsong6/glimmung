@@ -65,9 +65,11 @@ externalSecret:
     - envVar: ENTRA_TEST_CLIENT_ID
       kvKey: glimmung-oauth-test-client-id
 
-# The wildcard XListenerSet that per-install HTTPRoutes attach to (in
-# the same `glimmung` namespace where this chart installs).
+# The wildcard XListenerSet that per-install HTTPRoutes attach to. Production
+# and legacy per-issue releases install in `glimmung`; native test slots install
+# into slot namespaces and attach back to this shared listener.
 attachListenerSet: glimmung-wildcard
+attachListenerSetNamespace: glimmung
 
 # ExternalDNS reads Gateway parentRefs from HTTPRoutes to create DNS
 # records. The XListenerSet serves HTTPS; this Gateway parentRef makes

@@ -1900,10 +1900,6 @@ h2 .inline-action,
   stroke: var(--state-success-fg);
   fill: var(--state-success-fg);
 }
-.dag-rf .react-flow__edge.dag-rf-edge.policy-disabled .react-flow__edge-path {
-  stroke-dasharray: 4 3;
-  opacity: 0.7;
-}
 .dag-rf .react-flow__edge marker path {
   fill: var(--fg-dimmer);
   stroke: var(--fg-dimmer);

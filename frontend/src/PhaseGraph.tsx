@@ -415,7 +415,7 @@ export function PhaseGraph({
             targetHandle: `recycle-in-${targetHandleIndex}`,
             type: "recycle",
             markerEnd: { type: MarkerType.ArrowClosed },
-            className: `dag-rf-edge dag-rf-recycle${arrow.active ? " fired" : ""}${arrow.max_attempts <= 0 ? " policy-disabled" : ""}`,
+            className: `dag-rf-edge dag-rf-recycle${arrow.active ? " fired" : ""}`,
             data: { laneIndex: idx, laneBaseY: recycleLaneBaseY },
             label: "",
           });

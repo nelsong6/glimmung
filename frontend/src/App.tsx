@@ -246,6 +246,8 @@ export function App() {
           <Route path="issue" element={null} />
           <Route path="runs" element={null} />
           <Route path="runs/:runId" element={null} />
+          <Route path="workflow" element={null} />
+          <Route path="workflow/:workflowRunId" element={null} />
           <Route path="touchpoint" element={null} />
           <Route path="description" element={null} />
           <Route path="the-run" element={null} />
@@ -264,6 +266,9 @@ export function App() {
           <Route path="issue" element={null} />
           <Route path="the-run" element={null} />
           <Route path="runs" element={null} />
+          <Route path="runs/:runId" element={null} />
+          <Route path="workflow" element={null} />
+          <Route path="workflow/:workflowRunId" element={null} />
           <Route path="touchpoint" element={null} />
           {/* Backwards-compat: pre-#81 tab slugs. SLUG_TO_TAB in
               IssueDetailView maps these to the new tabs so deep links
@@ -277,6 +282,9 @@ export function App() {
           <Route path="issue" element={null} />
           <Route path="the-run" element={null} />
           <Route path="runs" element={null} />
+          <Route path="runs/:runId" element={null} />
+          <Route path="workflow" element={null} />
+          <Route path="workflow/:workflowRunId" element={null} />
           <Route path="touchpoint" element={null} />
           <Route path="description" element={null} />
           <Route path="in-progress" element={null} />
@@ -301,7 +309,6 @@ function Layout() {
   const location = useLocation();
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [conn, setConn] = useState<Connection>("dead");
-  const [lastUpdate, setLastUpdate] = useState<number>(0);
   const selected = ALL;
   const [account, setAccount] = useState<AccountInfo | null>(null);
   const [authReady, setAuthReady] = useState(false);
@@ -352,20 +359,20 @@ function Layout() {
   useEffect(() => {
     if (isMockMode()) {
       setSnap(mockSnapshot as Snapshot);
-      setLastUpdate(Date.now());
       setConn("live");
       return;
     }
 
     let es: EventSource | null = null;
     let staleTimer: number | null = null;
+    let lastSeen = 0;
 
     const connect = () => {
       es = new EventSource("/v1/events");
       es.addEventListener("state", (e) => {
         try {
           setSnap(JSON.parse((e as MessageEvent).data));
-          setLastUpdate(Date.now());
+          lastSeen = Date.now();
           setConn("live");
         } catch (err) {
           console.error("bad snapshot", err);
@@ -376,14 +383,16 @@ function Layout() {
 
     connect();
     staleTimer = window.setInterval(() => {
-      if (Date.now() - lastUpdate > 5000) setConn((c) => (c === "live" ? "stale" : c));
+      if (lastSeen > 0 && Date.now() - lastSeen > 5000) {
+        setConn((c) => (c === "live" ? "stale" : c));
+      }
     }, 1000);
 
     return () => {
       es?.close();
       if (staleTimer !== null) window.clearInterval(staleTimer);
     };
-  }, [lastUpdate]);
+  }, []);
 
   // Poll /v1/issues + /v1/touchpoints to drive the issue-workspace pulse
   // when issue work or touchpoint review is in flight. Touchpoints are no
@@ -658,6 +667,12 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
         crumbs.push({
           label: "Runs",
           to: `/projects/${encodeURIComponent(parts[1] ?? "")}/issues/${encodeURIComponent(parts[3] ?? "")}/runs`,
+        });
+        if (parts[5]) crumbs.push({ label: runSlugDisplay(parts[5]) });
+      } else if (parts[4] === "workflow") {
+        crumbs.push({
+          label: "Workflow",
+          to: `/projects/${encodeURIComponent(parts[1] ?? "")}/issues/${encodeURIComponent(parts[3] ?? "")}/workflow`,
         });
         if (parts[5]) crumbs.push({ label: runSlugDisplay(parts[5]) });
       } else if (parts[4]) {
