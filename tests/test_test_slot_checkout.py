@@ -457,6 +457,39 @@ async def test_return_test_slot_resolves_by_slot_index(app_state):
 
 
 @pytest.mark.asyncio
+async def test_return_test_slot_resolves_slot_index_from_project_metadata(app_state):
+    await _register_project(
+        SimpleNamespace(state=app_state),
+        "glimmung",
+        "nelsong6/glimmung",
+        metadata={
+            "native_standby_dns": {
+                "enabled": True,
+                "record_base": "glimmung.dev.romaine.life",
+                "slot_prefix": "glimmung-slot",
+                "count": 1,
+            },
+        },
+    )
+    checked_out = await app_module.checkout_test_slot(
+        app_module.TestSlotCheckoutRequest(
+            project="glimmung",
+            slot_index=1,
+            requester=_glimmung_requester(),
+        )
+    )
+
+    returned = await app_module.return_test_slot(
+        app_module.TestSlotReturnRequest(project="glimmung", slot_index=1)
+    )
+
+    assert checked_out.lease == "glimmung-slot-1"
+    assert returned.lease == "glimmung-slot-1"
+    assert returned.slot_index == 1
+    assert returned.slot_name == "glimmung-slot-1"
+
+
+@pytest.mark.asyncio
 async def test_playwright_reconcile_includes_checked_out_test_slots(app_state):
     await _register_project(
         SimpleNamespace(state=app_state),
