@@ -8723,9 +8723,18 @@ async def _resolve_test_slot_lease(
     if slot_index is None and not (slot_name or "").strip():
         raise HTTPException(400, "slot_index or slot_name required")
 
-    target_slot_name = (slot_name or "").strip() or (
-        f"{project}-{slot_index}" if slot_index is not None else ""
-    )
+    target_slot_name = (slot_name or "").strip()
+    if not target_slot_name and slot_index is not None:
+        project_doc = await _read_project(cosmos, project)
+        if project_doc is None:
+            raise HTTPException(400, f"project {project!r} not registered")
+        target_slot_name = str(
+            native_k8s_ops._test_slot_spec(
+                project_doc,
+                slot_index,
+                app.state.settings,
+            )["slot_name"]
+        )
     docs = await query_all(
         cosmos.leases,
         (
