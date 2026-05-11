@@ -1,0 +1,79 @@
+[
+  {
+    "name": "parse total only",
+    "function": "parse_budget_label",
+    "label": "agent-budget:50",
+    "want_parsed": true,
+    "want_total": 50.0
+  },
+  {
+    "name": "parse decimal",
+    "function": "parse_budget_label",
+    "label": "agent-budget:12.5",
+    "want_parsed": true,
+    "want_total": 12.5
+  },
+  {
+    "name": "parse legacy total",
+    "function": "parse_budget_label",
+    "label": "agent-budget:5x50",
+    "want_parsed": true,
+    "want_total": 50.0
+  },
+  {
+    "name": "ignore unrelated",
+    "function": "parse_budget_label",
+    "label": "bug",
+    "want_parsed": false,
+    "want_total": null
+  },
+  {
+    "name": "ignore non numeric",
+    "function": "parse_budget_label",
+    "label": "agent-budget:bogus",
+    "want_parsed": false,
+    "want_total": null
+  },
+  {
+    "name": "ignore non positive",
+    "function": "parse_budget_label",
+    "label": "agent-budget:0",
+    "want_parsed": false,
+    "want_total": null
+  },
+  {
+    "name": "resolve label wins",
+    "function": "resolve_budget",
+    "labels": ["bug", "agent-budget:50"],
+    "workflow_default": 10.0,
+    "want_resolved": 50.0
+  },
+  {
+    "name": "resolve workflow default",
+    "function": "resolve_budget",
+    "labels": ["bug", "needs-design"],
+    "workflow_default": 100.0,
+    "want_resolved": 100.0
+  },
+  {
+    "name": "resolve global default",
+    "function": "resolve_budget",
+    "labels": [],
+    "workflow_default": null,
+    "want_resolved": 25.0
+  },
+  {
+    "name": "resolve first matching label",
+    "function": "resolve_budget",
+    "labels": ["agent-budget:1", "agent-budget:999"],
+    "workflow_default": null,
+    "want_resolved": 1.0
+  },
+  {
+    "name": "resolve skips malformed",
+    "function": "resolve_budget",
+    "labels": ["agent-budget:bogus"],
+    "workflow_default": 40.0,
+    "want_resolved": 40.0
+  }
+]

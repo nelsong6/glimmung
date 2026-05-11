@@ -1,7 +1,36 @@
 """Budget label parsing + resolution (#69 schema)."""
 
+import json
+from pathlib import Path
+
+import pytest
 from glimmung.budget import parse_budget_label, resolve_budget
 from glimmung.models import BudgetConfig
+
+
+BUDGET_CASES = json.loads(
+    (Path(__file__).resolve().parents[1] / "testdata" / "budget_cases.json").read_text()
+)
+
+
+@pytest.mark.parametrize("case", BUDGET_CASES, ids=lambda case: case["name"])
+def test_budget_golden_cases(case):
+    match case["function"]:
+        case "parse_budget_label":
+            budget = parse_budget_label(case["label"])
+            assert (budget is not None) is case["want_parsed"]
+            if budget is not None:
+                assert budget == BudgetConfig(total=case["want_total"])
+        case "resolve_budget":
+            workflow_default = (
+                BudgetConfig(total=case["workflow_default"])
+                if case["workflow_default"] is not None
+                else None
+            )
+            budget = resolve_budget(case["labels"], workflow_default)
+            assert budget == BudgetConfig(total=case["want_resolved"])
+        case _:
+            raise AssertionError(f"unknown budget function {case['function']!r}")
 
 
 def test_parses_new_format_total_only():
@@ -60,7 +89,8 @@ def test_resolve_falls_back_to_global_defaults():
 def test_resolve_first_matching_label_wins():
     """If a user (somehow) has two budget labels, take the first."""
     resolved = resolve_budget(
-        ["agent-budget:1", "agent-budget:999"], None,
+        ["agent-budget:1", "agent-budget:999"],
+        None,
     )
     assert resolved == BudgetConfig(total=1.0)
 
