@@ -33,6 +33,13 @@ cosmos:
 testEnv:
   enabled: false
 
+staticOverride:
+  enabled: true
+  mountPath: /var/run/glimmung-static-override
+  writerContainerName: static-writer
+  writerImage: alpine:3.20
+  writerImagePullPolicy: IfNotPresent
+
 config:
   allowedEmails:
     - nelson@romaine.life

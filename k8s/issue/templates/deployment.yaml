@@ -44,11 +44,21 @@ spec:
             - name: CONTROL_PLANE_LOOPS_ENABLED
               value: "false"
             {{- end }}
+            {{- if and .Values.testEnv.enabled .Values.staticOverride.enabled }}
+            - name: GLIMMUNG_STATIC_OVERRIDE_DIR
+              value: {{ .Values.staticOverride.mountPath | quote }}
+            {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ .Values.configMapName }}
             - secretRef:
                 name: {{ .Values.secretName }}
+          {{- if and .Values.testEnv.enabled .Values.staticOverride.enabled }}
+          volumeMounts:
+            - name: static-override
+              mountPath: {{ .Values.staticOverride.mountPath | quote }}
+              readOnly: true
+          {{- end }}
           readinessProbe:
             httpGet:
               path: /healthz
@@ -68,3 +78,22 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
+        {{- if and .Values.testEnv.enabled .Values.staticOverride.enabled }}
+        - name: {{ .Values.staticOverride.writerContainerName }}
+          image: {{ .Values.staticOverride.writerImage | quote }}
+          imagePullPolicy: {{ .Values.staticOverride.writerImagePullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p {{ .Values.staticOverride.mountPath | quote }}
+              while true; do sleep 3600; done
+          volumeMounts:
+            - name: static-override
+              mountPath: {{ .Values.staticOverride.mountPath | quote }}
+        {{- end }}
+      {{- if and .Values.testEnv.enabled .Values.staticOverride.enabled }}
+      volumes:
+        - name: static-override
+          emptyDir: {}
+      {{- end }}
