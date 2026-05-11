@@ -33,6 +33,10 @@ type Settings struct {
 	ArtifactsStorageAccount        string
 	ArtifactsContainer             string
 	NativeRunnerProjectConcurrency int
+	GitHubAppID                    string
+	GitHubAppInstallationID        string
+	GitHubAppPrivateKey            string
+	GitHubWebhookSecret            string
 }
 
 func SettingsFromEnv() Settings {
@@ -59,6 +63,10 @@ func SettingsFromEnv() Settings {
 			"NATIVE_RUNNER_PROJECT_CONCURRENCY",
 			5,
 		),
+		GitHubAppID:             os.Getenv("GITHUB_APP_ID"),
+		GitHubAppInstallationID: os.Getenv("GITHUB_APP_INSTALLATION_ID"),
+		GitHubAppPrivateKey:     os.Getenv("GITHUB_APP_PRIVATE_KEY"),
+		GitHubWebhookSecret:     os.Getenv("GITHUB_WEBHOOK_SECRET"),
 	}
 }
 
@@ -70,7 +78,16 @@ func NewWithStore(settings Settings, store ReadStore) http.Handler {
 	return NewWithDependencies(settings, store, nil)
 }
 
+// NewWithSyncClient extends NewWithDependencies with an optional GitHub client for workflow sync.
+func NewWithSyncClient(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, artifactStores ...ArtifactStore) http.Handler {
+	return newHandler(settings, store, authResolver, ghClient, artifactStores...)
+}
+
 func NewWithDependencies(settings Settings, store ReadStore, authResolver AuthResolver, artifactStores ...ArtifactStore) http.Handler {
+	return newHandler(settings, store, authResolver, nil, artifactStores...)
+}
+
+func newHandler(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, artifactStores ...ArtifactStore) http.Handler {
 	var artifactStore ArtifactStore
 	if len(artifactStores) > 0 {
 		artifactStore = artifactStores[0]
@@ -225,6 +242,10 @@ func NewWithDependencies(settings Settings, store ReadStore, authResolver AuthRe
 	mux.Handle("PATCH /v1/portfolio/elements/{project}/{element_ref}", requireAdmin(adminAuthenticator, http.HandlerFunc(patchPortfolioElement(store))))
 	mux.Handle("POST /v1/playbooks/{project}/{playbook_ref}/entries/{entry_id}/gate", requireAdmin(adminAuthenticator, http.HandlerFunc(patchPlaybookEntryGate(store))))
 	mux.Handle("POST /v1/hosts", requireAdmin(adminAuthenticator, http.HandlerFunc(registerHost(store))))
+	mux.Handle("POST /v1/lease", requireAdmin(adminAuthenticator, http.HandlerFunc(createLease(store))))
+	mux.Handle("POST /v1/leases/cancel", requireAdmin(adminAuthenticator, http.HandlerFunc(cancelLeaseByRef(store))))
+	mux.HandleFunc("GET /v1/projects/{project}/workflows/{name}/upstream", getWorkflowUpstream(store, ghClient))
+	mux.Handle("POST /v1/projects/{project}/workflows/{name}/sync", requireAdmin(adminAuthenticator, http.HandlerFunc(syncWorkflow(store, ghClient))))
 	if staticRoots(settings).enabled() {
 		mux.HandleFunc("GET /assets/", serveAsset(settings))
 		mux.HandleFunc("GET /", serveSPA(settings))

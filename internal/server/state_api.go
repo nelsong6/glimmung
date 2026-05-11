@@ -294,6 +294,11 @@ func leaseToPublic(lease Lease) LeasePublic {
 	}
 }
 
+// LeasePublicRefFromLease is the exported wrapper used by the cosmos store.
+func LeasePublicRefFromLease(lease Lease) string {
+	return leasePublicRef(lease)
+}
+
 func leasePublicRef(lease Lease) string {
 	slotName := ""
 	if value, ok := stringFromMap(lease.Metadata, "native_slot_name"); ok {

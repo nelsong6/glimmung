@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nelsong6/glimmung/internal/auth"
+	githubclient "github.com/nelsong6/glimmung/internal/github"
 	"github.com/nelsong6/glimmung/internal/server"
 	artifactstore "github.com/nelsong6/glimmung/internal/store/artifacts"
 	cosmosstore "github.com/nelsong6/glimmung/internal/store/cosmos"
@@ -24,11 +26,12 @@ func main() {
 		log.Printf("artifact store disabled: %v", err)
 	}
 	authenticator := buildAuthenticator(settings)
+	ghClient := buildGitHubClient(settings)
 	addr := ":" + settings.Port
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           server.NewWithDependencies(settings, store, authenticator, artifacts),
+		Handler:           server.NewWithSyncClient(settings, store, authenticator, ghClient, artifacts),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -37,6 +40,34 @@ func main() {
 		log.Printf("server failed: %v", err)
 		os.Exit(1)
 	}
+}
+
+type gitHubClientAdapter struct {
+	client *githubclient.Client
+}
+
+func (a *gitHubClientAdapter) FetchWorkflowFile(ctx context.Context, repo, name, ref string) ([]byte, int, error) {
+	path := ".glimmung/workflows/" + name + ".yaml"
+	data, err := a.client.FetchFileContents(ctx, repo, path, ref)
+	if errors.Is(err, githubclient.ErrNotFound) {
+		return nil, 404, err
+	}
+	if err != nil {
+		return nil, 502, err
+	}
+	return data, 200, nil
+}
+
+func buildGitHubClient(settings server.Settings) server.WorkflowSyncClient {
+	if settings.GitHubAppID == "" || settings.GitHubAppInstallationID == "" || settings.GitHubAppPrivateKey == "" {
+		return nil
+	}
+	client, err := githubclient.New(settings.GitHubAppID, settings.GitHubAppInstallationID, settings.GitHubAppPrivateKey)
+	if err != nil {
+		log.Printf("GitHub App client disabled: %v", err)
+		return nil
+	}
+	return &gitHubClientAdapter{client: client}
 }
 
 func buildAuthenticator(settings server.Settings) auth.CompositeAuthenticator {

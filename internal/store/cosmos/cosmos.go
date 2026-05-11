@@ -3100,6 +3100,383 @@ type signalDoc struct {
 	FailureReason     *string        `json:"failure_reason,omitempty"`
 }
 
+// ---------------------------------------------------------------------------
+// Lease acquire and cancel
+// ---------------------------------------------------------------------------
+
+const leaseCounterPrefix = "__counter:lease-number:"
+const maxLeaseConflictRetries = 3
+
+func (s *Store) AcquireLease(ctx context.Context, req server.LeaseAcquireRequest) (server.Lease, *server.Host, error) {
+	now := time.Now().UTC()
+	leaseID := uuid.New().String()
+	leaseNumber, err := s.nextLeaseNumber(ctx, req.Project)
+	if err != nil {
+		return server.Lease{}, nil, fmt.Errorf("next lease number: %w", err)
+	}
+	ttl := 900
+	if req.TTLSeconds != nil && *req.TTLSeconds > 0 {
+		ttl = *req.TTLSeconds
+	}
+	metadata := buildLeaseMetadata(req)
+	callbackToken := uuid.New().String()[:32]
+	metadata["lease_callback_token"] = callbackToken
+
+	// Query all free hosts.
+	var rawHosts []map[string]any
+	if err := queryAllWhere(
+		ctx, s.hosts,
+		"SELECT * FROM c WHERE (NOT IS_DEFINED(c.currentLeaseId) OR c.currentLeaseId = null) AND c.drained = false",
+		nil, &rawHosts,
+	); err != nil {
+		return server.Lease{}, nil, fmt.Errorf("query free hosts: %w", err)
+	}
+	// Filter by requirements and sort by lastUsedAt (idle-longest first).
+	candidates := make([]map[string]any, 0, len(rawHosts))
+	for _, h := range rawHosts {
+		caps, _ := h["capabilities"].(map[string]any)
+		if matchesRequirements(caps, req.Requirements) {
+			candidates = append(candidates, h)
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		ai, _ := candidates[i]["lastUsedAt"].(string)
+		aj, _ := candidates[j]["lastUsedAt"].(string)
+		return ai < aj
+	})
+
+	nowStr := now.Format(time.RFC3339Nano)
+	for _, candidate := range candidates {
+		hostID, _ := candidate["id"].(string)
+		etag, _ := candidate["_etag"].(string)
+		if hostID == "" || etag == "" {
+			continue
+		}
+		updated := cloneMap(candidate)
+		delete(updated, "_etag")
+		delete(updated, "_rid")
+		delete(updated, "_self")
+		delete(updated, "_attachments")
+		delete(updated, "_ts")
+		updated["currentLeaseId"] = leaseID
+		updated["lastUsedAt"] = nowStr
+		updated["lastHeartbeat"] = nowStr
+
+		payload, err := json.Marshal(updated)
+		if err != nil {
+			continue
+		}
+		pk := azcosmos.NewPartitionKeyString(hostID)
+		etagVal := azcore.ETag(etag)
+		opts := &azcosmos.ItemOptions{IfMatchEtag: &etagVal}
+		if _, err := s.hosts.ReplaceItem(ctx, pk, hostID, payload, opts); err != nil {
+			if isCosmosStatus(err, http.StatusPreconditionFailed) {
+				continue // lost the race — try next candidate
+			}
+			return server.Lease{}, nil, fmt.Errorf("claim host: %w", err)
+		}
+
+		hostName, _ := candidate["name"].(string)
+		leaseDoc := leaseDoc{
+			ID:          leaseID,
+			LeaseNumber: &leaseNumber,
+			Project:     req.Project,
+			Workflow:    req.Workflow,
+			Host:        &hostName,
+			State:       "claimed",
+			Requirements: req.Requirements,
+			Metadata:    metadata,
+			RequestedAt: nowStr,
+			AssignedAt:  nowStr,
+			TTLSeconds:  ttl,
+		}
+		docPayload, err := json.Marshal(leaseDoc)
+		if err != nil {
+			return server.Lease{}, nil, err
+		}
+		leasePK := azcosmos.NewPartitionKeyString(req.Project)
+		if _, err := s.leases.CreateItem(ctx, leasePK, docPayload, nil); err != nil {
+			return server.Lease{}, nil, fmt.Errorf("create lease doc: %w", err)
+		}
+		lease := leaseFromDoc(leaseDoc)
+		hostModel, _ := hostFromMap(updated)
+		hostModel.ID = hostID
+		return lease, &hostModel, nil
+	}
+
+	// No host found — create pending lease.
+	pendingDoc := leaseDoc{
+		ID:           leaseID,
+		LeaseNumber:  &leaseNumber,
+		Project:      req.Project,
+		Workflow:     req.Workflow,
+		Host:         nil,
+		State:        "pending",
+		Requirements: req.Requirements,
+		Metadata:     metadata,
+		RequestedAt:  nowStr,
+		TTLSeconds:   ttl,
+	}
+	docPayload, err := json.Marshal(pendingDoc)
+	if err != nil {
+		return server.Lease{}, nil, err
+	}
+	leasePK := azcosmos.NewPartitionKeyString(req.Project)
+	if _, err := s.leases.CreateItem(ctx, leasePK, docPayload, nil); err != nil {
+		return server.Lease{}, nil, fmt.Errorf("create pending lease doc: %w", err)
+	}
+	return leaseFromDoc(pendingDoc), nil, nil
+}
+
+func (s *Store) CancelLeaseByRef(ctx context.Context, project, ref string) (server.CancelLeaseResult, error) {
+	// Find the lease doc by iterating all leases for the project.
+	var docs []leaseDoc
+	if err := queryAllWhere(
+		ctx, s.leases,
+		"SELECT * FROM c WHERE c.project = @p",
+		[]azcosmos.QueryParameter{{Name: "@p", Value: project}},
+		&docs,
+	); err != nil {
+		return server.CancelLeaseResult{}, fmt.Errorf("query leases: %w", err)
+	}
+	var found *leaseDoc
+	for i, doc := range docs {
+		lease := leaseFromDoc(doc)
+		if server.LeasePublicRefFromLease(lease) == ref {
+			found = &docs[i]
+			break
+		}
+	}
+	if found == nil {
+		return server.CancelLeaseResult{}, server.ErrNotFound
+	}
+
+	publicRef := server.LeasePublicRefFromLease(leaseFromDoc(*found))
+
+	if found.State == "released" || found.State == "expired" {
+		return server.CancelLeaseResult{
+			State:    "already_terminal",
+			LeaseRef: publicRef,
+		}, nil
+	}
+
+	// Release the host claim.
+	if found.Host != nil && *found.Host != "" && *found.Host != "native-k8s" {
+		if err := s.clearHostLease(ctx, *found.Host, found.ID); err != nil {
+			return server.CancelLeaseResult{}, fmt.Errorf("clear host lease: %w", err)
+		}
+	}
+
+	found.State = "released"
+	found.ReleasedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	payload, err := json.Marshal(found)
+	if err != nil {
+		return server.CancelLeaseResult{}, err
+	}
+	leasePK := azcosmos.NewPartitionKeyString(project)
+	if _, err := s.leases.ReplaceItem(ctx, leasePK, found.ID, payload, nil); err != nil {
+		return server.CancelLeaseResult{}, fmt.Errorf("release lease: %w", err)
+	}
+	return server.CancelLeaseResult{
+		State:    "no_active_run",
+		LeaseRef: publicRef,
+	}, nil
+}
+
+func (s *Store) nextLeaseNumber(ctx context.Context, project string) (int, error) {
+	counterID := leaseCounterPrefix + project
+	pk := azcosmos.NewPartitionKeyString(project)
+	for attempt := 0; attempt < maxLeaseConflictRetries; attempt++ {
+		read, err := s.leases.ReadItem(ctx, pk, counterID, nil)
+		if isCosmosStatus(err, http.StatusNotFound) {
+			// Seed the counter from the highest existing lease number.
+			highest, err := s.highestLeaseNumber(ctx, project)
+			if err != nil {
+				return 0, err
+			}
+			first := highest + 1
+			now := time.Now().UTC().Format(time.RFC3339Nano)
+			doc := map[string]any{
+				"id":               counterID,
+				"project":          project,
+				"kind":             "lease_number_counter",
+				"lastAllocated":    first,
+				"nextLeaseNumber":  first + 1,
+				"created_at":       now,
+				"updated_at":       now,
+			}
+			payload, _ := json.Marshal(doc)
+			if _, err := s.leases.CreateItem(ctx, pk, payload, nil); err != nil {
+				if isCosmosStatus(err, http.StatusConflict) {
+					continue // lost the seed race, retry
+				}
+				return 0, fmt.Errorf("seed lease counter: %w", err)
+			}
+			return first, nil
+		}
+		if err != nil {
+			return 0, fmt.Errorf("read lease counter: %w", err)
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(read.Value, &doc); err != nil {
+			return 0, err
+		}
+		currentNext := int(floatVal(doc["nextLeaseNumber"]))
+		if currentNext < 1 {
+			currentNext = 1
+		}
+		updated := cloneMap(doc)
+		delete(updated, "_etag")
+		delete(updated, "_rid")
+		delete(updated, "_self")
+		delete(updated, "_attachments")
+		delete(updated, "_ts")
+		updated["nextLeaseNumber"] = currentNext + 1
+		updated["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+		payload, _ := json.Marshal(updated)
+		etagStr, _ := doc["_etag"].(string)
+		etagVal := azcore.ETag(etagStr)
+		opts := &azcosmos.ItemOptions{IfMatchEtag: &etagVal}
+		if _, err := s.leases.ReplaceItem(ctx, pk, counterID, payload, opts); err != nil {
+			if isCosmosStatus(err, http.StatusPreconditionFailed) {
+				continue
+			}
+			return 0, fmt.Errorf("increment lease counter: %w", err)
+		}
+		return currentNext, nil
+	}
+	return 0, fmt.Errorf("lease counter conflict after %d retries", maxLeaseConflictRetries)
+}
+
+func (s *Store) highestLeaseNumber(ctx context.Context, project string) (int, error) {
+	var docs []struct {
+		LeaseNumber *float64 `json:"leaseNumber"`
+	}
+	if err := queryAllWhere(
+		ctx, s.leases,
+		"SELECT c.leaseNumber FROM c WHERE c.project = @p",
+		[]azcosmos.QueryParameter{{Name: "@p", Value: project}},
+		&docs,
+	); err != nil {
+		return 0, err
+	}
+	highest := 0
+	for _, doc := range docs {
+		if doc.LeaseNumber == nil {
+			continue
+		}
+		n := int(*doc.LeaseNumber)
+		if n > highest {
+			highest = n
+		}
+	}
+	return highest, nil
+}
+
+func buildLeaseMetadata(req server.LeaseAcquireRequest) map[string]any {
+	m := map[string]any{}
+	for k, v := range req.Metadata {
+		m[k] = v
+	}
+	requesterDoc := map[string]any{
+		"consumer": req.Requester.Consumer,
+		"kind":     req.Requester.Kind,
+		"ref":      req.Requester.Ref,
+	}
+	if req.Requester.Label != nil {
+		requesterDoc["label"] = *req.Requester.Label
+	}
+	if req.Requester.URL != nil {
+		requesterDoc["url"] = *req.Requester.URL
+	}
+	if len(req.Requester.Metadata) > 0 {
+		requesterDoc["metadata"] = req.Requester.Metadata
+	}
+	m["requester"] = requesterDoc
+	m["requester_consumer"] = req.Requester.Consumer
+	m["requester_kind"] = req.Requester.Kind
+	m["requester_ref"] = req.Requester.Ref
+	return m
+}
+
+func matchesRequirements(caps map[string]any, required map[string]any) bool {
+	for key, want := range required {
+		have := caps[key]
+		switch w := want.(type) {
+		case []any:
+			h, ok := have.([]any)
+			if !ok {
+				return false
+			}
+			haveSet := make(map[any]bool, len(h))
+			for _, v := range h {
+				haveSet[v] = true
+			}
+			for _, v := range w {
+				if !haveSet[v] {
+					return false
+				}
+			}
+		default:
+			if have != want {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func cloneMap(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func floatVal(v any) float64 {
+	if v == nil {
+		return 0
+	}
+	switch f := v.(type) {
+	case float64:
+		return f
+	case float32:
+		return float64(f)
+	case int:
+		return float64(f)
+	case int64:
+		return float64(f)
+	default:
+		return 0
+	}
+}
+
+// ---------------------------------------------------------------------------
+// WorkflowSyncStore
+// ---------------------------------------------------------------------------
+
+func (s *Store) GetWorkflowByName(ctx context.Context, project, name string) (*server.Workflow, error) {
+	pk := azcosmos.NewPartitionKeyString(project)
+	read, err := s.workflows.ReadItem(ctx, pk, name, nil)
+	if isCosmosStatus(err, http.StatusNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var doc workflowDoc
+	if err := json.Unmarshal(read.Value, &doc); err != nil {
+		return nil, err
+	}
+	w := workflowFromDoc(doc)
+	return &w, nil
+}
+
+func (s *Store) UpsertWorkflowFromRegister(ctx context.Context, reg server.WorkflowRegister) (server.Workflow, error) {
+	return s.UpsertWorkflow(ctx, reg)
+}
+
 func (s *Store) EnqueueSignal(ctx context.Context, req server.SignalEnqueue) (server.PublicSignal, error) {
 	var targetID string
 	switch req.TargetType {
