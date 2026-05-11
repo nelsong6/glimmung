@@ -1,0 +1,93 @@
+[
+  {
+    "name": "basic",
+    "value": "${{ phases.env-prep.outputs.validation_url }}",
+    "want_parsed": true,
+    "want_phase": "env-prep",
+    "want_key": "validation_url"
+  },
+  {
+    "name": "no inner whitespace",
+    "value": "${{phases.a.outputs.b}}",
+    "want_parsed": true,
+    "want_phase": "a",
+    "want_key": "b"
+  },
+  {
+    "name": "underscores and hyphens",
+    "value": "${{ phases.agent_phase-1.outputs.image_tag-x }}",
+    "want_parsed": true,
+    "want_phase": "agent_phase-1",
+    "want_key": "image_tag-x"
+  },
+  {
+    "name": "outer whitespace",
+    "value": "  ${{ phases.a.outputs.b }}  ",
+    "want_parsed": true,
+    "want_phase": "a",
+    "want_key": "b"
+  },
+  {
+    "name": "bare string",
+    "value": "validation_url",
+    "want_parsed": false,
+    "want_phase": "",
+    "want_key": ""
+  },
+  {
+    "name": "missing outputs segment",
+    "value": "${{ phases.a.b }}",
+    "want_parsed": false,
+    "want_phase": "",
+    "want_key": ""
+  },
+  {
+    "name": "missing key",
+    "value": "${{ phases.a.outputs }}",
+    "want_parsed": false,
+    "want_phase": "",
+    "want_key": ""
+  },
+  {
+    "name": "empty phase",
+    "value": "${{ phases..outputs.b }}",
+    "want_parsed": false,
+    "want_phase": "",
+    "want_key": ""
+  },
+  {
+    "name": "empty key",
+    "value": "${{ phases.a.outputs. }}",
+    "want_parsed": false,
+    "want_phase": "",
+    "want_key": ""
+  },
+  {
+    "name": "wrong namespace",
+    "value": "${{ inputs.a.outputs.b }}",
+    "want_parsed": false,
+    "want_phase": "",
+    "want_key": ""
+  },
+  {
+    "name": "trailing junk",
+    "value": "${{ phases.a.outputs.b }} extra",
+    "want_parsed": false,
+    "want_phase": "",
+    "want_key": ""
+  },
+  {
+    "name": "missing braces",
+    "value": "phases.a.outputs.b",
+    "want_parsed": false,
+    "want_phase": "",
+    "want_key": ""
+  },
+  {
+    "name": "disallowed phase char",
+    "value": "${{ phases.a$.outputs.b }}",
+    "want_parsed": false,
+    "want_phase": "",
+    "want_key": ""
+  }
+]

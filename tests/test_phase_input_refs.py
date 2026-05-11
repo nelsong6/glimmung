@@ -14,6 +14,9 @@ bad ref before the single-phase gate runs.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from glimmung.models import (
@@ -25,38 +28,54 @@ from glimmung.models import (
 )
 
 
+PHASE_REF_CASES = json.loads(
+    (Path(__file__).resolve().parents[1] / "testdata" / "phase_ref_cases.json").read_text()
+)
+
+
 # ─── parse_phase_input_ref — pure parser ──────────────────────────────────
 
 
+@pytest.mark.parametrize("case", PHASE_REF_CASES, ids=lambda case: case["name"])
+def test_parse_phase_input_ref_golden_cases(case):
+    parsed = parse_phase_input_ref(case["value"])
+    assert (parsed is not None) is case["want_parsed"]
+    if parsed is not None:
+        assert parsed == (case["want_phase"], case["want_key"])
+
+
 def test_parse_basic():
-    assert parse_phase_input_ref(
-        "${{ phases.env-prep.outputs.validation_url }}"
-    ) == ("env-prep", "validation_url")
+    assert parse_phase_input_ref("${{ phases.env-prep.outputs.validation_url }}") == (
+        "env-prep",
+        "validation_url",
+    )
 
 
 def test_parse_no_inner_whitespace():
-    assert parse_phase_input_ref(
-        "${{phases.a.outputs.b}}"
-    ) == ("a", "b")
+    assert parse_phase_input_ref("${{phases.a.outputs.b}}") == ("a", "b")
 
 
 def test_parse_underscores_and_hyphens():
-    assert parse_phase_input_ref(
-        "${{ phases.agent_phase-1.outputs.image_tag-x }}"
-    ) == ("agent_phase-1", "image_tag-x")
+    assert parse_phase_input_ref("${{ phases.agent_phase-1.outputs.image_tag-x }}") == (
+        "agent_phase-1",
+        "image_tag-x",
+    )
 
 
-@pytest.mark.parametrize("bad", [
-    "validation_url",                              # bare string
-    "${{ phases.a.b }}",                           # missing .outputs.
-    "${{ phases.a.outputs }}",                     # missing key
-    "${{ phases..outputs.b }}",                    # empty phase
-    "${{ phases.a.outputs. }}",                    # empty key
-    "${{ inputs.a.outputs.b }}",                   # wrong namespace
-    "${{ phases.a.outputs.b }} extra",             # trailing junk
-    "phases.a.outputs.b",                          # missing ${{ }}
-    "${{ phases.a$.outputs.b }}",                  # disallowed char in name
-])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "validation_url",  # bare string
+        "${{ phases.a.b }}",  # missing .outputs.
+        "${{ phases.a.outputs }}",  # missing key
+        "${{ phases..outputs.b }}",  # empty phase
+        "${{ phases.a.outputs. }}",  # empty key
+        "${{ inputs.a.outputs.b }}",  # wrong namespace
+        "${{ phases.a.outputs.b }} extra",  # trailing junk
+        "phases.a.outputs.b",  # missing ${{ }}
+        "${{ phases.a$.outputs.b }}",  # disallowed char in name
+    ],
+)
 def test_parse_rejects_malformed(bad):
     assert parse_phase_input_ref(bad) is None
 
