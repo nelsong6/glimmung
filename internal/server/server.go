@@ -69,6 +69,74 @@ func NewWithDependencies(settings Settings, store ReadStore, authResolver AuthRe
 	mux.HandleFunc("GET /v1/config", publicConfig(settings))
 	mux.HandleFunc("GET /v1/auth/me", authMe(authResolver))
 	adminAuthenticator, _ := authResolver.(AdminAuthenticator)
+	mux.HandleFunc(
+		"GET /v1/issues/by-id/{project}/{issue_id}",
+		storageIDGone("Issue storage-ID lookup is disabled; use /v1/issues/by-number/{project}/{issue_number}"),
+	)
+	mux.HandleFunc(
+		"PATCH /v1/issues/by-id/{project}/{issue_id}",
+		storageIDGone("Issue storage-ID mutation is disabled; use /v1/issues/by-number/{project}/{issue_number}"),
+	)
+	mux.HandleFunc(
+		"POST /v1/issues/by-id/{project}/{issue_id}/archive",
+		storageIDGone("Issue storage-ID mutation is disabled; use /v1/issues/by-number/{project}/{issue_number}/archive"),
+	)
+	mux.HandleFunc(
+		"POST /v1/issues/by-id/{project}/{issue_id}/discard",
+		storageIDGone("Issue storage-ID mutation is disabled; use /v1/issues/by-number/{project}/{issue_number}/discard"),
+	)
+	mux.HandleFunc(
+		"POST /v1/issues/by-id/{project}/{issue_id}/comments",
+		storageIDGone("Issue storage-ID comments are disabled; use /v1/issues/by-number/{project}/{issue_number}/comments"),
+	)
+	mux.HandleFunc(
+		"PATCH /v1/issues/by-id/{project}/{issue_id}/comments/{comment_id}",
+		storageIDGone("Issue storage-ID comments are disabled; use /v1/issues/by-number/{project}/{issue_number}/comments/{comment_id}"),
+	)
+	mux.HandleFunc(
+		"DELETE /v1/issues/by-id/{project}/{issue_id}/comments/{comment_id}",
+		storageIDGone("Issue storage-ID comments are disabled; use /v1/issues/by-number/{project}/{issue_number}/comments/{comment_id}"),
+	)
+	mux.HandleFunc(
+		"GET /v1/reports/by-id/{project}/{report_id}",
+		storageIDGone("touchpoints are no longer addressable by storage id; use /v1/touchpoints/{owner}/{repo}/{pr_number} or /v1/projects/{project}/issues/{issue_number}/touchpoint"),
+	)
+	mux.HandleFunc(
+		"GET /v1/touchpoints/by-id/{project}/{report_id}",
+		storageIDGone("touchpoints are no longer addressable by storage id; use /v1/touchpoints/{owner}/{repo}/{pr_number} or /v1/projects/{project}/issues/{issue_number}/touchpoint"),
+	)
+	mux.HandleFunc(
+		"GET /v1/reports/by-id/{project}/{report_id}/versions",
+		storageIDGone("touchpoint versions are no longer addressable by storage id"),
+	)
+	mux.HandleFunc(
+		"GET /v1/touchpoints/by-id/{project}/{report_id}/versions",
+		storageIDGone("touchpoint versions are no longer addressable by storage id"),
+	)
+	mux.HandleFunc(
+		"GET /v1/reports/by-id/{project}/{report_id}/versions/{version}",
+		storageIDGone("touchpoint versions are no longer addressable by storage id"),
+	)
+	mux.HandleFunc(
+		"GET /v1/touchpoints/by-id/{project}/{report_id}/versions/{version}",
+		storageIDGone("touchpoint versions are no longer addressable by storage id"),
+	)
+	mux.HandleFunc(
+		"POST /v1/reports/by-id/{project}/{report_id}/versions",
+		storageIDGone("touchpoint versions are no longer addressable by storage id"),
+	)
+	mux.HandleFunc(
+		"POST /v1/touchpoints/by-id/{project}/{report_id}/versions",
+		storageIDGone("touchpoint versions are no longer addressable by storage id"),
+	)
+	mux.HandleFunc(
+		"PATCH /v1/reports/by-id/{project}/{report_id}",
+		storageIDGone("touchpoints are no longer patchable by storage id"),
+	)
+	mux.HandleFunc(
+		"PATCH /v1/touchpoints/by-id/{project}/{report_id}",
+		storageIDGone("touchpoints are no longer patchable by storage id"),
+	)
 	mux.HandleFunc("GET /v1/projects/{project}/runs", listProjectRuns(store))
 	mux.HandleFunc(
 		"GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/report",
