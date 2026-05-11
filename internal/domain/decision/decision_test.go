@@ -63,6 +63,17 @@ func attempt(phase string, status *VerificationStatus, conclusion string) Attemp
 	}
 }
 
+func attemptWithReasons(phase string, status VerificationStatus, conclusion string, reasons ...string) Attempt {
+	return Attempt{
+		Phase:      phase,
+		Conclusion: conclusion,
+		Verification: &Verification{
+			Status:  status,
+			Reasons: reasons,
+		},
+	}
+}
+
 func status(value VerificationStatus) *VerificationStatus {
 	return &value
 }
@@ -236,4 +247,85 @@ func TestVerifyPhaseBeforeEvidenceGateAdvancesOnSuccessConclusion(t *testing.T) 
 		wf,
 		AbortMalformed,
 	)
+}
+
+func TestAbortExplanationAttemptsIncludesCountAndReasons(t *testing.T) {
+	text, err := AbortExplanation(
+		run([]Attempt{
+			attemptWithReasons("agent", VerificationFail, "failure", "selector .foo not found"),
+			attempt("agent", status(VerificationFail), "failure"),
+			attemptWithReasons("agent", VerificationFail, "failure", "expected status 200, got 500"),
+		}, 3.0, 25.0),
+		workflow(withMaxAttempts(3)),
+		AbortBudgetAttempts,
+	)
+	if err != nil {
+		t.Fatalf("AbortExplanation returned error: %v", err)
+	}
+	if !strings.Contains(text, "max_attempts=3") || !strings.Contains(text, "expected status 200") {
+		t.Fatalf("unexpected explanation: %s", text)
+	}
+}
+
+func TestAbortExplanationCostIncludesAmounts(t *testing.T) {
+	text, err := AbortExplanation(
+		run([]Attempt{attempt("agent", status(VerificationFail), "failure")}, 30.0, 25.0),
+		workflow(),
+		AbortBudgetCost,
+	)
+	if err != nil {
+		t.Fatalf("AbortExplanation returned error: %v", err)
+	}
+	if !strings.Contains(text, "$30.00") || !strings.Contains(text, "$25.00") {
+		t.Fatalf("unexpected explanation: %s", text)
+	}
+}
+
+func TestAbortExplanationMalformedSelfExplanatory(t *testing.T) {
+	text, err := AbortExplanation(
+		run([]Attempt{attempt("agent", nil, "failure")}, 0, 25.0),
+		workflow(),
+		AbortMalformed,
+	)
+	if err != nil {
+		t.Fatalf("AbortExplanation returned error: %v", err)
+	}
+	if !strings.Contains(text, "verification.json") {
+		t.Fatalf("unexpected explanation: %s", text)
+	}
+}
+
+func TestAbortExplanationSkipsAlwaysRunAttempts(t *testing.T) {
+	wf := Workflow{Phases: []PhaseSpec{
+		{
+			Name:   "agent",
+			Verify: true,
+			RecyclePolicy: &RecyclePolicy{
+				MaxAttempts: 3,
+				On:          []string{"verify_fail"},
+			},
+		},
+		{Name: "cleanup", Always: true},
+	}}
+	text, err := AbortExplanation(
+		run([]Attempt{
+			attemptWithReasons("agent", VerificationFail, "failure", "agent failed"),
+			attemptWithReasons("cleanup", VerificationFail, "failure", "cleanup failed"),
+		}, 2.0, 25.0),
+		wf,
+		AbortBudgetAttempts,
+	)
+	if err != nil {
+		t.Fatalf("AbortExplanation returned error: %v", err)
+	}
+	if !strings.Contains(text, "agent failed") || strings.Contains(text, "cleanup failed") {
+		t.Fatalf("unexpected explanation: %s", text)
+	}
+}
+
+func TestAbortExplanationRejectsNonAbortDecision(t *testing.T) {
+	_, err := AbortExplanation(run([]Attempt{attempt("agent", nil, "success")}, 0, 25.0), workflow(), Advance)
+	if err == nil || !strings.Contains(err.Error(), "non-abort") {
+		t.Fatalf("got error %v, want non-abort error", err)
+	}
 }
