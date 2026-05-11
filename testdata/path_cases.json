@@ -1,0 +1,57 @@
+[
+  {
+    "name": "project",
+    "function": "project_path",
+    "project": "ambience",
+    "want": "projects/ambience"
+  },
+  {
+    "name": "workflow",
+    "function": "workflow_path",
+    "project": "ambience",
+    "workflow": "agent-run",
+    "want": "projects/ambience/workflows/agent-run"
+  },
+  {
+    "name": "phase",
+    "function": "phase_path",
+    "project": "ambience",
+    "workflow": "agent-run",
+    "phase": "env-prep",
+    "want": "projects/ambience/workflows/agent-run/phases/env-prep"
+  },
+  {
+    "name": "run",
+    "function": "run_path",
+    "project": "ambience",
+    "run_id": "01KR23YZE6TE92JZPK6ZV4NNRY",
+    "want": "projects/ambience/runs/01KR23YZE6TE92JZPK6ZV4NNRY"
+  },
+  {
+    "name": "attempt",
+    "function": "attempt_path",
+    "project": "ambience",
+    "run_id": "01KR23",
+    "attempt_index": 1,
+    "want": "projects/ambience/runs/01KR23/attempts/1"
+  },
+  {
+    "name": "job",
+    "function": "job_path",
+    "project": "ambience",
+    "run_id": "01KR23",
+    "attempt_index": 1,
+    "job_id": "agent-execute",
+    "want": "projects/ambience/runs/01KR23/attempts/1/jobs/agent-execute"
+  },
+  {
+    "name": "step",
+    "function": "step_path",
+    "project": "ambience",
+    "run_id": "01KR23",
+    "attempt_index": 1,
+    "job_id": "agent-execute",
+    "step_slug": "verify-result",
+    "want": "projects/ambience/runs/01KR23/attempts/1/jobs/agent-execute/steps/verify-result"
+  }
+]
