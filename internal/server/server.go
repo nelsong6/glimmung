@@ -17,6 +17,8 @@ const (
 
 type Settings struct {
 	Port                string
+	CosmosEndpoint      string
+	CosmosDatabase      string
 	EntraClientID       string
 	EntraTestClientID   string
 	TankOperatorBaseURL string
@@ -27,6 +29,8 @@ type Settings struct {
 func SettingsFromEnv() Settings {
 	return Settings{
 		Port:                envOrDefault("PORT", defaultPort),
+		CosmosEndpoint:      os.Getenv("COSMOS_ENDPOINT"),
+		CosmosDatabase:      os.Getenv("COSMOS_DATABASE"),
 		EntraClientID:       os.Getenv("ENTRA_CLIENT_ID"),
 		EntraTestClientID:   os.Getenv("ENTRA_TEST_CLIENT_ID"),
 		TankOperatorBaseURL: envOrDefault("TANK_OPERATOR_BASE_URL", defaultTankOperatorBaseURL),
