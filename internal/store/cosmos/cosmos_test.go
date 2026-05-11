@@ -257,6 +257,37 @@ func TestRunReportsFromDocsBuildsPublicRefsAndAttempts(t *testing.T) {
 	}
 }
 
+func TestIssueDetailFromDocBuildsPublicShape(t *testing.T) {
+	doc := issueDoc{
+		ID:      "01KISSUE",
+		Number:  17,
+		Project: "glimmung",
+		Title:   "Fix dashboard",
+		Body:    "details",
+		Labels:  []string{"bug"},
+		State:   "open",
+		Comments: []issueCommentDoc{{
+			ID:        "comment-1",
+			Author:    "admin@example.com",
+			Body:      "looking",
+			CreatedAt: "2026-05-11T05:00:00Z",
+			UpdatedAt: "2026-05-11T05:00:00Z",
+		}},
+	}
+
+	detail := issueDetailFromDoc(doc)
+
+	if detail.Ref != "glimmung#17" || detail.Number == nil || *detail.Number != 17 {
+		t.Fatalf("detail refs=%#v", detail)
+	}
+	if detail.Repo != nil || detail.HTMLURL != nil {
+		t.Fatalf("legacy github fields should be nil: %#v", detail)
+	}
+	if len(detail.Comments) != 1 || detail.Comments[0].ID != "comment-1" {
+		t.Fatalf("comments=%#v", detail.Comments)
+	}
+}
+
 func intPtr(value int) *int {
 	return &value
 }
