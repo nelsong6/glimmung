@@ -31,6 +31,13 @@ func (s *fakePlaybookStore) GetPlaybook(_ context.Context, _, _ string) (Playboo
 	return s.detail, nil
 }
 
+func (s *fakePlaybookStore) PatchPlaybookEntryGate(_ context.Context, _, _, _ string, _ bool) (PlaybookPublic, error) {
+	if s.err != nil {
+		return PlaybookPublic{}, s.err
+	}
+	return s.detail, nil
+}
+
 func (s *fakePlaybookStore) CreatePlaybook(_ context.Context, req PlaybookCreate) (PlaybookPublic, error) {
 	if s.err != nil {
 		return PlaybookPublic{}, s.err

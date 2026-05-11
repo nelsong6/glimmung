@@ -220,6 +220,10 @@ func NewWithDependencies(settings Settings, store ReadStore, authResolver AuthRe
 	mux.HandleFunc("GET /v1/state", stateSnapshot(settings, store))
 	mux.HandleFunc("GET /v1/events", stateEvents(settings, store))
 	mux.Handle("POST /v1/signals", requireAdmin(adminAuthenticator, http.HandlerFunc(createSignal(store))))
+	mux.HandleFunc("GET /v1/portfolio/elements", listPortfolioElements(store))
+	mux.Handle("POST /v1/portfolio/elements", requireAdmin(adminAuthenticator, http.HandlerFunc(upsertPortfolioElement(store))))
+	mux.Handle("PATCH /v1/portfolio/elements/{project}/{element_ref}", requireAdmin(adminAuthenticator, http.HandlerFunc(patchPortfolioElement(store))))
+	mux.Handle("POST /v1/playbooks/{project}/{playbook_ref}/entries/{entry_id}/gate", requireAdmin(adminAuthenticator, http.HandlerFunc(patchPlaybookEntryGate(store))))
 	mux.Handle("POST /v1/hosts", requireAdmin(adminAuthenticator, http.HandlerFunc(registerHost(store))))
 	if staticRoots(settings).enabled() {
 		mux.HandleFunc("GET /assets/", serveAsset(settings))

@@ -2,6 +2,7 @@ package cosmos
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2815,6 +2816,266 @@ func playbookIssueSpecFromMap(m map[string]any) server.PlaybookIssueSpec {
 		spec.Metadata = meta
 	}
 	return spec
+}
+
+// ── Portfolio store ───────────────────────────────────────────────────────────
+
+type portfolioElementDoc struct {
+	ID                string         `json:"id"`
+	Kind              string         `json:"kind"`
+	Project           string         `json:"project"`
+	Route             string         `json:"route"`
+	ElementID         string         `json:"element_id"`
+	Title             string         `json:"title"`
+	ScreenshotURL     *string        `json:"screenshot_url"`
+	PreviewURL        *string        `json:"preview_url"`
+	Status            string         `json:"status"`
+	Notes             *string        `json:"notes"`
+	LastTouchedRunID  *string        `json:"last_touched_run_id"`
+	Metadata          map[string]any `json:"metadata"`
+	CreatedAt         string         `json:"created_at"`
+	UpdatedAt         string         `json:"updated_at"`
+}
+
+func portfolioElementDocID(project, route, elementID string) string {
+	raw := project + "\n" + route + "\n" + elementID
+	sum := sha256.Sum256([]byte(raw))
+	h := fmt.Sprintf("%x", sum[:])
+	if len(h) > 32 {
+		return h[:32]
+	}
+	return h
+}
+
+func portfolioElementDocToPublic(doc portfolioElementDoc, runRef *string) server.PortfolioElementPublic {
+	return server.PortfolioElementPublic{
+		Ref:               server.PortfolioElementRef(doc.Route, doc.ElementID),
+		Project:           doc.Project,
+		Route:             doc.Route,
+		ElementID:         doc.ElementID,
+		Title:             doc.Title,
+		ScreenshotURL:     doc.ScreenshotURL,
+		PreviewURL:        doc.PreviewURL,
+		Status:            firstNonEmpty(doc.Status, "needs_review"),
+		Notes:             doc.Notes,
+		LastTouchedRunRef: runRef,
+		Metadata:          mapOrEmpty(doc.Metadata),
+		CreatedAt:         doc.CreatedAt,
+		UpdatedAt:         doc.UpdatedAt,
+	}
+}
+
+func (s *Store) resolveLastTouchedRunRef(ctx context.Context, project string, runID *string) *string {
+	if runID == nil || *runID == "" {
+		return nil
+	}
+	pk := azcosmos.NewPartitionKeyString(project)
+	resp, err := s.runs.ReadItem(ctx, pk, *runID, nil)
+	if err != nil {
+		return nil
+	}
+	var doc runDoc
+	if err := json.Unmarshal(resp.Value, &doc); err != nil {
+		return nil
+	}
+	docs, _ := s.issueRunDocs(ctx, project, doc.IssueNumber)
+	numbers := runNumberMap(docs)
+	display := runDisplayNumber(doc, numbers[doc.ID])
+	ref := publicids.RunRef(doc.Project, &doc.IssueNumber, display)
+	return &ref
+}
+
+func (s *Store) resolveRunRefToID(ctx context.Context, project string, ref *string) (*string, error) {
+	if ref == nil || *ref == "" {
+		return nil, nil
+	}
+	id := s.resolveRunIDByRef(ctx, project, *ref)
+	if id == nil {
+		return nil, server.ErrNotFound
+	}
+	return id, nil
+}
+
+func (s *Store) ListPortfolioElements(ctx context.Context, filter server.PortfolioListFilter) ([]server.PortfolioElementPublic, error) {
+	query := "SELECT * FROM c WHERE c.kind = @kind"
+	params := []azcosmos.QueryParameter{{Name: "@kind", Value: "portfolio_element"}}
+	if filter.Project != "" {
+		query += " AND c.project = @project"
+		params = append(params, azcosmos.QueryParameter{Name: "@project", Value: filter.Project})
+	}
+	if filter.Status != "" {
+		query += " AND c.status = @status"
+		params = append(params, azcosmos.QueryParameter{Name: "@status", Value: filter.Status})
+	}
+	query += " ORDER BY c.updated_at DESC"
+	var docs []portfolioElementDoc
+	if err := queryAllWhere(ctx, s.issues, query, params, &docs); err != nil {
+		return nil, err
+	}
+	if filter.Limit != nil && *filter.Limit < len(docs) {
+		docs = docs[:*filter.Limit]
+	}
+	out := make([]server.PortfolioElementPublic, 0, len(docs))
+	for _, doc := range docs {
+		runRef := s.resolveLastTouchedRunRef(ctx, doc.Project, doc.LastTouchedRunID)
+		out = append(out, portfolioElementDocToPublic(doc, runRef))
+	}
+	return out, nil
+}
+
+func (s *Store) UpsertPortfolioElement(ctx context.Context, req server.PortfolioElementUpsert) (server.PortfolioElementPublic, error) {
+	runID, err := s.resolveRunRefToID(ctx, req.Project, req.LastTouchedRunRef)
+	if err != nil {
+		return server.PortfolioElementPublic{}, err
+	}
+	docID := portfolioElementDocID(req.Project, req.Route, req.ElementID)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	createdAt := now
+	pk := azcosmos.NewPartitionKeyString(req.Project)
+	existing, readErr := s.issues.ReadItem(ctx, pk, docID, nil)
+	if readErr == nil {
+		var existDoc map[string]any
+		if json.Unmarshal(existing.Value, &existDoc) == nil {
+			if ca, ok := existDoc["created_at"].(string); ok && ca != "" {
+				createdAt = ca
+			}
+		}
+	}
+	doc := portfolioElementDoc{
+		ID:               docID,
+		Kind:             "portfolio_element",
+		Project:          req.Project,
+		Route:            req.Route,
+		ElementID:        req.ElementID,
+		Title:            req.Title,
+		ScreenshotURL:    req.ScreenshotURL,
+		PreviewURL:       req.PreviewURL,
+		Status:           firstNonEmpty(req.Status, "needs_review"),
+		Notes:            req.Notes,
+		LastTouchedRunID: runID,
+		Metadata:         mapOrEmpty(req.Metadata),
+		CreatedAt:        createdAt,
+		UpdatedAt:        now,
+	}
+	data, err := json.Marshal(doc)
+	if err != nil {
+		return server.PortfolioElementPublic{}, err
+	}
+	if _, err := s.issues.UpsertItem(ctx, pk, data, nil); err != nil {
+		return server.PortfolioElementPublic{}, err
+	}
+	runRef := s.resolveLastTouchedRunRef(ctx, doc.Project, doc.LastTouchedRunID)
+	return portfolioElementDocToPublic(doc, runRef), nil
+}
+
+func (s *Store) PatchPortfolioElement(ctx context.Context, project, ref string, req server.PortfolioElementPatch) (server.PortfolioElementPublic, error) {
+	// Resolve ref → doc ID by scanning project's portfolio elements.
+	var docs []portfolioElementDoc
+	if err := queryAllWhere(ctx, s.issues,
+		"SELECT * FROM c WHERE c.kind = @kind AND c.project = @project",
+		[]azcosmos.QueryParameter{
+			{Name: "@kind", Value: "portfolio_element"},
+			{Name: "@project", Value: project},
+		},
+		&docs,
+	); err != nil {
+		return server.PortfolioElementPublic{}, err
+	}
+	var target *portfolioElementDoc
+	for i := range docs {
+		if server.PortfolioElementRef(docs[i].Route, docs[i].ElementID) == ref {
+			target = &docs[i]
+			break
+		}
+	}
+	if target == nil {
+		return server.PortfolioElementPublic{}, server.ErrNotFound
+	}
+
+	if req.Title != nil {
+		target.Title = *req.Title
+	}
+	if req.ScreenshotURL != nil {
+		target.ScreenshotURL = req.ScreenshotURL
+	}
+	if req.PreviewURL != nil {
+		target.PreviewURL = req.PreviewURL
+	}
+	if req.Status != nil {
+		target.Status = *req.Status
+	}
+	if req.Notes != nil {
+		target.Notes = req.Notes
+	}
+	if req.Metadata != nil {
+		target.Metadata = *req.Metadata
+	}
+	if req.LastTouchedRunRef != nil {
+		runID, err := s.resolveRunRefToID(ctx, project, req.LastTouchedRunRef)
+		if err != nil {
+			return server.PortfolioElementPublic{}, err
+		}
+		target.LastTouchedRunID = runID
+	}
+	target.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	data, err := json.Marshal(*target)
+	if err != nil {
+		return server.PortfolioElementPublic{}, err
+	}
+	pk := azcosmos.NewPartitionKeyString(project)
+	if _, err := s.issues.ReplaceItem(ctx, pk, target.ID, data, nil); err != nil {
+		return server.PortfolioElementPublic{}, server.ErrNotFound
+	}
+	runRef := s.resolveLastTouchedRunRef(ctx, target.Project, target.LastTouchedRunID)
+	return portfolioElementDocToPublic(*target, runRef), nil
+}
+
+// ── Playbook gate ─────────────────────────────────────────────────────────────
+
+func (s *Store) PatchPlaybookEntryGate(ctx context.Context, project, ref, entryID string, manualGate bool) (server.PlaybookPublic, error) {
+	var docs []playbookDoc
+	if err := queryAllWhere(ctx, s.playbooks,
+		"SELECT * FROM c WHERE c.project = @project ORDER BY c.created_at DESC",
+		[]azcosmos.QueryParameter{{Name: "@project", Value: project}},
+		&docs,
+	); err != nil {
+		return server.PlaybookPublic{}, err
+	}
+	var target *playbookDoc
+	for i := range docs {
+		if playbookPublicRef(docs[i]) == ref {
+			target = &docs[i]
+			break
+		}
+	}
+	if target == nil {
+		return server.PlaybookPublic{}, server.ErrNotFound
+	}
+	found := false
+	for i := range target.Entries {
+		if target.Entries[i].ID == entryID {
+			target.Entries[i].ManualGate = manualGate
+			if target.Entries[i].Metadata == nil {
+				target.Entries[i].Metadata = map[string]any{}
+			}
+			target.Entries[i].Metadata["manual_gate_updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+			found = true
+			break
+		}
+	}
+	if !found {
+		return server.PlaybookPublic{}, server.ErrNotFound
+	}
+	target.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	data, err := json.Marshal(*target)
+	if err != nil {
+		return server.PlaybookPublic{}, err
+	}
+	pk := azcosmos.NewPartitionKeyString(project)
+	if _, err := s.playbooks.ReplaceItem(ctx, pk, target.ID, data, nil); err != nil {
+		return server.PlaybookPublic{}, fmt.Errorf("replace playbook: %w", err)
+	}
+	return s.playbookToPublic(ctx, *target), nil
 }
 
 func max(a, b int) int {
