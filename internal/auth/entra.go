@@ -41,9 +41,6 @@ func NewEntraAuthenticator(config EntraConfig) (*EntraAuthenticator, error) {
 		return nil, AuthError{Status: http.StatusServiceUnavailable, Message: "ENTRA_CLIENT_ID not configured"}
 	}
 	allowed := AllowedEmails(config.AllowedEmails)
-	if len(allowed) == 0 {
-		return nil, AuthError{Status: http.StatusServiceUnavailable, Message: "ALLOWED_EMAILS not configured"}
-	}
 	client := config.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
@@ -81,6 +78,9 @@ func (a *EntraAuthenticator) RequireAdmin(ctx context.Context, token string) (Us
 	if email == "" {
 		return User{}, AuthError{Status: http.StatusUnauthorized, Message: "token has no email or preferred_username claim"}
 	}
+	if len(a.allowedEmails) == 0 {
+		return User{}, AuthError{Status: http.StatusServiceUnavailable, Message: "ALLOWED_EMAILS not configured"}
+	}
 	if _, ok := a.allowedEmails[email]; !ok {
 		return User{}, AuthError{Status: http.StatusForbidden, Message: "email not allowed"}
 	}
@@ -90,6 +90,23 @@ func (a *EntraAuthenticator) RequireAdmin(ctx context.Context, token string) (Us
 		Email: email,
 		Name:  firstClaimString(claims, "name"),
 	}, nil
+}
+
+func (a *EntraAuthenticator) Resolve(ctx context.Context, token string) (User, bool, error) {
+	claims, err := a.verifyToken(ctx, token)
+	if err != nil {
+		return User{}, false, err
+	}
+	email := strings.ToLower(firstClaimString(claims, "email", "preferred_username"))
+	if email == "" {
+		return User{}, false, AuthError{Status: http.StatusUnauthorized, Message: "token has no email or preferred_username claim"}
+	}
+	_, isAdmin := a.allowedEmails[email]
+	return User{
+		Sub:   firstClaimString(claims, "sub"),
+		Email: email,
+		Name:  firstClaimString(claims, "name"),
+	}, isAdmin, nil
 }
 
 func (a *EntraAuthenticator) verifyToken(ctx context.Context, token string) (jwt.MapClaims, error) {

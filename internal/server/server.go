@@ -21,6 +21,11 @@ type Settings struct {
 	CosmosDatabase      string
 	EntraClientID       string
 	EntraTestClientID   string
+	AllowedEmails       string
+	K8sSAAllowlist      string
+	K8sAPIHost          string
+	K8sSATokenPath      string
+	K8sCACertPath       string
 	TankOperatorBaseURL string
 	StaticDir           string
 	StaticOverrideDir   string
@@ -33,6 +38,11 @@ func SettingsFromEnv() Settings {
 		CosmosDatabase:      os.Getenv("COSMOS_DATABASE"),
 		EntraClientID:       os.Getenv("ENTRA_CLIENT_ID"),
 		EntraTestClientID:   os.Getenv("ENTRA_TEST_CLIENT_ID"),
+		AllowedEmails:       os.Getenv("ALLOWED_EMAILS"),
+		K8sSAAllowlist:      os.Getenv("K8S_SA_ALLOWLIST"),
+		K8sAPIHost:          envOrDefault("K8S_API_HOST", "https://kubernetes.default.svc"),
+		K8sSATokenPath:      envOrDefault("K8S_SA_TOKEN_PATH", "/var/run/secrets/kubernetes.io/serviceaccount/token"),
+		K8sCACertPath:       envOrDefault("K8S_CA_CERT_PATH", "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"),
 		TankOperatorBaseURL: envOrDefault("TANK_OPERATOR_BASE_URL", defaultTankOperatorBaseURL),
 		StaticDir:           os.Getenv("GLIMMUNG_STATIC_DIR"),
 		StaticOverrideDir:   os.Getenv("GLIMMUNG_STATIC_OVERRIDE_DIR"),
@@ -44,9 +54,14 @@ func New(settings Settings) http.Handler {
 }
 
 func NewWithStore(settings Settings, store ReadStore) http.Handler {
+	return NewWithDependencies(settings, store, nil)
+}
+
+func NewWithDependencies(settings Settings, store ReadStore, authResolver AuthResolver) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
 	mux.HandleFunc("GET /v1/config", publicConfig(settings))
+	mux.HandleFunc("GET /v1/auth/me", authMe(authResolver))
 	mux.HandleFunc("GET /v1/projects", listProjects(store))
 	mux.HandleFunc("GET /v1/workflows", listWorkflows(store))
 	if staticRoots(settings).enabled() {

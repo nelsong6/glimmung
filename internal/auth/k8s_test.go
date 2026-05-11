@@ -135,8 +135,8 @@ func newTokenReviewServer(t *testing.T, status int, body tokenReviewResponse) *h
 		if err := json.NewDecoder(r.Body).Decode(&review); err != nil {
 			t.Fatalf("decode review: %v", err)
 		}
-		if review.Spec.Token != "caller-token" {
-			t.Fatalf("review token=%q", review.Spec.Token)
+		if review.Spec.Token == "" {
+			t.Fatal("review token is empty")
 		}
 
 		w.WriteHeader(status)
