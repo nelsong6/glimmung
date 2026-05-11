@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,6 +29,7 @@ type Store struct {
 	runs      *azcosmos.ContainerClient
 	issues    *azcosmos.ContainerClient
 	locks     *azcosmos.ContainerClient
+	reports   *azcosmos.ContainerClient
 }
 
 func NewFromSettings(settings server.Settings) (*Store, error) {
@@ -70,7 +72,11 @@ func NewFromSettings(settings server.Settings) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create locks container client: %w", err)
 	}
-	return &Store{projects: projects, workflows: workflows, hosts: hosts, leases: leases, runs: runs, issues: issues, locks: locks}, nil
+	reports, err := client.NewContainer(settings.CosmosDatabase, "reports")
+	if err != nil {
+		return nil, fmt.Errorf("create reports container client: %w", err)
+	}
+	return &Store{projects: projects, workflows: workflows, hosts: hosts, leases: leases, runs: runs, issues: issues, locks: locks, reports: reports}, nil
 }
 
 func (s *Store) ListProjects(ctx context.Context) ([]server.Project, error) {
@@ -1199,6 +1205,7 @@ type runDoc struct {
 	IssueID             string         `json:"issue_id"`
 	IssueRepo           string         `json:"issue_repo"`
 	IssueNumber         int            `json:"issue_number"`
+	PRNumber            *int           `json:"pr_number"`
 	State               string         `json:"state"`
 	Attempts            []attemptDoc   `json:"attempts"`
 	CumulativeCostUSD   float64        `json:"cumulative_cost_usd"`
@@ -2024,4 +2031,520 @@ func sliceOrEmpty[T any](values []T) []T {
 		return []T{}
 	}
 	return values
+}
+
+// ── Touchpoint / Report store ─────────────────────────────────────────────────
+
+type reportDoc struct {
+	ID             string           `json:"id"`
+	Project        string           `json:"project"`
+	Repo           string           `json:"repo"`
+	Number         int              `json:"number"`
+	Title          string           `json:"title"`
+	Body           string           `json:"body"`
+	State          string           `json:"state"`
+	Branch         string           `json:"branch"`
+	BaseRef        string           `json:"base_ref"`
+	HeadSHA        string           `json:"head_sha"`
+	HTMLURL        string           `json:"html_url"`
+	LinkedIssueID  *string          `json:"linked_issue_id"`
+	LinkedRunID    *string          `json:"linked_run_id"`
+	MergedAt       *string          `json:"merged_at"`
+	MergedBy       *string          `json:"merged_by"`
+	Comments       []map[string]any `json:"comments"`
+	Reviews        []map[string]any `json:"reviews"`
+	CreatedAt      string           `json:"created_at"`
+	UpdatedAt      string           `json:"updated_at"`
+}
+
+func (s *Store) ListTouchpoints(ctx context.Context, filter server.TouchpointListFilter) ([]server.TouchpointRow, error) {
+	var reportDocs []reportDoc
+	query := "SELECT * FROM c"
+	var params []azcosmos.QueryParameter
+	var predicates []string
+	if filter.Project != "" {
+		predicates = append(predicates, "c.project = @project")
+		params = append(params, azcosmos.QueryParameter{Name: "@project", Value: filter.Project})
+	}
+	if filter.Repo != "" {
+		predicates = append(predicates, "c.repo = @repo")
+		params = append(params, azcosmos.QueryParameter{Name: "@repo", Value: filter.Repo})
+	}
+	if filter.State != "" {
+		predicates = append(predicates, "c.state = @state")
+		params = append(params, azcosmos.QueryParameter{Name: "@state", Value: filter.State})
+	}
+	if len(predicates) > 0 {
+		query = "SELECT * FROM c WHERE " + strings.Join(predicates, " AND ")
+	}
+	query += " ORDER BY c.updated_at DESC"
+	if err := queryAllWhere(ctx, s.reports, query, params, &reportDocs); err != nil {
+		return nil, err
+	}
+
+	// Enrich with issue and run data.
+	issueDocs, _ := s.listIssueDocs(ctx)
+	runDocs, _ := s.listRunDocs(ctx)
+	lockDocs, _ := s.listIssueLockDocs(ctx)
+
+	issueRefByID, issueNumberByID := buildIssueIndexes(issueDocs)
+	runRefByID, runByLinkedIssueID, runByRepoPR := buildRunIndexes(runDocs)
+	prLockByKey := buildPRLockIndex(lockDocs)
+
+	now := time.Now().UTC()
+	rows := make([]server.TouchpointRow, 0, len(reportDocs))
+	for _, doc := range reportDocs {
+		row := touchpointRowFromDoc(doc, issueRefByID, issueNumberByID, runRefByID, runByLinkedIssueID, runByRepoPR, prLockByKey, now)
+		rows = append(rows, row)
+	}
+	if filter.Limit != nil && *filter.Limit < len(rows) {
+		rows = rows[:*filter.Limit]
+	}
+	return rows, nil
+}
+
+func (s *Store) GetTouchpointByRepoPR(ctx context.Context, repo string, prNumber int) (server.TouchpointDetail, error) {
+	var docs []reportDoc
+	if err := queryAllWhere(ctx, s.reports,
+		"SELECT * FROM c WHERE c.repo = @repo AND c.number = @num",
+		[]azcosmos.QueryParameter{
+			{Name: "@repo", Value: repo},
+			{Name: "@num", Value: prNumber},
+		},
+		&docs,
+	); err != nil {
+		return server.TouchpointDetail{}, err
+	}
+	if len(docs) == 0 {
+		return server.TouchpointDetail{}, server.ErrNotFound
+	}
+	sort.Slice(docs, func(i, j int) bool { return docs[i].CreatedAt < docs[j].CreatedAt })
+	return s.buildTouchpointDetail(ctx, docs[0])
+}
+
+func (s *Store) GetTouchpointForIssue(ctx context.Context, project string, issueNumber int) (server.TouchpointDetail, error) {
+	issueDoc, err := s.readIssueByNumber(ctx, project, issueNumber)
+	if err != nil {
+		return server.TouchpointDetail{}, server.ErrNotFound
+	}
+	// Find report by linked_issue_id.
+	var docs []reportDoc
+	if err := queryAllWhere(ctx, s.reports,
+		"SELECT * FROM c WHERE c.project = @project AND c.linked_issue_id = @iid ORDER BY c.updated_at DESC",
+		[]azcosmos.QueryParameter{
+			{Name: "@project", Value: project},
+			{Name: "@iid", Value: issueDoc.ID},
+		},
+		&docs,
+	); err != nil {
+		return server.TouchpointDetail{}, err
+	}
+	if len(docs) == 0 {
+		return server.TouchpointDetail{}, server.ErrNotFound
+	}
+	return s.buildTouchpointDetail(ctx, docs[0])
+}
+
+func (s *Store) EnsureTouchpoint(ctx context.Context, req server.TouchpointCreate) (server.TouchpointDetail, error) {
+	// Resolve linked_issue_id by ref if provided.
+	var linkedIssueID *string
+	if req.LinkedIssueRef != "" {
+		linkedIssueID = s.resolveIssueIDByRef(ctx, req.Project, req.LinkedIssueRef)
+	}
+	var linkedRunID *string
+	if req.LinkedRunRef != "" {
+		linkedRunID = s.resolveRunIDByRef(ctx, req.Project, req.LinkedRunRef)
+	}
+
+	// If we have a linked issue, check for an existing touchpoint for that issue.
+	if linkedIssueID != nil {
+		var docs []reportDoc
+		_ = queryAllWhere(ctx, s.reports,
+			"SELECT * FROM c WHERE c.project = @project AND c.linked_issue_id = @iid ORDER BY c.updated_at DESC",
+			[]azcosmos.QueryParameter{
+				{Name: "@project", Value: req.Project},
+				{Name: "@iid", Value: *linkedIssueID},
+			},
+			&docs,
+		)
+		if len(docs) > 0 {
+			doc := docs[0]
+			// Patch linkages if caller is providing them.
+			if linkedRunID != nil && (doc.LinkedRunID == nil || *doc.LinkedRunID != *linkedRunID) {
+				doc.LinkedRunID = linkedRunID
+				doc.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+				_ = s.replaceReportDoc(ctx, doc)
+			}
+			return s.buildTouchpointDetail(ctx, doc)
+		}
+	}
+
+	// Fall back to (repo, number) idempotency key.
+	var existingDocs []reportDoc
+	_ = queryAllWhere(ctx, s.reports,
+		"SELECT * FROM c WHERE c.repo = @repo AND c.number = @num",
+		[]azcosmos.QueryParameter{
+			{Name: "@repo", Value: req.Repo},
+			{Name: "@num", Value: req.Number},
+		},
+		&existingDocs,
+	)
+	if len(existingDocs) > 0 {
+		doc := existingDocs[0]
+		// Attach linkages if not already set.
+		updated := false
+		if linkedIssueID != nil && doc.LinkedIssueID == nil {
+			doc.LinkedIssueID = linkedIssueID
+			updated = true
+		}
+		if linkedRunID != nil && (doc.LinkedRunID == nil || *doc.LinkedRunID != *linkedRunID) {
+			doc.LinkedRunID = linkedRunID
+			updated = true
+		}
+		if updated {
+			doc.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+			_ = s.replaceReportDoc(ctx, doc)
+		}
+		return s.buildTouchpointDetail(ctx, doc)
+	}
+
+	// Create a new touchpoint.
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	doc := reportDoc{
+		ID:            uuid.New().String(),
+		Project:       req.Project,
+		Repo:          req.Repo,
+		Number:        req.Number,
+		Title:         req.Title,
+		Body:          req.Body,
+		State:         "ready",
+		Branch:        req.Branch,
+		BaseRef:       firstNonEmpty(req.BaseRef, "main"),
+		HeadSHA:       req.HeadSHA,
+		HTMLURL:       req.HTMLURL,
+		LinkedIssueID: linkedIssueID,
+		LinkedRunID:   linkedRunID,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return server.TouchpointDetail{}, err
+	}
+	partitionKey := azcosmos.NewPartitionKeyString(req.Project)
+	if _, err := s.reports.CreateItem(ctx, partitionKey, payload, nil); err != nil {
+		return server.TouchpointDetail{}, err
+	}
+	return s.buildTouchpointDetail(ctx, doc)
+}
+
+func (s *Store) buildTouchpointDetail(ctx context.Context, doc reportDoc) (server.TouchpointDetail, error) {
+	// Look up linked run.
+	var run *runDoc
+	if doc.LinkedRunID != nil && *doc.LinkedRunID != "" {
+		var runDocs []runDoc
+		if err := queryAllWhere(ctx, s.runs,
+			"SELECT * FROM c WHERE c.id = @id",
+			[]azcosmos.QueryParameter{{Name: "@id", Value: *doc.LinkedRunID}},
+			&runDocs,
+		); err == nil && len(runDocs) > 0 {
+			run = &runDocs[0]
+		}
+	}
+	if run == nil {
+		// Fall back to latest run by (repo, pr_number).
+		var runDocs []runDoc
+		if err := queryAllWhere(ctx, s.runs,
+			"SELECT * FROM c WHERE c.issue_repo = @repo AND c.pr_number = @num ORDER BY c.created_at DESC",
+			[]azcosmos.QueryParameter{
+				{Name: "@repo", Value: doc.Repo},
+				{Name: "@num", Value: doc.Number},
+			},
+			&runDocs,
+		); err == nil && len(runDocs) > 0 {
+			run = &runDocs[0]
+		}
+	}
+
+	// Look up linked issue.
+	var linkedIssueRef *string
+	var linkedIssueNumber *int
+	var linkedIssueTitle *string
+	if doc.LinkedIssueID != nil && *doc.LinkedIssueID != "" {
+		var issueDocs []issueDoc
+		_ = queryAllWhere(ctx, s.issues,
+			"SELECT * FROM c WHERE c.id = @id",
+			[]azcosmos.QueryParameter{{Name: "@id", Value: *doc.LinkedIssueID}},
+			&issueDocs,
+		)
+		if len(issueDocs) > 0 {
+			issue := issueDocs[0]
+			ref := publicids.IssueRef(issue.Project, &issue.Number)
+			linkedIssueRef = &ref
+			linkedIssueNumber = &issue.Number
+			linkedIssueTitle = &issue.Title
+		}
+	}
+
+	// PR lock check.
+	prLockHeld, _ := s.prLockHeld(ctx, doc.Repo, doc.Number)
+
+	detail := server.TouchpointDetail{
+		Ref:          publicids.ReportRef(doc.Repo, &doc.Number),
+		Project:      doc.Project,
+		Repo:         doc.Repo,
+		PRNumber:     doc.Number,
+		Title:        doc.Title,
+		Body:         doc.Body,
+		State:        firstNonEmpty(doc.State, "ready"),
+		Merged:       doc.MergedAt != nil,
+		BaseRef:      firstNonEmpty(doc.BaseRef, "main"),
+		HeadSHA:      doc.HeadSHA,
+		LinkedIssueRef: linkedIssueRef,
+		IssueNumber:    linkedIssueNumber,
+		IssueTitle:     linkedIssueTitle,
+		Comments:     sliceOrEmpty(doc.Comments),
+		Reviews:      sliceOrEmpty(doc.Reviews),
+		PRLockHeld:   prLockHeld,
+	}
+	if doc.PRBranchStr() != "" {
+		b := doc.PRBranchStr()
+		detail.PRBranch = &b
+	}
+	if doc.HTMLURL != "" {
+		detail.HTMLURL = &doc.HTMLURL
+	}
+	if run != nil {
+		allRunDocs, _ := s.issueRunDocs(ctx, doc.Project, 0)
+		_ = allRunDocs
+		runRefMap := runRefMapFromDocs([]runDoc{*run})
+		ref := runRefMap[run.ID]
+		if ref != "" {
+			detail.RunRef = &ref
+			detail.LinkedRunRef = &ref
+		}
+		detail.RunState = ptrString(firstNonEmpty(run.State, ""))
+		detail.ValidationURL = run.ValidationURL
+		detail.ScreenshotsMarkdown = run.ScreenshotsMarkdown
+		detail.RunAttempts = len(run.Attempts)
+		detail.RunCumulativeCostUSD = run.CumulativeCostUSD
+		if run.IssueNumber > 0 {
+			detail.IssueNumber = &run.IssueNumber
+		}
+		detail.RunAttemptHistory = buildAttemptHistory(run.Attempts)
+	}
+	return detail, nil
+}
+
+func (s *Store) replaceReportDoc(ctx context.Context, doc reportDoc) error {
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	partitionKey := azcosmos.NewPartitionKeyString(doc.Project)
+	_, err = s.reports.ReplaceItem(ctx, partitionKey, doc.ID, payload, nil)
+	return err
+}
+
+func (s *Store) prLockHeld(ctx context.Context, repo string, prNumber int) (bool, error) {
+	key := fmt.Sprintf("%s#%d", repo, prNumber)
+	var docs []lockDoc
+	if err := queryAllWhere(ctx, s.locks,
+		"SELECT * FROM c WHERE c.scope = @scope AND c.key = @key",
+		[]azcosmos.QueryParameter{
+			{Name: "@scope", Value: "pr"},
+			{Name: "@key", Value: key},
+		},
+		&docs,
+	); err != nil || len(docs) == 0 {
+		return false, err
+	}
+	lock := docs[0]
+	if lock.State != "held" {
+		return false, nil
+	}
+	expires := parseTimeOrZero(lock.ExpiresAt)
+	return expires.After(time.Now().UTC()), nil
+}
+
+func (s *Store) resolveIssueIDByRef(ctx context.Context, project, ref string) *string {
+	// ref format: "{project}#{number}" — parse the number part.
+	parts := strings.SplitN(ref, "#", 2)
+	if len(parts) != 2 {
+		return nil
+	}
+	num, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return nil
+	}
+	doc, err := s.readIssueByNumber(ctx, project, num)
+	if err != nil {
+		return nil
+	}
+	return &doc.ID
+}
+
+func (s *Store) resolveRunIDByRef(_ context.Context, _ string, ref string) *string {
+	// run ref format: "{project}#<issue_number>/runs/<run_number>" — we can't
+	// easily resolve this to a run ID without a DB lookup, so skip for now.
+	// Callers that have the run ID will pass it directly via linked_run_id if
+	// we ever need to support that path.
+	if ref == "" {
+		return nil
+	}
+	return nil
+}
+
+func (d reportDoc) PRBranchStr() string {
+	return d.Branch
+}
+
+// buildIssueIndexes builds maps from issue ID → ref and issue ID → number.
+func buildIssueIndexes(docs []issueDoc) (map[string]string, map[string]int) {
+	refByID := make(map[string]string, len(docs))
+	numByID := make(map[string]int, len(docs))
+	for _, d := range docs {
+		ref := publicids.IssueRef(d.Project, &d.Number)
+		refByID[d.ID] = ref
+		numByID[d.ID] = d.Number
+	}
+	return refByID, numByID
+}
+
+// buildRunIndexes builds maps: run ID → ref, linked_issue_id → run, (repo,pr) → run.
+func buildRunIndexes(docs []runDoc) (map[string]string, map[string]*runDoc, map[string]*runDoc) {
+	refByID := runRefMapFromDocs(docs)
+	byLinkedIssue := make(map[string]*runDoc)
+	byRepoPR := make(map[string]*runDoc)
+	for i := range docs {
+		d := &docs[i]
+		if d.IssueID != "" {
+			cur := byLinkedIssue[d.IssueID]
+			if cur == nil || d.CreatedAt > cur.CreatedAt {
+				byLinkedIssue[d.IssueID] = d
+			}
+		}
+		if d.IssueRepo != "" && d.PRNumber != nil {
+			key := fmt.Sprintf("%s#%d", d.IssueRepo, *d.PRNumber)
+			cur := byRepoPR[key]
+			if cur == nil || d.CreatedAt > cur.CreatedAt {
+				byRepoPR[key] = d
+			}
+		}
+	}
+	return refByID, byLinkedIssue, byRepoPR
+}
+
+// buildPRLockIndex maps "{repo}#{pr_number}" → whether a held, unexpired lock exists.
+func buildPRLockIndex(docs []lockDoc) map[string]bool {
+	m := make(map[string]bool, len(docs))
+	now := time.Now().UTC()
+	for _, d := range docs {
+		if d.Scope != "pr" || d.State != "held" {
+			continue
+		}
+		expires := parseTimeOrZero(d.ExpiresAt)
+		m[d.Key] = expires.After(now)
+	}
+	return m
+}
+
+func touchpointRowFromDoc(
+	doc reportDoc,
+	issueRefByID map[string]string,
+	issueNumByID map[string]int,
+	runRefByID map[string]string,
+	runByLinkedIssue map[string]*runDoc,
+	runByRepoPR map[string]*runDoc,
+	prLockByKey map[string]bool,
+	now time.Time,
+) server.TouchpointRow {
+	row := server.TouchpointRow{
+		Ref:      publicids.ReportRef(doc.Repo, &doc.Number),
+		Project:  doc.Project,
+		Repo:     doc.Repo,
+		PRNumber: doc.Number,
+		Title:    doc.Title,
+		State:    firstNonEmpty(doc.State, "ready"),
+		Merged:   doc.MergedAt != nil,
+	}
+	if doc.Branch != "" {
+		row.PRBranch = &doc.Branch
+	}
+	if doc.HTMLURL != "" {
+		row.HTMLURL = &doc.HTMLURL
+	}
+
+	if doc.LinkedIssueID != nil && *doc.LinkedIssueID != "" {
+		if ref, ok := issueRefByID[*doc.LinkedIssueID]; ok {
+			row.LinkedIssueRef = &ref
+		}
+		if num, ok := issueNumByID[*doc.LinkedIssueID]; ok {
+			row.IssueNumber = &num
+		}
+	}
+
+	// Find associated run.
+	var run *runDoc
+	if doc.LinkedIssueID != nil && *doc.LinkedIssueID != "" {
+		run = runByLinkedIssue[*doc.LinkedIssueID]
+	}
+	if run == nil {
+		key := fmt.Sprintf("%s#%d", doc.Repo, doc.Number)
+		run = runByRepoPR[key]
+	}
+	if run != nil {
+		if ref := runRefByID[run.ID]; ref != "" {
+			row.RunRef = &ref
+			row.LinkedRunRef = &ref
+		}
+		row.RunState = ptrString(run.State)
+		row.ValidationURL = run.ValidationURL
+		row.RunAttempts = len(run.Attempts)
+		row.RunCumulativeCostUSD = run.CumulativeCostUSD
+		if run.IssueNumber > 0 && row.IssueNumber == nil {
+			row.IssueNumber = &run.IssueNumber
+		}
+	}
+
+	lockKey := fmt.Sprintf("%s#%d", doc.Repo, doc.Number)
+	row.PRLockHeld = prLockByKey[lockKey]
+	_ = now
+	return row
+}
+
+func buildAttemptHistory(attempts []attemptDoc) []map[string]any {
+	out := make([]map[string]any, 0, len(attempts))
+	for _, a := range attempts {
+		entry := map[string]any{
+			"attempt_index":     a.AttemptIndex,
+			"phase":             a.Phase,
+			"workflow_filename": a.WorkflowFilename,
+			"workflow_run_id":   a.WorkflowRunID,
+			"dispatched_at":     a.DispatchedAt,
+			"completed_at":      a.CompletedAt,
+			"conclusion":        a.Conclusion,
+			"cost_usd":          a.CostUSD,
+			"decision":          a.Decision,
+			"log_archive_url":   a.LogArchiveURL,
+		}
+		if a.Verification != nil {
+			entry["verification_status"] = a.Verification.Status
+			entry["evidence_refs"] = a.Verification.EvidenceRefs
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func ptrString(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+func parseTimeOrZero(s string) time.Time {
+	t, _ := time.Parse(time.RFC3339Nano, s)
+	return t
 }
