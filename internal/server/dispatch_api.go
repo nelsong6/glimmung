@@ -80,6 +80,7 @@ type DispatchRunRequest struct {
 	Project       string         `json:"project"`
 	IssueNumber   int            `json:"issue_number"`
 	WorkflowName  string         `json:"workflow_name"`
+	Workflow      string         `json:"workflow"`
 	TriggerSource map[string]any `json:"trigger_source"`
 }
 
@@ -107,194 +108,186 @@ func dispatchRunHandler(store ReadStore, ghDispatch GHADispatchClient) http.Hand
 			writeProblem(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
-		if req.Project == "" {
-			writeProblem(w, http.StatusBadRequest, "project required")
+		result, problem := dispatchRun(r.Context(), dispatchStore, ghDispatch, req)
+		if problem != nil {
+			writeProblem(w, problem.status, problem.message)
 			return
 		}
-		if req.IssueNumber <= 0 {
-			writeProblem(w, http.StatusBadRequest, "issue_number required")
-			return
-		}
-
-		ctx := r.Context()
-
-		// 1. Verify project exists and get its GitHub repo.
-		issueRepo, err := dispatchStore.ReadProjectGitHubRepo(ctx, req.Project)
-		if errors.Is(err, ErrNotFound) {
-			writeJSON(w, http.StatusOK, PublicDispatchResult{
-				State:  "no_project",
-				Detail: stringPtr(fmt.Sprintf("project %q not registered", req.Project)),
-			})
-			return
-		}
-		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "read project failed")
-			return
-		}
-
-		// 2. Read the issue.
-		issue, err := dispatchStore.ReadIssueForDispatch(ctx, req.Project, req.IssueNumber)
-		if errors.Is(err, ErrNotFound) {
-			writeJSON(w, http.StatusOK, PublicDispatchResult{
-				State:  "no_project",
-				Detail: stringPtr(fmt.Sprintf("no issue %s#%d", req.Project, req.IssueNumber)),
-			})
-			return
-		}
-		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "read issue failed")
-			return
-		}
-
-		// 3. Resolve workflow.
-		wf, resolveDetail, err := resolveDispatchWorkflow(ctx, dispatchStore, req.Project, req.WorkflowName)
-		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "read workflow failed")
-			return
-		}
-		if wf == nil {
-			writeJSON(w, http.StatusOK, PublicDispatchResult{State: "no_workflow", Detail: &resolveDetail})
-			return
-		}
-		if len(wf.Phases) == 0 {
-			writeJSON(w, http.StatusOK, PublicDispatchResult{
-				State:    "no_workflow",
-				Workflow: &wf.Name,
-				Detail:   stringPtr("workflow has no phases"),
-			})
-			return
-		}
-
-		// 4. Claim the per-issue serialization lock.
-		holderID := newDispatchID()
-		if err := dispatchStore.ClaimIssueLock(ctx, req.Project, req.IssueNumber, holderID, defaultIssueLockTTLSeconds); err != nil {
-			if errors.Is(err, ErrAlreadyRunning) {
-				writeJSON(w, http.StatusOK, PublicDispatchResult{
-					State:    "already_running",
-					Workflow: &wf.Name,
-					Detail:   stringPtr(err.Error()),
-				})
-				return
-			}
-			writeProblem(w, http.StatusInternalServerError, "claim issue lock failed")
-			return
-		}
-
-		// 5. Resolve budget from issue labels + workflow default.
-		var wfBudget *budget.Config
-		if wf.Budget.Total > 0 {
-			c := wf.Budget
-			wfBudget = &c
-		}
-		resolvedBudget := budget.ResolveBudget(issue.Labels, wfBudget)
-
-		// 6. Prepare initial phase parameters.
-		initPhase := wf.Phases[0]
-		phaseKind := initPhase.Kind
-		if phaseKind == "" {
-			phaseKind = "gha_dispatch"
-		}
-		workflowFilename := initPhase.WorkflowFilename
-		if workflowFilename == "" {
-			workflowFilename = fmt.Sprintf("%s:%s", phaseKind, initPhase.Name)
-		}
-		triggerSource := req.TriggerSource
-		if triggerSource == nil {
-			triggerSource = map[string]any{"kind": "dispatch"}
-		}
-
-		// 7. Create the run document (under the lock, so run-number allocation is serialized).
-		run, err := dispatchStore.CreateRun(ctx, CreateRunRequest{
-			Project:                 req.Project,
-			Workflow:                wf.Name,
-			IssueID:                 issue.ID,
-			IssueRepo:               issueRepo,
-			IssueNumber:             req.IssueNumber,
-			Budget:                  resolvedBudget,
-			InitialPhaseName:        initPhase.Name,
-			InitialPhaseKind:        phaseKind,
-			InitialWorkflowFilename: workflowFilename,
-			IssueLockHolderID:       holderID,
-			TriggerSource:           triggerSource,
-		})
-		if err != nil {
-			// Run wasn't created — release the lock directly since AbortRunByID can't help.
-			dispatchStore.ReleaseIssueLock(ctx, req.Project, req.IssueNumber, holderID)
-			writeProblem(w, http.StatusInternalServerError, "create run failed")
-			return
-		}
-
-		// 8. Build lease metadata.
-		issueNum := req.IssueNumber
-		runRef := publicids.RunRef(req.Project, &issueNum, run.RunDisplay)
-		metadata := map[string]any{
-			"issue_body":           issue.Body,
-			"issue_title":          issue.Title,
-			"issue_lock_holder_id": holderID,
-			"run_id":               run.ID,
-			"run_ref":              runRef,
-			"run_callback_token":   run.CallbackToken,
-			"run_number":           strconv.Itoa(run.RunNumber),
-			"run_display_number":   run.RunDisplay,
-			"attempt_index":        "0",
-			"phase_name":           initPhase.Name,
-			"issue_number":         strconv.Itoa(req.IssueNumber),
-			"work_context_branch":  fmt.Sprintf("issue-%d-run-%s", req.IssueNumber, run.RunDisplay),
-		}
-
-		// 9. Acquire a lease for the initial phase.
-		requirements := initPhase.Requirements
-		if len(requirements) == 0 {
-			requirements = wf.DefaultRequirements
-		}
-		wfName := wf.Name
-		lease, host, err := dispatchStore.AcquireLease(ctx, LeaseAcquireRequest{
-			Project:      req.Project,
-			Workflow:     &wfName,
-			Requirements: requirements,
-			Metadata:     metadata,
-		})
-		if err != nil {
-			// Abort the run — this releases the issue lock as a side-effect.
-			dispatchStore.AbortRunByID(ctx, req.Project, run.ID, "lease_acquire_failed") //nolint:errcheck
-			writeProblem(w, http.StatusInternalServerError, "acquire lease failed")
-			return
-		}
-
-		wfNameStr := wf.Name
-		result := PublicDispatchResult{
-			RunNumber: &run.RunNumber,
-			Workflow:  &wfNameStr,
-			Lease:     "claimed",
-		}
-
-		// 10. If a host was immediately assigned and this is a GHA phase, fire workflow_dispatch.
-		if host != nil && phaseKind == "gha_dispatch" && ghDispatch != nil {
-			inputs := buildInitialDispatchInputs(lease, host, run, runRef, initPhase, req.IssueNumber)
-			wfRef := initPhase.WorkflowRef
-			if wfRef == "" {
-				wfRef = "main"
-			}
-			if err := ghDispatch.DispatchWorkflow(ctx, issueRepo, workflowFilename, wfRef, inputs); err != nil {
-				// Rollback: abort run (releases issue lock). Lease will expire via TTL.
-				dispatchStore.AbortRunByID(ctx, req.Project, run.ID, "dispatch_failed: "+err.Error()) //nolint:errcheck
-				detail := fmt.Sprintf("runner dispatch failed: %s", err)
-				writeJSON(w, http.StatusOK, PublicDispatchResult{
-					State:    "dispatch_failed",
-					Workflow: &wfNameStr,
-					Detail:   &detail,
-				})
-				return
-			}
-			result.State = "dispatched"
-			hostName := host.Name
-			result.Host = &hostName
-		} else {
-			result.State = "pending"
-		}
-
 		writeJSON(w, http.StatusOK, result)
 	}
+}
+
+type dispatchProblem struct {
+	status  int
+	message string
+}
+
+func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, ghDispatch GHADispatchClient, req DispatchRunRequest) (PublicDispatchResult, *dispatchProblem) {
+	if req.Project == "" {
+		return PublicDispatchResult{}, &dispatchProblem{status: http.StatusBadRequest, message: "project required"}
+	}
+	if req.IssueNumber <= 0 {
+		return PublicDispatchResult{}, &dispatchProblem{status: http.StatusBadRequest, message: "issue_number required"}
+	}
+
+	issueRepo, err := dispatchStore.ReadProjectGitHubRepo(ctx, req.Project)
+	if errors.Is(err, ErrNotFound) {
+		return PublicDispatchResult{
+			State:  "no_project",
+			Detail: stringPtr(fmt.Sprintf("project %q not registered", req.Project)),
+		}, nil
+	}
+	if err != nil {
+		return PublicDispatchResult{}, &dispatchProblem{status: http.StatusInternalServerError, message: "read project failed"}
+	}
+
+	issue, err := dispatchStore.ReadIssueForDispatch(ctx, req.Project, req.IssueNumber)
+	if errors.Is(err, ErrNotFound) {
+		return PublicDispatchResult{
+			State:  "no_project",
+			Detail: stringPtr(fmt.Sprintf("no issue %s#%d", req.Project, req.IssueNumber)),
+		}, nil
+	}
+	if err != nil {
+		return PublicDispatchResult{}, &dispatchProblem{status: http.StatusInternalServerError, message: "read issue failed"}
+	}
+
+	wf, resolveDetail, err := resolveDispatchWorkflow(ctx, dispatchStore, req.Project, req.resolvedWorkflowName())
+	if err != nil {
+		return PublicDispatchResult{}, &dispatchProblem{status: http.StatusInternalServerError, message: "read workflow failed"}
+	}
+	if wf == nil {
+		return PublicDispatchResult{State: "no_workflow", Detail: &resolveDetail}, nil
+	}
+	if len(wf.Phases) == 0 {
+		return PublicDispatchResult{
+			State:    "no_workflow",
+			Workflow: &wf.Name,
+			Detail:   stringPtr("workflow has no phases"),
+		}, nil
+	}
+
+	holderID := newDispatchID()
+	if err := dispatchStore.ClaimIssueLock(ctx, req.Project, req.IssueNumber, holderID, defaultIssueLockTTLSeconds); err != nil {
+		if errors.Is(err, ErrAlreadyRunning) {
+			return PublicDispatchResult{
+				State:    "already_running",
+				Workflow: &wf.Name,
+				Detail:   stringPtr(err.Error()),
+			}, nil
+		}
+		return PublicDispatchResult{}, &dispatchProblem{status: http.StatusInternalServerError, message: "claim issue lock failed"}
+	}
+
+	var wfBudget *budget.Config
+	if wf.Budget.Total > 0 {
+		c := wf.Budget
+		wfBudget = &c
+	}
+	resolvedBudget := budget.ResolveBudget(issue.Labels, wfBudget)
+
+	initPhase := wf.Phases[0]
+	phaseKind := initPhase.Kind
+	if phaseKind == "" {
+		phaseKind = "gha_dispatch"
+	}
+	workflowFilename := initPhase.WorkflowFilename
+	if workflowFilename == "" {
+		workflowFilename = fmt.Sprintf("%s:%s", phaseKind, initPhase.Name)
+	}
+	triggerSource := req.TriggerSource
+	if triggerSource == nil {
+		triggerSource = map[string]any{"kind": "dispatch"}
+	}
+
+	run, err := dispatchStore.CreateRun(ctx, CreateRunRequest{
+		Project:                 req.Project,
+		Workflow:                wf.Name,
+		IssueID:                 issue.ID,
+		IssueRepo:               issueRepo,
+		IssueNumber:             req.IssueNumber,
+		Budget:                  resolvedBudget,
+		InitialPhaseName:        initPhase.Name,
+		InitialPhaseKind:        phaseKind,
+		InitialWorkflowFilename: workflowFilename,
+		IssueLockHolderID:       holderID,
+		TriggerSource:           triggerSource,
+	})
+	if err != nil {
+		dispatchStore.ReleaseIssueLock(ctx, req.Project, req.IssueNumber, holderID)
+		return PublicDispatchResult{}, &dispatchProblem{status: http.StatusInternalServerError, message: "create run failed"}
+	}
+
+	issueNum := req.IssueNumber
+	runRef := publicids.RunRef(req.Project, &issueNum, run.RunDisplay)
+	metadata := map[string]any{
+		"issue_body":           issue.Body,
+		"issue_title":          issue.Title,
+		"issue_lock_holder_id": holderID,
+		"run_id":               run.ID,
+		"run_ref":              runRef,
+		"run_callback_token":   run.CallbackToken,
+		"run_number":           strconv.Itoa(run.RunNumber),
+		"run_display_number":   run.RunDisplay,
+		"attempt_index":        "0",
+		"phase_name":           initPhase.Name,
+		"issue_number":         strconv.Itoa(req.IssueNumber),
+		"work_context_branch":  fmt.Sprintf("issue-%d-run-%s", req.IssueNumber, run.RunDisplay),
+	}
+
+	requirements := initPhase.Requirements
+	if len(requirements) == 0 {
+		requirements = wf.DefaultRequirements
+	}
+	wfName := wf.Name
+	lease, host, err := dispatchStore.AcquireLease(ctx, LeaseAcquireRequest{
+		Project:      req.Project,
+		Workflow:     &wfName,
+		Requirements: requirements,
+		Metadata:     metadata,
+	})
+	if err != nil {
+		dispatchStore.AbortRunByID(ctx, req.Project, run.ID, "lease_acquire_failed") //nolint:errcheck
+		return PublicDispatchResult{}, &dispatchProblem{status: http.StatusInternalServerError, message: "acquire lease failed"}
+	}
+
+	wfNameStr := wf.Name
+	result := PublicDispatchResult{
+		RunNumber: &run.RunNumber,
+		Workflow:  &wfNameStr,
+		Lease:     "claimed",
+	}
+
+	if host != nil && phaseKind == "gha_dispatch" && ghDispatch != nil {
+		inputs := buildInitialDispatchInputs(lease, host, run, runRef, initPhase, req.IssueNumber)
+		wfRef := initPhase.WorkflowRef
+		if wfRef == "" {
+			wfRef = "main"
+		}
+		if err := ghDispatch.DispatchWorkflow(ctx, issueRepo, workflowFilename, wfRef, inputs); err != nil {
+			dispatchStore.AbortRunByID(ctx, req.Project, run.ID, "dispatch_failed: "+err.Error()) //nolint:errcheck
+			detail := fmt.Sprintf("runner dispatch failed: %s", err)
+			return PublicDispatchResult{
+				State:    "dispatch_failed",
+				Workflow: &wfNameStr,
+				Detail:   &detail,
+			}, nil
+		}
+		result.State = "dispatched"
+		hostName := host.Name
+		result.Host = &hostName
+	} else {
+		result.State = "pending"
+	}
+
+	return result, nil
+}
+
+func (req DispatchRunRequest) resolvedWorkflowName() string {
+	if req.WorkflowName != "" {
+		return req.WorkflowName
+	}
+	return req.Workflow
 }
 
 // resolveDispatchWorkflow picks the workflow to dispatch: explicit name or the project's sole workflow.
@@ -353,7 +346,6 @@ func buildInitialDispatchInputs(lease Lease, host *Host, run CreatedRun, runRef 
 	if lease.LeaseNumber != nil {
 		inputs["lease_number"] = strconv.Itoa(*lease.LeaseNumber)
 	}
-	// Phase-level inputs fill slots not already set by standard fields.
 	for k, v := range phase.Inputs {
 		if _, exists := inputs[k]; !exists {
 			inputs[k] = v

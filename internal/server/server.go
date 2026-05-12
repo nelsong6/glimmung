@@ -243,6 +243,7 @@ func newHandler(settings Settings, store ReadStore, authResolver AuthResolver, g
 	mux.Handle("POST /v1/signals", requireAdmin(adminAuthenticator, http.HandlerFunc(createSignal(store))))
 	mux.HandleFunc("GET /v1/portfolio/elements", listPortfolioElements(store))
 	mux.Handle("POST /v1/portfolio/elements", requireAdmin(adminAuthenticator, http.HandlerFunc(upsertPortfolioElement(store))))
+	mux.Handle("POST /v1/portfolio/elements/dispatch", requireAdmin(adminAuthenticator, http.HandlerFunc(dispatchPortfolioElements(store, ghDispatch))))
 	mux.Handle("PATCH /v1/portfolio/elements/{project}/{element_ref}", requireAdmin(adminAuthenticator, http.HandlerFunc(patchPortfolioElement(store))))
 	mux.Handle("POST /v1/playbooks/{project}/{playbook_ref}/entries/{entry_id}/gate", requireAdmin(adminAuthenticator, http.HandlerFunc(patchPlaybookEntryGate(store))))
 	mux.Handle("POST /v1/hosts", requireAdmin(adminAuthenticator, http.HandlerFunc(registerHost(store))))
@@ -258,10 +259,28 @@ func newHandler(settings Settings, store ReadStore, authResolver AuthResolver, g
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/events", nativeRunEventWriteByCallbackToken(store))
 	mux.HandleFunc("GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/status", nativeRunStatusByNumber(store))
 	mux.HandleFunc("GET /v1/run-callbacks/{callback_token}/native/status", nativeRunStatusByCallbackToken(store))
+	mux.HandleFunc(
+		"GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/pod-logs",
+		legacyGone("native pod log proxying is retired; use /native/events and archived log evidence"),
+	)
 	mux.HandleFunc("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/failed", nativeRunFailedByNumber(store))
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/failed", nativeRunFailedByCallbackToken(store))
+	mux.HandleFunc(
+		"POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/github-token",
+		legacyGone("native GitHub token minting by run coordinates is retired; use injected Kubernetes credentials"),
+	)
+	mux.HandleFunc(
+		"POST /v1/run-callbacks/{callback_token}/native/github-token",
+		legacyGone("native GitHub token minting by callback token is retired; use injected Kubernetes credentials"),
+	)
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/completed", runCompletedByCallbackToken(store, ghDispatch))
+	mux.HandleFunc(
+		"POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/completed",
+		legacyGone("native completion by run coordinates is retired; use /v1/run-callbacks/{callback_token}/native/completed"),
+	)
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/completed", nativeRunCompletedByCallbackToken(store, ghDispatch))
+	mux.HandleFunc("POST /v1/test-slots/checkout", legacyGone("test-slot checkout is retired; use project test-environment scaling"))
+	mux.HandleFunc("POST /v1/test-slots/return", legacyGone("test-slot return is retired; use project test-environment scaling"))
 	mux.Handle("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/replay", requireAdmin(adminAuthenticator, http.HandlerFunc(replayRunDecisionByNumber(store))))
 	mux.Handle("POST /v1/runs/dispatch", requireAdmin(adminAuthenticator, http.HandlerFunc(dispatchRunHandler(store, ghDispatch))))
 	mux.Handle("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/resume", requireAdmin(adminAuthenticator, http.HandlerFunc(resumeRunHandler(store, ghDispatch))))
