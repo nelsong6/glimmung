@@ -10,7 +10,7 @@ The product is similar in spirit to Spacelift / Terraform Cloud or Airflow, but 
 ## Sources
 
 - **Live product:** https://glimmung.romaine.life/
-- **Codebase:** [nelsong6/glimmung](https://github.com/nelsong6/glimmung) — FastAPI backend (`src/glimmung/`) + Vite/React dashboard (`frontend/src/`)
+- **Codebase:** [nelsong6/glimmung](https://github.com/nelsong6/glimmung) — Go backend (`cmd/glimmung-go`, `internal/server`) + Vite/React dashboard (`frontend/src/`)
 - **Design source of truth:** [`frontend/src/index.css`](https://github.com/nelsong6/glimmung/blob/main/frontend/src/index.css) — every color, spacing, and component pattern in this design system was lifted directly from there. There is no Figma; the codebase IS the design source.
 - **Product philosophy:** [`CLAUDE.md`](https://github.com/nelsong6/glimmung/blob/main/CLAUDE.md) (in the repo) — the "humans as curators, agents in lanes, verify-loop as the one cycle" thesis.
 

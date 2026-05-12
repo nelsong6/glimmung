@@ -95,10 +95,9 @@ Dockerfile            # multi-stage: node frontend build -> Go backend
 .github/workflows/    # build + ACR push + chart bump + tofu plan/apply
 ```
 
-The legacy Python tree under `src/glimmung/` is cleanup/reference material only;
-it is not the app runtime, local app dev path, or CI authority. The keep/port/
-retire map lives in
-[`docs/go-runtime-cleanup-inventory.md`](docs/go-runtime-cleanup-inventory.md).
+The legacy Python app and root Python test suite have been removed. The app
+runtime, local dev path, repo-local ops CLI, and default CI authority are Go
+plus the Vite dashboard.
 
 ## Contribution checklist
 
@@ -150,6 +149,7 @@ surface rather than every compatibility tombstone.
 | POST   | `/v1/playbooks`                   | Create a draft Playbook for a coordinated batch of issue specs. |
 | GET    | `/v1/playbooks`                   | List Playbooks, optionally filtered by project. |
 | GET    | `/v1/playbooks/{project}/{id}`    | Inspect a Playbook. |
+| POST   | `/v1/playbooks/{project}/{id}/run` | Advance a Playbook: create ready entry Issues and dispatch their Runs through the canonical run path. |
 | POST   | `/v1/playbooks/{project}/{id}/entries/{entry_id}/gate` | Set or clear a manual Playbook entry gate; optionally advances the Playbook after clearing. |
 | POST   | `/v1/hosts`                       | Register/update a host. |
 | GET    | `/v1/issues`                      | List Glimmung issues across registered projects. |
@@ -161,7 +161,8 @@ surface rather than every compatibility tombstone.
 | GET    | `/v1/touchpoints/{owner}/{repo}/{n}` | Compatibility Touchpoint lookup by GitHub PR coordinates. |
 | GET    | `/v1/reports`                     | Compatibility alias for `/v1/touchpoints`. |
 | GET    | `/v1/reports/{owner}/{repo}/{n}`  | Compatibility alias for `/v1/touchpoints/{owner}/{repo}/{n}`. |
-| POST   | `/v1/signals`                     | Enqueue a Signal (e.g., `{target_type:"pr", target_repo, target_id, source:"glimmung_ui", payload:{kind:"reject", feedback:"..."}}`). Signal drain/triage cleanup is tracked separately. |
+| POST   | `/v1/signals`                     | Enqueue a Signal (e.g., `{target_type:"pr", target_repo, target_ref:"42", source:"glimmung_ui", payload:{kind:"reject", feedback:"..."}}`). |
+| POST   | `/v1/signals/drain`               | Admin drain endpoint for queued signals; production also runs the Go signal drain loop in-process. |
 
 Admin endpoints accept **either** auth path:
 
@@ -309,12 +310,11 @@ throwaway app image build with `push: false`. Pushes to `main` also run a
 Go-native live Cosmos smoke test for the lock lifecycle with GitHub OIDC, using
 the database-scoped CI role assignment in [`tofu/test-access.tf`](tofu/test-access.tf).
 
-The repository root no longer carries Python packaging. The legacy
-`src/glimmung/` tree and `tests/` suite remain cleanup/reference material while
-the remaining keep/port/retire decisions are resolved, but they are not part of
-the app dev loop or CI authority. Repo-local agent workflow operations live in
-the Go CLI under `cmd/glimmung-agent` and reusable functions under
-`internal/ops/agentops`; they are covered by `go test ./...`.
+The repository root no longer carries Python packaging, the legacy
+`src/glimmung/` app tree is gone, and the root Python `tests/` suite has been
+deleted. Repo-local agent workflow operations live in the Go CLI under
+`cmd/glimmung-agent` and reusable functions under `internal/ops/agentops`;
+they are covered by `go test ./...`.
 
 ```sh
 go run ./cmd/glimmung-agent --help
@@ -496,26 +496,22 @@ ported to Go store tests before the legacy lock module is deleted.
 
 `POST /v1/signals` enqueues Signal documents through
 [`internal/server/signal_api.go`](internal/server/signal_api.go) and
-[`internal/store/cosmos`](internal/store/cosmos). Signal drain, triage
-decisioning, and PR re-entry remain cleanup decisions: port them to Go if they
-are still product requirements, or retire them with explicit compatibility
-notes.
+[`internal/store/cosmos`](internal/store/cosmos). The Go service drains queued
+signals in-process and exposes `POST /v1/signals/drain` as an admin/manual
+drain endpoint.
 
-Legacy behavior to preserve if triage is ported:
+Active triage behavior:
 
 - **Per-PR serialization**: signals on a PR whose lock is held stay PENDING and
   re-evaluate later.
 - **Triage decisioning**: non-actionable signals are ignored; actionable reject
-  feedback can create a cycle Run and dispatch the consumer triage workflow.
-- **Budget enforcement**: no-run and budget abort cases post an explanation
-  instead of dispatching more work.
-
-The cleanup inventory tracks whether PR webhook linking and triage workflow
-dispatch should be restored in Go.
+  feedback reopens the linked Run through the workflow PR recycle policy.
+- **Budget enforcement**: no-run and budget abort cases are recorded as
+  processed decisions instead of dispatching more work.
 
 ### Triage workflow contract
 
-If triage dispatch is ported, it should set:
+Triage dispatch sets:
 
 | Input | Description |
 |---|---|
@@ -528,15 +524,15 @@ If triage dispatch is ported, it should set:
 | `feedback`                            | Human-readable feedback text from the reject signal. |
 | `prior_verification_artifact_url`     | Empty for triage (the prior attempt PASSED to open the PR; no failure context to feed back). |
 
-The legacy triage workflow contract runs impl + verify with feedback in
+The triage workflow contract runs impl + verify with feedback in
 context, force-pushes the result, and uploads `verification.json` (same
 contract as retry workflows; see verify-loop substrate).
 
 ## Historical Platform Phases
 
-These are the original product build phases. The Go-runtime cleanup work is
-tracked separately in [issue #446](https://github.com/nelsong6/glimmung/issues/446)
-and [`docs/go-runtime-cleanup-inventory.md`](docs/go-runtime-cleanup-inventory.md).
+These are the original product build phases. The Go-runtime cleanup finished
+the app/runtime retirement of the legacy Python tree; final compatibility notes
+live in [`docs/go-runtime-cleanup-inventory.md`](docs/go-runtime-cleanup-inventory.md).
 
 1. **Phase 1** ✓ — lease primitive, sweep job, Cosmos backend.
 2. **Phase 2** ✓ — GitHub App webhook receiver, `workflow_dispatch` firing, ingress at `glimmung.romaine.life`, Entra ID auth on admin endpoints.

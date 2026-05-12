@@ -24,6 +24,7 @@ type RunReplayData struct {
 	WorkflowName      string
 	Attempts          []RunAttemptData
 	CumulativeCostUSD float64
+	Budget            budget.Config
 	IssueNumber       int
 	RunNumber         *int
 	RunDisplayNumber  *string

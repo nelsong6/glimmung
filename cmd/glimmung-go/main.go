@@ -27,6 +27,13 @@ func main() {
 	}
 	authenticator := buildAuthenticator(settings)
 	ghClient := buildGitHubClient(settings)
+	var ghDispatch server.GHADispatchClient
+	if d, ok := ghClient.(server.GHADispatchClient); ok {
+		ghDispatch = d
+	}
+	if store != nil {
+		go server.StartSignalDrainLoop(context.Background(), store, ghDispatch, 15*time.Second, log.Printf)
+	}
 	addr := ":" + settings.Port
 
 	srv := &http.Server{
@@ -56,6 +63,10 @@ func (a *gitHubClientAdapter) FetchWorkflowFile(ctx context.Context, repo, name,
 		return nil, 502, err
 	}
 	return data, 200, nil
+}
+
+func (a *gitHubClientAdapter) DispatchWorkflow(ctx context.Context, repo, filename, ref string, inputs map[string]string) error {
+	return a.client.DispatchWorkflow(ctx, repo, filename, ref, inputs)
 }
 
 func buildGitHubClient(settings server.Settings) server.WorkflowSyncClient {

@@ -1,7 +1,7 @@
 # ============================================================================
 # Cosmos data-plane RBAC for live-mode tests (#37)
 # ============================================================================
-# `GLIMMUNG_TEST_COSMOS=live` (tests/cosmos_fake.py) routes the suite at the
+# `GLIMMUNG_TEST_COSMOS=live` routes the Go live smoke at the
 # real Cosmos containers; auth flows through DefaultAzureCredential, so the
 # az-login session principal must hold a data-plane role on the glimmung
 # database. Without it the live smoke fails before the first read with

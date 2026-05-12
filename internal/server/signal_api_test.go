@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nelsong6/glimmung/internal/auth"
+	"github.com/nelsong6/glimmung/internal/domain/budget"
 )
 
 type fakeSignalStore struct {
@@ -94,5 +95,133 @@ func TestCreateSignalRequiresStore(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+type fakeSignalDrainStore struct {
+	fakeReadStore
+	pending           []QueuedSignal
+	processedDecision string
+	prLockReleased    bool
+	issueLockClaimed  bool
+	reopened          bool
+}
+
+func (s *fakeSignalDrainStore) ListPendingSignals(context.Context, int) ([]QueuedSignal, error) {
+	return s.pending, nil
+}
+
+func (s *fakeSignalDrainStore) MarkSignalProcessing(_ context.Context, signal QueuedSignal) (QueuedSignal, bool, error) {
+	signal.State = "processing"
+	return signal, true, nil
+}
+
+func (s *fakeSignalDrainStore) MarkSignalProcessed(_ context.Context, signal QueuedSignal, decision string) (QueuedSignal, error) {
+	s.processedDecision = decision
+	signal.State = "processed"
+	return signal, nil
+}
+
+func (s *fakeSignalDrainStore) MarkSignalFailed(context.Context, QueuedSignal, string) error {
+	return nil
+}
+
+func (s *fakeSignalDrainStore) ClaimLock(context.Context, string, string, string, int, map[string]any) error {
+	return nil
+}
+
+func (s *fakeSignalDrainStore) ReleaseLock(_ context.Context, scope, _, _ string) bool {
+	if scope == "pr" {
+		s.prLockReleased = true
+	}
+	return true
+}
+
+func (s *fakeSignalDrainStore) FindRunForPR(context.Context, string, int) (RunReplayData, error) {
+	pr := 42
+	callback := "tok"
+	return RunReplayData{
+		ID:                "run-1",
+		Project:           "glimmung",
+		WorkflowName:      "agent",
+		IssueRepo:         "owner/repo",
+		IssueNumber:       7,
+		PRNumber:          &pr,
+		CallbackToken:     &callback,
+		Budget:            defaultBudgetForTest(),
+		CumulativeCostUSD: 1,
+		Attempts:          []RunAttemptData{{AttemptIndex: 0, Phase: "impl", Completed: true}},
+	}, nil
+}
+
+func (s *fakeSignalDrainStore) GetWorkflowByName(context.Context, string, string) (*Workflow, error) {
+	return &Workflow{
+		Name: "agent",
+		Phases: []PhaseSpec{{
+			Name: "impl",
+			Kind: "k8s_job",
+		}},
+		PR: PrPrimitive{RecyclePolicy: &RecyclePolicy{MaxAttempts: 3, LandsAt: "impl"}},
+	}, nil
+}
+
+func (s *fakeSignalDrainStore) ClaimIssueLock(context.Context, string, int, string, int) error {
+	s.issueLockClaimed = true
+	return nil
+}
+
+func (s *fakeSignalDrainStore) ReleaseIssueLock(context.Context, string, int, string) {}
+
+func (s *fakeSignalDrainStore) ReopenRunForTriage(_ context.Context, req TriageReopenRequest) (RunReplayData, int, error) {
+	s.reopened = true
+	pr := 42
+	callback := "tok"
+	return RunReplayData{
+		ID:            req.RunID,
+		Project:       req.Project,
+		WorkflowName:  "agent",
+		IssueRepo:     "owner/repo",
+		IssueNumber:   7,
+		PRNumber:      &pr,
+		CallbackToken: &callback,
+	}, 1, nil
+}
+
+func (s *fakeSignalDrainStore) AcquireLease(context.Context, LeaseAcquireRequest) (Lease, *Host, error) {
+	return Lease{Project: "glimmung", Metadata: map[string]any{}}, nil, nil
+}
+
+func (s *fakeSignalDrainStore) AbortRunByID(context.Context, string, string, string) (AbortRunResult, error) {
+	return AbortRunResult{}, nil
+}
+
+func defaultBudgetForTest() budget.Config {
+	return budget.Config{Total: 10}
+}
+
+func TestDrainSignalsDispatchesRequestChangesTriage(t *testing.T) {
+	store := &fakeSignalDrainStore{pending: []QueuedSignal{{
+		ID:         "signal-1",
+		TargetType: "pr",
+		TargetRepo: "owner/repo",
+		TargetID:   "42",
+		Source:     "glimmung_ui",
+		Payload:    map[string]any{"kind": "reject", "feedback": "fix it"},
+		State:      "pending",
+		EnqueuedAt: time.Now(),
+	}}}
+
+	result, err := DrainSignals(context.Background(), store, nil, 10)
+	if err != nil {
+		t.Fatalf("DrainSignals: %v", err)
+	}
+	if result.Processed != 1 || store.processedDecision != triageDispatch {
+		t.Fatalf("result=%#v decision=%q", result, store.processedDecision)
+	}
+	if !store.issueLockClaimed || !store.reopened {
+		t.Fatalf("issueLockClaimed=%v reopened=%v", store.issueLockClaimed, store.reopened)
+	}
+	if store.prLockReleased {
+		t.Fatal("PR lock should stay held until the triage run reaches terminal state")
 	}
 }

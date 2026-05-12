@@ -21,9 +21,6 @@ Glimmung is a Go service with a Vite + React dashboard:
 - `internal/store/cosmos/` - Cosmos persistence boundary and live-smoke
   coverage for app data paths.
 - `internal/domain/` - budget, decision, paths, phase refs, and public IDs.
-- `src/glimmung/` - legacy Python implementation retained only as
-  cleanup/reference material until remaining route and tooling decisions are
-  resolved. It is not the app runtime or default test authority.
 - `frontend/` - Vite + React dashboard. Live SSE state, MSAL sign-in, admin
   panel for project/workflow/host registration.
 - `k8s/` - prod Helm chart. ArgoCD-synced from main. Plus `k8s/issue/`, the
@@ -40,9 +37,8 @@ auth paths: Entra and K8s service-account token.
 The default app checks are `go test ./...`, `go vet ./...`,
 `npm run test:run` from `frontend/`, and `npm run build` from `frontend/`.
 There is no root app `pyproject.toml`. Do not recreate root Python packaging
-for the app path, and do not treat the legacy Python test suite as the app
-authority; run it only when the change intentionally touches cleanup/reference
-behavior still living under `src/glimmung/`.
+for the app path. The legacy Python app and root Python test suite have been
+removed; app/runtime work is validated through Go tests and the frontend gate.
 
 ## Workflow
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -14,6 +15,14 @@ type PlaybookStore interface {
 	CreatePlaybook(ctx context.Context, req PlaybookCreate) (PlaybookPublic, error)
 	PatchPlaybookEntryGate(ctx context.Context, project, ref, entryID string, manualGate bool) (PlaybookPublic, error)
 }
+
+type PlaybookRunStore interface {
+	PlaybookStore
+	AdvancePlaybook(ctx context.Context, project, ref string, dispatch PlaybookEntryDispatcher) (PlaybookPublic, error)
+	AdvancePlaybooksForRun(ctx context.Context, project, runID string, dispatch PlaybookEntryDispatcher) error
+}
+
+type PlaybookEntryDispatcher func(ctx context.Context, entry PlaybookEntryDispatch) (PlaybookEntryDispatchResult, error)
 
 type PlaybookListFilter struct {
 	Project string
@@ -30,16 +39,35 @@ type PlaybookIssueSpec struct {
 }
 
 type PlaybookEntryPublic struct {
-	ID               string            `json:"id"`
-	Title            *string           `json:"title"`
-	Issue            PlaybookIssueSpec `json:"issue"`
-	DependsOn        []string          `json:"depends_on"`
-	ManualGate       bool              `json:"manual_gate"`
-	State            string            `json:"state"`
-	CreatedIssueRef  *string           `json:"created_issue_ref"`
-	RunRef           *string           `json:"run_ref"`
-	CompletedAt      *string           `json:"completed_at"`
-	Metadata         map[string]any    `json:"metadata"`
+	ID              string            `json:"id"`
+	Title           *string           `json:"title"`
+	Issue           PlaybookIssueSpec `json:"issue"`
+	DependsOn       []string          `json:"depends_on"`
+	ManualGate      bool              `json:"manual_gate"`
+	State           string            `json:"state"`
+	CreatedIssueRef *string           `json:"created_issue_ref"`
+	RunRef          *string           `json:"run_ref"`
+	CompletedAt     *string           `json:"completed_at"`
+	Metadata        map[string]any    `json:"metadata"`
+}
+
+type PlaybookEntryDispatch struct {
+	Project             string
+	PlaybookID          string
+	PlaybookRef         string
+	EntryID             string
+	Issue               PlaybookIssueSpec
+	CreatedIssueRef     *string
+	IntegrationStrategy string
+	WorkContext         map[string]string
+}
+
+type PlaybookEntryDispatchResult struct {
+	State           string
+	Detail          *string
+	CreatedIssueRef *string
+	RunID           *string
+	RunRef          *string
 }
 
 type PlaybookPublic struct {
@@ -210,4 +238,111 @@ func patchPlaybookEntryGate(store ReadStore) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, pb)
 	}
+}
+
+func runPlaybook(store ReadStore, ghDispatch GHADispatchClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		pbStore, ok := store.(PlaybookRunStore)
+		if !ok || pbStore == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "playbook run store not configured")
+			return
+		}
+		dispatcher, ok := playbookEntryDispatcher(store, ghDispatch)
+		if !ok {
+			writeProblem(w, http.StatusServiceUnavailable, "playbook dispatch dependencies not configured")
+			return
+		}
+		pb, err := pbStore.AdvancePlaybook(r.Context(), r.PathValue("project"), r.PathValue("playbook_ref"), dispatcher)
+		switch {
+		case errors.Is(err, ErrNotFound):
+			writeProblem(w, http.StatusNotFound, "playbook not found")
+			return
+		case err != nil:
+			writeProblem(w, http.StatusInternalServerError, "run playbook failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, pb)
+	}
+}
+
+func playbookEntryDispatcher(store ReadStore, ghDispatch GHADispatchClient) (PlaybookEntryDispatcher, bool) {
+	issueStore, ok := store.(IssueStore)
+	if !ok || issueStore == nil {
+		return nil, false
+	}
+	dispatchStore, ok := store.(RunDispatchStore)
+	if !ok || dispatchStore == nil {
+		return nil, false
+	}
+	return func(ctx context.Context, entry PlaybookEntryDispatch) (PlaybookEntryDispatchResult, error) {
+		issueRef := entry.CreatedIssueRef
+		var issueNumber int
+		if issueRef != nil && *issueRef != "" {
+			parsed, ok := issueNumberFromRef(entry.Project, *issueRef)
+			if !ok {
+				return PlaybookEntryDispatchResult{}, ValidationError{Message: "playbook entry has invalid created issue ref"}
+			}
+			issueNumber = parsed
+		} else {
+			issue, err := issueStore.CreateIssue(ctx, IssueCreate{
+				Project:  entry.Project,
+				Title:    entry.Issue.Title,
+				Body:     entry.Issue.Body,
+				Labels:   entry.Issue.Labels,
+				Workflow: entry.Issue.Workflow,
+			})
+			if err != nil {
+				return PlaybookEntryDispatchResult{}, err
+			}
+			issueRef = &issue.Ref
+			if issue.Number == nil {
+				return PlaybookEntryDispatchResult{}, ValidationError{Message: "created issue has no issue number"}
+			}
+			issueNumber = *issue.Number
+		}
+		workflow := ""
+		if entry.Issue.Workflow != nil {
+			workflow = *entry.Issue.Workflow
+		}
+		triggerSource := map[string]any{
+			"kind":                 "playbook",
+			"playbook_id":          entry.PlaybookID,
+			"playbook_ref":         entry.PlaybookRef,
+			"playbook_entry_id":    entry.EntryID,
+			"integration_strategy": entry.IntegrationStrategy,
+			"work_context":         entry.WorkContext,
+		}
+		result, problem := dispatchRun(ctx, dispatchStore, ghDispatch, DispatchRunRequest{
+			Project:       entry.Project,
+			IssueNumber:   issueNumber,
+			WorkflowName:  workflow,
+			TriggerSource: triggerSource,
+		})
+		if problem != nil {
+			return PlaybookEntryDispatchResult{
+				State:           "failed",
+				Detail:          &problem.message,
+				CreatedIssueRef: issueRef,
+			}, errors.New(problem.message)
+		}
+		return PlaybookEntryDispatchResult{
+			State:           result.State,
+			Detail:          result.Detail,
+			CreatedIssueRef: issueRef,
+			RunID:           result.RunID,
+			RunRef:          result.RunRef,
+		}, nil
+	}, true
+}
+
+func issueNumberFromRef(project, ref string) (int, bool) {
+	prefix := project + "#"
+	if !strings.HasPrefix(ref, prefix) {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimPrefix(ref, prefix))
+	if err != nil || n < 1 {
+		return 0, false
+	}
+	return n, true
 }

@@ -218,7 +218,7 @@ const RUN_VIEWER_IDLE_DISPATCH: DispatchState = { kind: "idle" };
 const RUN_VIEWER_IDLE_ABORT: AbortState = { kind: "idle" };
 
 // Pull a human-readable cause out of the raw error string built in
-// dispatchRun: `/v1/runs/dispatch -> <status>: <body>`. FastAPI errors
+// dispatchRun: `/v1/runs/dispatch -> <status>: <body>`. API errors
 // arrive as `{"detail":"..."}` JSON; surface that detail if present so
 // users see "403: email not allowed" instead of opaque JSON.
 function formatDispatchError(message: string): string {
