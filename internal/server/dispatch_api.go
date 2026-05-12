@@ -89,6 +89,8 @@ type PublicDispatchResult struct {
 	State     string  `json:"state"`
 	Lease     string  `json:"lease,omitempty"`
 	RunNumber *int    `json:"run_number"`
+	RunID     *string `json:"run_id,omitempty"`
+	RunRef    *string `json:"run_ref,omitempty"`
 	Host      *string `json:"host"`
 	Workflow  *string `json:"workflow"`
 	Detail    *string `json:"detail"`
@@ -254,6 +256,8 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, ghDispatch
 	wfNameStr := wf.Name
 	result := PublicDispatchResult{
 		RunNumber: &run.RunNumber,
+		RunID:     &run.ID,
+		RunRef:    &runRef,
 		Workflow:  &wfNameStr,
 		Lease:     "claimed",
 	}

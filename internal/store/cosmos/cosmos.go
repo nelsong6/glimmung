@@ -2672,16 +2672,18 @@ func parseTimeOrZero(s string) time.Time {
 // ── Playbook store ────────────────────────────────────────────────────────────
 
 type playbookEntryDoc struct {
-	ID             string         `json:"id"`
-	Title          *string        `json:"title"`
-	Issue          map[string]any `json:"issue"`
-	DependsOn      []string       `json:"depends_on"`
-	ManualGate     bool           `json:"manual_gate"`
-	State          string         `json:"state"`
-	CreatedIssueID *string        `json:"created_issue_id"`
-	RunID          *string        `json:"run_id"`
-	CompletedAt    *string        `json:"completed_at"`
-	Metadata       map[string]any `json:"metadata"`
+	ID              string         `json:"id"`
+	Title           *string        `json:"title"`
+	Issue           map[string]any `json:"issue"`
+	DependsOn       []string       `json:"depends_on"`
+	ManualGate      bool           `json:"manual_gate"`
+	State           string         `json:"state"`
+	CreatedIssueID  *string        `json:"created_issue_id"`
+	CreatedIssueRef *string        `json:"created_issue_ref,omitempty"`
+	RunID           *string        `json:"run_id"`
+	RunRef          *string        `json:"run_ref,omitempty"`
+	CompletedAt     *string        `json:"completed_at"`
+	Metadata        map[string]any `json:"metadata"`
 }
 
 type playbookDoc struct {
@@ -2806,6 +2808,12 @@ func (s *Store) playbookToPublic(ctx context.Context, doc playbookDoc) server.Pl
 			CompletedAt: e.CompletedAt,
 			Metadata:    mapOrEmpty(e.Metadata),
 		}
+		if e.CreatedIssueRef != nil && *e.CreatedIssueRef != "" {
+			pub.CreatedIssueRef = e.CreatedIssueRef
+		}
+		if e.RunRef != nil && *e.RunRef != "" {
+			pub.RunRef = e.RunRef
+		}
 		// Resolve created_issue_ref from created_issue_id.
 		if e.CreatedIssueID != nil && *e.CreatedIssueID != "" {
 			var issueDocs []issueDoc
@@ -2816,6 +2824,11 @@ func (s *Store) playbookToPublic(ctx context.Context, doc playbookDoc) server.Pl
 			); err == nil && len(issueDocs) > 0 {
 				ref := publicids.IssueRef(issueDocs[0].Project, &issueDocs[0].Number)
 				pub.CreatedIssueRef = &ref
+			}
+		}
+		if e.RunID != nil && *e.RunID != "" {
+			if ref := s.resolveLastTouchedRunRef(ctx, doc.Project, e.RunID); ref != nil {
+				pub.RunRef = ref
 			}
 		}
 		entries = append(entries, pub)
@@ -3162,6 +3175,390 @@ func (s *Store) PatchPlaybookEntryGate(ctx context.Context, project, ref, entryI
 		return server.PlaybookPublic{}, fmt.Errorf("replace playbook: %w", err)
 	}
 	return s.playbookToPublic(ctx, *target), nil
+}
+
+func (s *Store) AdvancePlaybook(ctx context.Context, project, ref string, dispatch server.PlaybookEntryDispatcher) (server.PlaybookPublic, error) {
+	target, err := s.readPlaybookDocByRef(ctx, project, ref)
+	if err != nil {
+		return server.PlaybookPublic{}, err
+	}
+	if err := s.advancePlaybookDoc(ctx, target, dispatch); err != nil {
+		return server.PlaybookPublic{}, err
+	}
+	if err := s.replacePlaybookDoc(ctx, target); err != nil {
+		return server.PlaybookPublic{}, err
+	}
+	return s.playbookToPublic(ctx, *target), nil
+}
+
+func (s *Store) AdvancePlaybooksForRun(ctx context.Context, project, runID string, dispatch server.PlaybookEntryDispatcher) error {
+	runRef, err := s.runRefByID(ctx, project, runID)
+	if err != nil {
+		return err
+	}
+	var docs []playbookDoc
+	if err := queryAllWhere(ctx, s.playbooks,
+		"SELECT * FROM c WHERE c.project = @project ORDER BY c.created_at DESC",
+		[]azcosmos.QueryParameter{{Name: "@project", Value: project}},
+		&docs,
+	); err != nil {
+		return err
+	}
+	for i := range docs {
+		if !playbookReferencesRun(docs[i], runID, runRef) {
+			continue
+		}
+		if err := s.advancePlaybookDoc(ctx, &docs[i], dispatch); err != nil {
+			return err
+		}
+		if err := s.replacePlaybookDoc(ctx, &docs[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) readPlaybookDocByRef(ctx context.Context, project, ref string) (*playbookDoc, error) {
+	var docs []playbookDoc
+	if err := queryAllWhere(ctx, s.playbooks,
+		"SELECT * FROM c WHERE c.project = @project ORDER BY c.created_at DESC",
+		[]azcosmos.QueryParameter{{Name: "@project", Value: project}},
+		&docs,
+	); err != nil {
+		return nil, err
+	}
+	for i := range docs {
+		if playbookPublicRef(docs[i]) == ref {
+			return &docs[i], nil
+		}
+	}
+	return nil, server.ErrNotFound
+}
+
+func (s *Store) replacePlaybookDoc(ctx context.Context, doc *playbookDoc) error {
+	doc.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	data, err := json.Marshal(*doc)
+	if err != nil {
+		return err
+	}
+	pk := azcosmos.NewPartitionKeyString(doc.Project)
+	if _, err := s.playbooks.ReplaceItem(ctx, pk, doc.ID, data, nil); err != nil {
+		return fmt.Errorf("replace playbook: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) advancePlaybookDoc(ctx context.Context, doc *playbookDoc, dispatch server.PlaybookEntryDispatcher) error {
+	s.refreshPlaybookEntries(ctx, doc)
+	if doc.State == "cancelled" {
+		return nil
+	}
+	if playbookAllSucceeded(*doc) {
+		doc.State = "succeeded"
+		return nil
+	}
+	if playbookHasBlockingFailure(*doc) {
+		doc.State = "failed"
+		return nil
+	}
+
+	limit := 1
+	if doc.ConcurrencyLimit != nil && *doc.ConcurrencyLimit > 0 {
+		limit = *doc.ConcurrencyLimit
+	}
+	active := 0
+	for _, entry := range doc.Entries {
+		if entry.State == "running" {
+			active++
+		}
+	}
+
+	started := 0
+	for i := range doc.Entries {
+		if active >= limit {
+			break
+		}
+		entry := &doc.Entries[i]
+		if !playbookEntryReady(*doc, *entry) {
+			continue
+		}
+		if dispatch == nil {
+			entry.State = "failed"
+			entry.CompletedAt = stringPtrValue(time.Now().UTC().Format(time.RFC3339Nano))
+			entry.Metadata = mergeMetadata(entry.Metadata, map[string]any{
+				"dispatch_state":  "failed",
+				"dispatch_detail": "playbook dispatcher not configured",
+			})
+			continue
+		}
+		workContext := playbookWorkContextForEntry(doc, entry)
+		result, err := dispatch(ctx, server.PlaybookEntryDispatch{
+			Project:             doc.Project,
+			PlaybookID:          doc.ID,
+			PlaybookRef:         playbookPublicRef(*doc),
+			EntryID:             entry.ID,
+			Issue:               playbookIssueSpecFromMap(entry.Issue),
+			CreatedIssueRef:     entry.CreatedIssueRef,
+			IntegrationStrategy: firstNonEmpty(doc.IntegrationStrategy, "isolated_prs"),
+			WorkContext:         workContext,
+		})
+		entry.Metadata = mergeMetadata(entry.Metadata, map[string]any{
+			"work_context":   workContext,
+			"dispatch_state": result.State,
+		})
+		if result.Detail != nil {
+			entry.Metadata["dispatch_detail"] = *result.Detail
+		}
+		if result.CreatedIssueRef != nil && *result.CreatedIssueRef != "" {
+			entry.CreatedIssueRef = result.CreatedIssueRef
+			entry.State = "created"
+		}
+		if result.RunID != nil && *result.RunID != "" {
+			entry.RunID = result.RunID
+		}
+		if result.RunRef != nil && *result.RunRef != "" {
+			entry.RunRef = result.RunRef
+		}
+		if err != nil {
+			entry.State = "failed"
+			entry.CompletedAt = stringPtrValue(time.Now().UTC().Format(time.RFC3339Nano))
+			entry.Metadata["dispatch_error"] = err.Error()
+			continue
+		}
+		switch result.State {
+		case "dispatched", "pending", "already_running":
+			entry.State = "running"
+			active++
+			started++
+		default:
+			entry.State = "failed"
+			entry.CompletedAt = stringPtrValue(time.Now().UTC().Format(time.RFC3339Nano))
+		}
+	}
+
+	if playbookAllSucceeded(*doc) {
+		doc.State = "succeeded"
+	} else if playbookHasBlockingFailure(*doc) {
+		doc.State = "failed"
+	} else if playbookHasOpenManualGate(*doc) {
+		doc.State = "paused"
+	} else if active > 0 || started > 0 {
+		doc.State = "running"
+	} else {
+		doc.State = "ready"
+	}
+	return nil
+}
+
+func (s *Store) refreshPlaybookEntries(ctx context.Context, doc *playbookDoc) {
+	for i := range doc.Entries {
+		entry := &doc.Entries[i]
+		run, ok := s.playbookEntryRun(ctx, doc.Project, *entry)
+		if !ok {
+			continue
+		}
+		switch run.State {
+		case "passed":
+			entry.State = "succeeded"
+			entry.CompletedAt = stringPtrValue(firstNonEmpty(run.UpdatedAt, time.Now().UTC().Format(time.RFC3339Nano)))
+		case "review_required", "aborted":
+			entry.State = "failed"
+			entry.CompletedAt = stringPtrValue(firstNonEmpty(run.UpdatedAt, time.Now().UTC().Format(time.RFC3339Nano)))
+			entry.Metadata = mergeMetadata(entry.Metadata, map[string]any{
+				"run_state":    run.State,
+				"abort_reason": stringOrEmpty(run.AbortReason),
+			})
+		case "in_progress":
+			if entry.State == "" || entry.State == "pending" || entry.State == "created" {
+				entry.State = "running"
+			}
+		}
+	}
+}
+
+func (s *Store) playbookEntryRun(ctx context.Context, project string, entry playbookEntryDoc) (runDoc, bool) {
+	var runID string
+	if entry.RunID != nil && *entry.RunID != "" {
+		runID = *entry.RunID
+	} else if entry.RunRef != nil && *entry.RunRef != "" {
+		resolved := s.resolveRunIDByRef(ctx, project, *entry.RunRef)
+		if resolved != nil {
+			runID = *resolved
+		}
+	}
+	if runID == "" {
+		return runDoc{}, false
+	}
+	pk := azcosmos.NewPartitionKeyString(project)
+	resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
+	if err != nil {
+		return runDoc{}, false
+	}
+	var doc runDoc
+	if err := json.Unmarshal(resp.Value, &doc); err != nil {
+		return runDoc{}, false
+	}
+	return doc, true
+}
+
+func (s *Store) runRefByID(ctx context.Context, project, runID string) (string, error) {
+	pk := azcosmos.NewPartitionKeyString(project)
+	resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
+	if isCosmosStatus(err, http.StatusNotFound) {
+		return "", server.ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	var doc runDoc
+	if err := json.Unmarshal(resp.Value, &doc); err != nil {
+		return "", err
+	}
+	siblings, _ := s.issueRunDocs(ctx, project, doc.IssueNumber)
+	numbers := runNumberMap(siblings)
+	return publicids.RunRef(doc.Project, positiveIssueNumberPtr(doc.IssueNumber), runDisplayNumber(doc, numbers[doc.ID])), nil
+}
+
+func playbookReferencesRun(doc playbookDoc, runID, runRef string) bool {
+	for _, entry := range doc.Entries {
+		if entry.RunID != nil && *entry.RunID == runID {
+			return true
+		}
+		if runRef != "" && entry.RunRef != nil && *entry.RunRef == runRef {
+			return true
+		}
+	}
+	return false
+}
+
+func playbookEntryReady(doc playbookDoc, entry playbookEntryDoc) bool {
+	state := firstNonEmpty(entry.State, "pending")
+	return (state == "pending" || state == "created") && !entry.ManualGate && playbookEntryDependenciesMet(doc, entry)
+}
+
+func playbookEntryDependenciesMet(doc playbookDoc, entry playbookEntryDoc) bool {
+	byID := map[string]playbookEntryDoc{}
+	for _, candidate := range doc.Entries {
+		byID[candidate.ID] = candidate
+	}
+	for _, dep := range entry.DependsOn {
+		candidate, ok := byID[dep]
+		if !ok || candidate.State != "succeeded" {
+			return false
+		}
+	}
+	return true
+}
+
+func playbookAllSucceeded(doc playbookDoc) bool {
+	if len(doc.Entries) == 0 {
+		return false
+	}
+	for _, entry := range doc.Entries {
+		if entry.State != "succeeded" && entry.State != "skipped" {
+			return false
+		}
+	}
+	return true
+}
+
+func playbookHasBlockingFailure(doc playbookDoc) bool {
+	for _, entry := range doc.Entries {
+		if entry.State == "failed" {
+			return true
+		}
+	}
+	return false
+}
+
+func playbookHasOpenManualGate(doc playbookDoc) bool {
+	for _, entry := range doc.Entries {
+		if entry.ManualGate && firstNonEmpty(entry.State, "pending") == "pending" && playbookEntryDependenciesMet(doc, entry) {
+			return true
+		}
+	}
+	return false
+}
+
+func playbookWorkContextForEntry(doc *playbookDoc, entry *playbookEntryDoc) map[string]string {
+	strategy := firstNonEmpty(doc.IntegrationStrategy, "isolated_prs")
+	baseRef := "main"
+	if value, ok := doc.Metadata["base_ref"].(string); ok && strings.TrimSpace(value) != "" {
+		baseRef = strings.TrimSpace(value)
+	}
+	switch strategy {
+	case "rolling_main":
+		context := map[string]string{
+			"id":                "project:" + doc.Project + ":main:" + baseRef,
+			"strategy":          strategy,
+			"branch":            baseRef,
+			"base_ref":          baseRef,
+			"owner_playbook_id": doc.ID,
+			"current_entry_id":  entry.ID,
+			"state":             "in_use",
+		}
+		doc.Metadata = mergeMetadata(doc.Metadata, map[string]any{"work_context": context})
+		return context
+	case "shared_feature_branch":
+		if existing, ok := doc.Metadata["work_context"].(map[string]any); ok {
+			if branch, ok := existing["branch"].(string); ok && branch != "" {
+				context := map[string]string{
+					"id":                stringValue(existing["id"]),
+					"strategy":          strategy,
+					"branch":            branch,
+					"base_ref":          firstNonEmpty(stringValue(existing["base_ref"]), baseRef),
+					"owner_playbook_id": doc.ID,
+					"current_entry_id":  entry.ID,
+					"state":             "in_use",
+				}
+				if context["id"] == "" {
+					context["id"] = "playbook:" + doc.ID + ":shared"
+				}
+				doc.Metadata = mergeMetadata(doc.Metadata, map[string]any{"work_context": context})
+				return context
+			}
+		}
+		context := map[string]string{
+			"id":                "playbook:" + doc.ID + ":shared",
+			"strategy":          strategy,
+			"branch":            "glimmung/playbooks/" + shortID(doc.ID),
+			"base_ref":          baseRef,
+			"owner_playbook_id": doc.ID,
+			"current_entry_id":  entry.ID,
+			"state":             "in_use",
+		}
+		doc.Metadata = mergeMetadata(doc.Metadata, map[string]any{"work_context": context})
+		return context
+	default:
+		return map[string]string{
+			"id":                "playbook:" + doc.ID + ":" + entry.ID,
+			"strategy":          strategy,
+			"branch":            "glimmung/playbooks/" + shortID(doc.ID) + "/" + playbookSlug(entry.ID),
+			"base_ref":          baseRef,
+			"owner_playbook_id": doc.ID,
+			"current_entry_id":  entry.ID,
+			"state":             "in_use",
+		}
+	}
+}
+
+func mergeMetadata(existing map[string]any, values map[string]any) map[string]any {
+	out := mapOrEmpty(existing)
+	for k, v := range values {
+		out[k] = v
+	}
+	return out
+}
+
+func stringPtrValue(value string) *string {
+	return &value
+}
+
+func shortID(value string) string {
+	if len(value) <= 8 {
+		return value
+	}
+	return value[:8]
 }
 
 func max(a, b int) int {
@@ -3597,12 +3994,17 @@ func (s *Store) ReadRunForReplay(ctx context.Context, project, runID string) (se
 			PhaseOutputs: stringMapOrEmpty(a.PhaseOutputs),
 		})
 	}
+	var bdg budget.Config
+	if doc.Budget != nil {
+		bdg.Total = doc.Budget.Total
+	}
 	return server.RunReplayData{
 		ID:                doc.ID,
 		Project:           doc.Project,
 		WorkflowName:      doc.Workflow,
 		Attempts:          attempts,
 		CumulativeCostUSD: doc.CumulativeCostUSD,
+		Budget:            bdg,
 		IssueNumber:       doc.IssueNumber,
 		RunNumber:         doc.RunNumber,
 		RunDisplayNumber:  doc.RunDisplayNumber,
@@ -3703,6 +4105,195 @@ func (s *Store) ListGraphSignals(ctx context.Context, filter server.GraphSignalF
 		})
 	}
 	return signals, nil
+}
+
+func (s *Store) ListPendingSignals(ctx context.Context, limit int) ([]server.QueuedSignal, error) {
+	query := "SELECT * FROM c WHERE c.state = @state ORDER BY c.enqueued_at ASC"
+	var docs []signalDoc
+	if err := queryAllWhere(ctx, s.signals, query,
+		[]azcosmos.QueryParameter{{Name: "@state", Value: "pending"}},
+		&docs,
+	); err != nil {
+		return nil, err
+	}
+	if limit > 0 && len(docs) > limit {
+		docs = docs[:limit]
+	}
+	out := make([]server.QueuedSignal, 0, len(docs))
+	for _, doc := range docs {
+		out = append(out, queuedSignalFromDoc(doc))
+	}
+	return out, nil
+}
+
+func (s *Store) MarkSignalProcessing(ctx context.Context, signal server.QueuedSignal) (server.QueuedSignal, bool, error) {
+	doc, etag, err := s.readSignalDoc(ctx, signal.TargetRepo, signal.ID)
+	if err != nil {
+		return server.QueuedSignal{}, false, err
+	}
+	if doc.State != "pending" {
+		return queuedSignalFromDoc(doc), false, nil
+	}
+	doc.State = "processing"
+	updated, err := s.replaceSignalDoc(ctx, signal.TargetRepo, doc, etag)
+	if isCosmosStatus(err, http.StatusPreconditionFailed) {
+		return server.QueuedSignal{}, false, nil
+	}
+	if err != nil {
+		return server.QueuedSignal{}, false, err
+	}
+	return queuedSignalFromDoc(updated), true, nil
+}
+
+func (s *Store) MarkSignalProcessed(ctx context.Context, signal server.QueuedSignal, decision string) (server.QueuedSignal, error) {
+	doc, etag, err := s.readSignalDoc(ctx, signal.TargetRepo, signal.ID)
+	if err != nil {
+		return server.QueuedSignal{}, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	doc.State = "processed"
+	doc.ProcessedAt = &now
+	doc.ProcessedDecision = &decision
+	updated, err := s.replaceSignalDoc(ctx, signal.TargetRepo, doc, etag)
+	if err != nil {
+		return server.QueuedSignal{}, err
+	}
+	return queuedSignalFromDoc(updated), nil
+}
+
+func (s *Store) MarkSignalFailed(ctx context.Context, signal server.QueuedSignal, reason string) error {
+	doc, etag, err := s.readSignalDoc(ctx, signal.TargetRepo, signal.ID)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	doc.State = "failed"
+	doc.ProcessedAt = &now
+	if len(reason) > 500 {
+		reason = reason[:500]
+	}
+	doc.FailureReason = &reason
+	_, err = s.replaceSignalDoc(ctx, signal.TargetRepo, doc, etag)
+	return err
+}
+
+func (s *Store) readSignalDoc(ctx context.Context, targetRepo, id string) (signalDoc, azcore.ETag, error) {
+	pk := azcosmos.NewPartitionKeyString(targetRepo)
+	resp, err := s.signals.ReadItem(ctx, pk, id, nil)
+	if isCosmosStatus(err, http.StatusNotFound) {
+		return signalDoc{}, "", server.ErrNotFound
+	}
+	if err != nil {
+		return signalDoc{}, "", err
+	}
+	var doc signalDoc
+	if err := json.Unmarshal(resp.Value, &doc); err != nil {
+		return signalDoc{}, "", err
+	}
+	return doc, resp.ETag, nil
+}
+
+func (s *Store) replaceSignalDoc(ctx context.Context, targetRepo string, doc signalDoc, etag azcore.ETag) (signalDoc, error) {
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return signalDoc{}, err
+	}
+	pk := azcosmos.NewPartitionKeyString(targetRepo)
+	resp, err := s.signals.ReplaceItem(ctx, pk, doc.ID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag})
+	if err != nil {
+		return signalDoc{}, err
+	}
+	var updated signalDoc
+	if err := json.Unmarshal(resp.Value, &updated); err != nil {
+		return signalDoc{}, err
+	}
+	return updated, nil
+}
+
+func queuedSignalFromDoc(doc signalDoc) server.QueuedSignal {
+	return server.QueuedSignal{
+		ID:         doc.ID,
+		TargetType: doc.TargetType,
+		TargetRepo: doc.TargetRepo,
+		TargetID:   doc.TargetID,
+		Source:     doc.Source,
+		Payload:    mapOrEmpty(doc.Payload),
+		State:      firstNonEmpty(doc.State, "pending"),
+		EnqueuedAt: parseTimeOrZero(doc.EnqueuedAt),
+	}
+}
+
+func (s *Store) FindRunForPR(ctx context.Context, repo string, prNumber int) (server.RunReplayData, error) {
+	var docs []runDoc
+	if err := queryAllWhere(ctx, s.runs,
+		"SELECT * FROM c WHERE c.issue_repo = @repo AND c.pr_number = @pr ORDER BY c.updated_at DESC",
+		[]azcosmos.QueryParameter{
+			{Name: "@repo", Value: repo},
+			{Name: "@pr", Value: prNumber},
+		},
+		&docs,
+	); err != nil {
+		return server.RunReplayData{}, err
+	}
+	if len(docs) == 0 {
+		return server.RunReplayData{}, server.ErrNotFound
+	}
+	return s.ReadRunForReplay(ctx, docs[0].Project, docs[0].ID)
+}
+
+func (s *Store) ReopenRunForTriage(ctx context.Context, req server.TriageReopenRequest) (server.RunReplayData, int, error) {
+	pk := azcosmos.NewPartitionKeyString(req.Project)
+	const maxRetries = 5
+	for i := 0; i < maxRetries; i++ {
+		resp, err := s.runs.ReadItem(ctx, pk, req.RunID, nil)
+		if isCosmosStatus(err, http.StatusNotFound) {
+			return server.RunReplayData{}, 0, server.ErrNotFound
+		}
+		if err != nil {
+			return server.RunReplayData{}, 0, err
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(resp.Value, &raw); err != nil {
+			return server.RunReplayData{}, 0, err
+		}
+		attempts, _ := raw["attempts"].([]any)
+		nextIdx := len(attempts)
+		if len(attempts) > 0 {
+			if last, ok := attempts[len(attempts)-1].(map[string]any); ok {
+				if ai, ok := last["attempt_index"].(float64); ok {
+					nextIdx = int(ai) + 1
+				}
+			}
+		}
+		attempt := map[string]any{
+			"attempt_index":     nextIdx,
+			"phase":             req.PhaseName,
+			"phase_kind":        req.PhaseKind,
+			"workflow_filename": req.WorkflowFilename,
+			"dispatched_at":     time.Now().UTC().Format(time.RFC3339Nano),
+		}
+		raw["attempts"] = append(attempts, attempt)
+		raw["state"] = "in_progress"
+		delete(raw, "abort_reason")
+		raw["issue_lock_holder_id"] = req.IssueLockHolderID
+		raw["pr_lock_holder_id"] = req.PRLockHolderID
+		raw["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+
+		payload, err := json.Marshal(raw)
+		if err != nil {
+			return server.RunReplayData{}, 0, err
+		}
+		etag := azcore.ETag(resp.ETag)
+		if _, err := s.runs.ReplaceItem(ctx, pk, req.RunID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
+			if isCosmosStatus(err, http.StatusPreconditionFailed) {
+				continue
+			}
+			return server.RunReplayData{}, 0, err
+		}
+		run, err := s.ReadRunForReplay(ctx, req.Project, req.RunID)
+		return run, nextIdx, err
+	}
+	return server.RunReplayData{}, 0, fmt.Errorf("reopen run for triage: too many conflicts")
 }
 
 // ---- RunMutationStore implementation ----
@@ -4362,22 +4953,26 @@ func (s *Store) AppendRunAttempt(ctx context.Context, project, runID, phase, pha
 // Returns server.ErrAlreadyRunning (wrapped in *server.AlreadyRunningError) if currently held.
 func (s *Store) ClaimIssueLock(ctx context.Context, project string, issueNumber int, holderID string, ttlSeconds int) error {
 	key := fmt.Sprintf("%s#%d", project, issueNumber)
-	docID := lockDocID("issue", key)
-	pk := azcosmos.NewPartitionKeyString("issue")
+	return s.ClaimLock(ctx, "issue", key, holderID, ttlSeconds, map[string]any{})
+}
+
+func (s *Store) ClaimLock(ctx context.Context, scope, key, holderID string, ttlSeconds int, metadata map[string]any) error {
+	docID := lockDocID(scope, key)
+	pk := azcosmos.NewPartitionKeyString(scope)
 
 	const maxRetries = 5
 	for i := 0; i < maxRetries; i++ {
 		now := time.Now().UTC()
 		newDoc := lockDoc{
 			ID:              docID,
-			Scope:           "issue",
+			Scope:           scope,
 			Key:             key,
 			State:           "held",
 			HeldBy:          &holderID,
 			ClaimedAt:       now.Format(time.RFC3339Nano),
 			ExpiresAt:       now.Add(time.Duration(ttlSeconds) * time.Second).Format(time.RFC3339Nano),
 			LastHeartbeatAt: now.Format(time.RFC3339Nano),
-			Metadata:        map[string]any{},
+			Metadata:        mapOrEmpty(metadata),
 		}
 		payload, err := json.Marshal(newDoc)
 		if err != nil {
@@ -4420,13 +5015,17 @@ func (s *Store) ClaimIssueLock(ctx context.Context, project string, issueNumber 
 			return replaceErr
 		}
 	}
-	return fmt.Errorf("claim issue lock: too many retries for %s#%d", project, issueNumber)
+	return fmt.Errorf("claim lock: too many retries for %s/%s", scope, key)
 }
 
 // ReleaseIssueLock releases the issue lock if held by holderID. Best-effort (ignores errors).
 func (s *Store) ReleaseIssueLock(ctx context.Context, project string, issueNumber int, holderID string) {
 	key := fmt.Sprintf("%s#%d", project, issueNumber)
 	s.releaseLock(ctx, "issue", key, holderID)
+}
+
+func (s *Store) ReleaseLock(ctx context.Context, scope, key, holderID string) bool {
+	return s.releaseLock(ctx, scope, key, holderID)
 }
 
 // ReadProjectGitHubRepo returns the githubRepo field for a registered project.

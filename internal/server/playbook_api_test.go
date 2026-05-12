@@ -156,3 +156,134 @@ func TestPlaybookRequiresStore(t *testing.T) {
 		}
 	}
 }
+
+type fakePlayableStore struct {
+	fakePlaybookStore
+	dispatchResult PlaybookEntryDispatchResult
+}
+
+func (s *fakePlayableStore) AdvancePlaybook(ctx context.Context, project, ref string, dispatch PlaybookEntryDispatcher) (PlaybookPublic, error) {
+	result, err := dispatch(ctx, PlaybookEntryDispatch{
+		Project:             project,
+		PlaybookID:          "pb-1",
+		PlaybookRef:         ref,
+		EntryID:             "entry-1",
+		IntegrationStrategy: "isolated_prs",
+		WorkContext:         map[string]string{"branch": "glimmung/playbooks/pb-1/entry-1"},
+		Issue: PlaybookIssueSpec{
+			Title: "entry work",
+			Body:  "do the work",
+		},
+	})
+	if err != nil {
+		return PlaybookPublic{}, err
+	}
+	s.dispatchResult = result
+	return PlaybookPublic{
+		SchemaVersion: 1,
+		Ref:           ref,
+		Project:       project,
+		Title:         "playbook",
+		State:         "running",
+		Entries: []PlaybookEntryPublic{{
+			ID:              "entry-1",
+			State:           "running",
+			CreatedIssueRef: result.CreatedIssueRef,
+			RunRef:          result.RunRef,
+		}},
+	}, nil
+}
+
+func (s *fakePlayableStore) AdvancePlaybooksForRun(context.Context, string, string, PlaybookEntryDispatcher) error {
+	return nil
+}
+
+func (s *fakePlayableStore) ListIssues(context.Context, IssueListFilter) ([]IssueRow, error) {
+	return nil, nil
+}
+
+func (s *fakePlayableStore) GetIssueDetailByNumber(context.Context, string, int) (IssueDetail, error) {
+	return IssueDetail{}, nil
+}
+
+func (s *fakePlayableStore) ArchiveIssueByNumber(context.Context, IssueArchive) (IssueDetail, error) {
+	return IssueDetail{}, nil
+}
+
+func (s *fakePlayableStore) CreateIssue(context.Context, IssueCreate) (IssueDetail, error) {
+	number := 7
+	return IssueDetail{Ref: "glimmung#7", Project: "glimmung", Number: &number, Title: "entry work"}, nil
+}
+
+func (s *fakePlayableStore) PatchIssueByNumber(context.Context, IssuePatch) (IssueDetail, error) {
+	return IssueDetail{}, nil
+}
+
+func (s *fakePlayableStore) AddIssueComment(context.Context, IssueCommentAdd) (IssueComment, error) {
+	return IssueComment{}, nil
+}
+
+func (s *fakePlayableStore) UpdateIssueComment(context.Context, IssueCommentUpdate) (IssueComment, error) {
+	return IssueComment{}, nil
+}
+
+func (s *fakePlayableStore) DeleteIssueComment(context.Context, IssueCommentDelete) (IssueDetail, error) {
+	return IssueDetail{}, nil
+}
+
+func (s *fakePlayableStore) ReadProjectGitHubRepo(context.Context, string) (string, error) {
+	return "owner/repo", nil
+}
+
+func (s *fakePlayableStore) ReadIssueForDispatch(context.Context, string, int) (IssueDispatchData, error) {
+	return IssueDispatchData{ID: "issue-1", Title: "entry work", Body: "do the work"}, nil
+}
+
+func (s *fakePlayableStore) GetWorkflowByName(context.Context, string, string) (*Workflow, error) {
+	return &Workflow{Name: "agent", Phases: []PhaseSpec{{Name: "impl", Kind: "k8s_job"}}}, nil
+}
+
+func (s *fakePlayableStore) ListProjectWorkflows(context.Context, string) ([]Workflow, error) {
+	return []Workflow{{Name: "agent", Phases: []PhaseSpec{{Name: "impl", Kind: "k8s_job"}}}}, nil
+}
+
+func (s *fakePlayableStore) ClaimIssueLock(context.Context, string, int, string, int) error {
+	return nil
+}
+
+func (s *fakePlayableStore) ReleaseIssueLock(context.Context, string, int, string) {}
+
+func (s *fakePlayableStore) CreateRun(context.Context, CreateRunRequest) (CreatedRun, error) {
+	return CreatedRun{ID: "run-1", RunNumber: 1, RunDisplay: "1", CallbackToken: "tok"}, nil
+}
+
+func (s *fakePlayableStore) AcquireLease(context.Context, LeaseAcquireRequest) (Lease, *Host, error) {
+	return Lease{Project: "glimmung", Metadata: map[string]any{}}, nil, nil
+}
+
+func (s *fakePlayableStore) AbortRunByID(context.Context, string, string, string) (AbortRunResult, error) {
+	return AbortRunResult{}, nil
+}
+
+func TestRunPlaybookDispatchesReadyEntries(t *testing.T) {
+	store := &fakePlayableStore{}
+	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/playbooks/glimmung/pb-ref/run", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.dispatchResult.CreatedIssueRef == nil || *store.dispatchResult.CreatedIssueRef != "glimmung#7" {
+		t.Fatalf("dispatch result=%#v", store.dispatchResult)
+	}
+	if store.dispatchResult.RunRef == nil || *store.dispatchResult.RunRef != "glimmung#7/runs/1" {
+		t.Fatalf("dispatch run ref=%#v", store.dispatchResult.RunRef)
+	}
+	if !strings.Contains(rec.Body.String(), `"state":"running"`) {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+}

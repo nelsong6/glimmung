@@ -314,6 +314,7 @@ func processRunCompletion(
 			writeProblem(w, http.StatusInternalServerError, "mark run terminal failed")
 			return nil
 		}
+		advancePlaybooksForTerminalRun(ctx, store, ghDispatch, project, runID)
 		return &RunCallbackResult{
 			RunRef:            runRef,
 			Decision:          &verdictStr,
@@ -348,6 +349,7 @@ func processRunCompletion(
 			writeProblem(w, http.StatusInternalServerError, "mark run aborted failed")
 			return nil
 		}
+		advancePlaybooksForTerminalRun(ctx, store, ghDispatch, project, runID)
 		return &RunCallbackResult{
 			RunRef:            runRef,
 			Decision:          &verdictStr,
@@ -355,6 +357,22 @@ func processRunCompletion(
 			PRLockReleased:    result.PRLockReleased,
 		}
 	}
+}
+
+func advancePlaybooksForTerminalRun(ctx context.Context, store RunCompletionStore, ghDispatch GHADispatchClient, project, runID string) {
+	pbStore, ok := store.(PlaybookRunStore)
+	if !ok || pbStore == nil {
+		return
+	}
+	readStore, ok := store.(ReadStore)
+	if !ok || readStore == nil {
+		return
+	}
+	dispatcher, ok := playbookEntryDispatcher(readStore, ghDispatch)
+	if !ok {
+		return
+	}
+	_ = pbStore.AdvancePlaybooksForRun(ctx, project, runID, dispatcher)
 }
 
 func withStampedAttemptDecision(run RunReplayData, attemptIndex int, verdict decision.RunDecision, payload CompletionPayload) RunReplayData {

@@ -2,7 +2,7 @@
 
 This document is the active contract for the Go-first Glimmung runtime. The
 older migration pilot is complete: production images start `cmd/glimmung-go`,
-and cleanup work now removes or isolates the legacy Python app.
+and the legacy Python app/test tree has been removed.
 
 The detailed cleanup inventory lives in
 [`docs/go-runtime-cleanup-inventory.md`](go-runtime-cleanup-inventory.md).
@@ -18,8 +18,6 @@ The detailed cleanup inventory lives in
   fetch, workflow dispatch, and workflow-run cancellation.
 - Domain helpers: `internal/domain/*` for budget, decision, paths, phase refs,
   and public IDs.
-- Legacy Python app: `src/glimmung` is cleanup/reference material only until
-  remaining route and tooling decisions are resolved.
 
 ## Documentation authority
 
@@ -27,8 +25,8 @@ The detailed cleanup inventory lives in
 - `.github/agent/prompt.md` is the default in-repo agent contract and must keep
   the app validation gate on Go plus the Vite dashboard.
 - `docs/workflow-shape.md` owns the workflow model and native job conventions.
-- `docs/go-runtime-cleanup-inventory.md` is the only doc that should enumerate
-  legacy Python app modules as cleanup targets.
+- `docs/go-runtime-cleanup-inventory.md` records the final compatibility notes
+  for the Python retirement.
 - `CLAUDE.md` owns architecture direction for human and agent contributors.
 
 ## API authority
@@ -63,8 +61,8 @@ The detailed cleanup inventory lives in
 
 ## Hot-swap rules
 
-- Keep a single writer service active. Do not run the legacy Python process
-  against the same Cosmos database alongside the Go service.
+- Keep a single writer service active. The Go service is the only app process
+  supported against the production Cosmos database.
 - Keep the service port and in-cluster DNS expectations stable for dashboard,
   MCP, and runner clients.
 - Serve frontend assets through Go when `GLIMMUNG_STATIC_DIR` points at a built
@@ -102,27 +100,17 @@ npm run build
 ```
 
 Pull-request app CI runs the Go gate and frontend gate. It does not install
-root Python dependencies or run the legacy Python app test suite. Pushes to
-`main` also run a Go-native live Cosmos smoke for the lock lifecycle.
+root Python dependencies or run a Python app test suite. Pushes to `main` also
+run a Go-native live Cosmos smoke for the lock lifecycle.
 
-The repository root has no Python package metadata. Remaining Python code is
-legacy cleanup/reference material under `src/glimmung` and `tests`; repo-local
-agent workflow operations now live in the Go CLI under `cmd/glimmung-agent`.
-The old one-shot Python migration scripts under `scripts/` have been retired
-because they imported the legacy app package or encoded pre-Go workflow shapes.
+The repository root has no Python package metadata. Repo-local agent workflow
+operations live in the Go CLI under `cmd/glimmung-agent`. The old one-shot
+Python migration scripts under `scripts/` have been retired because they
+imported the legacy app package or encoded pre-Go workflow shapes.
 
-## Cleanup gates
+## Cleanup contract
 
-The Python app tree can be deleted only after:
-
-- Route gaps in `docs/go-runtime-cleanup-inventory.md` are ported, tombstoned,
-  or formally retired.
-- Active behavior is covered by Go tests or language-neutral checks.
-- Root Python packaging stays absent; new repo-local workflow tooling should
-  prefer Go under `cmd/` plus testable functions under `internal/`.
-- Active developer docs and agent prompts describe the Go/Node app path and do
-  not include legacy Python app commands as setup or validation instructions.
-  Cleanup inventories may still name legacy modules to track port, retire, or
-  deletion decisions.
-- PR CI has verified the production image through
-  `.github/workflows/docker-build-check.yaml`.
+The Python app tree is gone. New app/runtime behavior belongs in Go under
+`cmd/`, `internal/server`, `internal/store`, or `internal/domain`. Any future
+Python must be explicitly scoped as separate non-app tooling and must not
+become part of the production image, deploy path, or default CI authority.
