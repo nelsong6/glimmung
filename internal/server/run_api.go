@@ -14,22 +14,33 @@ type RunStore interface {
 }
 
 type RunReportAttempt struct {
-	AttemptIndex       int               `json:"attempt_index"`
-	Phase              string            `json:"phase"`
-	PhaseKind          string            `json:"phase_kind"`
-	WorkflowFilename   string            `json:"workflow_filename"`
-	WorkflowRunID      *int64            `json:"workflow_run_id"`
-	DispatchedAt       time.Time         `json:"dispatched_at"`
-	CompletedAt        *time.Time        `json:"completed_at"`
-	Conclusion         *string           `json:"conclusion"`
-	VerificationStatus *string           `json:"verification_status"`
-	EvidenceRefs       []string          `json:"evidence_refs"`
-	SummaryMarkdown    *string           `json:"summary_markdown"`
-	Decision           *string           `json:"decision"`
-	CostUSD            *float64          `json:"cost_usd"`
-	LogArchiveURL      *string           `json:"log_archive_url"`
-	SkippedFromRunRef  *string           `json:"skipped_from_run_ref"`
-	PhaseOutputs       map[string]string `json:"phase_outputs"`
+	AttemptIndex       int                       `json:"attempt_index"`
+	Phase              string                    `json:"phase"`
+	PhaseKind          string                    `json:"phase_kind"`
+	WorkflowFilename   string                    `json:"workflow_filename"`
+	WorkflowRunID      *int64                    `json:"workflow_run_id"`
+	DispatchedAt       time.Time                 `json:"dispatched_at"`
+	CompletedAt        *time.Time                `json:"completed_at"`
+	Conclusion         *string                   `json:"conclusion"`
+	VerificationStatus *string                   `json:"verification_status"`
+	EvidenceRefs       []string                  `json:"evidence_refs"`
+	SummaryMarkdown    *string                   `json:"summary_markdown"`
+	Decision           *string                   `json:"decision"`
+	CostUSD            *float64                  `json:"cost_usd"`
+	LogArchiveURL      *string                   `json:"log_archive_url"`
+	SkippedFromRunRef  *string                   `json:"skipped_from_run_ref"`
+	PhaseOutputs       map[string]string         `json:"phase_outputs"`
+	JobCompletions     []RunAttemptJobCompletion `json:"job_completions"`
+}
+
+type RunAttemptJobCompletion struct {
+	JobID               string            `json:"job_id"`
+	CompletedAt         *time.Time        `json:"completed_at"`
+	Conclusion          string            `json:"conclusion"`
+	VerificationStatus  *string           `json:"verification_status"`
+	VerificationReasons []string          `json:"verification_reasons"`
+	CostUSD             float64           `json:"cost_usd"`
+	PhaseOutputs        map[string]string `json:"phase_outputs"`
 }
 
 type RunReport struct {

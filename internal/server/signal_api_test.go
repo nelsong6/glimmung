@@ -27,17 +27,17 @@ func (s *fakeSignalStore) EnqueueSignal(_ context.Context, _ SignalEnqueue) (Pub
 
 func TestCreateSignal(t *testing.T) {
 	store := &fakeSignalStore{result: PublicSignal{
-		Ref:        "signal:pr:owner/repo:main:2026-01-01T00:00:00Z",
+		Ref:        "signal:pr:owner/repo:42:2026-01-01T00:00:00Z",
 		TargetType: "pr",
 		TargetRepo: "owner/repo",
-		TargetRef:  "main",
+		TargetRef:  "42",
 		Source:     "glimmung_ui",
 		State:      "pending",
 		EnqueuedAt: time.Now(),
 	}}
 	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}})
 
-	body := `{"target_type":"pr","target_repo":"owner/repo","target_ref":"main","source":"glimmung_ui"}`
+	body := `{"target_type":"pr","target_repo":"owner/repo","target_ref":"42","source":"glimmung_ui"}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/signals", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer admin")
 	rec := httptest.NewRecorder()
@@ -62,7 +62,9 @@ func TestCreateSignalValidates(t *testing.T) {
 		{`{"target_repo":"owner/repo","target_ref":"main"}`, http.StatusBadRequest, "missing target_type"},
 		{`{"target_type":"pr","target_ref":"main"}`, http.StatusBadRequest, "missing target_repo"},
 		{`{"target_type":"pr","target_repo":"owner/repo"}`, http.StatusBadRequest, "missing target_ref"},
-		{`{"target_type":"pr","target_repo":"owner/repo","target_ref":"main","source":"bad_source"}`, http.StatusBadRequest, "invalid source"},
+		{`{"target_type":"pr","target_repo":"owner/repo","target_ref":"main"}`, http.StatusBadRequest, "invalid pr target_ref"},
+		{`{"target_type":"pr","target_repo":"glimmung","target_ref":"42"}`, http.StatusBadRequest, "invalid pr target_repo"},
+		{`{"target_type":"pr","target_repo":"owner/repo","target_ref":"42","source":"bad_source"}`, http.StatusBadRequest, "invalid source"},
 		{`{"target_type":"bad","target_repo":"owner/repo","target_ref":"main"}`, http.StatusBadRequest, "invalid target_type"},
 	}
 	for _, tc := range cases {

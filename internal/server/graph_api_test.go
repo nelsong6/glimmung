@@ -105,7 +105,19 @@ func TestIssueGraphByNumberBuildsRunAttemptAndTouchpointNodes(t *testing.T) {
 			Project: "glimmung",
 			Name:    "agent-run",
 			Phases: []PhaseSpec{
-				{Name: "env-prep", Outputs: []string{"validation_url"}},
+				{
+					Name:    "env-prep",
+					Kind:    "k8s_job",
+					Outputs: []string{"validation_url"},
+					Jobs: []NativeJobSpec{{
+						ID:   "prepare",
+						Name: stringPtr("prepare env"),
+						Steps: []NativeStepSpec{{
+							Slug:  "checkout",
+							Title: stringPtr("checkout"),
+						}},
+					}},
+				},
 				{Name: "agent-execute", DependsOn: []string{"env-prep"}},
 			},
 			PR: PrPrimitive{Enabled: true},
@@ -119,25 +131,37 @@ func TestIssueGraphByNumberBuildsRunAttemptAndTouchpointNodes(t *testing.T) {
 			Labels:  []string{"backend"},
 		},
 		runs: []RunReport{{
-			Project:          "glimmung",
-			RunRef:           runRef,
-			RunNumber:        &runNumber,
-			RunDisplayNumber: &runDisplay,
-			Workflow:         "agent-run",
-			IssueRef:         stringPtr("glimmung#17"),
-			IssueNumber:      &issueNumber,
-			State:            "in_progress",
-			StartedAt:        now,
-			UpdatedAt:        now,
+			Project:           "glimmung",
+			RunRef:            runRef,
+			RunNumber:         &runNumber,
+			RunDisplayNumber:  &runDisplay,
+			Workflow:          "agent-run",
+			IssueRef:          stringPtr("glimmung#17"),
+			IssueNumber:       &issueNumber,
+			State:             "in_progress",
+			CurrentPhase:      stringPtr("agent-execute"),
+			ValidationURL:     stringPtr("https://preview.example"),
+			CumulativeCostUSD: 1.25,
+			StartedAt:         now,
+			UpdatedAt:         now,
 			Attempts: []RunReportAttempt{{
-				AttemptIndex:     0,
-				Phase:            "env-prep",
-				PhaseKind:        "k8s_job",
-				WorkflowFilename: "k8s_job:env-prep",
-				DispatchedAt:     now,
-				CompletedAt:      &now,
-				Conclusion:       stringPtr("success"),
-				PhaseOutputs:     map[string]string{"validation_url": "https://preview.example"},
+				AttemptIndex:       0,
+				Phase:              "env-prep",
+				PhaseKind:          "k8s_job",
+				WorkflowFilename:   "k8s_job:env-prep",
+				DispatchedAt:       now,
+				CompletedAt:        &now,
+				Conclusion:         stringPtr("success"),
+				VerificationStatus: stringPtr("pass"),
+				EvidenceRefs:       []string{"blob://artifacts/glimmung/17/verification.json"},
+				LogArchiveURL:      stringPtr("blob://artifacts/glimmung/17/native.log"),
+				PhaseOutputs:       map[string]string{"validation_url": "https://preview.example"},
+				JobCompletions: []RunAttemptJobCompletion{{
+					JobID:              "prepare",
+					CompletedAt:        &now,
+					Conclusion:         "success",
+					VerificationStatus: stringPtr("pass"),
+				}},
 			}},
 		}},
 		touchpoints: []TouchpointRow{{
@@ -147,6 +171,7 @@ func TestIssueGraphByNumberBuildsRunAttemptAndTouchpointNodes(t *testing.T) {
 			PRNumber:     452,
 			Title:        "graph port",
 			State:        "ready",
+			HTMLURL:      stringPtr("https://github.com/nelsong6/glimmung/pull/452"),
 			LinkedRunRef: stringPtr(runRef),
 		}},
 		signals: []GraphSignal{{
@@ -174,9 +199,48 @@ func TestIssueGraphByNumberBuildsRunAttemptAndTouchpointNodes(t *testing.T) {
 		t.Fatalf("run metadata=%#v", runNode.Metadata)
 	}
 	assertGraphNode(t, graph, "attempt:"+runRef+":0", "attempt")
+	attemptNode := assertGraphNode(t, graph, "attempt:"+runRef+":0", "attempt")
+	if got, ok := attemptNode.Metadata["jobs_count"].(float64); !ok || got != 1 {
+		t.Fatalf("attempt jobs_count=%#v", got)
+	}
 	assertGraphNode(t, graph, "pr:"+touchpointRef, "pr")
 	assertGraphEdge(t, graph, "run:"+runRef, "pr:"+touchpointRef, "opened")
 	assertGraphEdge(t, graph, "run:"+runRef, "signal:glimmung_ui:"+runRef+":"+now.Add(time.Minute).Format(time.RFC3339Nano), "feedback")
+	if graph.Projection.IssueRef != "glimmung#17" {
+		t.Fatalf("projection issue_ref=%q", graph.Projection.IssueRef)
+	}
+	if graph.Projection.CurrentRunRef == nil || *graph.Projection.CurrentRunRef != runRef {
+		t.Fatalf("current_run_ref=%#v", graph.Projection.CurrentRunRef)
+	}
+	if graph.Projection.NextAction.Kind != "feedback_pending" {
+		t.Fatalf("next action=%#v", graph.Projection.NextAction)
+	}
+	assertProjectionEdge(t, graph.Projection, "run:"+runRef, "phase:"+runRef+":env-prep", "contains")
+	assertProjectionEdge(t, graph.Projection, "phase:"+runRef+":env-prep", "phase:"+runRef+":agent-execute", "depends_on")
+	if len(graph.Projection.Runs) != 1 {
+		t.Fatalf("projection runs=%#v", graph.Projection.Runs)
+	}
+	envPhase := assertProjectionPhase(t, graph.Projection.Runs[0], "env-prep")
+	if envPhase.State != "succeeded" || len(envPhase.Jobs) != 1 || envPhase.Jobs[0].State != "succeeded" {
+		t.Fatalf("env-prep projection=%#v", envPhase)
+	}
+	if envPhase.Jobs[0].Conclusion == nil || *envPhase.Jobs[0].Conclusion != "success" || envPhase.Jobs[0].CompletedAt == nil {
+		t.Fatalf("env-prep job completion=%#v", envPhase.Jobs[0])
+	}
+	if len(envPhase.Jobs[0].Steps) != 1 || envPhase.Jobs[0].Steps[0].Slug != "checkout" {
+		t.Fatalf("env-prep job steps=%#v", envPhase.Jobs[0].Steps)
+	}
+	executePhase := assertProjectionPhase(t, graph.Projection.Runs[0], "agent-execute")
+	if executePhase.State != "active" {
+		t.Fatalf("agent-execute state=%q", executePhase.State)
+	}
+	assertProjectionEvidence(t, graph.Projection.Runs[0], "validation", "https://preview.example")
+	assertProjectionEvidence(t, graph.Projection.Runs[0], "artifact", "blob://artifacts/glimmung/17/verification.json")
+	assertProjectionEvidence(t, graph.Projection.Runs[0], "log", "blob://artifacts/glimmung/17/native.log")
+	assertProjectionEvidence(t, graph.Projection.Runs[0], "pull_request", "https://github.com/nelsong6/glimmung/pull/452")
+	if len(graph.Projection.Signals) != 1 || graph.Projection.Signals[0].Kind != "reject" {
+		t.Fatalf("projection signals=%#v", graph.Projection.Signals)
+	}
 }
 
 func TestSystemGraphUsesProjectFilter(t *testing.T) {
@@ -244,4 +308,38 @@ func assertGraphEdge(t *testing.T, graph IssueGraph, source, target, kind string
 	}
 	encoded, _ := json.MarshalIndent(graph.Edges, "", "  ")
 	t.Fatalf("missing edge %s --%s--> %s in %s", source, kind, target, encoded)
+}
+
+func assertProjectionPhase(t *testing.T, run RunProjectionRun, name string) RunProjectionPhase {
+	t.Helper()
+	for _, phase := range run.Phases {
+		if phase.Name == name {
+			return phase
+		}
+	}
+	encoded, _ := json.MarshalIndent(run.Phases, "", "  ")
+	t.Fatalf("missing projection phase %s in %s", name, encoded)
+	return RunProjectionPhase{}
+}
+
+func assertProjectionEvidence(t *testing.T, run RunProjectionRun, kind, ref string) {
+	t.Helper()
+	for _, evidence := range run.Evidence {
+		if evidence.Kind == kind && evidence.Ref == ref {
+			return
+		}
+	}
+	encoded, _ := json.MarshalIndent(run.Evidence, "", "  ")
+	t.Fatalf("missing projection evidence %s:%s in %s", kind, ref, encoded)
+}
+
+func assertProjectionEdge(t *testing.T, projection RunGraphProjection, source, target, kind string) {
+	t.Helper()
+	for _, edge := range projection.Edges {
+		if edge.Source == source && edge.Target == target && edge.Kind == kind {
+			return
+		}
+	}
+	encoded, _ := json.MarshalIndent(projection.Edges, "", "  ")
+	t.Fatalf("missing projection edge %s --%s--> %s in %s", source, kind, target, encoded)
 }

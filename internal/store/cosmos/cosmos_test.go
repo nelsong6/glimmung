@@ -273,6 +273,19 @@ func TestRunReportsFromDocsBuildsPublicRefsAndAttempts(t *testing.T) {
 				Conclusion:       stringPtr("success"),
 				Verification:     &verificationDoc{Status: "pass", EvidenceRefs: []string{"blob://evidence"}, CostUSD: 2.5},
 				CostUSD:          &cost,
+				JobCompletions: map[string]nativeJobCompletionDoc{
+					"agent": {
+						JobID:       "agent",
+						CompletedAt: completed,
+						Conclusion:  "success",
+						Verification: &verificationDoc{
+							Status:  "pass",
+							Reasons: []string{"tests passed"},
+						},
+						CostUSD:      1.1,
+						PhaseOutputs: map[string]string{"validation_url": "https://preview.example"},
+					},
+				},
 			}},
 		},
 		{
@@ -303,6 +316,12 @@ func TestRunReportsFromDocsBuildsPublicRefsAndAttempts(t *testing.T) {
 	}
 	if reports[0].CompletedAt == nil {
 		t.Fatalf("completed_at missing: %#v", reports[0])
+	}
+	if len(reports[0].Attempts[0].JobCompletions) != 1 || reports[0].Attempts[0].JobCompletions[0].JobID != "agent" {
+		t.Fatalf("job completions=%#v", reports[0].Attempts[0].JobCompletions)
+	}
+	if reports[0].Attempts[0].JobCompletions[0].VerificationStatus == nil || *reports[0].Attempts[0].JobCompletions[0].VerificationStatus != "pass" {
+		t.Fatalf("job verification=%#v", reports[0].Attempts[0].JobCompletions[0])
 	}
 }
 

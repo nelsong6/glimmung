@@ -250,6 +250,7 @@ func resumeRunHandler(store ReadStore, ghDispatch GHADispatchClient) http.Handle
 
 		// 8. Build lease metadata (same pattern as dispatch, but entrypoint_index may be > 0).
 		issueNum := issueNumber
+		issueRef := publicids.IssueRef(project, &issueNum)
 		runRef := publicids.RunRef(project, &issueNum, newRun.RunDisplay)
 		priorOutputs := resumeStore.CollectPriorOutputs(priorRun.Attempts)
 		substituted, subErr := resumeStore.SubstitutePhaseInputs(entryPhase, priorOutputs)
@@ -266,6 +267,8 @@ func resumeRunHandler(store ReadStore, ghDispatch GHADispatchClient) http.Handle
 
 		metadata := map[string]any{
 			"issue_body":           "",
+			"issue_ref":            issueRef,
+			"issue_repo":           priorRun.IssueRepo,
 			"issue_title":          "",
 			"issue_lock_holder_id": holderID,
 			"run_id":               newRun.ID,
@@ -324,7 +327,7 @@ func resumeRunHandler(store ReadStore, ghDispatch GHADispatchClient) http.Handle
 
 		// 10. If host assigned and gha_dispatch, fire workflow_dispatch.
 		if host != nil && phaseKind == "gha_dispatch" && ghDispatch != nil {
-			inputs := buildResumeDispatchInputs(lease, host, newRun, runRef, entryPhase, issueNumber, entrypointIndex, substituted)
+			inputs := buildResumeDispatchInputs(lease, host, newRun, runRef, entryPhase, issueNumber, issueRef, entrypointIndex, substituted)
 			wfRef := entryPhase.WorkflowRef
 			if wfRef == "" {
 				wfRef = "main"
@@ -364,11 +367,13 @@ func buildResumeDispatchInputs(
 	runRef string,
 	phase PhaseSpec,
 	issueNumber int,
+	issueRef string,
 	entrypointIndex int,
 	substituted map[string]string,
 ) map[string]string {
 	inputs := map[string]string{
 		"attempt_index":      strconv.Itoa(entrypointIndex),
+		"issue_ref":          issueRef,
 		"issue_number":       strconv.Itoa(issueNumber),
 		"run_callback_token": run.CallbackToken,
 		"run_number":         strconv.Itoa(run.RunNumber),

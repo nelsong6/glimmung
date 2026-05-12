@@ -3,6 +3,7 @@ import { Link, Navigate, NavLink, Outlet, Route, Routes, useLocation, useNavigat
 import { AdminPanel } from "./AdminPanel";
 import { IssueDetailView, RunViewer, type AbortState, type DispatchState, type IssueGraph } from "./IssueDetailView";
 import { IssuesView } from "./IssuesView";
+import { PlaybooksView } from "./PlaybooksView";
 import { PortfolioView } from "./PortfolioView";
 import { TouchpointDetailView } from "./TouchpointDetailView";
 import { TouchpointsView } from "./TouchpointsView";
@@ -227,6 +228,7 @@ export function App() {
         <Route path="leases/agent" element={<GlobalLeaseRoute kind="agent" />} />
         <Route path="leases/agent/:leaseId" element={<GlobalLeaseDetailRoute kind="agent" />} />
         <Route path="needs-attention" element={<NeedsAttentionRoute />} />
+        <Route path="playbooks" element={<PlaybooksRoute />} />
         <Route path="graph" element={<Navigate to="/leases/test" replace />} />
         <Route path="projects" element={<ProjectsRoute />} />
         <Route path="projects/new" element={<ProjectOnboardingRoute />} />
@@ -239,6 +241,8 @@ export function App() {
         <Route path="projects/:project/workflows" element={<ProjectWorkflowsRoute />} />
         <Route path="projects/:project/workflows/:workflow" element={<ProjectWorkflowRoute />} />
         <Route path="projects/:project/issues" element={<ProjectIssuesRoute />} />
+        <Route path="projects/:project/playbooks" element={<ProjectPlaybooksRoute />} />
+        <Route path="projects/:project/playbooks/:playbookRef" element={<ProjectPlaybookDetailRoute />} />
         <Route path="projects/:project/portfolio" element={<ProjectPortfolioRoute />} />
         <Route path="projects/:project/issues/new" element={<IssueOnboardingRoute />} />
         <Route path="projects/:project/issues/:issueNumber" element={<IssueDetailView />}>
@@ -586,6 +590,9 @@ function Layout() {
               <NavLink to="/portfolio" className={dashboardLinkClass}>
                 portfolio
               </NavLink>
+              <NavLink to="/playbooks" className={dashboardLinkClass}>
+                playbooks
+              </NavLink>
             </nav>
         )}
 
@@ -678,6 +685,9 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
       } else if (parts[4]) {
         crumbs.push({ label: titleCase(parts[4]) });
       }
+    } else if (parts[2] === "playbooks") {
+      crumbs.push({ label: "Playbooks", to: `/projects/${encodeURIComponent(parts[1] ?? "")}/playbooks` });
+      if (parts[3]) crumbs.push({ label: parts[3] });
     } else if (parts[2] === "needs-attention") {
       crumbs.push({ label: "Needs attention" });
     } else if (parts[2] === "portfolio") {
@@ -723,6 +733,9 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
   }
   if (parts[0] === "portfolio") {
     return [{ label: "Home", to: "/" }, { label: "Portfolio", to: "/portfolio" }];
+  }
+  if (parts[0] === "playbooks") {
+    return [{ label: "Home", to: "/" }, { label: "Playbooks", to: "/playbooks" }];
   }
   return [{ label: "Home", to: "/" }, { label: parts[0] }];
 }
@@ -779,6 +792,17 @@ function NeedsAttentionRoute() {
   );
 }
 
+function PlaybooksRoute() {
+  const { signedIn, isAdmin, selected } = useOutletContext<LayoutContext>();
+  return (
+    <PlaybooksView
+      signedIn={signedIn}
+      isAdmin={isAdmin}
+      projectFilter={selected.kind === "all" ? null : selected.project}
+    />
+  );
+}
+
 function ProjectsRoute() {
   const ctx = useOutletContext<LayoutContext>();
   return <ProjectsView {...ctx} />;
@@ -817,6 +841,31 @@ function ProjectIssuesRoute() {
   const params = useParams<{ project?: string }>();
   const ctx = useOutletContext<LayoutContext>();
   return <ProjectIssuesView {...ctx} projectName={decodeURIComponent(params.project ?? "")} />;
+}
+
+function ProjectPlaybooksRoute() {
+  const params = useParams<{ project?: string }>();
+  const { signedIn, isAdmin } = useOutletContext<LayoutContext>();
+  return (
+    <PlaybooksView
+      signedIn={signedIn}
+      isAdmin={isAdmin}
+      projectFilter={decodeURIComponent(params.project ?? "")}
+    />
+  );
+}
+
+function ProjectPlaybookDetailRoute() {
+  const params = useParams<{ project?: string; playbookRef?: string }>();
+  const { signedIn, isAdmin } = useOutletContext<LayoutContext>();
+  return (
+    <PlaybooksView
+      signedIn={signedIn}
+      isAdmin={isAdmin}
+      projectFilter={decodeURIComponent(params.project ?? "")}
+      playbookRef={decodeURIComponent(params.playbookRef ?? "")}
+    />
+  );
 }
 
 function ProjectPortfolioRoute() {
@@ -1202,6 +1251,10 @@ function ProjectView({
         <Link to={`${projectPath}/issues`} className="home-link">
           <span className="key">Issues</span>
           <strong>All open issues for {project.name}</strong>
+        </Link>
+        <Link to={`${projectPath}/playbooks`} className="home-link">
+          <span className="key">Playbooks</span>
+          <strong>Executable plans, gates, dependencies, and linked runs</strong>
         </Link>
         <Link to={`${projectPath}/needs-attention`} className="home-link">
           <span className="key">Needs attention</span>

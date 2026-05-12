@@ -311,53 +311,81 @@ review."
 
 ## Projection Contract
 
-The backend should expose or derive a UI-friendly graph projection. The
-projection is separate from storage and separate from any executor's
-native model.
+The canonical issue graph endpoint now embeds `RunGraphProjection` under
+`projection` on `GET /v1/issues/by-number/{project}/{issue_number}/graph`.
+The projection is separate from storage and separate from any executor's
+native model; the frontend should prefer it over rebuilding state from
+generic graph-node metadata.
 
-It should be possible to build fixtures for the projection without
-standing up a real run.
+It is fixture-friendly and can be rendered without standing up a real run.
 
-Minimum projection concepts:
+Projection concepts:
 
 ```text
 RunGraphProjection
-  run
-  phases[]
+  issue_ref
+  runs[]
   edges[]
-  selected/default focus hints
-  evidence links
-  available actions
+  current_run_ref
+  default_focus
+  next_action
+  touchpoints[]
+  signals[]
+
+Run
+  run_ref
+  workflow
+  state
+  current_phase
+  validation_url
+  cost_usd
+  attempts_count
+  phases[]
+  evidence[]
 
 PhaseNode
-  id
-  label
+  name
   state
   kind
-  retry_count
-  cycle_number
+  verify
+  always
+  depends_on[]
   jobs[]
-  inputs
-  outputs
+  attempts[]
 
 JobNode
   id
-  label
+  name
   state
+  conclusion
+  completed_at
   steps[]
 
 StepNode
-  id
-  label
+  slug
+  title
   state
-  duration
-  log_ref
-  raw_external_url
+
+Signal
+  target_type
+  target_repo
+  target_id
+  source
+  state
+  kind
+  feedback
 ```
 
-The projection should normalize GitHub Actions phases, native Kubernetes
+The projection normalizes GitHub Actions phases, native Kubernetes
 jobs, PR evidence, touchpoint state, and future executor kinds into one
-display vocabulary.
+display vocabulary. Native job completions are job-scoped in the run attempt
+record so the projection can show one sibling job as complete while the phase
+waits for the remaining jobs.
+
+GitHub Check Runs are intentionally not part of this contract. Glimmung
+keeps run state canonical in the issue workspace and syndicates PR URLs as
+Touchpoint evidence; adding GitHub Check Runs should be a separate product
+issue if GitHub-native status boxes become necessary.
 
 ## Refactor Sequence
 

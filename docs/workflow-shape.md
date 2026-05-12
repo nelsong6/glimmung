@@ -71,6 +71,12 @@ dependencies between them. Each job is its own k8s Job; each
 emits its own completion callback; the phase is "complete"
 when all jobs have completed.
 
+The native completion contract is enforced at
+`POST /v1/run-callbacks/{callback_token}/native/completed`: the payload must
+include `job_id`. Glimmung records each job completion independently, returns a
+`wait_jobs` response while sibling jobs are still pending, and runs the phase
+decision path only on the transition where the final registered job completes.
+
 Because jobs in a phase are strictly parallel, **a job can never
 depend on the output of another job in the same phase**. If
 verifier needs implementation's output, verifier goes in a

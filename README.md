@@ -162,7 +162,7 @@ surface rather than every compatibility tombstone.
 | GET    | `/v1/touchpoints/{owner}/{repo}/{n}` | Compatibility Touchpoint lookup by GitHub PR coordinates. |
 | GET    | `/v1/reports`                     | Compatibility alias for `/v1/touchpoints`. |
 | GET    | `/v1/reports/{owner}/{repo}/{n}`  | Compatibility alias for `/v1/touchpoints/{owner}/{repo}/{n}`. |
-| POST   | `/v1/signals`                     | Enqueue a Signal (e.g., `{target_type:"pr", target_repo, target_ref:"42", source:"glimmung_ui", payload:{kind:"reject", feedback:"..."}}`). |
+| POST   | `/v1/signals`                     | Enqueue a Signal. PR signals use GitHub coordinates only: `{target_type:"pr", target_repo:"owner/repo", target_ref:"42", source:"glimmung_ui", payload:{kind:"reject", feedback:"..."}}`. |
 | POST   | `/v1/signals/drain`               | Admin drain endpoint for queued signals; production also runs the Go signal drain loop in-process. |
 
 Admin endpoints accept **either** auth path:
@@ -225,6 +225,13 @@ when configured and acknowledges the event. Rich issue/workflow_run processing
 from the legacy app is part of the runtime cleanup inventory and should be
 ported only if live consumers still need it.
 
+Current event contract: Glimmung accepts GitHub `issues` and `workflow_run`
+webhooks for compatibility and repair hooks. PR review decisions enter through
+the `/v1/signals` contract instead of GitHub webhook side effects. `pull_request`,
+`check_run`, `check_suite`, `deployment`, and `push` events are intentionally not
+canonical run-state inputs unless a future syndication issue explicitly adds
+them.
+
 ### Unified dispatch
 
 `POST /v1/runs/dispatch` is handled in
@@ -242,11 +249,19 @@ Cosmos operations in [`internal/store/cosmos`](internal/store/cosmos). It:
    GitHub dispatch client are available. Native `k8s_job` phases stay in the
    Go-managed native path and report through the native run callback APIs.
 8. Records completion through `/v1/run-callbacks/{callback_token}/completed`
-   or `/v1/run-callbacks/{callback_token}/native/completed`, then runs the Go
-   decision engine.
+   for GitHub Actions phases or `/v1/run-callbacks/{callback_token}/native/completed`
+   for native phases. Native completion is job-scoped: every callback must
+   include `job_id`, and the Go decision engine only advances the phase after
+   every registered job in that phase has completed.
 
 Issue-lock TTL is 4h. Terminal Run transitions release issue/PR locks through
 the Go store; leases still have their own TTL/callback lifecycle.
+
+Runner clients that open or update a GitHub PR should use the dispatch inputs
+and lease metadata as the PR body source of truth: include `issue_ref`,
+`run_ref`, the Touchpoint/PR URL when known, the validation URL, and evidence
+links from the RunReport. GitHub remains a syndication surface; the canonical
+review state stays in the Glimmung Issue workspace.
 
 ## Storage
 
@@ -551,6 +566,9 @@ Active triage behavior:
   feedback reopens the linked Run through the workflow PR recycle policy.
 - **Budget enforcement**: no-run and budget abort cases are recorded as
   processed decisions instead of dispatching more work.
+- **One PR signal contract**: `target_repo` is the GitHub repo (`owner/repo`)
+  and `target_ref` is the PR number. Glimmung project names and Touchpoint refs
+  are resolved after the signal lands, not accepted as alternate PR targets.
 
 ### Triage workflow contract
 

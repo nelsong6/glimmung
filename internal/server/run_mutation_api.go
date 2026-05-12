@@ -37,10 +37,14 @@ type AbortRunResult struct {
 
 // RunCallbackResult is the response for GHA run callback operations.
 type RunCallbackResult struct {
-	RunRef            string  `json:"run_ref"`
-	Decision          *string `json:"decision"`
-	IssueLockReleased *bool   `json:"issue_lock_released"`
-	PRLockReleased    *bool   `json:"pr_lock_released"`
+	RunRef            string   `json:"run_ref"`
+	Decision          *string  `json:"decision"`
+	IssueLockReleased *bool    `json:"issue_lock_released"`
+	PRLockReleased    *bool    `json:"pr_lock_released"`
+	PhaseComplete     *bool    `json:"phase_complete,omitempty"`
+	CompletedJobIDs   []string `json:"completed_job_ids,omitempty"`
+	PendingJobIDs     []string `json:"pending_job_ids,omitempty"`
+	FailedJobIDs      []string `json:"failed_job_ids,omitempty"`
 }
 
 // RunStartedRequest is the request body for /run-callbacks/{token}/started.

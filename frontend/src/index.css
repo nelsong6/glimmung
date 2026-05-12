@@ -1522,6 +1522,51 @@ h2 .inline-action,
   font-family: var(--font-mono);
   color: #d4d4d4;
 }
+.issue-control-plane {
+  display: grid;
+  gap: 12px;
+  margin: 16px 0 12px;
+}
+.issue-kpis {
+  margin-bottom: 0;
+}
+.issue-control-grid .val {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.touchpoint-evidence-list {
+  margin: 10px 0 12px;
+}
+.feedback-box {
+  width: 100%;
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--surface);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font: inherit;
+  resize: vertical;
+}
+.feedback-box:focus-visible {
+  outline: none;
+  border-color: var(--state-success-fg);
+}
+.review-actions,
+.playbook-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 16px;
+}
+.playbook-description {
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
 .evidence-list {
   display: inline-flex;
   flex-wrap: wrap;
