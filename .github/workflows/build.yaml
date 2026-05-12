@@ -73,7 +73,7 @@ jobs:
             --image app \
             --dockerfile Dockerfile \
             --context . \
-            --paths 'Dockerfile .dockerignore pyproject.toml src frontend/package.json frontend/package-lock.json frontend/index.html frontend/src frontend/tsconfig.json frontend/vite.config.ts design-system' \
+            --paths 'Dockerfile .dockerignore go.mod go.sum cmd internal frontend/package.json frontend/package-lock.json frontend/index.html frontend/src frontend/tsconfig.json frontend/vite.config.ts design-system' \
             | tee /tmp/glimmung-image-fingerprint.txt \
             | awk -F= '$1 == "fingerprint" { print $2 }')"
           echo "ALIAS_TAG=app-${fingerprint}" >> "$GITHUB_ENV"

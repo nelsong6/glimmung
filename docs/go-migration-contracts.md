@@ -1,26 +1,22 @@
 # Go migration contracts
 
-This note defines the compatibility baseline for moving the Glimmung backend and
-control-plane from Python to Go. The first migration PRs should preserve the
-runtime surface exactly and prove that with focused tests before replacing any
-large backend path.
+This note defines the compatibility baseline for the Glimmung backend and
+control-plane as production traffic moves from Python to Go. Migration PRs
+should preserve the runtime surface and prove that with focused tests before
+removing legacy Python-only surfaces.
 
 ## Current service shape
 
-- HTTP entrypoint: `src/glimmung/app.py` creates the FastAPI app and owns the
-  `/v1/*` API surface.
-- Runtime entrypoint: `src/glimmung/__main__.py` runs uvicorn on the configured
-  host and port.
-- Shadow Go entrypoint: `cmd/glimmung-go` runs a local/dev HTTP server for
-  migrated surfaces. It is not wired into Docker, Helm, or production traffic.
-- Persistence boundary: `src/glimmung/db.py` owns Cosmos containers and document
-  access helpers.
-- Auth boundary: `src/glimmung/auth.py` handles Entra JWKS auth and Kubernetes
+- Runtime entrypoint: `cmd/glimmung-go` runs the Go HTTP service used by the
+  production Docker image.
+- Legacy entrypoint: `src/glimmung/__main__.py` remains only for cleanup and
+  parity work while Python-only tests and scripts are retired.
+- Persistence boundary: `internal/store/cosmos` owns Cosmos containers and
+  document access helpers.
+- Auth boundary: `internal/auth` handles Entra JWKS auth and Kubernetes
   service-account TokenReview auth.
-- Dispatch boundary: `src/glimmung/dispatch.py` provides the shared
-  `dispatch_run` path used by API, playbooks, signals, and portfolio workflows.
-- Native runner boundary: `src/glimmung/native_k8s.py` creates and tracks native
-  Kubernetes runner jobs.
+- Dispatch and native-runner surfaces live under `internal/server` and related
+  Go store/domain packages.
 
 ## Non-negotiable API contracts
 
@@ -58,21 +54,21 @@ Start with modules that are deterministic and have low runtime coupling:
 
 ## Hot-swap and dev-loop rules
 
-- Keep the Python service as the only writer while Go is introduced.
-- Run Go initially as a shadow or sidecar service with no background loops
-  enabled. Do not run duplicate lease, signal, dispatch, or native-runner loops.
+- Keep a single writer service active. The production image now starts the Go
+  service; do not also run the legacy Python process against the same Cosmos
+  database.
 - Keep the service port and in-cluster DNS expectations stable for UI and MCP
   clients. MCP currently targets the Glimmung service URL and reads a projected
   service-account token per request.
 - Keep frontend assets and API routing separable. The Go backend should be able
   to serve the same static assets, but initial pilots should not require moving
   the frontend build pipeline.
-- Make local development support both processes: Python remains the default
-  `python -m glimmung` path, while Go pilots expose explicit commands and tests.
+- Make local development use the same Go entrypoint as production:
+  `go run ./cmd/glimmung-go`.
 
-## Shadow Go dev loop
+## Go Dev Loop
 
-The Go server can be run locally without replacing the Python service:
+Run the Go service locally with:
 
 ```sh
 PORT=8001 \
@@ -82,32 +78,13 @@ GLIMMUNG_STATIC_DIR=frontend/dist \
 go run ./cmd/glimmung-go
 ```
 
-The shadow server currently owns only:
+Static frontend assets and SPA fallback are served when `GLIMMUNG_STATIC_DIR`
+points at a built frontend directory.
 
-- `GET /healthz`
-- `GET /v1/config`
-- `GET /v1/projects` and `GET /v1/workflows` when a Cosmos read store is
-  configured with `COSMOS_ENDPOINT` and `COSMOS_DATABASE`.
-- Static frontend assets and SPA fallback when `GLIMMUNG_STATIC_DIR` points at
-  a built frontend directory.
+## Remaining Cleanup
 
-Do not route MCP, native-runner callbacks, lease lifecycle, dispatch, webhooks,
-or write endpoints to the Go server until the matching auth, storage, and
-runtime parity tests exist.
-
-## Recommended first slice
-
-The first PR should be a contract baseline only:
-
-- Document these boundaries.
-- Add an API route inventory test that freezes method, path, route name, and
-  order.
-- Run the existing pure-domain tests so later Go ports have a known Python
-  reference.
-
-The initial pure-domain and shadow-server pilots now cover path normalization,
-public ID generation, budget parsing, phase input references, decision routing,
-abort explanations, health/config endpoints, and static frontend serving. The
-next migration slices should move toward read-only API handlers behind explicit
-interfaces, starting with JSON model parity and fake-store tests before any
-Cosmos-backed production traffic is served by Go.
+The pure-domain and server pilots now cover path normalization, public ID
+generation, budget parsing, phase input references, decision routing, abort
+explanations, health/config endpoints, static frontend serving, and the current
+HTTP API surface. Remaining migration work should retire legacy Python tests,
+scripts, and docs once their Go replacements are the sole source of truth.
