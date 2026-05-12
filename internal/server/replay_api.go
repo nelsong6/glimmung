@@ -25,6 +25,8 @@ type RunReplayData struct {
 	Attempts          []RunAttemptData
 	CumulativeCostUSD float64
 	IssueNumber       int
+	RunNumber         *int
+	RunDisplayNumber  *string
 	IssueRepo         string
 	CallbackToken     *string
 	IssueLockHolderID *string
@@ -38,6 +40,9 @@ type RunAttemptData struct {
 	Phase        string
 	Conclusion   string
 	Verification *RunVerificationData
+	Decision     string
+	Completed    bool
+	PhaseOutputs map[string]string
 }
 
 // RunVerificationData holds the status and reasons from a verification result.
@@ -61,9 +66,9 @@ type SyntheticCompletion struct {
 
 // WorkflowReplayOverride lets a caller supply an alternate workflow shape for replay.
 type WorkflowReplayOverride struct {
-	Phases []PhaseSpec    `json:"phases"`
-	PR     PrPrimitive    `json:"pr"`
-	Budget budget.Config  `json:"budget"`
+	Phases []PhaseSpec   `json:"phases"`
+	PR     PrPrimitive   `json:"pr"`
+	Budget budget.Config `json:"budget"`
 }
 
 // RunReplayRequest is the request body for POST …/replay.

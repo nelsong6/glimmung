@@ -1665,6 +1665,7 @@ func runReportFromDoc(doc runDoc, lineageByID map[string]string) server.RunRepor
 		}
 	}
 	return server.RunReport{
+		ID:                  doc.ID,
 		Ref:                 runRef + "/report",
 		Project:             doc.Project,
 		RunRef:              runRef,
@@ -1673,6 +1674,7 @@ func runReportFromDoc(doc runDoc, lineageByID map[string]string) server.RunRepor
 		ParentRunRef:        refPtr(lineageByID, parentID),
 		RootRunRef:          refPtr(lineageByID, rootID),
 		OriginKind:          emptyStringNil(originKind),
+		EntrypointPhase:     emptyStringNil(doc.EntrypointPhase),
 		IsCycle:             doc.IsCycle,
 		CycleNumber:         doc.CycleNumber,
 		Workflow:            doc.Workflow,
@@ -1723,6 +1725,7 @@ func runReportAttemptFromDoc(doc attemptDoc, lineageByID map[string]string) serv
 		CostUSD:            cost,
 		LogArchiveURL:      emptyStringNil(doc.LogArchiveURL),
 		SkippedFromRunRef:  refPtr(lineageByID, doc.SkippedFromRunID),
+		PhaseOutputs:       mapStringOrEmpty(doc.PhaseOutputs),
 	}
 }
 
@@ -2084,25 +2087,25 @@ func sliceOrEmpty[T any](values []T) []T {
 // ── Touchpoint / Report store ─────────────────────────────────────────────────
 
 type reportDoc struct {
-	ID             string           `json:"id"`
-	Project        string           `json:"project"`
-	Repo           string           `json:"repo"`
-	Number         int              `json:"number"`
-	Title          string           `json:"title"`
-	Body           string           `json:"body"`
-	State          string           `json:"state"`
-	Branch         string           `json:"branch"`
-	BaseRef        string           `json:"base_ref"`
-	HeadSHA        string           `json:"head_sha"`
-	HTMLURL        string           `json:"html_url"`
-	LinkedIssueID  *string          `json:"linked_issue_id"`
-	LinkedRunID    *string          `json:"linked_run_id"`
-	MergedAt       *string          `json:"merged_at"`
-	MergedBy       *string          `json:"merged_by"`
-	Comments       []map[string]any `json:"comments"`
-	Reviews        []map[string]any `json:"reviews"`
-	CreatedAt      string           `json:"created_at"`
-	UpdatedAt      string           `json:"updated_at"`
+	ID            string           `json:"id"`
+	Project       string           `json:"project"`
+	Repo          string           `json:"repo"`
+	Number        int              `json:"number"`
+	Title         string           `json:"title"`
+	Body          string           `json:"body"`
+	State         string           `json:"state"`
+	Branch        string           `json:"branch"`
+	BaseRef       string           `json:"base_ref"`
+	HeadSHA       string           `json:"head_sha"`
+	HTMLURL       string           `json:"html_url"`
+	LinkedIssueID *string          `json:"linked_issue_id"`
+	LinkedRunID   *string          `json:"linked_run_id"`
+	MergedAt      *string          `json:"merged_at"`
+	MergedBy      *string          `json:"merged_by"`
+	Comments      []map[string]any `json:"comments"`
+	Reviews       []map[string]any `json:"reviews"`
+	CreatedAt     string           `json:"created_at"`
+	UpdatedAt     string           `json:"updated_at"`
 }
 
 func (s *Store) ListTouchpoints(ctx context.Context, filter server.TouchpointListFilter) ([]server.TouchpointRow, error) {
@@ -2338,22 +2341,22 @@ func (s *Store) buildTouchpointDetail(ctx context.Context, doc reportDoc) (serve
 	prLockHeld, _ := s.prLockHeld(ctx, doc.Repo, doc.Number)
 
 	detail := server.TouchpointDetail{
-		Ref:          publicids.ReportRef(doc.Repo, &doc.Number),
-		Project:      doc.Project,
-		Repo:         doc.Repo,
-		PRNumber:     doc.Number,
-		Title:        doc.Title,
-		Body:         doc.Body,
-		State:        firstNonEmpty(doc.State, "ready"),
-		Merged:       doc.MergedAt != nil,
-		BaseRef:      firstNonEmpty(doc.BaseRef, "main"),
-		HeadSHA:      doc.HeadSHA,
+		Ref:            publicids.ReportRef(doc.Repo, &doc.Number),
+		Project:        doc.Project,
+		Repo:           doc.Repo,
+		PRNumber:       doc.Number,
+		Title:          doc.Title,
+		Body:           doc.Body,
+		State:          firstNonEmpty(doc.State, "ready"),
+		Merged:         doc.MergedAt != nil,
+		BaseRef:        firstNonEmpty(doc.BaseRef, "main"),
+		HeadSHA:        doc.HeadSHA,
 		LinkedIssueRef: linkedIssueRef,
 		IssueNumber:    linkedIssueNumber,
 		IssueTitle:     linkedIssueTitle,
-		Comments:     sliceOrEmpty(doc.Comments),
-		Reviews:      sliceOrEmpty(doc.Reviews),
-		PRLockHeld:   prLockHeld,
+		Comments:       sliceOrEmpty(doc.Comments),
+		Reviews:        sliceOrEmpty(doc.Reviews),
+		PRLockHeld:     prLockHeld,
 	}
 	if doc.PRBranchStr() != "" {
 		b := doc.PRBranchStr()
@@ -2615,6 +2618,13 @@ func ptrString(s string) *string {
 	return &s
 }
 
+func mapStringOrEmpty(values map[string]string) map[string]string {
+	if values == nil {
+		return map[string]string{}
+	}
+	return values
+}
+
 func parseTimeOrZero(s string) time.Time {
 	t, _ := time.Parse(time.RFC3339Nano, s)
 	return t
@@ -2858,20 +2868,20 @@ func playbookIssueSpecFromMap(m map[string]any) server.PlaybookIssueSpec {
 // ── Portfolio store ───────────────────────────────────────────────────────────
 
 type portfolioElementDoc struct {
-	ID                string         `json:"id"`
-	Kind              string         `json:"kind"`
-	Project           string         `json:"project"`
-	Route             string         `json:"route"`
-	ElementID         string         `json:"element_id"`
-	Title             string         `json:"title"`
-	ScreenshotURL     *string        `json:"screenshot_url"`
-	PreviewURL        *string        `json:"preview_url"`
-	Status            string         `json:"status"`
-	Notes             *string        `json:"notes"`
-	LastTouchedRunID  *string        `json:"last_touched_run_id"`
-	Metadata          map[string]any `json:"metadata"`
-	CreatedAt         string         `json:"created_at"`
-	UpdatedAt         string         `json:"updated_at"`
+	ID               string         `json:"id"`
+	Kind             string         `json:"kind"`
+	Project          string         `json:"project"`
+	Route            string         `json:"route"`
+	ElementID        string         `json:"element_id"`
+	Title            string         `json:"title"`
+	ScreenshotURL    *string        `json:"screenshot_url"`
+	PreviewURL       *string        `json:"preview_url"`
+	Status           string         `json:"status"`
+	Notes            *string        `json:"notes"`
+	LastTouchedRunID *string        `json:"last_touched_run_id"`
+	Metadata         map[string]any `json:"metadata"`
+	CreatedAt        string         `json:"created_at"`
+	UpdatedAt        string         `json:"updated_at"`
 }
 
 func portfolioElementDocID(project, route, elementID string) string {
@@ -3215,17 +3225,17 @@ func (s *Store) AcquireLease(ctx context.Context, req server.LeaseAcquireRequest
 
 		hostName, _ := candidate["name"].(string)
 		leaseDoc := leaseDoc{
-			ID:          leaseID,
-			LeaseNumber: &leaseNumber,
-			Project:     req.Project,
-			Workflow:    req.Workflow,
-			Host:        &hostName,
-			State:       "claimed",
+			ID:           leaseID,
+			LeaseNumber:  &leaseNumber,
+			Project:      req.Project,
+			Workflow:     req.Workflow,
+			Host:         &hostName,
+			State:        "claimed",
 			Requirements: req.Requirements,
-			Metadata:    metadata,
-			RequestedAt: nowStr,
-			AssignedAt:  nowStr,
-			TTLSeconds:  ttl,
+			Metadata:     metadata,
+			RequestedAt:  nowStr,
+			AssignedAt:   nowStr,
+			TTLSeconds:   ttl,
 		}
 		docPayload, err := json.Marshal(leaseDoc)
 		if err != nil {
@@ -3334,13 +3344,13 @@ func (s *Store) nextLeaseNumber(ctx context.Context, project string) (int, error
 			first := highest + 1
 			now := time.Now().UTC().Format(time.RFC3339Nano)
 			doc := map[string]any{
-				"id":               counterID,
-				"project":          project,
-				"kind":             "lease_number_counter",
-				"lastAllocated":    first,
-				"nextLeaseNumber":  first + 1,
-				"created_at":       now,
-				"updated_at":       now,
+				"id":              counterID,
+				"project":         project,
+				"kind":            "lease_number_counter",
+				"lastAllocated":   first,
+				"nextLeaseNumber": first + 1,
+				"created_at":      now,
+				"updated_at":      now,
 			}
 			payload, _ := json.Marshal(doc)
 			if _, err := s.leases.CreateItem(ctx, pk, payload, nil); err != nil {
@@ -3543,6 +3553,9 @@ func (s *Store) ReadRunForReplay(ctx context.Context, project, runID string) (se
 			Phase:        a.Phase,
 			Conclusion:   conclusion,
 			Verification: verif,
+			Decision:     stringOrEmpty(a.Decision),
+			Completed:    a.CompletedAt != "",
+			PhaseOutputs: stringMapOrEmpty(a.PhaseOutputs),
 		})
 	}
 	return server.RunReplayData{
@@ -3552,6 +3565,8 @@ func (s *Store) ReadRunForReplay(ctx context.Context, project, runID string) (se
 		Attempts:          attempts,
 		CumulativeCostUSD: doc.CumulativeCostUSD,
 		IssueNumber:       doc.IssueNumber,
+		RunNumber:         doc.RunNumber,
+		RunDisplayNumber:  doc.RunDisplayNumber,
 		IssueRepo:         doc.IssueRepo,
 		CallbackToken:     doc.CallbackToken,
 		IssueLockHolderID: doc.IssueLockHolderID,
@@ -3619,6 +3634,36 @@ func (s *Store) EnqueueSignal(ctx context.Context, req server.SignalEnqueue) (se
 		State:      doc.State,
 		EnqueuedAt: now,
 	}, nil
+}
+
+func (s *Store) ListGraphSignals(ctx context.Context, filter server.GraphSignalFilter) ([]server.GraphSignal, error) {
+	query := "SELECT * FROM c"
+	var params []azcosmos.QueryParameter
+	if strings.TrimSpace(filter.State) != "" {
+		query += " WHERE c.state = @state"
+		params = append(params, azcosmos.QueryParameter{Name: "@state", Value: filter.State})
+	}
+	query += " ORDER BY c.enqueued_at ASC"
+	var docs []signalDoc
+	if err := queryAllWhere(ctx, s.signals, query, params, &docs); err != nil {
+		return nil, err
+	}
+	signals := make([]server.GraphSignal, 0, len(docs))
+	for _, doc := range docs {
+		signals = append(signals, server.GraphSignal{
+			ID:                doc.ID,
+			TargetType:        doc.TargetType,
+			TargetRepo:        doc.TargetRepo,
+			TargetID:          doc.TargetID,
+			Source:            doc.Source,
+			Payload:           mapOrEmpty(doc.Payload),
+			State:             firstNonEmpty(doc.State, "pending"),
+			EnqueuedAt:        parseTimeOrNow(doc.EnqueuedAt),
+			ProcessedDecision: doc.ProcessedDecision,
+			FailureReason:     doc.FailureReason,
+		})
+	}
+	return signals, nil
 }
 
 // ---- RunMutationStore implementation ----
@@ -4080,8 +4125,8 @@ func (s *Store) StampRunCompletion(ctx context.Context, project, runID string, p
 		}
 		if p.VerificationStatus != "" {
 			attempt["verification"] = map[string]any{
-				"status":  p.VerificationStatus,
-				"reasons": p.VerificationReasons,
+				"status":   p.VerificationStatus,
+				"reasons":  p.VerificationReasons,
 				"cost_usd": p.CostUSD,
 			}
 		}
@@ -4690,31 +4735,31 @@ func (s *Store) CreateResumedRun(ctx context.Context, req server.CreateResumedRu
 	bdg := &budgetDoc{Total: prior.Budget.Total}
 
 	doc := runDoc{
-		ID:               runID,
-		Project:          prior.Project,
-		Workflow:         prior.Workflow,
-		RunNumber:        &runNumber,
-		RunDisplayNumber: &runDisplay,
-		ParentRunID:      &parentRunID,
-		RootRunID:        &rootRunID,
-		OriginKind:       &originKind,
-		IsCycle:          true,
-		CycleNumber:      &cycleNumber,
-		IssueID:          prior.IssueID,
-		IssueRepo:        prior.IssueRepo,
-		IssueNumber:      prior.IssueNumber,
-		State:            "in_progress",
-		Budget:           bdg,
-		ValidationURL:    prior.ValidationURL,
-		ClonedFromRunID:  &parentRunID,
-		EntrypointPhase:  &entrypointPhase,
-		Attempts:         allAttempts,
+		ID:                runID,
+		Project:           prior.Project,
+		Workflow:          prior.Workflow,
+		RunNumber:         &runNumber,
+		RunDisplayNumber:  &runDisplay,
+		ParentRunID:       &parentRunID,
+		RootRunID:         &rootRunID,
+		OriginKind:        &originKind,
+		IsCycle:           true,
+		CycleNumber:       &cycleNumber,
+		IssueID:           prior.IssueID,
+		IssueRepo:         prior.IssueRepo,
+		IssueNumber:       prior.IssueNumber,
+		State:             "in_progress",
+		Budget:            bdg,
+		ValidationURL:     prior.ValidationURL,
+		ClonedFromRunID:   &parentRunID,
+		EntrypointPhase:   &entrypointPhase,
+		Attempts:          allAttempts,
 		CumulativeCostUSD: 0.0,
-		TriggerSource:    req.TriggerSource,
-		CallbackToken:    &callbackToken,
+		TriggerSource:     req.TriggerSource,
+		CallbackToken:     &callbackToken,
 		IssueLockHolderID: &req.IssueLockHolderID,
-		CreatedAt:        now,
-		UpdatedAt:        now,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 
 	payload, err := json.Marshal(doc)
