@@ -144,6 +144,7 @@ surface rather than every compatibility tombstone.
 |---|---|---|
 | POST   | `/v1/projects`                    | Register/upsert a project (`{name, github_repo}`). |
 | GET    | `/v1/projects`                    | List projects. |
+| PATCH  | `/v1/projects/{project}/test-environments/count` | Set native validation slot capacity and reconcile managed auth redirect URIs when configured. |
 | POST   | `/v1/workflows`                   | Register/upsert a workflow under a project. |
 | GET    | `/v1/workflows`                   | List workflows. |
 | POST   | `/v1/playbooks`                   | Create a draft Playbook for a coordinated batch of issue specs. |
@@ -170,6 +171,45 @@ Admin endpoints accept **either** auth path:
 - **K8s service-account token** — in-cluster callers (tank-operator, future agents). The pod presents its projected SA token as `Authorization: Bearer <token>`; backend validates it via `TokenReview` against the cluster API server and checks the resolved `system:serviceaccount:<ns>:<name>` against `K8S_SA_ALLOWLIST` (default `tank-operator/tank-operator`). Glimmung's pod SA is bound to `system:auth-delegator` ([k8s/templates/auth-delegator.yaml](k8s/templates/auth-delegator.yaml)) so the review call is permitted. Same RBAC primitive the mcp-* deployments use; the validation runs in-app instead of via a kube-rbac-proxy sidecar because glimmung's listener is publicly exposed.
 
 The two paths are routed by the unverified `iss` claim — Microsoft issuer vs. cluster issuer — and each goes through its own validator. To allowlist additional SAs, set `K8S_SA_ALLOWLIST="ns1/sa1,ns2/sa2"`.
+
+### Native webapp auth redirects
+
+Native webapps that use MSAL with `redirectUri = window.location.origin + "/"`
+need each validation slot hostname registered on their dedicated Entra app
+registration. Glimmung reconciles those SPA redirect URIs when
+`PATCH /v1/projects/{project}/test-environments/count` changes
+`metadata.native_standby_dns.count`.
+
+Project metadata contract:
+
+```json
+{
+  "native_webapp": true,
+  "native_standby_dns": {
+    "enabled": true,
+    "record_base": "tank.dev.romaine.life",
+    "slot_prefix": "tank-slot",
+    "count": 3
+  },
+  "native_auth_redirects": {
+    "enabled": true,
+    "provider": "entra",
+    "redirect_uri_mode": "spa",
+    "application_object_id": "<entra application object id>",
+    "production_redirect_uris": ["https://tank.romaine.life/"],
+    "extra_redirect_uris": []
+  }
+}
+```
+
+`application_client_id` is also accepted when the object id is not known; the
+reconciler resolves it through Microsoft Graph. Desired managed slot URIs are
+derived as `https://{slot_prefix}-{i}.{record_base}/` for `i in 1..count`.
+The reconciler adds missing managed URIs and removes stale managed slot URIs
+above the current count. It preserves production, extra, and unrelated manual
+portal entries. Reconciliation diagnostics are written to
+`metadata.native_auth_redirects_status` so `/v1/projects` and `/v1/state`
+show whether auth redirect sync is `ok` or `failed`.
 
 ### GitHub webhook
 

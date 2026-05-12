@@ -2707,6 +2707,7 @@ function TestEnvironmentScaleControl({
   const [error, setError] = useState<string | null>(null);
   const configuredCount = projectTestEnvironmentCount(project, currentCount);
   const canSave = signedIn && isAdmin;
+  const authRedirectStatus = nativeAuthRedirectStatus(project);
 
   useEffect(() => {
     if (!saving) setDraft(String(configuredCount));
@@ -2754,6 +2755,11 @@ function TestEnvironmentScaleControl({
       <button type="submit" disabled={!canSave || saving || draft === String(configuredCount)}>
         {saving ? "saving..." : "apply"}
       </button>
+      {authRedirectStatus && (
+        <span className="test-env-auth-status mono" title={authRedirectStatus.title}>
+          auth redirects <span className={`pill ${authRedirectStatus.pill}`}>{authRedirectStatus.state}</span>
+        </span>
+      )}
       {!canSave && <span className="dim mono">admin sign-in required</span>}
       {error && <span className="danger-text mono">{error}</span>}
     </form>
@@ -2965,6 +2971,24 @@ function projectTestEnvironmentCount(project: Project, fallback: number): number
     }
   }
   return fallback;
+}
+
+function nativeAuthRedirectStatus(project: Project): { state: string; pill: "free" | "drain" | "info"; title: string } | null {
+  const raw = project.metadata?.native_auth_redirects_status;
+  if (!isRecord(raw)) return null;
+  const state = valueLabel(raw.state).toLowerCase();
+  if (!state) return null;
+  const desiredCount = valueLabel(raw.desired_count);
+  const lastError = valueLabel(raw.last_error);
+  const title = [
+    desiredCount ? `desired ${desiredCount}` : "",
+    lastError,
+  ].filter(Boolean).join(" / ") || state;
+  return {
+    state,
+    pill: state === "ok" ? "free" : state === "failed" ? "drain" : "info",
+    title,
+  };
 }
 
 function leaseRouteId(lease: Lease): string {

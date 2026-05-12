@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nelsong6/glimmung/internal/auth"
+	entraredirects "github.com/nelsong6/glimmung/internal/entra"
 	githubclient "github.com/nelsong6/glimmung/internal/github"
 	"github.com/nelsong6/glimmung/internal/server"
 	artifactstore "github.com/nelsong6/glimmung/internal/store/artifacts"
@@ -27,6 +28,11 @@ func main() {
 	}
 	authenticator := buildAuthenticator(settings)
 	ghClient := buildGitHubClient(settings)
+	authRedirectClient, err := entraredirects.NewRedirectClient()
+	if err != nil {
+		log.Printf("native auth redirect reconciler disabled: %v", err)
+	}
+	authRedirects := server.NativeAuthRedirectService{Client: authRedirectClient}
 	var ghDispatch server.GHADispatchClient
 	if d, ok := ghClient.(server.GHADispatchClient); ok {
 		ghDispatch = d
@@ -38,7 +44,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           server.NewWithSyncClient(settings, store, authenticator, ghClient, artifacts),
+		Handler:           server.NewWithRuntimeClients(settings, store, authenticator, ghClient, authRedirects, artifacts),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

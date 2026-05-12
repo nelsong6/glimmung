@@ -80,14 +80,18 @@ func NewWithStore(settings Settings, store ReadStore) http.Handler {
 
 // NewWithSyncClient extends NewWithDependencies with an optional GitHub client for workflow sync.
 func NewWithSyncClient(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, artifactStores ...ArtifactStore) http.Handler {
-	return newHandler(settings, store, authResolver, ghClient, artifactStores...)
+	return newHandler(settings, store, authResolver, ghClient, nil, artifactStores...)
+}
+
+func NewWithRuntimeClients(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, authRedirects NativeAuthRedirectReconciler, artifactStores ...ArtifactStore) http.Handler {
+	return newHandler(settings, store, authResolver, ghClient, authRedirects, artifactStores...)
 }
 
 func NewWithDependencies(settings Settings, store ReadStore, authResolver AuthResolver, artifactStores ...ArtifactStore) http.Handler {
-	return newHandler(settings, store, authResolver, nil, artifactStores...)
+	return newHandler(settings, store, authResolver, nil, nil, artifactStores...)
 }
 
-func newHandler(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, artifactStores ...ArtifactStore) http.Handler {
+func newHandler(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, authRedirects NativeAuthRedirectReconciler, artifactStores ...ArtifactStore) http.Handler {
 	var artifactStore ArtifactStore
 	if len(artifactStores) > 0 {
 		artifactStore = artifactStores[0]
@@ -229,7 +233,7 @@ func newHandler(settings Settings, store ReadStore, authResolver AuthResolver, g
 	)
 	mux.Handle(
 		"PATCH /v1/projects/{project}/test-environments/count",
-		requireAdmin(adminAuthenticator, http.HandlerFunc(scaleProjectTestEnvironments(store))),
+		requireAdmin(adminAuthenticator, http.HandlerFunc(scaleProjectTestEnvironments(store, authRedirects))),
 	)
 	mux.HandleFunc("GET /v1/workflows", listWorkflows(store))
 	mux.Handle("POST /v1/workflows", requireAdmin(adminAuthenticator, http.HandlerFunc(registerWorkflow(store))))
