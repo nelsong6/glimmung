@@ -35,9 +35,9 @@ Project -> Workflow -> Issue -> Run -> Phase/Job -> Report
 - **Project** = a repo (e.g. `spirelens`), declares the github_repo only.
 - **Workflow** = a database-backed automation shape under a project. Dispatch
   reads the Workflow row from Cosmos: phases, native jobs, PR policy, budget,
-  trigger label if any, and requirements. Native web app projects default
-  omitted phase kinds to `k8s_job`; legacy/non-native projects keep the
-  compatibility default of `gha_dispatch`.
+  and requirements. Trigger labels are legacy metadata and are not a dispatch
+  primitive. Native web app projects default omitted phase kinds to `k8s_job`;
+  legacy/non-native projects keep the compatibility default of `gha_dispatch`.
 - **Issue** = the canonical Glimmung issue row. GitHub Issues may still feed
   temporary backlog/tracker workflows, but the live run loop is issue-row based.
 - **Run** = durable execution record for one issue/workflow invocation. Runs
@@ -422,14 +422,14 @@ The Entra side is fully tofu-managed. The GitHub App is created via the GitHub U
 Visit https://glimmung.romaine.life/, click **sign in** (top right) — MSAL popup against the `glimmung-oauth` Entra app. Once signed in (email must be in the allowlist), click **admin** to reveal the registration tabs:
 
 - **Register project** → name + github_repo
-- **Register workflow** → project (dropdown), name, phases/native jobs, budget,
-  trigger label, requirements
 - **Register legacy host** -> name + capabilities for explicit `gha_dispatch`
   exception workflows
 
-The dashboard shows projects, workflows, leases, runs, and legacy host pools.
-Host tables are retained for self-hosted GitHub Actions exceptions, not the
-normal native web app path.
+Workflow registrations are structural control-plane data. Apply them through
+the Glimmung API/MCP workflow registration path with a full phase shape, not as
+a project-creation side effect. The dashboard shows projects, workflows, leases,
+runs, and legacy host pools. Host tables are retained for self-hosted GitHub
+Actions exceptions, not the normal native web app path.
 
 ## Running locally
 
@@ -538,32 +538,24 @@ Glimmung-as-orchestrator wedge: when a verify phase fails, glimmung re-dispatche
 
 ### Opting a workflow in
 
-Register the workflow with `retry_workflow_filename` set:
-
-```sh
-curl -X POST https://glimmung.romaine.life/v1/workflows \
-  -H "Authorization: Bearer $(az account get-access-token --resource <client-id> -o tsv --query accessToken)" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "project": "spirelens",
-    "name": "issue-agent",
-    "workflow_filename": "issue-agent.yml",
-    "retry_workflow_filename": "agent-retry.yml",
-    "trigger_label": "agent-run",
-    "default_budget": {"max_attempts": 3, "max_cost_usd": 25.0}
-  }'
-```
-
-Workflows without `retry_workflow_filename` keep the pre-#18 fire-and-forget behavior unchanged (no Run record, no decision engine, no retry path).
+Register a workflow with explicit phases, marking the verification phase with
+`verify: true` and adding `recycle_policy` on the phase or PR primitive where
+needed. The current workflow shape is documented in
+[`docs/workflow-shape.md`](docs/workflow-shape.md). Older fields such as
+`retry_workflow_filename`, `default_budget`, and trigger-label dispatch are
+retired.
 
 ### Per-issue budget overrides
 
-Apply an `agent-budget:NxM` label to the issue (`N` = max_attempts, `M` = max_cost_usd in USD). Examples:
+Apply an `agent-budget:USD` label to the issue. Examples:
 
-- `agent-budget:5x50` → 5 attempts, $50 ceiling
-- `agent-budget:1x10` → no retries, $10 ceiling
+- `agent-budget:50` -> $50 ceiling
+- `agent-budget:12.5` -> $12.50 ceiling
 
-The budget is **frozen at run-creation time** — relabeling mid-run does not move the goalposts. Resolution order: issue label → `Workflow.default_budget` → glimmung global default (3 / $25).
+The parser still accepts the old `agent-budget:NxM` spelling and uses the
+value after `x` as the dollar ceiling; new labels should use the direct total.
+
+The budget is **frozen at run-creation time** — relabeling mid-run does not move the goalposts. Resolution order: issue label → `Workflow.budget` → glimmung global default ($25).
 
 ### `verification.json` contract
 
