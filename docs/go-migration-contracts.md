@@ -21,6 +21,16 @@ The detailed cleanup inventory lives in
 - Legacy Python app: `src/glimmung` is cleanup/reference material only until
   remaining route and tooling decisions are resolved.
 
+## Documentation authority
+
+- `README.md` is the operator/developer overview for the active Go service.
+- `.github/agent/prompt.md` is the default in-repo agent contract and must keep
+  the app validation gate on Go plus the Vite dashboard.
+- `docs/workflow-shape.md` owns the workflow model and native job conventions.
+- `docs/go-runtime-cleanup-inventory.md` is the only doc that should enumerate
+  legacy Python app modules as cleanup targets.
+- `CLAUDE.md` owns architecture direction for human and agent contributors.
+
 ## API authority
 
 - Go route registration is canonical. `internal/server/route_inventory_test.go`
@@ -90,8 +100,8 @@ npm run build
 ```
 
 Pull-request app CI runs the Go gate and frontend gate. It does not install
-root Python dependencies or run the legacy FastAPI test suite. Pushes to `main`
-also run a Go-native live Cosmos smoke for the lock lifecycle.
+root Python dependencies or run the legacy Python app test suite. Pushes to
+`main` also run a Go-native live Cosmos smoke for the lock lifecycle.
 
 The repository root has no Python package metadata. Remaining Python code is
 either legacy cleanup/reference material under `src/glimmung` and `tests`, or
@@ -106,7 +116,9 @@ The Python app tree can be deleted only after:
 - Active behavior is covered by Go tests or language-neutral checks.
 - Root Python packaging stays absent; non-app Python tooling keeps packaging
   under the specific tool directory that needs it.
-- Docs and agent prompts no longer point new contributors at FastAPI,
-  `python -m glimmung`, `uv run pytest`, or Python app modules.
+- Active developer docs and agent prompts describe the Go/Node app path and do
+  not include legacy Python app commands as setup or validation instructions.
+  Cleanup inventories may still name legacy modules to track port, retire, or
+  deletion decisions.
 - PR CI has verified the production image through
   `.github/workflows/docker-build-check.yaml`.
