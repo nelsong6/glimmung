@@ -96,14 +96,15 @@ matching surface in the same PR:
 
 ## API
 
-### Lease lifecycle (capability auth via lease_id; ULID is unguessable)
+### Lease lifecycle
 
 | Method | Path                              | Purpose |
 |---|---|---|
-| POST   | `/v1/lease`                       | Acquire (`{project, workflow?, requirements, metadata}`). Returns lease + host (or pending lease if no capacity). |
-| GET    | `/v1/lease/{id}?project=<name>`   | Read a lease. Used by consumer workflows for the verify-lease step. |
-| POST   | `/v1/lease/{id}/heartbeat`        | Keep the lease alive. `?project=<name>` required. |
-| POST   | `/v1/lease/{id}/release`          | Release the lease. Idempotent. |
+| POST   | `/v1/lease`                       | Acquire (`{project, workflow?, requirements, metadata, requester}`). Admin-auth guarded; returns a public lease ref, callback token metadata, and host when capacity is immediately available. |
+| GET    | `/v1/lease-callbacks/{callback_token}` | Read the public lease by callback token. Used by runner clients. |
+| POST   | `/v1/lease-callbacks/{callback_token}/heartbeat` | Keep the lease alive. |
+| POST   | `/v1/lease-callbacks/{callback_token}/release` | Release the lease. Idempotent. |
+| POST   | `/v1/leases/cancel`               | Cancel a lease by public ref. Admin-auth guarded. |
 | GET    | `/v1/state`                       | Snapshot: hosts + workflows + projects + pending + active leases. |
 | GET    | `/v1/events`                      | Server-Sent Events stream — yields `{event: "state", data: <snapshot>}` every 2s. |
 | GET    | `/v1/config`                      | Public — `{entra_client_id, authority}` for SPA MSAL bootstrap. |
@@ -122,17 +123,16 @@ matching surface in the same PR:
 | GET    | `/v1/playbooks/{project}/{id}`    | Inspect a Playbook. |
 | POST   | `/v1/playbooks/{project}/{id}/entries/{entry_id}/gate` | Set or clear a manual Playbook entry gate; optionally advances the Playbook after clearing. |
 | POST   | `/v1/hosts`                       | Register/update a host. |
-| GET    | `/v1/issues`                      | List open issues across all registered repos (live GH API). |
-| GET    | `/v1/issues/{owner}/{repo}/{n}`   | Issue detail (title, body, labels, last-run, lock state). |
-| POST   | `/v1/runs/dispatch`               | UI-initiated dispatch (`{repo, issue_number, workflow?}`). Same path as the label-webhook trigger; per-issue lock-serialized. |
-| GET    | `/v1/runs/{project}/{run_id}/report` | Factual RunReport for one Run: attempts, cost, validation URL, screenshot markdown, and terminal status. |
-| POST   | `/v1/portfolio/elements/dispatch` | Mint a Glimmung issue from selected portfolio review rows and dispatch it through the normal issue lock/lease path. |
+| GET    | `/v1/issues`                      | List Glimmung issues across registered projects. |
+| GET    | `/v1/issues/by-number/{project}/{issue_number}` | Issue detail by canonical project issue number. |
+| POST   | `/v1/runs/dispatch`               | UI/API-initiated dispatch (`{project, issue_number, workflow_name?}`); per-issue lock-serialized. |
+| GET    | `/v1/projects/{project}/issues/{issue_number}/runs/{run_number}/report` | Factual RunReport for one Run: attempts, cost, validation URL, screenshot markdown, and terminal status. |
 | GET    | `/v1/touchpoints`                 | Touchpoint index across registered projects (GitHub PR syndication metadata + linked Issue/Run state). |
 | GET    | `/v1/projects/{project}/issues/{n}/touchpoint` | Canonical live Touchpoint summary for one Glimmung Issue. |
 | GET    | `/v1/touchpoints/{owner}/{repo}/{n}` | Compatibility Touchpoint lookup by GitHub PR coordinates. |
 | GET    | `/v1/reports`                     | Compatibility alias for `/v1/touchpoints`. |
 | GET    | `/v1/reports/{owner}/{repo}/{n}`  | Compatibility alias for `/v1/touchpoints/{owner}/{repo}/{n}`. |
-| POST   | `/v1/signals`                     | Enqueue a Signal (e.g., `{target_type:"pr", target_repo, target_id, source:"glimmung_ui", payload:{kind:"reject", feedback:"…"}}`). UI reject button uses this. |
+| POST   | `/v1/signals`                     | Enqueue a Signal (e.g., `{target_type:"pr", target_repo, target_id, source:"glimmung_ui", payload:{kind:"reject", feedback:"..."}}`). Signal drain/triage cleanup is tracked separately. |
 
 Admin endpoints accept **either** auth path:
 
@@ -147,23 +147,26 @@ The two paths are routed by the unverified `iss` claim — Microsoft issuer vs. 
 |---|---|---|
 | POST   | `/v1/webhook/github`              | Receives `issues` and `workflow_run` events. |
 
-The handler:
+The Go handler verifies `X-Hub-Signature-256` against `GITHUB_WEBHOOK_SECRET`
+when configured and acknowledges the event. Rich issue/workflow_run processing
+from the legacy app is part of the runtime cleanup inventory and should be
+ported only if live consumers still need it.
 
-1. Verifies `X-Hub-Signature-256` against `GITHUB_WEBHOOK_SECRET`.
-2. **`issues`** → match the workflow whose `trigger_label` fires for this event, then route through `dispatch_run` (see below). The label-trigger path is preserved for backward compatibility, but labels are no longer the dispatch primitive — UI dispatch is also a first-class trigger source.
-3. **`workflow_run.completed`** → pull lease_id back out of `workflow_run.inputs`, look up project by repo, call `release()`. If the originating workflow opted into the verify-loop substrate (see below), also fetch the verification artifact, run the decision engine, and either dispatch the retry workflow or abort with an issue comment. On terminal Run transitions (PASS / ABORT) or non-Run-tracked completions, also releases the per-issue lock claimed by `dispatch_run`. Belt-and-suspenders alongside any in-workflow release step. Idempotent.
-4. Other events → ignore.
+### Unified dispatch
 
-### Unified dispatch (`dispatch_run`)
+`POST /v1/runs/dispatch` is handled in
+[`internal/server/dispatch_api.go`](internal/server/dispatch_api.go), backed by
+Cosmos operations in [`internal/store/cosmos`](internal/store/cosmos). It:
 
-Both the GH webhook and the UI's `POST /v1/runs/dispatch` route through one function in [`src/glimmung/dispatch.py`](src/glimmung/dispatch.py). It:
+1. Resolves the project and workflow from Cosmos.
+2. Reads the Glimmung issue by project issue number.
+3. Claims the `("issue", "<project>#<number>")` lock; concurrent dispatches on the same issue return `state="already_running"`.
+4. Creates the Run record while the issue lock serializes run-number allocation.
+5. Acquires a lease. If no host is available, the run stays pending.
+6. Fires `workflow_dispatch` only for `gha_dispatch` phases when a host and GitHub dispatch client are available. Native `k8s_job` phases stay in the Go-managed native path.
 
-1. Resolves project (by `github_repo`) and workflow (explicit param, or the project's only registered one).
-2. Claims the `("issue", "<repo>#<number>")` lock — concurrent dispatches on the same issue serialize cleanly; the second sees `state="already_running"` without acquiring a lease or firing `workflow_dispatch`.
-3. Acquires a lease + fires `workflow_dispatch` (or returns `state="pending"` if no host capacity).
-4. Creates a `Run` record if the workflow opts into the verify-loop substrate (`retry_workflow_filename` set), with `trigger_source` recorded for W6 observability.
-
-Lock TTL = `lease_default_ttl_seconds` (4h). Release happens at terminal Run transition (PASS / ABORT) for verify-loop workflows, or at lease release for non-Run-tracked workflows. Lock + lease both expire via TTL/sweep if `workflow_run.completed` never fires.
+Issue-lock TTL is 4h. Terminal Run transitions release issue/PR locks through
+the Go store; leases still have their own TTL/callback lifecycle.
 
 ## Storage
 
@@ -186,12 +189,18 @@ Runtime pod auth via the `infra-shared-identity` workload identity, which has `C
 
 ## Lock semantics
 
-Optimistic concurrency on the host doc's `_etag`. Acquire reads matching candidates, sorts by `lastUsedAt` (NULLs first → bin-pack toward unused venues), tries each via `replace_item(match_condition=IfNotModified)`. 412 PreconditionFailed → try the next. Bounded retry; loop terminates after exhausting candidates.
+Optimistic concurrency on the host doc's `_etag`. Acquire reads matching
+candidates, sorts by `lastUsedAt` (NULLs first, so unused venues are preferred),
+tries each via ETag-protected replace, and moves to the next candidate on a
+precondition failure. The loop is bounded and terminates after exhausting
+candidates.
 
 Release paths:
 - **Fast**: workflow's own release step (if it has one).
-- **Safety net**: `workflow_run.completed` webhook handler. Covers UI-cancellation, runner-died, network blips mid-step.
-- **Backstop**: 60-second sweep on stale heartbeat (`ttl_seconds`-driven; default 4h, sized to outlast the longest known caller workflow so heartbeats are optional).
+- **Run terminal paths**: Go completion, abort, replay, and native failure
+  handlers release related issue/PR locks and update run state.
+- **Backstop**: lease TTL and stale heartbeat handling remain compatibility
+  behavior to preserve while the Python cleanup completes.
 
 ## One-time setup
 
@@ -240,15 +249,31 @@ cd frontend && npm install && npm run dev
 
 ## Tests
 
-Default test runs use the deterministic in-memory Cosmos backing:
+The default backend gate is Go:
+
+```sh
+go test ./...
+```
+
+Frontend changes should also run:
+
+```sh
+cd frontend
+npm run test:run
+npm run build
+```
+
+The legacy Python app tests still exist during the cleanup window and use the
+deterministic in-memory Cosmos backing:
 
 ```sh
 uv run --extra dev pytest
 ```
 
-GitHub Actions runs the same fake-backed app suite on pull requests and pushes.
-Pushes to `main` also run a focused live Cosmos smoke with GitHub OIDC, using
-the database-scoped CI role assignment in [`tofu/test-access.tf`](tofu/test-access.tf).
+GitHub Actions still runs the legacy fake-backed app suite until the remaining
+Python behavior is ported, deleted, or isolated. Pushes to `main` also run a
+focused live Cosmos smoke with GitHub OIDC, using the database-scoped CI role
+assignment in [`tofu/test-access.tf`](tofu/test-access.tf).
 
 To exercise the same container surface against live Cosmos, opt in with:
 
@@ -374,29 +399,36 @@ When glimmung dispatches the retry workflow, it sets:
 
 ### Decision engine
 
-Pure function `decide(run) -> RunDecision` lives in [`src/glimmung/decision.py`](src/glimmung/decision.py). Side effects (artifact fetch, Cosmos updates, workflow dispatch, issue comment) live at the call site in `app.py`. Outputs:
+Pure decision logic lives in
+[`internal/domain/decision/decision.go`](internal/domain/decision/decision.go).
+Side effects live at the server call sites, primarily
+[`internal/server/completion_api.go`](internal/server/completion_api.go) and
+[`internal/server/replay_api.go`](internal/server/replay_api.go). Outputs:
 
-- `ADVANCE` — verification passed; consumer's PR step runs.
-- `RETRY` — dispatch retry workflow with `prior_verification_artifact_url`.
-- `ABORT_BUDGET_ATTEMPTS` — `len(attempts) >= max_attempts`.
-- `ABORT_BUDGET_COST` — `cumulative_cost_usd >= max_cost_usd` (checked first; harder cap).
-- `ABORT_MALFORMED` — verification artifact missing or schema-invalid.
+- `advance` - verification passed; consumer's PR step runs.
+- `retry` - dispatch retry workflow with `prior_verification_artifact_url`.
+- `abort_budget_attempts` - `len(attempts) >= max_attempts`.
+- `abort_budget_cost` - `cumulative_cost_usd >= max_cost_usd` (checked first; harder cap).
+- `abort_malformed` - verification artifact missing or schema-invalid.
 
-Decision logic and edge-case coverage live in [`tests/test_decision.py`](tests/test_decision.py).
+Decision logic and edge-case coverage live in
+[`internal/domain/decision/decision_test.go`](internal/domain/decision/decision_test.go).
 
 ## Lock primitive (W1 substrate)
 
-Generic mutual-exclusion claim keyed by `(scope, key)`. Used by per-PR triage serialization (#19), per-issue dispatch serialization (#20), signal-drain locks, and any future critical-section need that's mutual exclusion on a logical entity (not host capacity — that's [`leases.py`](src/glimmung/leases.py), a different problem).
+Generic mutual-exclusion claims are stored in the `locks` Cosmos container and
+keyed by `(scope, key)`. Active Go callers use the primitive for per-issue
+dispatch/resume serialization and PR/issue lock release at terminal run states.
+The implementation lives in [`internal/store/cosmos`](internal/store/cosmos),
+with handler coverage in dispatch, resume, abort, and completion tests.
 
-API in [`src/glimmung/locks.py`](src/glimmung/locks.py):
+Important active operations:
 
 | Call | Behavior |
 |---|---|
-| `claim_lock(scope, key, holder_id, ttl_seconds, metadata?)` | Atomic create or take-over (when prior lock is RELEASED, EXPIRED, or HELD-but-time-expired). Raises `LockBusy(existing)` if currently held. |
-| `release_lock(scope, key, holder_id)` | Idempotent. Returns `True` if we transitioned HELD→RELEASED, `False` otherwise (not ours / already released / never existed). |
-| `extend_lock(scope, key, holder_id, ttl_seconds)` | Heartbeat. Validates holder. Raises `LockBusy` if the lock is no longer ours. |
-| `read_lock(scope, key)` | Diagnostic point-read. Returns `Lock \| None`. Doesn't normalize state for expiry. |
-| `sweep_expired_locks()` | Background loop in [`app.py`](src/glimmung/app.py); marks HELD-but-time-expired locks as EXPIRED. Cosmetic — claimers can take over directly without waiting. |
+| `ClaimIssueLock(project, issueNumber, holderID, ttlSeconds)` | Atomic create or ETag-protected take-over when the prior lock is released or expired. Returns `already_running` detail when held. |
+| `ReleaseIssueLock(project, issueNumber, holderID)` | Best-effort release for rollback and terminal paths; validates holder before transitioning to released. |
+| terminal run updates | Release issue/PR locks from stored holder fields when a run advances, aborts, or completes. |
 
 ### Doc id
 
@@ -410,31 +442,33 @@ Deterministic: `f"{scope}::{urllib.parse.quote(key, safe='')}"`. Cosmos forbids 
 
 ### Test coverage
 
-29 unit tests in [`tests/test_locks.py`](tests/test_locks.py), backed by the
-Cosmos-compatible test container at [`tests/cosmos_fake.py`](tests/cosmos_fake.py)
-so `_etag`/`IfNotModified` semantics + TTL behavior are exercised
-deterministically by default and can be re-run against live Cosmos when
-`GLIMMUNG_TEST_COSMOS=live`.
+Remaining generic lock edge cases from the Python test suite should be ported
+to Go store tests before the legacy lock module is deleted.
 
 ## Signal bus + PR triage (#19)
 
-A `Signal` is a unit of work for the orchestrator. Webhooks (`pull_request_review`, future `issue_comment` / `pull_request_review_comment`) and the glimmung UI (reject button) enqueue Signals; a background drain loop (`_signal_drain_loop` in [`app.py`](src/glimmung/app.py)) processes them through the per-target lock primitive + triage decision engine.
+`POST /v1/signals` enqueues Signal documents through
+[`internal/server/signal_api.go`](internal/server/signal_api.go) and
+[`internal/store/cosmos`](internal/store/cosmos). Signal drain, triage
+decisioning, and PR re-entry remain cleanup decisions: port them to Go if they
+are still product requirements, or retire them with explicit compatibility
+notes.
 
-**Per-PR serialization** is built in: signals on a PR whose lock is held stay PENDING and re-evaluate next tick. Two consecutive reject submissions queue cleanly — the first holds the PR lock through its triage cycle, the second waits.
+Legacy behavior to preserve if triage is ported:
 
-**Triage decision engine** ([`src/glimmung/triage.py`](src/glimmung/triage.py)) is pure: `decide_triage(signal, run) → TriageDecision`. Outputs:
+- **Per-PR serialization**: signals on a PR whose lock is held stay PENDING and
+  re-evaluate later.
+- **Triage decisioning**: non-actionable signals are ignored; actionable reject
+  feedback can create a cycle Run and dispatch the consumer triage workflow.
+- **Budget enforcement**: no-run and budget abort cases post an explanation
+  instead of dispatching more work.
 
-- `DISPATCH_TRIAGE` — create a cycle Run linked to the originating Run, claim issue + PR locks, dispatch the consumer's `triage_workflow_filename` with `feedback` as input. The PR lock is held through the triage cycle; the terminal handler releases on PASS / ABORT.
-- `IGNORE` — non-actionable signal (approved review, empty changes-requested body, etc.).
-- `ABORT_NO_RUN` / `ABORT_BUDGET_*` — posts an explanation comment to the PR; lock released immediately.
-
-Decision precedence: no-run → actionability → budget-cost → budget-attempts → DISPATCH_TRIAGE.
-
-**PR↔Run linking** is automatic: `pull_request.opened` / `pull_request.reopened` events whose body matches `Closes #N` / `Fixes #N` / `Resolves #N` link the Run for that issue to the new PR (`Run.pr_number`, `Run.pr_branch`).
+The cleanup inventory tracks whether PR webhook linking and triage workflow
+dispatch should be restored in Go.
 
 ### Triage workflow contract
 
-When glimmung dispatches `triage_workflow_filename`, it sets:
+If triage dispatch is ported, it should set:
 
 | Input | Description |
 |---|---|
@@ -447,7 +481,9 @@ When glimmung dispatches `triage_workflow_filename`, it sets:
 | `feedback`                            | Human-readable feedback text from the reject signal. |
 | `prior_verification_artifact_url`     | Empty for triage (the prior attempt PASSED to open the PR; no failure context to feed back). |
 
-The triage workflow runs impl + verify with feedback in context, force-pushes the result, and uploads `verification.json` (same contract as retry workflows — see verify-loop substrate).
+The legacy triage workflow contract runs impl + verify with feedback in
+context, force-pushes the result, and uploads `verification.json` (same
+contract as retry workflows; see verify-loop substrate).
 
 ## Phases
 
