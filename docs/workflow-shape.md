@@ -113,12 +113,11 @@ Two valid shapes for emitting a verdict at the testing boundary:
     lands_at: testing
 ```
 
-The gate primitive is glimmung-supplied — no project jobs,
-glimmung fills in the runner image + script (a small Python
-that reads `$VERIFICATION` and exits 0/1 by status). Use the
-gate when you want enforcement to be its own visible box,
-its own recycle policy, or its own budget separately from the
-verifier.
+The gate primitive is Glimmung-supplied: no project jobs, no consumer
+repository runner script. Glimmung owns the native gate image and command that
+reads `$VERIFICATION` and exits by status. Use the gate when you want
+enforcement to be its own visible box, its own recycle policy, or its own budget
+separately from the verifier.
 
 ## Naming convention
 
