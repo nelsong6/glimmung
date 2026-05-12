@@ -267,12 +267,11 @@ also run a Go-native live Cosmos smoke test for the lock lifecycle with GitHub
 OIDC, using the database-scoped CI role assignment in
 [`tofu/test-access.tf`](tofu/test-access.tf).
 
-The legacy Python app tests still exist as cleanup/reference material during
-the migration window, but they are no longer the app CI authority:
-
-```sh
-uv run --extra dev pytest
-```
+The repository root no longer carries Python packaging. The legacy
+`src/glimmung/` tree and `tests/` suite remain cleanup/reference material while
+the remaining keep/port/retire decisions are resolved, but they are not part of
+the app dev loop or CI authority. Scoped Python tooling keeps its own packaging
+under that tool directory, such as `mcp/pyproject.toml`.
 
 To exercise the Go live Cosmos smoke locally, opt in with:
 
@@ -290,8 +289,9 @@ lock name. The test deletes its lock document before and after the run.
 ## Browser inspection
 
 `mcp-glimmung` includes a generic Playwright-backed inspector for validation
-URLs. Use the MCP `inspect_browser_url` tool, or run the same implementation
-from the standalone repo:
+URLs. This is optional external tooling, not part of Glimmung's app runtime or
+local app setup. Use the MCP `inspect_browser_url` tool, or run the same
+implementation from the standalone repo:
 
 ```sh
 git clone https://github.com/nelsong6/mcp-glimmung.git

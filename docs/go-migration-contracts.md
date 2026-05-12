@@ -93,6 +93,10 @@ Pull-request app CI runs the Go gate and frontend gate. It does not install
 root Python dependencies or run the legacy FastAPI test suite. Pushes to `main`
 also run a Go-native live Cosmos smoke for the lock lifecycle.
 
+The repository root has no Python package metadata. Remaining Python code is
+either legacy cleanup/reference material under `src/glimmung` and `tests`, or
+scoped non-app tooling with its own packaging, such as `mcp/pyproject.toml`.
+
 ## Cleanup gates
 
 The Python app tree can be deleted only after:
@@ -100,11 +104,9 @@ The Python app tree can be deleted only after:
 - Route gaps in `docs/go-runtime-cleanup-inventory.md` are ported, tombstoned,
   or formally retired.
 - Active behavior is covered by Go tests or language-neutral checks.
-- Remaining root Python packaging is no longer needed for manual legacy tests
-  or migration tooling.
-- Root Python packaging is removed or moved under the specific non-app tooling
-  that still needs it.
+- Root Python packaging stays absent; non-app Python tooling keeps packaging
+  under the specific tool directory that needs it.
 - Docs and agent prompts no longer point new contributors at FastAPI,
   `python -m glimmung`, `uv run pytest`, or Python app modules.
 - PR CI has verified the production image through
-  `.github/workflows/docker-build-check.yml`.
+  `.github/workflows/docker-build-check.yaml`.
