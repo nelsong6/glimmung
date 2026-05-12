@@ -133,16 +133,10 @@ func (s NativeAuthRedirectService) now() time.Time {
 }
 
 func nativeAuthRedirectConfigFromProject(project Project) (nativeAuthRedirectConfig, bool, error) {
+	if hasLegacyNativeAuthRedirectMetadata(project.Metadata) {
+		return nativeAuthRedirectConfig{}, true, ValidationError{Message: "native_standby_entra_redirects is no longer supported; use native_auth_redirects"}
+	}
 	cfgMap, ok := mapFromMap(project.Metadata, "native_auth_redirects")
-	if !ok {
-		cfgMap, ok = mapFromMap(project.Metadata, "nativeAuthRedirects")
-	}
-	if !ok {
-		cfgMap, ok = mapFromMap(project.Metadata, "native_standby_entra_redirects")
-	}
-	if !ok {
-		cfgMap, ok = mapFromMap(project.Metadata, "nativeStandbyEntraRedirects")
-	}
 	if !ok || !boolFromMap(cfgMap, "enabled") {
 		return nativeAuthRedirectConfig{}, false, nil
 	}
@@ -154,11 +148,11 @@ func nativeAuthRedirectConfigFromProject(project Project) (nativeAuthRedirectCon
 	cfg := nativeAuthRedirectConfig{
 		Enabled:                true,
 		Provider:               firstNonEmpty(stringMapValue(cfgMap, "provider"), "entra"),
-		ApplicationObjectID:    firstNonEmpty(stringMapValue(cfgMap, "application_object_id"), stringMapValue(cfgMap, "applicationObjectId"), stringMapValue(cfgMap, "app_registration_object_id"), stringMapValue(cfgMap, "entra_application_object_id")),
-		ApplicationClientID:    firstNonEmpty(stringMapValue(cfgMap, "application_client_id"), stringMapValue(cfgMap, "applicationClientId"), stringMapValue(cfgMap, "application_app_id"), stringMapValue(cfgMap, "applicationAppId"), stringMapValue(cfgMap, "client_id"), stringMapValue(cfgMap, "app_id"), stringMapValue(cfgMap, "appId"), stringMapValue(cfgMap, "entra_client_id")),
-		RedirectURIMode:        firstNonEmpty(stringMapValue(cfgMap, "redirect_uri_mode"), stringMapValue(cfgMap, "redirectUriMode"), "spa"),
-		ProductionRedirectURIs: stringSliceFromMap(cfgMap, "production_redirect_uris", "productionRedirectUris"),
-		ExtraRedirectURIs:      stringSliceFromMap(cfgMap, "extra_redirect_uris", "extraRedirectUris"),
+		ApplicationObjectID:    stringMapValue(cfgMap, "application_object_id"),
+		ApplicationClientID:    stringMapValue(cfgMap, "application_client_id"),
+		RedirectURIMode:        firstNonEmpty(stringMapValue(cfgMap, "redirect_uri_mode"), "spa"),
+		ProductionRedirectURIs: stringSliceFromMap(cfgMap, "production_redirect_uris"),
+		ExtraRedirectURIs:      stringSliceFromMap(cfgMap, "extra_redirect_uris"),
 		RecordBase:             firstNonEmpty(stringMapValue(standby, "record_base"), stringMapValue(standby, "recordBase")),
 		SlotPrefix:             firstNonEmpty(stringMapValue(standby, "slot_prefix"), stringMapValue(standby, "slotPrefix")),
 		Count:                  nonNegativeIntMapValue(standby, "count"),
@@ -185,6 +179,16 @@ func nativeAuthRedirectConfigFromProject(project Project) (nativeAuthRedirectCon
 		return cfg, true, errors.New("native_standby_dns.slot_prefix is required")
 	}
 	return cfg, true, nil
+}
+
+func hasLegacyNativeAuthRedirectMetadata(metadata map[string]any) bool {
+	if _, ok := mapFromMap(metadata, "native_standby_entra_redirects"); ok {
+		return true
+	}
+	if _, ok := mapFromMap(metadata, "nativeStandbyEntraRedirects"); ok {
+		return true
+	}
+	return false
 }
 
 func desiredManagedRedirectURIs(cfg nativeAuthRedirectConfig) []string {

@@ -45,6 +45,10 @@ func registerProject(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusUnprocessableEntity, "github_repo is required")
 			return
 		}
+		if hasLegacyNativeAuthRedirectMetadata(req.Metadata) {
+			writeProblem(w, http.StatusUnprocessableEntity, "native_standby_entra_redirects is no longer supported; use native_auth_redirects")
+			return
+		}
 
 		project, err := writer.UpsertProject(r.Context(), ProjectRegister{
 			Name:       *req.Name,

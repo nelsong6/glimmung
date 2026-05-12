@@ -66,6 +66,7 @@ config:
 # the pod's SA `system:auth-delegator`, leaving Entra as the only admin path.
 k8sSaAuth:
   enabled: true
+  allowlist: tank-operator/tank-operator
 
 # Cosmos DB — endpoint of the shared serverless account, database is glimmung's own.
 cosmos:

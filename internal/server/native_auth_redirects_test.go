@@ -113,8 +113,8 @@ func TestNativeAuthRedirectsSkippedWhenDisabled(t *testing.T) {
 	}
 }
 
-func TestNativeAuthRedirectsAcceptsLegacyStandbyEntraMetadata(t *testing.T) {
-	cfg, ok, err := nativeAuthRedirectConfigFromProject(Project{
+func TestNativeAuthRedirectsRejectsLegacyStandbyEntraMetadata(t *testing.T) {
+	_, ok, err := nativeAuthRedirectConfigFromProject(Project{
 		Name: "tank-operator",
 		Metadata: map[string]any{
 			"native_standby_dns": map[string]any{
@@ -128,14 +128,11 @@ func TestNativeAuthRedirectsAcceptsLegacyStandbyEntraMetadata(t *testing.T) {
 			},
 		},
 	})
-	if err != nil || !ok {
-		t.Fatalf("ok=%v err=%v cfg=%#v", ok, err, cfg)
+	if err == nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
 	}
-	if cfg.ApplicationClientID != "c189a2aa-adf8-466b-a699-156cbfd9810c" {
-		t.Fatalf("cfg=%#v", cfg)
-	}
-	if got := desiredManagedRedirectURIs(cfg); len(got) != 10 || got[9] != "https://tank-operator-slot-10.tank.dev.romaine.life/" {
-		t.Fatalf("managed=%#v", got)
+	if err.Error() != "native_standby_entra_redirects is no longer supported; use native_auth_redirects" {
+		t.Fatalf("err=%v", err)
 	}
 }
 
