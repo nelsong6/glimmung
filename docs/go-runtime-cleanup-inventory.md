@@ -14,6 +14,11 @@ helper under `mcp/glimmung_agent` or one-off migration scripts, if that tooling
 keeps its packaging outside the repo root and is documented as not part of the
 production service.
 
+The root `pyproject.toml` has been removed. `mcp/pyproject.toml` is the scoped
+package for the cleanup workflow helper, and any future Python tooling should
+follow that narrow packaging pattern instead of reintroducing repo-root app
+dependencies.
+
 ## Route authority
 
 The active HTTP route inventory is now Go-owned by
@@ -39,7 +44,8 @@ FastAPI test suite. The push-only live Cosmos smoke has been moved to
 `GLIMMUNG_TEST_COSMOS=live`.
 
 The root Python suite remains as cleanup/reference material until individual
-behaviors are ported, retired, or moved to scoped tooling.
+behaviors are ported, retired, or moved to scoped tooling, but it no longer has
+repo-root packaging or app CI authority.
 
 ## Route parity notes
 
