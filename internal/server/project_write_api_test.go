@@ -82,6 +82,28 @@ func TestRegisterProjectValidatesRequiredFields(t *testing.T) {
 	}
 }
 
+func TestRegisterProjectRejectsLegacyNativeAuthRedirectMetadata(t *testing.T) {
+	handler := NewWithDependencies(
+		Settings{},
+		&fakeProjectStore{},
+		fakeAdminAuthenticator{user: auth.User{Sub: "admin"}},
+	)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/projects", strings.NewReader(`{
+		"name":"tank-operator",
+		"github_repo":"nelsong6/tank-operator",
+		"metadata":{"native_standby_entra_redirects":{"enabled":true,"application_app_id":"client"}}
+	}`)))
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "native_auth_redirects") {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
 func TestRegisterProjectStoreErrorsReturn500(t *testing.T) {
 	handler := NewWithDependencies(
 		Settings{},

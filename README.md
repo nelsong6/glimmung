@@ -168,7 +168,7 @@ surface rather than every compatibility tombstone.
 Admin endpoints accept **either** auth path:
 
 - **Entra ID** — humans + CLI. `az account get-access-token --resource <client-id>` mints a token; backend validates it via JWKS and checks the email claim against `ALLOWED_EMAILS`. The dashboard uses MSAL.js to do the same thing.
-- **K8s service-account token** — in-cluster callers (tank-operator, future agents). The pod presents its projected SA token as `Authorization: Bearer <token>`; backend validates it via `TokenReview` against the cluster API server and checks the resolved `system:serviceaccount:<ns>:<name>` against `K8S_SA_ALLOWLIST` (default `tank-operator/tank-operator`). Glimmung's pod SA is bound to `system:auth-delegator` ([k8s/templates/auth-delegator.yaml](k8s/templates/auth-delegator.yaml)) so the review call is permitted. Same RBAC primitive the mcp-* deployments use; the validation runs in-app instead of via a kube-rbac-proxy sidecar because glimmung's listener is publicly exposed.
+- **K8s service-account token** — in-cluster callers (tank-operator, future agents). The pod presents its projected SA token as `Authorization: Bearer <token>`; backend validates it via `TokenReview` against the cluster API server and checks the resolved `system:serviceaccount:<ns>:<name>` against `K8S_SA_ALLOWLIST` (Helm default `tank-operator/tank-operator`). Glimmung's pod SA is bound to `system:auth-delegator` ([k8s/templates/auth-delegator.yaml](k8s/templates/auth-delegator.yaml)) so the review call is permitted. Same RBAC primitive the mcp-* deployments use; the validation runs in-app instead of via a kube-rbac-proxy sidecar because glimmung's listener is publicly exposed.
 
 The two paths are routed by the unverified `iss` claim — Microsoft issuer vs. cluster issuer — and each goes through its own validator. To allowlist additional SAs, set `K8S_SA_ALLOWLIST="ns1/sa1,ns2/sa2"`.
 
@@ -211,9 +211,8 @@ portal entries. Reconciliation diagnostics are written to
 `metadata.native_auth_redirects_status` so `/v1/projects` and `/v1/state`
 show whether auth redirect sync is `ok` or `failed`.
 
-For existing project rows, Glimmung also accepts the earlier
-`metadata.native_standby_entra_redirects.application_app_id` shape as the Entra
-application client id.
+`native_standby_entra_redirects` is not accepted. Use `native_auth_redirects`
+for all native webapp auth redirect reconciliation.
 
 ### GitHub webhook
 

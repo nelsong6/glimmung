@@ -75,6 +75,10 @@ spec:
               value: {{ .Values.artifacts.storageAccount | quote }}
             - name: ARTIFACTS_CONTAINER
               value: {{ .Values.artifacts.container | quote }}
+{{ if .Values.k8sSaAuth.enabled }}
+            - name: K8S_SA_ALLOWLIST
+              value: {{ .Values.k8sSaAuth.allowlist | quote }}
+{{ end }}
           envFrom:
             - configMapRef:
                 name: {{ .Values.config.name }}
