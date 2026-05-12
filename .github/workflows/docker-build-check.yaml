@@ -30,7 +30,7 @@ jobs:
             context: .
             cache-ref: romainecr.azurecr.io/glimmung-build-cache:app
             image-repo: glimmung
-            fingerprint-paths: Dockerfile .dockerignore pyproject.toml src frontend/package.json frontend/package-lock.json frontend/index.html frontend/src frontend/tsconfig.json frontend/vite.config.ts design-system
+            fingerprint-paths: Dockerfile .dockerignore go.mod go.sum cmd internal frontend/package.json frontend/package-lock.json frontend/index.html frontend/src frontend/tsconfig.json frontend/vite.config.ts design-system
     steps:
       - name: Checkout
         uses: actions/checkout@v4

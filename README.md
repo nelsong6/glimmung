@@ -67,13 +67,13 @@ See [Repo UI Packages And Design Portfolios](docs/ui-package-design-portfolios.m
 ## Layout
 
 ```
-src/glimmung/         # FastAPI app, Cosmos client, lease lifecycle, GH webhook
-cmd/glimmung-go/      # Shadow Go HTTP entrypoint for migrated surfaces
-internal/             # Go domain/server packages used by migration pilots
+cmd/glimmung-go/      # Go HTTP entrypoint used by the production image
+internal/             # Go domain/server/store packages
+src/glimmung/         # Legacy Python implementation retained during cleanup
 frontend/             # Vite + React dashboard (live SSE state, MSAL admin)
 k8s/                  # Helm chart, ArgoCD-synced from main
 tofu/                 # Cosmos database + containers + Entra app reg
-Dockerfile            # multi-stage: node frontend build → python backend
+Dockerfile            # multi-stage: node frontend build -> Go backend
 .github/workflows/    # build + ACR push + chart bump + tofu plan/apply
 ```
 
@@ -226,10 +226,9 @@ The dashboard's left sidebar shows projects expandable into their workflows. Cli
 ## Running locally
 
 ```sh
-pip install -e ".[dev]"
 az login                                 # for DefaultAzureCredential
 COSMOS_ENDPOINT=https://infra-cosmos-serverless.documents.azure.com:443/ \
-  python -m glimmung
+  go run ./cmd/glimmung-go
 ```
 
 For the frontend:

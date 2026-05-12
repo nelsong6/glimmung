@@ -12,14 +12,20 @@ COPY design-system /design-system
 COPY frontend/ ./
 RUN npm run build
 
-FROM python:3.12-slim AS backend
+FROM golang:1.23-alpine AS backend
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd ./cmd
+COPY internal ./internal
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/glimmung ./cmd/glimmung-go
+
+FROM alpine:3.21 AS runtime
+RUN apk add --no-cache ca-certificates
 WORKDIR /app
-ENV PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1
-COPY pyproject.toml ./
-COPY src ./src
-RUN pip install --no-cache-dir .
+COPY --from=backend /out/glimmung /app/glimmung
 COPY --from=frontend /frontend/dist /app/static
 ENV GLIMMUNG_STATIC_DIR=/app/static
 EXPOSE 8000
 USER 1000
-CMD ["python", "-m", "glimmung"]
+CMD ["/app/glimmung"]
