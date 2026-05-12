@@ -2269,6 +2269,13 @@ h2 .inline-action,
 .test-env-scale input {
   width: 82px;
 }
+.test-env-auth-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg-muted);
+  font-size: 0.78rem;
+}
 
 /* Upstream sync (`.glimmung/workflows/<name>.yaml` -> Cosmos).
    Pairs with /v1/projects/{project}/workflows/{name}/{upstream,sync}. */

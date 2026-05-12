@@ -15,10 +15,12 @@ import (
 
 type fakeProjectScalerStore struct {
 	fakeReadStore
-	project Project
-	name    string
-	count   int
-	err     error
+	project   Project
+	name      string
+	count     int
+	status    *NativeAuthRedirectStatus
+	statusErr error
+	err       error
 }
 
 func (s *fakeProjectScalerStore) SetProjectTestEnvironmentCount(_ context.Context, project string, count int) (Project, error) {
@@ -28,6 +30,24 @@ func (s *fakeProjectScalerStore) SetProjectTestEnvironmentCount(_ context.Contex
 		return Project{}, s.err
 	}
 	return s.project, nil
+}
+
+func (s *fakeProjectScalerStore) SetProjectNativeAuthRedirectStatus(_ context.Context, project string, status NativeAuthRedirectStatus) (Project, error) {
+	if s.statusErr != nil {
+		return Project{}, s.statusErr
+	}
+	s.status = &status
+	s.project.Metadata["native_auth_redirects_status"] = status
+	return s.project, nil
+}
+
+type fakeNativeAuthRedirectReconciler struct {
+	status NativeAuthRedirectStatus
+	err    error
+}
+
+func (r fakeNativeAuthRedirectReconciler) ReconcileNativeAuthRedirects(context.Context, Project) (NativeAuthRedirectStatus, error) {
+	return r.status, r.err
 }
 
 func TestScaleProjectTestEnvironmentsRequiresAdmin(t *testing.T) {
@@ -64,6 +84,38 @@ func TestScaleProjectTestEnvironmentsUpdatesCount(t *testing.T) {
 		t.Fatalf("name=%q count=%d", store.name, store.count)
 	}
 	if project.Metadata["native_standby_dns"] == nil {
+		t.Fatalf("metadata=%#v", project.Metadata)
+	}
+}
+
+func TestScaleProjectTestEnvironmentsPersistsAuthRedirectStatus(t *testing.T) {
+	store := &fakeProjectScalerStore{project: Project{
+		ID:         "tank",
+		Name:       "tank",
+		GitHubRepo: "nelsong6/tank-operator",
+		Metadata: map[string]any{
+			"native_standby_dns": map[string]any{"count": float64(4)},
+		},
+	}}
+	handler := newHandler(
+		Settings{},
+		store,
+		fakeAdminAuthenticator{user: auth.User{Sub: "admin"}},
+		nil,
+		fakeNativeAuthRedirectReconciler{status: NativeAuthRedirectStatus{
+			State:               NativeAuthRedirectStatusOK,
+			DesiredCount:        4,
+			ManagedRedirectURIs: []string{"https://tank-slot-1.tank.dev.romaine.life/"},
+		}},
+	)
+
+	var project Project
+	patchJSON(t, handler, "/v1/projects/tank/test-environments/count", `{"count":4}`, &project)
+
+	if store.status == nil || store.status.State != NativeAuthRedirectStatusOK {
+		t.Fatalf("status=%#v", store.status)
+	}
+	if project.Metadata["native_auth_redirects_status"] == nil {
 		t.Fatalf("metadata=%#v", project.Metadata)
 	}
 }
