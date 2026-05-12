@@ -24,6 +24,23 @@ an intentional inventory update.
 `tests/test_api_contract_inventory.py` has been removed because it imported the
 legacy FastAPI app and made the Python app route table look canonical.
 
+## App CI authority
+
+The default app CI gate is now Go and frontend-native:
+
+- `go test ./...`
+- `go vet ./...`
+- `npm run test:run` from `frontend/`
+- `npm run build` from `frontend/`
+
+Pull-request CI does not install root Python dependencies or run the legacy
+FastAPI test suite. The push-only live Cosmos smoke has been moved to
+`internal/store/cosmos` and exercises the Go lock lifecycle with
+`GLIMMUNG_TEST_COSMOS=live`.
+
+The root Python suite remains as cleanup/reference material until individual
+behaviors are ported, retired, or moved to scoped tooling.
+
 ## Route parity notes
 
 Most active routes are registered by the Go server. The rows below call out the
@@ -111,7 +128,7 @@ still needs a keep/port/delete decision.
 | `tests/test_issues.py` | Replace with Go issue store/API tests. |
 | `tests/test_job_level_dispatch.py` | Port if native job dispatch behavior remains active. |
 | `tests/test_leases_sweep.py` | Port only if Go keeps a sweep loop; otherwise delete as obsolete. |
-| `tests/test_live_cosmos_smoke.py` | Port to Go live Cosmos smoke if still useful. |
+| `tests/test_live_cosmos_smoke.py` | Replaced by `internal/store/cosmos.TestLiveCosmosLockLifecycle` for the live lock smoke. |
 | `tests/test_locks.py` | Port remaining generic lock edge cases to Go store tests. |
 | `tests/test_mandatory_phases.py` | Replace with Go workflow validation tests. |
 | `tests/test_native_events.py` | Replace with Go native event/status tests. |
