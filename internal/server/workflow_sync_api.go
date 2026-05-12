@@ -80,7 +80,12 @@ func syncWorkflow(store ReadStore, ghClient WorkflowSyncClient) http.HandlerFunc
 			return
 		}
 		reg := *result.Upstream
-		if err := validateWorkflowAllowedForProject(*findProjectForSync(r.Context(), store, project), reg); err != nil {
+		projectDoc := findProjectForSync(r.Context(), store, project)
+		if projectDoc == nil {
+			writeProblem(w, http.StatusNotFound, fmt.Sprintf("project %q does not exist", project))
+			return
+		}
+		if err := validateWorkflowAllowedForProject(*projectDoc, reg); err != nil {
 			writeProblem(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -155,7 +160,7 @@ func fetchUpstreamResult(
 		}, nil
 	}
 
-	upstream, err := parseWorkflowYAML(raw, project, name)
+	upstream, err := parseWorkflowYAML(raw, project, name, workflowDefaultPhaseKind(*proj))
 	if err != nil {
 		return nil, &upstreamError{http.StatusUnprocessableEntity, fmt.Sprintf("parse workflow upstream: %s", err)}
 	}
@@ -201,7 +206,7 @@ func readCurrentWorkflow(ctx context.Context, store ReadStore, project, name str
 }
 
 // parseWorkflowYAML parses YAML bytes as a WorkflowRegister, filling in project and name.
-func parseWorkflowYAML(data []byte, project, name string) (WorkflowRegister, error) {
+func parseWorkflowYAML(data []byte, project, name, defaultPhaseKind string) (WorkflowRegister, error) {
 	var raw map[string]any
 	if err := yaml.Unmarshal(data, &raw); err != nil {
 		return WorkflowRegister{}, fmt.Errorf("invalid YAML: %w", err)
@@ -219,7 +224,7 @@ func parseWorkflowYAML(data []byte, project, name string) (WorkflowRegister, err
 	if err := json.Unmarshal(b, &reg); err != nil {
 		return WorkflowRegister{}, fmt.Errorf("unmarshal workflow register: %w", err)
 	}
-	normalizeWorkflowRegister(&reg)
+	normalizeWorkflowRegisterWithDefaultKind(&reg, defaultPhaseKind)
 	return reg, nil
 }
 

@@ -35,7 +35,9 @@ Project -> Workflow -> Issue -> Run -> Phase/Job -> Report
 - **Project** = a repo (e.g. `spirelens`), declares the github_repo only.
 - **Workflow** = a database-backed automation shape under a project. Dispatch
   reads the Workflow row from Cosmos: phases, native jobs, PR policy, budget,
-  trigger label if any, and requirements.
+  trigger label if any, and requirements. Native web app projects default
+  omitted phase kinds to `k8s_job`; legacy/non-native projects keep the
+  compatibility default of `gha_dispatch`.
 - **Issue** = the canonical Glimmung issue row. GitHub Issues may still feed
   temporary backlog/tracker workflows, but the live run loop is issue-row based.
 - **Run** = durable execution record for one issue/workflow invocation. Runs
@@ -262,9 +264,12 @@ Visit https://glimmung.romaine.life/, click **sign in** (top right) — MSAL pop
 - **Register project** → name + github_repo
 - **Register workflow** → project (dropdown), name, phases/native jobs, budget,
   trigger label, requirements
-- **Register host** → name + capabilities
+- **Register legacy host** -> name + capabilities for explicit `gha_dispatch`
+  exception workflows
 
-The dashboard's left sidebar shows projects expandable into their workflows. Clicking a workflow filters the lease tables and highlights eligible hosts.
+The dashboard shows projects, workflows, leases, runs, and legacy host pools.
+Host tables are retained for self-hosted GitHub Actions exceptions, not the
+normal native web app path.
 
 ## Running locally
 

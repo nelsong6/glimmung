@@ -50,7 +50,6 @@ func registerWorkflow(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusBadRequest, "invalid JSON body")
 			return
 		}
-		normalizeWorkflowRegister(&req)
 		project, ok, err := lookupProject(r.Context(), store, req.Project)
 		if err != nil {
 			writeProblem(w, http.StatusInternalServerError, "read project failed")
@@ -60,6 +59,7 @@ func registerWorkflow(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusBadRequest, "project "+req.Project+" does not exist; register it first")
 			return
 		}
+		normalizeWorkflowRegisterForProject(&req, project)
 		if err := validateWorkflowAllowedForProject(project, req); err != nil {
 			writeProblem(w, http.StatusBadRequest, err.Error())
 			return
@@ -132,14 +132,26 @@ func deleteWorkflow(store ReadStore) http.HandlerFunc {
 }
 
 func normalizeWorkflowRegister(req *WorkflowRegister) {
+	normalizeWorkflowRegisterWithDefaultKind(req, "gha_dispatch")
+}
+
+func normalizeWorkflowRegisterForProject(req *WorkflowRegister, project Project) {
+	normalizeWorkflowRegisterWithDefaultKind(req, workflowDefaultPhaseKind(project))
+}
+
+func normalizeWorkflowRegisterWithDefaultKind(req *WorkflowRegister, defaultKind string) {
+	if strings.TrimSpace(defaultKind) == "" {
+		defaultKind = "gha_dispatch"
+	}
 	if req.Budget.Total == 0 {
 		req.Budget = budget.DefaultConfig()
 	}
 	req.DefaultRequirements = mapOrEmpty(req.DefaultRequirements)
 	req.Metadata = mapOrEmpty(req.Metadata)
 	for i := range req.Phases {
+		req.Phases[i].Kind = strings.TrimSpace(req.Phases[i].Kind)
 		if req.Phases[i].Kind == "" {
-			req.Phases[i].Kind = "gha_dispatch"
+			req.Phases[i].Kind = defaultKind
 		}
 		if req.Phases[i].WorkflowRef == "" {
 			req.Phases[i].WorkflowRef = "main"
@@ -151,6 +163,13 @@ func normalizeWorkflowRegister(req *WorkflowRegister) {
 		req.Phases[i].DependsOn = sliceOrEmpty(req.Phases[i].DependsOn)
 		req.Phases[i].Jobs = sliceOrEmpty(req.Phases[i].Jobs)
 	}
+}
+
+func workflowDefaultPhaseKind(project Project) string {
+	if projectRequiresNativeWorkflows(project) {
+		return "k8s_job"
+	}
+	return "gha_dispatch"
 }
 
 func lookupProject(ctx context.Context, store ReadStore, name string) (Project, bool, error) {
@@ -171,7 +190,7 @@ func validateWorkflowAllowedForProject(project Project, req WorkflowRegister) er
 		return nil
 	}
 	for _, phase := range req.Phases {
-		if phase.Kind != "k8s_job" {
+		if strings.TrimSpace(phase.Kind) != "k8s_job" {
 			return ValidationError{Message: "project is marked native_webapp; workflow phases must use kind='k8s_job' instead of GitHub Actions dispatch"}
 		}
 	}
@@ -186,9 +205,21 @@ func projectRequiresNativeWorkflows(project Project) bool {
 	kind := strings.ToLower(firstNonEmpty(
 		stringValue(metadata["app_kind"]),
 		stringValue(metadata["appKind"]),
+		stringValue(metadata["app_type"]),
+		stringValue(metadata["appType"]),
 		stringValue(metadata["kind"]),
 	))
-	return kind == "native_webapp" || kind == "native-webapp" || kind == "native webapp"
+	return isNativeWebappKind(kind)
+}
+
+func isNativeWebappKind(kind string) bool {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "native_webapp", "native-webapp", "native webapp",
+		"native_web_app", "native-web-app", "native web app":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateMandatoryPhases(req WorkflowRegister) error {

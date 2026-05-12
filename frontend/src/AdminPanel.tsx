@@ -25,7 +25,7 @@ export function AdminPanel({ projects, onSuccess }: Props) {
             className={`tab ${tab === t ? "selected" : ""}`}
             onClick={() => setTab(t)}
           >
-            {t === "issue" ? "Create issue" : `Register ${t}`}
+            {t === "issue" ? "create issue" : t === "host" ? "register legacy host" : `register ${t}`}
           </button>
         ))}
       </div>
@@ -84,7 +84,7 @@ function ProjectForm({ onSuccess }: { onSuccess: () => void }) {
       </label>
       {error && <div className="error">{error}</div>}
       <button type="submit" disabled={busy}>
-        {busy ? "Submitting…" : "Register"}
+        {busy ? "submitting..." : "register"}
       </button>
     </form>
   );
@@ -132,7 +132,7 @@ function WorkflowForm({ projects, onSuccess }: { projects: Project[]; onSuccess:
   };
 
   if (projects.length === 0) {
-    return <div className="admin-form"><div className="error">Register a project first.</div></div>;
+    return <div className="admin-form"><div className="error">register a project first.</div></div>;
   }
 
   return (
@@ -173,7 +173,7 @@ function WorkflowForm({ projects, onSuccess }: { projects: Project[]; onSuccess:
       </label>
       {error && <div className="error">{error}</div>}
       <button type="submit" disabled={busy}>
-        {busy ? "Submitting…" : "Register"}
+        {busy ? "submitting..." : "register"}
       </button>
     </form>
   );
@@ -217,7 +217,7 @@ function IssueForm({ projects, onSuccess }: { projects: Project[]; onSuccess: ()
   };
 
   if (projects.length === 0) {
-    return <div className="admin-form"><div className="error">Register a project first.</div></div>;
+    return <div className="admin-form"><div className="error">register a project first.</div></div>;
   }
 
   return (
@@ -251,7 +251,7 @@ function IssueForm({ projects, onSuccess }: { projects: Project[]; onSuccess: ()
       </label>
       {error && <div className="error">{error}</div>}
       <button type="submit" disabled={busy}>
-        {busy ? "Submitting…" : "Create"}
+        {busy ? "creating..." : "create"}
       </button>
     </form>
   );
@@ -304,7 +304,7 @@ function HostForm({ onSuccess }: { onSuccess: () => void }) {
       </label>
       {error && <div className="error">{error}</div>}
       <button type="submit" disabled={busy}>
-        {busy ? "Submitting…" : "Register"}
+        {busy ? "submitting..." : "register legacy host"}
       </button>
     </form>
   );

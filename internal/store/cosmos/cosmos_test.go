@@ -129,6 +129,53 @@ func TestWorkflowFromDocRespectsExplicitDependsOn(t *testing.T) {
 	}
 }
 
+func TestNormalizeWorkflowRegisterForNativeWebappProjectDefaultsToK8sJob(t *testing.T) {
+	req := server.WorkflowRegister{
+		Project: "glimmung",
+		Name:    "agent-run",
+		Phases: []server.PhaseSpec{
+			{Name: "prepare"},
+			{Name: "test", Verify: true},
+			{Name: "cleanup", Always: true},
+		},
+	}
+	project := projectDoc{
+		Name:     "glimmung",
+		Metadata: map[string]any{"app_type": "native_web_app"},
+	}
+
+	normalizeWorkflowRegisterForProjectDoc(&req, project)
+
+	for _, phase := range req.Phases {
+		if phase.Kind != "k8s_job" {
+			t.Fatalf("phase %q kind=%q, want k8s_job", phase.Name, phase.Kind)
+		}
+	}
+	if err := validateWorkflowForProject(project, req); err != nil {
+		t.Fatalf("validateWorkflowForProject: %v", err)
+	}
+}
+
+func TestValidateWorkflowForNativeWebappProjectRejectsExplicitGHA(t *testing.T) {
+	req := server.WorkflowRegister{
+		Project: "glimmung",
+		Name:    "agent-run",
+		Phases: []server.PhaseSpec{
+			{Name: "prepare", Kind: "gha_dispatch"},
+			{Name: "test", Kind: "k8s_job", Verify: true},
+			{Name: "cleanup", Kind: "k8s_job", Always: true},
+		},
+	}
+	project := projectDoc{
+		Name:     "glimmung",
+		Metadata: map[string]any{"app_type": "native_web_app"},
+	}
+
+	if err := validateWorkflowForProject(project, req); err == nil {
+		t.Fatal("validateWorkflowForProject succeeded, want error")
+	}
+}
+
 func TestHostFromDocConvertsLeaseAndTimes(t *testing.T) {
 	raw := []byte(`{
 		"id": "runner-1",

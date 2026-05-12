@@ -55,11 +55,14 @@ Glimmung-managed workflows must declare:
 Any number of `work` phases between prepare and testing — that's
 where the actual implementation happens.
 
-The mandatory-phase enforcement is opinionated; future glimmung
-versions will reject registrations that don't match. Until the
-enforcement lands (depends on a test-fixture migration), the
-pattern is the recommended convention rather than a hard
-requirement.
+The mandatory-phase enforcement is active in the Go workflow writer and sync
+path. Registrations that miss an entry phase, a testing phase, or an always-run
+cleanup phase are rejected before they can become the project runtime contract.
+
+For native web app projects, blank phase `kind` values default to `k8s_job`.
+Legacy or non-native projects keep the backward-compatible blank-kind default
+of `gha_dispatch`, but those phases are explicit exception support, not the
+normal path for new web-native work.
 
 ## Job-level concurrency within a phase
 
@@ -132,6 +135,13 @@ The reference names for the four mandatory phases are:
 Projects may use other names; these are the canonical defaults.
 The MCP `scaffold_workflow` tool (TODO) emits a starter template
 with these names pre-filled.
+
+## Runtime source of truth
+
+Cosmos workflow registrations are the runtime source of truth. The
+`.glimmung/workflows/<name>.yaml` upstream endpoints remain an import/sync
+convenience for older desired-state flows, but dispatch reads the registered
+workflow document, not a consumer repository file.
 
 ## Path-typed identity
 

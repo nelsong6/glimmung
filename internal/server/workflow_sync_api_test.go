@@ -90,6 +90,24 @@ phases:
     jobs: []
 `)
 
+var nativeWorkflowYAMLOmittedKind = []byte(`
+phases:
+  - name: entry
+    workflow_filename: run.yaml
+    depends_on: []
+    jobs: []
+  - name: test
+    workflow_filename: verify.yaml
+    verify: true
+    depends_on: [entry]
+    jobs: []
+  - name: cleanup
+    workflow_filename: cleanup.yaml
+    always: true
+    depends_on: []
+    jobs: []
+`)
+
 func TestGetWorkflowUpstream(t *testing.T) {
 	store := &fakeWorkflowSyncStore{
 		projects: []Project{{Name: "myproject", GitHubRepo: "nelsong6/myproject"}},
@@ -154,6 +172,58 @@ func TestSyncWorkflow(t *testing.T) {
 	}
 }
 
+func TestSyncWorkflowNativeWebappDefaultsOmittedKindsToK8sJob(t *testing.T) {
+	store := &fakeWorkflowSyncStore{
+		projects: []Project{{Name: "myproject", GitHubRepo: "nelsong6/myproject", Metadata: map[string]any{"app_type": "native_web_app"}}},
+	}
+	client := &fakeWorkflowSyncClient{content: nativeWorkflowYAMLOmittedKind, statusCode: 200}
+	handler := newHandlerWithSyncClientAdmin(store, client)
+	req := httptest.NewRequest(http.MethodPost, "/v1/projects/myproject/workflows/agent-run/sync", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.upserted == nil {
+		t.Fatalf("expected workflow to be upserted")
+	}
+	for _, phase := range store.upserted.Phases {
+		if phase.Kind != "k8s_job" {
+			t.Fatalf("phase %q kind=%q, want k8s_job", phase.Name, phase.Kind)
+		}
+	}
+}
+
+func TestSyncWorkflowNativeWebappRejectsExplicitGHA(t *testing.T) {
+	store := &fakeWorkflowSyncStore{
+		projects: []Project{{Name: "myproject", GitHubRepo: "nelsong6/myproject", Metadata: map[string]any{"app_type": "native_web_app"}}},
+	}
+	client := &fakeWorkflowSyncClient{content: []byte(`
+phases:
+  - name: entry
+    kind: gha_dispatch
+  - name: test
+    kind: k8s_job
+    verify: true
+    depends_on: [entry]
+  - name: cleanup
+    kind: k8s_job
+    always: true
+`), statusCode: 200}
+	handler := newHandlerWithSyncClientAdmin(store, client)
+	req := httptest.NewRequest(http.MethodPost, "/v1/projects/myproject/workflows/agent-run/sync", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.upserted != nil {
+		t.Fatalf("workflow should not be upserted")
+	}
+}
+
 func TestSyncWorkflowAlreadyInSync(t *testing.T) {
 	phases := []PhaseSpec{
 		{Name: "entry", Kind: "k8s_job", WorkflowFilename: "run.yaml", WorkflowRef: "main", Inputs: map[string]string{}, Outputs: []string{}, DependsOn: []string{}, Jobs: []NativeJobSpec{}},
@@ -187,7 +257,7 @@ func TestSyncWorkflowAlreadyInSync(t *testing.T) {
 }
 
 func TestParseWorkflowYAML(t *testing.T) {
-	reg, err := parseWorkflowYAML(exampleWorkflowYAML, "testproject", "my-workflow")
+	reg, err := parseWorkflowYAML(exampleWorkflowYAML, "testproject", "my-workflow", "gha_dispatch")
 	if err != nil {
 		t.Fatalf("parseWorkflowYAML error: %v", err)
 	}
@@ -196,6 +266,16 @@ func TestParseWorkflowYAML(t *testing.T) {
 	}
 	if len(reg.Phases) != 3 {
 		t.Fatalf("expected 3 phases, got %d", len(reg.Phases))
+	}
+}
+
+func TestParseWorkflowYAMLUsesProvidedDefaultPhaseKind(t *testing.T) {
+	reg, err := parseWorkflowYAML(nativeWorkflowYAMLOmittedKind, "testproject", "my-workflow", "k8s_job")
+	if err != nil {
+		t.Fatalf("parseWorkflowYAML error: %v", err)
+	}
+	if reg.Phases[0].Kind != "k8s_job" || reg.Phases[1].Kind != "k8s_job" || reg.Phases[2].Kind != "k8s_job" {
+		t.Fatalf("phase kinds=%#v", reg.Phases)
 	}
 }
 

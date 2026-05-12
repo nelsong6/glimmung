@@ -1055,7 +1055,7 @@ function ProjectsView({ snap }: LayoutContext) {
               <th>Workflows</th>
               <th>Test leases</th>
               <th>Agent leases</th>
-              <th>Hosts</th>
+              <th>Legacy hosts</th>
             </tr>
           </thead>
           <tbody>
@@ -1066,8 +1066,8 @@ function ProjectsView({ snap }: LayoutContext) {
               const leases = [...active, ...pending];
               const testLeases = leases.filter((l) => leaseKind(l) === "test");
               const agentLeases = leases.filter((l) => leaseKind(l) === "agent");
-              const isNativeK8sProject = project.metadata.native_webapp === true || project.metadata.app_kind === "native_webapp";
-              const activeHosts = new Set(active.flatMap((l) => (l.host ? [l.host] : [])));
+              const isNativeK8sProject = projectUsesNativeWorkflows(project);
+              const activeHosts = new Set(isNativeK8sProject ? [] : active.flatMap((l) => (l.host ? [l.host] : [])));
               return (
                 <tr key={project.id}>
                   <td>
@@ -1134,12 +1134,12 @@ function ProjectView({
   const testLeases = projectLeases.filter((l) => leaseKind(l) === "test");
   const agentLeases = projectLeases.filter((l) => leaseKind(l) === "agent");
   const projectPath = `/projects/${encodeURIComponent(project.name)}`;
-  const isNativeK8sProject = project.metadata.native_webapp === true || project.metadata.app_kind === "native_webapp";
+  const isNativeK8sProject = projectUsesNativeWorkflows(project);
 
   const nonEmptyReqs = workflows
     .map((w) => w.default_requirements)
     .filter((r) => Object.keys(r).length > 0);
-  const hasHosts = snap.hosts.some((h) =>
+  const hasHosts = !isNativeK8sProject && snap.hosts.some((h) =>
     nonEmptyReqs.some((reqs) => matchesRequirements(h, reqs))
   );
 
@@ -1217,8 +1217,8 @@ function ProjectView({
         </Link>
         {hasHosts && (
           <Link to={`${projectPath}/hosts`} className="home-link">
-            <span className="key">Hosts</span>
-            <strong>Registered agent machines for this project</strong>
+            <span className="key">Legacy hosts</span>
+            <strong>Self-hosted gha_dispatch capacity for exception workflows</strong>
           </Link>
         )}
       </section>
@@ -1882,8 +1882,9 @@ function ProjectHostsView({
     <div className="project-workspace">
       <section className="project-hero">
         <div className="project-hero-main">
-          <div className="project-kicker mono">project / {project.name}</div>
-          <h2>Hosts</h2>
+          <div className="project-kicker mono">legacy gha capacity / {project.name}</div>
+          <h2>Legacy hosts</h2>
+          <div className="project-repo mono">self-hosted runner pool for explicit gha_dispatch workflows</div>
         </div>
         <div className="project-facts">
           <div className="project-fact"><span>total</span><strong>{hosts.length}</strong></div>
@@ -1894,7 +1895,7 @@ function ProjectHostsView({
       </section>
 
       {hosts.length === 0 ? (
-        <div className="empty">No hosts match this project's workflow requirements.</div>
+        <div className="empty">No legacy hosts match this project's workflow requirements.</div>
       ) : (
         <table>
           <thead>
@@ -2925,6 +2926,32 @@ function leaseKindDescription(kind: LeaseKind): string {
   return kind === "test"
     ? "test environments and native slots"
     : "agent runners and work leases that are not test environments";
+}
+
+function projectUsesNativeWorkflows(project: Project): boolean {
+  const metadata = project.metadata ?? {};
+  return metadata.native_webapp === true
+    || metadata.nativeWebapp === true
+    || isNativeWebappMetadataValue(metadata.app_kind)
+    || isNativeWebappMetadataValue(metadata.appKind)
+    || isNativeWebappMetadataValue(metadata.app_type)
+    || isNativeWebappMetadataValue(metadata.appType)
+    || isNativeWebappMetadataValue(metadata.kind);
+}
+
+function isNativeWebappMetadataValue(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  switch (value.trim().toLowerCase()) {
+    case "native_webapp":
+    case "native-webapp":
+    case "native webapp":
+    case "native_web_app":
+    case "native-web-app":
+    case "native web app":
+      return true;
+    default:
+      return false;
+  }
 }
 
 function projectTestEnvironmentCount(project: Project, fallback: number): number {

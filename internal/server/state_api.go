@@ -431,7 +431,7 @@ func projectTestSlotCount(settings Settings, project Project) int {
 			return count
 		}
 	}
-	if boolFromMap(metadata, "native_webapp") || stringValue(metadata["app_kind"]) == "native_webapp" {
+	if projectRequiresNativeWorkflows(project) {
 		if settings.NativeRunnerProjectConcurrency > 0 {
 			return settings.NativeRunnerProjectConcurrency
 		}

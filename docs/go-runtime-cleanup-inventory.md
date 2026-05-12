@@ -59,8 +59,8 @@ still needs a keep/port/delete decision.
 | `/v1/artifacts/{blob_path}` | Implemented in Go as `/v1/artifacts/{blob_path...}` | Same public path shape; Go ServeMux uses `{name...}` for catch-all segments. |
 | Lease callback routes | Implemented in Go | Go is canonical for token-scoped lease clients. |
 | `POST /v1/lease`, `POST /v1/leases/cancel` | Implemented in Go | Go is canonical; admin-auth guarded. |
-| Project, workflow, host registration routes | Implemented in Go | Go is canonical; `gha_dispatch` stays valid for legacy workflows. |
-| Workflow upstream/sync routes | Implemented in Go | Keep as import convenience, not runtime source of truth. |
+| Project, workflow, host registration routes | Implemented in Go | Go is canonical; `gha_dispatch` stays valid only as explicit legacy/exception support. Native web app projects default blank phase kinds to `k8s_job` and reject explicit `gha_dispatch`. |
+| Workflow upstream/sync routes | Implemented in Go | Keep as import convenience for older desired-state flows, not runtime source of truth. |
 | Issue number routes | Implemented in Go | Project plus issue-number routes are canonical. |
 | Issue storage-ID routes under `/v1/issues/by-id/...` | Registered in Go and return `410 Gone` | Keep only as explicit compatibility tombstones until clients have migrated. |
 | GitHub issue-coordinate detail and graph routes `/v1/issues/{owner}/{repo}/{n}` | Registered in Go and return `410 Gone` | Project plus issue-number lookup is canonical; GitHub Issue coordinates remain explicit compatibility tombstones. |
@@ -103,7 +103,7 @@ still needs a keep/port/delete decision.
 | `src/glimmung/public_ids.py` | Already ported | `internal/domain/publicids` has golden parity coverage. |
 | `src/glimmung/replay.py` | Already ported for active route | `internal/server/replay_api.go` owns run replay. |
 | `src/glimmung/reports.py` | Already ported | Go touchpoint/report store owns active report shape. |
-| `src/glimmung/runs.py` | Partially ported | Go owns run reports, mutation callbacks, resume, replay, completion; multi-phase forward dispatch remains open. |
+| `src/glimmung/runs.py` | Partially ported | Go owns run reports, mutation callbacks, resume, replay, completion, retry, and multi-phase forward dispatch. Keep as reference for remaining native token/log decisions. |
 | `src/glimmung/settings.py` | Already ported for app runtime | `internal/server.SettingsFromEnv` owns production settings. |
 | `src/glimmung/signals.py` | Still needed for parity decisions | Go enqueues signals; legacy drain/triage behavior is not fully ported. |
 | `src/glimmung/touchpoints.py` | Already ported | Go touchpoint/report APIs are canonical except storage-ID tombstones. |
@@ -174,7 +174,7 @@ an explicit migration window exists:
 | Container | Compatibility notes |
 |---|---|
 | `projects` | Preserve `id`, `name`, `githubRepo`, `metadata`, `createdAt`; `argocdApp` may still appear on old docs. |
-| `workflows` | Preserve `project`, `name`, `phases`, `pr`, `budget`, `triggerLabel`, `defaultRequirements`, `metadata`, `createdAt`; empty phase `kind` still defaults to `gha_dispatch`. |
+| `workflows` | Preserve `project`, `name`, `phases`, `pr`, `budget`, `triggerLabel`, `defaultRequirements`, `metadata`, `createdAt`; empty phase `kind` still defaults to `gha_dispatch` for legacy/non-native projects, while native web app projects default blank phase kinds to `k8s_job`. |
 | `hosts` | Preserve host capability and lease fields for legacy/self-hosted-runner visibility. |
 | `leases` | Preserve lease numbers, state values, `metadata.lease_callback_token`, requester metadata, test-slot fields, and TTL timestamps. |
 | `runs` | Preserve issue refs, public run-number fields, attempts, verification, phase outputs, callback tokens, lock-holder fields, PR links, and native attempt fields. |
@@ -185,12 +185,23 @@ an explicit migration window exists:
 | `playbooks` | Preserve Playbook entry state, gates, issue specs, and integration strategy fields. |
 | `signals` | Preserve queued signal documents until signal drain/triage behavior is ported or retired. |
 
+## Phase 6 workflow execution decisions
+
+| Surface | Decision | Go coverage |
+|---|---|---|
+| New web-native workflow kind default | Projects marked `native_webapp`, `native_web_app`, or `app_type=native_web_app` default omitted phase `kind` to `k8s_job`. | `internal/server/workflow_write_api_test.go`, `internal/server/workflow_sync_api_test.go`, `internal/store/cosmos/cosmos_test.go`. |
+| GitHub Actions dispatch | Keep `gha_dispatch` readable and dispatchable only when the workflow phase explicitly asks for it. Native web app project registration rejects explicit `gha_dispatch`. | Workflow write/sync validation plus dispatch/completion tests for legacy GHA forwarding. |
+| Native dispatch and callbacks | `POST /v1/runs/dispatch` creates the run, lease, callback token, and initial `k8s_job` attempt without firing `workflow_dispatch`; callback-token native status/events/completion routes are canonical for runners. | `internal/server/dispatch_api_test.go`, `internal/server/run_mutation_api_test.go`, `internal/server/completion_api_test.go`, `internal/server/lease_callback_api_test.go`. |
+| Lease lifecycle and cancel/abort | Lease read, heartbeat, release, admin cancel, run abort, terminal completion, retry, resume, and teardown paths are Go-owned. Host-backed leases remain for legacy GHA pools; native leases use callback-token APIs and native metadata. | `internal/server/lease_api_test.go`, `internal/server/lease_callback_api_test.go`, `internal/server/run_mutation_api_test.go`, `internal/server/resume_api_test.go`, `internal/server/completion_api_test.go`. |
+| Evidence and native logs | Completion payloads stamp summaries, screenshots, verification, phase outputs, and cost. Native event/log archive projection is Go-owned; direct pod-log proxying remains undecided. | `internal/server/completion_api_test.go`, `internal/server/run_api_test.go`, `internal/server/graph_api_test.go`, `internal/store/cosmos/cosmos_test.go`. |
+| `.glimmung/workflows/<name>.yaml` | Keep upstream/sync endpoints as optional import helpers. The registered workflow document in Cosmos is runtime authority for dispatch. | `internal/server/workflow_sync_api_test.go`; docs in `README.md` and `docs/workflow-shape.md`. |
+| Dashboard host UX | Keep host registration and host tables for legacy/self-hosted GHA capacity, but label them as legacy surfaces. Native web app projects do not surface host pools as the normal path. | Frontend build plus `frontend/src/StyleguideView.tsx` catalog update. |
+
 ## Live-consumer checks still required
 
 Before deleting the Python app tree, identify live consumers for:
 
-- `gha_dispatch` workflows and any workflow that assumes GitHub Actions as the
-  default phase kind.
+- `gha_dispatch` workflows in legacy or exception projects.
 - Storage-ID routes and GitHub issue-coordinate routes.
 - Native pod-log and GitHub-token routes.
 - Test-slot checkout/return routes.
