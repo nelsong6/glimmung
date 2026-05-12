@@ -338,6 +338,48 @@ const mockPortfolioElements = [
   },
 ];
 
+const mockPlaybooks = [
+  {
+    schema_version: 1,
+    ref: "sdlc-control-plane-20260512110000",
+    project: "glimmung",
+    title: "sdlc control plane sweep",
+    description: "Mock executable plan for the integrated issue/run/touchpoint sweep.",
+    entries: [
+      {
+        id: "projection",
+        title: "run projection",
+        issue: { title: "Expose RunGraphProjection", body: "", labels: ["backend"], workflow: "issue-agent", metadata: {} },
+        depends_on: [],
+        manual_gate: false,
+        state: "succeeded",
+        created_issue_ref: "glimmung#206",
+        run_ref: "glimmung#206/runs/1",
+        completed_at: ago(28),
+        metadata: {},
+      },
+      {
+        id: "playbook-ui",
+        title: "operator ui",
+        issue: { title: "Add Playbook operator UI", body: "", labels: ["frontend"], workflow: "issue-agent", metadata: {} },
+        depends_on: ["projection"],
+        manual_gate: true,
+        state: "pending",
+        created_issue_ref: null,
+        run_ref: null,
+        completed_at: null,
+        metadata: {},
+      },
+    ],
+    concurrency_limit: 1,
+    integration_strategy: "isolated_prs",
+    state: "active",
+    metadata: {},
+    created_at: ago(90),
+    updated_at: ago(5),
+  },
+];
+
 export const mockRuns = [
   {
     id: "run-glimmung-206-live",
@@ -473,6 +515,7 @@ const mockReports = [
 ];
 
 const issueGraph = {
+  issue_ref: "glimmung#206",
   issue_id: "issue-glimmung-206",
   nodes: [
     {
@@ -540,6 +583,51 @@ const issueGraph = {
     { source: "run:run-glimmung-206-live", target: "attempt:run-glimmung-206-live:2", kind: "attempted" },
     { source: "run:run-glimmung-206-live", target: "pr:report-glimmung-206", kind: "opened" },
   ],
+  projection: {
+    issue_ref: "glimmung#206",
+    current_run_ref: "glimmung#206/runs/1",
+    default_focus: { kind: "phase", ref: "glimmung#206/runs/1#verify" },
+    next_action: { kind: "watch_run", label: "watch run", target_ref: "glimmung#206/runs/1" },
+    edges: [
+      { source: "run:glimmung#206/runs/1", target: "phase:glimmung#206/runs/1:design", kind: "contains" },
+      { source: "phase:glimmung#206/runs/1:design", target: "phase:glimmung#206/runs/1:implement", kind: "depends_on" },
+      { source: "phase:glimmung#206/runs/1:implement", target: "phase:glimmung#206/runs/1:verify", kind: "depends_on" },
+    ],
+    runs: [{
+      run_ref: "glimmung#206/runs/1",
+      run_number: 1,
+      run_display_number: "1",
+      workflow: "issue-agent",
+      state: "in_progress",
+      current_phase: "verify",
+      validation_url: "https://design-portfolio-pr-216.glimmung.dev.romaine.life/?mock=1",
+      cost_usd: 8.91,
+      attempts_count: 3,
+      started_at: ago(24),
+      updated_at: ago(2),
+      completed_at: null,
+      phases: [
+        { name: "design", kind: "k8s_job", state: "succeeded", verify: false, always: false, depends_on: [], jobs: [{ id: "design", name: "design", state: "succeeded", steps: [{ slug: "read-docs", title: "read docs", state: "succeeded" }] }], attempts: [] },
+        { name: "implement", kind: "k8s_job", state: "succeeded", verify: false, always: false, depends_on: ["design"], jobs: [{ id: "implement", name: "implement", state: "succeeded", steps: [{ slug: "build", title: "build", state: "succeeded" }] }], attempts: [] },
+        { name: "verify", kind: "k8s_job", state: "active", verify: true, always: false, depends_on: ["implement"], jobs: [{ id: "verify-ui", name: "verify ui", state: "active", steps: [{ slug: "screenshot", title: "screenshot", state: "active" }] }], attempts: [] },
+      ],
+      evidence: [
+        { kind: "validation", ref: "https://design-portfolio-pr-216.glimmung.dev.romaine.life/?mock=1", label: "validation", url: "https://design-portfolio-pr-216.glimmung.dev.romaine.life/?mock=1" },
+        { kind: "pull_request", ref: "https://github.com/nelsong6/glimmung/pull/218", label: "PR #218", url: "https://github.com/nelsong6/glimmung/pull/218" },
+      ],
+    }],
+    touchpoints: [{
+      ref: "nelsong6/glimmung#218",
+      repo: "nelsong6/glimmung",
+      pr_number: 218,
+      title: "Render native run graph detail view",
+      state: "open",
+      html_url: "https://github.com/nelsong6/glimmung/pull/218",
+      linked_run_ref: "glimmung#206/runs/1",
+      validation_url: "https://design-portfolio-pr-216.glimmung.dev.romaine.life/?mock=1",
+    }],
+    signals: [],
+  },
 };
 
 const systemGraph = {
@@ -628,12 +716,30 @@ function handleMockRequest(url: URL, init?: RequestInit): Response {
       && (!status || row.status === status)
     )));
   }
+  if (path === "/v1/playbooks" && method === "GET") {
+    const project = url.searchParams.get("project");
+    return json(mockPlaybooks.filter((row) => !project || row.project === project));
+  }
   if (path === "/v1/graph" && method === "GET") return json(filterGraph(url.searchParams.get("project")));
   if (path === "/v1/runs/dispatch" && method === "POST") {
-    return json({ state: "dispatched", lease: "claimed", run_number: 1, host: null, workflow: "issue-agent", detail: null });
+    return json({ state: "dispatched", lease: "claimed", issue_ref: "glimmung#206", issue_number: 206, run_number: 1, run_ref: "glimmung#206/runs/1", host: null, workflow: "issue-agent", detail: null });
   }
   if (path === "/v1/portfolio/elements/dispatch" && method === "POST") {
-    return json({ state: "dispatched", lease: "claimed", run_number: 1, host: null, workflow: "portfolio-agent", detail: null });
+    return json({ state: "dispatched", lease: "claimed", issue_ref: "glimmung#217", issue_number: 217, run_number: 1, run_ref: "glimmung#217/runs/1", host: null, workflow: "portfolio-agent", detail: null });
+  }
+  const playbookRunMatch = path.match(/^\/v1\/playbooks\/([^/]+)\/([^/]+)\/run$/);
+  if (playbookRunMatch && method === "POST") {
+    const project = decodeURIComponent(playbookRunMatch[1]);
+    const ref = decodeURIComponent(playbookRunMatch[2]);
+    const row = mockPlaybooks.find((p) => p.project === project && p.ref === ref);
+    return row ? json(row) : json({ error: "not found" }, { status: 404 });
+  }
+  const playbookGateMatch = path.match(/^\/v1\/playbooks\/([^/]+)\/([^/]+)\/entries\/([^/]+)\/gate$/);
+  if (playbookGateMatch && method === "POST") {
+    const project = decodeURIComponent(playbookGateMatch[1]);
+    const ref = decodeURIComponent(playbookGateMatch[2]);
+    const row = mockPlaybooks.find((p) => p.project === project && p.ref === ref);
+    return row ? json(row) : json({ error: "not found" }, { status: 404 });
   }
   if (path === "/v1/leases/cancel" && method === "POST") return json({ state: "cancelled", lease_ref: "glimmung/leases/11" });
   if (path === "/v1/signals" && method === "POST") return json({ ref: `signal:mock:${Date.now()}`, state: "pending" });
@@ -666,12 +772,31 @@ function handleMockRequest(url: URL, init?: RequestInit): Response {
   const ghIssueGraphMatch = path.match(/^\/v1\/issues\/([^/]+)\/([^/]+)\/(\d+)\/graph$/);
   if (ghIssueGraphMatch) return json(issueGraph);
 
+  const nativeIssueGraphMatch = path.match(/^\/v1\/issues\/by-number\/([^/]+)\/(\d+)\/graph$/);
+  if (nativeIssueGraphMatch) return json(issueGraph);
+
   const ghIssueMatch = path.match(/^\/v1\/issues\/([^/]+)\/([^/]+)\/(\d+)$/);
   if (ghIssueMatch) {
     const repo = `${decodeURIComponent(ghIssueMatch[1])}/${decodeURIComponent(ghIssueMatch[2])}`;
     const number = Number(ghIssueMatch[3]);
     const detail = issueDetails.find((i) => i.repo === repo && i.number === number);
     return detail ? json(detail) : json({ error: "not found" }, { status: 404 });
+  }
+
+  const nativeIssueNumberMatch = path.match(/^\/v1\/issues\/by-number\/([^/]+)\/(\d+)$/);
+  if (nativeIssueNumberMatch) {
+    const project = decodeURIComponent(nativeIssueNumberMatch[1]);
+    const number = Number(nativeIssueNumberMatch[2]);
+    const detail = issueDetails.find((i) => i.project === project && i.number === number);
+    return detail ? json(detail) : json({ error: "not found" }, { status: 404 });
+  }
+
+  const playbookDetailMatch = path.match(/^\/v1\/playbooks\/([^/]+)\/([^/]+)$/);
+  if (playbookDetailMatch) {
+    const project = decodeURIComponent(playbookDetailMatch[1]);
+    const ref = decodeURIComponent(playbookDetailMatch[2]);
+    const row = mockPlaybooks.find((p) => p.project === project && p.ref === ref);
+    return row ? json(row) : json({ error: "not found" }, { status: 404 });
   }
 
   const nativeIssueMatch = path.match(/^\/v1\/issues\/by-id\/([^/]+)\/([^/]+)$/);

@@ -22,7 +22,10 @@ type PortfolioElement = {
 type DispatchResult = {
   state: string;
   lease: string | null;
+  issue_ref?: string | null;
+  issue_number?: number | null;
   run_number: number | null;
+  run_ref?: string | null;
   host: string | null;
   workflow: string | null;
   detail: string | null;
@@ -227,13 +230,28 @@ export function PortfolioView({
           {action.kind === "result" && (
             <div className="empty">
               Dispatch {action.result.state}
-              {action.result.run_number ? `: run ${action.result.run_number}` : ""}
+              {action.result.issue_number ? (
+                <>
+                  {": "}
+                  <a
+                    className="link mono"
+                    href={`/projects/${encodeURIComponent(projectFromActionKey(action.key))}/issues/${action.result.issue_number}/runs`}
+                  >
+                    issue {action.result.issue_number}
+                    {action.result.run_number ? ` / run ${action.result.run_number}` : ""}
+                  </a>
+                </>
+              ) : action.result.run_number ? `: run ${action.result.run_number}` : ""}
             </div>
           )}
         </>
       ) : null}
     </>
   );
+}
+
+function projectFromActionKey(key: string): string {
+  return key.startsWith("dispatch:") ? key.slice("dispatch:".length) : "";
 }
 
 function statusClass(status: PortfolioReviewState): string {

@@ -22,6 +22,7 @@ type GHADispatchClient interface {
 // CompletionPayload carries the completion data to stamp on a run attempt.
 type CompletionPayload struct {
 	WorkflowRunID       *int64
+	JobID               *string
 	Conclusion          string
 	VerificationStatus  string
 	VerificationReasons []string
@@ -30,6 +31,16 @@ type CompletionPayload struct {
 	ScreenshotsMarkdown *string
 	PhaseOutputs        map[string]string
 	AttemptIndex        *int
+}
+
+type NativeJobCompletionResult struct {
+	Run             RunReplayData
+	PhaseComplete   bool
+	CompletionReady bool
+	CompletedJobIDs []string
+	PendingJobIDs   []string
+	FailedJobIDs    []string
+	PhasePayload    CompletionPayload
 }
 
 // RunCompletionStore provides all store operations needed by completion handlers.
@@ -43,6 +54,10 @@ type RunCompletionStore interface {
 	SetRunTerminalState(ctx context.Context, project, runID, state string, abortReason *string) (AbortRunResult, error)
 	AppendRunAttempt(ctx context.Context, project, runID, phase, phaseKind, workflowFilename string) (int, error)
 	AcquireLease(ctx context.Context, req LeaseAcquireRequest) (Lease, *Host, error)
+}
+
+type NativeJobCompletionStore interface {
+	RecordNativeJobCompletion(ctx context.Context, project, runID string, p CompletionPayload) (NativeJobCompletionResult, error)
 }
 
 // RunCompletedRequest is the body for POST /run-callbacks/{token}/completed.
@@ -130,9 +145,59 @@ func nativeRunCompletedByCallbackToken(store ReadStore, ghDispatch GHADispatchCl
 			writeProblem(w, http.StatusBadRequest, "conclusion required")
 			return
 		}
+		if req.JobID == nil || *req.JobID == "" {
+			writeProblem(w, http.StatusBadRequest, "job_id required")
+			return
+		}
 
-		result := processRunCompletion(r.Context(), w, completionStore, ghDispatch, project, runID, completionPayloadFromNative(req), nil)
+		payload := completionPayloadFromNative(req)
+		jobStore, ok := store.(NativeJobCompletionStore)
+		if !ok || jobStore == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "native job completion store not configured")
+			return
+		}
+		jobResult, err := jobStore.RecordNativeJobCompletion(r.Context(), project, runID, payload)
+		if errors.Is(err, ErrNotFound) {
+			writeProblem(w, http.StatusNotFound, "run not found")
+			return
+		}
+		if errors.Is(err, ErrConflict) {
+			writeProblem(w, http.StatusConflict, "native job completion conflict")
+			return
+		}
+		var validationErr ValidationError
+		if errors.As(err, &validationErr) {
+			writeProblem(w, http.StatusBadRequest, validationErr.Message)
+			return
+		}
+		if err != nil {
+			writeProblem(w, http.StatusInternalServerError, "record native job completion failed")
+			return
+		}
+		if !jobResult.CompletionReady {
+			phaseComplete := jobResult.PhaseComplete
+			decision := "wait_jobs"
+			if phaseComplete {
+				decision = "already_completed"
+			}
+			writeJSON(w, http.StatusOK, &RunCallbackResult{
+				RunRef:          runRefFromData(jobResult.Run),
+				Decision:        &decision,
+				PhaseComplete:   &phaseComplete,
+				CompletedJobIDs: jobResult.CompletedJobIDs,
+				PendingJobIDs:   jobResult.PendingJobIDs,
+				FailedJobIDs:    jobResult.FailedJobIDs,
+			})
+			return
+		}
+
+		result := processRunCompletion(r.Context(), w, completionStore, ghDispatch, project, runID, jobResult.PhasePayload, nil)
 		if result != nil {
+			phaseComplete := true
+			result.PhaseComplete = &phaseComplete
+			result.CompletedJobIDs = jobResult.CompletedJobIDs
+			result.PendingJobIDs = jobResult.PendingJobIDs
+			result.FailedJobIDs = jobResult.FailedJobIDs
 			writeJSON(w, http.StatusOK, result)
 		}
 	}
@@ -156,6 +221,7 @@ func completionPayloadFromGHA(req RunCompletedRequest) CompletionPayload {
 
 func completionPayloadFromNative(req NativeRunCompletedRequest) CompletionPayload {
 	p := CompletionPayload{
+		JobID:               req.JobID,
 		Conclusion:          req.Conclusion,
 		SummaryMarkdown:     req.SummaryMarkdown,
 		ScreenshotsMarkdown: req.ScreenshotsMarkdown,
@@ -582,6 +648,7 @@ func dispatchForwardPhase(
 		"phase_name":          targetPhase.Name,
 		"attempt_index":       strconv.Itoa(newAttemptIdx),
 		"phase_inputs":        substituted,
+		"issue_ref":           publicids.IssueRef(run.Project, positiveIssueNumber(run.IssueNumber)),
 		"issue_number":        strconv.Itoa(run.IssueNumber),
 		"work_context_branch": fmt.Sprintf("issue-%d-run-unknown", run.IssueNumber),
 	}
@@ -646,6 +713,7 @@ func buildForwardDispatchInputs(
 ) map[string]string {
 	inputs := map[string]string{
 		"attempt_index": strconv.Itoa(attemptIndex),
+		"issue_ref":     publicids.IssueRef(run.Project, positiveIssueNumber(run.IssueNumber)),
 		"issue_number":  strconv.Itoa(run.IssueNumber),
 		"run_ref":       runRef,
 		"phase_name":    phase.Name,
@@ -756,6 +824,9 @@ func dispatchRetry(
 	// Build dispatch inputs.
 	inputs := map[string]string{
 		"attempt_index": strconv.Itoa(newAttemptIdx),
+		"issue_ref":     publicids.IssueRef(run.Project, positiveIssueNumber(run.IssueNumber)),
+		"issue_number":  strconv.Itoa(run.IssueNumber),
+		"run_ref":       runRefFromData(run),
 		"lease_ref":     leaseRef,
 	}
 	if host != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -69,6 +70,10 @@ func createSignal(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusBadRequest, "target_ref required")
 			return
 		}
+		if body.TargetType == "pr" && !validPRSignalTarget(body.TargetRepo, body.TargetRef) {
+			writeProblem(w, http.StatusBadRequest, "pr signals require target_repo as owner/repo and target_ref as the PR number")
+			return
+		}
 		source := firstNonEmpty(body.Source, "glimmung_ui")
 		if !validSignalSources[source] {
 			writeProblem(w, http.StatusBadRequest, "invalid source")
@@ -92,4 +97,12 @@ func createSignal(store ReadStore) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, sig)
 	}
+}
+
+func validPRSignalTarget(repo, ref string) bool {
+	if !strings.Contains(repo, "/") {
+		return false
+	}
+	pr, err := strconv.Atoi(strings.TrimSpace(ref))
+	return err == nil && pr > 0
 }

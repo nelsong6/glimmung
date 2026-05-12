@@ -65,6 +65,7 @@ type RejectStatus =
 
 type AuthContext = {
   signedIn: boolean;
+  isAdmin: boolean;
 };
 
 type TouchpointDetailRouteParams = {
@@ -76,7 +77,7 @@ type TouchpointDetailRouteParams = {
 export function TouchpointDetailView() {
   const navigate = useNavigate();
   const params = useParams<TouchpointDetailRouteParams>();
-  const { signedIn } = useOutletContext<AuthContext>();
+  const { signedIn, isAdmin } = useOutletContext<AuthContext>();
   const repo = `${params.owner ?? ""}/${params.repo ?? ""}`;
   const prNumber = parseInt(params.n ?? "0", 10);
 
@@ -132,15 +133,16 @@ export function TouchpointDetailView() {
     if (!feedback.trim() || !detail) return;
     setReject({ kind: "submitting" });
     try {
-      // Public signal shape: target_repo is the project name, target_ref is
-      // the human-readable touchpoint ref (`owner/repo#PR`).
+      // Public signal shape: target_repo is the GitHub repo and target_ref is
+      // the PR number. Glimmung stays canonical, but PR signals use GitHub
+      // coordinates because the drain resolves the linked run from PR state.
       const r = await authedFetch("/v1/signals", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           target_type: "pr",
-          target_repo: detail.project,
-          target_ref: detail.ref,
+          target_repo: detail.repo,
+          target_ref: String(detail.pr_number),
           source: "glimmung_ui",
           payload: { kind: "reject", feedback: feedback.trim() },
         }),
@@ -363,7 +365,7 @@ export function TouchpointDetailView() {
             placeholder="What needs to change? e.g. 'the date format on the dashboard is wrong, should be ISO-8601'"
             rows={6}
             style={{ width: "100%", fontFamily: "inherit", padding: "0.5rem" }}
-            disabled={detail.pr_lock_held || reject.kind === "submitting" || !signedIn}
+            disabled={detail.pr_lock_held || reject.kind === "submitting" || !signedIn || !isAdmin}
           />
           <div style={{ marginTop: "0.5rem" }}>
             <button
@@ -373,11 +375,12 @@ export function TouchpointDetailView() {
               disabled={
                 !feedback.trim()
                 || !signedIn
+                || !isAdmin
                 || detail.pr_lock_held
                 || reject.kind === "submitting"
               }
             >
-              {reject.kind === "submitting" ? "submitting…" : signedIn ? "submit reject" : "sign in"}
+              {reject.kind === "submitting" ? "submitting…" : !signedIn ? "sign in" : !isAdmin ? "admin only" : "submit reject"}
             </button>
             {reject.kind === "submitted" && (
               <span className="pill free" style={{ marginLeft: "0.5rem" }}>

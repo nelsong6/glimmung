@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -1313,24 +1314,36 @@ type lockDoc struct {
 }
 
 type attemptDoc struct {
-	AttemptIndex          int               `json:"attempt_index"`
-	Phase                 string            `json:"phase"`
-	PhaseKind             string            `json:"phase_kind"`
-	WorkflowFilename      string            `json:"workflow_filename"`
-	WorkflowRunID         *int64            `json:"workflow_run_id"`
-	DispatchedAt          string            `json:"dispatched_at"`
-	CompletedAt           string            `json:"completed_at"`
-	Conclusion            *string           `json:"conclusion"`
-	Verification          *verificationDoc  `json:"verification"`
-	SummaryMarkdown       *string           `json:"summary_markdown"`
-	CostUSD               *float64          `json:"cost_usd"`
-	Decision              *string           `json:"decision"`
-	LogArchiveURL         *string           `json:"log_archive_url"`
-	SkippedFromRunID      *string           `json:"skipped_from_run_id"`
-	PhaseOutputs          map[string]string `json:"phase_outputs,omitempty"`
-	CancelRequestedAt     *string           `json:"cancel_requested_at,omitempty"`
-	CancelReason          *string           `json:"cancel_reason,omitempty"`
-	CapabilityTokenSHA256 *string           `json:"capability_token_sha256,omitempty"`
+	AttemptIndex          int                               `json:"attempt_index"`
+	Phase                 string                            `json:"phase"`
+	PhaseKind             string                            `json:"phase_kind"`
+	WorkflowFilename      string                            `json:"workflow_filename"`
+	WorkflowRunID         *int64                            `json:"workflow_run_id"`
+	DispatchedAt          string                            `json:"dispatched_at"`
+	CompletedAt           string                            `json:"completed_at"`
+	Conclusion            *string                           `json:"conclusion"`
+	Verification          *verificationDoc                  `json:"verification"`
+	SummaryMarkdown       *string                           `json:"summary_markdown"`
+	CostUSD               *float64                          `json:"cost_usd"`
+	Decision              *string                           `json:"decision"`
+	LogArchiveURL         *string                           `json:"log_archive_url"`
+	SkippedFromRunID      *string                           `json:"skipped_from_run_id"`
+	PhaseOutputs          map[string]string                 `json:"phase_outputs,omitempty"`
+	JobCompletions        map[string]nativeJobCompletionDoc `json:"job_completions,omitempty"`
+	CancelRequestedAt     *string                           `json:"cancel_requested_at,omitempty"`
+	CancelReason          *string                           `json:"cancel_reason,omitempty"`
+	CapabilityTokenSHA256 *string                           `json:"capability_token_sha256,omitempty"`
+}
+
+type nativeJobCompletionDoc struct {
+	JobID               string            `json:"job_id"`
+	CompletedAt         string            `json:"completed_at"`
+	Conclusion          string            `json:"conclusion"`
+	Verification        *verificationDoc  `json:"verification,omitempty"`
+	SummaryMarkdown     *string           `json:"summary_markdown,omitempty"`
+	ScreenshotsMarkdown *string           `json:"screenshots_markdown,omitempty"`
+	CostUSD             float64           `json:"cost_usd,omitempty"`
+	PhaseOutputs        map[string]string `json:"phase_outputs,omitempty"`
 }
 
 type nativeEventDoc struct {
@@ -1741,6 +1754,13 @@ func runReportAttemptFromDoc(doc attemptDoc, lineageByID map[string]string) serv
 	if doc.CostUSD != nil {
 		cost = doc.CostUSD
 	}
+	jobCompletions := make([]server.RunAttemptJobCompletion, 0, len(doc.JobCompletions))
+	for _, completion := range doc.JobCompletions {
+		jobCompletions = append(jobCompletions, runAttemptJobCompletionFromDoc(completion))
+	}
+	sort.SliceStable(jobCompletions, func(i, j int) bool {
+		return jobCompletions[i].JobID < jobCompletions[j].JobID
+	})
 	return server.RunReportAttempt{
 		AttemptIndex:       doc.AttemptIndex,
 		Phase:              doc.Phase,
@@ -1758,6 +1778,25 @@ func runReportAttemptFromDoc(doc attemptDoc, lineageByID map[string]string) serv
 		LogArchiveURL:      emptyStringNil(doc.LogArchiveURL),
 		SkippedFromRunRef:  refPtr(lineageByID, doc.SkippedFromRunID),
 		PhaseOutputs:       mapStringOrEmpty(doc.PhaseOutputs),
+		JobCompletions:     jobCompletions,
+	}
+}
+
+func runAttemptJobCompletionFromDoc(doc nativeJobCompletionDoc) server.RunAttemptJobCompletion {
+	var verificationStatus *string
+	verificationReasons := []string{}
+	if doc.Verification != nil {
+		verificationStatus = optionalNonEmptyStringPtr(doc.Verification.Status)
+		verificationReasons = sliceOrEmpty(doc.Verification.Reasons)
+	}
+	return server.RunAttemptJobCompletion{
+		JobID:               doc.JobID,
+		CompletedAt:         parseOptionalTime(doc.CompletedAt),
+		Conclusion:          doc.Conclusion,
+		VerificationStatus:  verificationStatus,
+		VerificationReasons: verificationReasons,
+		CostUSD:             doc.CostUSD,
+		PhaseOutputs:        mapStringOrEmpty(doc.PhaseOutputs),
 	}
 }
 
@@ -4737,6 +4776,346 @@ func stringOrEmpty(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// RecordNativeJobCompletion records a single native job's terminal callback.
+// It returns CompletionReady only for the transition where the final expected
+// job for the current phase has completed; callers should run the decision
+// engine only for that transition.
+func (s *Store) RecordNativeJobCompletion(ctx context.Context, project, runID string, p server.CompletionPayload) (server.NativeJobCompletionResult, error) {
+	jobID := ""
+	if p.JobID != nil {
+		jobID = strings.TrimSpace(*p.JobID)
+	}
+	if jobID == "" {
+		return server.NativeJobCompletionResult{}, server.ValidationError{Message: "job_id required"}
+	}
+
+	pk := azcosmos.NewPartitionKeyString(project)
+	const maxRetries = 5
+	for i := 0; i < maxRetries; i++ {
+		resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
+		if isCosmosStatus(err, http.StatusNotFound) {
+			return server.NativeJobCompletionResult{}, server.ErrNotFound
+		}
+		if err != nil {
+			return server.NativeJobCompletionResult{}, err
+		}
+
+		var doc runDoc
+		if err := json.Unmarshal(resp.Value, &doc); err != nil {
+			return server.NativeJobCompletionResult{}, err
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(resp.Value, &raw); err != nil {
+			return server.NativeJobCompletionResult{}, err
+		}
+		attempts, _ := raw["attempts"].([]any)
+		if len(doc.Attempts) == 0 || len(attempts) == 0 {
+			return server.NativeJobCompletionResult{}, server.ErrConflict
+		}
+
+		idx := len(doc.Attempts) - 1
+		if p.AttemptIndex != nil && *p.AttemptIndex >= 0 && *p.AttemptIndex < len(doc.Attempts) {
+			idx = *p.AttemptIndex
+		}
+		attemptMap, ok := attempts[idx].(map[string]any)
+		if !ok {
+			return server.NativeJobCompletionResult{}, fmt.Errorf("invalid attempt at index %d", idx)
+		}
+		attempt := doc.Attempts[idx]
+		if attempt.PhaseKind != "k8s_job" {
+			return server.NativeJobCompletionResult{}, server.ErrConflict
+		}
+
+		expectedJobIDs, err := s.expectedNativeJobIDs(ctx, project, doc.Workflow, attempt.Phase, jobID)
+		if err != nil {
+			return server.NativeJobCompletionResult{}, err
+		}
+		if !containsString(expectedJobIDs, jobID) {
+			return server.NativeJobCompletionResult{}, server.ValidationError{
+				Message: fmt.Sprintf("job_id %q is not registered on phase %q", jobID, attempt.Phase),
+			}
+		}
+
+		completions := cloneJobCompletions(attempt.JobCompletions)
+		if attempt.CompletedAt != "" {
+			run, err := s.ReadRunForReplay(ctx, project, runID)
+			if err != nil {
+				return server.NativeJobCompletionResult{}, err
+			}
+			return nativeJobCompletionResult(run, expectedJobIDs, completions, true, false), nil
+		}
+		newCompletion := nativeJobCompletionDocFromPayload(jobID, p, time.Now().UTC().Format(time.RFC3339Nano))
+		if existing, exists := completions[jobID]; exists {
+			if !sameNativeJobCompletion(existing, newCompletion) {
+				return server.NativeJobCompletionResult{}, server.ErrConflict
+			}
+			run, err := s.ReadRunForReplay(ctx, project, runID)
+			if err != nil {
+				return server.NativeJobCompletionResult{}, err
+			}
+			return nativeJobCompletionResult(run, expectedJobIDs, completions, attempt.CompletedAt != "" || allExpectedJobsCompleted(expectedJobIDs, completions), false), nil
+		}
+
+		completions[jobID] = newCompletion
+		attemptMap["job_completions"] = completions
+		attempts[idx] = attemptMap
+		raw["attempts"] = attempts
+		raw["updated_at"] = newCompletion.CompletedAt
+
+		payload, err := json.Marshal(raw)
+		if err != nil {
+			return server.NativeJobCompletionResult{}, err
+		}
+		etag := azcore.ETag(resp.ETag)
+		if _, err := s.runs.ReplaceItem(ctx, pk, runID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
+			if isCosmosStatus(err, http.StatusPreconditionFailed) {
+				continue
+			}
+			return server.NativeJobCompletionResult{}, err
+		}
+
+		run, err := s.ReadRunForReplay(ctx, project, runID)
+		if err != nil {
+			return server.NativeJobCompletionResult{}, err
+		}
+		phaseComplete := allExpectedJobsCompleted(expectedJobIDs, completions)
+		return nativeJobCompletionResult(run, expectedJobIDs, completions, phaseComplete, phaseComplete), nil
+	}
+	return server.NativeJobCompletionResult{}, fmt.Errorf("record native job completion: too many etag conflicts")
+}
+
+func (s *Store) expectedNativeJobIDs(ctx context.Context, project, workflowName, phaseName, fallbackJobID string) ([]string, error) {
+	wf, err := s.GetWorkflowByName(ctx, project, workflowName)
+	if err != nil {
+		return nil, err
+	}
+	if wf == nil {
+		return []string{fallbackJobID}, nil
+	}
+	for _, phase := range wf.Phases {
+		if phase.Name != phaseName {
+			continue
+		}
+		if len(phase.Jobs) == 0 {
+			return []string{fallbackJobID}, nil
+		}
+		ids := make([]string, 0, len(phase.Jobs))
+		seen := map[string]bool{}
+		for _, job := range phase.Jobs {
+			id := strings.TrimSpace(job.ID)
+			if id == "" || seen[id] {
+				continue
+			}
+			seen[id] = true
+			ids = append(ids, id)
+		}
+		if len(ids) == 0 {
+			return []string{fallbackJobID}, nil
+		}
+		return ids, nil
+	}
+	return nil, server.ValidationError{Message: fmt.Sprintf("phase %q is not registered on workflow %q", phaseName, workflowName)}
+}
+
+func nativeJobCompletionDocFromPayload(jobID string, p server.CompletionPayload, completedAt string) nativeJobCompletionDoc {
+	var verification *verificationDoc
+	if p.VerificationStatus != "" {
+		verification = &verificationDoc{
+			Status:  p.VerificationStatus,
+			Reasons: sliceOrEmpty(p.VerificationReasons),
+			CostUSD: p.CostUSD,
+		}
+	}
+	return nativeJobCompletionDoc{
+		JobID:               jobID,
+		CompletedAt:         completedAt,
+		Conclusion:          p.Conclusion,
+		Verification:        verification,
+		SummaryMarkdown:     p.SummaryMarkdown,
+		ScreenshotsMarkdown: p.ScreenshotsMarkdown,
+		CostUSD:             p.CostUSD,
+		PhaseOutputs:        stringMapOrEmpty(p.PhaseOutputs),
+	}
+}
+
+func cloneJobCompletions(values map[string]nativeJobCompletionDoc) map[string]nativeJobCompletionDoc {
+	out := make(map[string]nativeJobCompletionDoc, len(values))
+	for k, v := range values {
+		out[k] = v
+	}
+	return out
+}
+
+func sameNativeJobCompletion(a, b nativeJobCompletionDoc) bool {
+	a.CompletedAt = ""
+	b.CompletedAt = ""
+	return reflect.DeepEqual(a, b)
+}
+
+func nativeJobCompletionResult(run server.RunReplayData, expected []string, completions map[string]nativeJobCompletionDoc, phaseComplete bool, completionReady bool) server.NativeJobCompletionResult {
+	completed, pending, failed := nativeJobCompletionLists(expected, completions, phaseComplete)
+	return server.NativeJobCompletionResult{
+		Run:             run,
+		PhaseComplete:   phaseComplete,
+		CompletionReady: completionReady,
+		CompletedJobIDs: completed,
+		PendingJobIDs:   pending,
+		FailedJobIDs:    failed,
+		PhasePayload:    aggregateNativePhaseCompletion(expected, completions),
+	}
+}
+
+func nativeJobCompletionLists(expected []string, completions map[string]nativeJobCompletionDoc, phaseComplete bool) ([]string, []string, []string) {
+	if len(expected) == 0 {
+		expected = sortedJobCompletionIDs(completions)
+	}
+	completed := make([]string, 0, len(expected))
+	pending := make([]string, 0)
+	failed := make([]string, 0)
+	seen := map[string]bool{}
+	for _, id := range expected {
+		seen[id] = true
+		completion, ok := completions[id]
+		if !ok {
+			if !phaseComplete {
+				pending = append(pending, id)
+			}
+			continue
+		}
+		completed = append(completed, id)
+		if completion.Conclusion != "" && completion.Conclusion != "success" {
+			failed = append(failed, id)
+		}
+	}
+	extras := make([]string, 0)
+	for id := range completions {
+		if !seen[id] {
+			extras = append(extras, id)
+		}
+	}
+	sort.Strings(extras)
+	for _, id := range extras {
+		completed = append(completed, id)
+		if completions[id].Conclusion != "" && completions[id].Conclusion != "success" {
+			failed = append(failed, id)
+		}
+	}
+	return completed, pending, failed
+}
+
+func sortedJobCompletionIDs(completions map[string]nativeJobCompletionDoc) []string {
+	ids := make([]string, 0, len(completions))
+	for id := range completions {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func allExpectedJobsCompleted(expected []string, completions map[string]nativeJobCompletionDoc) bool {
+	if len(expected) == 0 {
+		return len(completions) > 0
+	}
+	for _, id := range expected {
+		if _, ok := completions[id]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func aggregateNativePhaseCompletion(expected []string, completions map[string]nativeJobCompletionDoc) server.CompletionPayload {
+	ids := expected
+	if len(ids) == 0 {
+		ids = sortedJobCompletionIDs(completions)
+	}
+	phaseOutputs := map[string]string{}
+	summaries := make([]string, 0)
+	screenshots := make([]string, 0)
+	reasons := make([]string, 0)
+	conclusion := "success"
+	verificationStatus := ""
+	for _, id := range ids {
+		completion, ok := completions[id]
+		if !ok {
+			continue
+		}
+		if completion.Conclusion != "" && completion.Conclusion != "success" && conclusion == "success" {
+			conclusion = completion.Conclusion
+		}
+		for key, value := range completion.PhaseOutputs {
+			phaseOutputs[key] = value
+		}
+		if completion.SummaryMarkdown != nil && strings.TrimSpace(*completion.SummaryMarkdown) != "" {
+			summaries = append(summaries, nativeJobMarkdownSection(id, *completion.SummaryMarkdown))
+		}
+		if completion.ScreenshotsMarkdown != nil && strings.TrimSpace(*completion.ScreenshotsMarkdown) != "" {
+			screenshots = append(screenshots, nativeJobMarkdownSection(id, *completion.ScreenshotsMarkdown))
+		}
+		if completion.Verification != nil {
+			verificationStatus = combineVerificationStatus(verificationStatus, completion.Verification.Status)
+			for _, reason := range completion.Verification.Reasons {
+				if strings.TrimSpace(reason) != "" {
+					reasons = append(reasons, id+": "+reason)
+				}
+			}
+		}
+	}
+	payload := server.CompletionPayload{
+		Conclusion:          conclusion,
+		VerificationStatus:  verificationStatus,
+		VerificationReasons: reasons,
+		CostUSD:             sumNativeJobCosts(completions),
+		PhaseOutputs:        phaseOutputs,
+	}
+	if len(summaries) > 0 {
+		joined := strings.Join(summaries, "\n\n")
+		payload.SummaryMarkdown = &joined
+	}
+	if len(screenshots) > 0 {
+		joined := strings.Join(screenshots, "\n\n")
+		payload.ScreenshotsMarkdown = &joined
+	}
+	return payload
+}
+
+func nativeJobMarkdownSection(jobID, markdown string) string {
+	return "### " + jobID + "\n\n" + strings.TrimSpace(markdown)
+}
+
+func combineVerificationStatus(current, next string) string {
+	switch next {
+	case "error":
+		return "error"
+	case "fail":
+		if current != "error" {
+			return "fail"
+		}
+	case "pass":
+		if current == "" {
+			return "pass"
+		}
+	}
+	return current
+}
+
+func sumNativeJobCosts(completions map[string]nativeJobCompletionDoc) float64 {
+	var total float64
+	for _, completion := range completions {
+		total += completion.CostUSD
+	}
+	return total
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 // StampRunCompletion records completion data on the latest (or specified) attempt and

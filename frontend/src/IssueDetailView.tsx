@@ -87,6 +87,106 @@ export type IssueGraph = {
       // table + run-meta panel as "resumed from Run X".
       | "resumed_from";
   }>;
+  projection?: RunGraphProjection;
+};
+
+type RunGraphProjection = {
+  issue_ref: string;
+  runs: RunProjectionRun[];
+  edges: Array<{ source: string; target: string; kind: string }>;
+  current_run_ref?: string | null;
+  default_focus?: { kind: string; ref: string } | null;
+  next_action: {
+    kind: string;
+    label: string;
+    target_ref?: string | null;
+    detail?: string | null;
+  };
+  touchpoints: RunProjectionTouchpoint[];
+  signals: RunProjectionSignal[];
+};
+
+type RunProjectionRun = {
+  run_ref: string;
+  run_number?: number | null;
+  run_display_number?: string | null;
+  workflow: string;
+  state: string;
+  current_phase?: string | null;
+  validation_url?: string | null;
+  cost_usd: number;
+  attempts_count: number;
+  started_at: string;
+  updated_at: string;
+  completed_at?: string | null;
+  phases: RunProjectionPhase[];
+  evidence: RunProjectionEvidence[];
+};
+
+type RunProjectionPhase = {
+  name: string;
+  kind: string;
+  state: string;
+  verify: boolean;
+  always: boolean;
+  depends_on: string[];
+  jobs: Array<{
+    id: string;
+    name?: string | null;
+    state: string;
+    conclusion?: string | null;
+    completed_at?: string | null;
+    steps: Array<{ slug: string; title?: string | null; state: string }>;
+  }>;
+  attempts: Array<{
+    attempt_index: number;
+    state: string;
+    conclusion?: string | null;
+    verification_status?: string | null;
+    decision?: string | null;
+    log_archive_url?: string | null;
+    evidence_refs: string[];
+    job_completions?: Array<{
+      job_id: string;
+      completed_at?: string | null;
+      conclusion: string;
+      verification_status?: string | null;
+      verification_reasons?: string[];
+      cost_usd?: number;
+      phase_outputs?: Record<string, string>;
+    }>;
+  }>;
+};
+
+type RunProjectionEvidence = {
+  kind: string;
+  ref: string;
+  label: string;
+  url?: string | null;
+};
+
+type RunProjectionTouchpoint = {
+  ref: string;
+  repo: string;
+  pr_number: number;
+  title: string;
+  state: string;
+  html_url?: string | null;
+  linked_run_ref?: string | null;
+  validation_url?: string | null;
+};
+
+type RunProjectionSignal = {
+  id: string;
+  target_type: string;
+  target_repo: string;
+  target_id: string;
+  source: string;
+  state: string;
+  kind?: string;
+  feedback?: string;
+  processed_decision?: string | null;
+  failure_reason?: string | null;
 };
 
 type NativeRunEvent = {
@@ -270,10 +370,18 @@ export function IssueDetailView() {
         issue_number: parseInt(params.n, 10),
       }
     : null;
+  const resolvedProjectFromRepo = target?.kind === "gh"
+    ? snap?.projects.find((candidate) => candidate.github_repo === target.repo) ?? null
+    : null;
+  const canonicalProject = target?.kind === "number"
+    ? target.project
+    : resolvedProjectFromRepo?.name ?? null;
 
   const baseUrl =
     projectRouteIssueNumber !== null
       ? `/projects/${encodeURIComponent(params.project ?? "")}/issues/${projectRouteIssueNumber}`
+      : target?.kind === "gh" && resolvedProjectFromRepo
+      ? `/projects/${encodeURIComponent(resolvedProjectFromRepo.name)}/issues/${target.issue_number}`
       : target?.kind === "gh"
       ? `/issues/${target.repo}/${target.issue_number}`
       : target?.kind === "number"
@@ -350,14 +458,18 @@ export function IssueDetailView() {
     [detail, issueWorkflowCandidates, selectedWorkflowRun],
   );
   const detailUrl =
-    target?.kind === "gh"
-      ? `/v1/issues/${target.repo}/${target.issue_number}`
+    target?.kind === "gh" && canonicalProject
+      ? `/v1/issues/by-number/${encodeURIComponent(canonicalProject)}/${target.issue_number}`
+      : target?.kind === "gh"
+      ? null
       : target?.kind === "number"
       ? `/v1/issues/by-number/${encodeURIComponent(target.project)}/${target.issue_number}`
       : null;
   const graphUrl =
-    target?.kind === "gh"
-      ? `/v1/issues/${target.repo}/${target.issue_number}/graph`
+    target?.kind === "gh" && canonicalProject
+      ? `/v1/issues/by-number/${encodeURIComponent(canonicalProject)}/${target.issue_number}/graph`
+      : target?.kind === "gh"
+      ? null
       : target?.kind === "number"
       ? `/v1/issues/by-number/${encodeURIComponent(target.project)}/${target.issue_number}/graph`
       : null;
@@ -431,13 +543,12 @@ export function IssueDetailView() {
     }
     if (target?.kind !== "gh") return;
     if (projectRouteIssueNumber !== null) return;
-    const project = snap?.projects.find((candidate) => candidate.github_repo === target.repo);
-    if (!project) return;
+    if (!resolvedProjectFromRepo) return;
     navigate(
-      `/projects/${encodeURIComponent(project.name)}/issues/${target.issue_number}/${canonicalSlug}`,
+      `/projects/${encodeURIComponent(resolvedProjectFromRepo.name)}/issues/${target.issue_number}/${canonicalSlug}`,
       { replace: true },
     );
-  }, [baseUrl, lastSeg, navigate, params.runId, params.workflowRunId, projectRouteIssueNumber, snap?.projects, tab, target]);
+  }, [baseUrl, lastSeg, navigate, params.runId, params.workflowRunId, projectRouteIssueNumber, resolvedProjectFromRepo, tab, target]);
 
   useEffect(() => {
     if (!detail?.number) return;
@@ -515,6 +626,9 @@ export function IssueDetailView() {
     return () => clearInterval(id);
   }, [tab, isInFlight]);
 
+  if (target?.kind === "gh" && snap && !resolvedProjectFromRepo) {
+    return <div className="empty">GitHub-shaped issue links are compatibility entry points only. Register the project route to open this issue.</div>;
+  }
   if (!target && projectRouteIssueNumber !== null && snap) {
     return <div className="empty">Project {params.project || "(missing)"} was not found.</div>;
   }
@@ -530,6 +644,13 @@ export function IssueDetailView() {
       ) : detail ? (
         <>
           <IssueHeader detail={detail} heading={heading} />
+
+          <IssueControlPlaneSummary
+            graph={graph}
+            detail={detail}
+            onOpenRuns={() => setTab("runs")}
+            onOpenTouchpoint={() => setTab("touchpoint")}
+          />
 
           <div className="dashboard-nav" aria-label="issue sections">
             <TabButton current={tab} value="summary" onSelect={selectTab}>
@@ -599,7 +720,14 @@ export function IssueDetailView() {
               />
             )}
             {tab === "touchpoint" && (
-              <TouchpointTab graph={graph} graphAvailable={!!graphUrl} repo={detail.repo} />
+              <TouchpointTab
+                graph={graph}
+                graphAvailable={!!graphUrl}
+                repo={detail.repo}
+                signedIn={signedIn}
+                isAdmin={isAdmin}
+                onSubmitted={() => setRefreshTick((t) => t + 1)}
+              />
             )}
           </div>
         </>
@@ -646,6 +774,150 @@ function IssueHeader({ detail, heading }: { detail: IssueDetail; heading: string
           {detail.issue_lock_held && <span className="pill busy">in flight</span>}
         </div>
       )}
+    </section>
+  );
+}
+
+function IssueControlPlaneSummary({
+  graph,
+  detail,
+  onOpenRuns,
+  onOpenTouchpoint,
+}: {
+  graph: IssueGraph | null;
+  detail: IssueDetail;
+  onOpenRuns: () => void;
+  onOpenTouchpoint: () => void;
+}) {
+  const projection = graph?.projection;
+  const projectionTouchpoints = projection?.touchpoints ?? [];
+  const run = latestProjectionRun(projection);
+  const activePhase = run?.phases.find((phase) => phase.state === "active") ?? null;
+  const touchpoint = projectionTouchpoints.find((tp) => touchpointNeedsDecision(tp))
+    ?? projectionTouchpoints[projectionTouchpoints.length - 1]
+    ?? null;
+  const signals = projection?.signals ?? [];
+  const pendingSignal = signals.find((signal) => signal.state === "pending" || signal.state === "processing") ?? null;
+  const nextAction = projection?.next_action;
+  const phaseCounts = run ? countProjectionPhases(run) : { active: 0, succeeded: 0, failed: 0, pending: 0 };
+  const jobCount = run?.phases.reduce((sum, phase) => sum + phase.jobs.length, 0) ?? 0;
+  const stepCount = run?.phases.reduce(
+    (sum, phase) => sum + phase.jobs.reduce((jobSum, job) => jobSum + job.steps.length, 0),
+    0,
+  ) ?? 0;
+
+  if (!projection || !run) {
+    return (
+      <section className="issue-control-plane">
+        <div className="project-info">
+          <div className="row">
+            <span className="key">current</span>
+            <span className="val mono">{detail.last_run_state ?? "no run"}</span>
+          </div>
+          <div className="row">
+            <span className="key">next</span>
+            <span className="val">new run</span>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="issue-control-plane">
+      <div className="kpi-strip issue-kpis" aria-label="issue run rollup">
+        <div className="kpi">
+          <span className="k">runs</span>
+          <span className="v">{projection.runs.length}</span>
+        </div>
+        <div className="kpi">
+          <span className="k">phases</span>
+          <span className="v">{run.phases.length}</span>
+        </div>
+        <div className="kpi">
+          <span className="k">jobs</span>
+          <span className="v">{jobCount}</span>
+        </div>
+        <div className="kpi">
+          <span className="k">steps</span>
+          <span className="v">{stepCount}</span>
+        </div>
+        <div className="kpi">
+          <span className="k">cost</span>
+          <span className="v">${run.cost_usd.toFixed(2)}</span>
+        </div>
+      </div>
+      <div className="project-info issue-control-grid">
+        <div className="row">
+          <span className="key">current</span>
+          <span className="val">
+            <button type="button" className="link mono" onClick={onOpenRuns}>
+              {projectionRunLabel(run)}
+            </button>{" "}
+            <span className={`pill ${runStatePill(run.state)}`}>{run.state}</span>
+          </span>
+        </div>
+        <div className="row">
+          <span className="key">phase</span>
+          <span className="val mono">
+            {activePhase
+              ? `${activePhase.name} active`
+              : `${phaseCounts.succeeded}/${run.phases.length} done`}
+          </span>
+        </div>
+        <div className="row">
+          <span className="key">evidence</span>
+          <span className="val">
+            {run.evidence.length > 0 ? (
+              <span className="evidence-list">
+                {run.evidence.slice(0, 4).map((item) => (
+                  item.url ? (
+                    <a key={`${item.kind}:${item.ref}`} href={item.url} target="_blank" rel="noreferrer">
+                      {item.label}
+                    </a>
+                  ) : (
+                    <span key={`${item.kind}:${item.ref}`} className="mono dim">{item.label}</span>
+                  )
+                ))}
+                {run.evidence.length > 4 && <span className="mono dim">+{run.evidence.length - 4}</span>}
+              </span>
+            ) : (
+              <span className="dim">none yet</span>
+            )}
+          </span>
+        </div>
+        <div className="row">
+          <span className="key">touchpoint</span>
+          <span className="val">
+            {touchpoint ? (
+              <>
+                <button type="button" className="link mono" onClick={onOpenTouchpoint}>
+                  PR #{touchpoint.pr_number}
+                </button>{" "}
+                <span className={`pill ${projectionStatePill(touchpoint.state)}`}>{touchpoint.state}</span>
+              </>
+            ) : (
+              <span className="dim">pending</span>
+            )}
+          </span>
+        </div>
+        <div className="row">
+          <span className="key">feedback</span>
+          <span className="val">
+            {pendingSignal ? (
+              <span className={`pill ${pendingSignal.state === "processing" ? "busy" : "info"}`}>
+                {pendingSignal.state}
+              </span>
+            ) : (
+              <span className="dim">clear</span>
+            )}
+          </span>
+        </div>
+        <div className="row">
+          <span className="key">next</span>
+          <span className="val mono">{nextAction?.label ?? "no action"}</span>
+        </div>
+      </div>
     </section>
   );
 }
@@ -1432,7 +1704,7 @@ function phaseStatus(attempt: GraphNode): { cls: string; text: string } {
   // ahead of any other state since they're never dispatched. No pill
   // (skipped isn't one of {free, busy, drain, info}); the caller renders
   // it as dim text. Also propagates upward via the attempt node's
-  // `state === "skipped"` value emitted by `_build_issue_graph`.
+  // `state === "skipped"` value emitted by the graph endpoint.
   if (attempt.state === "skipped" || stringOrNull(meta.skipped_from_run_ref)) {
     return { cls: "", text: "skipped" };
   }
@@ -2177,11 +2449,25 @@ function TouchpointTab({
   graph,
   graphAvailable,
   repo,
+  signedIn,
+  isAdmin,
+  onSubmitted,
 }: {
   graph: IssueGraph | null;
   graphAvailable: boolean;
   repo: string | null;
+  signedIn: boolean;
+  isAdmin: boolean;
+  onSubmitted: () => void;
 }) {
+  const [feedback, setFeedback] = useState("");
+  const [reject, setReject] = useState<
+    | { kind: "idle" }
+    | { kind: "submitting" }
+    | { kind: "submitted"; signalId: string }
+    | { kind: "error"; message: string }
+  >({ kind: "idle" });
+
   if (!graphAvailable) {
     return (
       <div className="empty">
@@ -2193,22 +2479,60 @@ function TouchpointTab({
     return <div className="empty">Loading touchpoint…</div>;
   }
 
+  const projection = graph.projection;
+  const projectionTouchpoints = projection?.touchpoints ?? [];
+  const projectedRun = latestProjectionRun(projection);
+  const projectedTouchpoint = projectionTouchpoints.find((tp) => touchpointNeedsDecision(tp))
+    ?? projectionTouchpoints[projectionTouchpoints.length - 1]
+    ?? null;
+  const pendingSignal = projection?.signals.find((signal) => (
+    signal.state === "pending" || signal.state === "processing"
+  )) ?? null;
   const prNodes = graph.nodes.filter((n) => n.kind === "pr");
   const latestRun = findActiveRun(graph) ?? findLastCompletedRun(graph);
   const latestMeta = latestRun?.metadata ?? {};
   const latestPr = prNodes[prNodes.length - 1] ?? null;
   const latestPrMeta = latestPr?.metadata ?? {};
   const prNumber =
-    numberOrNull(latestMeta.pr_number)
+    projectedTouchpoint?.pr_number
+    ?? numberOrNull(latestMeta.pr_number)
     ?? numberOrNull(latestPrMeta.number)
     ?? prNumberFromNode(latestPr);
-  const reportTitle = stringOrNull(latestMeta.report_title) ?? stringOrNull(latestPrMeta.title);
-  const reportState = stringOrNull(latestMeta.report_state) ?? latestPr?.state;
-  const reportUrl = stringOrNull(latestMeta.report_url) ?? stringOrNull(latestPrMeta.html_url);
-  const evidenceRepo = repo ?? stringOrNull(latestPrMeta.repo);
-  const validationUrl = stringOrNull(latestMeta.validation_url);
+  const reportTitle = projectedTouchpoint?.title ?? stringOrNull(latestMeta.report_title) ?? stringOrNull(latestPrMeta.title);
+  const reportState = projectedTouchpoint?.state ?? stringOrNull(latestMeta.report_state) ?? latestPr?.state;
+  const reportUrl = projectedTouchpoint?.html_url ?? stringOrNull(latestMeta.report_url) ?? stringOrNull(latestPrMeta.html_url);
+  const evidenceRepo = projectedTouchpoint?.repo ?? repo ?? stringOrNull(latestPrMeta.repo);
+  const validationUrl = projectedRun?.validation_url ?? projectedTouchpoint?.validation_url ?? stringOrNull(latestMeta.validation_url);
   const screenshotsMarkdown = stringOrNull(latestMeta.screenshots_markdown);
-  const hasCurrentEvidence = prNumber !== null || Boolean(validationUrl) || Boolean(screenshotsMarkdown);
+  const projectionEvidence = projectedRun?.evidence ?? [];
+  const hasCurrentEvidence = prNumber !== null || Boolean(validationUrl) || Boolean(screenshotsMarkdown) || projectionEvidence.length > 0;
+  const canReject = signedIn && isAdmin && !pendingSignal && prNumber !== null && Boolean(evidenceRepo) && reject.kind !== "submitting";
+
+  const submitReject = async () => {
+    if (!feedback.trim() || prNumber === null || !evidenceRepo) return;
+    setReject({ kind: "submitting" });
+    try {
+      const r = await authedFetch("/v1/signals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          target_type: "pr",
+          target_repo: evidenceRepo,
+          target_ref: String(prNumber),
+          source: "glimmung_ui",
+          payload: { kind: "reject", feedback: feedback.trim() },
+        }),
+      });
+      if (!r.ok) throw new Error(`/v1/signals -> ${r.status}: ${await r.text()}`);
+      const sig = await r.json() as { ref?: string };
+      setReject({ kind: "submitted", signalId: sig.ref ?? "signal" });
+      setFeedback("");
+      onSubmitted();
+      window.setTimeout(onSubmitted, 3000);
+    } catch (e) {
+      setReject({ kind: "error", message: e instanceof Error ? e.message : String(e) });
+    }
+  };
 
   return (
     <>
@@ -2219,6 +2543,18 @@ function TouchpointTab({
             <span className={`pill ${reportState === "open" || reportState === "ready" ? "busy" : reportState ? "free" : ""}`}>
               {reportState ?? "pending evidence"}
             </span>
+          </span>
+        </div>
+        <div className="row">
+          <span className="key">feedback</span>
+          <span className="val">
+            {pendingSignal ? (
+              <span className={`pill ${pendingSignal.state === "processing" ? "busy" : "info"}`}>
+                {pendingSignal.state}
+              </span>
+            ) : (
+              <span className="dim">clear</span>
+            )}
           </span>
         </div>
         <div className="row">
@@ -2251,18 +2587,101 @@ function TouchpointTab({
         </div>
       </div>
 
-      {(screenshotsMarkdown || !hasCurrentEvidence) && (
+      {(projectionEvidence.length > 0 || screenshotsMarkdown || !hasCurrentEvidence) && (
         <>
           <h2>Evidence</h2>
-          {screenshotsMarkdown ? (
-            <ScreenshotEvidence markdown={screenshotsMarkdown} />
-          ) : (
+          {projectionEvidence.length > 0 && (
+            <div className="project-info touchpoint-evidence-list">
+              {projectionEvidence.map((item) => (
+                <div className="row" key={`${item.kind}:${item.ref}`}>
+                  <span className="key">{item.kind}</span>
+                  <span className="val">
+                    {item.url ? (
+                      <a className="mono" href={item.url} target="_blank" rel="noreferrer">
+                        {item.label}
+                      </a>
+                    ) : (
+                      <span className="mono">{item.label}</span>
+                    )}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+          {screenshotsMarkdown ? <ScreenshotEvidence markdown={screenshotsMarkdown} /> : null}
+          {!screenshotsMarkdown && projectionEvidence.length === 0 && (
             <div className="empty">No current evidence has landed yet.</div>
           )}
         </>
       )}
+
+      <h2>Request changes</h2>
+      <textarea
+        value={feedback}
+        onChange={(e) => setFeedback(e.target.value)}
+        placeholder="what needs to change?"
+        rows={5}
+        className="feedback-box"
+        disabled={!canReject}
+      />
+      <div className="review-actions">
+        <button
+          type="button"
+          className="link"
+          onClick={() => void submitReject()}
+          disabled={!canReject || !feedback.trim()}
+          title={!signedIn ? "sign in" : !isAdmin ? "admin only" : undefined}
+        >
+          {reject.kind === "submitting" ? "queueing..." : !signedIn ? "sign in" : !isAdmin ? "admin only" : "request changes"}
+        </button>
+        {pendingSignal && <span className="dim mono">feedback already queued</span>}
+        {reject.kind === "submitted" && (
+          <span className="pill free">queued {reject.signalId.slice(0, 8)}</span>
+        )}
+        {reject.kind === "error" && (
+          <span className="pill drain" title={reject.message}>error</span>
+        )}
+      </div>
     </>
   );
+}
+
+function latestProjectionRun(projection: RunGraphProjection | undefined | null): RunProjectionRun | null {
+  if (!projection || projection.runs.length === 0) return null;
+  if (projection.current_run_ref) {
+    return projection.runs.find((run) => run.run_ref === projection.current_run_ref) ?? projection.runs[projection.runs.length - 1];
+  }
+  return projection.runs[projection.runs.length - 1];
+}
+
+function projectionRunLabel(run: RunProjectionRun): string {
+  if (run.run_display_number) return `run ${run.run_display_number}`;
+  if (run.run_number !== null && run.run_number !== undefined) return `run ${run.run_number}`;
+  return run.run_ref;
+}
+
+function countProjectionPhases(run: RunProjectionRun) {
+  return run.phases.reduce(
+    (acc, phase) => {
+      if (phase.state === "active") acc.active += 1;
+      else if (phase.state === "succeeded" || phase.state === "completed" || phase.state === "skipped") acc.succeeded += 1;
+      else if (phase.state === "failed") acc.failed += 1;
+      else acc.pending += 1;
+      return acc;
+    },
+    { active: 0, succeeded: 0, failed: 0, pending: 0 },
+  );
+}
+
+function touchpointNeedsDecision(tp: RunProjectionTouchpoint): boolean {
+  return ["ready", "needs_review", "open", "review_required"].includes(tp.state);
+}
+
+function projectionStatePill(state: string): string {
+  if (state === "ready" || state === "needs_review" || state === "open" || state === "review_required") return "busy";
+  if (state === "merged" || state === "approved" || state === "closed") return "free";
+  if (state === "failed" || state === "needs_work") return "drain";
+  return "info";
 }
 
 function prNumberFromNode(node: GraphNode | null): number | null {

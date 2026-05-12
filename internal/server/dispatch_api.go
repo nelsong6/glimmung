@@ -86,14 +86,16 @@ type DispatchRunRequest struct {
 
 // PublicDispatchResult is the response for POST /v1/runs/dispatch.
 type PublicDispatchResult struct {
-	State     string  `json:"state"`
-	Lease     string  `json:"lease,omitempty"`
-	RunNumber *int    `json:"run_number"`
-	RunID     *string `json:"run_id,omitempty"`
-	RunRef    *string `json:"run_ref,omitempty"`
-	Host      *string `json:"host"`
-	Workflow  *string `json:"workflow"`
-	Detail    *string `json:"detail"`
+	State       string  `json:"state"`
+	Lease       string  `json:"lease,omitempty"`
+	IssueRef    *string `json:"issue_ref,omitempty"`
+	IssueNumber *int    `json:"issue_number,omitempty"`
+	RunNumber   *int    `json:"run_number"`
+	RunID       *string `json:"run_id,omitempty"`
+	RunRef      *string `json:"run_ref,omitempty"`
+	Host        *string `json:"host"`
+	Workflow    *string `json:"workflow"`
+	Detail      *string `json:"detail"`
 }
 
 // dispatchRunHandler handles POST /v1/runs/dispatch (admin-only).
@@ -221,9 +223,12 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, ghDispatch
 	}
 
 	issueNum := req.IssueNumber
+	issueRef := publicids.IssueRef(req.Project, &issueNum)
 	runRef := publicids.RunRef(req.Project, &issueNum, run.RunDisplay)
 	metadata := map[string]any{
 		"issue_body":           issue.Body,
+		"issue_ref":            issueRef,
+		"issue_repo":           issueRepo,
 		"issue_title":          issue.Title,
 		"issue_lock_holder_id": holderID,
 		"run_id":               run.ID,
@@ -255,15 +260,17 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, ghDispatch
 
 	wfNameStr := wf.Name
 	result := PublicDispatchResult{
-		RunNumber: &run.RunNumber,
-		RunID:     &run.ID,
-		RunRef:    &runRef,
-		Workflow:  &wfNameStr,
-		Lease:     "claimed",
+		IssueRef:    &issueRef,
+		IssueNumber: &issueNum,
+		RunNumber:   &run.RunNumber,
+		RunID:       &run.ID,
+		RunRef:      &runRef,
+		Workflow:    &wfNameStr,
+		Lease:       "claimed",
 	}
 
 	if host != nil && phaseKind == "gha_dispatch" && ghDispatch != nil {
-		inputs := buildInitialDispatchInputs(lease, host, run, runRef, initPhase, req.IssueNumber)
+		inputs := buildInitialDispatchInputs(lease, host, run, runRef, initPhase, req.IssueNumber, issueRef)
 		wfRef := initPhase.WorkflowRef
 		if wfRef == "" {
 			wfRef = "main"
@@ -326,9 +333,10 @@ func resolveDispatchWorkflow(ctx context.Context, store RunDispatchStore, projec
 }
 
 // buildInitialDispatchInputs constructs the workflow_dispatch input map for the first attempt.
-func buildInitialDispatchInputs(lease Lease, host *Host, run CreatedRun, runRef string, phase PhaseSpec, issueNumber int) map[string]string {
+func buildInitialDispatchInputs(lease Lease, host *Host, run CreatedRun, runRef string, phase PhaseSpec, issueNumber int, issueRef string) map[string]string {
 	inputs := map[string]string{
 		"attempt_index":      "0",
+		"issue_ref":          issueRef,
 		"issue_number":       strconv.Itoa(issueNumber),
 		"run_callback_token": run.CallbackToken,
 		"run_number":         strconv.Itoa(run.RunNumber),
