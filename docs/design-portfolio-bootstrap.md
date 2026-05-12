@@ -6,8 +6,9 @@ components, stable fixture data, screenshot capture, and passive review state.
 
 The reusable PlaybookCreate payload lives at
 [`docs/playbooks/design-portfolio-bootstrap.json`](playbooks/design-portfolio-bootstrap.json).
-Create it with `POST /v1/playbooks`, inspect it in the dashboard, then run it
-when the target project/workflow is ready.
+Create it with `POST /v1/playbooks` and inspect it in the dashboard. The Go
+runtime port for running stored playbooks is still pending; use normal Issue
+dispatch or `/portfolio` dispatch for active work until that route is ported.
 
 ## Target Contract
 

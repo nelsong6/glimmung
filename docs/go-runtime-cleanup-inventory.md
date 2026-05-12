@@ -70,19 +70,40 @@ still needs a keep/port/delete decision.
 | GitHub issue-coordinate detail and graph routes `/v1/issues/{owner}/{repo}/{n}` | Registered in Go and return `410 Gone` | Project plus issue-number lookup is canonical; GitHub Issue coordinates remain explicit compatibility tombstones. |
 | Canonical issue graph route `/v1/issues/by-number/{project}/{issue_number}/graph` and system graph `/v1/graph` | Implemented in Go | Go now owns the dashboard graph projection for issue/run/attempt/touchpoint/signal nodes. |
 | Run report, abort, callback, native event/status/failure/completion routes | Implemented in Go | Callback-token routes are canonical for runners. |
-| `POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/completed` | Python-only | Prefer callback-token completion unless a live caller is found. |
-| `GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/pod-logs` | Python-only | Decide whether Go needs direct pod log proxying or whether event/log archive evidence replaces it. |
-| Native GitHub token routes | Python-only | Identify live native runners before porting; otherwise retire. |
+| `POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/completed` | Registered in Go and returns `410 Gone` | Tombstone. Callback-token native completion is canonical. |
+| `GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/pod-logs` | Registered in Go and returns `410 Gone` | Retired. The dashboard uses Go-owned native events plus archived log evidence instead of direct pod proxying. |
+| Native GitHub token routes | Registered in Go and return `410 Gone` | Tombstone. Native jobs use injected Kubernetes credentials instead of HTTP token minting. |
 | Run replay, resume, and completion forward-dispatch routes | Implemented in Go | Go is canonical. Completion dispatches ready downstream workflow phases instead of sealing multi-phase runs after the first advance. |
 | Playbook list/get/create/gate routes | Implemented in Go | Go is canonical for current Playbook control-plane operations. |
-| `POST /v1/playbooks/{project}/{playbook_ref}/run` | Python-only | Decide whether Playbook execution is still product scope before porting. |
+| `POST /v1/playbooks/{project}/{playbook_ref}/run` | Python-only | Port if Playbook execution remains product scope; docs now mark the Go runtime route as pending. |
 | Portfolio element CRUD routes | Implemented in Go | Go is canonical. |
-| `POST /v1/portfolio/elements/dispatch` | Python-only | Port only if portfolio-to-issue dispatch remains required. |
-| Test-slot checkout/return routes | Python-only | Likely obsolete if native Kubernetes jobs own ephemeral test capacity; confirm before deletion. |
+| `POST /v1/portfolio/elements/dispatch` | Implemented in Go | Ported because the portfolio dashboard still dispatches review work through this route. |
+| Test-slot checkout/return routes | Registered in Go and return `410 Gone` | Tombstone. Project test-environment scaling is the active capacity control surface. |
 | Touchpoint/report list/detail/create/update/version routes | Implemented in Go, storage-ID routes return `410 Gone` | GitHub PR coordinate and project issue-number routes are canonical. |
-| `POST /v1/signals` | Implemented in Go as enqueue-only | Triage/drain behavior still needs a keep/port/retire decision. |
-| `POST /v1/webhook/github` | Implemented in Go for signature validation and acknowledgement | Event-specific issue/run processing from Python still needs a live-consumer decision. |
+| `POST /v1/signals` | Implemented in Go as enqueue-only | Port signal drain/triage before deleting Python signal/triage reference code. |
+| `POST /v1/webhook/github` | Implemented in Go for signature validation and acknowledgement | Retire Python event-specific issue/run processing unless a new product requirement restores it. |
 | Static asset and SPA fallback routes | Implemented in Go when `GLIMMUNG_STATIC_DIR` is set | Go production image serves built frontend assets. |
+
+## Issue 455 live-consumer decisions
+
+This table is the issue #455 Workstream 1 decision record. `Ported` means the
+behavior is now Go-owned; `port` means the behavior remains product scope but
+still needs a Go implementation; `tombstone` means the Go app intentionally
+keeps a `410 Gone` compatibility surface; `retire` means no app behavior should
+be preserved beyond any explicit tombstone listed here.
+
+| Surface | Repo-local live consumer audit | Decision | Go state |
+|---|---|---|---|
+| `POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/completed` | No non-legacy repo caller. Native runner callbacks use `/v1/run-callbacks/{callback_token}/native/completed`. | tombstone | `410 Gone` route registered in Go. |
+| `GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/pod-logs` | The dashboard was the only repo-local caller; it now reads `/native/events` and archive links only. | retire + tombstone | `410 Gone` route registered in Go. |
+| Native GitHub token routes | No non-legacy repo caller; native job specs reference injected Kubernetes credentials. | tombstone | Run-coordinate and callback-token token routes return `410 Gone`. |
+| Test-slot checkout/return routes | No active frontend, docs, workflow, or Go caller; only legacy state projection still understands old test-slot leases. | tombstone | Checkout and return routes return `410 Gone`; project test-environment scaling remains active. |
+| `POST /v1/playbooks/{project}/{playbook_ref}/run` | Playbook docs now mark execution as pending; no Go route exists yet. | port | Pending Go Playbook execution implementation. |
+| `POST /v1/portfolio/elements/dispatch` | Live portfolio dashboard action posts here. | ported | Go creates a portfolio review Issue and dispatches it through the canonical run dispatch path. |
+| Signal drain and triage behavior | Touchpoint reject UI still enqueues `/v1/signals` and expects a drain to dispatch triage work. | port | Pending Go drain/triage worker; Python remains reference material. |
+| Rich GitHub webhook event processing beyond signature validation/acknowledgement | GitHub Issues are no longer part of the live issue/run loop; repo-local runtime only needs signed acknowledgement today. | retire | Go keeps signed webhook acknowledgement; no Python event processing is canonical. |
+| Explicit `gha_dispatch` workflows in legacy/exception projects | Go tests and docs keep `gha_dispatch` readable and dispatchable only when explicit. | keep legacy-compatible | Go workflow registration, dispatch, resume, and completion paths preserve explicit legacy support. |
+| Storage-ID routes and GitHub issue-coordinate compatibility routes | Frontend canonicalizes to project plus issue-number routes; old shapes may remain bookmarked. | tombstone | Go returns `410 Gone` with canonical route guidance. |
 
 ## Legacy Python module classification
 
@@ -94,16 +115,16 @@ still needs a keep/port/delete decision.
 | `src/glimmung/auth.py` | Already ported | `internal/auth` owns Entra and Kubernetes service-account auth. |
 | `src/glimmung/budget.py` | Already ported | `internal/domain/budget` has golden parity coverage. |
 | `src/glimmung/decision.py` | Already ported | `internal/domain/decision` is the active decision engine. |
-| `src/glimmung/dispatch.py` | Still needed for parity decisions | Go owns dispatch/resume paths, but this remains reference material for native token routes, test-slot routes, and legacy behavior checks. |
+| `src/glimmung/dispatch.py` | Still needed for parity decisions | Go owns dispatch/resume paths. Keep only as reference for Playbook execution and signal/triage dispatch context until those decisions are implemented. |
 | `src/glimmung/github_app.py` | Partially ported | `internal/github` covers token minting, workflow dispatch, cancel, and upstream fetch. PR/comment helpers need a product decision. |
 | `src/glimmung/issues.py` | Already ported for canonical routes | Storage-ID and GitHub-coordinate behavior is intentionally disabled in Go. |
 | `src/glimmung/leases.py` | Already ported for active lifecycle | Go store owns lease acquire/callback/cancel behavior. |
 | `src/glimmung/locks.py` | Already ported for issue/PR lock usage | Go store owns lock document compatibility for dispatch, resume, completion, abort, and read-model enrichment. |
 | `src/glimmung/models.py` | Reference-only until all tests/docs move | Go structs now mirror active public and Cosmos shapes. Keep as schema reference during cleanup. |
 | `src/glimmung/native_events.py` | Already ported for active event/status paths | Go owns native event write/list/status/failure routes. |
-| `src/glimmung/native_k8s.py` | Still needed for parity decisions | Direct native job launch/log/token behavior needs a keep/port/retire decision. |
+| `src/glimmung/native_k8s.py` | Reference-only pending deletion | Native job dispatch/callback behavior is Go-owned; direct pod-log, HTTP token, and test-slot routes now have Go tombstones. Keep only until final test disposition confirms no valuable Kubernetes helper cases remain. |
 | `src/glimmung/paths.py` | Already ported | `internal/domain/paths` has golden parity coverage. |
-| `src/glimmung/playbooks.py` | Partially ported | Current CRUD/gate routes are in Go; `run` endpoint remains undecided. |
+| `src/glimmung/playbooks.py` | Partially ported | Current CRUD/gate routes are in Go; `run` endpoint remains product-scope pending a Go port. |
 | `src/glimmung/public_ids.py` | Already ported | `internal/domain/publicids` has golden parity coverage. |
 | `src/glimmung/replay.py` | Already ported for active route | `internal/server/replay_api.go` owns run replay. |
 | `src/glimmung/reports.py` | Already ported | Go touchpoint/report store owns active report shape. |
@@ -142,15 +163,15 @@ still needs a keep/port/delete decision.
 | `tests/test_locks.py` | Port remaining generic lock edge cases to Go store tests. |
 | `tests/test_mandatory_phases.py` | Replace with Go workflow validation tests. |
 | `tests/test_native_events.py` | Replace with Go native event/status tests. |
-| `tests/test_native_k8s.py` | Keep as reference until native Kubernetes launch/log/token decision is made. |
+| `tests/test_native_k8s.py` | Delete or narrow to Go-port candidates after confirming native job dispatch coverage; direct pod-log, HTTP token, and test-slot route behavior is retired. |
 | `tests/test_paths.py` | Replace with `internal/domain/paths` golden tests. |
 | `tests/test_phase_depends_on.py` | Replace with Go workflow parse/validation tests. |
 | `tests/test_phase_input_refs.py` | Replace with `internal/domain/phaserefs` tests. |
 | `tests/test_playbook_templates.py` | Port if Playbook templates stay in app scope; otherwise move to docs/tooling. |
 | `tests/test_playbooks.py` | Replace with `internal/server/playbook_api_test.go`. |
-| `tests/test_portfolio_elements.py` | Replace with `internal/server/portfolio_api_test.go`; dispatch-specific coverage remains undecided. |
+| `tests/test_portfolio_elements.py` | Replace with `internal/server/portfolio_api_test.go`; portfolio dispatch is now covered in Go. |
 | `tests/test_pr_marker.py` | Port only if PR body marker parsing remains in Glimmung. |
-| `tests/test_pr_webhook.py` | Port only if GitHub webhook PR handling remains active. |
+| `tests/test_pr_webhook.py` | Delete event-specific webhook processing tests unless a new product requirement restores rich webhook handling. |
 | `tests/test_public_ids.py` | Replace with `internal/domain/publicids` golden tests. |
 | `tests/test_public_read_auth.py` | Replace with Go auth/admin/public endpoint tests. |
 | `tests/test_public_signal_refs.py` | Port if signal ref projections remain active. |
@@ -160,11 +181,11 @@ still needs a keep/port/delete decision.
 | `tests/test_resume.py` | Replace with `internal/server/resume_api_test.go`. |
 | `tests/test_run_callbacks.py` | Replace with Go run mutation/completion tests. |
 | `tests/test_run_report_api.py` | Replace with `internal/server/run_api_test.go`. |
-| `tests/test_signals.py` | Keep as reference until signal drain/triage decision is made. |
+| `tests/test_signals.py` | Keep as reference until Go signal drain/triage behavior is ported. |
 | `tests/test_state_snapshot.py` | Replace with `internal/server/state_api_test.go`. |
-| `tests/test_test_slot_checkout.py` | Delete if test-slot routes are retired; otherwise port. |
+| `tests/test_test_slot_checkout.py` | Delete; test-slot checkout/return routes are retired with Go tombstones. |
 | `tests/test_touchpoint_aliases.py` | Replace with Go touchpoint alias/tombstone tests. |
-| `tests/test_triage.py` | Keep as reference until triage engine is ported or retired. |
+| `tests/test_triage.py` | Keep as reference until the Go triage engine is ported. |
 | `tests/test_verification.py` | Replace with Go decision/completion verification tests. |
 | `tests/test_workflow_endpoints.py` | Replace with Go workflow write/read tests. |
 | `tests/test_workflow_sync.py` | Replace with `internal/server/workflow_sync_api_test.go`. |
@@ -214,16 +235,17 @@ an explicit migration window exists:
 | `scripts/seed-from-github.py` | Retired and deleted. It imported legacy issue/report/run modules and seeded historical GitHub PR state through the old Python app package. |
 | README browser-inspection command | Kept as optional external `mcp-glimmung` tooling because it belongs to the dedicated MCP repo, not this repo's workflow ops helper. |
 
-## Live-consumer checks still required
+## Remaining Python-deletion blockers
 
-Before deleting the Python app tree, identify live consumers for:
+The issue #455 live-consumer audit resolved the route-level decisions above.
+Before deleting the Python app tree, finish these remaining blockers:
 
-- `gha_dispatch` workflows in legacy or exception projects.
-- Storage-ID routes and GitHub issue-coordinate routes.
-- Native pod-log and GitHub-token routes.
-- Test-slot checkout/return routes.
-- Playbook run and portfolio dispatch routes.
-- Signal drain and triage behavior.
-
-Those checks determine which remaining Python-only behavior must be ported,
-which compatibility tombstones stay registered, and which routes can be deleted.
+- Port Playbook execution (`POST /v1/playbooks/{project}/{playbook_ref}/run`)
+  or remove the product docs that advertise it.
+- Port signal drain/triage behavior so Touchpoint reject signals are processed
+  by Go instead of the legacy Python reference path.
+- Decide whether any Python test-only Kubernetes helper coverage is still
+  valuable after the direct pod-log, HTTP token, and test-slot routes were
+  retired.
+- Delete or port the Python test clusters according to the disposition table,
+  then delete `tests/cosmos_fake.py`.

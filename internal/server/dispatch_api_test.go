@@ -34,10 +34,12 @@ type fakeDispatchStore struct {
 
 	run    *CreatedRun
 	runErr error
+	runReq *CreateRunRequest
 
 	leaseResult Lease
 	leaseHost   *Host
 	leaseErr    error
+	leaseReq    *LeaseAcquireRequest
 
 	abortResult AbortRunResult
 	abortErr    error
@@ -75,7 +77,8 @@ func (s *fakeDispatchStore) ReleaseIssueLock(_ context.Context, _ string, _ int,
 	s.lockReleased = true
 }
 
-func (s *fakeDispatchStore) CreateRun(_ context.Context, _ CreateRunRequest) (CreatedRun, error) {
+func (s *fakeDispatchStore) CreateRun(_ context.Context, req CreateRunRequest) (CreatedRun, error) {
+	s.runReq = &req
 	if s.runErr != nil {
 		return CreatedRun{}, s.runErr
 	}
@@ -85,7 +88,8 @@ func (s *fakeDispatchStore) CreateRun(_ context.Context, _ CreateRunRequest) (Cr
 	return *s.run, nil
 }
 
-func (s *fakeDispatchStore) AcquireLease(_ context.Context, _ LeaseAcquireRequest) (Lease, *Host, error) {
+func (s *fakeDispatchStore) AcquireLease(_ context.Context, req LeaseAcquireRequest) (Lease, *Host, error) {
+	s.leaseReq = &req
 	return s.leaseResult, s.leaseHost, s.leaseErr
 }
 
@@ -425,5 +429,27 @@ func TestDispatchRun_WorkflowByName(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &result)
 	if result.State != "pending" && result.State != "dispatched" {
 		t.Errorf("expected pending or dispatched, got %q", result.State)
+	}
+}
+
+func TestDispatchRun_WorkflowAlias(t *testing.T) {
+	store := minimalDispatchStore()
+	store.workflows = []Workflow{
+		{Name: "other", Project: "proj", Phases: []PhaseSpec{{Name: "impl", WorkflowFilename: "other.yml"}}, Budget: budget.Config{Total: 25}},
+		*store.wf,
+	}
+	h := newHandlerWithDispatch(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil)
+
+	req := httptest.NewRequest("POST", "/v1/runs/dispatch", bytes.NewBufferString(`{"project":"proj","issue_number":1,"workflow":"main"}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var result PublicDispatchResult
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if result.State == "no_workflow" {
+		t.Fatalf("workflow alias was not honored: %s", w.Body.String())
 	}
 }
