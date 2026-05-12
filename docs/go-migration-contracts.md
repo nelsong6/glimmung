@@ -43,8 +43,8 @@ The detailed cleanup inventory lives in
   stable for operations, dashboard bootstrap, and automation clients.
 - Storage-ID routes that remain registered as `410 Gone` are intentional
   tombstones, not unfinished handlers.
-- Graph routes currently return `410 Gone`; porting or retiring them is still
-  an explicit product decision.
+- Canonical graph routes are Go-owned: `/v1/issues/by-number/{project}/{issue_number}/graph`
+  and `/v1/graph`. GitHub Issue-coordinate graph routes remain `410 Gone`.
 
 ## Data compatibility
 

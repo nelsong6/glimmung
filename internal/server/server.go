@@ -183,13 +183,13 @@ func newHandler(settings Settings, store ReadStore, authResolver AuthResolver, g
 	)
 	mux.HandleFunc(
 		"GET /v1/issues/by-number/{project}/{issue_number}/graph",
-		storageIDGone("use /v1/issues/by-number/{project}/{issue_number}/graph is not supported in the Go backend yet"),
+		issueGraphByNumber(store),
 	)
 	mux.HandleFunc(
 		"GET /v1/issues/{repo_owner}/{repo_name}/{issue_number}/graph",
 		storageIDGone("GitHub Issue graph lookup is disabled; use /v1/issues/by-number/{project}/{issue_number}/graph"),
 	)
-	mux.HandleFunc("GET /v1/graph", storageIDGone("system graph is not supported in the Go backend yet"))
+	mux.HandleFunc("GET /v1/graph", systemGraph(store))
 	mux.HandleFunc("GET /v1/playbooks", listPlaybooks(store))
 	mux.Handle("POST /v1/playbooks", requireAdmin(adminAuthenticator, http.HandlerFunc(createPlaybook(store))))
 	mux.HandleFunc("GET /v1/playbooks/{project}/{playbook_ref}", getPlaybook(store))

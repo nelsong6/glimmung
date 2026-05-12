@@ -1,0 +1,247 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+)
+
+type fakeGraphStore struct {
+	fakeReadStore
+	issue       IssueDetail
+	issues      []IssueRow
+	runs        []RunReport
+	touchpoints []TouchpointRow
+	signals     []GraphSignal
+}
+
+func (s fakeGraphStore) ListIssues(context.Context, IssueListFilter) ([]IssueRow, error) {
+	return s.issues, nil
+}
+
+func (s fakeGraphStore) GetIssueDetailByNumber(_ context.Context, project string, number int) (IssueDetail, error) {
+	if s.issue.Project == project && s.issue.Number != nil && *s.issue.Number == number {
+		return s.issue, nil
+	}
+	return IssueDetail{}, ErrNotFound
+}
+
+func (s fakeGraphStore) ArchiveIssueByNumber(context.Context, IssueArchive) (IssueDetail, error) {
+	return IssueDetail{}, ErrUnsupported
+}
+
+func (s fakeGraphStore) CreateIssue(context.Context, IssueCreate) (IssueDetail, error) {
+	return IssueDetail{}, ErrUnsupported
+}
+
+func (s fakeGraphStore) PatchIssueByNumber(context.Context, IssuePatch) (IssueDetail, error) {
+	return IssueDetail{}, ErrUnsupported
+}
+
+func (s fakeGraphStore) AddIssueComment(context.Context, IssueCommentAdd) (IssueComment, error) {
+	return IssueComment{}, ErrUnsupported
+}
+
+func (s fakeGraphStore) UpdateIssueComment(context.Context, IssueCommentUpdate) (IssueComment, error) {
+	return IssueComment{}, ErrUnsupported
+}
+
+func (s fakeGraphStore) DeleteIssueComment(context.Context, IssueCommentDelete) (IssueDetail, error) {
+	return IssueDetail{}, ErrUnsupported
+}
+
+func (s fakeGraphStore) ListProjectRuns(_ context.Context, project string, _ int) ([]RunReport, error) {
+	out := make([]RunReport, 0, len(s.runs))
+	for _, run := range s.runs {
+		if run.Project == project {
+			out = append(out, run)
+		}
+	}
+	return out, nil
+}
+
+func (s fakeGraphStore) GetRunReportByNumber(context.Context, string, int, string) (RunReport, error) {
+	return RunReport{}, ErrUnsupported
+}
+
+func (s fakeGraphStore) ListTouchpoints(_ context.Context, filter TouchpointListFilter) ([]TouchpointRow, error) {
+	out := make([]TouchpointRow, 0, len(s.touchpoints))
+	for _, row := range s.touchpoints {
+		if filter.Project == "" || row.Project == filter.Project {
+			out = append(out, row)
+		}
+	}
+	return out, nil
+}
+
+func (s fakeGraphStore) GetTouchpointByRepoPR(context.Context, string, int) (TouchpointDetail, error) {
+	return TouchpointDetail{}, ErrUnsupported
+}
+
+func (s fakeGraphStore) GetTouchpointForIssue(context.Context, string, int) (TouchpointDetail, error) {
+	return TouchpointDetail{}, ErrUnsupported
+}
+
+func (s fakeGraphStore) EnsureTouchpoint(context.Context, TouchpointCreate) (TouchpointDetail, error) {
+	return TouchpointDetail{}, ErrUnsupported
+}
+
+func (s fakeGraphStore) ListGraphSignals(context.Context, GraphSignalFilter) ([]GraphSignal, error) {
+	return s.signals, nil
+}
+
+func TestIssueGraphByNumberBuildsRunAttemptAndTouchpointNodes(t *testing.T) {
+	issueNumber := 17
+	runNumber := 1
+	runDisplay := "1"
+	now := time.Date(2026, 5, 12, 18, 0, 0, 0, time.UTC)
+	runRef := "glimmung#17/runs/1"
+	touchpointRef := "nelsong6/glimmung#452"
+	store := fakeGraphStore{
+		fakeReadStore: fakeReadStore{workflows: []Workflow{{
+			Project: "glimmung",
+			Name:    "agent-run",
+			Phases: []PhaseSpec{
+				{Name: "env-prep", Outputs: []string{"validation_url"}},
+				{Name: "agent-execute", DependsOn: []string{"env-prep"}},
+			},
+			PR: PrPrimitive{Enabled: true},
+		}}},
+		issue: IssueDetail{
+			Ref:     "glimmung#17",
+			Project: "glimmung",
+			Number:  &issueNumber,
+			Title:   "Port graph",
+			State:   "open",
+			Labels:  []string{"backend"},
+		},
+		runs: []RunReport{{
+			Project:          "glimmung",
+			RunRef:           runRef,
+			RunNumber:        &runNumber,
+			RunDisplayNumber: &runDisplay,
+			Workflow:         "agent-run",
+			IssueRef:         stringPtr("glimmung#17"),
+			IssueNumber:      &issueNumber,
+			State:            "in_progress",
+			StartedAt:        now,
+			UpdatedAt:        now,
+			Attempts: []RunReportAttempt{{
+				AttemptIndex:     0,
+				Phase:            "env-prep",
+				PhaseKind:        "k8s_job",
+				WorkflowFilename: "k8s_job:env-prep",
+				DispatchedAt:     now,
+				CompletedAt:      &now,
+				Conclusion:       stringPtr("success"),
+				PhaseOutputs:     map[string]string{"validation_url": "https://preview.example"},
+			}},
+		}},
+		touchpoints: []TouchpointRow{{
+			Ref:          touchpointRef,
+			Project:      "glimmung",
+			Repo:         "nelsong6/glimmung",
+			PRNumber:     452,
+			Title:        "graph port",
+			State:        "ready",
+			LinkedRunRef: stringPtr(runRef),
+		}},
+		signals: []GraphSignal{{
+			ID:         "sig-1",
+			TargetType: "run",
+			TargetRepo: "glimmung",
+			TargetID:   runRef,
+			Source:     "glimmung_ui",
+			State:      "pending",
+			EnqueuedAt: now.Add(time.Minute),
+			Payload:    map[string]any{"kind": "reject"},
+		}},
+	}
+	handler := NewWithStore(Settings{}, store)
+
+	var graph IssueGraph
+	getJSON(t, handler, "/v1/issues/by-number/glimmung/17/graph", &graph)
+
+	if graph.IssueRef != "glimmung#17" {
+		t.Fatalf("issue_ref=%q", graph.IssueRef)
+	}
+	assertGraphNode(t, graph, "issue:glimmung#17", "issue")
+	runNode := assertGraphNode(t, graph, "run:"+runRef, "run")
+	if runNode.Metadata["workflow"].(string) != "agent-run" {
+		t.Fatalf("run metadata=%#v", runNode.Metadata)
+	}
+	assertGraphNode(t, graph, "attempt:"+runRef+":0", "attempt")
+	assertGraphNode(t, graph, "pr:"+touchpointRef, "pr")
+	assertGraphEdge(t, graph, "run:"+runRef, "pr:"+touchpointRef, "opened")
+	assertGraphEdge(t, graph, "run:"+runRef, "signal:glimmung_ui:"+runRef+":"+now.Add(time.Minute).Format(time.RFC3339Nano), "feedback")
+}
+
+func TestSystemGraphUsesProjectFilter(t *testing.T) {
+	number := 17
+	now := time.Date(2026, 5, 12, 18, 0, 0, 0, time.UTC)
+	store := fakeGraphStore{
+		issues: []IssueRow{{
+			Ref:     "glimmung#17",
+			Project: "glimmung",
+			Number:  &number,
+			Title:   "Port graph",
+			State:   "open",
+		}},
+		runs: []RunReport{{
+			Project:     "glimmung",
+			RunRef:      "glimmung#17/runs/1",
+			Workflow:    "agent-run",
+			IssueRef:    stringPtr("glimmung#17"),
+			IssueNumber: &number,
+			State:       "in_progress",
+			StartedAt:   now,
+			UpdatedAt:   now,
+		}},
+	}
+	handler := NewWithStore(Settings{}, store)
+
+	var graph IssueGraph
+	getJSON(t, handler, "/v1/graph?project=glimmung", &graph)
+
+	assertGraphNode(t, graph, "issue:glimmung#17", "issue")
+	assertGraphNode(t, graph, "run:glimmung#17/runs/1", "run")
+	assertGraphEdge(t, graph, "issue:glimmung#17", "run:glimmung#17/runs/1", "spawned")
+}
+
+func TestLegacyGitHubIssueGraphRouteRemainsGone(t *testing.T) {
+	handler := NewWithStore(Settings{}, fakeReadStore{})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/issues/nelsong6/glimmung/446/graph", nil))
+	if rec.Code != http.StatusGone {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func assertGraphNode(t *testing.T, graph IssueGraph, id, kind string) GraphNode {
+	t.Helper()
+	for _, node := range graph.Nodes {
+		if node.ID == id {
+			if node.Kind != kind {
+				t.Fatalf("node %s kind=%s, want %s", id, node.Kind, kind)
+			}
+			return node
+		}
+	}
+	encoded, _ := json.MarshalIndent(graph.Nodes, "", "  ")
+	t.Fatalf("missing node %s in %s", id, encoded)
+	return GraphNode{}
+}
+
+func assertGraphEdge(t *testing.T, graph IssueGraph, source, target, kind string) {
+	t.Helper()
+	for _, edge := range graph.Edges {
+		if edge.Source == source && edge.Target == target && edge.Kind == kind {
+			return
+		}
+	}
+	encoded, _ := json.MarshalIndent(graph.Edges, "", "  ")
+	t.Fatalf("missing edge %s --%s--> %s in %s", source, kind, target, encoded)
+}

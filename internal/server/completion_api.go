@@ -10,6 +10,7 @@ import (
 
 	"github.com/nelsong6/glimmung/internal/domain/budget"
 	"github.com/nelsong6/glimmung/internal/domain/decision"
+	"github.com/nelsong6/glimmung/internal/domain/phaserefs"
 	"github.com/nelsong6/glimmung/internal/domain/publicids"
 )
 
@@ -269,6 +270,7 @@ func processRunCompletion(
 
 	// 6. Record the decision on the attempt.
 	_ = store.StampRunDecision(ctx, project, runID, string(verdict)) // best-effort
+	run = withStampedAttemptDecision(run, lastAttempt.AttemptIndex, verdict, payload)
 
 	verdictStr := string(verdict)
 
@@ -286,20 +288,21 @@ func processRunCompletion(
 		return &RunCallbackResult{RunRef: runRef, Decision: &verdictStr}
 
 	case decision.Advance:
-		// Find what would happen next.
-		var nextPhase *string
-		for i, p := range wf.Phases {
-			if p.Name == lastAttempt.Phase && i+1 < len(wf.Phases) {
-				next := wf.Phases[i+1].Name
-				nextPhase = &next
-				break
+		targets := allReadyDispatchTargets(wf, run, verdict)
+		if len(targets) > 0 {
+			for _, target := range targets {
+				if err := dispatchForwardPhase(ctx, store, ghDispatch, run, wf, target); err != nil {
+					abortReason := fmt.Sprintf("forward_dispatch_failed: %s", err)
+					_, _ = store.AbortRunByID(ctx, project, runID, abortReason)
+					verdictStr = "abort_malformed"
+					return &RunCallbackResult{RunRef: runRef, Decision: &verdictStr}
+				}
 			}
+			verdictStr = "advance_phase"
+			return &RunCallbackResult{RunRef: runRef, Decision: &verdictStr}
 		}
-		if nextPhase != nil {
-			// More phases remaining — dispatch the next phase (simplified: treat as pending).
-			// Full multi-phase DAG dispatch is complex; for now mark run as passed and let
-			// the operator trigger the next phase if needed.
-			// TODO: implement multi-phase forward dispatch.
+		if hasInFlightAttempts(run) {
+			return &RunCallbackResult{RunRef: runRef, Decision: &verdictStr}
 		}
 		// Mark run passed (or review_required if PR primitive enabled).
 		state := "passed"
@@ -319,6 +322,22 @@ func processRunCompletion(
 		}
 
 	default: // abort_budget_attempts, abort_budget_cost, abort_malformed
+		targets := allReadyDispatchTargets(wf, run, verdict)
+		if len(targets) > 0 {
+			for _, target := range targets {
+				if err := dispatchForwardPhase(ctx, store, ghDispatch, run, wf, target); err != nil {
+					abortReason := fmt.Sprintf("teardown_dispatch_failed: %s", err)
+					_, _ = store.AbortRunByID(ctx, project, runID, abortReason)
+					verdictStr = "abort_malformed"
+					return &RunCallbackResult{RunRef: runRef, Decision: &verdictStr}
+				}
+			}
+			verdictStr = "advance_phase"
+			return &RunCallbackResult{RunRef: runRef, Decision: &verdictStr}
+		}
+		if hasInFlightAttempts(run) {
+			return &RunCallbackResult{RunRef: runRef, Decision: &verdictStr}
+		}
 		explanation, _ := decision.AbortExplanation(decisionRun, decisionWorkflow, verdict)
 		var abortReason *string
 		if explanation != "" {
@@ -336,6 +355,311 @@ func processRunCompletion(
 			PRLockReleased:    result.PRLockReleased,
 		}
 	}
+}
+
+func withStampedAttemptDecision(run RunReplayData, attemptIndex int, verdict decision.RunDecision, payload CompletionPayload) RunReplayData {
+	for i := range run.Attempts {
+		if run.Attempts[i].AttemptIndex != attemptIndex {
+			continue
+		}
+		run.Attempts[i].Decision = string(verdict)
+		run.Attempts[i].Completed = true
+		run.Attempts[i].Conclusion = payload.Conclusion
+		if payload.PhaseOutputs != nil {
+			run.Attempts[i].PhaseOutputs = payload.PhaseOutputs
+		}
+		return run
+	}
+	if len(run.Attempts) > 0 {
+		i := len(run.Attempts) - 1
+		run.Attempts[i].Decision = string(verdict)
+		run.Attempts[i].Completed = true
+		run.Attempts[i].Conclusion = payload.Conclusion
+		if payload.PhaseOutputs != nil {
+			run.Attempts[i].PhaseOutputs = payload.PhaseOutputs
+		}
+	}
+	return run
+}
+
+func allReadyDispatchTargets(wf *Workflow, run RunReplayData, verdict decision.RunDecision) []PhaseSpec {
+	if wf == nil || len(run.Attempts) == 0 {
+		return nil
+	}
+	completed := run.Attempts[len(run.Attempts)-1]
+	completedPhase := phaseSpecByName(wf.Phases, completed.Phase)
+	if completedPhase != nil && completedPhase.Always {
+		return listReadyPhases(wf.Phases, run, true)
+	}
+	onAbortPath := verdict != decision.Advance || runHasNonAlwaysAbort(wf.Phases, run)
+	if onAbortPath {
+		if hasInFlightAttempts(run) {
+			return nil
+		}
+		if phase := firstUnattemptedAlwaysPhase(wf.Phases, run); phase != nil {
+			return []PhaseSpec{*phase}
+		}
+		return nil
+	}
+	if ready := listReadyPhases(wf.Phases, run, false); len(ready) > 0 {
+		return ready
+	}
+	if hasInFlightAttempts(run) {
+		return nil
+	}
+	return listReadyPhases(wf.Phases, run, true)
+}
+
+func listReadyPhases(phases []PhaseSpec, run RunReplayData, includeAlways bool) []PhaseSpec {
+	completed := completedAdvancePhases(run)
+	attempted := attemptedPhases(run)
+	ready := make([]PhaseSpec, 0)
+	for _, phase := range phases {
+		if attempted[phase.Name] {
+			continue
+		}
+		if phase.Always && !includeAlways {
+			continue
+		}
+		if allPhaseDepsAdvanced(phase, completed) {
+			ready = append(ready, phase)
+		}
+	}
+	return ready
+}
+
+func completedAdvancePhases(run RunReplayData) map[string]bool {
+	latestByPhase := map[string]RunAttemptData{}
+	for _, attempt := range run.Attempts {
+		latestByPhase[attempt.Phase] = attempt
+	}
+	advanced := map[string]bool{}
+	for phase, attempt := range latestByPhase {
+		if attempt.Decision == string(decision.Advance) {
+			advanced[phase] = true
+			continue
+		}
+		if isAbortDecision(attempt.Decision) {
+			continue
+		}
+		if attempt.Decision == "" && attempt.Completed && attempt.Conclusion == "success" {
+			advanced[phase] = true
+		}
+	}
+	return advanced
+}
+
+func attemptedPhases(run RunReplayData) map[string]bool {
+	attempted := map[string]bool{}
+	for _, attempt := range run.Attempts {
+		attempted[attempt.Phase] = true
+	}
+	return attempted
+}
+
+func allPhaseDepsAdvanced(phase PhaseSpec, completed map[string]bool) bool {
+	for _, dep := range phase.DependsOn {
+		if !completed[dep] {
+			return false
+		}
+	}
+	return true
+}
+
+func runHasNonAlwaysAbort(phases []PhaseSpec, run RunReplayData) bool {
+	for _, attempt := range run.Attempts {
+		phase := phaseSpecByName(phases, attempt.Phase)
+		if phase != nil && phase.Always {
+			continue
+		}
+		if isAbortDecision(attempt.Decision) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasInFlightAttempts(run RunReplayData) bool {
+	for _, attempt := range run.Attempts {
+		if !attempt.Completed && attempt.Decision == "" {
+			return true
+		}
+	}
+	return false
+}
+
+func firstUnattemptedAlwaysPhase(phases []PhaseSpec, run RunReplayData) *PhaseSpec {
+	completed := completedAdvancePhases(run)
+	attempted := attemptedPhases(run)
+	alwaysNames := map[string]bool{}
+	for _, phase := range phases {
+		if phase.Always {
+			alwaysNames[phase.Name] = true
+		}
+	}
+	for _, phase := range phases {
+		if !phase.Always || attempted[phase.Name] {
+			continue
+		}
+		ok := true
+		for _, dep := range phase.DependsOn {
+			if alwaysNames[dep] && !completed[dep] {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			copy := phase
+			return &copy
+		}
+	}
+	return nil
+}
+
+func phaseSpecByName(phases []PhaseSpec, name string) *PhaseSpec {
+	for _, phase := range phases {
+		if phase.Name == name {
+			copy := phase
+			return &copy
+		}
+	}
+	return nil
+}
+
+func isAbortDecision(value string) bool {
+	switch value {
+	case string(decision.AbortBudgetAttempts), string(decision.AbortBudgetCost), string(decision.AbortMalformed):
+		return true
+	default:
+		return false
+	}
+}
+
+func dispatchForwardPhase(
+	ctx context.Context,
+	store RunCompletionStore,
+	ghDispatch GHADispatchClient,
+	run RunReplayData,
+	wf *Workflow,
+	targetPhase PhaseSpec,
+) error {
+	phaseKind := firstNonEmpty(targetPhase.Kind, "gha_dispatch")
+	workflowFilename := targetPhase.WorkflowFilename
+	if workflowFilename == "" {
+		workflowFilename = fmt.Sprintf("%s:%s", phaseKind, targetPhase.Name)
+	}
+	substituted, err := substituteCompletionPhaseInputs(targetPhase, run)
+	if err != nil {
+		return err
+	}
+	newAttemptIdx, err := store.AppendRunAttempt(ctx, run.Project, run.ID, targetPhase.Name, phaseKind, workflowFilename)
+	if err != nil {
+		return fmt.Errorf("append forward attempt: %w", err)
+	}
+	runRef := runRefFromData(run)
+	wfName := wf.Name
+	metadata := map[string]any{
+		"run_id":              run.ID,
+		"run_ref":             runRef,
+		"phase_name":          targetPhase.Name,
+		"attempt_index":       strconv.Itoa(newAttemptIdx),
+		"phase_inputs":        substituted,
+		"issue_number":        strconv.Itoa(run.IssueNumber),
+		"work_context_branch": fmt.Sprintf("issue-%d-run-unknown", run.IssueNumber),
+	}
+	if run.CallbackToken != nil && *run.CallbackToken != "" {
+		metadata["run_callback_token"] = *run.CallbackToken
+	}
+	if run.IssueLockHolderID != nil && *run.IssueLockHolderID != "" {
+		metadata["issue_lock_holder_id"] = *run.IssueLockHolderID
+	}
+	requirements := targetPhase.Requirements
+	if len(requirements) == 0 {
+		requirements = wf.DefaultRequirements
+	}
+	lease, host, err := store.AcquireLease(ctx, LeaseAcquireRequest{
+		Project:      run.Project,
+		Workflow:     &wfName,
+		Requirements: requirements,
+		Metadata:     metadata,
+	})
+	if err != nil {
+		return fmt.Errorf("acquire lease for forward phase: %w", err)
+	}
+	if phaseKind != "gha_dispatch" || host == nil {
+		return nil
+	}
+	if ghDispatch == nil {
+		return fmt.Errorf("no GHA dispatch client configured")
+	}
+	inputs := buildForwardDispatchInputs(lease, host, run, runRef, targetPhase, newAttemptIdx, substituted)
+	ref := firstNonEmpty(targetPhase.WorkflowRef, "main")
+	if err := ghDispatch.DispatchWorkflow(ctx, run.IssueRepo, workflowFilename, ref, inputs); err != nil {
+		return fmt.Errorf("workflow_dispatch: %w", err)
+	}
+	return nil
+}
+
+func substituteCompletionPhaseInputs(phase PhaseSpec, run RunReplayData) (map[string]string, error) {
+	if len(phase.Inputs) == 0 {
+		return map[string]string{}, nil
+	}
+	priorOutputs := map[string]map[string]string{}
+	for _, attempt := range run.Attempts {
+		if len(attempt.PhaseOutputs) > 0 {
+			priorOutputs[attempt.Phase] = attempt.PhaseOutputs
+		}
+	}
+	return phaserefs.Substitute(phaserefs.Phase{
+		Name:    phase.Name,
+		Inputs:  phase.Inputs,
+		Outputs: phase.Outputs,
+	}, priorOutputs)
+}
+
+func buildForwardDispatchInputs(
+	lease Lease,
+	host *Host,
+	run RunReplayData,
+	runRef string,
+	phase PhaseSpec,
+	attemptIndex int,
+	phaseInputs map[string]string,
+) map[string]string {
+	inputs := map[string]string{
+		"attempt_index": strconv.Itoa(attemptIndex),
+		"issue_number":  strconv.Itoa(run.IssueNumber),
+		"run_ref":       runRef,
+		"phase_name":    phase.Name,
+	}
+	if host != nil {
+		inputs["host"] = host.Name
+	}
+	if run.CallbackToken != nil && *run.CallbackToken != "" {
+		inputs["run_callback_token"] = *run.CallbackToken
+	}
+	var slotName string
+	if m, ok := lease.Metadata["native_slot_name"].(string); ok {
+		slotName = m
+	}
+	inputs["lease_ref"] = publicids.LeaseRef(lease.Project, slotName, lease.LeaseNumber)
+	if t, ok := lease.Metadata["lease_callback_token"].(string); ok && t != "" {
+		inputs["lease_callback_token"] = t
+	}
+	if lease.LeaseNumber != nil {
+		inputs["lease_number"] = strconv.Itoa(*lease.LeaseNumber)
+	}
+	for k, v := range phaseInputs {
+		if _, exists := inputs[k]; !exists {
+			inputs[k] = v
+		}
+	}
+	for k, v := range phase.Inputs {
+		if _, exists := inputs[k]; !exists {
+			inputs[k] = v
+		}
+	}
+	return inputs
 }
 
 // dispatchRetry appends a new attempt and fires workflow_dispatch for a GHA retry.
@@ -370,9 +694,6 @@ func dispatchRetry(
 	if targetPhase == nil {
 		return fmt.Errorf("no retry target phase found for %q", failingPhase)
 	}
-	if ghDispatch == nil {
-		return fmt.Errorf("no GHA dispatch client configured")
-	}
 
 	// Acquire a lease for the target phase.
 	wfName := wf.Name
@@ -391,9 +712,20 @@ func dispatchRetry(
 	}
 
 	// Append the new attempt to the run doc.
-	newAttemptIdx, err := store.AppendRunAttempt(ctx, run.Project, run.ID, targetPhase.Name, "gha_dispatch", targetPhase.WorkflowFilename)
+	phaseKind := firstNonEmpty(targetPhase.Kind, "gha_dispatch")
+	workflowFilename := targetPhase.WorkflowFilename
+	if workflowFilename == "" {
+		workflowFilename = fmt.Sprintf("%s:%s", phaseKind, targetPhase.Name)
+	}
+	newAttemptIdx, err := store.AppendRunAttempt(ctx, run.Project, run.ID, targetPhase.Name, phaseKind, workflowFilename)
 	if err != nil {
 		return fmt.Errorf("append retry attempt: %w", err)
+	}
+	if phaseKind != "gha_dispatch" {
+		return nil
+	}
+	if ghDispatch == nil {
+		return fmt.Errorf("no GHA dispatch client configured")
 	}
 
 	// Compute the lease_ref dispatch input.
@@ -431,14 +763,21 @@ func dispatchRetry(
 	if ref == "" {
 		ref = "main"
 	}
-	if err := ghDispatch.DispatchWorkflow(ctx, run.IssueRepo, targetPhase.WorkflowFilename, ref, inputs); err != nil {
+	if err := ghDispatch.DispatchWorkflow(ctx, run.IssueRepo, workflowFilename, ref, inputs); err != nil {
 		return fmt.Errorf("workflow_dispatch: %w", err)
 	}
 	return nil
 }
 
 func runRefFromData(run RunReplayData) string {
-	return publicids.RunRef(run.Project, positiveIssueNumber(run.IssueNumber), "")
+	display := ""
+	if run.RunDisplayNumber != nil {
+		display = *run.RunDisplayNumber
+	}
+	if display == "" && run.RunNumber != nil {
+		display = strconv.Itoa(*run.RunNumber)
+	}
+	return publicids.RunRef(run.Project, positiveIssueNumber(run.IssueNumber), display)
 }
 
 func positiveIssueNumber(n int) *int {

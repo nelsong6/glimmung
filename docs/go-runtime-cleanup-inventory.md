@@ -63,13 +63,13 @@ still needs a keep/port/delete decision.
 | Workflow upstream/sync routes | Implemented in Go | Keep as import convenience, not runtime source of truth. |
 | Issue number routes | Implemented in Go | Project plus issue-number routes are canonical. |
 | Issue storage-ID routes under `/v1/issues/by-id/...` | Registered in Go and return `410 Gone` | Keep only as explicit compatibility tombstones until clients have migrated. |
-| GitHub issue-coordinate detail route `/v1/issues/{owner}/{repo}/{n}` | Registered in Go and returns `410 Gone` | Project plus issue-number lookup is canonical. |
-| Issue graph routes and `/v1/graph` | Registered in Go and return `410 Gone` | Product decision still needed: port graph projection or formally retire it. |
+| GitHub issue-coordinate detail and graph routes `/v1/issues/{owner}/{repo}/{n}` | Registered in Go and return `410 Gone` | Project plus issue-number lookup is canonical; GitHub Issue coordinates remain explicit compatibility tombstones. |
+| Canonical issue graph route `/v1/issues/by-number/{project}/{issue_number}/graph` and system graph `/v1/graph` | Implemented in Go | Go now owns the dashboard graph projection for issue/run/attempt/touchpoint/signal nodes. |
 | Run report, abort, callback, native event/status/failure/completion routes | Implemented in Go | Callback-token routes are canonical for runners. |
 | `POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/completed` | Python-only | Prefer callback-token completion unless a live caller is found. |
 | `GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/pod-logs` | Python-only | Decide whether Go needs direct pod log proxying or whether event/log archive evidence replaces it. |
 | Native GitHub token routes | Python-only | Identify live native runners before porting; otherwise retire. |
-| Run replay and resume routes | Implemented in Go | Go is canonical. Multi-phase forward dispatch still has a Go TODO in `internal/server/completion_api.go`. |
+| Run replay, resume, and completion forward-dispatch routes | Implemented in Go | Go is canonical. Completion dispatches ready downstream workflow phases instead of sealing multi-phase runs after the first advance. |
 | Playbook list/get/create/gate routes | Implemented in Go | Go is canonical for current Playbook control-plane operations. |
 | `POST /v1/playbooks/{project}/{playbook_ref}/run` | Python-only | Decide whether Playbook execution is still product scope before porting. |
 | Portfolio element CRUD routes | Implemented in Go | Go is canonical. |
@@ -191,7 +191,7 @@ Before deleting the Python app tree, identify live consumers for:
 
 - `gha_dispatch` workflows and any workflow that assumes GitHub Actions as the
   default phase kind.
-- Storage-ID routes, GitHub issue-coordinate routes, and graph endpoints.
+- Storage-ID routes and GitHub issue-coordinate routes.
 - Native pod-log and GitHub-token routes.
 - Test-slot checkout/return routes.
 - Playbook run and portfolio dispatch routes.

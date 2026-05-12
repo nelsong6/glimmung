@@ -14,24 +14,26 @@ type RunStore interface {
 }
 
 type RunReportAttempt struct {
-	AttemptIndex       int        `json:"attempt_index"`
-	Phase              string     `json:"phase"`
-	PhaseKind          string     `json:"phase_kind"`
-	WorkflowFilename   string     `json:"workflow_filename"`
-	WorkflowRunID      *int64     `json:"workflow_run_id"`
-	DispatchedAt       time.Time  `json:"dispatched_at"`
-	CompletedAt        *time.Time `json:"completed_at"`
-	Conclusion         *string    `json:"conclusion"`
-	VerificationStatus *string    `json:"verification_status"`
-	EvidenceRefs       []string   `json:"evidence_refs"`
-	SummaryMarkdown    *string    `json:"summary_markdown"`
-	Decision           *string    `json:"decision"`
-	CostUSD            *float64   `json:"cost_usd"`
-	LogArchiveURL      *string    `json:"log_archive_url"`
-	SkippedFromRunRef  *string    `json:"skipped_from_run_ref"`
+	AttemptIndex       int               `json:"attempt_index"`
+	Phase              string            `json:"phase"`
+	PhaseKind          string            `json:"phase_kind"`
+	WorkflowFilename   string            `json:"workflow_filename"`
+	WorkflowRunID      *int64            `json:"workflow_run_id"`
+	DispatchedAt       time.Time         `json:"dispatched_at"`
+	CompletedAt        *time.Time        `json:"completed_at"`
+	Conclusion         *string           `json:"conclusion"`
+	VerificationStatus *string           `json:"verification_status"`
+	EvidenceRefs       []string          `json:"evidence_refs"`
+	SummaryMarkdown    *string           `json:"summary_markdown"`
+	Decision           *string           `json:"decision"`
+	CostUSD            *float64          `json:"cost_usd"`
+	LogArchiveURL      *string           `json:"log_archive_url"`
+	SkippedFromRunRef  *string           `json:"skipped_from_run_ref"`
+	PhaseOutputs       map[string]string `json:"phase_outputs"`
 }
 
 type RunReport struct {
+	ID                  string             `json:"-"`
 	Ref                 string             `json:"ref"`
 	Project             string             `json:"project"`
 	RunRef              string             `json:"run_ref"`
@@ -40,6 +42,7 @@ type RunReport struct {
 	ParentRunRef        *string            `json:"parent_run_ref"`
 	RootRunRef          *string            `json:"root_run_ref"`
 	OriginKind          *string            `json:"origin_kind"`
+	EntrypointPhase     *string            `json:"entrypoint_phase"`
 	IsCycle             bool               `json:"is_cycle"`
 	CycleNumber         *int               `json:"cycle_number"`
 	Workflow            string             `json:"workflow"`

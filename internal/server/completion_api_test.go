@@ -17,10 +17,10 @@ import (
 type fakeCompletionStore struct {
 	fakeReadStore
 	// token → (runID, project, runRef)
-	tokenRunID  string
+	tokenRunID   string
 	tokenProject string
-	tokenRef    string
-	tokenErr    error
+	tokenRef     string
+	tokenErr     error
 
 	abortResult AbortRunResult
 	abortErr    error
@@ -39,12 +39,16 @@ type fakeCompletionStore struct {
 	terminalResult AbortRunResult
 	terminalErr    error
 
-	appendIdx int
-	appendErr error
+	appendIdx   int
+	appendErr   error
+	appendPhase string
+	appendKind  string
+	appendFile  string
 
 	leaseResult Lease
 	leaseHost   *Host
 	leaseErr    error
+	leaseReq    LeaseAcquireRequest
 }
 
 func (s *fakeCompletionStore) ReadRunIDForCallbackToken(_ context.Context, token string) (string, string, string, error) {
@@ -87,6 +91,10 @@ func (s *fakeCompletionStore) StampRunCompletion(_ context.Context, _, _ string,
 	if len(copy.Attempts) > 0 {
 		last := copy.Attempts[len(copy.Attempts)-1]
 		last.Conclusion = p.Conclusion
+		last.Completed = true
+		if p.PhaseOutputs != nil {
+			last.PhaseOutputs = p.PhaseOutputs
+		}
 		if p.VerificationStatus != "" {
 			last.Verification = &RunVerificationData{
 				Status:  p.VerificationStatus,
@@ -108,29 +116,49 @@ func (s *fakeCompletionStore) SetRunTerminalState(_ context.Context, _, _, _ str
 	return s.terminalResult, s.terminalErr
 }
 
-func (s *fakeCompletionStore) AppendRunAttempt(_ context.Context, _, _, _, _, _ string) (int, error) {
+func (s *fakeCompletionStore) AppendRunAttempt(_ context.Context, _, _, phase, phaseKind, workflowFilename string) (int, error) {
+	s.appendPhase = phase
+	s.appendKind = phaseKind
+	s.appendFile = workflowFilename
 	return s.appendIdx, s.appendErr
 }
 
-func (s *fakeCompletionStore) AcquireLease(_ context.Context, _ LeaseAcquireRequest) (Lease, *Host, error) {
+func (s *fakeCompletionStore) AcquireLease(_ context.Context, req LeaseAcquireRequest) (Lease, *Host, error) {
+	s.leaseReq = req
 	return s.leaseResult, s.leaseHost, s.leaseErr
 }
 
 // fakeDispatchClient records dispatch calls.
 type fakeDispatchClient struct {
 	called bool
+	repo   string
+	file   string
+	ref    string
+	inputs map[string]string
 	err    error
 }
 
-func (f *fakeDispatchClient) DispatchWorkflow(_ context.Context, _, _, _ string, _ map[string]string) error {
+func (f *fakeDispatchClient) DispatchWorkflow(_ context.Context, repo, file, ref string, inputs map[string]string) error {
 	f.called = true
+	f.repo = repo
+	f.file = file
+	f.ref = ref
+	f.inputs = inputs
 	return f.err
+}
+
+type fakeGitHubClient struct {
+	fakeDispatchClient
+}
+
+func (f *fakeGitHubClient) FetchWorkflowFile(context.Context, string, string, string) ([]byte, int, error) {
+	return nil, 404, ErrNotFound
 }
 
 // --- helpers ---
 
-func newCompletionHandler(store *fakeCompletionStore, _ GHADispatchClient) http.Handler {
-	return NewWithSyncClient(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil)
+func newCompletionHandler(store *fakeCompletionStore, ghClient WorkflowSyncClient) http.Handler {
+	return NewWithSyncClient(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, ghClient)
 }
 
 func singlePhaseWorkflowForCompletion(name string, verify bool) *Workflow {
@@ -241,6 +269,94 @@ func TestRunCompletedByCallbackToken_Advance_ReviewRequired(t *testing.T) {
 	}
 	if result.Decision == nil || *result.Decision != "advance" {
 		t.Errorf("expected decision=advance, got %v", result.Decision)
+	}
+}
+
+func TestRunCompletedByCallbackToken_AdvanceDispatchesNextPhase(t *testing.T) {
+	leaseNumber := 12
+	token := "lease-token"
+	runCallback := "run-token"
+	store := &fakeCompletionStore{
+		tokenRunID:   "r1",
+		tokenProject: "proj",
+		appendIdx:    1,
+		leaseResult: Lease{
+			Project:     "proj",
+			LeaseNumber: &leaseNumber,
+			Metadata:    map[string]any{"lease_callback_token": token},
+		},
+		leaseHost: &Host{Name: "runner-1"},
+	}
+	store.run = &RunReplayData{
+		ID:            "r1",
+		Project:       "proj",
+		WorkflowName:  "wf",
+		IssueNumber:   7,
+		IssueRepo:     "owner/repo",
+		CallbackToken: &runCallback,
+		Attempts: []RunAttemptData{
+			{AttemptIndex: 0, Phase: "env-prep", Conclusion: "failure"},
+		},
+		CumulativeCostUSD: 0.1,
+	}
+	store.wf = &Workflow{
+		Project: "proj",
+		Name:    "wf",
+		Budget:  budget.Config{Total: 25},
+		Phases: []PhaseSpec{
+			{Name: "env-prep", Outputs: []string{"validation_url"}},
+			{
+				Name:             "agent-execute",
+				Kind:             "gha_dispatch",
+				WorkflowFilename: "agent.yml",
+				WorkflowRef:      "feature",
+				DependsOn:        []string{"env-prep"},
+				Inputs: map[string]string{
+					"validation_url": "${{ phases.env-prep.outputs.validation_url }}",
+				},
+			},
+		},
+	}
+	gh := &fakeGitHubClient{}
+	h := newCompletionHandler(store, gh)
+
+	body, _ := json.Marshal(RunCompletedRequest{
+		WorkflowRunID: 1,
+		Conclusion:    "success",
+		Outputs:       map[string]string{"validation_url": "https://preview.example"},
+	})
+	req := httptest.NewRequest("POST", "/v1/run-callbacks/tok/completed", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var result RunCallbackResult
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Decision == nil || *result.Decision != "advance_phase" {
+		t.Fatalf("decision=%v, want advance_phase", result.Decision)
+	}
+	if store.appendPhase != "agent-execute" || store.appendKind != "gha_dispatch" || store.appendFile != "agent.yml" {
+		t.Fatalf("append=(%q,%q,%q)", store.appendPhase, store.appendKind, store.appendFile)
+	}
+	phaseInputs, ok := store.leaseReq.Metadata["phase_inputs"].(map[string]string)
+	if !ok || phaseInputs["validation_url"] != "https://preview.example" {
+		t.Fatalf("phase_inputs=%#v", store.leaseReq.Metadata["phase_inputs"])
+	}
+	if !gh.called {
+		t.Fatal("expected workflow dispatch")
+	}
+	if gh.repo != "owner/repo" || gh.file != "agent.yml" || gh.ref != "feature" {
+		t.Fatalf("dispatch=(%q,%q,%q)", gh.repo, gh.file, gh.ref)
+	}
+	if gh.inputs["validation_url"] != "https://preview.example" {
+		t.Fatalf("dispatch inputs=%#v", gh.inputs)
+	}
+	if gh.inputs["lease_callback_token"] != token {
+		t.Fatalf("lease callback input=%q", gh.inputs["lease_callback_token"])
 	}
 }
 
