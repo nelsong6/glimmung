@@ -211,6 +211,10 @@ portal entries. Reconciliation diagnostics are written to
 `metadata.native_auth_redirects_status` so `/v1/projects` and `/v1/state`
 show whether auth redirect sync is `ok` or `failed`.
 
+For existing project rows, Glimmung also accepts the earlier
+`metadata.native_standby_entra_redirects.application_app_id` shape as the Entra
+application client id.
+
 ### GitHub webhook
 
 | Method | Path                              | Purpose |

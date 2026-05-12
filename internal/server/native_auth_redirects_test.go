@@ -113,6 +113,32 @@ func TestNativeAuthRedirectsSkippedWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestNativeAuthRedirectsAcceptsLegacyStandbyEntraMetadata(t *testing.T) {
+	cfg, ok, err := nativeAuthRedirectConfigFromProject(Project{
+		Name: "tank-operator",
+		Metadata: map[string]any{
+			"native_standby_dns": map[string]any{
+				"record_base": "tank.dev.romaine.life",
+				"slot_prefix": "tank-operator-slot",
+				"count":       float64(10),
+			},
+			"native_standby_entra_redirects": map[string]any{
+				"enabled":            true,
+				"application_app_id": "c189a2aa-adf8-466b-a699-156cbfd9810c",
+			},
+		},
+	})
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v cfg=%#v", ok, err, cfg)
+	}
+	if cfg.ApplicationClientID != "c189a2aa-adf8-466b-a699-156cbfd9810c" {
+		t.Fatalf("cfg=%#v", cfg)
+	}
+	if got := desiredManagedRedirectURIs(cfg); len(got) != 10 || got[9] != "https://tank-operator-slot-10.tank.dev.romaine.life/" {
+		t.Fatalf("managed=%#v", got)
+	}
+}
+
 func assertStringSlice(t *testing.T, got, want []string) {
 	t.Helper()
 	if !reflect.DeepEqual(got, want) {
