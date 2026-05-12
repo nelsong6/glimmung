@@ -229,6 +229,7 @@ func (s *Store) UpsertWorkflow(ctx context.Context, req server.WorkflowRegister)
 	if err != nil {
 		return server.Workflow{}, err
 	}
+	normalizeWorkflowRegisterForProjectDoc(&req, projectDoc)
 	if err := validateWorkflowForProject(projectDoc, req); err != nil {
 		return server.Workflow{}, err
 	}
@@ -1859,7 +1860,7 @@ func validateWorkflowForProject(project projectDoc, req server.WorkflowRegister)
 	if projectRequiresNativeWorkflows(project) {
 		ghaPhases := make([]string, 0)
 		for _, phase := range req.Phases {
-			if firstNonEmpty(phase.Kind, "gha_dispatch") == "gha_dispatch" {
+			if strings.TrimSpace(phase.Kind) == "gha_dispatch" {
 				ghaPhases = append(ghaPhases, phase.Name)
 			}
 		}
@@ -1900,13 +1901,51 @@ func validateWorkflowForProject(project projectDoc, req server.WorkflowRegister)
 	return nil
 }
 
+func normalizeWorkflowRegisterForProjectDoc(req *server.WorkflowRegister, project projectDoc) {
+	defaultKind := "gha_dispatch"
+	if projectRequiresNativeWorkflows(project) {
+		defaultKind = "k8s_job"
+	}
+	for i := range req.Phases {
+		req.Phases[i].Kind = strings.TrimSpace(req.Phases[i].Kind)
+		if req.Phases[i].Kind == "" {
+			req.Phases[i].Kind = defaultKind
+		}
+		if req.Phases[i].WorkflowRef == "" {
+			req.Phases[i].WorkflowRef = "main"
+		}
+		if req.Phases[i].Inputs == nil {
+			req.Phases[i].Inputs = map[string]string{}
+		}
+		req.Phases[i].Outputs = sliceOrEmpty(req.Phases[i].Outputs)
+		req.Phases[i].DependsOn = sliceOrEmpty(req.Phases[i].DependsOn)
+		req.Phases[i].Jobs = sliceOrEmpty(req.Phases[i].Jobs)
+	}
+}
+
 func projectRequiresNativeWorkflows(project projectDoc) bool {
 	metadata := project.Metadata
 	if boolValue(metadata["native_webapp"]) || boolValue(metadata["nativeWebapp"]) {
 		return true
 	}
-	appKind := strings.ToLower(strings.TrimSpace(stringValue(metadata["app_kind"])))
-	return appKind == "native_webapp" || appKind == "native-webapp" || appKind == "native webapp"
+	appKind := firstNonEmpty(
+		stringValue(metadata["app_kind"]),
+		stringValue(metadata["appKind"]),
+		stringValue(metadata["app_type"]),
+		stringValue(metadata["appType"]),
+		stringValue(metadata["kind"]),
+	)
+	return isNativeWebappKind(appKind)
+}
+
+func isNativeWebappKind(kind string) bool {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "native_webapp", "native-webapp", "native webapp",
+		"native_web_app", "native-web-app", "native web app":
+		return true
+	default:
+		return false
+	}
 }
 
 func boolValue(value any) bool {

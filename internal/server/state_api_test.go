@@ -129,6 +129,26 @@ func TestStateSnapshotIncludesTestEnvironmentsAndWaitingRequests(t *testing.T) {
 	}
 }
 
+func TestStateSnapshotTreatsAppTypeNativeWebAppAsNative(t *testing.T) {
+	now := time.Date(2026, 5, 11, 3, 0, 0, 0, time.UTC)
+	store := fakeStateStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:        "glimmung",
+			Name:      "glimmung",
+			Metadata:  map[string]any{"app_type": "native_web_app"},
+			CreatedAt: now,
+		}}},
+	}
+	handler := NewWithStore(Settings{NativeRunnerProjectConcurrency: 3}, store)
+
+	var snapshot StateSnapshot
+	getJSON(t, handler, "/v1/state", &snapshot)
+
+	if len(snapshot.TestEnvironments) != 3 {
+		t.Fatalf("test_environments=%#v", snapshot.TestEnvironments)
+	}
+}
+
 func TestStateSnapshotRequiresStateStore(t *testing.T) {
 	handler := NewWithStore(Settings{}, fakeReadStore{})
 	rec := httptest.NewRecorder()

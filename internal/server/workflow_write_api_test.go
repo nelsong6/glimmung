@@ -100,11 +100,11 @@ func TestRegisterWorkflowRequiresProject(t *testing.T) {
 	}
 }
 
-func TestRegisterWorkflowRejectsNativeWebappGHA(t *testing.T) {
+func TestRegisterWorkflowNativeWebappDefaultsBlankKindToK8sJob(t *testing.T) {
 	store := &fakeWorkflowWriteStore{fakeReadStore: fakeReadStore{projects: []Project{{
 		ID:       "glimmung",
 		Name:     "glimmung",
-		Metadata: map[string]any{"native_webapp": true},
+		Metadata: map[string]any{"app_type": "native_web_app"},
 	}}}}
 	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{})
 
@@ -113,8 +113,29 @@ func TestRegisterWorkflowRejectsNativeWebappGHA(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer token")
 	handler.ServeHTTP(rec, req)
 
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.upsert.Phases[0].Kind != "k8s_job" || store.upsert.Phases[1].Kind != "k8s_job" || store.upsert.Phases[2].Kind != "k8s_job" {
+		t.Fatalf("phase kinds=%#v", store.upsert.Phases)
+	}
+}
+
+func TestRegisterWorkflowRejectsNativeWebappExplicitGHA(t *testing.T) {
+	store := &fakeWorkflowWriteStore{fakeReadStore: fakeReadStore{projects: []Project{{
+		ID:       "glimmung",
+		Name:     "glimmung",
+		Metadata: map[string]any{"native_webapp": true},
+	}}}}
+	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/workflows", strings.NewReader(`{"project":"glimmung","name":"agent-run","phases":[{"name":"prep","kind":"gha_dispatch"},{"name":"verify","kind":"k8s_job","verify":true},{"name":"cleanup","kind":"k8s_job","always":true}]}`))
+	req.Header.Set("Authorization", "Bearer token")
+	handler.ServeHTTP(rec, req)
+
 	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d, want 400", rec.Code)
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

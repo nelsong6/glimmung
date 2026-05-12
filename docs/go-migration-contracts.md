@@ -55,8 +55,10 @@ The detailed cleanup inventory lives in
   `signals`.
 - Keep `gha_dispatch` readable as a workflow phase kind. It is legacy support,
   not the default for new native web work.
-- Empty workflow phase `kind` still normalizes to `gha_dispatch` for backward
-  compatibility.
+- Empty workflow phase `kind` normalizes to `gha_dispatch` only for legacy or
+  non-native projects. Projects marked `native_webapp`, `native_web_app`, or
+  `app_type=native_web_app` default blank phase kinds to `k8s_job` and reject
+  explicit `gha_dispatch` phases.
 - Native `k8s_job` workflows are the default direction for new web-native work.
 
 ## Hot-swap rules

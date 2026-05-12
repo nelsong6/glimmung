@@ -323,7 +323,7 @@ const DESIGN_FILE_ITEMS: PortfolioItem[] = [
   {
     id: "capacity-view",
     title: "Front page - Capacity",
-    caption: "The dashboard landing surface: project scope, host capacity, queue, and active work",
+    caption: "The dashboard landing surface: project scope, legacy host capacity, queue, and active work",
     initialOpen: true,
     render: () => (
       <Specimen title="front page - capacity">
@@ -343,7 +343,7 @@ const DESIGN_FILE_ITEMS: PortfolioItem[] = [
               </div>
             </header>
             <div className="kpi-strip frontpage-kpis">
-              <div className="kpi"><span className="k">hosts</span><span className="v">8</span></div>
+              <div className="kpi"><span className="k">legacy hosts</span><span className="v">8</span></div>
               <div className="kpi"><span className="k">free</span><span className="v green">5</span></div>
               <div className="kpi"><span className="k">busy</span><span className="v amber">2</span></div>
               <div className="kpi"><span className="k">drained</span><span className="v red">1</span></div>
@@ -351,7 +351,7 @@ const DESIGN_FILE_ITEMS: PortfolioItem[] = [
             </div>
             <div className="frontpage-grid">
               <section>
-                <h2>Hosts</h2>
+                <h2>Legacy hosts</h2>
                 <table>
                   <thead>
                     <tr><th>Name</th><th>State</th><th>Lease</th></tr>
@@ -410,7 +410,7 @@ const DESIGN_FILE_ITEMS: PortfolioItem[] = [
           <div className="row"><span className="key">project</span><span className="val mono">glimmung</span></div>
           <div className="row"><span className="key">github</span><span className="val mono">nelsong6/glimmung</span></div>
           <div className="row"><span className="key">work</span><span className="val mono">1 active / 2 pending</span></div>
-          <div className="row"><span className="key">hosts</span><span className="val mono">nelsonpc</span></div>
+          <div className="row"><span className="key">legacy hosts</span><span className="val mono">nelsonpc</span></div>
         </div>
         <h2>Workflows</h2>
         <table>
