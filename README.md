@@ -1,35 +1,51 @@
 # glimmung
 
-Agent dispatcher. Owns a queue of "agent runs" and assigns them to a pool of self-hosted runner machines based on each machine's capabilities.
+Go service for issue-driven agentic development. Glimmung stores projects,
+workflows, issues, runs, leases, reports, and signals in Cosmos DB; serves the
+Vite + React dashboard; and coordinates native Kubernetes jobs plus the legacy
+GitHub Actions dispatch path.
 
 > *The Glimmung scanned the assembled list of beings he had summoned. From a thousand worlds they had come, each with a craft to contribute.*
 > — paraphrased from Philip K. Dick, *Galactic Pot-Healer*
 
 ## What it does
 
-The agentic-CI pattern (issue label → run Claude on a host with GUI / state requirements → produce a PR) repeats across multiple projects (spirelens, ambience, tank-operator, …) and no off-the-shelf CI provider models the actual constraint well: **stateful, host-pinned, scarce-resource leases.** Glimmung owns that primitive.
+The agentic development pattern (issue -> bounded agent run -> verification ->
+review report / PR) repeats across multiple projects, and off-the-shelf CI
+systems do not model the orchestration cleanly. Glimmung owns the queue, the
+database-backed workflow shape, the run/lease lifecycle, the callback surface,
+the verify-loop decision engine, the dashboard, and the signal bus.
 
-Native Kubernetes jobs are the default execution layer. Legacy GitHub Actions
-dispatch is still present for older consumers, but new native apps should not
-register app-specific GitHub runner pools or keep repo-backed workflow files.
-Glimmung owns the queue, the lease lifecycle, the dashboard, and the
-cross-project orchestration.
+Native Kubernetes jobs are the default execution layer for web-native apps.
+Legacy GitHub Actions dispatch is still present for older consumers, but new
+native apps should not register app-specific GitHub runner pools or keep
+repo-backed workflow files as the runtime source of truth.
 
 Full design + intent: [issue #1](https://github.com/nelsong6/glimmung/issues/1).
 
 ## Mental model
 
 ```
-Project ──< Workflow ──< Run/Lease ──── Native capacity or Host
-(repo)     (database-backed        (k8s_job phases use native
-            runtime shape)          capacity; legacy GHA dispatch
-                                    can still match registered hosts)
+Project -> Workflow -> Issue -> Run -> Phase/Job -> Report
+                         \        \
+                          \        -> Lease + callback token
+                           -> Touchpoint / PR review surface
 ```
 
 - **Project** = a repo (e.g. `spirelens`), declares the github_repo only.
-- **Workflow** = a database-backed automation shape under a project. Dispatch reads the Workflow row from Cosmos: phases, native jobs, PR policy, budget, trigger label if any, and requirements.
-- **Lease** = "this workflow wants to run, and got assigned this host." Lifecycle: pending → active → released | expired.
-- **Host** = a virtual venue for legacy/self-hosted-runner dispatch. Native `k8s_job` workflows use Glimmung's native capacity path instead of GitHub runner labels.
+- **Workflow** = a database-backed automation shape under a project. Dispatch
+  reads the Workflow row from Cosmos: phases, native jobs, PR policy, budget,
+  trigger label if any, and requirements.
+- **Issue** = the canonical Glimmung issue row. GitHub Issues may still feed
+  temporary backlog/tracker workflows, but the live run loop is issue-row based.
+- **Run** = durable execution record for one issue/workflow invocation. Runs
+  hold attempts, phase state, evidence refs, cost, terminal decision, and
+  callback-token metadata.
+- **Lease** = capacity claim for a run phase. Native `k8s_job` phases use the
+  native capacity path and callback-token APIs; legacy `gha_dispatch` phases may
+  still claim a registered Host and fire `workflow_dispatch`.
+- **Host** = a legacy/self-hosted-runner venue kept for exception workflows and
+  dashboard visibility.
 
 Workflow registration is an admin/control-plane operation. Consumer repos do
 not need `.glimmung/workflows/<name>.yaml` files for runtime dispatch; changing
@@ -69,13 +85,17 @@ See [Repo UI Packages And Design Portfolios](docs/ui-package-design-portfolios.m
 ```
 cmd/glimmung-go/      # Go HTTP entrypoint used by the production image
 internal/             # Go domain/server/store packages
-src/glimmung/         # Legacy Python implementation retained during cleanup
 frontend/             # Vite + React dashboard (live SSE state, MSAL admin)
 k8s/                  # Helm chart, ArgoCD-synced from main
 tofu/                 # Cosmos database + containers + Entra app reg
 Dockerfile            # multi-stage: node frontend build -> Go backend
 .github/workflows/    # build + ACR push + chart bump + tofu plan/apply
 ```
+
+The legacy Python tree under `src/glimmung/` is cleanup/reference material only;
+it is not the app runtime, local app dev path, or CI authority. The keep/port/
+retire map lives in
+[`docs/go-runtime-cleanup-inventory.md`](docs/go-runtime-cleanup-inventory.md).
 
 ## Contribution checklist
 
@@ -95,6 +115,12 @@ matching surface in the same PR:
   API and MCP surface do not drift silently.
 
 ## API
+
+The Go route registration in
+[`internal/server/server.go`](internal/server/server.go) is the active HTTP
+surface. [`internal/server/route_inventory_test.go`](internal/server/route_inventory_test.go)
+keeps that route list explicit; the tables below summarize the operator-facing
+surface rather than every compatibility tombstone.
 
 ### Lease lifecycle
 
@@ -162,8 +188,15 @@ Cosmos operations in [`internal/store/cosmos`](internal/store/cosmos). It:
 2. Reads the Glimmung issue by project issue number.
 3. Claims the `("issue", "<project>#<number>")` lock; concurrent dispatches on the same issue return `state="already_running"`.
 4. Creates the Run record while the issue lock serializes run-number allocation.
-5. Acquires a lease. If no host is available, the run stays pending.
-6. Fires `workflow_dispatch` only for `gha_dispatch` phases when a host and GitHub dispatch client are available. Native `k8s_job` phases stay in the Go-managed native path.
+5. Acquires a lease. If no capacity is immediately available, the run stays
+   pending.
+6. Returns the callback-token metadata needed by the executor.
+7. Fires `workflow_dispatch` only for `gha_dispatch` phases when a host and
+   GitHub dispatch client are available. Native `k8s_job` phases stay in the
+   Go-managed native path and report through the native run callback APIs.
+8. Records completion through `/v1/run-callbacks/{callback_token}/completed`
+   or `/v1/run-callbacks/{callback_token}/native/completed`, then runs the Go
+   decision engine.
 
 Issue-lock TTL is 4h. Terminal Run transitions release issue/PR locks through
 the Go store; leases still have their own TTL/callback lifecycle.
@@ -185,7 +218,7 @@ Epics are not persisted yet. For now, Epic-level context lives in Playbook
 descriptions or linked documentation; the model boundary is documented in
 [Epics and Playbooks](docs/epics-and-playbooks.md).
 
-Runtime pod auth via the `infra-shared-identity` workload identity, which has `Cosmos DB Built-in Data Contributor` at the account scope (granted in [`infra-bootstrap/tofu/cosmos-serverless.tf`](https://github.com/nelsong6/infra-bootstrap/blob/main/tofu/cosmos-serverless.tf)). Container clients are obtained via `get_*_client` (no API call); reads/writes use the data-plane permissions. CREATE DATABASE / CREATE CONTAINER is control-plane and runs only via tofu under the app SP.
+Runtime pod auth via the `infra-shared-identity` workload identity, which has `Cosmos DB Built-in Data Contributor` at the account scope (granted in [`infra-bootstrap/tofu/cosmos-serverless.tf`](https://github.com/nelsong6/infra-bootstrap/blob/main/tofu/cosmos-serverless.tf)). The Go store opens existing containers with `azcosmos.NewContainer`; reads/writes use the data-plane permissions. CREATE DATABASE / CREATE CONTAINER is control-plane and runs only via tofu under the app SP.
 
 ## Lock semantics
 
@@ -200,7 +233,7 @@ Release paths:
 - **Run terminal paths**: Go completion, abort, replay, and native failure
   handlers release related issue/PR locks and update run state.
 - **Backstop**: lease TTL and stale heartbeat handling remain compatibility
-  behavior to preserve while the Python cleanup completes.
+  behavior to preserve while the legacy cleanup completes.
 
 ## One-time setup
 
@@ -227,7 +260,8 @@ The Entra side is fully tofu-managed. The GitHub App is created via the GitHub U
 Visit https://glimmung.romaine.life/, click **sign in** (top right) — MSAL popup against the `glimmung-oauth` Entra app. Once signed in (email must be in the allowlist), click **admin** to reveal the registration tabs:
 
 - **Register project** → name + github_repo
-- **Register workflow** → project (dropdown), name, filename, ref, trigger_label, requirements
+- **Register workflow** → project (dropdown), name, phases/native jobs, budget,
+  trigger label, requirements
 - **Register host** → name + capabilities
 
 The dashboard's left sidebar shows projects expandable into their workflows. Clicking a workflow filters the lease tables and highlights eligible hosts.
@@ -237,6 +271,7 @@ The dashboard's left sidebar shows projects expandable into their workflows. Cli
 ```sh
 az login                                 # for DefaultAzureCredential
 COSMOS_ENDPOINT=https://infra-cosmos-serverless.documents.azure.com:443/ \
+  COSMOS_DATABASE=glimmung \
   go run ./cmd/glimmung-go
 ```
 
@@ -262,10 +297,11 @@ npm run test:run
 npm run build
 ```
 
-GitHub Actions runs those checks on pull requests and pushes. Pushes to `main`
-also run a Go-native live Cosmos smoke test for the lock lifecycle with GitHub
-OIDC, using the database-scoped CI role assignment in
-[`tofu/test-access.tf`](tofu/test-access.tf).
+GitHub Actions runs those checks on pull requests and pushes. Pull requests
+also run `.github/workflows/docker-build-check.yaml`, which performs a
+throwaway app image build with `push: false`. Pushes to `main` also run a
+Go-native live Cosmos smoke test for the lock lifecycle with GitHub OIDC, using
+the database-scoped CI role assignment in [`tofu/test-access.tf`](tofu/test-access.tf).
 
 The repository root no longer carries Python packaging. The legacy
 `src/glimmung/` tree and `tests/` suite remain cleanup/reference material while
@@ -442,8 +478,8 @@ Deterministic: `f"{scope}::{urllib.parse.quote(key, safe='')}"`. Cosmos forbids 
 
 ### Test coverage
 
-Remaining generic lock edge cases from the Python test suite should be ported
-to Go store tests before the legacy lock module is deleted.
+Remaining generic lock edge cases identified in the cleanup inventory should be
+ported to Go store tests before the legacy lock module is deleted.
 
 ## Signal bus + PR triage (#19)
 
@@ -485,7 +521,11 @@ The legacy triage workflow contract runs impl + verify with feedback in
 context, force-pushes the result, and uploads `verification.json` (same
 contract as retry workflows; see verify-loop substrate).
 
-## Phases
+## Historical Platform Phases
+
+These are the original product build phases. The Go-runtime cleanup work is
+tracked separately in [issue #446](https://github.com/nelsong6/glimmung/issues/446)
+and [`docs/go-runtime-cleanup-inventory.md`](docs/go-runtime-cleanup-inventory.md).
 
 1. **Phase 1** ✓ — lease primitive, sweep job, Cosmos backend.
 2. **Phase 2** ✓ — GitHub App webhook receiver, `workflow_dispatch` firing, ingress at `glimmung.romaine.life`, Entra ID auth on admin endpoints.

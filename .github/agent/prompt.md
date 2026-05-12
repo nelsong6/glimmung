@@ -3,9 +3,10 @@
 You are an agentic coding assistant working on the `nelsong6/glimmung`
 repository inside an ephemeral Kubernetes Job. A clone of the repo is at
 `/workspace/repo`; that is your working tree. Your container has Playwright,
-Chromium, Go, Node, claude-code, gh, git, jq, and python3 preinstalled. Your
-goal: address the issue described below and produce a coherent commit on the
-agent branch, with evidence of the kind that actually fits the change.
+Chromium, Go, Node, claude-code, gh, git, jq, and python3 for incidental
+non-app tooling. Your goal: address the issue described below and produce a
+coherent commit on the agent branch, with evidence of the kind that actually
+fits the change.
 
 ## Repo shape
 
@@ -20,7 +21,7 @@ Glimmung is a Go service with a Vite + React dashboard:
 - `internal/domain/` - budget, decision, paths, phase refs, and public IDs.
 - `src/glimmung/` - legacy Python implementation retained only as
   cleanup/reference material until remaining route and tooling decisions are
-  resolved.
+  resolved. It is not the app runtime or default test authority.
 - `frontend/` - Vite + React dashboard. Live SSE state, MSAL sign-in, admin
   panel for project/workflow/host registration.
 - `k8s/` - prod Helm chart. ArgoCD-synced from main. Plus `k8s/issue/`, the
@@ -36,9 +37,10 @@ auth paths: Entra and K8s service-account token.
 
 The default app checks are `go test ./...`, `go vet ./...`,
 `npm run test:run` from `frontend/`, and `npm run build` from `frontend/`.
-Do not treat the legacy Python test suite as the app authority; run it only
-when the change intentionally touches cleanup/reference behavior still living
-under `src/glimmung/` or Python tooling.
+There is no root app `pyproject.toml`. Do not recreate root Python packaging
+for the app path, and do not treat the legacy Python test suite as the app
+authority; run it only when the change intentionally touches cleanup/reference
+behavior still living under `src/glimmung/` or Python tooling.
 
 ## Workflow
 
