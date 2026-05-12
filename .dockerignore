@@ -9,8 +9,6 @@ __pycache__
 pyproject.toml
 src
 tests
-mcp
-scripts/*.py
 
 frontend/node_modules
 frontend/dist

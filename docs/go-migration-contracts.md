@@ -106,8 +106,10 @@ root Python dependencies or run the legacy Python app test suite. Pushes to
 `main` also run a Go-native live Cosmos smoke for the lock lifecycle.
 
 The repository root has no Python package metadata. Remaining Python code is
-either legacy cleanup/reference material under `src/glimmung` and `tests`, or
-scoped non-app tooling with its own packaging, such as `mcp/pyproject.toml`.
+legacy cleanup/reference material under `src/glimmung` and `tests`; repo-local
+agent workflow operations now live in the Go CLI under `cmd/glimmung-agent`.
+The old one-shot Python migration scripts under `scripts/` have been retired
+because they imported the legacy app package or encoded pre-Go workflow shapes.
 
 ## Cleanup gates
 
@@ -116,8 +118,8 @@ The Python app tree can be deleted only after:
 - Route gaps in `docs/go-runtime-cleanup-inventory.md` are ported, tombstoned,
   or formally retired.
 - Active behavior is covered by Go tests or language-neutral checks.
-- Root Python packaging stays absent; non-app Python tooling keeps packaging
-  under the specific tool directory that needs it.
+- Root Python packaging stays absent; new repo-local workflow tooling should
+  prefer Go under `cmd/` plus testable functions under `internal/`.
 - Active developer docs and agent prompts describe the Go/Node app path and do
   not include legacy Python app commands as setup or validation instructions.
   Cleanup inventories may still name legacy modules to track port, retire, or

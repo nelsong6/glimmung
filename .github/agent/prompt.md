@@ -13,9 +13,11 @@ fits the change.
 Glimmung is a Go service with a Vite + React dashboard:
 
 - `cmd/glimmung-go/` - production service entrypoint.
+- `cmd/glimmung-agent/` - Go ops CLI for validation previews and agent Jobs.
 - `internal/server/` - active HTTP surface, including auth, lease lifecycle,
   dispatch/callback routes, touchpoints, playbooks, signals, webhooks, and
   static frontend serving.
+- `internal/ops/agentops/` - reusable functions behind the agent ops CLI.
 - `internal/store/cosmos/` - Cosmos persistence boundary and live-smoke
   coverage for app data paths.
 - `internal/domain/` - budget, decision, paths, phase refs, and public IDs.
@@ -40,7 +42,7 @@ The default app checks are `go test ./...`, `go vet ./...`,
 There is no root app `pyproject.toml`. Do not recreate root Python packaging
 for the app path, and do not treat the legacy Python test suite as the app
 authority; run it only when the change intentionally touches cleanup/reference
-behavior still living under `src/glimmung/` or Python tooling.
+behavior still living under `src/glimmung/`.
 
 ## Workflow
 

@@ -9,15 +9,18 @@ isolating the old Python app without breaking active Glimmung behavior.
 The cleanup target is **no Python in the app runtime, production image, deploy
 path, or default app CI gate**.
 
-Python may remain only for explicitly scoped non-app tooling, such as the MCP
-helper under `mcp/glimmung_agent` or one-off migration scripts, if that tooling
-keeps its packaging outside the repo root and is documented as not part of the
-production service.
+Python may remain only as legacy cleanup/reference material under
+`src/glimmung` and `tests` until the remaining keep/port/retire decisions are
+resolved. Repo-local workflow and preview operations should be Go code under
+`cmd/` plus testable functions under `internal/`.
 
-The root `pyproject.toml` has been removed. `mcp/pyproject.toml` is the scoped
-package for the cleanup workflow helper, and any future Python tooling should
-follow that narrow packaging pattern instead of reintroducing repo-root app
-dependencies.
+The root `pyproject.toml` and the old repo-local `mcp/pyproject.toml` have
+been removed. Do not reintroduce repo-root app dependencies for Python.
+
+The old one-shot Python migration scripts under `scripts/` and the old
+`mcp/glimmung_agent` Python ops helper have been retired. New data fixes should
+be written against the Go store/API contracts or isolated behind an explicit
+tooling decision.
 
 ## Route authority
 
@@ -44,8 +47,9 @@ FastAPI test suite. The push-only live Cosmos smoke has been moved to
 `GLIMMUNG_TEST_COSMOS=live`.
 
 The root Python suite remains as cleanup/reference material until individual
-behaviors are ported, retired, or moved to scoped tooling, but it no longer has
-repo-root packaging or app CI authority.
+behaviors are ported, retired, or moved, but it no longer has repo-root
+packaging or app CI authority. The former MCP helper tests are now Go tests
+under `internal/ops/agentops`.
 
 ## Route parity notes
 
@@ -128,7 +132,7 @@ still needs a keep/port/delete decision.
 | `tests/test_dispatch_inputs_filter.py` | Port to Go dispatch input tests if still required. |
 | `tests/test_disposable_frontend_auth_config.py` | Replace with `internal/server/server_test.go` config tests. |
 | `tests/test_evidence_verification_gate.py` | Replace with `internal/domain/decision` and completion API tests. |
-| `tests/test_glimmung_agent_ops.py` | Move or retain under MCP tooling if `mcp/glimmung_agent` stays Python. |
+| `tests/test_glimmung_agent_ops.py` | Replaced by `internal/ops/agentops` Go tests; deleted from the legacy app test suite. |
 | `tests/test_issue_endpoints.py` | Replace with `internal/server/issue_api_test.go`. |
 | `tests/test_issue_graph.py` | Keep as reference until graph endpoints are ported or retired. |
 | `tests/test_issues.py` | Replace with Go issue store/API tests. |
@@ -196,6 +200,19 @@ an explicit migration window exists:
 | Evidence and native logs | Completion payloads stamp summaries, screenshots, verification, phase outputs, and cost. Native event/log archive projection is Go-owned; direct pod-log proxying remains undecided. | `internal/server/completion_api_test.go`, `internal/server/run_api_test.go`, `internal/server/graph_api_test.go`, `internal/store/cosmos/cosmos_test.go`. |
 | `.glimmung/workflows/<name>.yaml` | Keep upstream/sync endpoints as optional import helpers. The registered workflow document in Cosmos is runtime authority for dispatch. | `internal/server/workflow_sync_api_test.go`; docs in `README.md` and `docs/workflow-shape.md`. |
 | Dashboard host UX | Keep host registration and host tables for legacy/self-hosted GHA capacity, but label them as legacy surfaces. Native web app projects do not surface host pools as the normal path. | Frontend build plus `frontend/src/StyleguideView.tsx` catalog update. |
+
+## Phase 7 workflow ops tooling decisions
+
+| Surface | Decision |
+|---|---|
+| `cmd/glimmung-agent` | New Go CLI for validation-preview and agent-job orchestration. Commands stay thin and delegate to `internal/ops/agentops`. |
+| `internal/ops/agentops` | Owns reusable functions and command-runner boundaries for ACR image checks/builds, Helm preview deploy/destroy, Kubernetes labels, public preview waiting, and agent Job apply/wait behavior. |
+| `mcp/glimmung_agent` | Retired and deleted. The repo no longer has a Python package for agent workflow ops. The dedicated `mcp-glimmung` repo remains the MCP server surface. |
+| `.github/workflows/agent-pr-cleanup.yml` | Builds `./cmd/glimmung-agent` and invokes the binary for validation-preview cleanup; it no longer installs Python packaging. |
+| `scripts/migrate-prs-to-reports.py` | Retired and deleted. It imported `src/glimmung` models/store helpers and represented an old one-shot PR backfill path. |
+| `scripts/migrate_workflows_to_phases.py` | Retired and deleted. The phase-shape migration is complete; Cosmos Workflow documents are now runtime authority. |
+| `scripts/seed-from-github.py` | Retired and deleted. It imported legacy issue/report/run modules and seeded historical GitHub PR state through the old Python app package. |
+| README browser-inspection command | Kept as optional external `mcp-glimmung` tooling because it belongs to the dedicated MCP repo, not this repo's workflow ops helper. |
 
 ## Live-consumer checks still required
 

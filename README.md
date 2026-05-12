@@ -86,6 +86,7 @@ See [Repo UI Packages And Design Portfolios](docs/ui-package-design-portfolios.m
 
 ```
 cmd/glimmung-go/      # Go HTTP entrypoint used by the production image
+cmd/glimmung-agent/   # Go ops CLI for agent jobs and validation previews
 internal/             # Go domain/server/store packages
 frontend/             # Vite + React dashboard (live SSE state, MSAL admin)
 k8s/                  # Helm chart, ArgoCD-synced from main
@@ -311,8 +312,13 @@ the database-scoped CI role assignment in [`tofu/test-access.tf`](tofu/test-acce
 The repository root no longer carries Python packaging. The legacy
 `src/glimmung/` tree and `tests/` suite remain cleanup/reference material while
 the remaining keep/port/retire decisions are resolved, but they are not part of
-the app dev loop or CI authority. Scoped Python tooling keeps its own packaging
-under that tool directory, such as `mcp/pyproject.toml`.
+the app dev loop or CI authority. Repo-local agent workflow operations live in
+the Go CLI under `cmd/glimmung-agent` and reusable functions under
+`internal/ops/agentops`; they are covered by `go test ./...`.
+
+```sh
+go run ./cmd/glimmung-agent --help
+```
 
 To exercise the Go live Cosmos smoke locally, opt in with:
 
@@ -330,9 +336,9 @@ lock name. The test deletes its lock document before and after the run.
 ## Browser inspection
 
 `mcp-glimmung` includes a generic Playwright-backed inspector for validation
-URLs. This is optional external tooling, not part of Glimmung's app runtime or
-local app setup. Use the MCP `inspect_browser_url` tool, or run the same
-implementation from the standalone repo:
+URLs. This is optional external tooling, not part of Glimmung's app runtime,
+local app setup, or repo-local ops CLI. Use the MCP `inspect_browser_url` tool,
+or run the same implementation from the standalone repo:
 
 ```sh
 git clone https://github.com/nelsong6/mcp-glimmung.git
