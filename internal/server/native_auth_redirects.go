@@ -137,6 +137,12 @@ func nativeAuthRedirectConfigFromProject(project Project) (nativeAuthRedirectCon
 	if !ok {
 		cfgMap, ok = mapFromMap(project.Metadata, "nativeAuthRedirects")
 	}
+	if !ok {
+		cfgMap, ok = mapFromMap(project.Metadata, "native_standby_entra_redirects")
+	}
+	if !ok {
+		cfgMap, ok = mapFromMap(project.Metadata, "nativeStandbyEntraRedirects")
+	}
 	if !ok || !boolFromMap(cfgMap, "enabled") {
 		return nativeAuthRedirectConfig{}, false, nil
 	}
@@ -149,7 +155,7 @@ func nativeAuthRedirectConfigFromProject(project Project) (nativeAuthRedirectCon
 		Enabled:                true,
 		Provider:               firstNonEmpty(stringMapValue(cfgMap, "provider"), "entra"),
 		ApplicationObjectID:    firstNonEmpty(stringMapValue(cfgMap, "application_object_id"), stringMapValue(cfgMap, "applicationObjectId"), stringMapValue(cfgMap, "app_registration_object_id"), stringMapValue(cfgMap, "entra_application_object_id")),
-		ApplicationClientID:    firstNonEmpty(stringMapValue(cfgMap, "application_client_id"), stringMapValue(cfgMap, "applicationClientId"), stringMapValue(cfgMap, "client_id"), stringMapValue(cfgMap, "entra_client_id")),
+		ApplicationClientID:    firstNonEmpty(stringMapValue(cfgMap, "application_client_id"), stringMapValue(cfgMap, "applicationClientId"), stringMapValue(cfgMap, "application_app_id"), stringMapValue(cfgMap, "applicationAppId"), stringMapValue(cfgMap, "client_id"), stringMapValue(cfgMap, "app_id"), stringMapValue(cfgMap, "appId"), stringMapValue(cfgMap, "entra_client_id")),
 		RedirectURIMode:        firstNonEmpty(stringMapValue(cfgMap, "redirect_uri_mode"), stringMapValue(cfgMap, "redirectUriMode"), "spa"),
 		ProductionRedirectURIs: stringSliceFromMap(cfgMap, "production_redirect_uris", "productionRedirectUris"),
 		ExtraRedirectURIs:      stringSliceFromMap(cfgMap, "extra_redirect_uris", "extraRedirectUris"),
