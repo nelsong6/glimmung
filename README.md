@@ -249,13 +249,12 @@ cd frontend && npm install && npm run dev
 
 ## Tests
 
-The default backend gate is Go:
+The default app gate is Go plus the Vite dashboard:
 
 ```sh
 go test ./...
+go vet ./...
 ```
-
-Frontend changes should also run:
 
 ```sh
 cd frontend
@@ -263,29 +262,30 @@ npm run test:run
 npm run build
 ```
 
-The legacy Python app tests still exist during the cleanup window and use the
-deterministic in-memory Cosmos backing:
+GitHub Actions runs those checks on pull requests and pushes. Pushes to `main`
+also run a Go-native live Cosmos smoke test for the lock lifecycle with GitHub
+OIDC, using the database-scoped CI role assignment in
+[`tofu/test-access.tf`](tofu/test-access.tf).
+
+The legacy Python app tests still exist as cleanup/reference material during
+the migration window, but they are no longer the app CI authority:
 
 ```sh
 uv run --extra dev pytest
 ```
 
-GitHub Actions still runs the legacy fake-backed app suite until the remaining
-Python behavior is ported, deleted, or isolated. Pushes to `main` also run a
-focused live Cosmos smoke with GitHub OIDC, using the database-scoped CI role
-assignment in [`tofu/test-access.tf`](tofu/test-access.tf).
-
-To exercise the same container surface against live Cosmos, opt in with:
+To exercise the Go live Cosmos smoke locally, opt in with:
 
 ```sh
 az login
-GLIMMUNG_TEST_COSMOS=live uv run --extra dev pytest
+COSMOS_ENDPOINT=https://infra-cosmos-serverless.documents.azure.com:443/ \
+  COSMOS_DATABASE=glimmung \
+  GLIMMUNG_TEST_COSMOS=live \
+  go test ./internal/store/cosmos -run TestLiveCosmosLockLifecycle -count=1 -v
 ```
 
-The live adapter in [`tests/cosmos_fake.py`](tests/cosmos_fake.py) prefixes
-every partition-key value with a per-session `test-...:` namespace and sweeps
-that namespace on first use. Set `GLIMMUNG_TEST_PREFIX=test-my-run:` to reuse
-or inspect a specific namespace.
+Set `GLIMMUNG_TEST_PREFIX=test-my-run` to reuse or inspect a specific smoke-test
+lock name. The test deletes its lock document before and after the run.
 
 ## Browser inspection
 

@@ -79,6 +79,7 @@ Run the default backend gate with:
 
 ```sh
 go test ./...
+go vet ./...
 ```
 
 Run frontend checks from `frontend/` when dashboard code changes:
@@ -88,6 +89,10 @@ npm run test:run
 npm run build
 ```
 
+Pull-request app CI runs the Go gate and frontend gate. It does not install
+root Python dependencies or run the legacy FastAPI test suite. Pushes to `main`
+also run a Go-native live Cosmos smoke for the lock lifecycle.
+
 ## Cleanup gates
 
 The Python app tree can be deleted only after:
@@ -95,8 +100,8 @@ The Python app tree can be deleted only after:
 - Route gaps in `docs/go-runtime-cleanup-inventory.md` are ported, tombstoned,
   or formally retired.
 - Active behavior is covered by Go tests or language-neutral checks.
-- Default app CI no longer installs root Python dependencies or imports
-  `src/glimmung`.
+- Remaining root Python packaging is no longer needed for manual legacy tests
+  or migration tooling.
 - Root Python packaging is removed or moved under the specific non-app tooling
   that still needs it.
 - Docs and agent prompts no longer point new contributors at FastAPI,

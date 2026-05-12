@@ -14,5 +14,8 @@ export function resolveProjectWorkflow<T extends WorkflowLookupItem>(
     const exact = projectWorkflows.find((workflow) => workflow.name === name);
     if (exact) return exact;
   }
+  if (projectWorkflows.length === 1) {
+    return projectWorkflows[0];
+  }
   return null;
 }
