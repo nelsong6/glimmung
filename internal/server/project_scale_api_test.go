@@ -258,7 +258,7 @@ func TestScaleProjectTestEnvironmentsPersistsWorkloadIdentityStatus(t *testing.T
 	}
 }
 
-func TestScaleProjectTestEnvironmentsWarmsSlotsBeforeReady(t *testing.T) {
+func TestScaleProjectTestEnvironmentsPreparesSlotsBeforeReady(t *testing.T) {
 	store := &fakeProjectScalerStore{project: Project{
 		ID:         "tank",
 		Name:       "tank",
@@ -283,8 +283,11 @@ func TestScaleProjectTestEnvironmentsWarmsSlotsBeforeReady(t *testing.T) {
 	var project Project
 	patchJSON(t, handler, "/v1/projects/tank/test-environments/count", `{"count":2}`, &project)
 
-	if !preparer.ensured {
-		t.Fatal("expected scale to prepare test slots")
+	if !preparer.preliminaries {
+		t.Fatal("expected scale to prepare test slot preliminaries")
+	}
+	if preparer.activated {
+		t.Fatal("scale should not activate test slot runtime")
 	}
 	if len(store.slotStatuses) != 4 {
 		t.Fatalf("statuses=%#v", store.slotStatuses)
@@ -339,8 +342,8 @@ func TestScaleProjectTestEnvironmentsDeprovisionsRemovedSlots(t *testing.T) {
 	if got, want := strings.Join(preparer.deprovisioned, ","), "tank-slot-2,tank-slot-3"; got != want {
 		t.Fatalf("deprovisioned=%q, want %q", got, want)
 	}
-	if preparer.ensured {
-		t.Fatal("scale down should not warm removed slots")
+	if preparer.preliminaries || preparer.activated {
+		t.Fatal("scale down should not warm or activate removed slots")
 	}
 	standby := updated.Metadata["native_standby_dns"].(map[string]any)
 	slots := standby["slots"].([]any)

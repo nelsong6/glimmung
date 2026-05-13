@@ -46,7 +46,7 @@ type TestSlotReturnResult struct {
 	CleanupStarted bool    `json:"cleanup_started"`
 }
 
-func checkoutTestSlot(store ReadStore, _ TestSlotPreparer, _ NativeGitHubTokenMinter) http.HandlerFunc {
+func checkoutTestSlot(store ReadStore, preparer TestSlotPreparer, minter NativeGitHubTokenMinter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		leaseStore, ok := store.(LeaseStore)
 		if !ok || leaseStore == nil {
@@ -106,11 +106,20 @@ func checkoutTestSlot(store ReadStore, _ TestSlotPreparer, _ NativeGitHubTokenMi
 			writeProblem(w, http.StatusInternalServerError, "test-slot checkout failed")
 			return
 		}
+		if preparer != nil && lease.State == "claimed" && boolFromMap(lease.Metadata, "test_slot_checkout") {
+			if err := preparer.ActivateTestSlotRuntime(r.Context(), lease, project, minter); err != nil {
+				markLeaseSlotStatus(r.Context(), store, project, lease, "error", err)
+				_ = preparer.ReturnTestSlotRuntime(r.Context(), lease, project)
+				_, _ = leaseStore.CancelLeaseByRef(r.Context(), req.Project, LeasePublicRefFromLease(lease))
+				writeProblem(w, http.StatusBadGateway, "test-slot runtime activation failed")
+				return
+			}
+		}
 		writeJSON(w, http.StatusOK, testSlotCheckoutResponse(project, workflow, lease, host))
 	}
 }
 
-func returnTestSlot(store ReadStore, preparer TestSlotPreparer, minter NativeGitHubTokenMinter) http.HandlerFunc {
+func returnTestSlot(store ReadStore, preparer TestSlotPreparer, _ NativeGitHubTokenMinter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		leaseStore, ok := store.(LeaseStore)
 		stateStore, hasState := store.(StateStore)
@@ -144,12 +153,12 @@ func returnTestSlot(store ReadStore, preparer TestSlotPreparer, minter NativeGit
 				return
 			}
 			markLeaseSlotStatus(r.Context(), store, project, lease, "warming", nil)
-			if err := preparer.ReturnTestSlot(r.Context(), lease); err != nil {
+			if err := preparer.ReturnTestSlotRuntime(r.Context(), lease, project); err != nil {
 				markLeaseSlotStatus(r.Context(), store, project, lease, "error", err)
 				writeProblem(w, http.StatusBadGateway, "test-slot cleanup failed")
 				return
 			}
-			if err := preparer.EnsureTestSlot(r.Context(), lease, project, minter); err != nil {
+			if err := preparer.EnsureTestSlotPreliminaries(r.Context(), lease, project); err != nil {
 				markLeaseSlotStatus(r.Context(), store, project, lease, "error", err)
 				writeProblem(w, http.StatusBadGateway, "test-slot rewarm failed")
 				return

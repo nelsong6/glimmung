@@ -25,6 +25,8 @@ The detailed cleanup inventory lives in
 - `.github/agent/prompt.md` is the default in-repo agent contract and must keep
   the app validation gate on Go plus the Vite dashboard.
 - `docs/workflow-shape.md` owns the workflow model and native job conventions.
+- `docs/test-slot-lifecycle.md` owns the native test-slot terms, lifecycle
+  states, and warm-versus-hot resource boundary.
 - `docs/go-runtime-cleanup-inventory.md` records the final compatibility notes
   for the Python retirement.
 - `CLAUDE.md` owns architecture direction for human and agent contributors.

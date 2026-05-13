@@ -12,10 +12,12 @@ import (
 )
 
 type fakeTestSlotPreparer struct {
-	ensured       bool
+	preliminaries bool
+	activated     bool
 	returned      bool
 	project       Project
 	deprovisioned []string
+	activateErr   error
 }
 
 func (s *fakeLeaseStore) AppendTestSlotHotSwapHistory(_ context.Context, _ string, _ string, entry TestSlotHotSwapHistoryEntry) (Lease, error) {
@@ -32,17 +34,23 @@ func (s *fakeLeaseStore) AppendTestSlotHotSwapHistory(_ context.Context, _ strin
 	return s.lease, nil
 }
 
-func (p *fakeTestSlotPreparer) EnsureTestSlot(_ context.Context, _ Lease, project Project, _ NativeGitHubTokenMinter) error {
-	p.ensured = true
+func (p *fakeTestSlotPreparer) EnsureTestSlotPreliminaries(_ context.Context, _ Lease, project Project) error {
+	p.preliminaries = true
 	p.project = project
 	return nil
+}
+
+func (p *fakeTestSlotPreparer) ActivateTestSlotRuntime(_ context.Context, _ Lease, project Project, _ NativeGitHubTokenMinter) error {
+	p.activated = true
+	p.project = project
+	return p.activateErr
 }
 
 func (p *fakeTestSlotPreparer) LaunchNativePhase(context.Context, NativeLaunchRequest) ([]string, error) {
 	return nil, nil
 }
 
-func (p *fakeTestSlotPreparer) ReturnTestSlot(context.Context, Lease) error {
+func (p *fakeTestSlotPreparer) ReturnTestSlotRuntime(context.Context, Lease, Project) error {
 	p.returned = true
 	return nil
 }
@@ -88,8 +96,11 @@ func TestCheckoutTestSlotClaimsNativeLease(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if preparer.ensured {
-		t.Fatal("checkout should lease an already-ready slot without preparing it")
+	if !preparer.activated {
+		t.Fatal("checkout should activate runtime after leasing an already-ready slot")
+	}
+	if preparer.preliminaries {
+		t.Fatal("checkout activation should not call the warmup path through the API handler")
 	}
 	if len(store.leaseReq.Metadata) != 1 || !boolFromMap(store.leaseReq.Metadata, "test_slot_checkout") {
 		t.Fatalf("checkout metadata should not include mode: %#v", store.leaseReq.Metadata)
@@ -135,7 +146,7 @@ func TestCheckoutTestSlotRejectsSlotIndexField(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if preparer.ensured {
+	if preparer.activated || preparer.preliminaries {
 		t.Fatal("slot preparer should not run for caller-selected slots")
 	}
 	if !strings.Contains(rec.Body.String(), "slot_index") {
