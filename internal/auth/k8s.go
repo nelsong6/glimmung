@@ -39,10 +39,11 @@ type K8sConfig struct {
 }
 
 type K8sAuthenticator struct {
-	apiHost  string
-	ownToken string
-	allowed  map[string]struct{}
-	client   *http.Client
+	apiHost      string
+	ownToken     string
+	ownTokenPath string
+	allowed      map[string]struct{}
+	client       *http.Client
 }
 
 func NewK8sAuthenticator(config K8sConfig) (*K8sAuthenticator, error) {
@@ -77,10 +78,11 @@ func NewK8sAuthenticator(config K8sConfig) (*K8sAuthenticator, error) {
 	}
 
 	return &K8sAuthenticator{
-		apiHost:  strings.TrimRight(config.APIHost, "/"),
-		ownToken: ownToken,
-		allowed:  allowed,
-		client:   client,
+		apiHost:      strings.TrimRight(config.APIHost, "/"),
+		ownToken:     ownToken,
+		ownTokenPath: config.OwnTokenPath,
+		allowed:      allowed,
+		client:       client,
 	}, nil
 }
 
@@ -140,6 +142,10 @@ func (a *K8sAuthenticator) Resolve(ctx context.Context, token string) (User, boo
 }
 
 func (a *K8sAuthenticator) VerifyToken(ctx context.Context, token string) (string, error) {
+	ownToken, err := a.currentOwnToken()
+	if err != nil {
+		return "", err
+	}
 	review := tokenReviewRequest{
 		APIVersion: "authentication.k8s.io/v1",
 		Kind:       "TokenReview",
@@ -159,7 +165,7 @@ func (a *K8sAuthenticator) VerifyToken(ctx context.Context, token string) (strin
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Authorization", "Bearer "+a.ownToken)
+	req.Header.Set("Authorization", "Bearer "+ownToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
@@ -192,6 +198,24 @@ func (a *K8sAuthenticator) VerifyToken(ctx context.Context, token string) (strin
 		return "", AuthError{Status: http.StatusForbidden, Message: "non-service-account principal: " + username}
 	}
 	return username, nil
+}
+
+func (a *K8sAuthenticator) currentOwnToken() (string, error) {
+	if a.ownTokenPath != "" {
+		data, err := os.ReadFile(a.ownTokenPath)
+		if err != nil {
+			return "", AuthError{Status: http.StatusServiceUnavailable, Message: fmt.Sprintf("could not read pod SA token: %v", err)}
+		}
+		token := strings.TrimSpace(string(data))
+		if token == "" {
+			return "", AuthError{Status: http.StatusServiceUnavailable, Message: "pod SA token file is empty"}
+		}
+		return token, nil
+	}
+	if a.ownToken != "" {
+		return a.ownToken, nil
+	}
+	return "", AuthError{Status: http.StatusServiceUnavailable, Message: "k8s SA token validation unavailable (not in-cluster)"}
 }
 
 func certPool(path string) (*x509.CertPool, error) {
