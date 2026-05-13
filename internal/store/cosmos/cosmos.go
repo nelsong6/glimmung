@@ -3978,9 +3978,11 @@ func (s *Store) CancelLeaseByRef(ctx context.Context, project, ref string) (serv
 	var found *leaseDoc
 	for i, doc := range docs {
 		lease := leaseFromDoc(doc)
-		if server.LeasePublicRefFromLease(lease) == ref {
+		if server.LeasePublicRefFromLease(lease) != ref {
+			continue
+		}
+		if found == nil || cancelLeaseCandidateRank(doc) < cancelLeaseCandidateRank(*found) {
 			found = &docs[i]
-			break
 		}
 	}
 	if found == nil {
@@ -4017,6 +4019,19 @@ func (s *Store) CancelLeaseByRef(ctx context.Context, project, ref string) (serv
 		State:    "no_active_run",
 		LeaseRef: publicRef,
 	}, nil
+}
+
+func cancelLeaseCandidateRank(doc leaseDoc) int {
+	switch doc.State {
+	case "claimed":
+		return 0
+	case "pending":
+		return 1
+	case "waiting":
+		return 2
+	default:
+		return 3
+	}
 }
 
 func (s *Store) nextLeaseNumber(ctx context.Context, project string) (int, error) {
