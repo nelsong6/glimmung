@@ -48,7 +48,7 @@ type TestSlotReturnResult struct {
 	CleanupStarted bool    `json:"cleanup_started"`
 }
 
-func checkoutTestSlot(store ReadStore, preparer TestSlotPreparer) http.HandlerFunc {
+func checkoutTestSlot(store ReadStore, preparer TestSlotPreparer, minter NativeGitHubTokenMinter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		leaseStore, ok := store.(LeaseStore)
 		if !ok || leaseStore == nil {
@@ -105,6 +105,7 @@ func checkoutTestSlot(store ReadStore, preparer TestSlotPreparer) http.HandlerFu
 		}
 		if slotName != "" {
 			metadata["native_slot_name"] = slotName
+			metadata["native_sessions_namespace"] = testSlotSessionsNamespace(slotName, project)
 		}
 		requester := req.Requester
 		if strings.TrimSpace(requester.Consumer) == "" {
@@ -128,7 +129,8 @@ func checkoutTestSlot(store ReadStore, preparer TestSlotPreparer) http.HandlerFu
 			return
 		}
 		if host != nil && preparer != nil {
-			if err := preparer.EnsureTestSlot(r.Context(), lease); err != nil {
+			if err := preparer.EnsureTestSlot(r.Context(), lease, project, minter); err != nil {
+				_ = preparer.ReturnTestSlot(r.Context(), lease)
 				_, _ = leaseStore.CancelLeaseByRef(r.Context(), req.Project, LeasePublicRefFromLease(lease))
 				writeProblem(w, http.StatusInternalServerError, "failed to prepare test environment for slot")
 				return
