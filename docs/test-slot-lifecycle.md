@@ -74,6 +74,21 @@ continue activation from those records. On success Glimmung records
 `activation_completed_at`; on failure it records `activation_error`, marks the
 slot `error`, and releases the lease after cleanup.
 
+### MCP Checkout Surface
+
+`nelsong6/mcp-glimmung` exposes `checkout_test_slot` as the session-facing MCP
+wrapper for `POST /v1/test-slots/checkout`. Its tool signature must match the
+HTTP request contract: project identity, requester/Tank session identity,
+optional workflow, and optional TTL only.
+
+The MCP tool must not expose or forward `slot_index`, `mode`, `phase_inputs`,
+or any other caller-owned slot identity or cleanup controls. Glimmung chooses
+the slot, and destructive cleanup is reserved for return and queue-size changes.
+
+When this API changes, update `mcp-glimmung`'s tool signature, docstring, and
+payload tests in the same rollout. A stale MCP tool is a contract bug even when
+the Go API correctly rejects the obsolete fields.
+
 ### Return
 
 `POST /v1/test-slots/return` starts release of the lease and teardown of hot

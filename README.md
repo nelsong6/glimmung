@@ -109,6 +109,9 @@ matching surface in the same PR:
 - Add or update the matching tool in
   [`nelsong6/mcp-glimmung`](https://github.com/nelsong6/mcp-glimmung) when the
   action should be available to LLM/session callers.
+- When an HTTP request schema changes, update the MCP tool signature,
+  docstring, and payload tests in the same rollout. A server-side rejection is
+  not enough; stale MCP schemas are still advertised to running sessions.
 - For MCP server renames/removals, follow the rollout sequence in
   [MCP Surface Rollout](docs/mcp-surface-rollout.md) so stale sessions have a
   clear compatibility or restart path.
