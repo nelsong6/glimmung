@@ -312,6 +312,7 @@ func newHandler(settings Settings, store ReadStore, authResolver AuthResolver, g
 	mux.Handle("POST /v1/playbooks/{project}/{playbook_ref}/run", requireAdmin(adminAuthenticator, http.HandlerFunc(runPlaybook(store, ghDispatch))))
 	mux.Handle("POST /v1/playbooks/{project}/{playbook_ref}/entries/{entry_id}/gate", requireAdmin(adminAuthenticator, http.HandlerFunc(patchPlaybookEntryGate(store))))
 	mux.Handle("POST /v1/hosts", requireAdmin(adminAuthenticator, http.HandlerFunc(registerHost(store))))
+	mux.Handle("DELETE /v1/hosts/{name}", requireAdmin(adminAuthenticator, http.HandlerFunc(deleteHost(store))))
 	mux.Handle("POST /v1/lease", requireAdmin(adminAuthenticator, http.HandlerFunc(createLease(store))))
 	mux.Handle("POST /v1/leases/cancel", requireAdmin(adminAuthenticator, http.HandlerFunc(cancelLeaseByRef(store))))
 	mux.HandleFunc("GET /v1/projects/{project}/workflows/{name}/upstream", getWorkflowUpstream(store, ghClient))

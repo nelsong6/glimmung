@@ -12,9 +12,11 @@ import (
 
 type fakeHostStore struct {
 	fakeReadStore
-	host Host
-	err  error
-	seen HostRegistration
+	host        Host
+	err         error
+	deleteErr   error
+	seen        HostRegistration
+	deletedName string
 }
 
 func (s *fakeHostStore) UpsertHost(_ context.Context, input HostRegistration) (Host, error) {
@@ -23,6 +25,11 @@ func (s *fakeHostStore) UpsertHost(_ context.Context, input HostRegistration) (H
 		return Host{}, s.err
 	}
 	return s.host, nil
+}
+
+func (s *fakeHostStore) DeleteHost(_ context.Context, name string) error {
+	s.deletedName = name
+	return s.deleteErr
 }
 
 func TestRegisterHostRequiresAdmin(t *testing.T) {
@@ -82,6 +89,85 @@ func TestRegisterHostValidatesName(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d, want 400", rec.Code)
+	}
+}
+
+func TestRegisterHostRejectsNativeSlotNames(t *testing.T) {
+	store := &fakeHostStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "tank-operator",
+			Name: "tank-operator",
+			Metadata: map[string]any{
+				"native_standby_dns": map[string]any{
+					"slot_prefix": "tank-operator-slot",
+					"count":       10,
+				},
+			},
+		}}},
+	}
+	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/hosts", strings.NewReader(`{"name":"tank-operator-slot-1","capabilities":{"project":"tank-operator","role":"agent"}}`))
+	req.Header.Set("Authorization", "Bearer token")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "managed by native_standby_dns.count") {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+	if store.seen.Name != "" {
+		t.Fatalf("unexpected upsert: %#v", store.seen)
+	}
+}
+
+func TestRegisterHostRejectsNativeSlotBeyondConfiguredCount(t *testing.T) {
+	store := &fakeHostStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "tank-operator",
+			Name: "tank-operator",
+			Metadata: map[string]any{
+				"native_standby_dns": map[string]any{
+					"slot_prefix": "tank-operator-slot",
+					"count":       10,
+				},
+			},
+		}}},
+	}
+	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/hosts", strings.NewReader(`{"name":"tank-operator-slot-99","capabilities":{"project":"tank-operator","role":"agent"}}`))
+	req.Header.Set("Authorization", "Bearer token")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "exceeds configured count") {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+	if store.seen.Name != "" {
+		t.Fatalf("unexpected upsert: %#v", store.seen)
+	}
+}
+
+func TestDeleteHostDeletesByName(t *testing.T) {
+	store := &fakeHostStore{}
+	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/v1/hosts/runner-1", nil)
+	req.Header.Set("Authorization", "Bearer token")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.deletedName != "runner-1" {
+		t.Fatalf("deletedName=%q", store.deletedName)
 	}
 }
 

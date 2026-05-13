@@ -441,6 +441,35 @@ func (s *Store) UpsertHost(ctx context.Context, input server.HostRegistration) (
 	})
 }
 
+func (s *Store) DeleteHost(ctx context.Context, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return server.ErrNotFound
+	}
+	pk := azcosmos.NewPartitionKeyString(name)
+	read, err := s.hosts.ReadItem(ctx, pk, name, nil)
+	if err != nil {
+		if isCosmosStatus(err, http.StatusNotFound) {
+			return server.ErrNotFound
+		}
+		return err
+	}
+	var doc hostDoc
+	if err := json.Unmarshal(read.Value, &doc); err != nil {
+		return err
+	}
+	if doc.CurrentLeaseID != nil && strings.TrimSpace(*doc.CurrentLeaseID) != "" {
+		return server.ErrConflict
+	}
+	if _, err := s.hosts.DeleteItem(ctx, pk, name, nil); err != nil {
+		if isCosmosStatus(err, http.StatusNotFound) {
+			return server.ErrNotFound
+		}
+		return err
+	}
+	return nil
+}
+
 func (s *Store) ListLeases(ctx context.Context) ([]server.Lease, error) {
 	var docs []leaseDoc
 	if err := queryAll(ctx, s.leases, &docs); err != nil {
@@ -3914,7 +3943,7 @@ func (s *Store) availableNativeSlot(ctx context.Context, project string, metadat
 	); err != nil {
 		return nil, err
 	}
-	projectCap := s.nativeProjectCap()
+	projectCap := s.nativeProjectCap(ctx, project)
 	globalCap := s.nativeGlobalCap()
 	if len(docs) >= globalCap {
 		return nil, nil
@@ -3947,7 +3976,14 @@ func (s *Store) availableNativeSlot(ctx context.Context, project string, metadat
 	return nil, nil
 }
 
-func (s *Store) nativeProjectCap() int {
+func (s *Store) nativeProjectCap(ctx context.Context, project string) int {
+	if doc, err := s.readProjectDoc(ctx, project); err == nil {
+		if standby, ok := doc.Metadata["native_standby_dns"].(map[string]any); ok {
+			if count, ok := positiveIntValue(standby["count"]); ok {
+				return count
+			}
+		}
+	}
 	if s.nativeProjectConcurrency > 0 {
 		return s.nativeProjectConcurrency
 	}
