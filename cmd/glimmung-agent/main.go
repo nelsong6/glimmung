@@ -7,8 +7,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
+	"strings"
+	"time"
 
+	"github.com/nelsong6/glimmung/internal/domain/hotswap"
 	"github.com/nelsong6/glimmung/internal/ops/agentops"
 )
 
@@ -176,6 +181,49 @@ func run(args []string, stdout, stderr io.Writer) int {
 		if err = requireFlags(map[string]string{"namespace": *namespace, "job-name": *jobName}); err == nil {
 			result, err = ops.WaitAgentJob(ctx, *namespace, *jobName, *timeoutSeconds)
 		}
+	case "test-slot-hot-swap":
+		fs := newFlagSet(command, stderr)
+		namespace := fs.String("namespace", "", "")
+		pod := fs.String("pod", "", "")
+		selector := fs.String("selector", "", "")
+		container := fs.String("container", "", "")
+		contractJSON := fs.String("contract-json", "", "")
+		contractFile := fs.String("contract-file", "", "")
+		project := fs.String("project", "", "")
+		glimmungBaseURL := fs.String("glimmung-base-url", os.Getenv("GLIMMUNG_BASE_URL"), "")
+		staticOnly := fs.Bool("static-only", false, "")
+		backendOnly := fs.Bool("backend-only", false, "")
+		changedFiles := fs.String("changed-files", "", "")
+		changedFilesFile := fs.String("changed-files-file", "", "")
+		allowImageRequired := fs.Bool("allow-image-required", false, "")
+		healthBaseURL := fs.String("health-base-url", "", "")
+		healthTimeoutSeconds := fs.Int("health-timeout-seconds", 60, "")
+		if parseErr := fs.Parse(args[1:]); parseErr != nil {
+			return 2
+		}
+		if err = requireFlags(map[string]string{"namespace": *namespace}); err == nil {
+			var contract hotswap.Contract
+			var changed []string
+			contract, err = readHotSwapContract(*contractJSON, *contractFile, *project, *glimmungBaseURL)
+			if err == nil {
+				changed, err = readChangedFiles(*changedFiles, *changedFilesFile)
+			}
+			if err == nil {
+				result, err = ops.TestSlotHotSwap(ctx, agentops.HotSwapOptions{
+					Contract:           contract,
+					Namespace:          *namespace,
+					Pod:                *pod,
+					Selector:           *selector,
+					Container:          *container,
+					StaticOnly:         *staticOnly,
+					BackendOnly:        *backendOnly,
+					ChangedFiles:       changed,
+					AllowImageRequired: *allowImageRequired,
+					HealthBaseURL:      *healthBaseURL,
+					HealthTimeout:      time.Duration(*healthTimeoutSeconds) * time.Second,
+				})
+			}
+		}
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n", command)
 		printUsage(stderr)
@@ -209,7 +257,88 @@ commands:
   wait-public-preview
   destroy-validation-preview
   apply-agent-job
-  wait-agent-job`)
+  wait-agent-job
+  test-slot-hot-swap`)
+}
+
+func readHotSwapContract(raw, file, project, baseURL string) (hotswap.Contract, error) {
+	if raw != "" && file != "" {
+		return hotswap.Contract{}, errors.New("--contract-json and --contract-file cannot both be set")
+	}
+	if file != "" {
+		payload, err := os.ReadFile(file)
+		if err != nil {
+			return hotswap.Contract{}, err
+		}
+		raw = string(payload)
+	}
+	if raw == "" {
+		if project != "" && baseURL != "" {
+			return fetchHotSwapContract(project, baseURL)
+		}
+		return hotswap.Contract{}, errors.New("--contract-json, --contract-file, or --project with --glimmung-base-url is required")
+	}
+	return hotswap.ParseJSON(raw)
+}
+
+func fetchHotSwapContract(project, baseURL string) (hotswap.Contract, error) {
+	endpoint := strings.TrimRight(baseURL, "/") + "/v1/projects?name=" + url.QueryEscape(project)
+	resp, err := http.Get(endpoint)
+	if err != nil {
+		return hotswap.Contract{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return hotswap.Contract{}, fmt.Errorf("fetch project metadata failed: status=%d", resp.StatusCode)
+	}
+	var rows []struct {
+		Name     string         `json:"name"`
+		ID       string         `json:"id"`
+		Metadata map[string]any `json:"metadata"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+		return hotswap.Contract{}, err
+	}
+	for _, row := range rows {
+		if row.Name != project && row.ID != project {
+			continue
+		}
+		contract, ok, err := hotswap.FromMetadata(row.Metadata)
+		if err != nil {
+			return hotswap.Contract{}, err
+		}
+		if !ok {
+			return hotswap.Contract{}, fmt.Errorf("project %q has no test_slot_hot_swap metadata", project)
+		}
+		return contract, nil
+	}
+	return hotswap.Contract{}, fmt.Errorf("project %q not found", project)
+}
+
+func readChangedFiles(raw, file string) ([]string, error) {
+	if raw != "" && file != "" {
+		return nil, errors.New("--changed-files and --changed-files-file cannot both be set")
+	}
+	if file != "" {
+		payload, err := os.ReadFile(file)
+		if err != nil {
+			return nil, err
+		}
+		raw = string(payload)
+	}
+	if raw == "" {
+		return nil, nil
+	}
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r' || r == '\t'
+	})
+	out := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if value := strings.TrimSpace(field); value != "" {
+			out = append(out, value)
+		}
+	}
+	return out, nil
 }
 
 func newFlagSet(name string, output io.Writer) *flag.FlagSet {

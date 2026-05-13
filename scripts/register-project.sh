@@ -16,6 +16,10 @@
 #   $4            trigger label (e.g. agent:run)
 #   $5..          slot host names to register
 #
+# Optional:
+#   PROJECT_METADATA_FILE=/path/to/project-metadata.json
+#   PROJECT_METADATA_JSON='{"native_webapp":true}'
+#
 # Capability vocabulary is hardcoded for the agent pattern:
 #   {"project": "<project>", "role": "agent"}
 # Adjust below if a project needs a different shape.
@@ -50,6 +54,13 @@ fi
 
 TOKEN="$(az account get-access-token --resource "$CLIENT_ID" --query accessToken -o tsv)"
 
+PROJECT_METADATA="{}"
+if [ -n "${PROJECT_METADATA_FILE:-}" ]; then
+  PROJECT_METADATA="$(cat "$PROJECT_METADATA_FILE")"
+elif [ -n "${PROJECT_METADATA_JSON:-}" ]; then
+  PROJECT_METADATA="$PROJECT_METADATA_JSON"
+fi
+
 post() {
   local path="$1"
   local body="$2"
@@ -65,7 +76,8 @@ post() {
 post /v1/projects "$(jq -nc \
   --arg name "$PROJECT" \
   --arg repo "$REPO" \
-  '{name: $name, github_repo: $repo}')"
+  --argjson metadata "$PROJECT_METADATA" \
+  '{name: $name, github_repo: $repo, metadata: $metadata}')"
 
 post /v1/workflows "$(jq -nc \
   --arg project "$PROJECT" \

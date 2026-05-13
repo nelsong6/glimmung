@@ -19,11 +19,13 @@ RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/glimmung ./cmd/glimmung-go
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/glimmung-supervisor ./cmd/glimmung-supervisor
 
 FROM alpine:3.21 AS runtime
 RUN apk add --no-cache ca-certificates
 WORKDIR /app
 COPY --from=backend /out/glimmung /app/glimmung
+COPY --from=backend /out/glimmung-supervisor /app/glimmung-supervisor
 COPY --from=frontend /frontend/dist /app/static
 ENV GLIMMUNG_STATIC_DIR=/app/static
 EXPOSE 8000

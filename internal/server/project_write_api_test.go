@@ -104,6 +104,28 @@ func TestRegisterProjectRejectsLegacyNativeAuthRedirectMetadata(t *testing.T) {
 	}
 }
 
+func TestRegisterProjectRejectsInvalidHotSwapMetadata(t *testing.T) {
+	handler := NewWithDependencies(
+		Settings{},
+		&fakeProjectStore{},
+		fakeAdminAuthenticator{user: auth.User{Sub: "admin"}},
+	)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/projects", strings.NewReader(`{
+		"name":"tank-operator",
+		"github_repo":"nelsong6/tank-operator",
+		"metadata":{"test_slot_hot_swap":{"enabled":true,"backend":{"enabled":true,"target":"/var/run/app-hot/app"}}}
+	}`)))
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "test_slot_hot_swap.backend.build_command") {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
 func TestRegisterProjectStoreErrorsReturn500(t *testing.T) {
 	handler := NewWithDependencies(
 		Settings{},

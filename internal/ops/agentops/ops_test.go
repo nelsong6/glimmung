@@ -4,9 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/nelsong6/glimmung/internal/domain/hotswap"
 )
 
 type recordedCommand struct {
@@ -16,24 +20,31 @@ type recordedCommand struct {
 type fakeRunner struct {
 	commands []recordedCommand
 	outputs  []string
+	results  []Result
 	errors   []error
 }
 
 func (f *fakeRunner) Run(_ context.Context, command Command) (Result, error) {
 	f.commands = append(f.commands, recordedCommand{Command: command})
 	idx := len(f.commands) - 1
-	out := ""
+	result := Result{}
+	if idx < len(f.results) {
+		result = f.results[idx]
+	}
 	if idx < len(f.outputs) {
-		out = f.outputs[idx]
+		result.Stdout = f.outputs[idx]
 	}
 	var err error
 	if idx < len(f.errors) {
 		err = f.errors[idx]
 	}
 	if err != nil && !command.AllowFailure {
-		return Result{Stdout: out, ExitCode: 1}, err
+		if result.ExitCode == 0 {
+			result.ExitCode = 1
+		}
+		return result, err
 	}
-	return Result{Stdout: out, ExitCode: 1}, nil
+	return result, nil
 }
 
 func TestBuildPreviewImageSkipsExistingACRTag(t *testing.T) {
@@ -190,6 +201,123 @@ func TestApplyAgentJobAppliesRenderedJobJSON(t *testing.T) {
 	command := container["command"].([]any)
 	if !strings.Contains(command[2].(string), "===EVIDENCE-TAR-START===") {
 		t.Fatal("agent script did not include evidence streaming marker")
+	}
+}
+
+func TestTestSlotHotSwapBuildsCopiesAndRestartsBackend(t *testing.T) {
+	root := t.TempDir()
+	artifact := filepath.Join(root, "app")
+	if err := os.WriteFile(artifact, []byte("binary"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{outputs: []string{"slot-pod", "build ok", "", "", "", "restarted"}}
+	ops := &Ops{Runner: runner, RepoRoot: root}
+
+	result, err := ops.TestSlotHotSwap(context.Background(), HotSwapOptions{
+		Namespace: "tank-slot-1",
+		Selector:  "app=tank-operator",
+		Container: "tank-operator",
+		Contract: hotswap.Contract{
+			Enabled: true,
+			Backend: hotswap.BackendContract{
+				Enabled:      true,
+				Strategy:     "supervisor",
+				BuildCommand: "go build -o " + artifact + " ./backend-go/cmd/tank-operator",
+				Artifact:     artifact,
+				Target:       "/var/run/app-hot/app",
+				HealthPath:   "/healthz",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Pod != "slot-pod" || result.Backend == nil {
+		t.Fatalf("result=%#v", result)
+	}
+	assertCommand(t, runner.commands[0].Command, "kubectl", []string{"-n", "tank-slot-1", "get", "pods", "-l", "app=tank-operator", "-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}"})
+	assertCommand(t, runner.commands[1].Command, "sh", []string{"-c", "go build -o " + artifact + " ./backend-go/cmd/tank-operator"})
+	assertCommand(t, runner.commands[2].Command, "kubectl", []string{"-n", "tank-slot-1", "cp", artifact, "slot-pod:/var/run/app-hot/app.next", "-c", "tank-operator"})
+	assertCommand(t, runner.commands[3].Command, "kubectl", []string{"-n", "tank-slot-1", "exec", "slot-pod", "-c", "tank-operator", "--", "sh", "-c", "chmod +x '/var/run/app-hot/app.next' && mv -f '/var/run/app-hot/app.next' '/var/run/app-hot/app'"})
+	assertCommand(t, runner.commands[4].Command, "kubectl", []string{"-n", "tank-slot-1", "exec", "slot-pod", "-c", "tank-operator", "--", "sh", "-c", "kill -HUP 1"})
+	assertCommand(t, runner.commands[5].Command, "kubectl", []string{"-n", "tank-slot-1", "logs", "slot-pod", "--tail=120", "-c", "tank-operator"})
+}
+
+func TestTestSlotHotSwapCopiesStaticOnly(t *testing.T) {
+	root := t.TempDir()
+	staticDir := filepath.Join(root, "frontend", "dist")
+	if err := os.MkdirAll(staticDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{outputs: []string{""}}
+	ops := &Ops{Runner: runner, RepoRoot: root}
+
+	result, err := ops.TestSlotHotSwap(context.Background(), HotSwapOptions{
+		Namespace:  "ambience-slot-1",
+		Pod:        "ambience-pod",
+		StaticOnly: true,
+		Contract: hotswap.Contract{
+			Enabled: true,
+			Static: hotswap.StaticContract{
+				Enabled: true,
+				Source:  "frontend/dist",
+				Target:  "/var/run/app-static-override",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Static == nil || result.Backend != nil {
+		t.Fatalf("result=%#v", result)
+	}
+	assertCommand(t, runner.commands[0].Command, "kubectl", []string{"-n", "ambience-slot-1", "cp", filepath.Join(staticDir, "."), "ambience-pod:/var/run/app-static-override"})
+}
+
+func TestTestSlotHotSwapCopiesStaticToAllSelectedPods(t *testing.T) {
+	root := t.TempDir()
+	staticDir := filepath.Join(root, "frontend", "dist")
+	if err := os.MkdirAll(staticDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{outputs: []string{"pod-a\npod-b", "", ""}}
+	ops := &Ops{Runner: runner, RepoRoot: root}
+
+	result, err := ops.TestSlotHotSwap(context.Background(), HotSwapOptions{
+		Namespace: "tank-slot-1",
+		Selector:  "app=tank-operator",
+		Contract: hotswap.Contract{
+			Enabled: true,
+			Static:  hotswap.StaticContract{Enabled: true, Source: "frontend/dist", Target: "/var/run/static"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(result.Pods, []string{"pod-a", "pod-b"}) {
+		t.Fatalf("pods=%#v", result.Pods)
+	}
+	assertCommand(t, runner.commands[1].Command, "kubectl", []string{"-n", "tank-slot-1", "cp", filepath.Join(staticDir, "."), "pod-a:/var/run/static"})
+	assertCommand(t, runner.commands[2].Command, "kubectl", []string{"-n", "tank-slot-1", "cp", filepath.Join(staticDir, "."), "pod-b:/var/run/static"})
+}
+
+func TestTestSlotHotSwapRejectsImageRequiredChanges(t *testing.T) {
+	ops := &Ops{Runner: &fakeRunner{}, RepoRoot: t.TempDir()}
+
+	result, err := ops.TestSlotHotSwap(context.Background(), HotSwapOptions{
+		Namespace:    "tank-slot-1",
+		Pod:          "tank-pod",
+		ChangedFiles: []string{"Dockerfile"},
+		Contract: hotswap.Contract{
+			Enabled: true,
+			Static:  hotswap.StaticContract{Enabled: true, Source: "frontend/dist", Target: "/var/run/static"},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected image-required rejection")
+	}
+	if !result.ChangeClassification.NeedsImage {
+		t.Fatalf("classification=%#v", result.ChangeClassification)
 	}
 }
 
