@@ -14,10 +14,12 @@ import (
 type fakeTestSlotPreparer struct {
 	ensured  bool
 	returned bool
+	project  Project
 }
 
-func (p *fakeTestSlotPreparer) EnsureTestSlot(context.Context, Lease) error {
+func (p *fakeTestSlotPreparer) EnsureTestSlot(_ context.Context, _ Lease, project Project, _ NativeGitHubTokenMinter) error {
 	p.ensured = true
+	p.project = project
 	return nil
 }
 

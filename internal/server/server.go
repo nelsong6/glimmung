@@ -34,6 +34,7 @@ type Settings struct {
 	ArtifactsContainer             string
 	NativeRunnerNamespace          string
 	NativeRunnerServiceAccount     string
+	NativeRunnerNamespaceRole      string
 	NativeRunnerCallbackBaseURL    string
 	NativeRunnerJobTTLSeconds      int
 	NativeRunnerCodexSecret        string
@@ -76,6 +77,10 @@ func SettingsFromEnv() Settings {
 		NativeRunnerServiceAccount: envOrDefault(
 			"NATIVE_RUNNER_SERVICE_ACCOUNT",
 			"glimmung-native-runner",
+		),
+		NativeRunnerNamespaceRole: envOrDefault(
+			"NATIVE_RUNNER_NAMESPACE_ROLE",
+			"cluster-admin",
 		),
 		NativeRunnerCallbackBaseURL: envOrDefault(
 			"NATIVE_RUNNER_CALLBACK_BASE_URL",
@@ -337,7 +342,7 @@ func newHandler(settings Settings, store ReadStore, authResolver AuthResolver, g
 	if p, ok := nativeLauncher.(TestSlotPreparer); ok {
 		testSlotPreparer = p
 	}
-	mux.Handle("POST /v1/test-slots/checkout", requireAdmin(adminAuthenticator, http.HandlerFunc(checkoutTestSlot(store, testSlotPreparer))))
+	mux.Handle("POST /v1/test-slots/checkout", requireAdmin(adminAuthenticator, http.HandlerFunc(checkoutTestSlot(store, testSlotPreparer, nativeTokenMinter))))
 	mux.Handle("POST /v1/test-slots/return", requireAdmin(adminAuthenticator, http.HandlerFunc(returnTestSlot(store, testSlotPreparer))))
 	mux.Handle("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/replay", requireAdmin(adminAuthenticator, http.HandlerFunc(replayRunDecisionByNumber(store))))
 	mux.Handle("POST /v1/runs/dispatch", requireAdmin(adminAuthenticator, http.HandlerFunc(dispatchRunHandler(store, ghDispatch, nativeLauncher))))

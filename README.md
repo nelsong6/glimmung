@@ -214,6 +214,34 @@ show whether auth redirect sync is `ok` or `failed`.
 `native_standby_entra_redirects` is not accepted. Use `native_auth_redirects`
 for all native webapp auth redirect reconciliation.
 
+### Native test-slot provisioning
+
+When a project has `metadata.test_slot_helm.enabled=true`, test-slot checkout
+does more than reserve a lease. The Go native launcher creates the slot
+namespace, the matching sessions namespace, namespace-scoped installer
+RoleBindings, any required slot ClusterRoleBindings, and a one-shot Helm
+installer Job in the native runner namespace. The Job clones the project repo
+with a short-lived GitHub App token, renders the chart, strips
+cluster-scoped RBAC from the apply stream, and applies the namespaced resources
+into the slot namespaces. Returning the slot deletes the installer artifacts,
+slot CRBs, Playwright helper, and slot namespaces.
+
+Minimal Tank-style config:
+
+```json
+{
+  "test_slot_helm": {
+    "enabled": true
+  }
+}
+```
+
+Defaults are intentionally aligned with `tank-operator`: chart path `k8s`,
+installer image `alpine/k8s:1.30.0`, and Helm value
+`testEnv.enabled=true`. Other projects can set `chart_path`, `installer_image`,
+`git_ref`, `values`, `set_string_values`, `sessions_namespace`, and
+`cluster_role_bindings` under `test_slot_helm`.
+
 ### GitHub webhook
 
 | Method | Path                              | Purpose |
