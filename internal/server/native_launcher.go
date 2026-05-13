@@ -76,9 +76,6 @@ func (l *KubernetesNativeLauncher) EnsureTestSlot(ctx context.Context, lease Lea
 		return nil
 	}
 	if testSlotCleanSlate(lease.Metadata) {
-		if err := l.deleteNamespace(ctx, slotName); err != nil {
-			return err
-		}
 		if err := l.deleteNamespace(ctx, testSlotSessionsNamespaceForLease(lease, project, slotName)); err != nil {
 			return err
 		}
@@ -138,9 +135,6 @@ func (l *KubernetesNativeLauncher) ReturnTestSlot(ctx context.Context, lease Lea
 		if err := l.deleteTestSlotInstaller(ctx, lease); err != nil {
 			return err
 		}
-		if err := l.deleteTestSlotClusterRoleBindings(ctx, slotName); err != nil {
-			return err
-		}
 	}
 	name := playwrightResourceName(lease.Project, slotName)
 	if name != "" {
@@ -155,9 +149,6 @@ func (l *KubernetesNativeLauncher) ReturnTestSlot(ctx context.Context, lease Lea
 		}
 	}
 	if strings.TrimSpace(slotName) != "" {
-		if err := l.deleteNamespace(ctx, slotName); err != nil {
-			return err
-		}
 		if err := l.deleteNamespace(ctx, testSlotSessionsNamespaceForLease(lease, Project{}, slotName)); err != nil {
 			return err
 		}
