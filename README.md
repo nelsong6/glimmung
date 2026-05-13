@@ -216,15 +216,20 @@ for all native webapp auth redirect reconciliation.
 
 ### Native test-slot provisioning
 
-When a project has `metadata.test_slot_helm.enabled=true`, test-slot checkout
-does more than reserve a lease. The Go native launcher creates the slot
-namespace, the matching sessions namespace, namespace-scoped installer
-RoleBindings, any required slot ClusterRoleBindings, and a one-shot Helm
-installer Job in the native runner namespace. The Job clones the project repo
-with a short-lived GitHub App token, renders the chart, strips
-cluster-scoped RBAC from the apply stream, and applies the namespaced resources
-into the slot namespaces. Returning the slot deletes the installer artifacts,
-slot CRBs, Playwright helper, and slot namespaces.
+The native test-slot lifecycle contract lives in
+[`docs/test-slot-lifecycle.md`](docs/test-slot-lifecycle.md). In short, queue
+size controls prepared capacity, and checkout asks Glimmung to choose and lease
+one available slot. Callers do not choose the slot.
+
+A warm or available slot is preliminary capacity only. It may include slot
+metadata, DNS and routing prerequisites, Entra redirect URIs, Azure federated
+identity credentials, namespaces, service accounts, RBAC, ExternalSecrets, and
+other zero-steady-runtime scaffolding. It must not keep project app, API proxy,
+session, Playwright, or validation workload pods running.
+
+Runtime materialization belongs after Glimmung assigns a lease. Returning a slot
+tears down that lease-scoped runtime and keeps the preliminary slot capacity.
+Changing queue size is the destructive path that may remove slot capacity.
 
 Minimal Tank-style config:
 
@@ -241,6 +246,10 @@ installer image `alpine/k8s:1.30.0`, and Helm value
 `testEnv.enabled=true`. Other projects can set `chart_path`, `installer_image`,
 `git_ref`, `values`, `set_string_values`, `sessions_namespace`, and
 `cluster_role_bindings` under `test_slot_helm`.
+
+Any implementation path that treats a Helm-rendered app/proxy/session/tool
+runtime as part of an unleased warmed slot violates the lifecycle contract and
+should be split into preliminary reconciliation and lease activation.
 
 ### Native test-slot hot swap
 

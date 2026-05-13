@@ -26,8 +26,9 @@ type NativeLauncher interface {
 }
 
 type TestSlotPreparer interface {
-	EnsureTestSlot(ctx context.Context, lease Lease, project Project, minter NativeGitHubTokenMinter) error
-	ReturnTestSlot(ctx context.Context, lease Lease) error
+	EnsureTestSlotPreliminaries(ctx context.Context, lease Lease, project Project) error
+	ActivateTestSlotRuntime(ctx context.Context, lease Lease, project Project, minter NativeGitHubTokenMinter) error
+	ReturnTestSlotRuntime(ctx context.Context, lease Lease, project Project) error
 	DeprovisionTestSlot(ctx context.Context, lease Lease, project Project) error
 }
 
@@ -74,7 +75,7 @@ func (l *KubernetesNativeLauncher) LaunchNativePhase(ctx context.Context, req Na
 	return launched, nil
 }
 
-func (l *KubernetesNativeLauncher) EnsureTestSlot(ctx context.Context, lease Lease, project Project, minter NativeGitHubTokenMinter) error {
+func (l *KubernetesNativeLauncher) EnsureTestSlotPreliminaries(ctx context.Context, lease Lease, project Project) error {
 	slotName, _ := stringFromMap(lease.Metadata, "native_slot_name")
 	if strings.TrimSpace(slotName) == "" {
 		return nil
@@ -83,12 +84,6 @@ func (l *KubernetesNativeLauncher) EnsureTestSlot(ctx context.Context, lease Lea
 		return err
 	}
 	if config, ok := testSlotHelmConfig(project); ok {
-		if strings.TrimSpace(project.GitHubRepo) == "" {
-			return fmt.Errorf("github_repo is required for test slot helm provisioning")
-		}
-		if minter == nil {
-			return fmt.Errorf("github token minter is required for test slot helm provisioning")
-		}
 		sessionsNamespace := testSlotSessionsNamespaceForLease(lease, project, slotName)
 		if err := l.ensureNamespace(ctx, sessionsNamespace, testSlotLabels(lease, slotName)); err != nil {
 			return err
@@ -103,24 +98,51 @@ func (l *KubernetesNativeLauncher) EnsureTestSlot(ctx context.Context, lease Lea
 		if err := l.ensureTestSlotClusterRoleBindings(ctx, lease, config.ClusterRoleBindings, substitutions, slotName); err != nil {
 			return err
 		}
-		token, err := minter.InstallationToken(ctx)
-		if err != nil {
-			return fmt.Errorf("mint github token for test slot install: %w", err)
-		}
-		if err := l.ensureCloneTokenSecret(ctx, testSlotInstallResourceName("glim-helm-clone", lease), token, lease, slotName); err != nil {
-			return err
-		}
-		if err := l.createJob(ctx, testSlotInstallJobManifest(l.Settings, config, lease, project, substitutions)); err != nil {
-			return err
-		}
 	}
 	return nil
 }
 
-func (l *KubernetesNativeLauncher) ReturnTestSlot(ctx context.Context, lease Lease) error {
+func (l *KubernetesNativeLauncher) ActivateTestSlotRuntime(ctx context.Context, lease Lease, project Project, minter NativeGitHubTokenMinter) error {
+	slotName, _ := stringFromMap(lease.Metadata, "native_slot_name")
+	if strings.TrimSpace(slotName) == "" {
+		return nil
+	}
+	config, ok := testSlotHelmConfig(project)
+	if !ok {
+		return nil
+	}
+	if strings.TrimSpace(project.GitHubRepo) == "" {
+		return fmt.Errorf("github_repo is required for test slot runtime activation")
+	}
+	if minter == nil {
+		return fmt.Errorf("github token minter is required for test slot runtime activation")
+	}
+	if err := l.EnsureTestSlotPreliminaries(ctx, lease, project); err != nil {
+		return err
+	}
+	sessionsNamespace := testSlotSessionsNamespaceForLease(lease, project, slotName)
+	substitutions := testSlotSubstitutions(lease, project, slotName, sessionsNamespace)
+	token, err := minter.InstallationToken(ctx)
+	if err != nil {
+		return fmt.Errorf("mint github token for test slot install: %w", err)
+	}
+	if err := l.ensureCloneTokenSecret(ctx, testSlotInstallResourceName("glim-helm-clone", lease), token, lease, slotName); err != nil {
+		return err
+	}
+	jobName := testSlotInstallResourceName("glim-helm-install", lease)
+	if err := l.createJob(ctx, testSlotInstallJobManifest(l.Settings, config, lease, project, substitutions)); err != nil {
+		return err
+	}
+	return l.waitForJobComplete(ctx, l.Settings.NativeRunnerNamespace, jobName, 5*time.Minute)
+}
+
+func (l *KubernetesNativeLauncher) ReturnTestSlotRuntime(ctx context.Context, lease Lease, project Project) error {
 	slotName, _ := stringFromMap(lease.Metadata, "native_slot_name")
 	if strings.TrimSpace(slotName) != "" {
 		if err := l.deletePlaywrightResources(ctx, lease, slotName); err != nil {
+			return err
+		}
+		if err := l.deleteTestSlotRuntimeResources(ctx, lease, project, slotName); err != nil {
 			return err
 		}
 		return l.deleteTestSlotInstaller(ctx, lease)
@@ -161,6 +183,49 @@ func (l *KubernetesNativeLauncher) deletePlaywrightResources(ctx context.Context
 			if err != nil && status != http.StatusNotFound {
 				return err
 			}
+		}
+	}
+	return nil
+}
+
+func (l *KubernetesNativeLauncher) deleteTestSlotRuntimeResources(ctx context.Context, lease Lease, project Project, slotName string) error {
+	namespaces := []string{slotName}
+	if sessionsNamespace := testSlotSessionsNamespaceForLease(lease, project, slotName); strings.TrimSpace(sessionsNamespace) != "" && sessionsNamespace != slotName {
+		namespaces = append(namespaces, sessionsNamespace)
+	}
+	for _, namespace := range namespaces {
+		for _, collectionPath := range []string{
+			"/apis/apps/v1/namespaces/" + namespace + "/deployments",
+			"/apis/apps/v1/namespaces/" + namespace + "/statefulsets",
+			"/apis/apps/v1/namespaces/" + namespace + "/daemonsets",
+			"/apis/batch/v1/namespaces/" + namespace + "/jobs",
+			"/api/v1/namespaces/" + namespace + "/pods",
+			"/api/v1/namespaces/" + namespace + "/services",
+		} {
+			if err := l.deleteCollectionItems(ctx, collectionPath); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (l *KubernetesNativeLauncher) deleteCollectionItems(ctx context.Context, collectionPath string) error {
+	status, list, err := l.request(ctx, http.MethodGet, collectionPath, nil)
+	if err != nil {
+		if status == http.StatusNotFound || status == http.StatusForbidden {
+			return nil
+		}
+		return err
+	}
+	for _, item := range anySlice(list["items"]) {
+		name := mapStringValueOrEmpty(anyMap(anyMap(item)["metadata"]), "name")
+		if name == "" || name == "kubernetes" {
+			continue
+		}
+		status, _, err := l.request(ctx, http.MethodDelete, collectionPath+"/"+name, deleteOptions("Background"))
+		if err != nil && status != http.StatusNotFound {
+			return err
 		}
 	}
 	return nil
@@ -463,6 +528,44 @@ func (l *KubernetesNativeLauncher) createJob(ctx context.Context, manifest map[s
 		return nil
 	}
 	return err
+}
+
+func (l *KubernetesNativeLauncher) waitForJobComplete(ctx context.Context, namespace, name string, timeout time.Duration) error {
+	if strings.TrimSpace(namespace) == "" || strings.TrimSpace(name) == "" {
+		return nil
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	path := "/apis/batch/v1/namespaces/" + namespace + "/jobs/" + name
+	for {
+		status, job, err := l.request(ctx, http.MethodGet, path, nil)
+		if err != nil {
+			if status == http.StatusNotFound {
+				return fmt.Errorf("test slot runtime installer job %s/%s not found", namespace, name)
+			}
+			return err
+		}
+		for _, condition := range anySlice(anyMap(job["status"])["conditions"]) {
+			typed := anyMap(condition)
+			conditionType := strings.TrimSpace(mapStringValueOrEmpty(typed, "type"))
+			conditionStatus := strings.TrimSpace(mapStringValueOrEmpty(typed, "status"))
+			if conditionType == "Complete" && strings.EqualFold(conditionStatus, "True") {
+				return nil
+			}
+			if conditionType == "Failed" && strings.EqualFold(conditionStatus, "True") {
+				return fmt.Errorf("test slot runtime installer job %s/%s failed", namespace, name)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("test slot runtime installer job %s/%s did not complete before timeout", namespace, name)
+		case <-ticker.C:
+		}
+	}
 }
 
 func (l *KubernetesNativeLauncher) createDeploymentInNamespace(ctx context.Context, namespace string, manifest map[string]any) error {
@@ -788,7 +891,10 @@ func testSlotInstallJobManifest(settings Settings, config testSlotHelmSettings, 
 		"fi\n"
 	installScript := "set -eu\n" +
 		"cd /workspace\n" +
-		helmTemplateCommand(config, slotName, substitutions) + " | " + stripClusterScopedCommand() + " | kubectl apply -f -\n"
+		helmTemplateCommand(config, slotName, substitutions) + " | " + stripClusterScopedCommand() + " | kubectl apply -f -\n" +
+		"if kubectl -n " + shellQuote(slotName) + " get deployment -o name | grep -q .; then\n" +
+		"  kubectl -n " + shellQuote(slotName) + " wait --for=condition=available --timeout=180s deployment --all\n" +
+		"fi\n"
 	podSpec := map[string]any{
 		"serviceAccountName": settings.NativeRunnerServiceAccount,
 		"restartPolicy":      "Never",

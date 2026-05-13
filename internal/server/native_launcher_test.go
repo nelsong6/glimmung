@@ -70,7 +70,7 @@ func TestNativeJobManifestIncludesRunnerCallbackEnv(t *testing.T) {
 	}
 }
 
-func TestReturnTestSlotDoesNotDeleteNamespaces(t *testing.T) {
+func TestReturnTestSlotRuntimeDoesNotDeleteNamespaces(t *testing.T) {
 	tokenPath := tempTokenFile(t)
 	var paths []string
 	launcher := &KubernetesNativeLauncher{
@@ -103,8 +103,8 @@ func TestReturnTestSlotDoesNotDeleteNamespaces(t *testing.T) {
 		},
 	}
 
-	if err := launcher.ReturnTestSlot(context.Background(), lease); err != nil {
-		t.Fatalf("ReturnTestSlot: %v", err)
+	if err := launcher.ReturnTestSlotRuntime(context.Background(), lease, Project{Name: "tank"}); err != nil {
+		t.Fatalf("ReturnTestSlotRuntime: %v", err)
 	}
 	for _, path := range paths {
 		if path == "DELETE /api/v1/namespaces/tank-slot-1" || path == "DELETE /api/v1/namespaces/tank-slot-1-sessions" {
@@ -119,7 +119,51 @@ func TestReturnTestSlotDoesNotDeleteNamespaces(t *testing.T) {
 	}
 }
 
-func TestEnsureTestSlotDoesNotCreatePlaywrightRuntime(t *testing.T) {
+func TestReturnTestSlotRuntimeDeletesSteadyRuntimeResources(t *testing.T) {
+	tokenPath := tempTokenFile(t)
+	var paths []string
+	launcher := &KubernetesNativeLauncher{
+		Settings: Settings{
+			K8sAPIHost:            "https://kube.test",
+			K8sSATokenPath:        tokenPath,
+			NativeRunnerNamespace: "glimmung-runs",
+		},
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			paths = append(paths, req.Method+" "+req.URL.Path)
+			body := runtimeListResponse(req.URL.Path)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		})},
+	}
+	lease := Lease{
+		Project:     "tank",
+		LeaseNumber: intPtr(2),
+		Metadata: map[string]any{
+			"native_slot_name":          "tank-slot-1",
+			"native_slot_index":         "1",
+			"native_sessions_namespace": "tank-slot-1-sessions",
+		},
+	}
+
+	if err := launcher.ReturnTestSlotRuntime(context.Background(), lease, Project{Name: "tank"}); err != nil {
+		t.Fatalf("ReturnTestSlotRuntime: %v", err)
+	}
+	for _, want := range []string{
+		"DELETE /apis/apps/v1/namespaces/tank-slot-1/deployments/tank-operator",
+		"DELETE /apis/apps/v1/namespaces/tank-slot-1/deployments/claude-api-proxy",
+		"DELETE /api/v1/namespaces/tank-slot-1/services/tank-operator",
+		"DELETE /api/v1/namespaces/tank-slot-1-sessions/pods/session-4",
+	} {
+		if !containsPath(paths, want) {
+			t.Fatalf("missing runtime delete %s, paths=%#v", want, paths)
+		}
+	}
+}
+
+func TestEnsureTestSlotPreliminariesDoesNotCreatePlaywrightRuntime(t *testing.T) {
 	tokenPath := tempTokenFile(t)
 	var paths []string
 	launcher := &KubernetesNativeLauncher{
@@ -156,13 +200,69 @@ func TestEnsureTestSlotDoesNotCreatePlaywrightRuntime(t *testing.T) {
 		},
 	}
 
-	if err := launcher.EnsureTestSlot(context.Background(), lease, Project{Name: "tank"}, nil); err != nil {
-		t.Fatalf("EnsureTestSlot: %v", err)
+	if err := launcher.EnsureTestSlotPreliminaries(context.Background(), lease, Project{Name: "tank"}); err != nil {
+		t.Fatalf("EnsureTestSlotPreliminaries: %v", err)
 	}
 	for _, path := range paths {
 		if strings.Contains(path, "/deployments") || strings.Contains(path, "/services") {
 			t.Fatalf("baseline warm should not create Playwright runtime resources, paths=%#v", paths)
 		}
+	}
+}
+
+func TestActivateTestSlotRuntimeRunsHelmInstallerAfterLeaseAssignment(t *testing.T) {
+	tokenPath := tempTokenFile(t)
+	var paths []string
+	launcher := &KubernetesNativeLauncher{
+		Settings: Settings{
+			K8sAPIHost:                 "https://kube.test",
+			K8sSATokenPath:             tokenPath,
+			NativeRunnerNamespace:      "glimmung-runs",
+			NativeRunnerServiceAccount: "glimmung-native-runner",
+			NativeRunnerNamespaceRole:  "cluster-admin",
+			NativeRunnerJobTTLSeconds:  3600,
+		},
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			paths = append(paths, req.Method+" "+req.URL.Path)
+			body := `{}`
+			if req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/jobs/glim-helm-install-") {
+				body = `{"status":{"conditions":[{"type":"Complete","status":"True"}]}}`
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		})},
+	}
+	leaseNumber := 12
+	lease := Lease{
+		Project:     "tank-operator",
+		LeaseNumber: &leaseNumber,
+		State:       "claimed",
+		Metadata: map[string]any{
+			"native_slot_name":          "tank-operator-slot-2",
+			"native_slot_index":         "2",
+			"native_sessions_namespace": "tank-operator-slot-2-sessions",
+		},
+	}
+	project := Project{
+		Name:       "tank-operator",
+		GitHubRepo: "nelsong6/tank-operator",
+		Metadata:   map[string]any{"test_slot_helm": map[string]any{"enabled": true}},
+	}
+
+	if err := launcher.ActivateTestSlotRuntime(context.Background(), lease, project, fakeNativeGitHubTokenMinter{token: "ghs_test"}); err != nil {
+		t.Fatalf("ActivateTestSlotRuntime: %v", err)
+	}
+	if !containsPath(paths, "POST /apis/batch/v1/namespaces/glimmung-runs/jobs") {
+		t.Fatalf("activation should create Helm installer job, paths=%#v", paths)
+	}
+	if !containsPath(paths, "GET /apis/batch/v1/namespaces/glimmung-runs/jobs/glim-helm-install-tank-operator-slot-2-12") {
+		t.Fatalf("activation should wait for Helm installer job completion, paths=%#v", paths)
+	}
+	if containsPath(paths, "POST /apis/apps/v1/namespaces/tank-operator-slot-2/deployments") {
+		t.Fatalf("activation should delegate app runtime creation to installer job, paths=%#v", paths)
 	}
 }
 
@@ -303,6 +403,7 @@ func TestTestSlotInstallJobManifestRendersHelmApplyJob(t *testing.T) {
 		"--set 'testEnv.enabled=true'",
 		"ClusterRoleBinding",
 		"kubectl apply -f -",
+		"kubectl -n 'tank-operator-slot-2' wait --for=condition=available --timeout=180s deployment --all",
 	} {
 		if !strings.Contains(installScript, want) {
 			t.Fatalf("install script missing %q: %s", want, installScript)
@@ -314,6 +415,15 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+type fakeNativeGitHubTokenMinter struct {
+	token string
+	err   error
+}
+
+func (m fakeNativeGitHubTokenMinter) InstallationToken(context.Context) (string, error) {
+	return m.token, m.err
 }
 
 func tempTokenFile(t *testing.T) string {
@@ -332,6 +442,22 @@ func containsPath(paths []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func runtimeListResponse(path string) string {
+	switch path {
+	case "/apis/apps/v1/namespaces/tank-slot-1/deployments":
+		return `{"items":[{"metadata":{"name":"tank-operator"}},{"metadata":{"name":"claude-api-proxy"}}]}`
+	case "/api/v1/namespaces/tank-slot-1/services":
+		return `{"items":[{"metadata":{"name":"tank-operator"}}]}`
+	case "/api/v1/namespaces/tank-slot-1-sessions/pods":
+		return `{"items":[{"metadata":{"name":"session-4"}}]}`
+	default:
+		if strings.Contains(path, "/jobs/glim-helm-install-") {
+			return `{"status":{"conditions":[{"type":"Complete","status":"True"}]}}`
+		}
+		return `{"items":[]}`
+	}
 }
 
 func nativeManifestEnv(manifest map[string]any) map[string]string {

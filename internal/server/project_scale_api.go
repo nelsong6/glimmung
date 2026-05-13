@@ -33,7 +33,7 @@ type TestEnvironmentSlotStatus struct {
 	ReadyAt   *time.Time `json:"ready_at,omitempty"`
 }
 
-func scaleProjectTestEnvironments(store ReadStore, authRedirects NativeAuthRedirectReconciler, workloadIdentities NativeWorkloadIdentityReconciler, preparer TestSlotPreparer, minter NativeGitHubTokenMinter) http.HandlerFunc {
+func scaleProjectTestEnvironments(store ReadStore, authRedirects NativeAuthRedirectReconciler, workloadIdentities NativeWorkloadIdentityReconciler, preparer TestSlotPreparer, _ NativeGitHubTokenMinter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		scaler, ok := store.(ProjectTestEnvironmentScaler)
 		if !ok || scaler == nil {
@@ -122,7 +122,7 @@ func scaleProjectTestEnvironments(store ReadStore, authRedirects NativeAuthRedir
 			}
 		}
 		if preparer != nil && *req.Count > 0 {
-			warmed, err := warmProjectTestEnvironments(r.Context(), store, preparer, minter, project, updated, *req.Count)
+			warmed, err := warmProjectTestEnvironments(r.Context(), store, preparer, project, updated, *req.Count)
 			if err != nil {
 				writeProblem(w, http.StatusBadGateway, err.Error())
 				return
@@ -135,7 +135,7 @@ func scaleProjectTestEnvironments(store ReadStore, authRedirects NativeAuthRedir
 	}
 }
 
-func warmProjectTestEnvironments(ctx context.Context, store ReadStore, preparer TestSlotPreparer, minter NativeGitHubTokenMinter, projectKey string, project Project, count int) (Project, error) {
+func warmProjectTestEnvironments(ctx context.Context, store ReadStore, preparer TestSlotPreparer, projectKey string, project Project, count int) (Project, error) {
 	writer, ok := store.(ProjectTestEnvironmentSlotStatusWriter)
 	if !ok || writer == nil {
 		return Project{}, nil
@@ -160,7 +160,7 @@ func warmProjectTestEnvironments(ctx context.Context, store ReadStore, preparer 
 		current = updated
 
 		lease := testEnvironmentWarmupLease(current, slotIndex, slotName)
-		if err := preparer.EnsureTestSlot(ctx, lease, current, minter); err != nil {
+		if err := preparer.EnsureTestSlotPreliminaries(ctx, lease, current); err != nil {
 			detail := err.Error()
 			_, _ = writer.SetProjectTestEnvironmentSlotStatus(ctx, projectKey, TestEnvironmentSlotStatus{
 				SlotIndex: slotIndex,
