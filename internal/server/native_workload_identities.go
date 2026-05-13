@@ -131,6 +131,13 @@ func (s NativeWorkloadIdentityService) ReconcileNativeWorkloadIdentities(ctx con
 	}
 
 	desired := desiredWorkloadIdentityCredentials(cfg)
+	deleted, err := s.deleteRemovedManagedCredentials(ctx, cfg, desired)
+	if err != nil {
+		status.LastError = stringPtr(err.Error())
+		return status, err
+	}
+	status.Deleted = credentialStatusList(deleted)
+
 	for _, credential := range desired {
 		if err := s.Client.UpsertFederatedIdentityCredential(ctx, credential); err != nil {
 			err = fmt.Errorf("upsert federated identity credential %s/%s: %w", credential.IdentityName, credential.CredentialName, err)
@@ -140,19 +147,14 @@ func (s NativeWorkloadIdentityService) ReconcileNativeWorkloadIdentities(ctx con
 		status.Upserted = append(status.Upserted, credentialStatus(credential))
 	}
 
-	deleted, err := s.deleteRemovedManagedCredentials(ctx, cfg)
-	if err != nil {
-		status.LastError = stringPtr(err.Error())
-		return status, err
-	}
-	status.Deleted = credentialStatusList(deleted)
 	status.State = NativeWorkloadIdentityStatusOK
 	status.LastError = nil
 	return status, nil
 }
 
-func (s NativeWorkloadIdentityService) deleteRemovedManagedCredentials(ctx context.Context, cfg nativeWorkloadIdentityConfig) ([]FederatedIdentityCredential, error) {
+func (s NativeWorkloadIdentityService) deleteRemovedManagedCredentials(ctx context.Context, cfg nativeWorkloadIdentityConfig, desired []FederatedIdentityCredential) ([]FederatedIdentityCredential, error) {
 	deleted := []FederatedIdentityCredential{}
+	desiredSet := workloadIdentityCredentialSet(desired)
 	seenIdentity := map[string]bool{}
 	for _, template := range cfg.Credentials {
 		if seenIdentity[template.IdentityName] {
@@ -169,8 +171,10 @@ func (s NativeWorkloadIdentityService) deleteRemovedManagedCredentials(ctx conte
 			return nil, fmt.Errorf("list federated identity credentials for %s: %w", template.IdentityName, err)
 		}
 		for _, credential := range current {
-			index, ok := managedWorkloadIdentityCredentialIndex(credential, cfg)
-			if !ok || index <= cfg.Count {
+			if desiredSet[workloadIdentityCredentialKey(credential)] {
+				continue
+			}
+			if _, ok := managedWorkloadIdentityCredentialSlotName(credential, cfg); !ok {
 				continue
 			}
 			if err := s.Client.DeleteFederatedIdentityCredential(ctx, credential.FederatedIdentityCredentialRef); err != nil {
@@ -290,6 +294,18 @@ func desiredWorkloadIdentityCredentials(cfg nativeWorkloadIdentityConfig) []Fede
 	return credentials
 }
 
+func workloadIdentityCredentialSet(credentials []FederatedIdentityCredential) map[string]bool {
+	out := map[string]bool{}
+	for _, credential := range credentials {
+		out[workloadIdentityCredentialKey(credential)] = true
+	}
+	return out
+}
+
+func workloadIdentityCredentialKey(credential FederatedIdentityCredential) string {
+	return credential.IdentityName + "\x00" + credential.CredentialName + "\x00" + credential.Subject
+}
+
 func workloadIdentitySubstitutions(cfg nativeWorkloadIdentityConfig, slotIndex int, slotName string) map[string]string {
 	return map[string]string{
 		"project":    cfg.SlotPrefix,
@@ -300,41 +316,92 @@ func workloadIdentitySubstitutions(cfg nativeWorkloadIdentityConfig, slotIndex i
 }
 
 func managedWorkloadIdentityCredentialIndex(credential FederatedIdentityCredential, cfg nativeWorkloadIdentityConfig) (int, bool) {
-	for _, candidate := range workloadIdentitySlotIndexes(credential, cfg.SlotPrefix) {
-		slotName := fmt.Sprintf("%s-%d", cfg.SlotPrefix, candidate)
-		substitutions := workloadIdentitySubstitutions(cfg, candidate, slotName)
-		for _, template := range cfg.Credentials {
-			if credential.IdentityName != template.IdentityName {
+	slotName, ok := managedWorkloadIdentityCredentialSlotName(credential, cfg)
+	if !ok {
+		return 0, false
+	}
+	index := workloadIdentitySlotIndex(slotName)
+	return index, index > 0
+}
+
+func managedWorkloadIdentityCredentialSlotName(credential FederatedIdentityCredential, cfg nativeWorkloadIdentityConfig) (string, bool) {
+	for _, template := range cfg.Credentials {
+		if credential.IdentityName != template.IdentityName {
+			continue
+		}
+		for _, slotName := range workloadIdentitySlotNameCandidates(credential, template) {
+			index := workloadIdentitySlotIndex(slotName)
+			if index < 1 {
 				continue
 			}
+			substitutions := workloadIdentitySubstitutions(cfg, index, slotName)
 			if credential.CredentialName != formatSubstitutions(template.CredentialName, substitutions) {
 				continue
 			}
 			if credential.Subject != formatSubstitutions(template.Subject, substitutions) {
 				continue
 			}
-			return candidate, true
+			return slotName, true
 		}
 	}
-	return 0, false
+	return "", false
 }
 
-func workloadIdentitySlotIndexes(credential FederatedIdentityCredential, slotPrefix string) []int {
-	pattern := regexp.MustCompile(regexp.QuoteMeta(slotPrefix) + `-([1-9][0-9]*)`)
-	seen := map[int]bool{}
-	var indexes []int
-	for _, value := range []string{credential.CredentialName, credential.Subject} {
-		for _, match := range pattern.FindAllStringSubmatch(value, -1) {
-			index, err := strconv.Atoi(match[1])
-			if err != nil || seen[index] {
-				continue
-			}
-			seen[index] = true
-			indexes = append(indexes, index)
+func workloadIdentitySlotNameCandidates(credential FederatedIdentityCredential, template nativeWorkloadIdentityCredentialTemplate) []string {
+	seen := map[string]bool{}
+	var candidates []string
+	for _, candidate := range slotNameCandidatesFromTemplate(credential.CredentialName, template.CredentialName) {
+		if !seen[candidate] {
+			seen[candidate] = true
+			candidates = append(candidates, candidate)
 		}
 	}
-	sort.Ints(indexes)
-	return indexes
+	for _, candidate := range slotNameCandidatesFromTemplate(credential.Subject, template.Subject) {
+		if !seen[candidate] {
+			seen[candidate] = true
+			candidates = append(candidates, candidate)
+		}
+	}
+	sort.Strings(candidates)
+	return candidates
+}
+
+func slotNameCandidatesFromTemplate(value, template string) []string {
+	if !strings.Contains(template, "{slot_name}") && !strings.Contains(template, "{namespace}") {
+		return nil
+	}
+	pattern := regexp.QuoteMeta(template)
+	slotPattern := `([a-z0-9](?:[a-z0-9-]*[a-z0-9])?-[1-9][0-9]*)`
+	pattern = strings.ReplaceAll(pattern, `\{slot_name\}`, slotPattern)
+	pattern = strings.ReplaceAll(pattern, `\{namespace\}`, slotPattern)
+	pattern = strings.ReplaceAll(pattern, `\{slot_index\}`, `[1-9][0-9]*`)
+	pattern = "^" + pattern + "$"
+	matches := regexp.MustCompile(pattern).FindStringSubmatch(value)
+	if len(matches) <= 1 {
+		return nil
+	}
+	seen := map[string]bool{}
+	var candidates []string
+	for _, match := range matches[1:] {
+		if match == "" || seen[match] {
+			continue
+		}
+		seen[match] = true
+		candidates = append(candidates, match)
+	}
+	return candidates
+}
+
+func workloadIdentitySlotIndex(slotName string) int {
+	idx := strings.LastIndex(slotName, "-")
+	if idx < 0 || idx == len(slotName)-1 {
+		return 0
+	}
+	index, err := strconv.Atoi(slotName[idx+1:])
+	if err != nil || index < 1 {
+		return 0
+	}
+	return index
 }
 
 func credentialStatusList(credentials []FederatedIdentityCredential) []NativeWorkloadIdentityCredentialStatus {
