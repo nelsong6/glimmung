@@ -6,18 +6,15 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 )
 
 type TestSlotCheckoutRequest struct {
 	Project       string              `json:"project"`
 	Workflow      *string             `json:"workflow"`
-	SlotIndex     *int                `json:"slot_index"`
 	Mode          string              `json:"mode"`
 	Requester     LeaseRequesterInput `json:"requester"`
 	TankSessionID *string             `json:"tank_session_id"`
-	PhaseInputs   map[string]string   `json:"phase_inputs"`
 	TTLSeconds    *int                `json:"ttl_seconds"`
 }
 
@@ -56,8 +53,10 @@ func checkoutTestSlot(store ReadStore, preparer TestSlotPreparer, minter NativeG
 			return
 		}
 		var req TestSlotCheckoutRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeProblem(w, http.StatusBadRequest, "invalid JSON body")
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&req); err != nil {
+			writeProblem(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 			return
 		}
 		req.Project = strings.TrimSpace(req.Project)
@@ -81,31 +80,10 @@ func checkoutTestSlot(store ReadStore, preparer TestSlotPreparer, minter NativeG
 		if req.Workflow != nil && strings.TrimSpace(*req.Workflow) != "" {
 			workflow = strings.TrimSpace(*req.Workflow)
 		}
-		slotName := ""
-		if req.SlotIndex != nil {
-			slotName = testSlotName(project, *req.SlotIndex)
-		}
-		phaseInputs := map[string]any{}
-		for k, v := range req.PhaseInputs {
-			phaseInputs[k] = v
-		}
-		if req.SlotIndex != nil {
-			phaseInputs["validation_slot_index"] = strconv.Itoa(*req.SlotIndex)
-			phaseInputs["slot_name"] = slotName
-			phaseInputs["namespace"] = slotName
-		}
-		phaseInputs["test_slot_mode"] = mode
-		phaseInputs["clean_slate"] = strconv.FormatBool(mode == "clean_slate")
-
 		metadata := map[string]any{
 			"test_slot_checkout": true,
 			"test_slot_mode":     mode,
-			"phase_inputs":       phaseInputs,
 			"native_slot_prefix": testSlotPrefix(project),
-		}
-		if slotName != "" {
-			metadata["native_slot_name"] = slotName
-			metadata["native_sessions_namespace"] = testSlotSessionsNamespace(slotName, project)
 		}
 		requester := req.Requester
 		if strings.TrimSpace(requester.Consumer) == "" {
@@ -136,7 +114,7 @@ func checkoutTestSlot(store ReadStore, preparer TestSlotPreparer, minter NativeG
 				return
 			}
 		}
-		writeJSON(w, http.StatusOK, testSlotCheckoutResponse(project, workflow, lease, host, req.SlotIndex))
+		writeJSON(w, http.StatusOK, testSlotCheckoutResponse(project, workflow, lease, host))
 	}
 }
 
@@ -203,11 +181,8 @@ func findProjectForTestSlot(r *http.Request, w http.ResponseWriter, store ReadSt
 	return Project{}, false
 }
 
-func testSlotCheckoutResponse(project Project, workflow string, lease Lease, host *Host, requestedSlot *int) TestSlotCheckoutResult {
+func testSlotCheckoutResponse(project Project, workflow string, lease Lease, host *Host) TestSlotCheckoutResult {
 	slotIndex := nativeSlotIndexFromMetadata(lease.Metadata)
-	if slotIndex == nil {
-		slotIndex = requestedSlot
-	}
 	slotName := nativeSlotNameFromMetadata(lease.Metadata)
 	url := testSlotURL(project, slotName)
 	ref := LeasePublicRefFromLease(lease)
@@ -274,14 +249,7 @@ func testSlotRequesterRef(req TestSlotCheckoutRequest) string {
 	if req.TankSessionID != nil && strings.TrimSpace(*req.TankSessionID) != "" {
 		return "tank-session-" + strings.TrimSpace(*req.TankSessionID)
 	}
-	if req.SlotIndex != nil {
-		return fmt.Sprintf("%s-slot-%d", req.Project, *req.SlotIndex)
-	}
 	return req.Project
-}
-
-func testSlotName(project Project, slotIndex int) string {
-	return fmt.Sprintf("%s-%d", testSlotPrefix(project), slotIndex)
 }
 
 func testSlotPrefix(project Project) string {
@@ -317,28 +285,13 @@ func nativeSlotIndexFromMetadata(metadata map[string]any) *int {
 	if n, ok := positiveIntFromMap(metadata, "native_slot_index"); ok {
 		return &n
 	}
-	if phaseInputs, ok := mapFromMap(metadata, "phase_inputs"); ok {
-		if n, ok := positiveIntFromMap(phaseInputs, "validation_slot_index"); ok {
-			return &n
-		}
-	}
 	return nil
 }
 
 func nativeSlotNameFromMetadata(metadata map[string]any) *string {
-	for _, key := range []string{"native_slot_name", "slot_name", "namespace"} {
-		if value, ok := stringFromMap(metadata, key); ok && strings.TrimSpace(value) != "" {
-			clean := strings.TrimSpace(value)
-			return &clean
-		}
-	}
-	if phaseInputs, ok := mapFromMap(metadata, "phase_inputs"); ok {
-		for _, key := range []string{"slot_name", "namespace"} {
-			if value, ok := stringFromMap(phaseInputs, key); ok && strings.TrimSpace(value) != "" {
-				clean := strings.TrimSpace(value)
-				return &clean
-			}
-		}
+	if value, ok := stringFromMap(metadata, "native_slot_name"); ok && strings.TrimSpace(value) != "" {
+		clean := strings.TrimSpace(value)
+		return &clean
 	}
 	return nil
 }

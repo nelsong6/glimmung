@@ -3885,7 +3885,7 @@ func (s *Store) acquireNativeLease(ctx context.Context, req server.LeaseAcquireR
 	callbackToken := uuid.New().String()[:32]
 	metadata["lease_callback_token"] = callbackToken
 
-	slotIndex, err := s.availableNativeSlot(ctx, req.Project, metadata)
+	slotIndex, err := s.availableNativeSlot(ctx, req.Project)
 	if err != nil {
 		return server.Lease{}, nil, err
 	}
@@ -3932,7 +3932,7 @@ func (s *Store) acquireNativeLease(ctx context.Context, req server.LeaseAcquireR
 	}, nil
 }
 
-func (s *Store) availableNativeSlot(ctx context.Context, project string, metadata map[string]any) (*int, error) {
+func (s *Store) availableNativeSlot(ctx context.Context, project string) (*int, error) {
 	var docs []leaseDoc
 	if err := queryAllWhere(
 		ctx,
@@ -3960,12 +3960,6 @@ func (s *Store) availableNativeSlot(ctx context.Context, project string, metadat
 		}
 	}
 	if projectActive >= projectCap {
-		return nil, nil
-	}
-	if preferred := nativePreferredSlot(metadata); preferred != nil {
-		if *preferred >= 1 && *preferred <= projectCap && !used[*preferred] {
-			return preferred, nil
-		}
 		return nil, nil
 	}
 	for slot := 1; slot <= projectCap; slot++ {
@@ -4259,18 +4253,6 @@ func isNativeLeaseRequest(req server.LeaseAcquireRequest) bool {
 	return boolValue(req.Metadata["native_k8s"]) ||
 		boolValue(req.Metadata["test_slot_checkout"]) ||
 		boolValue(req.Requirements["native_k8s"])
-}
-
-func nativePreferredSlot(metadata map[string]any) *int {
-	for _, value := range []any{
-		metadata["native_slot_index"],
-		anyMapValue(metadata["phase_inputs"])["validation_slot_index"],
-	} {
-		if n, ok := positiveIntValue(value); ok {
-			return &n
-		}
-	}
-	return nil
 }
 
 func nativeSlotIndex(metadata map[string]any) *int {
