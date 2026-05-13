@@ -154,6 +154,37 @@ func TestRegisterHostRejectsNativeSlotBeyondConfiguredCount(t *testing.T) {
 	}
 }
 
+func TestRegisterHostRejectsNativeProjectHostRegistration(t *testing.T) {
+	store := &fakeHostStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "tank-operator",
+			Name: "tank-operator",
+			Metadata: map[string]any{
+				"native_standby_dns": map[string]any{
+					"slot_prefix": "tank-operator-slot",
+					"count":       10,
+				},
+			},
+		}}},
+	}
+	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/hosts", strings.NewReader(`{"name":"tank-operator-runner-1","capabilities":{"project":"tank-operator","role":"agent"}}`))
+	req.Header.Set("Authorization", "Bearer token")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "native test-slot checkout") {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+	if store.seen.Name != "" {
+		t.Fatalf("unexpected upsert: %#v", store.seen)
+	}
+}
+
 func TestDeleteHostDeletesByName(t *testing.T) {
 	store := &fakeHostStore{}
 	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{})

@@ -103,7 +103,7 @@ func validateHostRegistration(ctx context.Context, store ReadStore, input HostRe
 		}
 		prefix = strings.Trim(strings.TrimSpace(prefix), ".")
 		if prefix == "" || !strings.HasPrefix(input.Name, prefix+"-") {
-			return nil
+			return fmt.Errorf("host registration for native project %s is managed by native test-slot checkout", projectName)
 		}
 		index, err := strconv.Atoi(strings.TrimPrefix(input.Name, prefix+"-"))
 		if err != nil || index < 1 {
