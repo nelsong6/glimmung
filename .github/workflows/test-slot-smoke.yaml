@@ -72,9 +72,27 @@ jobs:
               -backend-config="storage_account_name=nelsontofu" \
               -backend-config="container_name=tfstate" \
               -backend-config="key=infra-bootstrap.tfstate"
+            resource_group="$(tofu output -raw resource_group_name)"
+            cluster_name="$(tofu output -raw aks_cluster_name)"
+            aks_subscription=""
+            for subscription in $(az account list --query '[].id' -o tsv); do
+              if az aks show \
+                  --subscription "$subscription" \
+                  --resource-group "$resource_group" \
+                  --name "$cluster_name" \
+                  >/dev/null 2>&1; then
+                aks_subscription="$subscription"
+                break
+              fi
+            done
+            if [ -z "$aks_subscription" ]; then
+              echo "Unable to find AKS cluster ${resource_group}/${cluster_name} in accessible Azure subscriptions."
+              exit 1
+            fi
             {
-              echo "AZURE_AKS_RESOURCE_GROUP=$(tofu output -raw resource_group_name)"
-              echo "AZURE_AKS_CLUSTER_NAME=$(tofu output -raw aks_cluster_name)"
+              echo "AZURE_AKS_RESOURCE_GROUP=${resource_group}"
+              echo "AZURE_AKS_CLUSTER_NAME=${cluster_name}"
+              echo "AZURE_AKS_SUBSCRIPTION_ID=${aks_subscription}"
             } >> "$GITHUB_ENV"
           )
 
@@ -82,6 +100,7 @@ jobs:
         run: |
           set -euo pipefail
           az aks get-credentials \
+            --subscription "$AZURE_AKS_SUBSCRIPTION_ID" \
             --resource-group "$AZURE_AKS_RESOURCE_GROUP" \
             --name "$AZURE_AKS_CLUSTER_NAME" \
             --overwrite-existing
