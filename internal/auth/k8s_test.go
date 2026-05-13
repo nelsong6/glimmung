@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -110,6 +111,49 @@ func TestK8sVerifyTokenHandlesTokenReviewFailures(t *testing.T) {
 			_, err := authenticator.VerifyToken(context.Background(), "caller-token")
 			assertAuthStatus(t, err, tt.wantCode, tt.wantText)
 		})
+	}
+}
+
+func TestK8sVerifyTokenReloadsOwnTokenFile(t *testing.T) {
+	tokenPath := t.TempDir() + "/token"
+	if err := os.WriteFile(tokenPath, []byte("own-token-1"), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	var gotAuth []string
+	tokenReview := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = append(gotAuth, r.Header.Get("Authorization"))
+		_ = json.NewEncoder(w).Encode(tokenReviewResponse{
+			Status: tokenReviewStatus{
+				Authenticated: true,
+				User:          tokenReviewUser{Username: "system:serviceaccount:ns:sa"},
+			},
+		})
+	}))
+	defer tokenReview.Close()
+
+	authenticator, err := NewK8sAuthenticator(K8sConfig{
+		APIHost:      tokenReview.URL,
+		Allowlist:    "ns/sa",
+		OwnTokenPath: tokenPath,
+	})
+	if err != nil {
+		t.Fatalf("NewK8sAuthenticator returned error: %v", err)
+	}
+	if _, err := authenticator.VerifyToken(context.Background(), "caller-token"); err != nil {
+		t.Fatalf("first VerifyToken returned error: %v", err)
+	}
+	if err := os.WriteFile(tokenPath, []byte("own-token-2"), 0o600); err != nil {
+		t.Fatalf("rotate token: %v", err)
+	}
+	if _, err := authenticator.VerifyToken(context.Background(), "caller-token"); err != nil {
+		t.Fatalf("second VerifyToken returned error: %v", err)
+	}
+
+	if len(gotAuth) != 2 {
+		t.Fatalf("TokenReview calls=%d, want 2", len(gotAuth))
+	}
+	if gotAuth[0] != "Bearer own-token-1" || gotAuth[1] != "Bearer own-token-2" {
+		t.Fatalf("Authorization headers=%#v", gotAuth)
 	}
 }
 
