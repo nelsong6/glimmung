@@ -93,6 +93,24 @@ work.
 Return is not the scale-down path. It must not delete the slot's baseline
 capacity unless the caller is explicitly changing queue size.
 
+Lease callback release for a test-slot lease follows the same runtime cleanup
+path as `POST /v1/test-slots/return`. Callback release must not mark the lease
+released until hot runtime teardown and preliminary revalidation have
+completed.
+
+### Reconciliation And Repair
+
+Glimmung runs a test-slot reconciler for durable lifecycle work. The reconciler
+restarts stale `activating` work, restarts stale `cleaning` work, cleans up
+short-lived installer Jobs and clone Secrets for active slots, and starts
+cleanup for expired claimed test-slot leases.
+
+`POST /v1/projects/{project}/test-environments/{slot_name}/repair` is the
+explicit admin repair path for slots left in `error`, stale `warming`, or stale
+`cleaning` states. Repair reuses the return cleanup path and then revalidates
+preliminary resources. It must refuse to repair a healthy active lease; callers
+should return that lease instead.
+
 ## Resource Classification
 
 The following resources are preliminary when they are tied to the configured
@@ -148,3 +166,32 @@ activation path after Glimmung assigns a lease.
 Any code path that makes an available unleased slot keep app, proxy, session,
 Playwright, or other steady runtime pods alive violates this contract. Such
 resources must move behind lease activation and be deleted on return.
+
+## Completion Checklist
+
+The slot system is not complete until all of these are true:
+
+- Queue size increase warms only preliminary resources.
+- Queue size decrease is the only destructive capacity path and refuses to
+  remove any slot still owned by an active lease.
+- Checkout is allocator-owned. Callers cannot select a slot through request
+  fields, lease metadata, or phase inputs.
+- Checkout returns quickly. Runtime activation is durable, async, recoverable,
+  and pollable through slot status.
+- Return returns quickly. Runtime cleanup is durable, async, recoverable, and
+  keeps the lease claimed until the slot is safe to allocate again.
+- Lease callback release follows the same cleanup path as public test-slot
+  return for test-slot leases.
+- Expired or abandoned claimed test-slot leases are cleaned by reconciliation
+  without requiring manual intervention.
+- Slots in `error`, stale `warming`, or stale `cleaning` can be repaired by an
+  explicit admin operation that does not require queue-size churn.
+- Short-lived installer Jobs and clone Secrets are cleaned after success and
+  reconciled after process restarts.
+- Dashboard slot rows expose enough activation and cleanup metadata to debug
+  stuck work without querying Cosmos directly.
+- CI or a dispatchable smoke workflow exercises checkout, activation, return,
+  cleanup, and no-runtime-after-return against a live configured project.
+- Function names, resource names, and documentation use the slot lifecycle
+  terms in this document. Legacy names may remain only for compatibility
+  cleanup of old resources.

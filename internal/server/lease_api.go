@@ -13,6 +13,10 @@ type LeaseStore interface {
 	CancelLeaseByRef(ctx context.Context, project, ref string) (CancelLeaseResult, error)
 }
 
+type LeaseCanceller interface {
+	CancelLeaseByRef(ctx context.Context, project, ref string) (CancelLeaseResult, error)
+}
+
 type LeaseAcquireRequest struct {
 	Project      string
 	Workflow     *string

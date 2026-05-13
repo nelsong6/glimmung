@@ -20,6 +20,11 @@ import (
 	"github.com/google/uuid"
 )
 
+const (
+	testSlotInstallerJobPrefix    = "glim-slot-apply"
+	testSlotInstallerSecretPrefix = "glim-slot-clone"
+)
+
 // NativeLauncher creates Kubernetes resources for native k8s_job phases.
 type NativeLauncher interface {
 	LaunchNativePhase(ctx context.Context, req NativeLaunchRequest) ([]string, error)
@@ -130,10 +135,10 @@ func (l *KubernetesNativeLauncher) ActivateTestSlotRuntime(ctx context.Context, 
 	if err != nil {
 		return fmt.Errorf("mint github token for test slot install: %w", err)
 	}
-	if err := l.ensureCloneTokenSecret(ctx, testSlotInstallResourceName("glim-helm-clone", lease), token, lease, slotName); err != nil {
+	if err := l.ensureCloneTokenSecret(ctx, testSlotInstallerSecretName(lease), token, lease, slotName); err != nil {
 		return err
 	}
-	jobName := testSlotInstallResourceName("glim-helm-install", lease)
+	jobName := testSlotInstallerJobName(lease)
 	if err := l.createJob(ctx, testSlotInstallJobManifest(l.Settings, config, lease, project, substitutions)); err != nil {
 		return err
 	}
@@ -455,6 +460,8 @@ func (l *KubernetesNativeLauncher) deleteTestSlotClusterRoleBindings(ctx context
 
 func (l *KubernetesNativeLauncher) deleteTestSlotInstaller(ctx context.Context, lease Lease) error {
 	for _, path := range []string{
+		"/apis/batch/v1/namespaces/" + l.Settings.NativeRunnerNamespace + "/jobs/" + testSlotInstallerJobName(lease),
+		"/api/v1/namespaces/" + l.Settings.NativeRunnerNamespace + "/secrets/" + testSlotInstallerSecretName(lease),
 		"/apis/batch/v1/namespaces/" + l.Settings.NativeRunnerNamespace + "/jobs/" + testSlotInstallResourceName("glim-helm-install", lease),
 		"/api/v1/namespaces/" + l.Settings.NativeRunnerNamespace + "/secrets/" + testSlotInstallResourceName("glim-helm-clone", lease),
 	} {
@@ -881,10 +888,18 @@ func testSlotInstallResourceName(prefix string, lease Lease) string {
 	return compactResourceName(prefix, ref, attemptIndex)
 }
 
+func testSlotInstallerJobName(lease Lease) string {
+	return testSlotInstallResourceName(testSlotInstallerJobPrefix, lease)
+}
+
+func testSlotInstallerSecretName(lease Lease) string {
+	return testSlotInstallResourceName(testSlotInstallerSecretPrefix, lease)
+}
+
 func testSlotInstallJobManifest(settings Settings, config testSlotHelmSettings, lease Lease, project Project, substitutions map[string]string) map[string]any {
 	slotName, _ := stringFromMap(lease.Metadata, "native_slot_name")
-	jobName := testSlotInstallResourceName("glim-helm-install", lease)
-	secretName := testSlotInstallResourceName("glim-helm-clone", lease)
+	jobName := testSlotInstallerJobName(lease)
+	secretName := testSlotInstallerSecretName(lease)
 	labels := testSlotLabels(lease, slotName)
 	labels["glimmung.romaine.life/test-slot-installer"] = "true"
 	gitRef := strings.TrimSpace(config.GitRef)

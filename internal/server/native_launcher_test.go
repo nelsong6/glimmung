@@ -225,7 +225,7 @@ func TestActivateTestSlotRuntimeRunsHelmInstallerAfterLeaseAssignment(t *testing
 		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			paths = append(paths, req.Method+" "+req.URL.Path)
 			body := `{}`
-			if req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/jobs/glim-helm-install-") {
+			if req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/jobs/glim-slot-apply-") {
 				body = `{"status":{"conditions":[{"type":"Complete","status":"True"}]}}`
 			}
 			return &http.Response{
@@ -258,7 +258,7 @@ func TestActivateTestSlotRuntimeRunsHelmInstallerAfterLeaseAssignment(t *testing
 	if !containsPath(paths, "POST /apis/batch/v1/namespaces/glimmung-runs/jobs") {
 		t.Fatalf("activation should create Helm installer job, paths=%#v", paths)
 	}
-	if !containsPath(paths, "GET /apis/batch/v1/namespaces/glimmung-runs/jobs/glim-helm-install-tank-operator-slot-2-12") {
+	if !containsPath(paths, "GET /apis/batch/v1/namespaces/glimmung-runs/jobs/glim-slot-apply-tank-operator-slot-2-12") {
 		t.Fatalf("activation should wait for Helm installer job completion, paths=%#v", paths)
 	}
 	if containsPath(paths, "POST /apis/apps/v1/namespaces/tank-operator-slot-2/deployments") {
@@ -386,7 +386,7 @@ func TestTestSlotInstallJobManifestRendersHelmApplyJob(t *testing.T) {
 		project,
 		testSlotSubstitutions(lease, project, "tank-operator-slot-2", "tank-operator-slot-2-sessions"),
 	)
-	if manifest["metadata"].(map[string]any)["name"] != "glim-helm-install-tank-operator-slot-2-12" {
+	if manifest["metadata"].(map[string]any)["name"] != "glim-slot-apply-tank-operator-slot-2-12" {
 		t.Fatalf("job name=%q", manifest["metadata"].(map[string]any)["name"])
 	}
 	spec := manifest["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
@@ -453,7 +453,7 @@ func runtimeListResponse(path string) string {
 	case "/api/v1/namespaces/tank-slot-1-sessions/pods":
 		return `{"items":[{"metadata":{"name":"session-4"}}]}`
 	default:
-		if strings.Contains(path, "/jobs/glim-helm-install-") {
+		if strings.Contains(path, "/jobs/glim-slot-apply-") {
 			return `{"status":{"conditions":[{"type":"Complete","status":"True"}]}}`
 		}
 		return `{"items":[]}`

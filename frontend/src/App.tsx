@@ -2731,6 +2731,7 @@ function TestEnvironmentIndexView({
               {!projectName && <th>Project</th>}
               <th>Slot</th>
               <th>State</th>
+              <th>Work</th>
               <th>Lease</th>
               <th>Requester</th>
               <th>Purpose</th>
@@ -2749,6 +2750,7 @@ function TestEnvironmentIndexView({
                   )}
                   <td className="mono">{env.slot_name}</td>
                   <td><span className={`pill ${testEnvironmentPillClass(env.state)}`} title={env.detail ?? env.state}>{env.state}</span></td>
+                  <td className="mono dim" title={testEnvironmentWorkTitle(env)}>{testEnvironmentWorkLabel(env)}</td>
                   <td className="mono dim">
                     {env.lease && detailTo ? (
                       <Link className="link mono" to={detailTo}>{leaseDisplayName(env.lease)}</Link>
@@ -3024,6 +3026,39 @@ function testEnvironmentPillClass(state: TestEnvironment["state"]): "free" | "bu
     default:
       return "info";
   }
+}
+
+function testEnvironmentWorkLabel(env: TestEnvironment): string {
+  if (env.cleanup_error) return "cleanup error";
+  if (env.activation_error) return "activation error";
+  if (env.state === "cleaning") return compactWorkLabel("cleanup", env.cleanup_state, env.cleanup_started_at);
+  if (env.state === "activating") return compactWorkLabel("activation", env.activation_state, env.activation_started_at, env.activation_attempt);
+  if (env.activation_attempt) return `activation #${env.activation_attempt}`;
+  if (env.cleanup_state) return `cleanup ${env.cleanup_state}`;
+  return "-";
+}
+
+function testEnvironmentWorkTitle(env: TestEnvironment): string {
+  const parts = [
+    env.activation_attempt ? `activation attempt ${env.activation_attempt}` : null,
+    env.activation_state ? `activation ${env.activation_state}` : null,
+    env.activation_job_name ? `job ${env.activation_job_name}` : null,
+    env.activation_started_at ? `activation started ${env.activation_started_at}` : null,
+    env.activation_completed_at ? `activation completed ${env.activation_completed_at}` : null,
+    env.activation_error ? `activation error ${env.activation_error}` : null,
+    env.cleanup_state ? `cleanup ${env.cleanup_state}` : null,
+    env.cleanup_started_at ? `cleanup started ${env.cleanup_started_at}` : null,
+    env.cleanup_completed_at ? `cleanup completed ${env.cleanup_completed_at}` : null,
+    env.cleanup_error ? `cleanup error ${env.cleanup_error}` : null,
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.join(" | ") : env.detail ?? env.state;
+}
+
+function compactWorkLabel(kind: string, state?: string | null, startedAt?: string | null, attempt?: number | null): string {
+  const suffix = attempt ? ` #${attempt}` : "";
+  if (state) return `${kind}${suffix} ${state}`;
+  if (startedAt) return `${kind}${suffix} running`;
+  return `${kind}${suffix}`;
 }
 
 function projectUsesNativeWorkflows(project: Project): boolean {

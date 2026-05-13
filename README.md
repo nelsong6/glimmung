@@ -144,7 +144,10 @@ surface rather than every compatibility tombstone.
 |---|---|---|
 | POST   | `/v1/projects`                    | Register/upsert a project (`{name, github_repo}`). |
 | GET    | `/v1/projects`                    | List projects. |
-| PATCH  | `/v1/projects/{project}/test-environments/count` | Set native validation slot capacity and reconcile managed auth redirect URIs when configured. |
+| PATCH  | `/v1/projects/{project}/test-environments/count` | Set native test-slot capacity and reconcile configured preliminary resources, including auth redirect URIs and workload identities. |
+| POST   | `/v1/test-slots/checkout`          | Lease an available test slot chosen by Glimmung; runtime activation may continue asynchronously. |
+| POST   | `/v1/test-slots/return`            | Return a test-slot lease; runtime cleanup may continue asynchronously before the slot is available again. |
+| POST   | `/v1/projects/{project}/test-environments/{slot_name}/repair` | Admin repair for error or stale lifecycle slot states without changing queue size. |
 | POST   | `/v1/workflows`                   | Register/upsert a workflow under a project. |
 | GET    | `/v1/workflows`                   | List workflows. |
 | POST   | `/v1/playbooks`                   | Create a draft Playbook for a coordinated batch of issue specs. |
@@ -230,6 +233,9 @@ session, Playwright, or validation workload pods running.
 Runtime materialization belongs after Glimmung assigns a lease. Returning a slot
 tears down that lease-scoped runtime and keeps the preliminary slot capacity.
 Changing queue size is the destructive path that may remove slot capacity.
+Callback release for a test-slot lease uses the same cleanup path as
+`/v1/test-slots/return`, and an expired claimed test-slot lease is cleaned by
+the in-process test-slot reconciler.
 
 Minimal Tank-style config:
 

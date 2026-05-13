@@ -1,0 +1,178 @@
+name: test-slot-smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      project:
+        description: "Configured test-slot project to exercise"
+        required: false
+        default: "tank-operator"
+        type: string
+      service_account_namespace:
+        description: "Namespace for the admin-allowlisted service account"
+        required: false
+        default: "tank-operator"
+        type: string
+      service_account_name:
+        description: "Admin-allowlisted service account"
+        required: false
+        default: "tank-operator"
+        type: string
+  schedule:
+    - cron: "23 10 * * *"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    env:
+      GLIMMUNG_BASE_URL: https://glimmung.romaine.life
+      PROJECT: ${{ inputs.project || 'tank-operator' }}
+      SERVICE_ACCOUNT_NAMESPACE: ${{ inputs.service_account_namespace || 'tank-operator' }}
+      SERVICE_ACCOUNT_NAME: ${{ inputs.service_account_name || 'tank-operator' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: "1.9.0"
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.ARM_CLIENT_ID }}
+          tenant-id: ${{ vars.ARM_TENANT_ID }}
+          subscription-id: ${{ vars.ARM_SUBSCRIPTION_ID }}
+
+      - name: Read AKS outputs
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ vars.ARM_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ vars.ARM_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.ARM_SUBSCRIPTION_ID }}
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d)
+          cat > "${work}/main.tf" <<'EOF'
+          terraform {
+            backend "azurerm" {}
+          }
+          EOF
+          (
+            cd "${work}"
+            tofu init \
+              -backend-config="resource_group_name=infra" \
+              -backend-config="storage_account_name=nelsontofu" \
+              -backend-config="container_name=tfstate" \
+              -backend-config="key=infra-bootstrap.tfstate"
+            {
+              echo "AZURE_AKS_RESOURCE_GROUP=$(tofu output -raw resource_group_name)"
+              echo "AZURE_AKS_CLUSTER_NAME=$(tofu output -raw aks_cluster_name)"
+            } >> "$GITHUB_ENV"
+          )
+
+      - name: Set AKS context
+        run: |
+          set -euo pipefail
+          az aks get-credentials \
+            --resource-group "$AZURE_AKS_RESOURCE_GROUP" \
+            --name "$AZURE_AKS_CLUSTER_NAME" \
+            --overwrite-existing
+
+      - name: Exercise checkout and return
+        run: |
+          set -euo pipefail
+
+          token="$(kubectl -n "$SERVICE_ACCOUNT_NAMESPACE" create token "$SERVICE_ACCOUNT_NAME" --duration=20m)"
+          auth_header="Authorization: Bearer ${token}"
+          lease_slot=""
+
+          cleanup() {
+            if [ -n "$lease_slot" ]; then
+              curl -fsS \
+                -X POST "${GLIMMUNG_BASE_URL}/v1/test-slots/return" \
+                -H "$auth_header" \
+                -H "content-type: application/json" \
+                --data "$(jq -nc --arg project "$PROJECT" --arg slot "$lease_slot" '{project:$project, slot_name:$slot}')" \
+                >/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+
+          checkout="$(curl -fsS \
+            -X POST "${GLIMMUNG_BASE_URL}/v1/test-slots/checkout" \
+            -H "$auth_header" \
+            -H "content-type: application/json" \
+            --data "$(jq -nc --arg project "$PROJECT" --arg ref "smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" '{project:$project, requester:{consumer:"github-actions", kind:"test-slot-smoke", ref:$ref}, ttl_seconds:900}')")"
+          echo "$checkout" | jq .
+          lease_slot="$(echo "$checkout" | jq -r '.slot_name')"
+          status_url="$(echo "$checkout" | jq -r '.status_url')"
+          slot_url="$(echo "$checkout" | jq -r '.url')"
+          if [ "$lease_slot" = "null" ] || [ -z "$lease_slot" ]; then
+            echo "checkout did not assign a slot"
+            exit 1
+          fi
+
+          deadline=$((SECONDS + 600))
+          while true; do
+            status="$(curl -fsS "${GLIMMUNG_BASE_URL}${status_url}")"
+            echo "$status" | jq '{slot_name,state,usable,activation_state,activation_error}'
+            if [ "$(echo "$status" | jq -r '.state')" = "active" ] && [ "$(echo "$status" | jq -r '.usable')" = "true" ]; then
+              break
+            fi
+            if [ "$(echo "$status" | jq -r '.state')" = "error" ]; then
+              exit 1
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "slot did not become active before timeout"
+              exit 1
+            fi
+            sleep 5
+          done
+
+          curl -fsS "${slot_url%/}/healthz" | tee /tmp/test-slot-healthz.json
+
+          returned="$(curl -fsS \
+            -X POST "${GLIMMUNG_BASE_URL}/v1/test-slots/return" \
+            -H "$auth_header" \
+            -H "content-type: application/json" \
+            --data "$(jq -nc --arg project "$PROJECT" --arg slot "$lease_slot" '{project:$project, slot_name:$slot}')")"
+          echo "$returned" | jq .
+
+          deadline=$((SECONDS + 300))
+          while true; do
+            status="$(curl -fsS "${GLIMMUNG_BASE_URL}${status_url}")"
+            echo "$status" | jq '{slot_name,state,usable,cleanup_state,cleanup_error,lease}'
+            if [ "$(echo "$status" | jq -r '.state')" = "available" ] && [ "$(echo "$status" | jq -r '.lease')" = "null" ]; then
+              break
+            fi
+            if [ "$(echo "$status" | jq -r '.state')" = "error" ]; then
+              exit 1
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "slot did not become available before timeout"
+              exit 1
+            fi
+            sleep 5
+          done
+
+          slot_pods="$( (kubectl -n "$lease_slot" get pods -o json 2>/dev/null || echo '{"items":[]}') | jq '.items | length')"
+          session_pods="$( (kubectl -n "${lease_slot}-sessions" get pods -o json 2>/dev/null || echo '{"items":[]}') | jq '.items | length')"
+          installer_items="$( (kubectl -n glimmung-runs get jobs,secrets \
+            -l "glimmung.romaine.life/native-slot-name=${lease_slot}" \
+            -o json 2>/dev/null || echo '{"items":[]}') | jq '.items | length')"
+          if [ "$slot_pods" != "0" ] || [ "$session_pods" != "0" ] || [ "$installer_items" != "0" ]; then
+            echo "runtime resources remain after return: slot_pods=${slot_pods} session_pods=${session_pods} installer_items=${installer_items}"
+            kubectl -n "$lease_slot" get pods || true
+            kubectl -n "${lease_slot}-sessions" get pods || true
+            kubectl -n glimmung-runs get jobs,secrets -l "glimmung.romaine.life/native-slot-name=${lease_slot}" || true
+            exit 1
+          fi
+          lease_slot=""
