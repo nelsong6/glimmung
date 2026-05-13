@@ -817,11 +817,6 @@ func testSlotCleanSlate(metadata map[string]any) bool {
 	if value, ok := stringFromMap(metadata, "test_slot_mode"); ok && strings.EqualFold(value, "clean_slate") {
 		return true
 	}
-	if phaseInputs, ok := mapFromMap(metadata, "phase_inputs"); ok {
-		if value, ok := stringFromMap(phaseInputs, "clean_slate"); ok && strings.EqualFold(value, "true") {
-			return true
-		}
-	}
 	return false
 }
 

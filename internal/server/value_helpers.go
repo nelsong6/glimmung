@@ -10,6 +10,7 @@ var ErrConflict = errors.New("conflict")
 var ErrInactive = errors.New("inactive")
 var ErrUnsupported = errors.New("unsupported")
 var ErrForbidden = errors.New("forbidden")
+var ErrUnavailable = errors.New("unavailable")
 
 type ValidationError struct {
 	Message string

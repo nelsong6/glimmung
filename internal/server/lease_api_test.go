@@ -142,6 +142,19 @@ func TestCreateLeaseValidates(t *testing.T) {
 	}
 }
 
+func TestCreateLeaseMapsUnavailable(t *testing.T) {
+	handler := NewWithDependencies(Settings{}, &fakeLeaseStore{err: ErrUnavailable}, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}})
+	body := `{"project":"myproject","requester":{"consumer":"glimmung","kind":"run","ref":"myproject#1/runs/1"},"requirements":{"native_k8s":true}}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/lease", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestCreateLeaseRequiresAdmin(t *testing.T) {
 	handler := NewWithStore(Settings{}, &fakeLeaseStore{})
 	body := `{"project":"p","requester":{"consumer":"g","kind":"run","ref":"r"}}`

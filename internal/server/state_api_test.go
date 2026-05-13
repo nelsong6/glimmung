@@ -86,7 +86,15 @@ func TestStateSnapshotIncludesTestEnvironmentsAndWaitingRequests(t *testing.T) {
 			ID:   "glimmung",
 			Name: "glimmung",
 			Metadata: map[string]any{
-				"native_standby_dns": map[string]any{"enabled": true, "count": float64(2), "slot_prefix": "glimmung-slot"},
+				"native_standby_dns": map[string]any{
+					"enabled":     true,
+					"count":       float64(2),
+					"slot_prefix": "glimmung-slot",
+					"slots": []any{
+						map[string]any{"slot_index": float64(1), "slot_name": "glimmung-slot-1", "state": "ready"},
+						map[string]any{"slot_index": float64(2), "slot_name": "glimmung-slot-2", "state": "ready"},
+					},
+				},
 			},
 			CreatedAt: now,
 		}}},

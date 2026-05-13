@@ -41,8 +41,8 @@ type leaseRequest struct {
 }
 
 type LeaseResponse struct {
-	Lease LeasePublic  `json:"lease"`
-	Host  *HostPublic  `json:"host"`
+	Lease LeasePublic `json:"lease"`
+	Host  *HostPublic `json:"host"`
 }
 
 type CancelLeaseRequest struct {
@@ -89,6 +89,15 @@ func createLease(store ReadStore) http.HandlerFunc {
 		}
 		lease, host, err := ls.AcquireLease(r.Context(), req)
 		if err != nil {
+			var validationErr ValidationError
+			if errors.As(err, &validationErr) {
+				writeProblem(w, http.StatusBadRequest, validationErr.Message)
+				return
+			}
+			if errors.Is(err, ErrUnavailable) {
+				writeProblem(w, http.StatusServiceUnavailable, "lease unavailable")
+				return
+			}
 			writeProblem(w, http.StatusInternalServerError, "acquire lease failed")
 			return
 		}

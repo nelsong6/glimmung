@@ -2,6 +2,7 @@ package cosmos
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/nelsong6/glimmung/internal/server"
@@ -258,6 +259,51 @@ func TestSetNativeSlotMetadataUsesDeterministicQueueName(t *testing.T) {
 	}
 	if metadata["native_slot_name"] != "ambience-slot-2" {
 		t.Fatalf("metadata=%#v", metadata)
+	}
+}
+
+func TestValidateNativeLeaseSlotIdentityRejectsCallerSuppliedFields(t *testing.T) {
+	cases := []struct {
+		name     string
+		metadata map[string]any
+		want     string
+	}{
+		{
+			name:     "top-level slot index",
+			metadata: map[string]any{"native_slot_index": "2"},
+			want:     "native_slot_index",
+		},
+		{
+			name:     "top-level slot name",
+			metadata: map[string]any{"native_slot_name": "tank-slot-2"},
+			want:     "native_slot_name",
+		},
+		{
+			name:     "top-level slot prefix",
+			metadata: map[string]any{"native_slot_prefix": "tank-slot"},
+			want:     "native_slot_prefix",
+		},
+		{
+			name:     "phase input preferred slot",
+			metadata: map[string]any{"phase_inputs": map[string]any{"validation_slot_index": "2"}},
+			want:     "phase_inputs.validation_slot_index",
+		},
+		{
+			name:     "test slot phase inputs",
+			metadata: map[string]any{"test_slot_checkout": true, "phase_inputs": map[string]any{"mode": "provision"}},
+			want:     "test-slot checkout lease requests may not include phase_inputs",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateNativeLeaseSlotIdentity(tc.metadata)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want %q", err, tc.want)
+			}
+			if _, ok := err.(server.ValidationError); !ok {
+				t.Fatalf("err type=%T, want server.ValidationError", err)
+			}
+		})
 	}
 }
 

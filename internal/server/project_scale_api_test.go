@@ -15,12 +15,13 @@ import (
 
 type fakeProjectScalerStore struct {
 	fakeReadStore
-	project   Project
-	name      string
-	count     int
-	status    *NativeAuthRedirectStatus
-	statusErr error
-	err       error
+	project      Project
+	name         string
+	count        int
+	slotStatuses []TestEnvironmentSlotStatus
+	status       *NativeAuthRedirectStatus
+	statusErr    error
+	err          error
 }
 
 func (s *fakeProjectScalerStore) SetProjectTestEnvironmentCount(_ context.Context, project string, count int) (Project, error) {
@@ -30,6 +31,44 @@ func (s *fakeProjectScalerStore) SetProjectTestEnvironmentCount(_ context.Contex
 		return Project{}, s.err
 	}
 	return s.project, nil
+}
+
+func (s *fakeProjectScalerStore) SetProjectTestEnvironmentSlotStatus(_ context.Context, project string, status TestEnvironmentSlotStatus) (Project, error) {
+	s.name = project
+	s.slotStatuses = append(s.slotStatuses, status)
+	if s.project.Metadata == nil {
+		s.project.Metadata = map[string]any{}
+	}
+	standby, _ := s.project.Metadata["native_standby_dns"].(map[string]any)
+	if standby == nil {
+		standby = map[string]any{}
+	}
+	slots, _ := standby["slots"].([]any)
+	replaced := false
+	for i, raw := range slots {
+		slot, _ := raw.(map[string]any)
+		if slot == nil {
+			continue
+		}
+		if index, ok := positiveIntFromMap(slot, "slot_index"); ok && index == status.SlotIndex {
+			slots[i] = testSlotStatusMap(status)
+			replaced = true
+		}
+	}
+	if !replaced {
+		slots = append(slots, testSlotStatusMap(status))
+	}
+	standby["slots"] = slots
+	s.project.Metadata["native_standby_dns"] = standby
+	return s.project, nil
+}
+
+func testSlotStatusMap(status TestEnvironmentSlotStatus) map[string]any {
+	return map[string]any{
+		"slot_index": float64(status.SlotIndex),
+		"slot_name":  status.SlotName,
+		"state":      status.State,
+	}
 }
 
 func (s *fakeProjectScalerStore) SetProjectNativeAuthRedirectStatus(_ context.Context, project string, status NativeAuthRedirectStatus) (Project, error) {
@@ -118,6 +157,50 @@ func TestScaleProjectTestEnvironmentsPersistsAuthRedirectStatus(t *testing.T) {
 	}
 	if project.Metadata["native_auth_redirects_status"] == nil {
 		t.Fatalf("metadata=%#v", project.Metadata)
+	}
+}
+
+func TestScaleProjectTestEnvironmentsWarmsSlotsBeforeReady(t *testing.T) {
+	store := &fakeProjectScalerStore{project: Project{
+		ID:         "tank",
+		Name:       "tank",
+		GitHubRepo: "nelsong6/tank-operator",
+		Metadata: map[string]any{
+			"native_standby_dns": map[string]any{
+				"count":       float64(2),
+				"slot_prefix": "tank-slot",
+			},
+		},
+	}}
+	preparer := &fakeTestSlotPreparer{}
+	handler := newHandler(
+		Settings{},
+		store,
+		fakeAdminAuthenticator{user: auth.User{Sub: "admin"}},
+		nil,
+		nil,
+		preparer,
+	)
+
+	var project Project
+	patchJSON(t, handler, "/v1/projects/tank/test-environments/count", `{"count":2}`, &project)
+
+	if !preparer.ensured {
+		t.Fatal("expected scale to prepare test slots")
+	}
+	if len(store.slotStatuses) != 4 {
+		t.Fatalf("statuses=%#v", store.slotStatuses)
+	}
+	if store.slotStatuses[0].State != "warming" || store.slotStatuses[1].State != "ready" {
+		t.Fatalf("slot 1 statuses=%#v", store.slotStatuses[:2])
+	}
+	if store.slotStatuses[2].SlotIndex != 2 || store.slotStatuses[3].State != "ready" {
+		t.Fatalf("slot 2 statuses=%#v", store.slotStatuses[2:])
+	}
+	standby := project.Metadata["native_standby_dns"].(map[string]any)
+	slots := standby["slots"].([]any)
+	if len(slots) != 2 {
+		t.Fatalf("slots=%#v", slots)
 	}
 }
 

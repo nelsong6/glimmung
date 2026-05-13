@@ -1,12 +1,14 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 )
 
 type TestSlotCheckoutRequest struct {
@@ -45,7 +47,7 @@ type TestSlotReturnResult struct {
 	CleanupStarted bool    `json:"cleanup_started"`
 }
 
-func checkoutTestSlot(store ReadStore, preparer TestSlotPreparer, minter NativeGitHubTokenMinter) http.HandlerFunc {
+func checkoutTestSlot(store ReadStore, _ TestSlotPreparer, _ NativeGitHubTokenMinter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		leaseStore, ok := store.(LeaseStore)
 		if !ok || leaseStore == nil {
@@ -83,7 +85,6 @@ func checkoutTestSlot(store ReadStore, preparer TestSlotPreparer, minter NativeG
 		metadata := map[string]any{
 			"test_slot_checkout": true,
 			"test_slot_mode":     mode,
-			"native_slot_prefix": testSlotPrefix(project),
 		}
 		requester := req.Requester
 		if strings.TrimSpace(requester.Consumer) == "" {
@@ -103,22 +104,23 @@ func checkoutTestSlot(store ReadStore, preparer TestSlotPreparer, minter NativeG
 			TTLSeconds: req.TTLSeconds,
 		})
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "test-slot checkout failed")
-			return
-		}
-		if host != nil && preparer != nil {
-			if err := preparer.EnsureTestSlot(r.Context(), lease, project, minter); err != nil {
-				_ = preparer.ReturnTestSlot(r.Context(), lease)
-				_, _ = leaseStore.CancelLeaseByRef(r.Context(), req.Project, LeasePublicRefFromLease(lease))
-				writeProblem(w, http.StatusInternalServerError, "failed to prepare test environment for slot")
+			var validationErr ValidationError
+			if errors.As(err, &validationErr) {
+				writeProblem(w, http.StatusBadRequest, validationErr.Message)
 				return
 			}
+			if errors.Is(err, ErrUnavailable) {
+				writeProblem(w, http.StatusServiceUnavailable, "no ready test environment slots available")
+				return
+			}
+			writeProblem(w, http.StatusInternalServerError, "test-slot checkout failed")
+			return
 		}
 		writeJSON(w, http.StatusOK, testSlotCheckoutResponse(project, workflow, lease, host))
 	}
 }
 
-func returnTestSlot(store ReadStore, preparer TestSlotPreparer) http.HandlerFunc {
+func returnTestSlot(store ReadStore, preparer TestSlotPreparer, minter NativeGitHubTokenMinter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		leaseStore, ok := store.(LeaseStore)
 		stateStore, hasState := store.(StateStore)
@@ -147,7 +149,22 @@ func returnTestSlot(store ReadStore, preparer TestSlotPreparer) http.HandlerFunc
 		}
 		cleanupStarted := lease.State == "claimed" && boolFromMap(lease.Metadata, "test_slot_checkout")
 		if preparer != nil && cleanupStarted {
-			_ = preparer.ReturnTestSlot(r.Context(), lease)
+			project, ok := findProjectForTestSlot(r, w, store, req.Project)
+			if !ok {
+				return
+			}
+			markLeaseSlotStatus(r.Context(), store, project, lease, "warming", nil)
+			if err := preparer.ReturnTestSlot(r.Context(), lease); err != nil {
+				markLeaseSlotStatus(r.Context(), store, project, lease, "error", err)
+				writeProblem(w, http.StatusBadGateway, "test-slot cleanup failed")
+				return
+			}
+			if err := preparer.EnsureTestSlot(r.Context(), lease, project, minter); err != nil {
+				markLeaseSlotStatus(r.Context(), store, project, lease, "error", err)
+				writeProblem(w, http.StatusBadGateway, "test-slot rewarm failed")
+				return
+			}
+			markLeaseSlotStatus(r.Context(), store, project, lease, "ready", nil)
 		}
 		result, err := leaseStore.CancelLeaseByRef(r.Context(), req.Project, LeasePublicRefFromLease(lease))
 		if err != nil {
@@ -164,6 +181,35 @@ func returnTestSlot(store ReadStore, preparer TestSlotPreparer) http.HandlerFunc
 		}
 		writeJSON(w, http.StatusOK, resp)
 	}
+}
+
+func markLeaseSlotStatus(ctx context.Context, store ReadStore, project Project, lease Lease, state string, cause error) {
+	writer, ok := store.(ProjectTestEnvironmentSlotStatusWriter)
+	if !ok || writer == nil {
+		return
+	}
+	slotIndex := nativeSlotIndexFromMetadata(lease.Metadata)
+	slotName := nativeSlotNameFromMetadata(lease.Metadata)
+	if slotIndex == nil || slotName == nil {
+		return
+	}
+	now := time.Now().UTC()
+	var detail *string
+	if cause != nil {
+		text := cause.Error()
+		detail = &text
+	}
+	status := TestEnvironmentSlotStatus{
+		SlotIndex: *slotIndex,
+		SlotName:  *slotName,
+		State:     state,
+		UpdatedAt: now,
+		Detail:    detail,
+	}
+	if state == "ready" {
+		status.ReadyAt = &now
+	}
+	_, _ = writer.SetProjectTestEnvironmentSlotStatus(ctx, firstNonEmpty(lease.Project, project.ID, project.Name), status)
 }
 
 func findProjectForTestSlot(r *http.Request, w http.ResponseWriter, store ReadStore, name string) (Project, bool) {
