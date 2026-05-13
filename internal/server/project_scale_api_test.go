@@ -20,6 +20,7 @@ type fakeProjectScalerStore struct {
 	count        int
 	slotStatuses []TestEnvironmentSlotStatus
 	status       *NativeAuthRedirectStatus
+	wiStatus     *NativeWorkloadIdentityStatus
 	statusErr    error
 	err          error
 }
@@ -40,6 +41,10 @@ func (s *fakeProjectScalerStore) SetProjectTestEnvironmentCount(_ context.Contex
 	standby["count"] = count
 	standby["slots"] = pruneFakeTestSlots(standby["slots"], count)
 	s.project.Metadata["native_standby_dns"] = standby
+	if workloadIdentity, ok := s.project.Metadata["native_standby_workload_identity"].(map[string]any); ok {
+		workloadIdentity["count"] = count
+		s.project.Metadata["native_standby_workload_identity"] = workloadIdentity
+	}
 	return s.project, nil
 }
 
@@ -109,12 +114,30 @@ func (s *fakeProjectScalerStore) SetProjectNativeAuthRedirectStatus(_ context.Co
 	return s.project, nil
 }
 
+func (s *fakeProjectScalerStore) SetProjectNativeWorkloadIdentityStatus(_ context.Context, project string, status NativeWorkloadIdentityStatus) (Project, error) {
+	if s.statusErr != nil {
+		return Project{}, s.statusErr
+	}
+	s.wiStatus = &status
+	s.project.Metadata["native_standby_workload_identity_status"] = status
+	return s.project, nil
+}
+
 type fakeNativeAuthRedirectReconciler struct {
 	status NativeAuthRedirectStatus
 	err    error
 }
 
 func (r fakeNativeAuthRedirectReconciler) ReconcileNativeAuthRedirects(context.Context, Project) (NativeAuthRedirectStatus, error) {
+	return r.status, r.err
+}
+
+type fakeNativeWorkloadIdentityReconciler struct {
+	status NativeWorkloadIdentityStatus
+	err    error
+}
+
+func (r fakeNativeWorkloadIdentityReconciler) ReconcileNativeWorkloadIdentities(context.Context, Project) (NativeWorkloadIdentityStatus, error) {
 	return r.status, r.err
 }
 
@@ -185,6 +208,52 @@ func TestScaleProjectTestEnvironmentsPersistsAuthRedirectStatus(t *testing.T) {
 		t.Fatalf("status=%#v", store.status)
 	}
 	if project.Metadata["native_auth_redirects_status"] == nil {
+		t.Fatalf("metadata=%#v", project.Metadata)
+	}
+}
+
+func TestScaleProjectTestEnvironmentsPersistsWorkloadIdentityStatus(t *testing.T) {
+	store := &fakeProjectScalerStore{project: Project{
+		ID:         "tank",
+		Name:       "tank",
+		GitHubRepo: "nelsong6/tank-operator",
+		Metadata: map[string]any{
+			"native_standby_dns": map[string]any{"count": float64(4)},
+			"native_standby_workload_identity": map[string]any{
+				"enabled": true,
+				"count":   float64(4),
+			},
+		},
+	}}
+	handler := newHandlerWithReconcilers(
+		Settings{},
+		store,
+		fakeAdminAuthenticator{user: auth.User{Sub: "admin"}},
+		nil,
+		nil,
+		fakeNativeWorkloadIdentityReconciler{status: NativeWorkloadIdentityStatus{
+			State:        NativeWorkloadIdentityStatusOK,
+			DesiredCount: 6,
+			ManagedCredentials: []NativeWorkloadIdentityCredentialStatus{{
+				IdentityName:   "tank-session-identity",
+				CredentialName: "tank-slot-1-session",
+				Subject:        "system:serviceaccount:tank-slot-1-sessions:tank-slot-1-session",
+			}},
+		}},
+		nil,
+	)
+
+	var project Project
+	patchJSON(t, handler, "/v1/projects/tank/test-environments/count", `{"count":6}`, &project)
+
+	if store.wiStatus == nil || store.wiStatus.State != NativeWorkloadIdentityStatusOK {
+		t.Fatalf("status=%#v", store.wiStatus)
+	}
+	standbyWI := project.Metadata["native_standby_workload_identity"].(map[string]any)
+	if count, ok := positiveIntFromMap(standbyWI, "count"); !ok || count != 6 {
+		t.Fatalf("workload identity count=%#v", standbyWI["count"])
+	}
+	if project.Metadata["native_standby_workload_identity_status"] == nil {
 		t.Fatalf("metadata=%#v", project.Metadata)
 	}
 }

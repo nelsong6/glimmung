@@ -44,6 +44,7 @@ type Settings struct {
 	NativeRunnerPlaywrightPort     string
 	NativeRunnerProjectConcurrency int
 	NativeRunnerGlobalConcurrency  int
+	NativeWorkloadIdentityIssuer   string
 	GitHubAppID                    string
 	GitHubAppInstallationID        string
 	GitHubAppPrivateKey            string
@@ -118,10 +119,11 @@ func SettingsFromEnv() Settings {
 			"NATIVE_RUNNER_GLOBAL_CONCURRENCY",
 			5,
 		),
-		GitHubAppID:             os.Getenv("GITHUB_APP_ID"),
-		GitHubAppInstallationID: os.Getenv("GITHUB_APP_INSTALLATION_ID"),
-		GitHubAppPrivateKey:     os.Getenv("GITHUB_APP_PRIVATE_KEY"),
-		GitHubWebhookSecret:     os.Getenv("GITHUB_WEBHOOK_SECRET"),
+		NativeWorkloadIdentityIssuer: os.Getenv("NATIVE_WORKLOAD_IDENTITY_ISSUER"),
+		GitHubAppID:                  os.Getenv("GITHUB_APP_ID"),
+		GitHubAppInstallationID:      os.Getenv("GITHUB_APP_INSTALLATION_ID"),
+		GitHubAppPrivateKey:          os.Getenv("GITHUB_APP_PRIVATE_KEY"),
+		GitHubWebhookSecret:          os.Getenv("GITHUB_WEBHOOK_SECRET"),
 	}
 }
 
@@ -139,7 +141,11 @@ func NewWithSyncClient(settings Settings, store ReadStore, authResolver AuthReso
 }
 
 func NewWithRuntimeClients(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, authRedirects NativeAuthRedirectReconciler, nativeLauncher NativeLauncher, artifactStores ...ArtifactStore) http.Handler {
-	return newHandler(settings, store, authResolver, ghClient, authRedirects, nativeLauncher, artifactStores...)
+	return newHandlerWithReconcilers(settings, store, authResolver, ghClient, authRedirects, nil, nativeLauncher, artifactStores...)
+}
+
+func NewWithRuntimeReconcilers(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, authRedirects NativeAuthRedirectReconciler, workloadIdentities NativeWorkloadIdentityReconciler, nativeLauncher NativeLauncher, artifactStores ...ArtifactStore) http.Handler {
+	return newHandlerWithReconcilers(settings, store, authResolver, ghClient, authRedirects, workloadIdentities, nativeLauncher, artifactStores...)
 }
 
 func NewWithDependencies(settings Settings, store ReadStore, authResolver AuthResolver, artifactStores ...ArtifactStore) http.Handler {
@@ -147,6 +153,10 @@ func NewWithDependencies(settings Settings, store ReadStore, authResolver AuthRe
 }
 
 func newHandler(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, authRedirects NativeAuthRedirectReconciler, nativeLauncher NativeLauncher, artifactStores ...ArtifactStore) http.Handler {
+	return newHandlerWithReconcilers(settings, store, authResolver, ghClient, authRedirects, nil, nativeLauncher, artifactStores...)
+}
+
+func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, authRedirects NativeAuthRedirectReconciler, workloadIdentities NativeWorkloadIdentityReconciler, nativeLauncher NativeLauncher, artifactStores ...ArtifactStore) http.Handler {
 	var artifactStore ArtifactStore
 	if len(artifactStores) > 0 {
 		artifactStore = artifactStores[0]
@@ -296,7 +306,7 @@ func newHandler(settings Settings, store ReadStore, authResolver AuthResolver, g
 	)
 	mux.Handle(
 		"PATCH /v1/projects/{project}/test-environments/count",
-		requireAdmin(adminAuthenticator, http.HandlerFunc(scaleProjectTestEnvironments(store, authRedirects, testSlotPreparer, nativeTokenMinter))),
+		requireAdmin(adminAuthenticator, http.HandlerFunc(scaleProjectTestEnvironments(store, authRedirects, workloadIdentities, testSlotPreparer, nativeTokenMinter))),
 	)
 	mux.HandleFunc("GET /v1/workflows", listWorkflows(store))
 	mux.Handle("POST /v1/workflows", requireAdmin(adminAuthenticator, http.HandlerFunc(registerWorkflow(store))))
