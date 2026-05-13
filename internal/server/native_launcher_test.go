@@ -122,6 +122,7 @@ func TestReturnTestSlotRuntimeDoesNotDeleteNamespaces(t *testing.T) {
 func TestReturnTestSlotRuntimeDeletesSteadyRuntimeResources(t *testing.T) {
 	tokenPath := tempTokenFile(t)
 	var paths []string
+	deleted := map[string]bool{}
 	launcher := &KubernetesNativeLauncher{
 		Settings: Settings{
 			K8sAPIHost:            "https://kube.test",
@@ -130,7 +131,10 @@ func TestReturnTestSlotRuntimeDeletesSteadyRuntimeResources(t *testing.T) {
 		},
 		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			paths = append(paths, req.Method+" "+req.URL.Path)
-			body := runtimeListResponse(req.URL.Path)
+			if req.Method == http.MethodDelete {
+				deleted[req.URL.Path] = true
+			}
+			body := runtimeListResponse(req.URL.Path, deleted)
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Header:     make(http.Header),
@@ -160,6 +164,9 @@ func TestReturnTestSlotRuntimeDeletesSteadyRuntimeResources(t *testing.T) {
 		if !containsPath(paths, want) {
 			t.Fatalf("missing runtime delete %s, paths=%#v", want, paths)
 		}
+	}
+	if countPath(paths, "GET /api/v1/namespaces/tank-slot-1-sessions/pods") < 2 {
+		t.Fatalf("return should re-check session pods before marking cleanup complete, paths=%#v", paths)
 	}
 }
 
@@ -444,14 +451,42 @@ func containsPath(paths []string, want string) bool {
 	return false
 }
 
-func runtimeListResponse(path string) string {
+func countPath(paths []string, want string) int {
+	count := 0
+	for _, path := range paths {
+		if path == want {
+			count++
+		}
+	}
+	return count
+}
+
+func runtimeListResponse(path string, deleted map[string]bool) string {
+	item := func(deletePath, name string) string {
+		if deleted[deletePath] {
+			return ""
+		}
+		return `{"metadata":{"name":"` + name + `"}}`
+	}
+	items := func(values ...string) string {
+		filtered := make([]string, 0, len(values))
+		for _, value := range values {
+			if strings.TrimSpace(value) != "" {
+				filtered = append(filtered, value)
+			}
+		}
+		return `{"items":[` + strings.Join(filtered, ",") + `]}`
+	}
 	switch path {
 	case "/apis/apps/v1/namespaces/tank-slot-1/deployments":
-		return `{"items":[{"metadata":{"name":"tank-operator"}},{"metadata":{"name":"claude-api-proxy"}}]}`
+		return items(
+			item("/apis/apps/v1/namespaces/tank-slot-1/deployments/tank-operator", "tank-operator"),
+			item("/apis/apps/v1/namespaces/tank-slot-1/deployments/claude-api-proxy", "claude-api-proxy"),
+		)
 	case "/api/v1/namespaces/tank-slot-1/services":
-		return `{"items":[{"metadata":{"name":"tank-operator"}}]}`
+		return items(item("/api/v1/namespaces/tank-slot-1/services/tank-operator", "tank-operator"))
 	case "/api/v1/namespaces/tank-slot-1-sessions/pods":
-		return `{"items":[{"metadata":{"name":"session-4"}}]}`
+		return items(item("/api/v1/namespaces/tank-slot-1-sessions/pods/session-4", "session-4"))
 	default:
 		if strings.Contains(path, "/jobs/glim-slot-apply-") {
 			return `{"status":{"conditions":[{"type":"Complete","status":"True"}]}}`

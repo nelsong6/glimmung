@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -220,6 +221,9 @@ func (l *KubernetesNativeLauncher) deleteTestSlotRuntimeResources(ctx context.Co
 			}
 		}
 	}
+	if err := l.waitForNoPodsInNamespaces(ctx, namespaces, 5*time.Minute); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -242,6 +246,58 @@ func (l *KubernetesNativeLauncher) deleteCollectionItems(ctx context.Context, co
 		}
 	}
 	return nil
+}
+
+func (l *KubernetesNativeLauncher) waitForNoPodsInNamespaces(ctx context.Context, namespaces []string, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = time.Minute
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		remaining, err := l.remainingPodsInNamespaces(ctx, namespaces)
+		if err != nil {
+			return err
+		}
+		if len(remaining) == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("test slot runtime pods did not terminate before cleanup timeout: %s", strings.Join(remaining, ", "))
+		case <-ticker.C:
+		}
+	}
+}
+
+func (l *KubernetesNativeLauncher) remainingPodsInNamespaces(ctx context.Context, namespaces []string) ([]string, error) {
+	var remaining []string
+	for _, namespace := range namespaces {
+		namespace = strings.TrimSpace(namespace)
+		if namespace == "" {
+			continue
+		}
+		status, list, err := l.request(ctx, http.MethodGet, "/api/v1/namespaces/"+namespace+"/pods", nil)
+		if err != nil {
+			if status == http.StatusNotFound || status == http.StatusForbidden {
+				continue
+			}
+			return nil, err
+		}
+		for _, item := range anySlice(list["items"]) {
+			name := mapStringValueOrEmpty(anyMap(anyMap(item)["metadata"]), "name")
+			if name == "" {
+				continue
+			}
+			remaining = append(remaining, namespace+"/"+name)
+		}
+	}
+	sort.Strings(remaining)
+	return remaining, nil
 }
 
 func (l *KubernetesNativeLauncher) ensurePlaywrightForNativePhase(ctx context.Context, req NativeLaunchRequest) error {
