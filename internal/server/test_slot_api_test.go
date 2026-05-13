@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,12 +13,15 @@ import (
 )
 
 type fakeTestSlotPreparer struct {
-	preliminaries bool
-	activated     bool
-	returned      bool
-	project       Project
-	deprovisioned []string
-	activateErr   error
+	preliminaries   bool
+	activated       bool
+	returned        bool
+	project         Project
+	deprovisioned   []string
+	activateErr     error
+	activateStarted chan struct{}
+	activateRelease chan struct{}
+	activateDone    chan struct{}
 }
 
 func (s *fakeLeaseStore) AppendTestSlotHotSwapHistory(_ context.Context, _ string, _ string, entry TestSlotHotSwapHistoryEntry) (Lease, error) {
@@ -43,6 +47,11 @@ func (p *fakeTestSlotPreparer) EnsureTestSlotPreliminaries(_ context.Context, _ 
 func (p *fakeTestSlotPreparer) ActivateTestSlotRuntime(_ context.Context, _ Lease, project Project, _ NativeGitHubTokenMinter) error {
 	p.activated = true
 	p.project = project
+	signalTestChannel(p.activateStarted)
+	if p.activateRelease != nil {
+		<-p.activateRelease
+	}
+	defer signalTestChannel(p.activateDone)
 	return p.activateErr
 }
 
@@ -62,13 +71,30 @@ func (p *fakeTestSlotPreparer) DeprovisionTestSlot(_ context.Context, lease Leas
 	return nil
 }
 
-func TestCheckoutTestSlotClaimsNativeLease(t *testing.T) {
+func signalTestChannel(ch chan struct{}) {
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
+func TestCheckoutTestSlotStartsAsyncActivation(t *testing.T) {
 	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
 	store := &fakeLeaseStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{
-			ID:       "tank-operator",
-			Name:     "tank-operator",
-			Metadata: map[string]any{"native_standby_dns": map[string]any{"slot_prefix": "tank-slot", "record_base": "tank.dev.romaine.life"}},
+			ID:   "tank-operator",
+			Name: "tank-operator",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"slot_prefix": "tank-slot",
+				"record_base": "tank.dev.romaine.life",
+				"count":       float64(1),
+				"slots": []any{
+					map[string]any{"slot_index": float64(1), "slot_name": "tank-slot-1", "state": "ready"},
+				},
+			}},
 		}}},
 		lease: Lease{
 			Project:     "tank-operator",
@@ -85,7 +111,11 @@ func TestCheckoutTestSlotClaimsNativeLease(t *testing.T) {
 		},
 		host: &Host{Name: "native-k8s"},
 	}
-	preparer := &fakeTestSlotPreparer{}
+	preparer := &fakeTestSlotPreparer{
+		activateStarted: make(chan struct{}, 1),
+		activateRelease: make(chan struct{}),
+		activateDone:    make(chan struct{}, 1),
+	}
 	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil, preparer)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/test-slots/checkout", strings.NewReader(`{"project":"tank-operator","tank_session_id":"98"}`))
@@ -93,23 +123,166 @@ func TestCheckoutTestSlotClaimsNativeLease(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
+	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	if !preparer.activated {
-		t.Fatal("checkout should activate runtime after leasing an already-ready slot")
 	}
 	if preparer.preliminaries {
 		t.Fatal("checkout activation should not call the warmup path through the API handler")
 	}
+	if len(store.slotStatuses) != 1 || store.slotStatuses[0].State != testSlotStateActivating {
+		t.Fatalf("slot statuses=%#v, want activating", store.slotStatuses)
+	}
 	if len(store.leaseReq.Metadata) != 1 || !boolFromMap(store.leaseReq.Metadata, "test_slot_checkout") {
 		t.Fatalf("checkout metadata should not include mode: %#v", store.leaseReq.Metadata)
 	}
-	for _, want := range []string{`"state":"claimed"`, `"slot_name":"tank-slot-1"`, `"url":"https://tank-slot-1.tank.dev.romaine.life/"`, `"host":"native-k8s"`} {
+	for _, want := range []string{`"state":"activating"`, `"usable":false`, `"slot_name":"tank-slot-1"`, `"url":"https://tank-slot-1.tank.dev.romaine.life/"`, `"host":"native-k8s"`, `"status_url":"/v1/projects/tank-operator/test-environments/tank-slot-1"`} {
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Fatalf("response missing %s: %s", want, rec.Body.String())
 		}
 	}
+	select {
+	case <-preparer.activateStarted:
+	case <-time.After(time.Second):
+		t.Fatal("background activation did not start")
+	}
+	close(preparer.activateRelease)
+	select {
+	case <-preparer.activateDone:
+	case <-time.After(time.Second):
+		t.Fatal("background activation did not finish")
+	}
+	waitForSlotStatus(t, store, testSlotStateActive)
+}
+
+func TestRecoverActivatingTestSlotsRestartsOldActivation(t *testing.T) {
+	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "recover",
+			Name: "recover",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"slot_prefix": "recover-slot",
+				"record_base": "recover.dev.romaine.life",
+				"count":       float64(1),
+				"slots": []any{
+					map[string]any{
+						"slot_index": float64(1),
+						"slot_name":  "recover-slot-1",
+						"state":      testSlotStateActivating,
+						"updated_at": now.Add(-2 * time.Minute).Format(time.RFC3339Nano),
+					},
+				},
+			}},
+		}}},
+		lease: Lease{
+			Project:     "recover",
+			LeaseNumber: intPtr(4),
+			Host:        stringPtr("native-k8s"),
+			State:       "claimed",
+			Metadata: map[string]any{
+				"test_slot_checkout": true,
+				"native_k8s":         true,
+				"native_slot_index":  "1",
+				"native_slot_name":   "recover-slot-1",
+			},
+			RequestedAt: now,
+		},
+		host: &Host{Name: "native-k8s"},
+	}
+	preparer := &fakeTestSlotPreparer{
+		activateStarted: make(chan struct{}, 1),
+		activateRelease: make(chan struct{}),
+		activateDone:    make(chan struct{}, 1),
+	}
+
+	if got := recoverActivatingTestSlots(context.Background(), store, preparer, nil, 30*time.Second, nil); got != 1 {
+		t.Fatalf("recoveries=%d, want 1", got)
+	}
+	select {
+	case <-preparer.activateStarted:
+	case <-time.After(time.Second):
+		t.Fatal("recovered activation did not start")
+	}
+	close(preparer.activateRelease)
+	select {
+	case <-preparer.activateDone:
+	case <-time.After(time.Second):
+		t.Fatal("recovered activation did not finish")
+	}
+	waitForSlotStatus(t, store, testSlotStateActive)
+}
+
+func TestAsyncCheckoutFailureMarksErrorAndReleasesLease(t *testing.T) {
+	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "tank-operator",
+			Name: "tank-operator",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"slot_prefix": "tank-slot",
+				"record_base": "tank.dev.romaine.life",
+				"count":       float64(1),
+				"slots": []any{
+					map[string]any{"slot_index": float64(1), "slot_name": "tank-slot-1", "state": "ready"},
+				},
+			}},
+		}}},
+		lease: Lease{
+			Project:     "tank-operator",
+			LeaseNumber: intPtr(5),
+			Host:        stringPtr("native-k8s"),
+			State:       "claimed",
+			Metadata: map[string]any{
+				"test_slot_checkout": true,
+				"native_k8s":         true,
+				"native_slot_index":  "1",
+				"native_slot_name":   "tank-slot-1",
+			},
+			RequestedAt: now,
+		},
+		host: &Host{Name: "native-k8s"},
+	}
+	preparer := &fakeTestSlotPreparer{
+		activateErr:  errors.New("render/apply failed"),
+		activateDone: make(chan struct{}, 1),
+	}
+	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil, preparer)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/test-slots/checkout", strings.NewReader(`{"project":"tank-operator"}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	select {
+	case <-preparer.activateDone:
+	case <-time.After(time.Second):
+		t.Fatal("background activation did not finish")
+	}
+	waitForSlotStatus(t, store, "error")
+	if !preparer.returned {
+		t.Fatal("expected failed activation cleanup")
+	}
+	if store.cancelledRef != "tank-slot-1" {
+		t.Fatalf("cancelledRef=%q, want tank-slot-1", store.cancelledRef)
+	}
+}
+
+func waitForSlotStatus(t *testing.T, store *fakeLeaseStore, state string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if len(store.slotStatuses) > 0 && store.slotStatuses[len(store.slotStatuses)-1].State == state {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(store.slotStatuses) == 0 {
+		t.Fatalf("slot statuses empty, want %s", state)
+	}
+	t.Fatalf("final slot status=%q, want %s", store.slotStatuses[len(store.slotStatuses)-1].State, state)
 }
 
 func TestCheckoutTestSlotRejectsModeField(t *testing.T) {

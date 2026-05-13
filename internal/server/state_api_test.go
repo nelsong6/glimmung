@@ -137,6 +137,55 @@ func TestStateSnapshotIncludesTestEnvironmentsAndWaitingRequests(t *testing.T) {
 	}
 }
 
+func TestTestEnvironmentStatusShowsActivatingSlot(t *testing.T) {
+	now := time.Date(2026, 5, 11, 3, 0, 0, 0, time.UTC)
+	detail := "test-slot runtime activation is in progress"
+	store := fakeStateStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "tank",
+			Name: "tank",
+			Metadata: map[string]any{
+				"native_standby_dns": map[string]any{
+					"count":       float64(1),
+					"slot_prefix": "tank-slot",
+					"slots": []any{
+						map[string]any{
+							"slot_index": float64(1),
+							"slot_name":  "tank-slot-1",
+							"state":      "activating",
+							"detail":     detail,
+							"updated_at": now.Format(time.RFC3339Nano),
+						},
+					},
+				},
+			},
+			CreatedAt: now,
+		}}},
+		leases: []Lease{{
+			ID:          "lease-1",
+			Project:     "tank",
+			Workflow:    stringPtr("test-slot-checkout"),
+			State:       "claimed",
+			Metadata:    map[string]any{"test_slot_checkout": true, "native_slot_index": "1", "native_slot_name": "tank-slot-1"},
+			RequestedAt: now,
+		}},
+	}
+	handler := NewWithStore(Settings{}, store)
+
+	var env TestEnvironmentPublic
+	getJSON(t, handler, "/v1/projects/tank/test-environments/tank-slot-1", &env)
+
+	if env.State != "activating" || env.Usable || env.Detail == nil || *env.Detail != detail {
+		t.Fatalf("env=%#v", env)
+	}
+	if env.UpdatedAt == nil || !env.UpdatedAt.Equal(now) {
+		t.Fatalf("updated_at=%v, want %v", env.UpdatedAt, now)
+	}
+	if env.Lease == nil || env.Lease.Ref != "tank-slot-1" {
+		t.Fatalf("lease=%#v", env.Lease)
+	}
+}
+
 func TestStateSnapshotDoesNotInferNativeSlotsFromAppType(t *testing.T) {
 	now := time.Date(2026, 5, 11, 3, 0, 0, 0, time.UTC)
 	store := fakeStateStore{

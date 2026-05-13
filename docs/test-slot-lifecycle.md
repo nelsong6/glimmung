@@ -56,8 +56,15 @@ slot name, URL, and lease reference.
 
 Runtime materialization belongs after slot assignment. If the checkout response
 claims the lease is usable, the required runtime resources for that lease must
-have been created and reached readiness. If activation is asynchronous, the API
-must expose that explicitly through a non-usable activating state.
+have been created and reached readiness.
+
+Checkout may return before runtime activation completes. In that case it must
+return `202 Accepted`, `state: "activating"`, `usable: false`, the assigned
+slot name, lease reference, URL, and a status URL. Callers must poll the status
+URL, or `/v1/state`, until the slot reports `state: "active"` and
+`usable: true` before treating the environment as ready. A checkout response
+must not hold the public HTTP request open while rendering/applying the
+project chart or waiting for runtime deployments.
 
 ### Return
 
