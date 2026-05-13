@@ -107,6 +107,7 @@ func TestScaleProjectTestEnvironmentsPersistsAuthRedirectStatus(t *testing.T) {
 			DesiredCount:        4,
 			ManagedRedirectURIs: []string{"https://tank-slot-1.tank.dev.romaine.life/"},
 		}},
+		nil,
 	)
 
 	var project Project

@@ -264,7 +264,7 @@ func dispatchPortfolioElements(store ReadStore, ghDispatch GHADispatchClient) ht
 			return
 		}
 
-		result, problem := dispatchRun(r.Context(), dispatchStore, ghDispatch, DispatchRunRequest{
+		result, problem := dispatchRun(r.Context(), dispatchStore, ghDispatch, nil, DispatchRunRequest{
 			Project:     project,
 			IssueNumber: *issue.Number,
 			Workflow:    stringPtrValue(workflow),

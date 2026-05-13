@@ -14,6 +14,7 @@ import (
 type fakeLeaseStore struct {
 	fakeReadStore
 	lease  Lease
+	leases []Lease
 	host   *Host
 	result CancelLeaseResult
 	err    error
@@ -33,16 +34,30 @@ func (s *fakeLeaseStore) CancelLeaseByRef(_ context.Context, _, _ string) (Cance
 	return s.result, nil
 }
 
+func (s *fakeLeaseStore) ListHosts(context.Context) ([]Host, error) {
+	return nil, s.err
+}
+
+func (s *fakeLeaseStore) ListLeases(context.Context) ([]Lease, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	if s.leases != nil {
+		return s.leases, nil
+	}
+	return []Lease{s.lease}, nil
+}
+
 func TestCreateLease(t *testing.T) {
 	now := time.Date(2026, 5, 11, 8, 0, 0, 0, time.UTC)
 	store := &fakeLeaseStore{
 		lease: Lease{
-			ID:          "01JLEASE1234",
-			LeaseNumber: intPtr(3),
-			Project:     "myproject",
-			Workflow:    stringPtr("agent-run"),
-			Host:        stringPtr("native-k8s"),
-			State:       "claimed",
+			ID:           "01JLEASE1234",
+			LeaseNumber:  intPtr(3),
+			Project:      "myproject",
+			Workflow:     stringPtr("agent-run"),
+			Host:         stringPtr("native-k8s"),
+			State:        "claimed",
 			Requirements: map[string]any{"native_k8s": true},
 			Metadata: map[string]any{
 				"native_slot_name": "myproject-slot-1",
@@ -76,14 +91,14 @@ func TestCreateLeasePendingNoHost(t *testing.T) {
 	now := time.Date(2026, 5, 11, 8, 0, 0, 0, time.UTC)
 	store := &fakeLeaseStore{
 		lease: Lease{
-			ID:          "01JLEASE5678",
-			LeaseNumber: intPtr(4),
-			Project:     "myproject",
-			State:       "pending",
+			ID:           "01JLEASE5678",
+			LeaseNumber:  intPtr(4),
+			Project:      "myproject",
+			State:        "pending",
 			Requirements: map[string]any{},
-			Metadata:    map[string]any{},
-			RequestedAt: now,
-			TTLSeconds:  900,
+			Metadata:     map[string]any{},
+			RequestedAt:  now,
+			TTLSeconds:   900,
 		},
 		host: nil,
 	}

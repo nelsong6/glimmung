@@ -40,11 +40,12 @@ func main() {
 	if store != nil {
 		go server.StartSignalDrainLoop(context.Background(), store, ghDispatch, 15*time.Second, log.Printf)
 	}
+	nativeLauncher := server.NewKubernetesNativeLauncher(settings)
 	addr := ":" + settings.Port
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           server.NewWithRuntimeClients(settings, store, authenticator, ghClient, authRedirects, artifacts),
+		Handler:           server.NewWithRuntimeClients(settings, store, authenticator, ghClient, authRedirects, nativeLauncher, artifacts),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -73,6 +74,10 @@ func (a *gitHubClientAdapter) FetchWorkflowFile(ctx context.Context, repo, name,
 
 func (a *gitHubClientAdapter) DispatchWorkflow(ctx context.Context, repo, filename, ref string, inputs map[string]string) error {
 	return a.client.DispatchWorkflow(ctx, repo, filename, ref, inputs)
+}
+
+func (a *gitHubClientAdapter) InstallationToken(ctx context.Context) (string, error) {
+	return a.client.InstallationToken(ctx)
 }
 
 func buildGitHubClient(settings server.Settings) server.WorkflowSyncClient {
