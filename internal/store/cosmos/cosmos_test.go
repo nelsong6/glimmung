@@ -246,6 +246,43 @@ func TestLeaseFromDocConvertsStateSnapshotShape(t *testing.T) {
 	}
 }
 
+func TestListedLeaseFromDocSkipsLeaseNumberCounters(t *testing.T) {
+	cases := []leaseDoc{
+		{
+			ID:      leaseCounterPrefix + "ambience",
+			Kind:    "lease_number_counter",
+			Project: "ambience",
+		},
+		{
+			ID:      leaseCounterPrefix + "ambience",
+			Project: "ambience",
+		},
+		{
+			ID:      "legacy-counter",
+			Kind:    "lease_number_counter",
+			Project: "ambience",
+		},
+	}
+	for _, tc := range cases {
+		if lease, ok := listedLeaseFromDoc(tc); ok {
+			t.Fatalf("counter doc listed as lease: %#v", lease)
+		}
+	}
+
+	lease, ok := listedLeaseFromDoc(leaseDoc{
+		ID:           "lease-1",
+		LeaseNumber:  intPtr(1),
+		Project:      "ambience",
+		State:        "claimed",
+		RequestedAt:  "2026-05-11T03:00:00Z",
+		Requirements: map[string]any{},
+		Metadata:     map[string]any{},
+	})
+	if !ok || lease.ID != "lease-1" {
+		t.Fatalf("real lease not listed: ok=%v lease=%#v", ok, lease)
+	}
+}
+
 func TestRunReportsFromDocsBuildsPublicRefsAndAttempts(t *testing.T) {
 	cost := 1.25
 	workflowRunID := int64(123)
@@ -405,6 +442,34 @@ func TestCancelLeaseCandidateRankPrefersActiveLease(t *testing.T) {
 	}
 	if cancelLeaseCandidateRank(pending) >= cancelLeaseCandidateRank(released) {
 		t.Fatal("pending lease should rank ahead of released lease")
+	}
+}
+
+func TestSelectLeaseDocByPublicRefSkipsCountersAndPrefersActive(t *testing.T) {
+	docs := []leaseDoc{
+		{
+			ID:      leaseCounterPrefix + "ambience",
+			Kind:    "lease_number_counter",
+			Project: "ambience",
+		},
+		{
+			ID:         "released-legacy",
+			Project:    "ambience",
+			State:      "released",
+			ReleasedAt: "2026-05-11T04:00:00Z",
+		},
+		{
+			ID:          "claimed-legacy",
+			Project:     "ambience",
+			State:       "claimed",
+			RequestedAt: "2026-05-11T05:00:00Z",
+		},
+	}
+
+	found := selectLeaseDocByPublicRef(docs, "ambience/lease")
+
+	if found == nil || found.ID != "claimed-legacy" {
+		t.Fatalf("selected=%#v, want claimed legacy lease", found)
 	}
 }
 

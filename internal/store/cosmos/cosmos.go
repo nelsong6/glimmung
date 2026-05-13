@@ -448,7 +448,11 @@ func (s *Store) ListLeases(ctx context.Context) ([]server.Lease, error) {
 	}
 	rows := make([]server.Lease, 0, len(docs))
 	for _, doc := range docs {
-		rows = append(rows, leaseFromDoc(doc))
+		lease, ok := listedLeaseFromDoc(doc)
+		if !ok {
+			continue
+		}
+		rows = append(rows, lease)
 	}
 	return rows, nil
 }
@@ -1520,6 +1524,17 @@ func leaseFromDoc(doc leaseDoc) server.Lease {
 		FulfilledAt:        parseOptionalTime(doc.FulfilledAt),
 		FulfilledLeaseRef:  doc.FulfilledLeaseRef,
 	}
+}
+
+func listedLeaseFromDoc(doc leaseDoc) (server.Lease, bool) {
+	if isLeaseBookkeepingDoc(doc) {
+		return server.Lease{}, false
+	}
+	return leaseFromDoc(doc), true
+}
+
+func isLeaseBookkeepingDoc(doc leaseDoc) bool {
+	return doc.Kind == "lease_number_counter" || strings.HasPrefix(doc.ID, leaseCounterPrefix)
 }
 
 func runReportsFromDocs(docs []runDoc) []server.RunReport {
@@ -3975,16 +3990,7 @@ func (s *Store) CancelLeaseByRef(ctx context.Context, project, ref string) (serv
 	); err != nil {
 		return server.CancelLeaseResult{}, fmt.Errorf("query leases: %w", err)
 	}
-	var found *leaseDoc
-	for i, doc := range docs {
-		lease := leaseFromDoc(doc)
-		if server.LeasePublicRefFromLease(lease) != ref {
-			continue
-		}
-		if found == nil || cancelLeaseCandidateRank(doc) < cancelLeaseCandidateRank(*found) {
-			found = &docs[i]
-		}
-	}
+	found := selectLeaseDocByPublicRef(docs, ref)
 	if found == nil {
 		return server.CancelLeaseResult{}, server.ErrNotFound
 	}
@@ -4019,6 +4025,24 @@ func (s *Store) CancelLeaseByRef(ctx context.Context, project, ref string) (serv
 		State:    "no_active_run",
 		LeaseRef: publicRef,
 	}, nil
+}
+
+func selectLeaseDocByPublicRef(docs []leaseDoc, ref string) *leaseDoc {
+	var found *leaseDoc
+	for i := range docs {
+		doc := &docs[i]
+		lease, ok := listedLeaseFromDoc(*doc)
+		if !ok {
+			continue
+		}
+		if server.LeasePublicRefFromLease(lease) != ref {
+			continue
+		}
+		if found == nil || cancelLeaseCandidateRank(*doc) < cancelLeaseCandidateRank(*found) {
+			found = doc
+		}
+	}
+	return found
 }
 
 func cancelLeaseCandidateRank(doc leaseDoc) int {
