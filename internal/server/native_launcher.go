@@ -737,7 +737,7 @@ func testSlotInstallJobManifest(settings Settings, config testSlotHelmSettings, 
 		"fi\n"
 	installScript := "set -eu\n" +
 		"cd /workspace\n" +
-		helmTemplateCommand(config, slotName, substitutions) + " | " + stripClusterScopedCommand() + " | kubectl apply -n " + shellQuote(slotName) + " -f -\n"
+		helmTemplateCommand(config, slotName, substitutions) + " | " + stripClusterScopedCommand() + " | kubectl apply -f -\n"
 	podSpec := map[string]any{
 		"serviceAccountName": settings.NativeRunnerServiceAccount,
 		"restartPolicy":      "Never",

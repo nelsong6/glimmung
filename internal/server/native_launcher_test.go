@@ -138,7 +138,7 @@ func TestTestSlotInstallJobManifestRendersHelmApplyJob(t *testing.T) {
 		"helm template 'tank-operator-slot-2' 'k8s'",
 		"--set 'testEnv.enabled=true'",
 		"ClusterRoleBinding",
-		"kubectl apply -n 'tank-operator-slot-2' -f -",
+		"kubectl apply -f -",
 	} {
 		if !strings.Contains(installScript, want) {
 			t.Fatalf("install script missing %q: %s", want, installScript)
