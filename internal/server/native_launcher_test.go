@@ -65,8 +65,8 @@ func TestNativeJobManifestIncludesRunnerCallbackEnv(t *testing.T) {
 	if env["GLIMMUNG_INPUT_TARGET"] != "provision" {
 		t.Fatalf("phase input env=%q", env["GLIMMUNG_INPUT_TARGET"])
 	}
-	if env["PLAYWRIGHT_WS_ENDPOINT"] == "" {
-		t.Fatal("expected Playwright endpoint")
+	if env["PLAYWRIGHT_WS_ENDPOINT"] != "ws://slot-playwright.tank-operator-slot-1.svc.cluster.local:3000" {
+		t.Fatalf("Playwright endpoint=%q", env["PLAYWRIGHT_WS_ENDPOINT"])
 	}
 }
 
@@ -107,12 +107,125 @@ func TestReturnTestSlotDoesNotDeleteNamespaces(t *testing.T) {
 		t.Fatalf("ReturnTestSlot: %v", err)
 	}
 	for _, path := range paths {
-		if strings.Contains(path, "/api/v1/namespaces/tank-slot-1") {
+		if path == "DELETE /api/v1/namespaces/tank-slot-1" || path == "DELETE /api/v1/namespaces/tank-slot-1-sessions" {
 			t.Fatalf("return should not delete slot namespaces, saw %s in %#v", path, paths)
 		}
-		if strings.Contains(path, "/apis/apps/v1/namespaces/glimmung-runs/deployments/") {
-			t.Fatalf("return should not delete warmed Playwright resources, saw %s in %#v", path, paths)
+	}
+	if !containsPath(paths, "DELETE /apis/apps/v1/namespaces/tank-slot-1/deployments/slot-playwright") {
+		t.Fatalf("return should delete slot Playwright deployment, paths=%#v", paths)
+	}
+	if !containsPath(paths, "DELETE /api/v1/namespaces/tank-slot-1/services/slot-playwright") {
+		t.Fatalf("return should delete slot Playwright service, paths=%#v", paths)
+	}
+}
+
+func TestEnsureTestSlotDoesNotCreatePlaywrightRuntime(t *testing.T) {
+	tokenPath := tempTokenFile(t)
+	var paths []string
+	launcher := &KubernetesNativeLauncher{
+		Settings: Settings{
+			K8sAPIHost:                     "https://kube.test",
+			K8sSATokenPath:                 tokenPath,
+			NativeRunnerNamespace:          "glimmung-runs",
+			NativeRunnerPlaywrightEnabled:  true,
+			NativeRunnerPlaywrightImage:    "playwright:latest",
+			NativeRunnerPlaywrightPort:     "3000",
+			NativeRunnerServiceAccount:     "glimmung-native-runner",
+			NativeRunnerCallbackBaseURL:    "http://glimmung.glimmung.svc.cluster.local",
+			NativeRunnerCodexSecret:        "codex-credentials",
+			NativeRunnerCodexMountPath:     "/etc/codex-creds",
+			NativeRunnerJobTTLSeconds:      3600,
+			NativeRunnerNamespaceRole:      "cluster-admin",
+			NativeRunnerProjectConcurrency: 1,
+		},
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			paths = append(paths, req.Method+" "+req.URL.Path)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+			}, nil
+		})},
+	}
+	lease := Lease{
+		Project:     "tank",
+		LeaseNumber: intPtr(2),
+		Metadata: map[string]any{
+			"native_slot_name":  "tank-slot-1",
+			"native_slot_index": "1",
+		},
+	}
+
+	if err := launcher.EnsureTestSlot(context.Background(), lease, Project{Name: "tank"}, nil); err != nil {
+		t.Fatalf("EnsureTestSlot: %v", err)
+	}
+	for _, path := range paths {
+		if strings.Contains(path, "/deployments") || strings.Contains(path, "/services") {
+			t.Fatalf("baseline warm should not create Playwright runtime resources, paths=%#v", paths)
 		}
+	}
+}
+
+func TestLaunchNativePhaseCreatesSlotPlaywrightRuntime(t *testing.T) {
+	tokenPath := tempTokenFile(t)
+	var paths []string
+	launcher := &KubernetesNativeLauncher{
+		Settings: Settings{
+			K8sAPIHost:                    "https://kube.test",
+			K8sSATokenPath:                tokenPath,
+			NativeRunnerNamespace:         "glimmung-runs",
+			NativeRunnerServiceAccount:    "glimmung-native-runner",
+			NativeRunnerCallbackBaseURL:   "http://glimmung.glimmung.svc.cluster.local",
+			NativeRunnerCodexSecret:       "codex-credentials",
+			NativeRunnerCodexMountPath:    "/etc/codex-creds",
+			NativeRunnerPlaywrightEnabled: true,
+			NativeRunnerPlaywrightImage:   "playwright:latest",
+			NativeRunnerPlaywrightPort:    "3000",
+		},
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			paths = append(paths, req.Method+" "+req.URL.Path)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+			}, nil
+		})},
+	}
+	runNumber := 7
+	callback := "callback-token"
+	leaseNumber := 3
+	req := NativeLaunchRequest{
+		Lease: Lease{
+			Project:     "tank-operator",
+			LeaseNumber: &leaseNumber,
+			State:       "claimed",
+			Metadata: map[string]any{
+				"native_slot_name":  "tank-operator-slot-1",
+				"native_slot_index": "1",
+			},
+		},
+		Workflow: Workflow{Name: "agent-run"},
+		Phase:    PhaseSpec{Name: "verify", Jobs: []NativeJobSpec{{ID: "test", Image: "runner:latest"}}},
+		Run: RunReplayData{
+			ID:            "run-123",
+			Project:       "tank-operator",
+			IssueNumber:   42,
+			RunNumber:     &runNumber,
+			CallbackToken: &callback,
+		},
+	}
+
+	if _, err := launcher.LaunchNativePhase(context.Background(), req); err != nil {
+		t.Fatalf("LaunchNativePhase: %v", err)
+	}
+	if !containsPath(paths, "POST /apis/apps/v1/namespaces/tank-operator-slot-1/deployments") {
+		t.Fatalf("launch should create slot Playwright deployment, paths=%#v", paths)
+	}
+	if !containsPath(paths, "POST /api/v1/namespaces/tank-operator-slot-1/services") {
+		t.Fatalf("launch should create slot Playwright service, paths=%#v", paths)
+	}
+	if containsPath(paths, "POST /apis/apps/v1/namespaces/glimmung-runs/deployments") {
+		t.Fatalf("launch should not create Playwright in glimmung-runs, paths=%#v", paths)
 	}
 }
 
@@ -210,6 +323,15 @@ func tempTokenFile(t *testing.T) string {
 		t.Fatalf("write token: %v", err)
 	}
 	return path
+}
+
+func containsPath(paths []string, want string) bool {
+	for _, path := range paths {
+		if path == want {
+			return true
+		}
+	}
+	return false
 }
 
 func nativeManifestEnv(manifest map[string]any) map[string]string {

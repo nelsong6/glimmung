@@ -51,6 +51,9 @@ func (l *KubernetesNativeLauncher) LaunchNativePhase(ctx context.Context, req Na
 	if len(req.Phase.Jobs) == 0 {
 		return nil, fmt.Errorf("native phase %q has no jobs", req.Phase.Name)
 	}
+	if err := l.ensurePlaywrightForNativePhase(ctx, req); err != nil {
+		return nil, err
+	}
 	attemptIndex := nativeAttemptIndex(req)
 	attemptBase := compactResourceName("glim", runRefFromData(req.Run), attemptIndex)
 	launched := make([]string, 0, len(req.Phase.Jobs))
@@ -111,23 +114,15 @@ func (l *KubernetesNativeLauncher) EnsureTestSlot(ctx context.Context, lease Lea
 			return err
 		}
 	}
-	if !l.Settings.NativeRunnerPlaywrightEnabled {
-		return nil
-	}
-	name := playwrightResourceName(lease.Project, slotName)
-	if name == "" {
-		return nil
-	}
-	labels := playwrightLabels(lease, name)
-	if err := l.createDeployment(ctx, playwrightDeployment(l.Settings, name, labels)); err != nil {
-		return err
-	}
-	return l.createService(ctx, playwrightService(l.Settings, name, labels))
+	return nil
 }
 
 func (l *KubernetesNativeLauncher) ReturnTestSlot(ctx context.Context, lease Lease) error {
 	slotName, _ := stringFromMap(lease.Metadata, "native_slot_name")
 	if strings.TrimSpace(slotName) != "" {
+		if err := l.deletePlaywrightResources(ctx, lease, slotName); err != nil {
+			return err
+		}
 		return l.deleteTestSlotInstaller(ctx, lease)
 	}
 	return nil
@@ -157,19 +152,38 @@ func (l *KubernetesNativeLauncher) DeprovisionTestSlot(ctx context.Context, leas
 }
 
 func (l *KubernetesNativeLauncher) deletePlaywrightResources(ctx context.Context, lease Lease, slotName string) error {
-	name := playwrightResourceName(lease.Project, slotName)
-	if name != "" {
+	for _, target := range playwrightResourceTargets(lease, slotName, l.Settings.NativeRunnerNamespace) {
 		for _, path := range []string{
-			"/apis/apps/v1/namespaces/" + l.Settings.NativeRunnerNamespace + "/deployments/" + name,
-			"/api/v1/namespaces/" + l.Settings.NativeRunnerNamespace + "/services/" + name,
+			"/apis/apps/v1/namespaces/" + target.namespace + "/deployments/" + target.name,
+			"/api/v1/namespaces/" + target.namespace + "/services/" + target.name,
 		} {
-			status, _, err := l.request(ctx, http.MethodDelete, path, nil)
+			status, _, err := l.request(ctx, http.MethodDelete, path, deleteOptions("Background"))
 			if err != nil && status != http.StatusNotFound {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+func (l *KubernetesNativeLauncher) ensurePlaywrightForNativePhase(ctx context.Context, req NativeLaunchRequest) error {
+	if !l.Settings.NativeRunnerPlaywrightEnabled {
+		return nil
+	}
+	slotName, _ := stringFromMap(req.Lease.Metadata, "native_slot_name")
+	slotName = strings.TrimSpace(slotName)
+	if slotName == "" {
+		return nil
+	}
+	name := playwrightResourceName(req.Lease.Project, slotName)
+	if name == "" {
+		return nil
+	}
+	labels := playwrightLabels(req.Lease, name)
+	if err := l.createDeploymentInNamespace(ctx, slotName, playwrightDeployment(l.Settings, slotName, name, labels)); err != nil {
+		return err
+	}
+	return l.createServiceInNamespace(ctx, slotName, playwrightService(l.Settings, slotName, name, labels))
 }
 
 func (l *KubernetesNativeLauncher) ensureNamespace(ctx context.Context, name string, labels map[string]string) error {
@@ -451,16 +465,16 @@ func (l *KubernetesNativeLauncher) createJob(ctx context.Context, manifest map[s
 	return err
 }
 
-func (l *KubernetesNativeLauncher) createDeployment(ctx context.Context, manifest map[string]any) error {
-	status, _, err := l.request(ctx, http.MethodPost, "/apis/apps/v1/namespaces/"+l.Settings.NativeRunnerNamespace+"/deployments", manifest)
+func (l *KubernetesNativeLauncher) createDeploymentInNamespace(ctx context.Context, namespace string, manifest map[string]any) error {
+	status, _, err := l.request(ctx, http.MethodPost, "/apis/apps/v1/namespaces/"+namespace+"/deployments", manifest)
 	if err == nil || status == http.StatusConflict {
 		return nil
 	}
 	return err
 }
 
-func (l *KubernetesNativeLauncher) createService(ctx context.Context, manifest map[string]any) error {
-	status, _, err := l.request(ctx, http.MethodPost, "/api/v1/namespaces/"+l.Settings.NativeRunnerNamespace+"/services", manifest)
+func (l *KubernetesNativeLauncher) createServiceInNamespace(ctx context.Context, namespace string, manifest map[string]any) error {
+	status, _, err := l.request(ctx, http.MethodPost, "/api/v1/namespaces/"+namespace+"/services", manifest)
 	if err == nil || status == http.StatusConflict {
 		return nil
 	}
@@ -622,7 +636,7 @@ func nativeJobEnv(settings Settings, req NativeLaunchRequest, jobID, secretName 
 	}
 	if settings.NativeRunnerPlaywrightEnabled {
 		if slotName, ok := metadata["native_slot_name"].(string); ok && slotName != "" {
-			endpoint := fmt.Sprintf("ws://glim-pw-%s.%s.svc.cluster.local:%s", dnsLabel(req.Lease.Project+"-"+slotName), settings.NativeRunnerNamespace, settings.NativeRunnerPlaywrightPort)
+			endpoint := fmt.Sprintf("ws://%s.%s.svc.cluster.local:%s", playwrightResourceName(req.Lease.Project, slotName), slotName, settings.NativeRunnerPlaywrightPort)
 			env = append(env,
 				map[string]any{"name": "GLIMMUNG_PLAYWRIGHT_WS_ENDPOINT", "value": endpoint},
 				map[string]any{"name": "PLAYWRIGHT_WS_ENDPOINT", "value": endpoint},
@@ -970,19 +984,21 @@ func trailingSlotIndex(slotName string) string {
 	return ""
 }
 
-func playwrightResourceName(project, slotName string) string {
+func playwrightResourceName(_ string, slotName string) string {
 	if strings.TrimSpace(slotName) == "" {
 		return ""
 	}
-	return compactResourceName("glim-pw", project+"-"+slotName, 0)
+	return "slot-playwright"
 }
 
 func playwrightLabels(lease Lease, name string) map[string]string {
 	labels := map[string]string{
 		"app.kubernetes.io/managed-by":           "glimmung",
-		"app.kubernetes.io/part-of":              "glimmung-native-runner",
+		"app.kubernetes.io/part-of":              "glimmung-test-slot",
 		"app.kubernetes.io/name":                 name,
 		"glimmung.romaine.life/slot-playwright":  "true",
+		"glimmung.romaine.life/resource-scope":   "tool",
+		"glimmung.romaine.life/tool":             "playwright",
 		"glimmung.romaine.life/project":          labelValue(lease.Project),
 		"glimmung.romaine.life/native-slot-name": labelValue(mapStringValueOrEmpty(lease.Metadata, "native_slot_name")),
 	}
@@ -995,7 +1011,24 @@ func playwrightLabels(lease Lease, name string) map[string]string {
 	return labels
 }
 
-func playwrightDeployment(settings Settings, name string, labels map[string]string) map[string]any {
+type playwrightResourceTarget struct {
+	namespace string
+	name      string
+}
+
+func playwrightResourceTargets(lease Lease, slotName, runnerNamespace string) []playwrightResourceTarget {
+	var targets []playwrightResourceTarget
+	if name := playwrightResourceName(lease.Project, slotName); name != "" {
+		targets = append(targets, playwrightResourceTarget{namespace: slotName, name: name})
+	}
+	legacyName := compactResourceName("glim-pw", lease.Project+"-"+slotName, 0)
+	if legacyName != "" && runnerNamespace != "" {
+		targets = append(targets, playwrightResourceTarget{namespace: runnerNamespace, name: legacyName})
+	}
+	return targets
+}
+
+func playwrightDeployment(settings Settings, namespace, name string, labels map[string]string) map[string]any {
 	port, err := strconv.Atoi(settings.NativeRunnerPlaywrightPort)
 	if err != nil || port <= 0 {
 		port = 3000
@@ -1005,7 +1038,7 @@ func playwrightDeployment(settings Settings, name string, labels map[string]stri
 		"kind":       "Deployment",
 		"metadata": map[string]any{
 			"name":      name,
-			"namespace": settings.NativeRunnerNamespace,
+			"namespace": namespace,
 			"labels":    labels,
 		},
 		"spec": map[string]any{
@@ -1035,7 +1068,7 @@ func playwrightDeployment(settings Settings, name string, labels map[string]stri
 	}
 }
 
-func playwrightService(settings Settings, name string, labels map[string]string) map[string]any {
+func playwrightService(settings Settings, namespace, name string, labels map[string]string) map[string]any {
 	port, err := strconv.Atoi(settings.NativeRunnerPlaywrightPort)
 	if err != nil || port <= 0 {
 		port = 3000
@@ -1045,7 +1078,7 @@ func playwrightService(settings Settings, name string, labels map[string]string)
 		"kind":       "Service",
 		"metadata": map[string]any{
 			"name":      name,
-			"namespace": settings.NativeRunnerNamespace,
+			"namespace": namespace,
 			"labels":    labels,
 		},
 		"spec": map[string]any{
