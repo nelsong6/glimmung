@@ -109,16 +109,26 @@ type TestSlotRequestPublic struct {
 }
 
 type TestEnvironmentPublic struct {
-	Project         string                  `json:"project"`
-	SlotIndex       int                     `json:"slot_index"`
-	SlotName        string                  `json:"slot_name"`
-	State           string                  `json:"state"`
-	Usable          bool                    `json:"usable"`
-	Detail          *string                 `json:"detail,omitempty"`
-	UpdatedAt       *time.Time              `json:"updated_at,omitempty"`
-	ReadyAt         *time.Time              `json:"ready_at,omitempty"`
-	Lease           *LeasePublic            `json:"lease"`
-	WaitingRequests []TestSlotRequestPublic `json:"waiting_requests"`
+	Project               string                  `json:"project"`
+	SlotIndex             int                     `json:"slot_index"`
+	SlotName              string                  `json:"slot_name"`
+	State                 string                  `json:"state"`
+	Usable                bool                    `json:"usable"`
+	Detail                *string                 `json:"detail,omitempty"`
+	UpdatedAt             *time.Time              `json:"updated_at,omitempty"`
+	ReadyAt               *time.Time              `json:"ready_at,omitempty"`
+	ActivationAttempt     *int                    `json:"activation_attempt,omitempty"`
+	ActivationState       *string                 `json:"activation_state,omitempty"`
+	ActivationStartedAt   *time.Time              `json:"activation_started_at,omitempty"`
+	ActivationCompletedAt *time.Time              `json:"activation_completed_at,omitempty"`
+	ActivationJobName     *string                 `json:"activation_job_name,omitempty"`
+	ActivationError       *string                 `json:"activation_error,omitempty"`
+	CleanupState          *string                 `json:"cleanup_state,omitempty"`
+	CleanupStartedAt      *time.Time              `json:"cleanup_started_at,omitempty"`
+	CleanupCompletedAt    *time.Time              `json:"cleanup_completed_at,omitempty"`
+	CleanupError          *string                 `json:"cleanup_error,omitempty"`
+	Lease                 *LeasePublic            `json:"lease"`
+	WaitingRequests       []TestSlotRequestPublic `json:"waiting_requests"`
 }
 
 func stateSnapshot(settings Settings, store ReadStore) http.HandlerFunc {
@@ -430,7 +440,7 @@ func testEnvironmentsFromSnapshot(
 				state = "available"
 			}
 			if claimed {
-				if slotStatus.State == testSlotStateActivating || slotStatus.State == testSlotStateActive || slotStatus.State == "error" {
+				if slotStatus.State == testSlotStateActivating || slotStatus.State == testSlotStateActive || slotStatus.State == testSlotStateCleaning || slotStatus.State == "error" {
 					state = slotStatus.State
 				} else {
 					state = "claimed"
@@ -445,16 +455,26 @@ func testEnvironmentsFromSnapshot(
 				updatedAt = &value
 			}
 			envs = append(envs, TestEnvironmentPublic{
-				Project:         projectName,
-				SlotIndex:       slotIndex,
-				SlotName:        testEnvironmentName(projectName, slotIndex, project, lease),
-				State:           state,
-				Usable:          usable,
-				Detail:          slotStatus.Detail,
-				UpdatedAt:       updatedAt,
-				ReadyAt:         slotStatus.ReadyAt,
-				Lease:           publicLease,
-				WaitingRequests: sliceOrEmpty(waitingByProject[projectName][slotIndex]),
+				Project:               projectName,
+				SlotIndex:             slotIndex,
+				SlotName:              testEnvironmentName(projectName, slotIndex, project, lease),
+				State:                 state,
+				Usable:                usable,
+				Detail:                slotStatus.Detail,
+				UpdatedAt:             updatedAt,
+				ReadyAt:               slotStatus.ReadyAt,
+				ActivationAttempt:     slotStatus.ActivationAttempt,
+				ActivationState:       slotStatus.ActivationState,
+				ActivationStartedAt:   slotStatus.ActivationStartedAt,
+				ActivationCompletedAt: slotStatus.ActivationCompletedAt,
+				ActivationJobName:     slotStatus.ActivationJobName,
+				ActivationError:       slotStatus.ActivationError,
+				CleanupState:          slotStatus.CleanupState,
+				CleanupStartedAt:      slotStatus.CleanupStartedAt,
+				CleanupCompletedAt:    slotStatus.CleanupCompletedAt,
+				CleanupError:          slotStatus.CleanupError,
+				Lease:                 publicLease,
+				WaitingRequests:       sliceOrEmpty(waitingByProject[projectName][slotIndex]),
 			})
 		}
 	}
@@ -533,10 +553,50 @@ func testEnvironmentSlotStatuses(project Project) map[int]TestEnvironmentSlotSta
 					status.ReadyAt = &parsed
 				}
 			}
+			status.ActivationAttempt = slotPositiveIntPointer(slot, "activation_attempt", "activationAttempt")
+			status.ActivationState = slotStringPointer(slot, "activation_state", "activationState")
+			status.ActivationStartedAt = slotTimePointer(slot, "activation_started_at", "activationStartedAt")
+			status.ActivationCompletedAt = slotTimePointer(slot, "activation_completed_at", "activationCompletedAt")
+			status.ActivationJobName = slotStringPointer(slot, "activation_job_name", "activationJobName")
+			status.ActivationError = slotStringPointer(slot, "activation_error", "activationError")
+			status.CleanupState = slotStringPointer(slot, "cleanup_state", "cleanupState")
+			status.CleanupStartedAt = slotTimePointer(slot, "cleanup_started_at", "cleanupStartedAt")
+			status.CleanupCompletedAt = slotTimePointer(slot, "cleanup_completed_at", "cleanupCompletedAt")
+			status.CleanupError = slotStringPointer(slot, "cleanup_error", "cleanupError")
 			statuses[index] = status
 		}
 	}
 	return statuses
+}
+
+func slotStringPointer(slot map[string]any, keys ...string) *string {
+	for _, key := range keys {
+		if value, ok := stringFromMap(slot, key); ok && strings.TrimSpace(value) != "" {
+			text := strings.TrimSpace(value)
+			return &text
+		}
+	}
+	return nil
+}
+
+func slotTimePointer(slot map[string]any, keys ...string) *time.Time {
+	for _, key := range keys {
+		if value, ok := stringFromMap(slot, key); ok && strings.TrimSpace(value) != "" {
+			if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value)); err == nil {
+				return &parsed
+			}
+		}
+	}
+	return nil
+}
+
+func slotPositiveIntPointer(slot map[string]any, keys ...string) *int {
+	for _, key := range keys {
+		if value, ok := positiveIntFromMap(slot, key); ok {
+			return &value
+		}
+	}
+	return nil
 }
 
 func testEnvironmentName(project string, slotIndex int, projectDoc Project, _ Lease) string {

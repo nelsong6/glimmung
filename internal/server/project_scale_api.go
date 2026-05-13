@@ -25,12 +25,22 @@ type TestEnvironmentScaleRequest struct {
 }
 
 type TestEnvironmentSlotStatus struct {
-	SlotIndex int        `json:"slot_index"`
-	SlotName  string     `json:"slot_name"`
-	State     string     `json:"state"`
-	UpdatedAt time.Time  `json:"updated_at"`
-	Detail    *string    `json:"detail,omitempty"`
-	ReadyAt   *time.Time `json:"ready_at,omitempty"`
+	SlotIndex             int        `json:"slot_index"`
+	SlotName              string     `json:"slot_name"`
+	State                 string     `json:"state"`
+	UpdatedAt             time.Time  `json:"updated_at"`
+	Detail                *string    `json:"detail,omitempty"`
+	ReadyAt               *time.Time `json:"ready_at,omitempty"`
+	ActivationAttempt     *int       `json:"activation_attempt,omitempty"`
+	ActivationState       *string    `json:"activation_state,omitempty"`
+	ActivationStartedAt   *time.Time `json:"activation_started_at,omitempty"`
+	ActivationCompletedAt *time.Time `json:"activation_completed_at,omitempty"`
+	ActivationJobName     *string    `json:"activation_job_name,omitempty"`
+	ActivationError       *string    `json:"activation_error,omitempty"`
+	CleanupState          *string    `json:"cleanup_state,omitempty"`
+	CleanupStartedAt      *time.Time `json:"cleanup_started_at,omitempty"`
+	CleanupCompletedAt    *time.Time `json:"cleanup_completed_at,omitempty"`
+	CleanupError          *string    `json:"cleanup_error,omitempty"`
 }
 
 func scaleProjectTestEnvironments(store ReadStore, authRedirects NativeAuthRedirectReconciler, workloadIdentities NativeWorkloadIdentityReconciler, preparer TestSlotPreparer, _ NativeGitHubTokenMinter) http.HandlerFunc {

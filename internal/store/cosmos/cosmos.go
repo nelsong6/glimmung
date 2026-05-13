@@ -362,6 +362,36 @@ func projectTestEnvironmentSlotStatusMap(status server.TestEnvironmentSlotStatus
 	if status.ReadyAt != nil {
 		slot["ready_at"] = status.ReadyAt.Format(time.RFC3339Nano)
 	}
+	if status.ActivationAttempt != nil {
+		slot["activation_attempt"] = *status.ActivationAttempt
+	}
+	if status.ActivationState != nil && strings.TrimSpace(*status.ActivationState) != "" {
+		slot["activation_state"] = strings.TrimSpace(*status.ActivationState)
+	}
+	if status.ActivationStartedAt != nil {
+		slot["activation_started_at"] = status.ActivationStartedAt.Format(time.RFC3339Nano)
+	}
+	if status.ActivationCompletedAt != nil {
+		slot["activation_completed_at"] = status.ActivationCompletedAt.Format(time.RFC3339Nano)
+	}
+	if status.ActivationJobName != nil && strings.TrimSpace(*status.ActivationJobName) != "" {
+		slot["activation_job_name"] = strings.TrimSpace(*status.ActivationJobName)
+	}
+	if status.ActivationError != nil && strings.TrimSpace(*status.ActivationError) != "" {
+		slot["activation_error"] = strings.TrimSpace(*status.ActivationError)
+	}
+	if status.CleanupState != nil && strings.TrimSpace(*status.CleanupState) != "" {
+		slot["cleanup_state"] = strings.TrimSpace(*status.CleanupState)
+	}
+	if status.CleanupStartedAt != nil {
+		slot["cleanup_started_at"] = status.CleanupStartedAt.Format(time.RFC3339Nano)
+	}
+	if status.CleanupCompletedAt != nil {
+		slot["cleanup_completed_at"] = status.CleanupCompletedAt.Format(time.RFC3339Nano)
+	}
+	if status.CleanupError != nil && strings.TrimSpace(*status.CleanupError) != "" {
+		slot["cleanup_error"] = strings.TrimSpace(*status.CleanupError)
+	}
 	return slot
 }
 

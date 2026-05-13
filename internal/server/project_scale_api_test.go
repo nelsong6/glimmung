@@ -93,6 +93,36 @@ func testSlotStatusMap(status TestEnvironmentSlotStatus) map[string]any {
 	if status.ReadyAt != nil {
 		slot["ready_at"] = status.ReadyAt.Format(time.RFC3339Nano)
 	}
+	if status.ActivationAttempt != nil {
+		slot["activation_attempt"] = float64(*status.ActivationAttempt)
+	}
+	if status.ActivationState != nil {
+		slot["activation_state"] = *status.ActivationState
+	}
+	if status.ActivationStartedAt != nil {
+		slot["activation_started_at"] = status.ActivationStartedAt.Format(time.RFC3339Nano)
+	}
+	if status.ActivationCompletedAt != nil {
+		slot["activation_completed_at"] = status.ActivationCompletedAt.Format(time.RFC3339Nano)
+	}
+	if status.ActivationJobName != nil {
+		slot["activation_job_name"] = *status.ActivationJobName
+	}
+	if status.ActivationError != nil {
+		slot["activation_error"] = *status.ActivationError
+	}
+	if status.CleanupState != nil {
+		slot["cleanup_state"] = *status.CleanupState
+	}
+	if status.CleanupStartedAt != nil {
+		slot["cleanup_started_at"] = status.CleanupStartedAt.Format(time.RFC3339Nano)
+	}
+	if status.CleanupCompletedAt != nil {
+		slot["cleanup_completed_at"] = status.CleanupCompletedAt.Format(time.RFC3339Nano)
+	}
+	if status.CleanupError != nil {
+		slot["cleanup_error"] = *status.CleanupError
+	}
 	return slot
 }
 

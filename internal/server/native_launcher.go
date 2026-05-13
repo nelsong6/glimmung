@@ -32,6 +32,10 @@ type TestSlotPreparer interface {
 	DeprovisionTestSlot(ctx context.Context, lease Lease, project Project) error
 }
 
+type TestSlotInstallerCleaner interface {
+	CleanupTestSlotInstaller(ctx context.Context, lease Lease, project Project) error
+}
+
 type NativeLaunchRequest struct {
 	Lease    Lease
 	Workflow Workflow
@@ -148,6 +152,10 @@ func (l *KubernetesNativeLauncher) ReturnTestSlotRuntime(ctx context.Context, le
 		return l.deleteTestSlotInstaller(ctx, lease)
 	}
 	return nil
+}
+
+func (l *KubernetesNativeLauncher) CleanupTestSlotInstaller(ctx context.Context, lease Lease, _ Project) error {
+	return l.deleteTestSlotInstaller(ctx, lease)
 }
 
 func (l *KubernetesNativeLauncher) DeprovisionTestSlot(ctx context.Context, lease Lease, project Project) error {

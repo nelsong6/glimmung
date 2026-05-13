@@ -61,11 +61,21 @@ type TestEnvironment = {
   project: string;
   slot_index: number;
   slot_name: string;
-  state: "available" | "warming" | "activating" | "active" | "claimed" | "error";
+  state: "available" | "warming" | "activating" | "active" | "cleaning" | "claimed" | "error";
   usable?: boolean;
   detail?: string | null;
   updated_at?: string | null;
   ready_at?: string | null;
+  activation_attempt?: number | null;
+  activation_state?: string | null;
+  activation_started_at?: string | null;
+  activation_completed_at?: string | null;
+  activation_job_name?: string | null;
+  activation_error?: string | null;
+  cleanup_state?: string | null;
+  cleanup_started_at?: string | null;
+  cleanup_completed_at?: string | null;
+  cleanup_error?: string | null;
   lease: Lease | null;
   waiting_requests: TestSlotRequest[];
 };
@@ -2678,6 +2688,7 @@ function TestEnvironmentIndexView({
   const available = environments.filter((env) => env.state === "available");
   const activating = environments.filter((env) => env.state === "activating");
   const active = environments.filter((env) => env.state === "active");
+  const cleaning = environments.filter((env) => env.state === "cleaning");
   const claimed = environments.filter((env) => env.state === "claimed");
   const errored = environments.filter((env) => env.state === "error");
   const project = projectName ? snap.projects.find((p) => p.name === projectName) : null;
@@ -2694,6 +2705,7 @@ function TestEnvironmentIndexView({
           <div className="project-fact"><span>available</span><strong>{available.length}</strong></div>
           <div className="project-fact"><span>activating</span><strong>{activating.length}</strong></div>
           <div className="project-fact"><span>active</span><strong>{active.length}</strong></div>
+          {cleaning.length > 0 && <div className="project-fact"><span>cleaning</span><strong>{cleaning.length}</strong></div>}
           {claimed.length > 0 && <div className="project-fact"><span>claimed</span><strong>{claimed.length}</strong></div>}
           {errored.length > 0 && <div className="project-fact"><span>error</span><strong>{errored.length}</strong></div>}
           {projectName && <div className="project-fact"><span>configured</span><strong>{environments.length}</strong></div>}
@@ -3008,6 +3020,7 @@ function testEnvironmentPillClass(state: TestEnvironment["state"]): "free" | "bu
       return "drain";
     case "warming":
     case "activating":
+    case "cleaning":
     default:
       return "info";
   }

@@ -15,6 +15,7 @@ import (
 const (
 	testSlotStateActivating = "activating"
 	testSlotStateActive     = "active"
+	testSlotStateCleaning   = "cleaning"
 	testSlotStateReady      = "ready"
 )
 
@@ -53,9 +54,13 @@ type TestSlotReturnResult struct {
 	SlotIndex      *int    `json:"slot_index,omitempty"`
 	SlotName       *string `json:"slot_name,omitempty"`
 	CleanupStarted bool    `json:"cleanup_started"`
+	Usable         bool    `json:"usable"`
+	StatusURL      *string `json:"status_url,omitempty"`
+	Detail         *string `json:"detail,omitempty"`
 }
 
 var testSlotActivations sync.Map
+var testSlotCleanups sync.Map
 
 func checkoutTestSlot(store ReadStore, preparer TestSlotPreparer, minter NativeGitHubTokenMinter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -118,7 +123,7 @@ func checkoutTestSlot(store ReadStore, preparer TestSlotPreparer, minter NativeG
 			return
 		}
 		if preparer != nil && lease.State == "claimed" && boolFromMap(lease.Metadata, "test_slot_checkout") {
-			if _, err := setLeaseSlotStatus(r.Context(), store, project, lease, testSlotStateActivating, nil); err != nil {
+			if _, err := setLeaseSlotActivationStarting(r.Context(), store, project, lease); err != nil {
 				_, _ = leaseStore.CancelLeaseByRef(r.Context(), req.Project, LeasePublicRefFromLease(lease))
 				writeProblem(w, http.StatusInternalServerError, "record test-slot activation state failed")
 				return
@@ -164,18 +169,13 @@ func returnTestSlot(store ReadStore, preparer TestSlotPreparer, _ NativeGitHubTo
 			if !ok {
 				return
 			}
-			markLeaseSlotStatus(r.Context(), store, project, lease, "warming", nil)
-			if err := preparer.ReturnTestSlotRuntime(r.Context(), lease, project); err != nil {
-				markLeaseSlotStatus(r.Context(), store, project, lease, "error", err)
-				writeProblem(w, http.StatusBadGateway, "test-slot cleanup failed")
+			if _, err := setLeaseSlotCleanupStarting(r.Context(), store, project, lease); err != nil {
+				writeProblem(w, http.StatusInternalServerError, "record test-slot cleanup state failed")
 				return
 			}
-			if err := preparer.EnsureTestSlotPreliminaries(r.Context(), lease, project); err != nil {
-				markLeaseSlotStatus(r.Context(), store, project, lease, "error", err)
-				writeProblem(w, http.StatusBadGateway, "test-slot rewarm failed")
-				return
-			}
-			markLeaseSlotStatus(r.Context(), store, project, lease, "ready", nil)
+			beginTestSlotCleanup(store, preparer, project, lease, true, nil)
+			writeJSON(w, http.StatusAccepted, testSlotReturnResponse(project, req.Project, lease, testSlotStateCleaning, true))
+			return
 		}
 		result, err := leaseStore.CancelLeaseByRef(r.Context(), req.Project, LeasePublicRefFromLease(lease))
 		if err != nil {
@@ -189,6 +189,8 @@ func returnTestSlot(store ReadStore, preparer TestSlotPreparer, _ NativeGitHubTo
 			SlotIndex:      nativeSlotIndexFromMetadata(lease.Metadata),
 			SlotName:       nativeSlotNameFromMetadata(lease.Metadata),
 			CleanupStarted: cleanupStarted,
+			Usable:         false,
+			StatusURL:      testSlotStatusURL(Project{Name: req.Project}, nativeSlotNameFromMetadata(lease.Metadata)),
 		}
 		writeJSON(w, http.StatusOK, resp)
 	}
@@ -198,7 +200,71 @@ func markLeaseSlotStatus(ctx context.Context, store ReadStore, project Project, 
 	_, _ = setLeaseSlotStatus(ctx, store, project, lease, state, cause)
 }
 
-func setLeaseSlotStatus(ctx context.Context, store ReadStore, project Project, lease Lease, state string, cause error) (Project, error) {
+type testSlotStatusMutation func(*TestEnvironmentSlotStatus, time.Time)
+
+func setLeaseSlotActivationStarting(ctx context.Context, store ReadStore, project Project, lease Lease) (Project, error) {
+	return setLeaseSlotStatus(ctx, store, project, lease, testSlotStateActivating, nil, func(status *TestEnvironmentSlotStatus, now time.Time) {
+		if attempt := testSlotActivationAttempt(lease); attempt != nil {
+			status.ActivationAttempt = attempt
+		}
+		state := testSlotStateActivating
+		jobName := testSlotInstallResourceName("glim-helm-install", lease)
+		status.ActivationState = &state
+		status.ActivationStartedAt = &now
+		status.ActivationCompletedAt = nil
+		status.ActivationJobName = &jobName
+		status.ActivationError = nil
+	})
+}
+
+func setLeaseSlotActivationFinished(ctx context.Context, store ReadStore, project Project, lease Lease, state string, cause error) (Project, error) {
+	return setLeaseSlotStatus(ctx, store, project, lease, state, cause, func(status *TestEnvironmentSlotStatus, now time.Time) {
+		if attempt := testSlotActivationAttempt(lease); attempt != nil {
+			status.ActivationAttempt = attempt
+		}
+		if status.ActivationStartedAt == nil {
+			status.ActivationStartedAt = &now
+		}
+		jobName := testSlotInstallResourceName("glim-helm-install", lease)
+		status.ActivationState = &state
+		status.ActivationCompletedAt = &now
+		status.ActivationJobName = &jobName
+		if cause != nil {
+			text := cause.Error()
+			status.ActivationError = &text
+		} else {
+			status.ActivationError = nil
+		}
+	})
+}
+
+func setLeaseSlotCleanupStarting(ctx context.Context, store ReadStore, project Project, lease Lease) (Project, error) {
+	return setLeaseSlotStatus(ctx, store, project, lease, testSlotStateCleaning, nil, func(status *TestEnvironmentSlotStatus, now time.Time) {
+		state := testSlotStateCleaning
+		status.CleanupState = &state
+		status.CleanupStartedAt = &now
+		status.CleanupCompletedAt = nil
+		status.CleanupError = nil
+	})
+}
+
+func setLeaseSlotCleanupFinished(ctx context.Context, store ReadStore, project Project, lease Lease, state string, cause error) (Project, error) {
+	return setLeaseSlotStatus(ctx, store, project, lease, state, cause, func(status *TestEnvironmentSlotStatus, now time.Time) {
+		status.CleanupState = &state
+		if status.CleanupStartedAt == nil {
+			status.CleanupStartedAt = &now
+		}
+		status.CleanupCompletedAt = &now
+		if cause != nil {
+			text := cause.Error()
+			status.CleanupError = &text
+		} else {
+			status.CleanupError = nil
+		}
+	})
+}
+
+func setLeaseSlotStatus(ctx context.Context, store ReadStore, project Project, lease Lease, state string, cause error, mutations ...testSlotStatusMutation) (Project, error) {
 	writer, ok := store.(ProjectTestEnvironmentSlotStatusWriter)
 	if !ok || writer == nil {
 		return Project{}, errors.New("test-slot status store not configured")
@@ -217,14 +283,48 @@ func setLeaseSlotStatus(ctx context.Context, store ReadStore, project Project, l
 	status := TestEnvironmentSlotStatus{
 		SlotIndex: *slotIndex,
 		SlotName:  *slotName,
-		State:     state,
-		UpdatedAt: now,
-		Detail:    detail,
 	}
+	if current, ok := currentLeaseSlotStatus(ctx, store, project, lease, *slotIndex); ok {
+		status = current
+		if status.SlotName == "" {
+			status.SlotName = *slotName
+		}
+	}
+	status.State = state
+	status.UpdatedAt = now
+	status.Detail = detail
 	if state == testSlotStateReady {
 		status.ReadyAt = &now
 	}
+	for _, mutate := range mutations {
+		if mutate != nil {
+			mutate(&status, now)
+		}
+	}
 	return writer.SetProjectTestEnvironmentSlotStatus(ctx, firstNonEmpty(lease.Project, project.ID, project.Name), status)
+}
+
+func currentLeaseSlotStatus(ctx context.Context, store ReadStore, project Project, lease Lease, slotIndex int) (TestEnvironmentSlotStatus, bool) {
+	projects, err := store.ListProjects(ctx)
+	if err == nil {
+		for _, current := range projects {
+			if current.Name != lease.Project && current.ID != lease.Project && current.Name != project.Name && current.ID != project.ID {
+				continue
+			}
+			if status, ok := testEnvironmentSlotStatus(current, slotIndex); ok {
+				return status, true
+			}
+		}
+	}
+	return testEnvironmentSlotStatus(project, slotIndex)
+}
+
+func testSlotActivationAttempt(lease Lease) *int {
+	if lease.LeaseNumber == nil || *lease.LeaseNumber <= 0 {
+		return nil
+	}
+	value := *lease.LeaseNumber
+	return &value
 }
 
 func findProjectForTestSlot(r *http.Request, w http.ResponseWriter, store ReadStore, name string) (Project, bool) {
@@ -276,6 +376,26 @@ func testSlotCheckoutResponse(project Project, workflow string, lease Lease, hos
 	}
 }
 
+func testSlotReturnResponse(project Project, projectName string, lease Lease, state string, cleanupStarted bool) TestSlotReturnResult {
+	slotName := nativeSlotNameFromMetadata(lease.Metadata)
+	var detail *string
+	if state == testSlotStateCleaning {
+		text := "test-slot runtime cleanup is in progress"
+		detail = &text
+	}
+	return TestSlotReturnResult{
+		State:          state,
+		Project:        firstNonEmpty(project.Name, project.ID, projectName),
+		Lease:          LeasePublicRefFromLease(lease),
+		SlotIndex:      nativeSlotIndexFromMetadata(lease.Metadata),
+		SlotName:       slotName,
+		CleanupStarted: cleanupStarted,
+		Usable:         false,
+		StatusURL:      testSlotStatusURL(project, slotName),
+		Detail:         detail,
+	}
+}
+
 func testSlotStatusURL(project Project, slotName *string) *string {
 	if slotName == nil || strings.TrimSpace(*slotName) == "" {
 		return nil
@@ -317,16 +437,17 @@ func activateTestSlotRuntime(parent context.Context, store ReadStore, preparer T
 		return
 	}
 	if err == nil {
-		if _, statusErr := setLeaseSlotStatus(context.Background(), store, project, lease, testSlotStateActive, nil); statusErr != nil && logf != nil {
+		if _, statusErr := setLeaseSlotActivationFinished(context.Background(), store, project, lease, testSlotStateActive, nil); statusErr != nil && logf != nil {
 			logf("record test-slot activation success failed project=%s lease=%s: %v", lease.Project, LeasePublicRefFromLease(lease), statusErr)
 		}
+		cleanupTestSlotInstaller(context.Background(), preparer, lease, project, logf)
 		return
 	}
 
 	if logf != nil {
 		logf("test-slot activation failed project=%s lease=%s: %v", lease.Project, LeasePublicRefFromLease(lease), err)
 	}
-	markLeaseSlotStatus(context.Background(), store, project, lease, "error", err)
+	_, _ = setLeaseSlotActivationFinished(context.Background(), store, project, lease, "error", err)
 
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	if cleanupErr := preparer.ReturnTestSlotRuntime(cleanupCtx, lease, project); cleanupErr != nil && logf != nil {
@@ -340,6 +461,74 @@ func activateTestSlotRuntime(parent context.Context, store ReadStore, preparer T
 			logf("test-slot activation lease release failed project=%s lease=%s: %v", lease.Project, LeasePublicRefFromLease(lease), cancelErr)
 		}
 		cancelRelease()
+	}
+}
+
+func cleanupTestSlotInstaller(parent context.Context, preparer TestSlotPreparer, lease Lease, project Project, logf func(string, ...any)) {
+	cleaner, ok := preparer.(TestSlotInstallerCleaner)
+	if !ok || cleaner == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
+	defer cancel()
+	if err := cleaner.CleanupTestSlotInstaller(ctx, lease, project); err != nil && logf != nil {
+		logf("test-slot installer cleanup failed project=%s lease=%s: %v", lease.Project, LeasePublicRefFromLease(lease), err)
+	}
+}
+
+func beginTestSlotCleanup(store ReadStore, preparer TestSlotPreparer, project Project, lease Lease, releaseLease bool, logf func(string, ...any)) bool {
+	if preparer == nil {
+		return false
+	}
+	key := testSlotActivationKey(lease)
+	if key == "" {
+		return false
+	}
+	if _, loaded := testSlotCleanups.LoadOrStore(key, struct{}{}); loaded {
+		return false
+	}
+	go func() {
+		defer testSlotCleanups.Delete(key)
+		cleanupTestSlotRuntime(context.Background(), store, preparer, project, lease, releaseLease, logf)
+	}()
+	return true
+}
+
+func cleanupTestSlotRuntime(parent context.Context, store ReadStore, preparer TestSlotPreparer, project Project, lease Lease, releaseLease bool, logf func(string, ...any)) {
+	ctx, cancel := context.WithTimeout(parent, 10*time.Minute)
+	err := preparer.ReturnTestSlotRuntime(ctx, lease, project)
+	if err == nil {
+		err = preparer.EnsureTestSlotPreliminaries(ctx, lease, project)
+	}
+	cancel()
+	if err != nil {
+		if logf != nil {
+			logf("test-slot cleanup failed project=%s lease=%s: %v", lease.Project, LeasePublicRefFromLease(lease), err)
+		}
+		_, _ = setLeaseSlotCleanupFinished(context.Background(), store, project, lease, "error", err)
+		return
+	}
+
+	if releaseLease && testSlotLeaseStillClaimed(context.Background(), store, lease) {
+		leaseStore, ok := store.(LeaseStore)
+		if !ok || leaseStore == nil {
+			err := errors.New("lease store not configured")
+			_, _ = setLeaseSlotCleanupFinished(context.Background(), store, project, lease, "error", err)
+			return
+		}
+		cancelCtx, cancelRelease := context.WithTimeout(context.Background(), 30*time.Second)
+		_, cancelErr := leaseStore.CancelLeaseByRef(cancelCtx, lease.Project, LeasePublicRefFromLease(lease))
+		cancelRelease()
+		if cancelErr != nil {
+			if logf != nil {
+				logf("test-slot cleanup lease release failed project=%s lease=%s: %v", lease.Project, LeasePublicRefFromLease(lease), cancelErr)
+			}
+			_, _ = setLeaseSlotCleanupFinished(context.Background(), store, project, lease, "error", cancelErr)
+			return
+		}
+	}
+	if _, statusErr := setLeaseSlotCleanupFinished(context.Background(), store, project, lease, testSlotStateReady, nil); statusErr != nil && logf != nil {
+		logf("record test-slot cleanup success failed project=%s lease=%s: %v", lease.Project, LeasePublicRefFromLease(lease), statusErr)
 	}
 }
 
@@ -388,6 +577,10 @@ func sameTestSlotLease(left Lease, right Lease) bool {
 }
 
 func testSlotLeaseStillActivating(ctx context.Context, store ReadStore, project Project, lease Lease) bool {
+	return testSlotLeaseStillState(ctx, store, project, lease, testSlotStateActivating)
+}
+
+func testSlotLeaseStillState(ctx context.Context, store ReadStore, project Project, lease Lease, state string) bool {
 	slotIndex := nativeSlotIndexFromMetadata(lease.Metadata)
 	if slotIndex == nil {
 		return false
@@ -401,7 +594,7 @@ func testSlotLeaseStillActivating(ctx context.Context, store ReadStore, project 
 			continue
 		}
 		status, ok := testEnvironmentSlotStatus(current, *slotIndex)
-		return ok && status.State == testSlotStateActivating
+		return ok && status.State == state
 	}
 	return false
 }
@@ -459,6 +652,7 @@ func recoverActivatingTestSlots(ctx context.Context, store ReadStore, preparer T
 	}
 	started := 0
 	now := time.Now()
+	claimedSlots := map[string]map[int]bool{}
 	for _, lease := range leases {
 		if lease.State != "claimed" || !boolFromMap(lease.Metadata, "test_slot_checkout") {
 			continue
@@ -471,15 +665,52 @@ func recoverActivatingTestSlots(ctx context.Context, store ReadStore, preparer T
 		if !ok {
 			continue
 		}
+		projectKey := firstNonEmpty(project.Name, project.ID, lease.Project)
+		if claimedSlots[projectKey] == nil {
+			claimedSlots[projectKey] = map[int]bool{}
+		}
+		claimedSlots[projectKey][*slotIndex] = true
 		status, ok := testEnvironmentSlotStatus(project, *slotIndex)
-		if !ok || status.State != testSlotStateActivating {
+		if !ok {
 			continue
 		}
 		if !status.UpdatedAt.IsZero() && now.Sub(status.UpdatedAt) < minAge {
 			continue
 		}
-		if beginTestSlotActivation(store, preparer, minter, project, lease, logf) {
-			started++
+		switch status.State {
+		case testSlotStateActivating:
+			if beginTestSlotActivation(store, preparer, minter, project, lease, logf) {
+				started++
+			}
+		case testSlotStateCleaning:
+			if beginTestSlotCleanup(store, preparer, project, lease, true, logf) {
+				started++
+			}
+		}
+	}
+	for _, project := range projects {
+		projectName := firstNonEmpty(project.Name, project.ID)
+		if projectName == "" {
+			continue
+		}
+		for slotIndex, status := range testEnvironmentSlotStatuses(project) {
+			if status.State != testSlotStateCleaning {
+				continue
+			}
+			if claimedSlots[projectName][slotIndex] {
+				continue
+			}
+			if !status.UpdatedAt.IsZero() && now.Sub(status.UpdatedAt) < minAge {
+				continue
+			}
+			slotName := status.SlotName
+			if strings.TrimSpace(slotName) == "" {
+				slotName = testEnvironmentName(projectName, slotIndex, project, Lease{})
+			}
+			lease := testEnvironmentWarmupLease(project, slotIndex, slotName)
+			if beginTestSlotCleanup(store, preparer, project, lease, false, logf) {
+				started++
+			}
 		}
 	}
 	return started
