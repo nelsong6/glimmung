@@ -160,6 +160,81 @@ func TestNativeWorkloadIdentitiesDoesNotDeleteManualLookalikes(t *testing.T) {
 	}
 }
 
+func TestNativeWorkloadIdentitiesSkipsUnchangedCredentials(t *testing.T) {
+	client := &fakeFederatedIdentityCredentialClient{
+		current: map[string][]FederatedIdentityCredential{
+			"tank-session-identity": {
+				{
+					FederatedIdentityCredentialRef: FederatedIdentityCredentialRef{
+						SubscriptionID: "sub",
+						ResourceGroup:  "infra",
+						IdentityName:   "tank-session-identity",
+						CredentialName: "tank-slot-1-session",
+					},
+					Issuer:    "https://issuer.example/",
+					Subject:   "system:serviceaccount:tank-slot-1-sessions:tank-slot-1-session",
+					Audiences: []string{defaultWorkloadIdentityAudience},
+				},
+				{
+					FederatedIdentityCredentialRef: FederatedIdentityCredentialRef{
+						SubscriptionID: "sub",
+						ResourceGroup:  "infra",
+						IdentityName:   "tank-session-identity",
+						CredentialName: "tank-slot-2-session",
+					},
+					Issuer:    "https://old-issuer.example/",
+					Subject:   "system:serviceaccount:tank-slot-2-sessions:tank-slot-2-session",
+					Audiences: []string{defaultWorkloadIdentityAudience},
+				},
+			},
+		},
+	}
+	service := NativeWorkloadIdentityService{
+		Client: client,
+		Issuer: "https://issuer.example/",
+		Now:    func() time.Time { return time.Date(2026, 5, 13, 7, 0, 0, 0, time.UTC) },
+	}
+	project := Project{
+		Name: "tank",
+		Metadata: map[string]any{
+			"native_standby_dns": map[string]any{
+				"slot_prefix": "tank-slot",
+				"count":       float64(2),
+			},
+			"native_standby_workload_identity": map[string]any{
+				"enabled":        true,
+				"subscription":   "sub",
+				"resource_group": "infra",
+				"count":          float64(2),
+				"credentials": []any{
+					map[string]any{
+						"identity_name":   "tank-session-identity",
+						"credential_name": "{slot_name}-session",
+						"subject":         "system:serviceaccount:{slot_name}-sessions:{slot_name}-session",
+					},
+				},
+			},
+		},
+	}
+
+	status, err := service.ReconcileNativeWorkloadIdentities(context.Background(), project)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if status.State != NativeWorkloadIdentityStatusOK {
+		t.Fatalf("status=%#v", status)
+	}
+	if len(client.upserts) != 1 || client.upserts[0].CredentialName != "tank-slot-2-session" {
+		t.Fatalf("upserts=%#v", client.upserts)
+	}
+	if len(status.Upserted) != 1 || status.Upserted[0].CredentialName != "tank-slot-2-session" {
+		t.Fatalf("upserted status=%#v", status.Upserted)
+	}
+	if len(client.deletes) != 0 {
+		t.Fatalf("deletes=%#v", client.deletes)
+	}
+}
+
 func TestNativeWorkloadIdentitiesSkippedWhenDisabled(t *testing.T) {
 	service := NativeWorkloadIdentityService{Client: &fakeFederatedIdentityCredentialClient{}}
 	status, err := service.ReconcileNativeWorkloadIdentities(context.Background(), Project{Metadata: map[string]any{}})
