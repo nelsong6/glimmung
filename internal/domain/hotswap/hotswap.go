@@ -95,14 +95,18 @@ func (c Contract) Validate() error {
 		if strategy := strings.TrimSpace(c.Backend.Strategy); strategy != "" && strategy != "supervisor" {
 			return fmt.Errorf("test_slot_hot_swap.backend.strategy %q is not supported", strategy)
 		}
-		for field, value := range map[string]string{
-			"build_command": c.Backend.BuildCommand,
-			"artifact":      c.Backend.Artifact,
-			"target":        c.Backend.Target,
-			"health_path":   c.Backend.HealthPath,
-		} {
-			if strings.TrimSpace(value) == "" {
-				return fmt.Errorf("test_slot_hot_swap.backend.%s is required", field)
+		required := []struct {
+			name  string
+			value string
+		}{
+			{name: "build_command", value: c.Backend.BuildCommand},
+			{name: "artifact", value: c.Backend.Artifact},
+			{name: "target", value: c.Backend.Target},
+			{name: "health_path", value: c.Backend.HealthPath},
+		}
+		for _, field := range required {
+			if strings.TrimSpace(field.value) == "" {
+				return fmt.Errorf("test_slot_hot_swap.backend.%s is required", field.name)
 			}
 		}
 		if !strings.HasPrefix(strings.TrimSpace(c.Backend.Artifact), "/") {

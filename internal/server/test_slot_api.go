@@ -1,23 +1,22 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
+	"time"
 )
 
 type TestSlotCheckoutRequest struct {
 	Project       string              `json:"project"`
 	Workflow      *string             `json:"workflow"`
-	SlotIndex     *int                `json:"slot_index"`
 	Mode          string              `json:"mode"`
 	Requester     LeaseRequesterInput `json:"requester"`
 	TankSessionID *string             `json:"tank_session_id"`
-	PhaseInputs   map[string]string   `json:"phase_inputs"`
 	TTLSeconds    *int                `json:"ttl_seconds"`
 }
 
@@ -48,7 +47,7 @@ type TestSlotReturnResult struct {
 	CleanupStarted bool    `json:"cleanup_started"`
 }
 
-func checkoutTestSlot(store ReadStore, preparer TestSlotPreparer, minter NativeGitHubTokenMinter) http.HandlerFunc {
+func checkoutTestSlot(store ReadStore, _ TestSlotPreparer, _ NativeGitHubTokenMinter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		leaseStore, ok := store.(LeaseStore)
 		if !ok || leaseStore == nil {
@@ -56,8 +55,10 @@ func checkoutTestSlot(store ReadStore, preparer TestSlotPreparer, minter NativeG
 			return
 		}
 		var req TestSlotCheckoutRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeProblem(w, http.StatusBadRequest, "invalid JSON body")
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&req); err != nil {
+			writeProblem(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 			return
 		}
 		req.Project = strings.TrimSpace(req.Project)
@@ -81,31 +82,9 @@ func checkoutTestSlot(store ReadStore, preparer TestSlotPreparer, minter NativeG
 		if req.Workflow != nil && strings.TrimSpace(*req.Workflow) != "" {
 			workflow = strings.TrimSpace(*req.Workflow)
 		}
-		slotName := ""
-		if req.SlotIndex != nil {
-			slotName = testSlotName(project, *req.SlotIndex)
-		}
-		phaseInputs := map[string]any{}
-		for k, v := range req.PhaseInputs {
-			phaseInputs[k] = v
-		}
-		if req.SlotIndex != nil {
-			phaseInputs["validation_slot_index"] = strconv.Itoa(*req.SlotIndex)
-			phaseInputs["slot_name"] = slotName
-			phaseInputs["namespace"] = slotName
-		}
-		phaseInputs["test_slot_mode"] = mode
-		phaseInputs["clean_slate"] = strconv.FormatBool(mode == "clean_slate")
-
 		metadata := map[string]any{
 			"test_slot_checkout": true,
 			"test_slot_mode":     mode,
-			"phase_inputs":       phaseInputs,
-			"native_slot_prefix": testSlotPrefix(project),
-		}
-		if slotName != "" {
-			metadata["native_slot_name"] = slotName
-			metadata["native_sessions_namespace"] = testSlotSessionsNamespace(slotName, project)
 		}
 		requester := req.Requester
 		if strings.TrimSpace(requester.Consumer) == "" {
@@ -125,22 +104,23 @@ func checkoutTestSlot(store ReadStore, preparer TestSlotPreparer, minter NativeG
 			TTLSeconds: req.TTLSeconds,
 		})
 		if err != nil {
+			var validationErr ValidationError
+			if errors.As(err, &validationErr) {
+				writeProblem(w, http.StatusBadRequest, validationErr.Message)
+				return
+			}
+			if errors.Is(err, ErrUnavailable) {
+				writeProblem(w, http.StatusServiceUnavailable, "no ready test environment slots available")
+				return
+			}
 			writeProblem(w, http.StatusInternalServerError, "test-slot checkout failed")
 			return
 		}
-		if host != nil && preparer != nil {
-			if err := preparer.EnsureTestSlot(r.Context(), lease, project, minter); err != nil {
-				_ = preparer.ReturnTestSlot(r.Context(), lease)
-				_, _ = leaseStore.CancelLeaseByRef(r.Context(), req.Project, LeasePublicRefFromLease(lease))
-				writeProblem(w, http.StatusInternalServerError, "failed to prepare test environment for slot")
-				return
-			}
-		}
-		writeJSON(w, http.StatusOK, testSlotCheckoutResponse(project, workflow, lease, host, req.SlotIndex))
+		writeJSON(w, http.StatusOK, testSlotCheckoutResponse(project, workflow, lease, host))
 	}
 }
 
-func returnTestSlot(store ReadStore, preparer TestSlotPreparer) http.HandlerFunc {
+func returnTestSlot(store ReadStore, preparer TestSlotPreparer, minter NativeGitHubTokenMinter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		leaseStore, ok := store.(LeaseStore)
 		stateStore, hasState := store.(StateStore)
@@ -169,7 +149,22 @@ func returnTestSlot(store ReadStore, preparer TestSlotPreparer) http.HandlerFunc
 		}
 		cleanupStarted := lease.State == "claimed" && boolFromMap(lease.Metadata, "test_slot_checkout")
 		if preparer != nil && cleanupStarted {
-			_ = preparer.ReturnTestSlot(r.Context(), lease)
+			project, ok := findProjectForTestSlot(r, w, store, req.Project)
+			if !ok {
+				return
+			}
+			markLeaseSlotStatus(r.Context(), store, project, lease, "warming", nil)
+			if err := preparer.ReturnTestSlot(r.Context(), lease); err != nil {
+				markLeaseSlotStatus(r.Context(), store, project, lease, "error", err)
+				writeProblem(w, http.StatusBadGateway, "test-slot cleanup failed")
+				return
+			}
+			if err := preparer.EnsureTestSlot(r.Context(), lease, project, minter); err != nil {
+				markLeaseSlotStatus(r.Context(), store, project, lease, "error", err)
+				writeProblem(w, http.StatusBadGateway, "test-slot rewarm failed")
+				return
+			}
+			markLeaseSlotStatus(r.Context(), store, project, lease, "ready", nil)
 		}
 		result, err := leaseStore.CancelLeaseByRef(r.Context(), req.Project, LeasePublicRefFromLease(lease))
 		if err != nil {
@@ -188,6 +183,35 @@ func returnTestSlot(store ReadStore, preparer TestSlotPreparer) http.HandlerFunc
 	}
 }
 
+func markLeaseSlotStatus(ctx context.Context, store ReadStore, project Project, lease Lease, state string, cause error) {
+	writer, ok := store.(ProjectTestEnvironmentSlotStatusWriter)
+	if !ok || writer == nil {
+		return
+	}
+	slotIndex := nativeSlotIndexFromMetadata(lease.Metadata)
+	slotName := nativeSlotNameFromMetadata(lease.Metadata)
+	if slotIndex == nil || slotName == nil {
+		return
+	}
+	now := time.Now().UTC()
+	var detail *string
+	if cause != nil {
+		text := cause.Error()
+		detail = &text
+	}
+	status := TestEnvironmentSlotStatus{
+		SlotIndex: *slotIndex,
+		SlotName:  *slotName,
+		State:     state,
+		UpdatedAt: now,
+		Detail:    detail,
+	}
+	if state == "ready" {
+		status.ReadyAt = &now
+	}
+	_, _ = writer.SetProjectTestEnvironmentSlotStatus(ctx, firstNonEmpty(lease.Project, project.ID, project.Name), status)
+}
+
 func findProjectForTestSlot(r *http.Request, w http.ResponseWriter, store ReadStore, name string) (Project, bool) {
 	projects, err := store.ListProjects(r.Context())
 	if err != nil {
@@ -203,11 +227,8 @@ func findProjectForTestSlot(r *http.Request, w http.ResponseWriter, store ReadSt
 	return Project{}, false
 }
 
-func testSlotCheckoutResponse(project Project, workflow string, lease Lease, host *Host, requestedSlot *int) TestSlotCheckoutResult {
+func testSlotCheckoutResponse(project Project, workflow string, lease Lease, host *Host) TestSlotCheckoutResult {
 	slotIndex := nativeSlotIndexFromMetadata(lease.Metadata)
-	if slotIndex == nil {
-		slotIndex = requestedSlot
-	}
 	slotName := nativeSlotNameFromMetadata(lease.Metadata)
 	url := testSlotURL(project, slotName)
 	ref := LeasePublicRefFromLease(lease)
@@ -274,14 +295,7 @@ func testSlotRequesterRef(req TestSlotCheckoutRequest) string {
 	if req.TankSessionID != nil && strings.TrimSpace(*req.TankSessionID) != "" {
 		return "tank-session-" + strings.TrimSpace(*req.TankSessionID)
 	}
-	if req.SlotIndex != nil {
-		return fmt.Sprintf("%s-slot-%d", req.Project, *req.SlotIndex)
-	}
 	return req.Project
-}
-
-func testSlotName(project Project, slotIndex int) string {
-	return fmt.Sprintf("%s-%d", testSlotPrefix(project), slotIndex)
 }
 
 func testSlotPrefix(project Project) string {
@@ -317,28 +331,13 @@ func nativeSlotIndexFromMetadata(metadata map[string]any) *int {
 	if n, ok := positiveIntFromMap(metadata, "native_slot_index"); ok {
 		return &n
 	}
-	if phaseInputs, ok := mapFromMap(metadata, "phase_inputs"); ok {
-		if n, ok := positiveIntFromMap(phaseInputs, "validation_slot_index"); ok {
-			return &n
-		}
-	}
 	return nil
 }
 
 func nativeSlotNameFromMetadata(metadata map[string]any) *string {
-	for _, key := range []string{"native_slot_name", "slot_name", "namespace"} {
-		if value, ok := stringFromMap(metadata, key); ok && strings.TrimSpace(value) != "" {
-			clean := strings.TrimSpace(value)
-			return &clean
-		}
-	}
-	if phaseInputs, ok := mapFromMap(metadata, "phase_inputs"); ok {
-		for _, key := range []string{"slot_name", "namespace"} {
-			if value, ok := stringFromMap(phaseInputs, key); ok && strings.TrimSpace(value) != "" {
-				clean := strings.TrimSpace(value)
-				return &clean
-			}
-		}
+	if value, ok := stringFromMap(metadata, "native_slot_name"); ok && strings.TrimSpace(value) != "" {
+		clean := strings.TrimSpace(value)
+		return &clean
 	}
 	return nil
 }

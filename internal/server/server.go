@@ -159,6 +159,10 @@ func newHandler(settings Settings, store ReadStore, authResolver AuthResolver, g
 	if m, ok := ghClient.(NativeGitHubTokenMinter); ok {
 		nativeTokenMinter = m
 	}
+	var testSlotPreparer TestSlotPreparer
+	if p, ok := nativeLauncher.(TestSlotPreparer); ok {
+		testSlotPreparer = p
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
 	mux.HandleFunc("GET /v1/config", publicConfig(settings))
@@ -292,7 +296,7 @@ func newHandler(settings Settings, store ReadStore, authResolver AuthResolver, g
 	)
 	mux.Handle(
 		"PATCH /v1/projects/{project}/test-environments/count",
-		requireAdmin(adminAuthenticator, http.HandlerFunc(scaleProjectTestEnvironments(store, authRedirects))),
+		requireAdmin(adminAuthenticator, http.HandlerFunc(scaleProjectTestEnvironments(store, authRedirects, testSlotPreparer, nativeTokenMinter))),
 	)
 	mux.HandleFunc("GET /v1/workflows", listWorkflows(store))
 	mux.Handle("POST /v1/workflows", requireAdmin(adminAuthenticator, http.HandlerFunc(registerWorkflow(store))))
@@ -339,12 +343,8 @@ func newHandler(settings Settings, store ReadStore, authResolver AuthResolver, g
 		legacyGone("native completion by run coordinates is retired; use /v1/run-callbacks/{callback_token}/native/completed"),
 	)
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/completed", nativeRunCompletedByCallbackToken(store, ghDispatch, nativeLauncher))
-	var testSlotPreparer TestSlotPreparer
-	if p, ok := nativeLauncher.(TestSlotPreparer); ok {
-		testSlotPreparer = p
-	}
 	mux.Handle("POST /v1/test-slots/checkout", requireAdmin(adminAuthenticator, http.HandlerFunc(checkoutTestSlot(store, testSlotPreparer, nativeTokenMinter))))
-	mux.Handle("POST /v1/test-slots/return", requireAdmin(adminAuthenticator, http.HandlerFunc(returnTestSlot(store, testSlotPreparer))))
+	mux.Handle("POST /v1/test-slots/return", requireAdmin(adminAuthenticator, http.HandlerFunc(returnTestSlot(store, testSlotPreparer, nativeTokenMinter))))
 	mux.Handle("POST /v1/test-slots/hot-swap-history", requireAdmin(adminAuthenticator, http.HandlerFunc(appendTestSlotHotSwapHistory(store))))
 	mux.Handle("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/replay", requireAdmin(adminAuthenticator, http.HandlerFunc(replayRunDecisionByNumber(store))))
 	mux.Handle("POST /v1/runs/dispatch", requireAdmin(adminAuthenticator, http.HandlerFunc(dispatchRunHandler(store, ghDispatch, nativeLauncher))))

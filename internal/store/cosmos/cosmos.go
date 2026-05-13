@@ -198,6 +198,7 @@ func (s *Store) SetProjectTestEnvironmentCount(ctx context.Context, project stri
 		standbyDNS = map[string]any{}
 	}
 	standbyDNS["count"] = count
+	standbyDNS["slots"] = pruneProjectTestEnvironmentSlots(standbyDNS["slots"], count)
 	metadata["native_standby_dns"] = standbyDNS
 	doc["metadata"] = metadata
 
@@ -240,6 +241,93 @@ func (s *Store) SetProjectNativeAuthRedirectStatus(ctx context.Context, project 
 		return server.Project{}, err
 	}
 	return projectFromMap(doc)
+}
+
+func (s *Store) SetProjectTestEnvironmentSlotStatus(ctx context.Context, project string, status server.TestEnvironmentSlotStatus) (server.Project, error) {
+	partitionKey := azcosmos.NewPartitionKeyString(project)
+	read, err := s.projects.ReadItem(ctx, partitionKey, project, nil)
+	if err != nil {
+		if isCosmosStatus(err, http.StatusNotFound) {
+			return server.Project{}, server.ErrNotFound
+		}
+		return server.Project{}, err
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(read.Value, &doc); err != nil {
+		return server.Project{}, err
+	}
+	metadata, _ := doc["metadata"].(map[string]any)
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	standbyDNS, _ := metadata["native_standby_dns"].(map[string]any)
+	if standbyDNS == nil {
+		standbyDNS = map[string]any{}
+	}
+	standbyDNS["slots"] = setProjectTestEnvironmentSlotStatus(standbyDNS["slots"], status)
+	metadata["native_standby_dns"] = standbyDNS
+	doc["metadata"] = metadata
+
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return server.Project{}, err
+	}
+	if _, err := s.projects.ReplaceItem(ctx, partitionKey, project, payload, nil); err != nil {
+		return server.Project{}, err
+	}
+	return projectFromMap(doc)
+}
+
+func pruneProjectTestEnvironmentSlots(raw any, count int) []map[string]any {
+	slots := make([]map[string]any, 0)
+	for _, slot := range mapSliceValue(raw) {
+		index, ok := positiveIntValue(firstAny(slot["slot_index"], slot["slotIndex"]))
+		if !ok || index > count {
+			continue
+		}
+		slots = append(slots, slot)
+	}
+	return slots
+}
+
+func setProjectTestEnvironmentSlotStatus(raw any, status server.TestEnvironmentSlotStatus) []map[string]any {
+	slots := make([]map[string]any, 0)
+	replaced := false
+	for _, slot := range mapSliceValue(raw) {
+		index, ok := positiveIntValue(firstAny(slot["slot_index"], slot["slotIndex"]))
+		if ok && index == status.SlotIndex {
+			slots = append(slots, projectTestEnvironmentSlotStatusMap(status))
+			replaced = true
+			continue
+		}
+		slots = append(slots, slot)
+	}
+	if !replaced {
+		slots = append(slots, projectTestEnvironmentSlotStatusMap(status))
+	}
+	sort.SliceStable(slots, func(i, j int) bool {
+		left, _ := positiveIntValue(firstAny(slots[i]["slot_index"], slots[i]["slotIndex"]))
+		right, _ := positiveIntValue(firstAny(slots[j]["slot_index"], slots[j]["slotIndex"]))
+		return left < right
+	})
+	return slots
+}
+
+func projectTestEnvironmentSlotStatusMap(status server.TestEnvironmentSlotStatus) map[string]any {
+	slot := map[string]any{
+		"slot_index": status.SlotIndex,
+		"slot_name":  status.SlotName,
+		"state":      status.State,
+		"updated_at": status.UpdatedAt.Format(time.RFC3339Nano),
+	}
+	if status.Detail != nil && strings.TrimSpace(*status.Detail) != "" {
+		slot["detail"] = strings.TrimSpace(*status.Detail)
+	}
+	if status.ReadyAt != nil {
+		slot["ready_at"] = status.ReadyAt.Format(time.RFC3339Nano)
+	}
+	return slot
 }
 
 func (s *Store) readProjectDoc(ctx context.Context, project string) (projectDoc, error) {
@@ -2107,6 +2195,32 @@ func anyMapValue(raw any) map[string]any {
 	return map[string]any{}
 }
 
+func mapSliceValue(raw any) []map[string]any {
+	switch typed := raw.(type) {
+	case []map[string]any:
+		return typed
+	case []any:
+		out := make([]map[string]any, 0, len(typed))
+		for _, value := range typed {
+			if item, ok := value.(map[string]any); ok {
+				out = append(out, item)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func firstAny(values ...any) any {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
 func stringValue(value any) string {
 	typed, ok := value.(string)
 	if !ok {
@@ -3869,6 +3983,9 @@ func (s *Store) AcquireLease(ctx context.Context, req server.LeaseAcquireRequest
 }
 
 func (s *Store) acquireNativeLease(ctx context.Context, req server.LeaseAcquireRequest) (server.Lease, *server.Host, error) {
+	if err := validateNativeLeaseSlotIdentity(req.Metadata); err != nil {
+		return server.Lease{}, nil, err
+	}
 	now := time.Now().UTC()
 	nowStr := now.Format(time.RFC3339Nano)
 	leaseID := uuid.New().String()
@@ -3885,31 +4002,26 @@ func (s *Store) acquireNativeLease(ctx context.Context, req server.LeaseAcquireR
 	callbackToken := uuid.New().String()[:32]
 	metadata["lease_callback_token"] = callbackToken
 
-	slotIndex, err := s.availableNativeSlot(ctx, req.Project, metadata)
+	slotIndex, err := s.availableNativeSlot(ctx, req.Project)
 	if err != nil {
 		return server.Lease{}, nil, err
 	}
-	state := "pending"
-	var host *string
-	assignedAt := ""
-	if slotIndex != nil {
-		state = "claimed"
-		hostName := "native-k8s"
-		host = &hostName
-		assignedAt = nowStr
-		setNativeSlotMetadata(metadata, req.Project, *slotIndex, s.nativeSlotPrefix(ctx, req.Project, metadata))
+	if slotIndex == nil {
+		return server.Lease{}, nil, server.ErrUnavailable
 	}
+	hostName := "native-k8s"
+	setNativeSlotMetadata(metadata, req.Project, *slotIndex, s.nativeSlotPrefix(ctx, req.Project))
 	doc := leaseDoc{
 		ID:           leaseID,
 		LeaseNumber:  &leaseNumber,
 		Project:      req.Project,
 		Workflow:     req.Workflow,
-		Host:         host,
-		State:        state,
+		Host:         &hostName,
+		State:        "claimed",
 		Requirements: req.Requirements,
 		Metadata:     metadata,
 		RequestedAt:  nowStr,
-		AssignedAt:   assignedAt,
+		AssignedAt:   nowStr,
 		TTLSeconds:   ttl,
 	}
 	payload, err := json.Marshal(doc)
@@ -3920,9 +4032,6 @@ func (s *Store) acquireNativeLease(ctx context.Context, req server.LeaseAcquireR
 		return server.Lease{}, nil, fmt.Errorf("create native lease doc: %w", err)
 	}
 	lease := leaseFromDoc(doc)
-	if state != "claimed" {
-		return lease, nil, nil
-	}
 	return lease, &server.Host{
 		ID:            "native-k8s",
 		Name:          "native-k8s",
@@ -3932,7 +4041,7 @@ func (s *Store) acquireNativeLease(ctx context.Context, req server.LeaseAcquireR
 	}, nil
 }
 
-func (s *Store) availableNativeSlot(ctx context.Context, project string, metadata map[string]any) (*int, error) {
+func (s *Store) availableNativeSlot(ctx context.Context, project string) (*int, error) {
 	var docs []leaseDoc
 	if err := queryAllWhere(
 		ctx,
@@ -3943,7 +4052,7 @@ func (s *Store) availableNativeSlot(ctx context.Context, project string, metadat
 	); err != nil {
 		return nil, err
 	}
-	projectCap := s.nativeProjectCap(ctx, project)
+	readySlots := s.nativeReadySlots(ctx, project)
 	globalCap := s.nativeGlobalCap()
 	if len(docs) >= globalCap {
 		return nil, nil
@@ -3959,16 +4068,10 @@ func (s *Store) availableNativeSlot(ctx context.Context, project string, metadat
 			used[*slot] = true
 		}
 	}
-	if projectActive >= projectCap {
+	if projectActive >= len(readySlots) {
 		return nil, nil
 	}
-	if preferred := nativePreferredSlot(metadata); preferred != nil {
-		if *preferred >= 1 && *preferred <= projectCap && !used[*preferred] {
-			return preferred, nil
-		}
-		return nil, nil
-	}
-	for slot := 1; slot <= projectCap; slot++ {
+	for _, slot := range readySlots {
 		if !used[slot] {
 			return &slot, nil
 		}
@@ -3976,18 +4079,32 @@ func (s *Store) availableNativeSlot(ctx context.Context, project string, metadat
 	return nil, nil
 }
 
-func (s *Store) nativeProjectCap(ctx context.Context, project string) int {
-	if doc, err := s.readProjectDoc(ctx, project); err == nil {
-		if standby, ok := doc.Metadata["native_standby_dns"].(map[string]any); ok {
-			if count, ok := positiveIntValue(standby["count"]); ok {
-				return count
-			}
+func (s *Store) nativeReadySlots(ctx context.Context, project string) []int {
+	doc, err := s.readProjectDoc(ctx, project)
+	if err != nil {
+		return nil
+	}
+	standby, ok := doc.Metadata["native_standby_dns"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	count, ok := positiveIntValue(standby["count"])
+	if !ok {
+		return nil
+	}
+	slots := make([]int, 0)
+	for _, slot := range mapSliceValue(standby["slots"]) {
+		index, ok := positiveIntValue(firstAny(slot["slot_index"], slot["slotIndex"]))
+		if !ok || index < 1 || index > count {
+			continue
+		}
+		state, _ := slot["state"].(string)
+		if strings.EqualFold(strings.TrimSpace(state), "ready") {
+			slots = append(slots, index)
 		}
 	}
-	if s.nativeProjectConcurrency > 0 {
-		return s.nativeProjectConcurrency
-	}
-	return 5
+	sort.Ints(slots)
+	return slots
 }
 
 func (s *Store) nativeGlobalCap() int {
@@ -3997,10 +4114,7 @@ func (s *Store) nativeGlobalCap() int {
 	return 5
 }
 
-func (s *Store) nativeSlotPrefix(ctx context.Context, project string, metadata map[string]any) string {
-	if prefix, ok := metadata["native_slot_prefix"].(string); ok && strings.TrimSpace(prefix) != "" {
-		return strings.Trim(strings.TrimSpace(prefix), ".")
-	}
+func (s *Store) nativeSlotPrefix(ctx context.Context, project string) string {
 	doc, err := s.readProjectDoc(ctx, project)
 	if err == nil {
 		if standby, ok := doc.Metadata["native_standby_dns"].(map[string]any); ok {
@@ -4264,16 +4378,38 @@ func isNativeLeaseRequest(req server.LeaseAcquireRequest) bool {
 		boolValue(req.Requirements["native_k8s"])
 }
 
-func nativePreferredSlot(metadata map[string]any) *int {
-	for _, value := range []any{
-		metadata["native_slot_index"],
-		anyMapValue(metadata["phase_inputs"])["validation_slot_index"],
+func validateNativeLeaseSlotIdentity(metadata map[string]any) error {
+	for _, key := range []string{
+		"native_slot_index",
+		"native_slot_name",
+		"native_slot_prefix",
+		"native_sessions_namespace",
 	} {
-		if n, ok := positiveIntValue(value); ok {
-			return &n
+		if valueHasMeaning(metadata[key]) {
+			return server.ValidationError{Message: "native lease requests may not include caller-supplied slot identity field " + key}
 		}
 	}
+	phaseInputs := anyMapValue(metadata["phase_inputs"])
+	for _, key := range []string{"validation_slot_index", "slot_index", "native_slot_index", "native_slot_name"} {
+		if valueHasMeaning(phaseInputs[key]) {
+			return server.ValidationError{Message: "native lease requests may not include caller-supplied slot identity field phase_inputs." + key}
+		}
+	}
+	if boolValue(metadata["test_slot_checkout"]) && len(phaseInputs) > 0 {
+		return server.ValidationError{Message: "test-slot checkout lease requests may not include phase_inputs"}
+	}
 	return nil
+}
+
+func valueHasMeaning(value any) bool {
+	switch typed := value.(type) {
+	case nil:
+		return false
+	case string:
+		return strings.TrimSpace(typed) != ""
+	default:
+		return true
+	}
 }
 
 func nativeSlotIndex(metadata map[string]any) *int {
@@ -4285,10 +4421,6 @@ func nativeSlotIndex(metadata map[string]any) *int {
 
 func setNativeSlotMetadata(metadata map[string]any, project string, slotIndex int, slotPrefix string) {
 	metadata["native_slot_index"] = strconv.Itoa(slotIndex)
-	if existing, ok := metadata["native_slot_name"].(string); ok && strings.TrimSpace(existing) != "" {
-		metadata["native_slot_name"] = strings.TrimSpace(existing)
-		return
-	}
 	prefix := strings.Trim(strings.TrimSpace(slotPrefix), ".")
 	if prefix == "" {
 		prefix = project
