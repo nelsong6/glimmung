@@ -131,14 +131,23 @@ func (s NativeWorkloadIdentityService) ReconcileNativeWorkloadIdentities(ctx con
 	}
 
 	desired := desiredWorkloadIdentityCredentials(cfg)
-	deleted, err := s.deleteRemovedManagedCredentials(ctx, cfg, desired)
+	currentByIdentity, err := s.currentCredentialsByIdentity(ctx, cfg)
+	if err != nil {
+		status.LastError = stringPtr(err.Error())
+		return status, err
+	}
+	deleted, err := s.deleteRemovedManagedCredentials(ctx, cfg, desired, currentByIdentity)
 	if err != nil {
 		status.LastError = stringPtr(err.Error())
 		return status, err
 	}
 	status.Deleted = credentialStatusList(deleted)
 
+	currentSet := workloadIdentityCredentialFullSet(flattenWorkloadIdentityCredentials(currentByIdentity))
 	for _, credential := range desired {
+		if currentSet[workloadIdentityCredentialFullKey(credential)] {
+			continue
+		}
 		if err := s.Client.UpsertFederatedIdentityCredential(ctx, credential); err != nil {
 			err = fmt.Errorf("upsert federated identity credential %s/%s: %w", credential.IdentityName, credential.CredentialName, err)
 			status.LastError = stringPtr(err.Error())
@@ -152,9 +161,8 @@ func (s NativeWorkloadIdentityService) ReconcileNativeWorkloadIdentities(ctx con
 	return status, nil
 }
 
-func (s NativeWorkloadIdentityService) deleteRemovedManagedCredentials(ctx context.Context, cfg nativeWorkloadIdentityConfig, desired []FederatedIdentityCredential) ([]FederatedIdentityCredential, error) {
-	deleted := []FederatedIdentityCredential{}
-	desiredSet := workloadIdentityCredentialSet(desired)
+func (s NativeWorkloadIdentityService) currentCredentialsByIdentity(ctx context.Context, cfg nativeWorkloadIdentityConfig) (map[string][]FederatedIdentityCredential, error) {
+	currentByIdentity := map[string][]FederatedIdentityCredential{}
 	seenIdentity := map[string]bool{}
 	for _, template := range cfg.Credentials {
 		if seenIdentity[template.IdentityName] {
@@ -170,6 +178,21 @@ func (s NativeWorkloadIdentityService) deleteRemovedManagedCredentials(ctx conte
 		if err != nil {
 			return nil, fmt.Errorf("list federated identity credentials for %s: %w", template.IdentityName, err)
 		}
+		currentByIdentity[template.IdentityName] = current
+	}
+	return currentByIdentity, nil
+}
+
+func (s NativeWorkloadIdentityService) deleteRemovedManagedCredentials(ctx context.Context, cfg nativeWorkloadIdentityConfig, desired []FederatedIdentityCredential, currentByIdentity map[string][]FederatedIdentityCredential) ([]FederatedIdentityCredential, error) {
+	deleted := []FederatedIdentityCredential{}
+	desiredSet := workloadIdentityCredentialSet(desired)
+	seenIdentity := map[string]bool{}
+	for _, template := range cfg.Credentials {
+		if seenIdentity[template.IdentityName] {
+			continue
+		}
+		seenIdentity[template.IdentityName] = true
+		current := currentByIdentity[template.IdentityName]
 		for _, credential := range current {
 			if desiredSet[workloadIdentityCredentialKey(credential)] {
 				continue
@@ -304,6 +327,28 @@ func workloadIdentityCredentialSet(credentials []FederatedIdentityCredential) ma
 
 func workloadIdentityCredentialKey(credential FederatedIdentityCredential) string {
 	return credential.IdentityName + "\x00" + credential.CredentialName + "\x00" + credential.Subject
+}
+
+func workloadIdentityCredentialFullSet(credentials []FederatedIdentityCredential) map[string]bool {
+	out := map[string]bool{}
+	for _, credential := range credentials {
+		out[workloadIdentityCredentialFullKey(credential)] = true
+	}
+	return out
+}
+
+func workloadIdentityCredentialFullKey(credential FederatedIdentityCredential) string {
+	audiences := append([]string{}, credential.Audiences...)
+	sort.Strings(audiences)
+	return workloadIdentityCredentialKey(credential) + "\x00" + credential.Issuer + "\x00" + strings.Join(audiences, "\x00")
+}
+
+func flattenWorkloadIdentityCredentials(currentByIdentity map[string][]FederatedIdentityCredential) []FederatedIdentityCredential {
+	var out []FederatedIdentityCredential
+	for _, credentials := range currentByIdentity {
+		out = append(out, credentials...)
+	}
+	return out
 }
 
 func workloadIdentitySubstitutions(cfg nativeWorkloadIdentityConfig, slotIndex int, slotName string) map[string]string {
