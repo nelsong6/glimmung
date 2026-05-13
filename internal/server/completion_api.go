@@ -81,7 +81,7 @@ type NativeRunCompletedRequest struct {
 }
 
 // runCompletedByCallbackToken handles POST /v1/run-callbacks/{callback_token}/completed.
-func runCompletedByCallbackToken(store ReadStore, ghDispatch GHADispatchClient) http.HandlerFunc {
+func runCompletedByCallbackToken(store ReadStore, ghDispatch GHADispatchClient, nativeLauncher NativeLauncher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		completionStore, ok := store.(RunCompletionStore)
 		if !ok || completionStore == nil {
@@ -110,7 +110,7 @@ func runCompletedByCallbackToken(store ReadStore, ghDispatch GHADispatchClient) 
 		}
 
 		wfRunID := req.WorkflowRunID
-		result := processRunCompletion(r.Context(), w, completionStore, ghDispatch, project, runID, completionPayloadFromGHA(req), &wfRunID)
+		result := processRunCompletion(r.Context(), w, completionStore, ghDispatch, nativeLauncher, project, runID, completionPayloadFromGHA(req), &wfRunID)
 		if result != nil {
 			writeJSON(w, http.StatusOK, result)
 		}
@@ -118,7 +118,7 @@ func runCompletedByCallbackToken(store ReadStore, ghDispatch GHADispatchClient) 
 }
 
 // nativeRunCompletedByCallbackToken handles POST /v1/run-callbacks/{callback_token}/native/completed.
-func nativeRunCompletedByCallbackToken(store ReadStore, ghDispatch GHADispatchClient) http.HandlerFunc {
+func nativeRunCompletedByCallbackToken(store ReadStore, ghDispatch GHADispatchClient, nativeLauncher NativeLauncher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		completionStore, ok := store.(RunCompletionStore)
 		if !ok || completionStore == nil {
@@ -191,7 +191,7 @@ func nativeRunCompletedByCallbackToken(store ReadStore, ghDispatch GHADispatchCl
 			return
 		}
 
-		result := processRunCompletion(r.Context(), w, completionStore, ghDispatch, project, runID, jobResult.PhasePayload, nil)
+		result := processRunCompletion(r.Context(), w, completionStore, ghDispatch, nativeLauncher, project, runID, jobResult.PhasePayload, nil)
 		if result != nil {
 			phaseComplete := true
 			result.PhaseComplete = &phaseComplete
@@ -257,6 +257,7 @@ func processRunCompletion(
 	w http.ResponseWriter,
 	store RunCompletionStore,
 	ghDispatch GHADispatchClient,
+	nativeLauncher NativeLauncher,
 	project, runID string,
 	payload CompletionPayload,
 	workflowRunID *int64,
@@ -343,7 +344,7 @@ func processRunCompletion(
 	// 7. Route on decision.
 	switch verdict {
 	case decision.Retry:
-		err := dispatchRetry(ctx, store, ghDispatch, run, wf, lastAttempt.Phase)
+		err := dispatchRetry(ctx, store, ghDispatch, nativeLauncher, run, wf, lastAttempt.Phase)
 		if err != nil {
 			// Retry dispatch failed — abort the run to prevent it getting stuck.
 			abortReason := fmt.Sprintf("retry_dispatch_failed: %s", err)
@@ -357,7 +358,7 @@ func processRunCompletion(
 		targets := allReadyDispatchTargets(wf, run, verdict)
 		if len(targets) > 0 {
 			for _, target := range targets {
-				if err := dispatchForwardPhase(ctx, store, ghDispatch, run, wf, target); err != nil {
+				if err := dispatchForwardPhase(ctx, store, ghDispatch, nativeLauncher, run, wf, target); err != nil {
 					abortReason := fmt.Sprintf("forward_dispatch_failed: %s", err)
 					_, _ = store.AbortRunByID(ctx, project, runID, abortReason)
 					verdictStr = "abort_malformed"
@@ -392,7 +393,7 @@ func processRunCompletion(
 		targets := allReadyDispatchTargets(wf, run, verdict)
 		if len(targets) > 0 {
 			for _, target := range targets {
-				if err := dispatchForwardPhase(ctx, store, ghDispatch, run, wf, target); err != nil {
+				if err := dispatchForwardPhase(ctx, store, ghDispatch, nativeLauncher, run, wf, target); err != nil {
 					abortReason := fmt.Sprintf("teardown_dispatch_failed: %s", err)
 					_, _ = store.AbortRunByID(ctx, project, runID, abortReason)
 					verdictStr = "abort_malformed"
@@ -623,6 +624,7 @@ func dispatchForwardPhase(
 	ctx context.Context,
 	store RunCompletionStore,
 	ghDispatch GHADispatchClient,
+	nativeLauncher NativeLauncher,
 	run RunReplayData,
 	wf *Workflow,
 	targetPhase PhaseSpec,
@@ -652,6 +654,9 @@ func dispatchForwardPhase(
 		"issue_number":        strconv.Itoa(run.IssueNumber),
 		"work_context_branch": fmt.Sprintf("issue-%d-run-unknown", run.IssueNumber),
 	}
+	if phaseKind == "k8s_job" {
+		metadata["native_k8s"] = true
+	}
 	if run.CallbackToken != nil && *run.CallbackToken != "" {
 		metadata["run_callback_token"] = *run.CallbackToken
 	}
@@ -670,6 +675,23 @@ func dispatchForwardPhase(
 	})
 	if err != nil {
 		return fmt.Errorf("acquire lease for forward phase: %w", err)
+	}
+	if phaseKind == "k8s_job" && lease.State == "claimed" {
+		launchedRun := run
+		launchedRun.Attempts = append(append([]RunAttemptData{}, run.Attempts...), RunAttemptData{
+			AttemptIndex: newAttemptIdx,
+			Phase:        targetPhase.Name,
+		})
+		if nativeLauncher == nil {
+			return fmt.Errorf("no native launcher configured")
+		}
+		_, err := nativeLauncher.LaunchNativePhase(ctx, NativeLaunchRequest{
+			Lease:    lease,
+			Workflow: *wf,
+			Phase:    targetPhase,
+			Run:      launchedRun,
+		})
+		return err
 	}
 	if phaseKind != "gha_dispatch" || host == nil {
 		return nil
@@ -753,6 +775,7 @@ func dispatchRetry(
 	ctx context.Context,
 	store RunCompletionStore,
 	ghDispatch GHADispatchClient,
+	nativeLauncher NativeLauncher,
 	run RunReplayData,
 	wf *Workflow,
 	failingPhase string,
@@ -782,11 +805,30 @@ func dispatchRetry(
 	}
 
 	// Acquire a lease for the target phase.
+	phaseKind := firstNonEmpty(targetPhase.Kind, "gha_dispatch")
 	wfName := wf.Name
+	metadata := map[string]any{
+		"run_id":              run.ID,
+		"run_ref":             runRefFromData(run),
+		"phase_name":          targetPhase.Name,
+		"issue_ref":           publicids.IssueRef(run.Project, positiveIssueNumber(run.IssueNumber)),
+		"issue_number":        strconv.Itoa(run.IssueNumber),
+		"work_context_branch": fmt.Sprintf("issue-%d-run-unknown", run.IssueNumber),
+	}
+	if phaseKind == "k8s_job" {
+		metadata["native_k8s"] = true
+	}
+	if run.CallbackToken != nil && *run.CallbackToken != "" {
+		metadata["run_callback_token"] = *run.CallbackToken
+	}
+	if run.IssueLockHolderID != nil && *run.IssueLockHolderID != "" {
+		metadata["issue_lock_holder_id"] = *run.IssueLockHolderID
+	}
 	lease, host, err := store.AcquireLease(ctx, LeaseAcquireRequest{
 		Project:      run.Project,
 		Workflow:     &wfName,
 		Requirements: targetPhase.Requirements,
+		Metadata:     metadata,
 		Requester: LeaseRequesterInput{
 			Consumer: "run",
 			Kind:     "retry",
@@ -798,7 +840,6 @@ func dispatchRetry(
 	}
 
 	// Append the new attempt to the run doc.
-	phaseKind := firstNonEmpty(targetPhase.Kind, "gha_dispatch")
 	workflowFilename := targetPhase.WorkflowFilename
 	if workflowFilename == "" {
 		workflowFilename = fmt.Sprintf("%s:%s", phaseKind, targetPhase.Name)
@@ -806,6 +847,27 @@ func dispatchRetry(
 	newAttemptIdx, err := store.AppendRunAttempt(ctx, run.Project, run.ID, targetPhase.Name, phaseKind, workflowFilename)
 	if err != nil {
 		return fmt.Errorf("append retry attempt: %w", err)
+	}
+	if lease.Metadata == nil {
+		lease.Metadata = map[string]any{}
+	}
+	lease.Metadata["attempt_index"] = strconv.Itoa(newAttemptIdx)
+	if phaseKind == "k8s_job" && lease.State == "claimed" {
+		launchedRun := run
+		launchedRun.Attempts = append(append([]RunAttemptData{}, run.Attempts...), RunAttemptData{
+			AttemptIndex: newAttemptIdx,
+			Phase:        targetPhase.Name,
+		})
+		if nativeLauncher == nil {
+			return fmt.Errorf("no native launcher configured")
+		}
+		_, err := nativeLauncher.LaunchNativePhase(ctx, NativeLaunchRequest{
+			Lease:    lease,
+			Workflow: *wf,
+			Phase:    *targetPhase,
+			Run:      launchedRun,
+		})
+		return err
 	}
 	if phaseKind != "gha_dispatch" {
 		return nil

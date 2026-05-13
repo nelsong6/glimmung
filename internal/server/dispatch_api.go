@@ -99,7 +99,7 @@ type PublicDispatchResult struct {
 }
 
 // dispatchRunHandler handles POST /v1/runs/dispatch (admin-only).
-func dispatchRunHandler(store ReadStore, ghDispatch GHADispatchClient) http.HandlerFunc {
+func dispatchRunHandler(store ReadStore, ghDispatch GHADispatchClient, nativeLauncher NativeLauncher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		dispatchStore, ok := store.(RunDispatchStore)
 		if !ok || dispatchStore == nil {
@@ -112,7 +112,7 @@ func dispatchRunHandler(store ReadStore, ghDispatch GHADispatchClient) http.Hand
 			writeProblem(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
-		result, problem := dispatchRun(r.Context(), dispatchStore, ghDispatch, req)
+		result, problem := dispatchRun(r.Context(), dispatchStore, ghDispatch, nativeLauncher, req)
 		if problem != nil {
 			writeProblem(w, problem.status, problem.message)
 			return
@@ -126,7 +126,7 @@ type dispatchProblem struct {
 	message string
 }
 
-func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, ghDispatch GHADispatchClient, req DispatchRunRequest) (PublicDispatchResult, *dispatchProblem) {
+func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, ghDispatch GHADispatchClient, nativeLauncher NativeLauncher, req DispatchRunRequest) (PublicDispatchResult, *dispatchProblem) {
 	if req.Project == "" {
 		return PublicDispatchResult{}, &dispatchProblem{status: http.StatusBadRequest, message: "project required"}
 	}
@@ -241,6 +241,9 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, ghDispatch
 		"issue_number":         strconv.Itoa(req.IssueNumber),
 		"work_context_branch":  fmt.Sprintf("issue-%d-run-%s", req.IssueNumber, run.RunDisplay),
 	}
+	if phaseKind == "k8s_job" {
+		metadata["native_k8s"] = true
+	}
 
 	requirements := initPhase.Requirements
 	if len(requirements) == 0 {
@@ -286,6 +289,39 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, ghDispatch
 		}
 		result.State = "dispatched"
 		hostName := host.Name
+		result.Host = &hostName
+	} else if phaseKind == "k8s_job" && nativeLauncher != nil && lease.State == "claimed" {
+		runData := RunReplayData{
+			ID:               run.ID,
+			Project:          req.Project,
+			WorkflowName:     wf.Name,
+			IssueNumber:      req.IssueNumber,
+			RunNumber:        &run.RunNumber,
+			RunDisplayNumber: &run.RunDisplay,
+			IssueRepo:        issueRepo,
+			CallbackToken:    &run.CallbackToken,
+			Attempts: []RunAttemptData{{
+				AttemptIndex: 0,
+				Phase:        initPhase.Name,
+			}},
+		}
+		if _, err := nativeLauncher.LaunchNativePhase(ctx, NativeLaunchRequest{
+			Lease:    lease,
+			Workflow: *wf,
+			Phase:    initPhase,
+			Run:      runData,
+		}); err != nil {
+			dispatchStore.AbortRunByID(ctx, req.Project, run.ID, "native_dispatch_failed: "+err.Error()) //nolint:errcheck
+			detail := fmt.Sprintf("native dispatch failed: %s", err)
+			result.State = "dispatch_failed"
+			result.Detail = &detail
+			return result, nil
+		}
+		result.State = "dispatched"
+		hostName := "native-k8s"
+		if host != nil {
+			hostName = host.Name
+		}
 		result.Host = &hostName
 	} else {
 		result.State = "pending"

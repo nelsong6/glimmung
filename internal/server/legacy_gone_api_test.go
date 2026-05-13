@@ -32,11 +32,7 @@ func TestLegacyStorageIDRoutesReturnGone(t *testing.T) {
 		{http.MethodPatch, "/v1/reports/by-id/glimmung/report-1", "touchpoints are no longer patchable by storage id"},
 		{http.MethodPatch, "/v1/touchpoints/by-id/glimmung/report-1", "touchpoints are no longer patchable by storage id"},
 		{http.MethodGet, "/v1/projects/glimmung/issues/455/runs/1/native/pod-logs", "native pod log proxying is retired"},
-		{http.MethodPost, "/v1/projects/glimmung/issues/455/runs/1/native/github-token", "native GitHub token minting by run coordinates is retired"},
-		{http.MethodPost, "/v1/run-callbacks/callback-token/native/github-token", "native GitHub token minting by callback token is retired"},
 		{http.MethodPost, "/v1/projects/glimmung/issues/455/runs/1/native/completed", "native completion by run coordinates is retired"},
-		{http.MethodPost, "/v1/test-slots/checkout", "test-slot checkout is retired"},
-		{http.MethodPost, "/v1/test-slots/return", "test-slot return is retired"},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			rec := httptest.NewRecorder()

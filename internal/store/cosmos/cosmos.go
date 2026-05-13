@@ -25,17 +25,19 @@ import (
 )
 
 type Store struct {
-	projects  *azcosmos.ContainerClient
-	workflows *azcosmos.ContainerClient
-	hosts     *azcosmos.ContainerClient
-	leases    *azcosmos.ContainerClient
-	runs      *azcosmos.ContainerClient
-	runEvents *azcosmos.ContainerClient
-	issues    *azcosmos.ContainerClient
-	locks     *azcosmos.ContainerClient
-	reports   *azcosmos.ContainerClient
-	playbooks *azcosmos.ContainerClient
-	signals   *azcosmos.ContainerClient
+	projects                 *azcosmos.ContainerClient
+	workflows                *azcosmos.ContainerClient
+	hosts                    *azcosmos.ContainerClient
+	leases                   *azcosmos.ContainerClient
+	runs                     *azcosmos.ContainerClient
+	runEvents                *azcosmos.ContainerClient
+	issues                   *azcosmos.ContainerClient
+	locks                    *azcosmos.ContainerClient
+	reports                  *azcosmos.ContainerClient
+	playbooks                *azcosmos.ContainerClient
+	signals                  *azcosmos.ContainerClient
+	nativeProjectConcurrency int
+	nativeGlobalConcurrency  int
 }
 
 func NewFromSettings(settings server.Settings) (*Store, error) {
@@ -94,7 +96,21 @@ func NewFromSettings(settings server.Settings) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create signals container client: %w", err)
 	}
-	return &Store{projects: projects, workflows: workflows, hosts: hosts, leases: leases, runs: runs, runEvents: runEvents, issues: issues, locks: locks, reports: reports, playbooks: playbooks, signals: signals}, nil
+	return &Store{
+		projects:                 projects,
+		workflows:                workflows,
+		hosts:                    hosts,
+		leases:                   leases,
+		runs:                     runs,
+		runEvents:                runEvents,
+		issues:                   issues,
+		locks:                    locks,
+		reports:                  reports,
+		playbooks:                playbooks,
+		signals:                  signals,
+		nativeProjectConcurrency: settings.NativeRunnerProjectConcurrency,
+		nativeGlobalConcurrency:  settings.NativeRunnerGlobalConcurrency,
+	}, nil
 }
 
 func (s *Store) ListProjects(ctx context.Context) ([]server.Project, error) {
@@ -2023,6 +2039,30 @@ func boolValue(value any) bool {
 	return ok && typed
 }
 
+func positiveIntValue(value any) (int, bool) {
+	switch typed := value.(type) {
+	case int:
+		return typed, typed > 0
+	case int64:
+		return int(typed), typed > 0
+	case float64:
+		n := int(typed)
+		return n, typed == float64(n) && n > 0
+	case string:
+		n, err := strconv.Atoi(strings.TrimSpace(typed))
+		return n, err == nil && n > 0
+	default:
+		return 0, false
+	}
+}
+
+func anyMapValue(raw any) map[string]any {
+	if value, ok := raw.(map[string]any); ok {
+		return value
+	}
+	return map[string]any{}
+}
+
 func stringValue(value any) string {
 	typed, ok := value.(string)
 	if !ok {
@@ -3661,6 +3701,9 @@ const leaseCounterPrefix = "__counter:lease-number:"
 const maxLeaseConflictRetries = 3
 
 func (s *Store) AcquireLease(ctx context.Context, req server.LeaseAcquireRequest) (server.Lease, *server.Host, error) {
+	if isNativeLeaseRequest(req) {
+		return s.acquireNativeLease(ctx, req)
+	}
 	now := time.Now().UTC()
 	leaseID := uuid.New().String()
 	leaseNumber, err := s.nextLeaseNumber(ctx, req.Project)
@@ -3779,6 +3822,146 @@ func (s *Store) AcquireLease(ctx context.Context, req server.LeaseAcquireRequest
 		return server.Lease{}, nil, fmt.Errorf("create pending lease doc: %w", err)
 	}
 	return leaseFromDoc(pendingDoc), nil, nil
+}
+
+func (s *Store) acquireNativeLease(ctx context.Context, req server.LeaseAcquireRequest) (server.Lease, *server.Host, error) {
+	now := time.Now().UTC()
+	nowStr := now.Format(time.RFC3339Nano)
+	leaseID := uuid.New().String()
+	leaseNumber, err := s.nextLeaseNumber(ctx, req.Project)
+	if err != nil {
+		return server.Lease{}, nil, fmt.Errorf("next lease number: %w", err)
+	}
+	ttl := 900
+	if req.TTLSeconds != nil && *req.TTLSeconds > 0 {
+		ttl = *req.TTLSeconds
+	}
+	metadata := buildLeaseMetadata(req)
+	metadata["native_k8s"] = true
+	callbackToken := uuid.New().String()[:32]
+	metadata["lease_callback_token"] = callbackToken
+
+	slotIndex, err := s.availableNativeSlot(ctx, req.Project, metadata)
+	if err != nil {
+		return server.Lease{}, nil, err
+	}
+	state := "pending"
+	var host *string
+	assignedAt := ""
+	if slotIndex != nil {
+		state = "claimed"
+		hostName := "native-k8s"
+		host = &hostName
+		assignedAt = nowStr
+		setNativeSlotMetadata(metadata, req.Project, *slotIndex, s.nativeSlotPrefix(ctx, req.Project, metadata))
+	}
+	doc := leaseDoc{
+		ID:           leaseID,
+		LeaseNumber:  &leaseNumber,
+		Project:      req.Project,
+		Workflow:     req.Workflow,
+		Host:         host,
+		State:        state,
+		Requirements: req.Requirements,
+		Metadata:     metadata,
+		RequestedAt:  nowStr,
+		AssignedAt:   assignedAt,
+		TTLSeconds:   ttl,
+	}
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return server.Lease{}, nil, err
+	}
+	if _, err := s.leases.CreateItem(ctx, azcosmos.NewPartitionKeyString(req.Project), payload, nil); err != nil {
+		return server.Lease{}, nil, fmt.Errorf("create native lease doc: %w", err)
+	}
+	lease := leaseFromDoc(doc)
+	if state != "claimed" {
+		return lease, nil, nil
+	}
+	return lease, &server.Host{
+		ID:            "native-k8s",
+		Name:          "native-k8s",
+		Capabilities:  map[string]any{"native_k8s": true},
+		LastHeartbeat: &now,
+		LastUsedAt:    &now,
+	}, nil
+}
+
+func (s *Store) availableNativeSlot(ctx context.Context, project string, metadata map[string]any) (*int, error) {
+	var docs []leaseDoc
+	if err := queryAllWhere(
+		ctx,
+		s.leases,
+		"SELECT * FROM c WHERE c.state = @state AND c.metadata.native_k8s = true",
+		[]azcosmos.QueryParameter{{Name: "@state", Value: "claimed"}},
+		&docs,
+	); err != nil {
+		return nil, err
+	}
+	projectCap := s.nativeProjectCap()
+	globalCap := s.nativeGlobalCap()
+	if len(docs) >= globalCap {
+		return nil, nil
+	}
+	used := map[int]bool{}
+	projectActive := 0
+	for _, doc := range docs {
+		if doc.Project != project {
+			continue
+		}
+		projectActive++
+		if slot := nativeSlotIndex(doc.Metadata); slot != nil {
+			used[*slot] = true
+		}
+	}
+	if projectActive >= projectCap {
+		return nil, nil
+	}
+	if preferred := nativePreferredSlot(metadata); preferred != nil {
+		if *preferred >= 1 && *preferred <= projectCap && !used[*preferred] {
+			return preferred, nil
+		}
+		return nil, nil
+	}
+	for slot := 1; slot <= projectCap; slot++ {
+		if !used[slot] {
+			return &slot, nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *Store) nativeProjectCap() int {
+	if s.nativeProjectConcurrency > 0 {
+		return s.nativeProjectConcurrency
+	}
+	return 5
+}
+
+func (s *Store) nativeGlobalCap() int {
+	if s.nativeGlobalConcurrency > 0 {
+		return s.nativeGlobalConcurrency
+	}
+	return 5
+}
+
+func (s *Store) nativeSlotPrefix(ctx context.Context, project string, metadata map[string]any) string {
+	if prefix, ok := metadata["native_slot_prefix"].(string); ok && strings.TrimSpace(prefix) != "" {
+		return strings.Trim(strings.TrimSpace(prefix), ".")
+	}
+	doc, err := s.readProjectDoc(ctx, project)
+	if err == nil {
+		if standby, ok := doc.Metadata["native_standby_dns"].(map[string]any); ok {
+			if prefix, ok := standby["slot_prefix"].(string); ok && strings.TrimSpace(prefix) != "" {
+				return strings.Trim(strings.TrimSpace(prefix), ".")
+			}
+			if prefix, ok := standby["slotPrefix"].(string); ok && strings.TrimSpace(prefix) != "" {
+				return strings.Trim(strings.TrimSpace(prefix), ".")
+			}
+		}
+	}
+	return project
 }
 
 func (s *Store) CancelLeaseByRef(ctx context.Context, project, ref string) (server.CancelLeaseResult, error) {
@@ -3950,6 +4133,44 @@ func buildLeaseMetadata(req server.LeaseAcquireRequest) map[string]any {
 	m["requester_kind"] = req.Requester.Kind
 	m["requester_ref"] = req.Requester.Ref
 	return m
+}
+
+func isNativeLeaseRequest(req server.LeaseAcquireRequest) bool {
+	return boolValue(req.Metadata["native_k8s"]) ||
+		boolValue(req.Metadata["test_slot_checkout"]) ||
+		boolValue(req.Requirements["native_k8s"])
+}
+
+func nativePreferredSlot(metadata map[string]any) *int {
+	for _, value := range []any{
+		metadata["native_slot_index"],
+		anyMapValue(metadata["phase_inputs"])["validation_slot_index"],
+	} {
+		if n, ok := positiveIntValue(value); ok {
+			return &n
+		}
+	}
+	return nil
+}
+
+func nativeSlotIndex(metadata map[string]any) *int {
+	if n, ok := positiveIntValue(metadata["native_slot_index"]); ok {
+		return &n
+	}
+	return nil
+}
+
+func setNativeSlotMetadata(metadata map[string]any, project string, slotIndex int, slotPrefix string) {
+	metadata["native_slot_index"] = strconv.Itoa(slotIndex)
+	if existing, ok := metadata["native_slot_name"].(string); ok && strings.TrimSpace(existing) != "" {
+		metadata["native_slot_name"] = strings.TrimSpace(existing)
+		return
+	}
+	prefix := strings.Trim(strings.TrimSpace(slotPrefix), ".")
+	if prefix == "" {
+		prefix = project
+	}
+	metadata["native_slot_name"] = fmt.Sprintf("%s-%d", prefix, slotIndex)
 }
 
 func matchesRequirements(caps map[string]any, required map[string]any) bool {
@@ -4178,7 +4399,7 @@ func (s *Store) ListGraphSignals(ctx context.Context, filter server.GraphSignalF
 }
 
 func (s *Store) ListPendingSignals(ctx context.Context, limit int) ([]server.QueuedSignal, error) {
-	query := "SELECT * FROM c WHERE c.state = @state ORDER BY c.enqueued_at ASC"
+	query := "SELECT * FROM c WHERE c.state = @state"
 	var docs []signalDoc
 	if err := queryAllWhere(ctx, s.signals, query,
 		[]azcosmos.QueryParameter{{Name: "@state", Value: "pending"}},
@@ -4186,6 +4407,9 @@ func (s *Store) ListPendingSignals(ctx context.Context, limit int) ([]server.Que
 	); err != nil {
 		return nil, err
 	}
+	sort.Slice(docs, func(i, j int) bool {
+		return docs[i].EnqueuedAt < docs[j].EnqueuedAt
+	})
 	if limit > 0 && len(docs) > limit {
 		docs = docs[:limit]
 	}

@@ -47,6 +47,21 @@ type fakeDispatchStore struct {
 	lockReleased bool
 }
 
+type fakeNativeLauncher struct {
+	called bool
+	req    NativeLaunchRequest
+	err    error
+}
+
+func (l *fakeNativeLauncher) LaunchNativePhase(_ context.Context, req NativeLaunchRequest) ([]string, error) {
+	l.called = true
+	l.req = req
+	if l.err != nil {
+		return nil, l.err
+	}
+	return []string{"native-job"}, nil
+}
+
 func (s *fakeDispatchStore) ReadProjectGitHubRepo(_ context.Context, _ string) (string, error) {
 	return s.githubRepo, s.githubRepoErr
 }
@@ -118,10 +133,14 @@ func newDispatchHandlerWithDispatch(store *fakeDispatchStore, dispatch GHADispat
 
 // newHandlerWithDispatch is a test-only constructor that wires ghDispatch directly.
 func newHandlerWithDispatch(settings Settings, store ReadStore, authResolver AuthResolver, ghDispatch GHADispatchClient) http.Handler {
+	return newHandlerWithDispatchAndNative(settings, store, authResolver, ghDispatch, nil)
+}
+
+func newHandlerWithDispatchAndNative(settings Settings, store ReadStore, authResolver AuthResolver, ghDispatch GHADispatchClient, nativeLauncher NativeLauncher) http.Handler {
 	adminAuthenticator, _ := authResolver.(AdminAuthenticator)
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/runs/dispatch",
-		requireAdmin(adminAuthenticator, http.HandlerFunc(dispatchRunHandler(store, ghDispatch))))
+		requireAdmin(adminAuthenticator, http.HandlerFunc(dispatchRunHandler(store, ghDispatch, nativeLauncher))))
 	return mux
 }
 
@@ -326,6 +345,51 @@ func TestDispatchRun_Dispatched_WithHost(t *testing.T) {
 	}
 	if !dispatch.called {
 		t.Error("expected DispatchWorkflow to be called")
+	}
+}
+
+func TestDispatchRun_DispatchedNativeK8sJob(t *testing.T) {
+	store := minimalDispatchStore()
+	store.wf.Phases[0] = PhaseSpec{
+		Name: "verify",
+		Kind: "k8s_job",
+		Jobs: []NativeJobSpec{{ID: "test", Image: "runner:latest"}},
+	}
+	store.leaseResult = Lease{
+		Project:     "proj",
+		LeaseNumber: intPtr(1),
+		Host:        stringPtr("native-k8s"),
+		State:       "claimed",
+		Metadata: map[string]any{
+			"native_k8s":           true,
+			"native_slot_index":    "1",
+			"native_slot_name":     "proj-1",
+			"lease_callback_token": "lctok",
+		},
+	}
+	store.leaseHost = &Host{Name: "native-k8s", Capabilities: map[string]any{"native_k8s": true}}
+	launcher := &fakeNativeLauncher{}
+	h := newHandlerWithDispatchAndNative(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, launcher)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, dispatchRequest("proj", 1))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var result PublicDispatchResult
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if result.State != "dispatched" {
+		t.Fatalf("expected dispatched, got %q", result.State)
+	}
+	if !launcher.called {
+		t.Fatal("expected native launcher to be called")
+	}
+	if launcher.req.Phase.Name != "verify" || launcher.req.Run.ID == "" {
+		t.Fatalf("unexpected native launch request: %#v", launcher.req)
+	}
+	if store.leaseReq == nil || store.leaseReq.Metadata["native_k8s"] != true {
+		t.Fatalf("expected native_k8s lease metadata, got %#v", store.leaseReq)
 	}
 }
 

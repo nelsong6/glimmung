@@ -312,7 +312,7 @@ func playbookEntryDispatcher(store ReadStore, ghDispatch GHADispatchClient) (Pla
 			"integration_strategy": entry.IntegrationStrategy,
 			"work_context":         entry.WorkContext,
 		}
-		result, problem := dispatchRun(ctx, dispatchStore, ghDispatch, DispatchRunRequest{
+		result, problem := dispatchRun(ctx, dispatchStore, ghDispatch, nil, DispatchRunRequest{
 			Project:       entry.Project,
 			IssueNumber:   issueNumber,
 			WorkflowName:  workflow,

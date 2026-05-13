@@ -22,10 +22,10 @@ are Go plus the Vite dashboard.
 
 | Surface | Final state |
 |---|---|
-| Native runner callback, event, status, failure, replay, resume, completion, retry, and forward-dispatch paths | Go-owned. |
+| Native runner callback, event, status, failure, replay, resume, completion, retry, forward-dispatch, and Kubernetes launch paths | Go-owned. |
 | Native pod-log proxy | Retired with a `410 Gone` tombstone; use native events and archived evidence. |
-| Native HTTP GitHub token routes | Retired with `410 Gone` tombstones; native jobs use injected Kubernetes credentials. |
-| Test-slot checkout/return routes | Retired with `410 Gone` tombstones; project test-environment scaling remains active. |
+| Native HTTP GitHub token routes | Go-owned compatibility surface for native runner callbacks. |
+| Test-slot checkout/return routes | Go-owned compatibility surface for MCP/test skill callers; project test-environment scaling remains active for capacity management. |
 | Storage-ID and GitHub issue-coordinate compatibility routes | Kept only as explicit `410 Gone` tombstones with canonical route guidance. |
 | `POST /v1/portfolio/elements/dispatch` | Go-owned; creates a portfolio review Issue and dispatches through the canonical run path. |
 | `POST /v1/playbooks/{project}/{playbook_ref}/run` | Go-owned; advances ready Playbook entries by creating Issues and dispatching Runs. |

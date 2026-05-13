@@ -32,7 +32,17 @@ type Settings struct {
 	StaticOverrideDir              string
 	ArtifactsStorageAccount        string
 	ArtifactsContainer             string
+	NativeRunnerNamespace          string
+	NativeRunnerServiceAccount     string
+	NativeRunnerCallbackBaseURL    string
+	NativeRunnerJobTTLSeconds      int
+	NativeRunnerCodexSecret        string
+	NativeRunnerCodexMountPath     string
+	NativeRunnerPlaywrightEnabled  bool
+	NativeRunnerPlaywrightImage    string
+	NativeRunnerPlaywrightPort     string
 	NativeRunnerProjectConcurrency int
+	NativeRunnerGlobalConcurrency  int
 	GitHubAppID                    string
 	GitHubAppInstallationID        string
 	GitHubAppPrivateKey            string
@@ -59,8 +69,48 @@ func SettingsFromEnv() Settings {
 			"romaineglimmungartifacts",
 		),
 		ArtifactsContainer: envOrDefault("ARTIFACTS_CONTAINER", "artifacts"),
+		NativeRunnerNamespace: envOrDefault(
+			"NATIVE_RUNNER_NAMESPACE",
+			"glimmung-runs",
+		),
+		NativeRunnerServiceAccount: envOrDefault(
+			"NATIVE_RUNNER_SERVICE_ACCOUNT",
+			"glimmung-native-runner",
+		),
+		NativeRunnerCallbackBaseURL: envOrDefault(
+			"NATIVE_RUNNER_CALLBACK_BASE_URL",
+			"http://glimmung.glimmung.svc.cluster.local",
+		),
+		NativeRunnerJobTTLSeconds: envIntOrDefault(
+			"NATIVE_RUNNER_JOB_TTL_SECONDS",
+			259200,
+		),
+		NativeRunnerCodexSecret: envOrDefault(
+			"NATIVE_RUNNER_CODEX_CREDENTIALS_SECRET",
+			"codex-credentials",
+		),
+		NativeRunnerCodexMountPath: envOrDefault(
+			"NATIVE_RUNNER_CODEX_CREDENTIALS_MOUNT_PATH",
+			"/etc/codex-creds",
+		),
+		NativeRunnerPlaywrightEnabled: envBoolOrDefault(
+			"NATIVE_RUNNER_PLAYWRIGHT_ENABLED",
+			true,
+		),
+		NativeRunnerPlaywrightImage: envOrDefault(
+			"NATIVE_RUNNER_PLAYWRIGHT_IMAGE",
+			"romainecr.azurecr.io/agent-container:latest",
+		),
+		NativeRunnerPlaywrightPort: envOrDefault(
+			"NATIVE_RUNNER_PLAYWRIGHT_PORT",
+			"3000",
+		),
 		NativeRunnerProjectConcurrency: envIntOrDefault(
 			"NATIVE_RUNNER_PROJECT_CONCURRENCY",
+			5,
+		),
+		NativeRunnerGlobalConcurrency: envIntOrDefault(
+			"NATIVE_RUNNER_GLOBAL_CONCURRENCY",
 			5,
 		),
 		GitHubAppID:             os.Getenv("GITHUB_APP_ID"),
@@ -80,18 +130,18 @@ func NewWithStore(settings Settings, store ReadStore) http.Handler {
 
 // NewWithSyncClient extends NewWithDependencies with an optional GitHub client for workflow sync.
 func NewWithSyncClient(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, artifactStores ...ArtifactStore) http.Handler {
-	return newHandler(settings, store, authResolver, ghClient, nil, artifactStores...)
+	return newHandler(settings, store, authResolver, ghClient, nil, nil, artifactStores...)
 }
 
-func NewWithRuntimeClients(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, authRedirects NativeAuthRedirectReconciler, artifactStores ...ArtifactStore) http.Handler {
-	return newHandler(settings, store, authResolver, ghClient, authRedirects, artifactStores...)
+func NewWithRuntimeClients(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, authRedirects NativeAuthRedirectReconciler, nativeLauncher NativeLauncher, artifactStores ...ArtifactStore) http.Handler {
+	return newHandler(settings, store, authResolver, ghClient, authRedirects, nativeLauncher, artifactStores...)
 }
 
 func NewWithDependencies(settings Settings, store ReadStore, authResolver AuthResolver, artifactStores ...ArtifactStore) http.Handler {
-	return newHandler(settings, store, authResolver, nil, nil, artifactStores...)
+	return newHandler(settings, store, authResolver, nil, nil, nil, artifactStores...)
 }
 
-func newHandler(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, authRedirects NativeAuthRedirectReconciler, artifactStores ...ArtifactStore) http.Handler {
+func newHandler(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, authRedirects NativeAuthRedirectReconciler, nativeLauncher NativeLauncher, artifactStores ...ArtifactStore) http.Handler {
 	var artifactStore ArtifactStore
 	if len(artifactStores) > 0 {
 		artifactStore = artifactStores[0]
@@ -99,6 +149,10 @@ func newHandler(settings Settings, store ReadStore, authResolver AuthResolver, g
 	var ghDispatch GHADispatchClient
 	if d, ok := ghClient.(GHADispatchClient); ok {
 		ghDispatch = d
+	}
+	var nativeTokenMinter NativeGitHubTokenMinter
+	if m, ok := ghClient.(NativeGitHubTokenMinter); ok {
+		nativeTokenMinter = m
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
@@ -271,24 +325,22 @@ func newHandler(settings Settings, store ReadStore, authResolver AuthResolver, g
 	)
 	mux.HandleFunc("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/failed", nativeRunFailedByNumber(store))
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/failed", nativeRunFailedByCallbackToken(store))
-	mux.HandleFunc(
-		"POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/github-token",
-		legacyGone("native GitHub token minting by run coordinates is retired; use injected Kubernetes credentials"),
-	)
-	mux.HandleFunc(
-		"POST /v1/run-callbacks/{callback_token}/native/github-token",
-		legacyGone("native GitHub token minting by callback token is retired; use injected Kubernetes credentials"),
-	)
-	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/completed", runCompletedByCallbackToken(store, ghDispatch))
+	mux.HandleFunc("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/github-token", nativeGitHubTokenByNumber(store, nativeTokenMinter))
+	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/github-token", nativeGitHubTokenByCallbackToken(store, nativeTokenMinter))
+	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/completed", runCompletedByCallbackToken(store, ghDispatch, nativeLauncher))
 	mux.HandleFunc(
 		"POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/completed",
 		legacyGone("native completion by run coordinates is retired; use /v1/run-callbacks/{callback_token}/native/completed"),
 	)
-	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/completed", nativeRunCompletedByCallbackToken(store, ghDispatch))
-	mux.HandleFunc("POST /v1/test-slots/checkout", legacyGone("test-slot checkout is retired; use project test-environment scaling"))
-	mux.HandleFunc("POST /v1/test-slots/return", legacyGone("test-slot return is retired; use project test-environment scaling"))
+	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/completed", nativeRunCompletedByCallbackToken(store, ghDispatch, nativeLauncher))
+	var testSlotPreparer TestSlotPreparer
+	if p, ok := nativeLauncher.(TestSlotPreparer); ok {
+		testSlotPreparer = p
+	}
+	mux.Handle("POST /v1/test-slots/checkout", requireAdmin(adminAuthenticator, http.HandlerFunc(checkoutTestSlot(store, testSlotPreparer))))
+	mux.Handle("POST /v1/test-slots/return", requireAdmin(adminAuthenticator, http.HandlerFunc(returnTestSlot(store, testSlotPreparer))))
 	mux.Handle("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/replay", requireAdmin(adminAuthenticator, http.HandlerFunc(replayRunDecisionByNumber(store))))
-	mux.Handle("POST /v1/runs/dispatch", requireAdmin(adminAuthenticator, http.HandlerFunc(dispatchRunHandler(store, ghDispatch))))
+	mux.Handle("POST /v1/runs/dispatch", requireAdmin(adminAuthenticator, http.HandlerFunc(dispatchRunHandler(store, ghDispatch, nativeLauncher))))
 	mux.Handle("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/resume", requireAdmin(adminAuthenticator, http.HandlerFunc(resumeRunHandler(store, ghDispatch))))
 	mux.HandleFunc("POST /v1/webhook/github", githubWebhook(settings))
 	if staticRoots(settings).enabled() {
@@ -469,4 +521,19 @@ func envIntOrDefault(name string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+func envBoolOrDefault(name string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	switch strings.ToLower(value) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
 }
