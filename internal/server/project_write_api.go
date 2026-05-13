@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+
+	"github.com/nelsong6/glimmung/internal/domain/hotswap"
 )
 
 type ProjectWriter interface {
@@ -47,6 +49,10 @@ func registerProject(store ReadStore) http.HandlerFunc {
 		}
 		if hasLegacyNativeAuthRedirectMetadata(req.Metadata) {
 			writeProblem(w, http.StatusUnprocessableEntity, "native_standby_entra_redirects is no longer supported; use native_auth_redirects")
+			return
+		}
+		if _, _, err := hotswap.FromMetadata(req.Metadata); err != nil {
+			writeProblem(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
 

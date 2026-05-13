@@ -40,6 +40,12 @@ staticOverride:
   writerImage: alpine:3.20
   writerImagePullPolicy: IfNotPresent
 
+hotSwapBackend:
+  enabled: true
+  mountPath: /var/run/glimmung-hot
+  target: /var/run/glimmung-hot/glimmung
+  childCommand: /app/glimmung
+
 config: {}
 
 externalSecret:

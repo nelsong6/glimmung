@@ -4027,6 +4027,54 @@ func (s *Store) CancelLeaseByRef(ctx context.Context, project, ref string) (serv
 	}, nil
 }
 
+func (s *Store) AppendTestSlotHotSwapHistory(ctx context.Context, project, ref string, entry server.TestSlotHotSwapHistoryEntry) (server.Lease, error) {
+	var docs []leaseDoc
+	if err := queryAllWhere(
+		ctx, s.leases,
+		"SELECT * FROM c WHERE c.project = @p",
+		[]azcosmos.QueryParameter{{Name: "@p", Value: project}},
+		&docs,
+	); err != nil {
+		return server.Lease{}, fmt.Errorf("query leases: %w", err)
+	}
+	found := selectLeaseDocByPublicRef(docs, ref)
+	if found == nil {
+		return server.Lease{}, server.ErrNotFound
+	}
+	if found.Metadata == nil {
+		found.Metadata = map[string]any{}
+	}
+	history := anySliceValue(found.Metadata["test_slot_hot_swap_history"])
+	payload, err := json.Marshal(entry)
+	if err != nil {
+		return server.Lease{}, err
+	}
+	var entryMap map[string]any
+	if err := json.Unmarshal(payload, &entryMap); err != nil {
+		return server.Lease{}, err
+	}
+	history = append(history, entryMap)
+	if len(history) > 20 {
+		history = history[len(history)-20:]
+	}
+	found.Metadata["test_slot_hot_swap_history"] = history
+	payload, err = json.Marshal(found)
+	if err != nil {
+		return server.Lease{}, err
+	}
+	if _, err := s.leases.ReplaceItem(ctx, azcosmos.NewPartitionKeyString(project), found.ID, payload, nil); err != nil {
+		return server.Lease{}, fmt.Errorf("append hot-swap history: %w", err)
+	}
+	return leaseFromDoc(*found), nil
+}
+
+func anySliceValue(raw any) []any {
+	if value, ok := raw.([]any); ok {
+		return value
+	}
+	return nil
+}
+
 func selectLeaseDocByPublicRef(docs []leaseDoc, ref string) *leaseDoc {
 	var found *leaseDoc
 	for i := range docs {

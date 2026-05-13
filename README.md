@@ -242,6 +242,60 @@ installer image `alpine/k8s:1.30.0`, and Helm value
 `git_ref`, `values`, `set_string_values`, `sessions_namespace`, and
 `cluster_role_bindings` under `test_slot_helm`.
 
+### Native test-slot hot swap
+
+Native webapp projects can also advertise `metadata.test_slot_hot_swap` for
+the no-rollout validation path. Static changes copy built assets into the
+slot's static override directory. Backend changes run the project build command
+from the session checkout, copy the compiled artifact into the selected pod as
+`target.next`, atomically rename it to `target`, signal the supervisor, and
+optionally poll the configured health path.
+
+Glimmung validates the metadata on project registration. The first executor is
+the repo-local ops CLI:
+
+```sh
+glimmung-agent test-slot-hot-swap \
+  --project glimmung \
+  --namespace glimmung-slot-1 \
+  --selector app.kubernetes.io/instance=glimmung-slot-1 \
+  --container glimmung \
+  --health-base-url https://glimmung-slot-1.glimmung.dev.romaine.life
+```
+
+The command reads project metadata from `GLIMMUNG_BASE_URL` or
+`--glimmung-base-url`; callers can also pass `--contract-file` or
+`--contract-json` directly.
+
+Glimmung's own issue chart supports this in test slots. When
+`testEnv.enabled=true`, the workload runs `/app/glimmung-supervisor` as PID 1,
+mounts `/var/run/glimmung-hot`, and restarts the child process on `SIGHUP`.
+Production installs keep the normal image command and do not enable restart
+behavior.
+
+Glimmung dogfood metadata:
+
+```json
+{
+  "test_slot_hot_swap": {
+    "enabled": true,
+    "static": {
+      "enabled": true,
+      "source": "frontend/dist",
+      "target": "/var/run/glimmung-static-override"
+    },
+    "backend": {
+      "enabled": true,
+      "strategy": "supervisor",
+      "build_command": "go build -o /tmp/glimmung ./cmd/glimmung-go",
+      "artifact": "/tmp/glimmung",
+      "target": "/var/run/glimmung-hot/glimmung",
+      "health_path": "/healthz"
+    }
+  }
+}
+```
+
 ### GitHub webhook
 
 | Method | Path                              | Purpose |
