@@ -66,11 +66,29 @@ URL, or `/v1/state`, until the slot reports `state: "active"` and
 must not hold the public HTTP request open while rendering/applying the
 project chart or waiting for runtime deployments.
 
+Activation is durable slot work. When checkout returns `202 Accepted`, Glimmung
+has already recorded `activation_attempt`, `activation_state`,
+`activation_started_at`, and `activation_job_name` on the slot status. A server
+restart must be able to recover any claimed slot left in `activating` and
+continue activation from those records. On success Glimmung records
+`activation_completed_at`; on failure it records `activation_error`, marks the
+slot `error`, and releases the lease after cleanup.
+
 ### Return
 
-`POST /v1/test-slots/return` releases the lease and tears down hot runtime
-resources for that lease. It keeps the slot's preliminary resources so the slot
-can become available again without destructive re-provisioning.
+`POST /v1/test-slots/return` starts release of the lease and teardown of hot
+runtime resources for that lease. It keeps the slot's preliminary resources so
+the slot can become available again without destructive re-provisioning.
+
+Return may be asynchronous. In that case it returns `202 Accepted`,
+`state: "cleaning"`, `usable: false`, the lease reference, and a status URL.
+Callers must poll the status URL, or `/v1/state`, until the slot reports
+`state: "available"` and no active lease. The lease remains claimed while
+cleanup runs so the allocator cannot hand the slot to a new caller before hot
+runtime is gone and preliminaries are ready again. Glimmung records
+`cleanup_state`, `cleanup_started_at`, `cleanup_completed_at`, and
+`cleanup_error` on the slot status, and recovery must restart stale `cleaning`
+work.
 
 Return is not the scale-down path. It must not delete the slot's baseline
 capacity unless the caller is explicitly changing queue size.
