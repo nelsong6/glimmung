@@ -13,21 +13,23 @@ import (
 )
 
 type fakeTestSlotPreparer struct {
-	preliminaries    bool
-	activated        bool
-	returned         bool
-	installerCleaned bool
-	project          Project
-	deprovisioned    []string
-	preliminariesErr error
-	activateErr      error
-	returnErr        error
-	activateStarted  chan struct{}
-	activateRelease  chan struct{}
-	activateDone     chan struct{}
-	returnStarted    chan struct{}
-	returnRelease    chan struct{}
-	returnDone       chan struct{}
+	preliminaries         bool
+	activated             bool
+	returned              bool
+	installerCleaned      bool
+	cleanedSlots          []string
+	project               Project
+	deprovisioned         []string
+	deprovisionedSessions []string
+	preliminariesErr      error
+	activateErr           error
+	returnErr             error
+	activateStarted       chan struct{}
+	activateRelease       chan struct{}
+	activateDone          chan struct{}
+	returnStarted         chan struct{}
+	returnRelease         chan struct{}
+	returnDone            chan struct{}
 }
 
 func (s *fakeLeaseStore) AppendTestSlotHotSwapHistory(_ context.Context, _ string, _ string, entry TestSlotHotSwapHistoryEntry) (Lease, error) {
@@ -75,14 +77,20 @@ func (p *fakeTestSlotPreparer) ReturnTestSlotRuntime(context.Context, Lease, Pro
 	return p.returnErr
 }
 
-func (p *fakeTestSlotPreparer) CleanupTestSlotInstaller(context.Context, Lease, Project) error {
+func (p *fakeTestSlotPreparer) CleanupTestSlotInstaller(_ context.Context, lease Lease, _ Project) error {
 	p.installerCleaned = true
+	if slotName, _ := stringFromMap(lease.Metadata, "native_slot_name"); strings.TrimSpace(slotName) != "" {
+		p.cleanedSlots = append(p.cleanedSlots, strings.TrimSpace(slotName))
+	}
 	return nil
 }
 
 func (p *fakeTestSlotPreparer) DeprovisionTestSlot(_ context.Context, lease Lease, _ Project) error {
 	if slotName, _ := stringFromMap(lease.Metadata, "native_slot_name"); strings.TrimSpace(slotName) != "" {
 		p.deprovisioned = append(p.deprovisioned, strings.TrimSpace(slotName))
+	}
+	if namespace, _ := stringFromMap(lease.Metadata, "native_sessions_namespace"); strings.TrimSpace(namespace) != "" {
+		p.deprovisionedSessions = append(p.deprovisionedSessions, strings.TrimSpace(namespace))
 	}
 	return nil
 }

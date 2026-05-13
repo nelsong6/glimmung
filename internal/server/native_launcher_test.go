@@ -336,6 +336,59 @@ func TestLaunchNativePhaseCreatesSlotPlaywrightRuntime(t *testing.T) {
 	}
 }
 
+func TestDeprovisionTestSlotDeletesInstallerAndNamespaces(t *testing.T) {
+	tokenPath := tempTokenFile(t)
+	var paths []string
+	namespaces := map[string]bool{
+		"tank-operator-slot-11":          true,
+		"tank-operator-slot-11-sessions": true,
+	}
+	launcher := &KubernetesNativeLauncher{
+		Settings: Settings{
+			K8sAPIHost:                 "https://kube.test",
+			K8sSATokenPath:             tokenPath,
+			NativeRunnerNamespace:      "glimmung-runs",
+			NativeRunnerServiceAccount: "glimmung-native-runner",
+		},
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			paths = append(paths, req.Method+" "+req.URL.Path)
+			status := http.StatusOK
+			body := `{}`
+			if req.Method == http.MethodGet && strings.HasPrefix(req.URL.Path, "/api/v1/namespaces/") {
+				namespace := strings.TrimPrefix(req.URL.Path, "/api/v1/namespaces/")
+				if !namespaces[namespace] {
+					status = http.StatusNotFound
+				}
+			}
+			if req.Method == http.MethodDelete && strings.HasPrefix(req.URL.Path, "/api/v1/namespaces/") {
+				namespace := strings.TrimPrefix(req.URL.Path, "/api/v1/namespaces/")
+				namespaces[namespace] = false
+			}
+			return &http.Response{
+				StatusCode: status,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		})},
+	}
+	lease := testEnvironmentWarmupLease(Project{Name: "tank-operator"}, 11, "tank-operator-slot-11")
+
+	if err := launcher.DeprovisionTestSlot(context.Background(), lease, Project{Name: "tank-operator"}); err != nil {
+		t.Fatalf("DeprovisionTestSlot: %v", err)
+	}
+	for _, want := range []string{
+		"DELETE /api/v1/namespaces/glimmung-runs/secrets/glim-helm-clone-tank-operator-slot-11-0",
+		"DELETE /api/v1/namespaces/tank-operator-slot-11-sessions",
+		"GET /api/v1/namespaces/tank-operator-slot-11-sessions",
+		"DELETE /api/v1/namespaces/tank-operator-slot-11",
+		"GET /api/v1/namespaces/tank-operator-slot-11",
+	} {
+		if !containsPath(paths, want) {
+			t.Fatalf("missing %s in paths=%#v", want, paths)
+		}
+	}
+}
+
 func TestTestSlotHelmConfigDefaultsTankChart(t *testing.T) {
 	config, ok := testSlotHelmConfig(Project{
 		ID:         "tank-operator",

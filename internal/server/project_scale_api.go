@@ -242,6 +242,7 @@ func warmProjectTestEnvironments(ctx context.Context, store ReadStore, preparer 
 			})
 			return current, err
 		}
+		cleanupTestSlotInstaller(ctx, preparer, lease, current, nil)
 		now := time.Now().UTC()
 		updated, err = writer.SetProjectTestEnvironmentSlotStatus(ctx, projectKey, TestEnvironmentSlotStatus{
 			SlotIndex: slotIndex,

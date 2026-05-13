@@ -345,6 +345,9 @@ func TestScaleProjectTestEnvironmentsPreparesSlotsBeforeReady(t *testing.T) {
 	if preparer.activated {
 		t.Fatal("scale should not activate test slot runtime")
 	}
+	if got, want := strings.Join(preparer.cleanedSlots, ","), "tank-slot-1,tank-slot-2"; got != want {
+		t.Fatalf("installer cleanup slots=%q, want %q", got, want)
+	}
 	if len(store.slotStatuses) != 4 {
 		t.Fatalf("statuses=%#v", store.slotStatuses)
 	}
@@ -397,6 +400,9 @@ func TestScaleProjectTestEnvironmentsDeprovisionsRemovedSlots(t *testing.T) {
 
 	if got, want := strings.Join(preparer.deprovisioned, ","), "tank-slot-2,tank-slot-3"; got != want {
 		t.Fatalf("deprovisioned=%q, want %q", got, want)
+	}
+	if got, want := strings.Join(preparer.deprovisionedSessions, ","), "tank-slot-2-sessions,tank-slot-3-sessions"; got != want {
+		t.Fatalf("deprovisioned sessions=%q, want %q", got, want)
 	}
 	if preparer.preliminaries || preparer.activated {
 		t.Fatal("scale down should not warm or activate removed slots")
