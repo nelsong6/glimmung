@@ -61,12 +61,11 @@ config:
 # In-cluster admin auth via Kubernetes service-account tokens. When enabled,
 # admin endpoints (/v1/projects, /v1/workflows, /v1/hosts) accept a bearer
 # token whose subject — resolved through TokenReview — matches an entry in
-# K8S_SA_ALLOWLIST (default `tank-operator/tank-operator`, set in
-# settings.py). Toggling this off removes the ClusterRoleBinding that grants
+# K8S_SA_ALLOWLIST. Toggling this off removes the ClusterRoleBinding that grants
 # the pod's SA `system:auth-delegator`, leaving Entra as the only admin path.
 k8sSaAuth:
   enabled: true
-  allowlist: tank-operator/tank-operator
+  allowlist: tank-operator/tank-operator,mcp-glimmung/mcp-glimmung
 
 # Cosmos DB — endpoint of the shared serverless account, database is glimmung's own.
 cosmos:
