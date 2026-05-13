@@ -53,6 +53,8 @@ type HotSwapBackendResult struct {
 	Artifact         string   `json:"artifact"`
 	Target           string   `json:"target"`
 	NextTarget       string   `json:"next_target"`
+	CopyContainer    string   `json:"copy_container,omitempty"`
+	RestartContainer string   `json:"restart_container,omitempty"`
 	RestartCommand   []string `json:"restart_command"`
 	PostRestartLogs  string   `json:"post_restart_logs,omitempty"`
 	PostRestartError string   `json:"post_restart_error,omitempty"`
@@ -148,11 +150,13 @@ func (o *Ops) resolveHotSwapPods(ctx context.Context, namespace, selector string
 func (o *Ops) hotSwapBackend(ctx context.Context, opts HotSwapOptions, pod string) (HotSwapBackendResult, error) {
 	backend := opts.Contract.Backend
 	build := HotSwapBackendResult{
-		BuildCommand:   backend.BuildCommand,
-		Artifact:       backend.Artifact,
-		Target:         backend.Target,
-		NextTarget:     backend.Target + ".next",
-		RestartCommand: backend.RestartCommand,
+		BuildCommand:     backend.BuildCommand,
+		Artifact:         backend.Artifact,
+		Target:           backend.Target,
+		NextTarget:       backend.Target + ".next",
+		CopyContainer:    firstNonEmptyString(backend.CopyContainer, opts.Container),
+		RestartContainer: firstNonEmptyString(backend.RestartContainer, opts.Container),
+		RestartCommand:   backend.RestartCommand,
 	}
 	if len(build.RestartCommand) == 0 {
 		build.RestartCommand = []string{"sh", "-c", "kill -HUP 1"}
@@ -175,16 +179,16 @@ func (o *Ops) hotSwapBackend(ctx context.Context, opts HotSwapOptions, pod strin
 	if _, statErr := os.Stat(backend.Artifact); statErr != nil {
 		return build, fmt.Errorf("backend artifact %q is not readable: %w", backend.Artifact, statErr)
 	}
-	if err := o.copyToPod(ctx, opts.Namespace, pod, opts.Container, backend.Artifact, build.NextTarget); err != nil {
+	if err := o.copyToPod(ctx, opts.Namespace, pod, build.CopyContainer, backend.Artifact, build.NextTarget); err != nil {
 		return build, err
 	}
-	if _, err := o.kubectlExec(ctx, opts.Namespace, pod, opts.Container, "sh", "-c", "chmod +x "+shellQuote(build.NextTarget)+" && mv -f "+shellQuote(build.NextTarget)+" "+shellQuote(backend.Target)); err != nil {
+	if _, err := o.kubectlExec(ctx, opts.Namespace, pod, build.CopyContainer, "sh", "-c", "chmod +x "+shellQuote(build.NextTarget)+" && mv -f "+shellQuote(build.NextTarget)+" "+shellQuote(backend.Target)); err != nil {
 		return build, err
 	}
-	if _, err := o.kubectlExec(ctx, opts.Namespace, pod, opts.Container, build.RestartCommand...); err != nil {
+	if _, err := o.kubectlExec(ctx, opts.Namespace, pod, build.RestartContainer, build.RestartCommand...); err != nil {
 		return build, err
 	}
-	logs := o.hotSwapLogs(ctx, opts.Namespace, pod, opts.Container)
+	logs := o.hotSwapLogs(ctx, opts.Namespace, pod, build.RestartContainer)
 	build.PostRestartLogs = tailString(logs.Stdout, 4000)
 	build.PostRestartError = tailString(logs.Stderr, 1000)
 	return build, nil
@@ -255,6 +259,15 @@ func staticCopySource(root, source string) string {
 		return filepath.Join(path, ".")
 	}
 	return path
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (o *Ops) hotSwapLogs(ctx context.Context, namespace, pod, container string) Result {

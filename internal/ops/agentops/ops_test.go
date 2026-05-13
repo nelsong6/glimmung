@@ -243,6 +243,43 @@ func TestTestSlotHotSwapBuildsCopiesAndRestartsBackend(t *testing.T) {
 	assertCommand(t, runner.commands[5].Command, "kubectl", []string{"-n", "tank-slot-1", "logs", "slot-pod", "--tail=120", "-c", "tank-operator"})
 }
 
+func TestTestSlotHotSwapCanCopyAndRestartDifferentContainers(t *testing.T) {
+	root := t.TempDir()
+	artifact := filepath.Join(root, "app")
+	if err := os.WriteFile(artifact, []byte("binary"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{outputs: []string{"slot-pod", "build ok", "", "", "", "restarted"}}
+	ops := &Ops{Runner: runner, RepoRoot: root}
+
+	_, err := ops.TestSlotHotSwap(context.Background(), HotSwapOptions{
+		Namespace: "ambience-slot-1",
+		Selector:  "app=ambience,component=authority",
+		Container: "ambience",
+		Contract: hotswap.Contract{
+			Enabled: true,
+			Backend: hotswap.BackendContract{
+				Enabled:          true,
+				Strategy:         "supervisor",
+				BuildCommand:     "go build -o " + artifact + " ./cmd/ambience",
+				Artifact:         artifact,
+				Target:           "/var/run/ambience-hot/ambience",
+				HealthPath:       "/healthz",
+				CopyContainer:    "hot-writer",
+				RestartContainer: "ambience",
+				RestartCommand:   []string{"/ambience-supervisor", "signal"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCommand(t, runner.commands[2].Command, "kubectl", []string{"-n", "ambience-slot-1", "cp", artifact, "slot-pod:/var/run/ambience-hot/ambience.next", "-c", "hot-writer"})
+	assertCommand(t, runner.commands[3].Command, "kubectl", []string{"-n", "ambience-slot-1", "exec", "slot-pod", "-c", "hot-writer", "--", "sh", "-c", "chmod +x '/var/run/ambience-hot/ambience.next' && mv -f '/var/run/ambience-hot/ambience.next' '/var/run/ambience-hot/ambience'"})
+	assertCommand(t, runner.commands[4].Command, "kubectl", []string{"-n", "ambience-slot-1", "exec", "slot-pod", "-c", "ambience", "--", "/ambience-supervisor", "signal"})
+	assertCommand(t, runner.commands[5].Command, "kubectl", []string{"-n", "ambience-slot-1", "logs", "slot-pod", "--tail=120", "-c", "ambience"})
+}
+
 func TestTestSlotHotSwapCopiesStaticOnly(t *testing.T) {
 	root := t.TempDir()
 	staticDir := filepath.Join(root, "frontend", "dist")

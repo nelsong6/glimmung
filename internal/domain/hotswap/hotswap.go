@@ -35,13 +35,15 @@ type StaticContract struct {
 }
 
 type BackendContract struct {
-	Enabled        bool     `json:"enabled"`
-	Strategy       string   `json:"strategy"`
-	BuildCommand   string   `json:"build_command"`
-	Artifact       string   `json:"artifact"`
-	Target         string   `json:"target"`
-	HealthPath     string   `json:"health_path"`
-	RestartCommand []string `json:"restart_command"`
+	Enabled          bool     `json:"enabled"`
+	Strategy         string   `json:"strategy"`
+	BuildCommand     string   `json:"build_command"`
+	Artifact         string   `json:"artifact"`
+	Target           string   `json:"target"`
+	HealthPath       string   `json:"health_path"`
+	CopyContainer    string   `json:"copy_container"`
+	RestartContainer string   `json:"restart_container"`
+	RestartCommand   []string `json:"restart_command"`
 }
 
 func FromMetadata(metadata map[string]any) (Contract, bool, error) {
