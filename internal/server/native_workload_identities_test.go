@@ -51,6 +51,16 @@ func TestNativeWorkloadIdentitiesReconcilesManagedCredentials(t *testing.T) {
 				Issuer:    "https://issuer.example/",
 				Subject:   "system:serviceaccount:tank-slot-4-sessions:tank-slot-4-session",
 				Audiences: []string{defaultWorkloadIdentityAudience},
+			}, {
+				FederatedIdentityCredentialRef: FederatedIdentityCredentialRef{
+					SubscriptionID: "sub",
+					ResourceGroup:  "infra",
+					IdentityName:   "tank-session-identity",
+					CredentialName: "tank-operator-2-session",
+				},
+				Issuer:    "https://issuer.example/",
+				Subject:   "system:serviceaccount:tank-operator-2-sessions:tank-operator-2-session",
+				Audiences: []string{defaultWorkloadIdentityAudience},
 			}},
 		},
 	}
@@ -100,13 +110,17 @@ func TestNativeWorkloadIdentitiesReconcilesManagedCredentials(t *testing.T) {
 	if !reflect.DeepEqual(gotUpserts, wantUpserts) {
 		t.Fatalf("upserts=%#v want %#v", gotUpserts, wantUpserts)
 	}
-	if len(client.deletes) != 1 || client.deletes[0].CredentialName != "tank-slot-4-session" {
+	gotDeletes := []string{}
+	for _, deleted := range client.deletes {
+		gotDeletes = append(gotDeletes, deleted.CredentialName)
+	}
+	if !reflect.DeepEqual(gotDeletes, []string{"tank-slot-4-session", "tank-operator-2-session"}) {
 		t.Fatalf("deletes=%#v", client.deletes)
 	}
 	if len(status.ManagedCredentials) != 3 {
 		t.Fatalf("managed=%#v", status.ManagedCredentials)
 	}
-	if len(status.Deleted) != 1 || status.Deleted[0].CredentialName != "tank-slot-4-session" {
+	if len(status.Deleted) != 2 {
 		t.Fatalf("deleted status=%#v", status.Deleted)
 	}
 }
