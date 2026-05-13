@@ -290,7 +290,7 @@ func TestValidateNativeLeaseSlotIdentityRejectsCallerSuppliedFields(t *testing.T
 		},
 		{
 			name:     "test slot phase inputs",
-			metadata: map[string]any{"test_slot_checkout": true, "phase_inputs": map[string]any{"mode": "provision"}},
+			metadata: map[string]any{"test_slot_checkout": true, "phase_inputs": map[string]any{"target": "provision"}},
 			want:     "test-slot checkout lease requests may not include phase_inputs",
 		},
 	}

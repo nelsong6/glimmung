@@ -12,9 +12,10 @@ import (
 )
 
 type fakeTestSlotPreparer struct {
-	ensured  bool
-	returned bool
-	project  Project
+	ensured       bool
+	returned      bool
+	project       Project
+	deprovisioned []string
 }
 
 func (s *fakeLeaseStore) AppendTestSlotHotSwapHistory(_ context.Context, _ string, _ string, entry TestSlotHotSwapHistoryEntry) (Lease, error) {
@@ -46,6 +47,13 @@ func (p *fakeTestSlotPreparer) ReturnTestSlot(context.Context, Lease) error {
 	return nil
 }
 
+func (p *fakeTestSlotPreparer) DeprovisionTestSlot(_ context.Context, lease Lease, _ Project) error {
+	if slotName, _ := stringFromMap(lease.Metadata, "native_slot_name"); strings.TrimSpace(slotName) != "" {
+		p.deprovisioned = append(p.deprovisioned, strings.TrimSpace(slotName))
+	}
+	return nil
+}
+
 func TestCheckoutTestSlotClaimsNativeLease(t *testing.T) {
 	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
 	store := &fakeLeaseStore{
@@ -72,7 +80,7 @@ func TestCheckoutTestSlotClaimsNativeLease(t *testing.T) {
 	preparer := &fakeTestSlotPreparer{}
 	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil, preparer)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/test-slots/checkout", strings.NewReader(`{"project":"tank-operator","tank_session_id":"98","mode":"provision"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/test-slots/checkout", strings.NewReader(`{"project":"tank-operator","tank_session_id":"98"}`))
 	req.Header.Set("Authorization", "Bearer admin")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -83,10 +91,32 @@ func TestCheckoutTestSlotClaimsNativeLease(t *testing.T) {
 	if preparer.ensured {
 		t.Fatal("checkout should lease an already-ready slot without preparing it")
 	}
+	if len(store.leaseReq.Metadata) != 1 || !boolFromMap(store.leaseReq.Metadata, "test_slot_checkout") {
+		t.Fatalf("checkout metadata should not include mode: %#v", store.leaseReq.Metadata)
+	}
 	for _, want := range []string{`"state":"claimed"`, `"slot_name":"tank-slot-1"`, `"url":"https://tank-slot-1.tank.dev.romaine.life/"`, `"host":"native-k8s"`} {
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Fatalf("response missing %s: %s", want, rec.Body.String())
 		}
+	}
+}
+
+func TestCheckoutTestSlotRejectsModeField(t *testing.T) {
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{ID: "tank-operator", Name: "tank-operator"}}},
+	}
+	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/test-slots/checkout", strings.NewReader(`{"project":"tank-operator","mode":"delete"}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "mode") {
+		t.Fatalf("body=%s", rec.Body.String())
 	}
 }
 

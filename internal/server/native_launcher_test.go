@@ -1,6 +1,11 @@
 package server
 
 import (
+	"context"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -20,7 +25,7 @@ func TestNativeJobManifestIncludesRunnerCallbackEnv(t *testing.T) {
 				"native_slot_name":  "tank-operator-slot-1",
 				"native_slot_index": "1",
 				"phase_inputs": map[string]any{
-					"test_slot_mode": "provision",
+					"target": "provision",
 				},
 			},
 		},
@@ -57,11 +62,57 @@ func TestNativeJobManifestIncludesRunnerCallbackEnv(t *testing.T) {
 	if env["GLIMMUNG_ATTEMPT_INDEX"] != "1" {
 		t.Fatalf("attempt index=%q", env["GLIMMUNG_ATTEMPT_INDEX"])
 	}
-	if env["GLIMMUNG_INPUT_TEST_SLOT_MODE"] != "provision" {
-		t.Fatalf("phase input env=%q", env["GLIMMUNG_INPUT_TEST_SLOT_MODE"])
+	if env["GLIMMUNG_INPUT_TARGET"] != "provision" {
+		t.Fatalf("phase input env=%q", env["GLIMMUNG_INPUT_TARGET"])
 	}
 	if env["PLAYWRIGHT_WS_ENDPOINT"] == "" {
 		t.Fatal("expected Playwright endpoint")
+	}
+}
+
+func TestReturnTestSlotDoesNotDeleteNamespaces(t *testing.T) {
+	tokenPath := tempTokenFile(t)
+	var paths []string
+	launcher := &KubernetesNativeLauncher{
+		Settings: Settings{
+			K8sAPIHost:                "https://kube.test",
+			K8sSATokenPath:            tokenPath,
+			NativeRunnerNamespace:     "glimmung-runs",
+			NativeRunnerJobTTLSeconds: 3600,
+		},
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			paths = append(paths, req.Method+" "+req.URL.Path)
+			body := ""
+			if req.Method == http.MethodGet {
+				body = `{"items":[]}`
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		})},
+	}
+	lease := Lease{
+		Project:     "tank",
+		LeaseNumber: intPtr(2),
+		Metadata: map[string]any{
+			"native_slot_name":          "tank-slot-1",
+			"native_slot_index":         "1",
+			"native_sessions_namespace": "tank-slot-1-sessions",
+		},
+	}
+
+	if err := launcher.ReturnTestSlot(context.Background(), lease); err != nil {
+		t.Fatalf("ReturnTestSlot: %v", err)
+	}
+	for _, path := range paths {
+		if strings.Contains(path, "/api/v1/namespaces/tank-slot-1") {
+			t.Fatalf("return should not delete slot namespaces, saw %s in %#v", path, paths)
+		}
+		if strings.Contains(path, "/apis/apps/v1/namespaces/glimmung-runs/deployments/") {
+			t.Fatalf("return should not delete warmed Playwright resources, saw %s in %#v", path, paths)
+		}
 	}
 }
 
@@ -144,6 +195,21 @@ func TestTestSlotInstallJobManifestRendersHelmApplyJob(t *testing.T) {
 			t.Fatalf("install script missing %q: %s", want, installScript)
 		}
 	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func tempTokenFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte("token"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	return path
 }
 
 func nativeManifestEnv(manifest map[string]any) map[string]string {

@@ -14,7 +14,6 @@ import (
 type TestSlotCheckoutRequest struct {
 	Project       string              `json:"project"`
 	Workflow      *string             `json:"workflow"`
-	Mode          string              `json:"mode"`
 	Requester     LeaseRequesterInput `json:"requester"`
 	TankSessionID *string             `json:"tank_session_id"`
 	TTLSeconds    *int                `json:"ttl_seconds"`
@@ -66,14 +65,6 @@ func checkoutTestSlot(store ReadStore, _ TestSlotPreparer, _ NativeGitHubTokenMi
 			writeProblem(w, http.StatusBadRequest, "project required")
 			return
 		}
-		mode := strings.TrimSpace(strings.ToLower(req.Mode))
-		if mode == "" {
-			mode = "provision"
-		}
-		if mode != "provision" && mode != "clean_slate" {
-			writeProblem(w, http.StatusBadRequest, "mode must be 'provision' or 'clean_slate'")
-			return
-		}
 		project, ok := findProjectForTestSlot(r, w, store, req.Project)
 		if !ok {
 			return
@@ -84,7 +75,6 @@ func checkoutTestSlot(store ReadStore, _ TestSlotPreparer, _ NativeGitHubTokenMi
 		}
 		metadata := map[string]any{
 			"test_slot_checkout": true,
-			"test_slot_mode":     mode,
 		}
 		requester := req.Requester
 		if strings.TrimSpace(requester.Consumer) == "" {

@@ -13,14 +13,16 @@ import (
 
 type fakeLeaseStore struct {
 	fakeReadStore
-	lease  Lease
-	leases []Lease
-	host   *Host
-	result CancelLeaseResult
-	err    error
+	lease    Lease
+	leases   []Lease
+	host     *Host
+	result   CancelLeaseResult
+	leaseReq LeaseAcquireRequest
+	err      error
 }
 
-func (s *fakeLeaseStore) AcquireLease(_ context.Context, _ LeaseAcquireRequest) (Lease, *Host, error) {
+func (s *fakeLeaseStore) AcquireLease(_ context.Context, req LeaseAcquireRequest) (Lease, *Host, error) {
+	s.leaseReq = req
 	if s.err != nil {
 		return Lease{}, nil, s.err
 	}
