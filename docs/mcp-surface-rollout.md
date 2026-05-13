@@ -9,6 +9,20 @@ uses it.
 
 Use this sequence for MCP server rename/removal work.
 
+## Request Schema Drift
+
+MCP tool signatures are part of Glimmung's operator-facing API surface. When a
+Glimmung HTTP endpoint changes its accepted request fields, update the matching
+MCP wrapper at the same time:
+
+- remove obsolete parameters from the tool signature
+- update the tool docstring so sessions see the current contract
+- update payload tests so the tool cannot keep forwarding removed fields
+- call out any necessary fresh-session requirement in the PR
+
+Do not rely on the backend rejecting stale fields as the only protection. A
+stale MCP schema still misleads agents before the request reaches Glimmung.
+
 ## Compatibility Window
 
 When a server is renamed, prefer a compatibility alias before removing the old
