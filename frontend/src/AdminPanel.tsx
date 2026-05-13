@@ -11,14 +11,14 @@ type Props = {
   onSuccess: () => void;
 };
 
-type Tab = "project" | "workflow" | "host" | "issue";
+type Tab = "project" | "host" | "issue";
 
 export function AdminPanel({ projects, onSuccess }: Props) {
   const [tab, setTab] = useState<Tab>("project");
   return (
     <div className="admin-panel">
       <div className="admin-tabs">
-        {(["project", "workflow", "host", "issue"] as Tab[]).map((t) => (
+        {(["project", "host", "issue"] as Tab[]).map((t) => (
           <button
             type="button"
             key={t}
@@ -30,7 +30,6 @@ export function AdminPanel({ projects, onSuccess }: Props) {
         ))}
       </div>
       {tab === "project" && <ProjectForm onSuccess={onSuccess} />}
-      {tab === "workflow" && <WorkflowForm projects={projects} onSuccess={onSuccess} />}
       {tab === "host" && <HostForm onSuccess={onSuccess} />}
       {tab === "issue" && <IssueForm projects={projects} onSuccess={onSuccess} />}
     </div>
@@ -80,95 +79,6 @@ function ProjectForm({ onSuccess }: { onSuccess: () => void }) {
           onChange={(e) => setGithubRepo(e.target.value)}
           placeholder="nelsong6/spirelens"
           required
-        />
-      </label>
-      {error && <div className="error">{error}</div>}
-      <button type="submit" disabled={busy}>
-        {busy ? "submitting..." : "register"}
-      </button>
-    </form>
-  );
-}
-
-function WorkflowForm({ projects, onSuccess }: { projects: Project[]; onSuccess: () => void }) {
-  const [project, setProject] = useState(projects[0]?.name ?? "");
-  const [name, setName] = useState("issue-agent");
-  const [filename, setFilename] = useState("issue-agent.yaml");
-  const [ref, setRef] = useState("main");
-  const [triggerLabel, setTriggerLabel] = useState("issue-agent");
-  const [requirements, setRequirements] = useState('{"apps":["sts2"]}');
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError(null);
-    setBusy(true);
-    try {
-      const reqs = JSON.parse(requirements || "{}");
-      const r = await authedFetch("/v1/workflows", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          project,
-          name,
-          workflow_filename: filename,
-          workflow_ref: ref,
-          trigger_label: triggerLabel,
-          default_requirements: reqs,
-        }),
-      });
-      if (!r.ok) {
-        setError(`${r.status}: ${await r.text()}`);
-        return;
-      }
-      setName("");
-      onSuccess();
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  if (projects.length === 0) {
-    return <div className="admin-form"><div className="error">register a project first.</div></div>;
-  }
-
-  return (
-    <form onSubmit={submit} className="admin-form">
-      <label>
-        <span>Project</span>
-        <select value={project} onChange={(e) => setProject(e.target.value)} required>
-          {projects.map((p) => (
-            <option key={p.name} value={p.name}>
-              {p.name}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label>
-        <span>Workflow name</span>
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="issue-agent" required />
-      </label>
-      <label>
-        <span>Workflow filename</span>
-        <input value={filename} onChange={(e) => setFilename(e.target.value)} required />
-      </label>
-      <label>
-        <span>Ref</span>
-        <input value={ref} onChange={(e) => setRef(e.target.value)} />
-      </label>
-      <label>
-        <span>Trigger label</span>
-        <input value={triggerLabel} onChange={(e) => setTriggerLabel(e.target.value)} />
-      </label>
-      <label>
-        <span>Requirements (JSON)</span>
-        <input
-          value={requirements}
-          onChange={(e) => setRequirements(e.target.value)}
-          className="mono"
         />
       </label>
       {error && <div className="error">{error}</div>}
