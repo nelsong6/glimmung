@@ -395,6 +395,19 @@ func TestIssueRunContextMapsLatestRunAndNeedsAttention(t *testing.T) {
 	}
 }
 
+func TestCancelLeaseCandidateRankPrefersActiveLease(t *testing.T) {
+	claimed := leaseDoc{State: "claimed"}
+	released := leaseDoc{State: "released"}
+	pending := leaseDoc{State: "pending"}
+
+	if cancelLeaseCandidateRank(claimed) >= cancelLeaseCandidateRank(released) {
+		t.Fatal("claimed lease should rank ahead of released lease")
+	}
+	if cancelLeaseCandidateRank(pending) >= cancelLeaseCandidateRank(released) {
+		t.Fatal("pending lease should rank ahead of released lease")
+	}
+}
+
 func intPtr(value int) *int {
 	return &value
 }
