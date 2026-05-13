@@ -392,16 +392,6 @@ func testEnvironmentsFromSnapshot(
 	for _, projectName := range names {
 		project := projectsByName[projectName]
 		slotCount := projectTestSlotCount(settings, project)
-		for slotIndex := range claimedByProject[projectName] {
-			if slotIndex > slotCount {
-				slotCount = slotIndex
-			}
-		}
-		for slotIndex := range waitingByProject[projectName] {
-			if slotIndex > slotCount {
-				slotCount = slotIndex
-			}
-		}
 		for slotIndex := 1; slotIndex <= slotCount; slotIndex++ {
 			lease, claimed := claimedByProject[projectName][slotIndex]
 			var publicLease *LeasePublic
@@ -424,26 +414,17 @@ func testEnvironmentsFromSnapshot(
 	return envs
 }
 
-func projectTestSlotCount(settings Settings, project Project) int {
+func projectTestSlotCount(_ Settings, project Project) int {
 	metadata := project.Metadata
 	if standbyDNS, ok := mapFromMap(metadata, "native_standby_dns"); ok {
 		if count, ok := positiveIntFromMap(standbyDNS, "count"); ok {
 			return count
 		}
 	}
-	if projectRequiresNativeWorkflows(project) {
-		if settings.NativeRunnerProjectConcurrency > 0 {
-			return settings.NativeRunnerProjectConcurrency
-		}
-		return 1
-	}
 	return 0
 }
 
-func testEnvironmentName(project string, slotIndex int, projectDoc Project, lease Lease) string {
-	if value, ok := stringFromMap(lease.Metadata, "native_slot_name"); ok && strings.TrimSpace(value) != "" {
-		return strings.TrimSpace(value)
-	}
+func testEnvironmentName(project string, slotIndex int, projectDoc Project, _ Lease) string {
 	prefix := firstNonEmpty(projectDoc.Name, projectDoc.ID, project)
 	if standbyDNS, ok := mapFromMap(projectDoc.Metadata, "native_standby_dns"); ok {
 		if value, ok := stringFromMap(standbyDNS, "slot_prefix"); ok && strings.TrimSpace(value) != "" {

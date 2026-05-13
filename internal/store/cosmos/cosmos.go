@@ -3984,10 +3984,7 @@ func (s *Store) nativeProjectCap(ctx context.Context, project string) int {
 			}
 		}
 	}
-	if s.nativeProjectConcurrency > 0 {
-		return s.nativeProjectConcurrency
-	}
-	return 5
+	return 0
 }
 
 func (s *Store) nativeGlobalCap() int {
@@ -4285,10 +4282,6 @@ func nativeSlotIndex(metadata map[string]any) *int {
 
 func setNativeSlotMetadata(metadata map[string]any, project string, slotIndex int, slotPrefix string) {
 	metadata["native_slot_index"] = strconv.Itoa(slotIndex)
-	if existing, ok := metadata["native_slot_name"].(string); ok && strings.TrimSpace(existing) != "" {
-		metadata["native_slot_name"] = strings.TrimSpace(existing)
-		return
-	}
 	prefix := strings.Trim(strings.TrimSpace(slotPrefix), ".")
 	if prefix == "" {
 		prefix = project

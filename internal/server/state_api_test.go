@@ -129,7 +129,7 @@ func TestStateSnapshotIncludesTestEnvironmentsAndWaitingRequests(t *testing.T) {
 	}
 }
 
-func TestStateSnapshotTreatsAppTypeNativeWebAppAsNative(t *testing.T) {
+func TestStateSnapshotDoesNotInferNativeSlotsFromAppType(t *testing.T) {
 	now := time.Date(2026, 5, 11, 3, 0, 0, 0, time.UTC)
 	store := fakeStateStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{
@@ -144,8 +144,46 @@ func TestStateSnapshotTreatsAppTypeNativeWebAppAsNative(t *testing.T) {
 	var snapshot StateSnapshot
 	getJSON(t, handler, "/v1/state", &snapshot)
 
-	if len(snapshot.TestEnvironments) != 3 {
+	if len(snapshot.TestEnvironments) != 0 {
 		t.Fatalf("test_environments=%#v", snapshot.TestEnvironments)
+	}
+}
+
+func TestStateSnapshotIgnoresOutOfRangeLegacyNativeSlots(t *testing.T) {
+	now := time.Date(2026, 5, 11, 3, 0, 0, 0, time.UTC)
+	store := fakeStateStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "tank-operator",
+			Name: "tank-operator",
+			Metadata: map[string]any{
+				"native_standby_dns": map[string]any{
+					"count":       float64(2),
+					"slot_prefix": "tank-operator-slot",
+				},
+			},
+			CreatedAt: now,
+		}}},
+		leases: []Lease{{
+			ID:          "legacy-slot",
+			Project:     "tank-operator",
+			Workflow:    stringPtr("test-slot-checkout"),
+			State:       "claimed",
+			Metadata:    map[string]any{"test_slot_checkout": true, "native_slot_index": "99", "native_slot_name": "tank-operator-slot-99"},
+			RequestedAt: now,
+		}},
+	}
+	handler := NewWithStore(Settings{NativeRunnerProjectConcurrency: 10}, store)
+
+	var snapshot StateSnapshot
+	getJSON(t, handler, "/v1/state", &snapshot)
+
+	if len(snapshot.TestEnvironments) != 2 {
+		t.Fatalf("test_environments=%#v", snapshot.TestEnvironments)
+	}
+	for _, env := range snapshot.TestEnvironments {
+		if strings.Contains(env.SlotName, "99") {
+			t.Fatalf("legacy slot leaked into queue: %#v", snapshot.TestEnvironments)
+		}
 	}
 }
 

@@ -246,6 +246,21 @@ func TestLeaseFromDocConvertsStateSnapshotShape(t *testing.T) {
 	}
 }
 
+func TestSetNativeSlotMetadataUsesDeterministicQueueName(t *testing.T) {
+	metadata := map[string]any{
+		"native_slot_name": "ambience-slot-99",
+	}
+
+	setNativeSlotMetadata(metadata, "ambience", 2, "ambience-slot")
+
+	if metadata["native_slot_index"] != "2" {
+		t.Fatalf("native_slot_index=%#v", metadata["native_slot_index"])
+	}
+	if metadata["native_slot_name"] != "ambience-slot-2" {
+		t.Fatalf("metadata=%#v", metadata)
+	}
+}
+
 func TestListedLeaseFromDocSkipsLeaseNumberCounters(t *testing.T) {
 	cases := []leaseDoc{
 		{
