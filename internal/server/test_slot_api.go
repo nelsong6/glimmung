@@ -8,7 +8,14 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
+)
+
+const (
+	testSlotStateActivating = "activating"
+	testSlotStateActive     = "active"
+	testSlotStateReady      = "ready"
 )
 
 type TestSlotCheckoutRequest struct {
@@ -28,6 +35,8 @@ type TestSlotCheckoutResult struct {
 	URL       *string `json:"url,omitempty"`
 	Lease     string  `json:"lease"`
 	Host      *string `json:"host,omitempty"`
+	Usable    bool    `json:"usable"`
+	StatusURL *string `json:"status_url,omitempty"`
 	Detail    *string `json:"detail,omitempty"`
 }
 
@@ -45,6 +54,8 @@ type TestSlotReturnResult struct {
 	SlotName       *string `json:"slot_name,omitempty"`
 	CleanupStarted bool    `json:"cleanup_started"`
 }
+
+var testSlotActivations sync.Map
 
 func checkoutTestSlot(store ReadStore, preparer TestSlotPreparer, minter NativeGitHubTokenMinter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -107,15 +118,16 @@ func checkoutTestSlot(store ReadStore, preparer TestSlotPreparer, minter NativeG
 			return
 		}
 		if preparer != nil && lease.State == "claimed" && boolFromMap(lease.Metadata, "test_slot_checkout") {
-			if err := preparer.ActivateTestSlotRuntime(r.Context(), lease, project, minter); err != nil {
-				markLeaseSlotStatus(r.Context(), store, project, lease, "error", err)
-				_ = preparer.ReturnTestSlotRuntime(r.Context(), lease, project)
+			if _, err := setLeaseSlotStatus(r.Context(), store, project, lease, testSlotStateActivating, nil); err != nil {
 				_, _ = leaseStore.CancelLeaseByRef(r.Context(), req.Project, LeasePublicRefFromLease(lease))
-				writeProblem(w, http.StatusBadGateway, "test-slot runtime activation failed")
+				writeProblem(w, http.StatusInternalServerError, "record test-slot activation state failed")
 				return
 			}
+			beginTestSlotActivation(store, preparer, minter, project, lease, nil)
+			writeJSON(w, http.StatusAccepted, testSlotCheckoutResponse(project, workflow, lease, host, testSlotStateActivating))
+			return
 		}
-		writeJSON(w, http.StatusOK, testSlotCheckoutResponse(project, workflow, lease, host))
+		writeJSON(w, http.StatusOK, testSlotCheckoutResponse(project, workflow, lease, host, lease.State))
 	}
 }
 
@@ -183,14 +195,18 @@ func returnTestSlot(store ReadStore, preparer TestSlotPreparer, _ NativeGitHubTo
 }
 
 func markLeaseSlotStatus(ctx context.Context, store ReadStore, project Project, lease Lease, state string, cause error) {
+	_, _ = setLeaseSlotStatus(ctx, store, project, lease, state, cause)
+}
+
+func setLeaseSlotStatus(ctx context.Context, store ReadStore, project Project, lease Lease, state string, cause error) (Project, error) {
 	writer, ok := store.(ProjectTestEnvironmentSlotStatusWriter)
 	if !ok || writer == nil {
-		return
+		return Project{}, errors.New("test-slot status store not configured")
 	}
 	slotIndex := nativeSlotIndexFromMetadata(lease.Metadata)
 	slotName := nativeSlotNameFromMetadata(lease.Metadata)
 	if slotIndex == nil || slotName == nil {
-		return
+		return Project{}, errors.New("test-slot lease is missing slot metadata")
 	}
 	now := time.Now().UTC()
 	var detail *string
@@ -205,10 +221,10 @@ func markLeaseSlotStatus(ctx context.Context, store ReadStore, project Project, 
 		UpdatedAt: now,
 		Detail:    detail,
 	}
-	if state == "ready" {
+	if state == testSlotStateReady {
 		status.ReadyAt = &now
 	}
-	_, _ = writer.SetProjectTestEnvironmentSlotStatus(ctx, firstNonEmpty(lease.Project, project.ID, project.Name), status)
+	return writer.SetProjectTestEnvironmentSlotStatus(ctx, firstNonEmpty(lease.Project, project.ID, project.Name), status)
 }
 
 func findProjectForTestSlot(r *http.Request, w http.ResponseWriter, store ReadStore, name string) (Project, bool) {
@@ -226,7 +242,7 @@ func findProjectForTestSlot(r *http.Request, w http.ResponseWriter, store ReadSt
 	return Project{}, false
 }
 
-func testSlotCheckoutResponse(project Project, workflow string, lease Lease, host *Host) TestSlotCheckoutResult {
+func testSlotCheckoutResponse(project Project, workflow string, lease Lease, host *Host, state string) TestSlotCheckoutResult {
 	slotIndex := nativeSlotIndexFromMetadata(lease.Metadata)
 	slotName := nativeSlotNameFromMetadata(lease.Metadata)
 	url := testSlotURL(project, slotName)
@@ -240,8 +256,13 @@ func testSlotCheckoutResponse(project Project, workflow string, lease Lease, hos
 		text := "slot unavailable; checkout request is waiting"
 		detail = &text
 	}
+	if state == testSlotStateActivating {
+		text := "test-slot runtime activation is in progress"
+		detail = &text
+	}
+	statusURL := testSlotStatusURL(project, slotName)
 	return TestSlotCheckoutResult{
-		State:     lease.State,
+		State:     state,
 		Project:   project.Name,
 		Workflow:  workflow,
 		SlotIndex: slotIndex,
@@ -249,8 +270,219 @@ func testSlotCheckoutResponse(project Project, workflow string, lease Lease, hos
 		URL:       url,
 		Lease:     ref,
 		Host:      hostName,
+		Usable:    state == testSlotStateActive,
+		StatusURL: statusURL,
 		Detail:    detail,
 	}
+}
+
+func testSlotStatusURL(project Project, slotName *string) *string {
+	if slotName == nil || strings.TrimSpace(*slotName) == "" {
+		return nil
+	}
+	projectName := firstNonEmpty(project.Name, project.ID)
+	if strings.TrimSpace(projectName) == "" {
+		return nil
+	}
+	value := "/v1/projects/" + projectName + "/test-environments/" + strings.TrimSpace(*slotName)
+	return &value
+}
+
+func beginTestSlotActivation(store ReadStore, preparer TestSlotPreparer, minter NativeGitHubTokenMinter, project Project, lease Lease, logf func(string, ...any)) bool {
+	if preparer == nil {
+		return false
+	}
+	key := testSlotActivationKey(lease)
+	if key == "" {
+		return false
+	}
+	if _, loaded := testSlotActivations.LoadOrStore(key, struct{}{}); loaded {
+		return false
+	}
+	go func() {
+		defer testSlotActivations.Delete(key)
+		activateTestSlotRuntime(context.Background(), store, preparer, minter, project, lease, logf)
+	}()
+	return true
+}
+
+func activateTestSlotRuntime(parent context.Context, store ReadStore, preparer TestSlotPreparer, minter NativeGitHubTokenMinter, project Project, lease Lease, logf func(string, ...any)) {
+	ctx, cancel := context.WithTimeout(parent, 10*time.Minute)
+	err := preparer.ActivateTestSlotRuntime(ctx, lease, project, minter)
+	cancel()
+	if !testSlotLeaseStillClaimed(context.Background(), store, lease) {
+		return
+	}
+	if !testSlotLeaseStillActivating(context.Background(), store, project, lease) {
+		return
+	}
+	if err == nil {
+		if _, statusErr := setLeaseSlotStatus(context.Background(), store, project, lease, testSlotStateActive, nil); statusErr != nil && logf != nil {
+			logf("record test-slot activation success failed project=%s lease=%s: %v", lease.Project, LeasePublicRefFromLease(lease), statusErr)
+		}
+		return
+	}
+
+	if logf != nil {
+		logf("test-slot activation failed project=%s lease=%s: %v", lease.Project, LeasePublicRefFromLease(lease), err)
+	}
+	markLeaseSlotStatus(context.Background(), store, project, lease, "error", err)
+
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	if cleanupErr := preparer.ReturnTestSlotRuntime(cleanupCtx, lease, project); cleanupErr != nil && logf != nil {
+		logf("test-slot activation cleanup failed project=%s lease=%s: %v", lease.Project, LeasePublicRefFromLease(lease), cleanupErr)
+	}
+	cleanupCancel()
+
+	if leaseStore, ok := store.(LeaseStore); ok && leaseStore != nil {
+		cancelCtx, cancelRelease := context.WithTimeout(context.Background(), 30*time.Second)
+		if _, cancelErr := leaseStore.CancelLeaseByRef(cancelCtx, lease.Project, LeasePublicRefFromLease(lease)); cancelErr != nil && logf != nil {
+			logf("test-slot activation lease release failed project=%s lease=%s: %v", lease.Project, LeasePublicRefFromLease(lease), cancelErr)
+		}
+		cancelRelease()
+	}
+}
+
+func testSlotActivationKey(lease Lease) string {
+	if strings.TrimSpace(lease.ID) != "" {
+		return lease.Project + ":id:" + strings.TrimSpace(lease.ID)
+	}
+	if lease.LeaseNumber != nil && *lease.LeaseNumber > 0 {
+		return fmt.Sprintf("%s:number:%d", lease.Project, *lease.LeaseNumber)
+	}
+	ref := LeasePublicRefFromLease(lease)
+	if strings.TrimSpace(ref) == "" {
+		return ""
+	}
+	return lease.Project + ":" + ref
+}
+
+func testSlotLeaseStillClaimed(ctx context.Context, store ReadStore, lease Lease) bool {
+	stateStore, ok := store.(StateStore)
+	if !ok || stateStore == nil {
+		return true
+	}
+	leases, err := stateStore.ListLeases(ctx)
+	if err != nil {
+		return true
+	}
+	for _, current := range leases {
+		if sameTestSlotLease(current, lease) {
+			return current.State == "claimed"
+		}
+	}
+	return false
+}
+
+func sameTestSlotLease(left Lease, right Lease) bool {
+	if left.Project != right.Project {
+		return false
+	}
+	if strings.TrimSpace(left.ID) != "" && strings.TrimSpace(right.ID) != "" {
+		return left.ID == right.ID
+	}
+	if left.LeaseNumber != nil && right.LeaseNumber != nil {
+		return *left.LeaseNumber == *right.LeaseNumber
+	}
+	return LeasePublicRefFromLease(left) == LeasePublicRefFromLease(right)
+}
+
+func testSlotLeaseStillActivating(ctx context.Context, store ReadStore, project Project, lease Lease) bool {
+	slotIndex := nativeSlotIndexFromMetadata(lease.Metadata)
+	if slotIndex == nil {
+		return false
+	}
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		return true
+	}
+	for _, current := range projects {
+		if current.Name != lease.Project && current.ID != lease.Project && current.Name != project.Name && current.ID != project.ID {
+			continue
+		}
+		status, ok := testEnvironmentSlotStatus(current, *slotIndex)
+		return ok && status.State == testSlotStateActivating
+	}
+	return false
+}
+
+func StartTestSlotActivationRecoveryLoop(ctx context.Context, store ReadStore, preparer TestSlotPreparer, minter NativeGitHubTokenMinter, interval time.Duration, logf func(string, ...any)) {
+	if store == nil || preparer == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	recoverActivatingTestSlots(ctx, store, preparer, minter, 30*time.Second, logf)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			recoverActivatingTestSlots(ctx, store, preparer, minter, 30*time.Second, logf)
+		}
+	}
+}
+
+func recoverActivatingTestSlots(ctx context.Context, store ReadStore, preparer TestSlotPreparer, minter NativeGitHubTokenMinter, minAge time.Duration, logf func(string, ...any)) int {
+	if store == nil || preparer == nil {
+		return 0
+	}
+	stateStore, ok := store.(StateStore)
+	if !ok || stateStore == nil {
+		return 0
+	}
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		if logf != nil {
+			logf("test-slot activation recovery list projects failed: %v", err)
+		}
+		return 0
+	}
+	leases, err := stateStore.ListLeases(ctx)
+	if err != nil {
+		if logf != nil {
+			logf("test-slot activation recovery list leases failed: %v", err)
+		}
+		return 0
+	}
+	projectsByKey := map[string]Project{}
+	for _, project := range projects {
+		if project.Name != "" {
+			projectsByKey[project.Name] = project
+		}
+		if project.ID != "" {
+			projectsByKey[project.ID] = project
+		}
+	}
+	started := 0
+	now := time.Now()
+	for _, lease := range leases {
+		if lease.State != "claimed" || !boolFromMap(lease.Metadata, "test_slot_checkout") {
+			continue
+		}
+		slotIndex := nativeSlotIndexFromMetadata(lease.Metadata)
+		if slotIndex == nil {
+			continue
+		}
+		project, ok := projectsByKey[lease.Project]
+		if !ok {
+			continue
+		}
+		status, ok := testEnvironmentSlotStatus(project, *slotIndex)
+		if !ok || status.State != testSlotStateActivating {
+			continue
+		}
+		if !status.UpdatedAt.IsZero() && now.Sub(status.UpdatedAt) < minAge {
+			continue
+		}
+		if beginTestSlotActivation(store, preparer, minter, project, lease, logf) {
+			started++
+		}
+	}
+	return started
 }
 
 func resolveTestSlotLease(r *http.Request, store StateStore, req TestSlotReturnRequest) (Lease, error) {

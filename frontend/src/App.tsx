@@ -61,7 +61,11 @@ type TestEnvironment = {
   project: string;
   slot_index: number;
   slot_name: string;
-  state: "available" | "claimed";
+  state: "available" | "warming" | "activating" | "active" | "claimed" | "error";
+  usable?: boolean;
+  detail?: string | null;
+  updated_at?: string | null;
+  ready_at?: string | null;
   lease: Lease | null;
   waiting_requests: TestSlotRequest[];
 };
@@ -2671,8 +2675,11 @@ function TestEnvironmentIndexView({
 }) {
   const environments = (snap.test_environments ?? [])
     .filter((env) => !projectName || env.project === projectName);
-  const claimed = environments.filter((env) => env.state === "claimed");
   const available = environments.filter((env) => env.state === "available");
+  const activating = environments.filter((env) => env.state === "activating");
+  const active = environments.filter((env) => env.state === "active");
+  const claimed = environments.filter((env) => env.state === "claimed");
+  const errored = environments.filter((env) => env.state === "error");
   const project = projectName ? snap.projects.find((p) => p.name === projectName) : null;
 
   return (
@@ -2681,11 +2688,14 @@ function TestEnvironmentIndexView({
         <div className="project-hero-main">
           <div className="project-kicker mono">{projectName ? `project / ${projectName}` : "global test environments"}</div>
           <h2>Test environments</h2>
-          <div className="project-repo mono">available and claimed slots</div>
+          <div className="project-repo mono">warm slots and leased runtime</div>
         </div>
         <div className="project-facts">
           <div className="project-fact"><span>available</span><strong>{available.length}</strong></div>
-          <div className="project-fact"><span>claimed</span><strong>{claimed.length}</strong></div>
+          <div className="project-fact"><span>activating</span><strong>{activating.length}</strong></div>
+          <div className="project-fact"><span>active</span><strong>{active.length}</strong></div>
+          {claimed.length > 0 && <div className="project-fact"><span>claimed</span><strong>{claimed.length}</strong></div>}
+          {errored.length > 0 && <div className="project-fact"><span>error</span><strong>{errored.length}</strong></div>}
           {projectName && <div className="project-fact"><span>configured</span><strong>{environments.length}</strong></div>}
         </div>
       </section>
@@ -2716,7 +2726,7 @@ function TestEnvironmentIndexView({
           </thead>
           <tbody>
             {environments.map((env) => {
-              const requester = env.lease ? leaseRequester(env.lease) : { label: "-", title: "available" };
+              const requester = env.lease ? leaseRequester(env.lease) : { label: "-", title: env.detail ?? env.state };
               const detailTo = env.lease
                 ? `/projects/${encodeURIComponent(env.project)}/leases/test/${encodeURIComponent(leaseRouteId(env.lease))}`
                 : null;
@@ -2726,7 +2736,7 @@ function TestEnvironmentIndexView({
                     <td><Link className="link" to={`/projects/${encodeURIComponent(env.project)}`}>{env.project}</Link></td>
                   )}
                   <td className="mono">{env.slot_name}</td>
-                  <td><span className={`pill ${env.state === "claimed" ? "busy" : "free"}`}>{env.state}</span></td>
+                  <td><span className={`pill ${testEnvironmentPillClass(env.state)}`} title={env.detail ?? env.state}>{env.state}</span></td>
                   <td className="mono dim">
                     {env.lease && detailTo ? (
                       <Link className="link mono" to={detailTo}>{leaseDisplayName(env.lease)}</Link>
@@ -2985,6 +2995,22 @@ function leaseKindDescription(kind: LeaseKind): string {
   return kind === "test"
     ? "test environments and native slots"
     : "agent runners and work leases that are not test environments";
+}
+
+function testEnvironmentPillClass(state: TestEnvironment["state"]): "free" | "busy" | "drain" | "info" {
+  switch (state) {
+    case "available":
+      return "free";
+    case "active":
+    case "claimed":
+      return "busy";
+    case "error":
+      return "drain";
+    case "warming":
+    case "activating":
+    default:
+      return "info";
+  }
 }
 
 function projectUsesNativeWorkflows(project: Project): boolean {

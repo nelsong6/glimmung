@@ -13,12 +13,14 @@ import (
 
 type fakeLeaseStore struct {
 	fakeReadStore
-	lease    Lease
-	leases   []Lease
-	host     *Host
-	result   CancelLeaseResult
-	leaseReq LeaseAcquireRequest
-	err      error
+	lease        Lease
+	leases       []Lease
+	host         *Host
+	result       CancelLeaseResult
+	leaseReq     LeaseAcquireRequest
+	slotStatuses []TestEnvironmentSlotStatus
+	cancelledRef string
+	err          error
 }
 
 func (s *fakeLeaseStore) AcquireLease(_ context.Context, req LeaseAcquireRequest) (Lease, *Host, error) {
@@ -29,7 +31,8 @@ func (s *fakeLeaseStore) AcquireLease(_ context.Context, req LeaseAcquireRequest
 	return s.lease, s.host, nil
 }
 
-func (s *fakeLeaseStore) CancelLeaseByRef(_ context.Context, _, _ string) (CancelLeaseResult, error) {
+func (s *fakeLeaseStore) CancelLeaseByRef(_ context.Context, _, ref string) (CancelLeaseResult, error) {
+	s.cancelledRef = ref
 	if s.err != nil {
 		return CancelLeaseResult{}, s.err
 	}
@@ -48,6 +51,41 @@ func (s *fakeLeaseStore) ListLeases(context.Context) ([]Lease, error) {
 		return s.leases, nil
 	}
 	return []Lease{s.lease}, nil
+}
+
+func (s *fakeLeaseStore) SetProjectTestEnvironmentSlotStatus(_ context.Context, project string, status TestEnvironmentSlotStatus) (Project, error) {
+	s.slotStatuses = append(s.slotStatuses, status)
+	for i := range s.projects {
+		if s.projects[i].Name != project && s.projects[i].ID != project {
+			continue
+		}
+		if s.projects[i].Metadata == nil {
+			s.projects[i].Metadata = map[string]any{}
+		}
+		standby, _ := s.projects[i].Metadata["native_standby_dns"].(map[string]any)
+		if standby == nil {
+			standby = map[string]any{}
+		}
+		slots, _ := standby["slots"].([]any)
+		replaced := false
+		for j, raw := range slots {
+			slot, _ := raw.(map[string]any)
+			if slot == nil {
+				continue
+			}
+			if index, ok := positiveIntFromMap(slot, "slot_index"); ok && index == status.SlotIndex {
+				slots[j] = testSlotStatusMap(status)
+				replaced = true
+			}
+		}
+		if !replaced {
+			slots = append(slots, testSlotStatusMap(status))
+		}
+		standby["slots"] = slots
+		s.projects[i].Metadata["native_standby_dns"] = standby
+		return s.projects[i], nil
+	}
+	return Project{}, ErrNotFound
 }
 
 func TestCreateLease(t *testing.T) {

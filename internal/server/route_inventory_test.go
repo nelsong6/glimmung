@@ -67,6 +67,7 @@ var expectedGoRoutes = []string{
 	"POST /v1/lease-callbacks/{callback_token}/heartbeat",
 	"POST /v1/lease-callbacks/{callback_token}/release",
 	"GET /v1/state",
+	"GET /v1/projects/{project}/test-environments/{slot_name}",
 	"GET /v1/events",
 	"POST /v1/signals",
 	"POST /v1/signals/drain",

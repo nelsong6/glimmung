@@ -79,11 +79,21 @@ func (s *fakeProjectScalerStore) SetProjectTestEnvironmentSlotStatus(_ context.C
 }
 
 func testSlotStatusMap(status TestEnvironmentSlotStatus) map[string]any {
-	return map[string]any{
+	slot := map[string]any{
 		"slot_index": float64(status.SlotIndex),
 		"slot_name":  status.SlotName,
 		"state":      status.State,
 	}
+	if !status.UpdatedAt.IsZero() {
+		slot["updated_at"] = status.UpdatedAt.Format(time.RFC3339Nano)
+	}
+	if status.Detail != nil {
+		slot["detail"] = *status.Detail
+	}
+	if status.ReadyAt != nil {
+		slot["ready_at"] = status.ReadyAt.Format(time.RFC3339Nano)
+	}
+	return slot
 }
 
 func pruneFakeTestSlots(raw any, count int) []any {

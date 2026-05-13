@@ -316,6 +316,7 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	mux.HandleFunc("POST /v1/lease-callbacks/{callback_token}/heartbeat", heartbeatLeaseByCallbackToken(store))
 	mux.HandleFunc("POST /v1/lease-callbacks/{callback_token}/release", releaseLeaseByCallbackToken(store))
 	mux.HandleFunc("GET /v1/state", stateSnapshot(settings, store))
+	mux.HandleFunc("GET /v1/projects/{project}/test-environments/{slot_name}", testEnvironmentStatus(settings, store))
 	mux.HandleFunc("GET /v1/events", stateEvents(settings, store))
 	mux.Handle("POST /v1/signals", requireAdmin(adminAuthenticator, http.HandlerFunc(createSignal(store))))
 	mux.Handle("POST /v1/signals/drain", requireAdmin(adminAuthenticator, http.HandlerFunc(drainSignalsHandler(store, ghDispatch))))

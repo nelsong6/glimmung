@@ -113,6 +113,10 @@ type TestEnvironmentPublic struct {
 	SlotIndex       int                     `json:"slot_index"`
 	SlotName        string                  `json:"slot_name"`
 	State           string                  `json:"state"`
+	Usable          bool                    `json:"usable"`
+	Detail          *string                 `json:"detail,omitempty"`
+	UpdatedAt       *time.Time              `json:"updated_at,omitempty"`
+	ReadyAt         *time.Time              `json:"ready_at,omitempty"`
 	Lease           *LeasePublic            `json:"lease"`
 	WaitingRequests []TestSlotRequestPublic `json:"waiting_requests"`
 }
@@ -125,6 +129,36 @@ func stateSnapshot(settings Settings, store ReadStore) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, snapshot)
+	}
+}
+
+func testEnvironmentStatus(settings Settings, store ReadStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		project := strings.TrimSpace(r.PathValue("project"))
+		slotName := strings.TrimSpace(r.PathValue("slot_name"))
+		if project == "" || slotName == "" {
+			writeProblem(w, http.StatusBadRequest, "project and slot_name required")
+			return
+		}
+		snapshot, err := loadStateSnapshot(r.Context(), settings, store)
+		if err != nil {
+			writeStateSnapshotError(w, err)
+			return
+		}
+		projectName := project
+		for _, candidate := range snapshot.Projects {
+			if candidate.Name == project || candidate.ID == project {
+				projectName = firstNonEmpty(candidate.Name, candidate.ID, project)
+				break
+			}
+		}
+		for _, env := range snapshot.TestEnvironments {
+			if env.Project == projectName && env.SlotName == slotName {
+				writeJSON(w, http.StatusOK, env)
+				return
+			}
+		}
+		writeProblem(w, http.StatusNotFound, "test environment slot not found")
 	}
 }
 
@@ -385,24 +419,40 @@ func testEnvironmentsFromSnapshot(
 	for _, projectName := range names {
 		project := projectsByName[projectName]
 		slotCount := projectTestSlotCount(settings, project)
-		slotStates := testEnvironmentSlotStates(project)
+		slotStatuses := testEnvironmentSlotStatuses(project)
 		for slotIndex := 1; slotIndex <= slotCount; slotIndex++ {
 			lease, claimed := claimedByProject[projectName][slotIndex]
 			var publicLease *LeasePublic
-			state := firstNonEmpty(slotStates[slotIndex], "warming")
-			if state == "ready" {
+			slotStatus := slotStatuses[slotIndex]
+			state := firstNonEmpty(slotStatus.State, "warming")
+			usable := false
+			if state == testSlotStateReady {
 				state = "available"
 			}
 			if claimed {
-				state = "claimed"
+				if slotStatus.State == testSlotStateActivating || slotStatus.State == testSlotStateActive || slotStatus.State == "error" {
+					state = slotStatus.State
+				} else {
+					state = "claimed"
+				}
+				usable = state == testSlotStateActive
 				value := leaseToPublic(lease)
 				publicLease = &value
+			}
+			var updatedAt *time.Time
+			if !slotStatus.UpdatedAt.IsZero() {
+				value := slotStatus.UpdatedAt
+				updatedAt = &value
 			}
 			envs = append(envs, TestEnvironmentPublic{
 				Project:         projectName,
 				SlotIndex:       slotIndex,
 				SlotName:        testEnvironmentName(projectName, slotIndex, project, lease),
 				State:           state,
+				Usable:          usable,
+				Detail:          slotStatus.Detail,
+				UpdatedAt:       updatedAt,
+				ReadyAt:         slotStatus.ReadyAt,
 				Lease:           publicLease,
 				WaitingRequests: sliceOrEmpty(waitingByProject[projectName][slotIndex]),
 			})
@@ -422,7 +472,22 @@ func projectTestSlotCount(_ Settings, project Project) int {
 }
 
 func testEnvironmentSlotStates(project Project) map[int]string {
+	statuses := testEnvironmentSlotStatuses(project)
 	states := map[int]string{}
+	for index, status := range statuses {
+		states[index] = status.State
+	}
+	return states
+}
+
+func testEnvironmentSlotStatus(project Project, slotIndex int) (TestEnvironmentSlotStatus, bool) {
+	statuses := testEnvironmentSlotStatuses(project)
+	status, ok := statuses[slotIndex]
+	return status, ok
+}
+
+func testEnvironmentSlotStatuses(project Project) map[int]TestEnvironmentSlotStatus {
+	statuses := map[int]TestEnvironmentSlotStatus{}
 	if standbyDNS, ok := mapFromMap(project.Metadata, "native_standby_dns"); ok {
 		for _, slot := range mapSliceFromAnySlice(anySlice(standbyDNS["slots"])) {
 			index, ok := positiveIntFromMap(slot, "slot_index")
@@ -432,12 +497,46 @@ func testEnvironmentSlotStates(project Project) map[int]string {
 			if !ok {
 				continue
 			}
-			if value, ok := stringFromMap(slot, "state"); ok && strings.TrimSpace(value) != "" {
-				states[index] = strings.TrimSpace(value)
+			status := TestEnvironmentSlotStatus{SlotIndex: index}
+			if value, ok := stringFromMap(slot, "slot_name"); ok && strings.TrimSpace(value) != "" {
+				status.SlotName = strings.TrimSpace(value)
 			}
+			if status.SlotName == "" {
+				if value, ok := stringFromMap(slot, "slotName"); ok && strings.TrimSpace(value) != "" {
+					status.SlotName = strings.TrimSpace(value)
+				}
+			}
+			if value, ok := stringFromMap(slot, "state"); ok && strings.TrimSpace(value) != "" {
+				status.State = strings.TrimSpace(value)
+			}
+			if value, ok := stringFromMap(slot, "detail"); ok && strings.TrimSpace(value) != "" {
+				detail := strings.TrimSpace(value)
+				status.Detail = &detail
+			}
+			if value, ok := stringFromMap(slot, "updated_at"); ok && strings.TrimSpace(value) != "" {
+				if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value)); err == nil {
+					status.UpdatedAt = parsed
+				}
+			}
+			if value, ok := stringFromMap(slot, "updatedAt"); ok && status.UpdatedAt.IsZero() && strings.TrimSpace(value) != "" {
+				if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value)); err == nil {
+					status.UpdatedAt = parsed
+				}
+			}
+			if value, ok := stringFromMap(slot, "ready_at"); ok && strings.TrimSpace(value) != "" {
+				if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value)); err == nil {
+					status.ReadyAt = &parsed
+				}
+			}
+			if value, ok := stringFromMap(slot, "readyAt"); ok && status.ReadyAt == nil && strings.TrimSpace(value) != "" {
+				if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value)); err == nil {
+					status.ReadyAt = &parsed
+				}
+			}
+			statuses[index] = status
 		}
 	}
-	return states
+	return statuses
 }
 
 func testEnvironmentName(project string, slotIndex int, projectDoc Project, _ Lease) string {
