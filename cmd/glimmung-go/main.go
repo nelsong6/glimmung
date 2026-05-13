@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nelsong6/glimmung/internal/auth"
+	azureclient "github.com/nelsong6/glimmung/internal/azure"
 	entraredirects "github.com/nelsong6/glimmung/internal/entra"
 	githubclient "github.com/nelsong6/glimmung/internal/github"
 	"github.com/nelsong6/glimmung/internal/server"
@@ -33,6 +34,15 @@ func main() {
 		log.Printf("native auth redirect reconciler disabled: %v", err)
 	}
 	authRedirects := server.NativeAuthRedirectService{Client: authRedirectClient}
+	workloadIdentityClient, err := azureclient.NewWorkloadIdentityClient()
+	if err != nil {
+		log.Printf("native workload identity reconciler disabled: %v", err)
+	}
+	workloadIdentities := server.NativeWorkloadIdentityService{
+		Client:                  workloadIdentityClient,
+		Issuer:                  settings.NativeWorkloadIdentityIssuer,
+		ServiceAccountTokenPath: settings.K8sSATokenPath,
+	}
 	var ghDispatch server.GHADispatchClient
 	if d, ok := ghClient.(server.GHADispatchClient); ok {
 		ghDispatch = d
@@ -45,7 +55,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           server.NewWithRuntimeClients(settings, store, authenticator, ghClient, authRedirects, nativeLauncher, artifacts),
+		Handler:           server.NewWithRuntimeReconcilers(settings, store, authenticator, ghClient, authRedirects, workloadIdentities, nativeLauncher, artifacts),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

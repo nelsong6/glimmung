@@ -33,7 +33,7 @@ type TestEnvironmentSlotStatus struct {
 	ReadyAt   *time.Time `json:"ready_at,omitempty"`
 }
 
-func scaleProjectTestEnvironments(store ReadStore, authRedirects NativeAuthRedirectReconciler, preparer TestSlotPreparer, minter NativeGitHubTokenMinter) http.HandlerFunc {
+func scaleProjectTestEnvironments(store ReadStore, authRedirects NativeAuthRedirectReconciler, workloadIdentities NativeWorkloadIdentityReconciler, preparer TestSlotPreparer, minter NativeGitHubTokenMinter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		scaler, ok := store.(ProjectTestEnvironmentScaler)
 		if !ok || scaler == nil {
@@ -92,6 +92,26 @@ func scaleProjectTestEnvironments(store ReadStore, authRedirects NativeAuthRedir
 			}
 			if err != nil {
 				writeProblem(w, http.StatusBadGateway, "auth redirect reconciliation failed")
+				return
+			}
+		}
+		if workloadIdentities != nil {
+			status, err := workloadIdentities.ReconcileNativeWorkloadIdentities(r.Context(), updated)
+			if status.State != "" && status.State != NativeWorkloadIdentityStatusSkipped {
+				statusWriter, ok := store.(ProjectNativeWorkloadIdentityStatusWriter)
+				if !ok || statusWriter == nil {
+					writeProblem(w, http.StatusServiceUnavailable, "project workload identity status store not configured")
+					return
+				}
+				persisted, persistErr := statusWriter.SetProjectNativeWorkloadIdentityStatus(r.Context(), project, status)
+				if persistErr != nil {
+					writeProblem(w, http.StatusInternalServerError, "record workload identity status failed")
+					return
+				}
+				updated = persisted
+			}
+			if err != nil {
+				writeProblem(w, http.StatusBadGateway, "workload identity reconciliation failed")
 				return
 			}
 		}
