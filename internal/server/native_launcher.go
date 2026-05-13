@@ -28,6 +28,7 @@ type NativeLauncher interface {
 type TestSlotPreparer interface {
 	EnsureTestSlot(ctx context.Context, lease Lease, project Project, minter NativeGitHubTokenMinter) error
 	ReturnTestSlot(ctx context.Context, lease Lease) error
+	DeprovisionTestSlot(ctx context.Context, lease Lease, project Project) error
 }
 
 type NativeLaunchRequest struct {
@@ -74,11 +75,6 @@ func (l *KubernetesNativeLauncher) EnsureTestSlot(ctx context.Context, lease Lea
 	slotName, _ := stringFromMap(lease.Metadata, "native_slot_name")
 	if strings.TrimSpace(slotName) == "" {
 		return nil
-	}
-	if testSlotCleanSlate(lease.Metadata) {
-		if err := l.deleteNamespace(ctx, testSlotSessionsNamespaceForLease(lease, project, slotName)); err != nil {
-			return err
-		}
 	}
 	if err := l.ensureNamespace(ctx, slotName, testSlotLabels(lease, slotName)); err != nil {
 		return err
@@ -132,10 +128,35 @@ func (l *KubernetesNativeLauncher) EnsureTestSlot(ctx context.Context, lease Lea
 func (l *KubernetesNativeLauncher) ReturnTestSlot(ctx context.Context, lease Lease) error {
 	slotName, _ := stringFromMap(lease.Metadata, "native_slot_name")
 	if strings.TrimSpace(slotName) != "" {
-		if err := l.deleteTestSlotInstaller(ctx, lease); err != nil {
+		return l.deleteTestSlotInstaller(ctx, lease)
+	}
+	return nil
+}
+
+func (l *KubernetesNativeLauncher) DeprovisionTestSlot(ctx context.Context, lease Lease, project Project) error {
+	slotName, _ := stringFromMap(lease.Metadata, "native_slot_name")
+	if strings.TrimSpace(slotName) == "" {
+		return nil
+	}
+	if err := l.deleteTestSlotInstaller(ctx, lease); err != nil {
+		return err
+	}
+	if err := l.deletePlaywrightResources(ctx, lease, slotName); err != nil {
+		return err
+	}
+	if err := l.deleteTestSlotClusterRoleBindings(ctx, slotName); err != nil {
+		return err
+	}
+	sessionsNamespace := testSlotSessionsNamespaceForLease(lease, project, slotName)
+	if strings.TrimSpace(sessionsNamespace) != "" && sessionsNamespace != slotName {
+		if err := l.deleteNamespaceAndWait(ctx, sessionsNamespace); err != nil {
 			return err
 		}
 	}
+	return l.deleteNamespaceAndWait(ctx, slotName)
+}
+
+func (l *KubernetesNativeLauncher) deletePlaywrightResources(ctx context.Context, lease Lease, slotName string) error {
 	name := playwrightResourceName(lease.Project, slotName)
 	if name != "" {
 		for _, path := range []string{
@@ -146,11 +167,6 @@ func (l *KubernetesNativeLauncher) ReturnTestSlot(ctx context.Context, lease Lea
 			if err != nil && status != http.StatusNotFound {
 				return err
 			}
-		}
-	}
-	if strings.TrimSpace(slotName) != "" {
-		if err := l.deleteNamespace(ctx, testSlotSessionsNamespaceForLease(lease, Project{}, slotName)); err != nil {
-			return err
 		}
 	}
 	return nil
@@ -186,6 +202,36 @@ func (l *KubernetesNativeLauncher) deleteNamespace(ctx context.Context, name str
 		return err
 	}
 	return nil
+}
+
+func (l *KubernetesNativeLauncher) deleteNamespaceAndWait(ctx context.Context, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	if err := l.deleteNamespace(ctx, name); err != nil {
+		return err
+	}
+	deadline := time.NewTimer(90 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	for {
+		status, _, err := l.request(ctx, http.MethodGet, "/api/v1/namespaces/"+name, nil)
+		if status == http.StatusNotFound {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("namespace %s deletion did not complete before deprovision", name)
+		case <-ticker.C:
+		}
+	}
 }
 
 func (l *KubernetesNativeLauncher) ensureTestSlotInstallerAccess(ctx context.Context, lease Lease, namespace string) error {
@@ -811,13 +857,6 @@ func testSlotLabels(lease Lease, slotName string) map[string]string {
 		labels["glimmung.romaine.life/lease-ref"] = labelValue(ref)
 	}
 	return labels
-}
-
-func testSlotCleanSlate(metadata map[string]any) bool {
-	if value, ok := stringFromMap(metadata, "test_slot_mode"); ok && strings.EqualFold(value, "clean_slate") {
-		return true
-	}
-	return false
 }
 
 func deleteOptions(policy string) map[string]any {

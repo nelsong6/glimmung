@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -54,6 +56,16 @@ func scaleProjectTestEnvironments(store ReadStore, authRedirects NativeAuthRedir
 			return
 		}
 
+		before, hasBefore, err := findProjectByKey(r.Context(), store, project)
+		if err != nil {
+			writeProblem(w, http.StatusInternalServerError, "list projects failed")
+			return
+		}
+		var removedSlots []TestEnvironmentSlotStatus
+		if hasBefore {
+			removedSlots = testEnvironmentSlotsAboveCount(before, *req.Count)
+		}
+
 		updated, err := scaler.SetProjectTestEnvironmentCount(r.Context(), project, *req.Count)
 		if err != nil {
 			if errors.Is(err, ErrNotFound) {
@@ -80,6 +92,12 @@ func scaleProjectTestEnvironments(store ReadStore, authRedirects NativeAuthRedir
 			}
 			if err != nil {
 				writeProblem(w, http.StatusBadGateway, "auth redirect reconciliation failed")
+				return
+			}
+		}
+		if preparer != nil && len(removedSlots) > 0 {
+			if err := deprovisionProjectTestEnvironments(r.Context(), preparer, before, removedSlots); err != nil {
+				writeProblem(w, http.StatusBadGateway, err.Error())
 				return
 			}
 		}
@@ -149,6 +167,32 @@ func warmProjectTestEnvironments(ctx context.Context, store ReadStore, preparer 
 	return current, nil
 }
 
+func deprovisionProjectTestEnvironments(ctx context.Context, preparer TestSlotPreparer, project Project, slots []TestEnvironmentSlotStatus) error {
+	for _, slot := range slots {
+		if strings.TrimSpace(slot.SlotName) == "" {
+			continue
+		}
+		lease := testEnvironmentWarmupLease(project, slot.SlotIndex, slot.SlotName)
+		if err := preparer.DeprovisionTestSlot(ctx, lease, project); err != nil {
+			return fmt.Errorf("deprovision test slot %s: %w", slot.SlotName, err)
+		}
+	}
+	return nil
+}
+
+func findProjectByKey(ctx context.Context, store ReadStore, key string) (Project, bool, error) {
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		return Project{}, false, err
+	}
+	for _, project := range projects {
+		if project.Name == key || project.ID == key {
+			return project, true, nil
+		}
+	}
+	return Project{}, false, nil
+}
+
 func testEnvironmentWarmupLease(project Project, slotIndex int, slotName string) Lease {
 	host := "native-k8s"
 	return Lease{
@@ -157,13 +201,43 @@ func testEnvironmentWarmupLease(project Project, slotIndex int, slotName string)
 		State:   "warming",
 		Metadata: map[string]any{
 			"test_slot_checkout":        true,
-			"test_slot_mode":            "provision",
 			"native_k8s":                true,
 			"native_slot_index":         strconv.Itoa(slotIndex),
 			"native_slot_name":          slotName,
 			"native_sessions_namespace": testSlotSessionsNamespace(slotName, project),
 		},
 	}
+}
+
+func testEnvironmentSlotsAboveCount(project Project, count int) []TestEnvironmentSlotStatus {
+	removed := make([]TestEnvironmentSlotStatus, 0)
+	projectName := firstNonEmpty(project.Name, project.ID)
+	if standbyDNS, ok := mapFromMap(project.Metadata, "native_standby_dns"); ok {
+		for _, slot := range mapSliceFromAnySlice(anySlice(standbyDNS["slots"])) {
+			index, ok := positiveIntFromMap(slot, "slot_index")
+			if !ok {
+				index, ok = positiveIntFromMap(slot, "slotIndex")
+			}
+			if !ok || index <= count {
+				continue
+			}
+			slotName, _ := stringFromMap(slot, "slot_name")
+			if strings.TrimSpace(slotName) == "" {
+				slotName, _ = stringFromMap(slot, "slotName")
+			}
+			if strings.TrimSpace(slotName) == "" {
+				slotName = testEnvironmentName(projectName, index, project, Lease{})
+			}
+			removed = append(removed, TestEnvironmentSlotStatus{
+				SlotIndex: index,
+				SlotName:  strings.TrimSpace(slotName),
+			})
+		}
+	}
+	sort.SliceStable(removed, func(i, j int) bool {
+		return removed[i].SlotIndex < removed[j].SlotIndex
+	})
+	return removed
 }
 
 func testEnvironmentSlotState(project Project, slotIndex int) string {

@@ -30,6 +30,16 @@ func (s *fakeProjectScalerStore) SetProjectTestEnvironmentCount(_ context.Contex
 	if s.err != nil {
 		return Project{}, s.err
 	}
+	if s.project.Metadata == nil {
+		s.project.Metadata = map[string]any{}
+	}
+	standby, _ := s.project.Metadata["native_standby_dns"].(map[string]any)
+	if standby == nil {
+		standby = map[string]any{}
+	}
+	standby["count"] = count
+	standby["slots"] = pruneFakeTestSlots(standby["slots"], count)
+	s.project.Metadata["native_standby_dns"] = standby
 	return s.project, nil
 }
 
@@ -69,6 +79,25 @@ func testSlotStatusMap(status TestEnvironmentSlotStatus) map[string]any {
 		"slot_name":  status.SlotName,
 		"state":      status.State,
 	}
+}
+
+func pruneFakeTestSlots(raw any, count int) []any {
+	slots, _ := raw.([]any)
+	pruned := make([]any, 0, len(slots))
+	for _, rawSlot := range slots {
+		slot, _ := rawSlot.(map[string]any)
+		if slot == nil {
+			continue
+		}
+		index, ok := positiveIntFromMap(slot, "slot_index")
+		if !ok {
+			index, ok = positiveIntFromMap(slot, "slotIndex")
+		}
+		if ok && index <= count {
+			pruned = append(pruned, slot)
+		}
+	}
+	return pruned
 }
 
 func (s *fakeProjectScalerStore) SetProjectNativeAuthRedirectStatus(_ context.Context, project string, status NativeAuthRedirectStatus) (Project, error) {
@@ -200,6 +229,53 @@ func TestScaleProjectTestEnvironmentsWarmsSlotsBeforeReady(t *testing.T) {
 	standby := project.Metadata["native_standby_dns"].(map[string]any)
 	slots := standby["slots"].([]any)
 	if len(slots) != 2 {
+		t.Fatalf("slots=%#v", slots)
+	}
+}
+
+func TestScaleProjectTestEnvironmentsDeprovisionsRemovedSlots(t *testing.T) {
+	project := Project{
+		ID:         "tank",
+		Name:       "tank",
+		GitHubRepo: "nelsong6/tank-operator",
+		Metadata: map[string]any{
+			"native_standby_dns": map[string]any{
+				"count":       float64(3),
+				"slot_prefix": "tank-slot",
+				"slots": []any{
+					map[string]any{"slot_index": float64(1), "slot_name": "tank-slot-1", "state": "ready"},
+					map[string]any{"slot_index": float64(2), "slot_name": "tank-slot-2", "state": "ready"},
+					map[string]any{"slot_index": float64(3), "slot_name": "tank-slot-3", "state": "error"},
+				},
+			},
+		},
+	}
+	store := &fakeProjectScalerStore{
+		fakeReadStore: fakeReadStore{projects: []Project{project}},
+		project:       project,
+	}
+	preparer := &fakeTestSlotPreparer{}
+	handler := newHandler(
+		Settings{},
+		store,
+		fakeAdminAuthenticator{user: auth.User{Sub: "admin"}},
+		nil,
+		nil,
+		preparer,
+	)
+
+	var updated Project
+	patchJSON(t, handler, "/v1/projects/tank/test-environments/count", `{"count":1}`, &updated)
+
+	if got, want := strings.Join(preparer.deprovisioned, ","), "tank-slot-2,tank-slot-3"; got != want {
+		t.Fatalf("deprovisioned=%q, want %q", got, want)
+	}
+	if preparer.ensured {
+		t.Fatal("scale down should not warm removed slots")
+	}
+	standby := updated.Metadata["native_standby_dns"].(map[string]any)
+	slots := standby["slots"].([]any)
+	if len(slots) != 1 {
 		t.Fatalf("slots=%#v", slots)
 	}
 }
