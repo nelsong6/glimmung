@@ -53,7 +53,7 @@ func main() {
 	nativeLauncher := server.NewKubernetesNativeLauncher(settings)
 	if store != nil {
 		if nativeMinter, ok := ghClient.(server.NativeGitHubTokenMinter); ok {
-			go server.StartTestSlotActivationRecoveryLoop(context.Background(), store, nativeLauncher, nativeMinter, 15*time.Second, log.Printf)
+			go server.StartTestSlotReconcilerLoop(context.Background(), store, nativeLauncher, nativeMinter, 15*time.Second, log.Printf)
 		}
 	}
 	addr := ":" + settings.Port

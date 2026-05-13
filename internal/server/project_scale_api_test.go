@@ -16,13 +16,29 @@ import (
 type fakeProjectScalerStore struct {
 	fakeReadStore
 	project      Project
+	leases       []Lease
 	name         string
 	count        int
 	slotStatuses []TestEnvironmentSlotStatus
 	status       *NativeAuthRedirectStatus
 	wiStatus     *NativeWorkloadIdentityStatus
 	statusErr    error
+	leaseErr     error
 	err          error
+}
+
+func (s *fakeProjectScalerStore) ListHosts(context.Context) ([]Host, error) {
+	return nil, s.err
+}
+
+func (s *fakeProjectScalerStore) ListLeases(context.Context) ([]Lease, error) {
+	if s.leaseErr != nil {
+		return nil, s.leaseErr
+	}
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.leases, nil
 }
 
 func (s *fakeProjectScalerStore) SetProjectTestEnvironmentCount(_ context.Context, project string, count int) (Project, error) {
@@ -389,6 +405,107 @@ func TestScaleProjectTestEnvironmentsDeprovisionsRemovedSlots(t *testing.T) {
 	slots := standby["slots"].([]any)
 	if len(slots) != 1 {
 		t.Fatalf("slots=%#v", slots)
+	}
+}
+
+func TestScaleProjectTestEnvironmentsRejectsRemovingActiveSlot(t *testing.T) {
+	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
+	project := Project{
+		ID:         "tank",
+		Name:       "tank",
+		GitHubRepo: "nelsong6/tank-operator",
+		Metadata: map[string]any{
+			"native_standby_dns": map[string]any{
+				"count":       float64(3),
+				"slot_prefix": "tank-slot",
+				"slots": []any{
+					map[string]any{"slot_index": float64(1), "slot_name": "tank-slot-1", "state": "ready"},
+					map[string]any{"slot_index": float64(2), "slot_name": "tank-slot-2", "state": "ready"},
+					map[string]any{"slot_index": float64(3), "slot_name": "tank-slot-3", "state": testSlotStateActive},
+				},
+			},
+		},
+	}
+	store := &fakeProjectScalerStore{
+		fakeReadStore: fakeReadStore{projects: []Project{project}},
+		project:       project,
+		leases: []Lease{{
+			Project:     "tank",
+			LeaseNumber: intPtr(3),
+			State:       "claimed",
+			Metadata: map[string]any{
+				"test_slot_checkout": true,
+				"native_slot_index":  "3",
+				"native_slot_name":   "tank-slot-3",
+			},
+			RequestedAt: now,
+		}},
+	}
+	preparer := &fakeTestSlotPreparer{}
+	handler := newHandler(
+		Settings{},
+		store,
+		fakeAdminAuthenticator{user: auth.User{Sub: "admin"}},
+		nil,
+		nil,
+		preparer,
+	)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/v1/projects/tank/test-environments/count", strings.NewReader(`{"count":2}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(preparer.deprovisioned) > 0 {
+		t.Fatalf("deprovisioned=%#v, want none", preparer.deprovisioned)
+	}
+	if store.count != 0 {
+		t.Fatalf("count=%d, want unchanged", store.count)
+	}
+}
+
+func TestScaleProjectTestEnvironmentsRequiresLeaseVisibilityWhenRemovingSlots(t *testing.T) {
+	project := Project{
+		ID:         "tank",
+		Name:       "tank",
+		GitHubRepo: "nelsong6/tank-operator",
+		Metadata: map[string]any{
+			"native_standby_dns": map[string]any{
+				"count": float64(2),
+				"slots": []any{
+					map[string]any{"slot_index": float64(1), "slot_name": "tank-slot-1", "state": "ready"},
+					map[string]any{"slot_index": float64(2), "slot_name": "tank-slot-2", "state": "ready"},
+				},
+			},
+		},
+	}
+	store := &fakeProjectScalerStore{
+		fakeReadStore: fakeReadStore{projects: []Project{project}},
+		project:       project,
+		leaseErr:      errors.New("cosmos unavailable"),
+	}
+	handler := newHandler(
+		Settings{},
+		store,
+		fakeAdminAuthenticator{user: auth.User{Sub: "admin"}},
+		nil,
+		nil,
+		&fakeTestSlotPreparer{},
+	)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/v1/projects/tank/test-environments/count", strings.NewReader(`{"count":1}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.count != 0 {
+		t.Fatalf("count=%d, want unchanged", store.count)
 	}
 }
 

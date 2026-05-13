@@ -75,6 +75,27 @@ func scaleProjectTestEnvironments(store ReadStore, authRedirects NativeAuthRedir
 		if hasBefore {
 			removedSlots = testEnvironmentSlotsAboveCount(before, *req.Count)
 		}
+		if hasBefore && len(removedSlots) > 0 {
+			activeRemoved, err := activeTestSlotLeasesAboveCount(r.Context(), store, before, project, *req.Count)
+			if err != nil {
+				if errors.Is(err, ErrUnsupported) {
+					writeProblem(w, http.StatusServiceUnavailable, "test-slot lease state store not configured")
+					return
+				}
+				writeProblem(w, http.StatusInternalServerError, "list test-slot leases failed")
+				return
+			}
+			if len(activeRemoved) > 0 {
+				lease := activeRemoved[0]
+				slotName := nativeSlotNameFromMetadata(lease.Metadata)
+				name := LeasePublicRefFromLease(lease)
+				if slotName != nil && strings.TrimSpace(*slotName) != "" {
+					name = strings.TrimSpace(*slotName)
+				}
+				writeProblem(w, http.StatusConflict, fmt.Sprintf("cannot scale test environments below active leased slot %s", name))
+				return
+			}
+		}
 
 		updated, err := scaler.SetProjectTestEnvironmentCount(r.Context(), project, *req.Count)
 		if err != nil {
@@ -143,6 +164,46 @@ func scaleProjectTestEnvironments(store ReadStore, authRedirects NativeAuthRedir
 		}
 		writeJSON(w, http.StatusOK, updated)
 	}
+}
+
+func activeTestSlotLeasesAboveCount(ctx context.Context, store ReadStore, project Project, projectKey string, count int) ([]Lease, error) {
+	stateStore, ok := store.(StateStore)
+	if !ok || stateStore == nil {
+		return nil, ErrUnsupported
+	}
+	leases, err := stateStore.ListLeases(ctx)
+	if err != nil {
+		return nil, err
+	}
+	projectNames := map[string]bool{}
+	for _, name := range []string{projectKey, project.Name, project.ID} {
+		if strings.TrimSpace(name) != "" {
+			projectNames[strings.TrimSpace(name)] = true
+		}
+	}
+	active := make([]Lease, 0)
+	for _, lease := range leases {
+		if lease.State != "claimed" || !boolFromMap(lease.Metadata, "test_slot_checkout") {
+			continue
+		}
+		if !projectNames[lease.Project] {
+			continue
+		}
+		slotIndex := nativeSlotIndexFromMetadata(lease.Metadata)
+		if slotIndex == nil || *slotIndex <= count {
+			continue
+		}
+		active = append(active, lease)
+	}
+	sort.SliceStable(active, func(i, j int) bool {
+		left := nativeSlotIndexFromMetadata(active[i].Metadata)
+		right := nativeSlotIndexFromMetadata(active[j].Metadata)
+		if left != nil && right != nil && *left != *right {
+			return *left < *right
+		}
+		return active[i].RequestedAt.Before(active[j].RequestedAt)
+	})
+	return active, nil
 }
 
 func warmProjectTestEnvironments(ctx context.Context, store ReadStore, preparer TestSlotPreparer, projectKey string, project Project, count int) (Project, error) {

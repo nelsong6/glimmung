@@ -187,8 +187,9 @@ func TestCheckoutTestSlotStartsAsyncActivation(t *testing.T) {
 	}
 }
 
-func TestRecoverActivatingTestSlotsRestartsOldActivation(t *testing.T) {
-	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
+func TestReconcileActivatingTestSlotsRestartsOldActivation(t *testing.T) {
+	now := time.Now().UTC()
+	stale := now.Add(-2 * time.Minute)
 	store := &fakeLeaseStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{
 			ID:   "recover",
@@ -202,7 +203,7 @@ func TestRecoverActivatingTestSlotsRestartsOldActivation(t *testing.T) {
 						"slot_index": float64(1),
 						"slot_name":  "recover-slot-1",
 						"state":      testSlotStateActivating,
-						"updated_at": now.Add(-2 * time.Minute).Format(time.RFC3339Nano),
+						"updated_at": stale.Format(time.RFC3339Nano),
 					},
 				},
 			}},
@@ -228,8 +229,8 @@ func TestRecoverActivatingTestSlotsRestartsOldActivation(t *testing.T) {
 		activateDone:    make(chan struct{}, 1),
 	}
 
-	if got := recoverActivatingTestSlots(context.Background(), store, preparer, nil, 30*time.Second, nil); got != 1 {
-		t.Fatalf("recoveries=%d, want 1", got)
+	if got := reconcileTestSlots(context.Background(), store, preparer, nil, 30*time.Second, nil); got != 1 {
+		t.Fatalf("reconciled=%d, want 1", got)
 	}
 	select {
 	case <-preparer.activateStarted:
@@ -245,8 +246,9 @@ func TestRecoverActivatingTestSlotsRestartsOldActivation(t *testing.T) {
 	waitForSlotStatus(t, store, testSlotStateActive)
 }
 
-func TestRecoverCleaningTestSlotsRestartsOldCleanup(t *testing.T) {
-	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
+func TestReconcileCleaningTestSlotsRestartsOldCleanup(t *testing.T) {
+	now := time.Now().UTC()
+	stale := now.Add(-2 * time.Minute)
 	store := &fakeLeaseStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{
 			ID:   "recover",
@@ -260,7 +262,7 @@ func TestRecoverCleaningTestSlotsRestartsOldCleanup(t *testing.T) {
 						"slot_index": float64(1),
 						"slot_name":  "recover-slot-1",
 						"state":      testSlotStateCleaning,
-						"updated_at": now.Add(-2 * time.Minute).Format(time.RFC3339Nano),
+						"updated_at": stale.Format(time.RFC3339Nano),
 					},
 				},
 			}},
@@ -286,8 +288,8 @@ func TestRecoverCleaningTestSlotsRestartsOldCleanup(t *testing.T) {
 		returnDone:    make(chan struct{}, 1),
 	}
 
-	if got := recoverActivatingTestSlots(context.Background(), store, preparer, nil, 30*time.Second, nil); got != 1 {
-		t.Fatalf("recoveries=%d, want 1", got)
+	if got := reconcileTestSlots(context.Background(), store, preparer, nil, 30*time.Second, nil); got != 1 {
+		t.Fatalf("reconciled=%d, want 1", got)
 	}
 	select {
 	case <-preparer.returnStarted:
@@ -306,8 +308,9 @@ func TestRecoverCleaningTestSlotsRestartsOldCleanup(t *testing.T) {
 	}
 }
 
-func TestRecoverCleaningTestSlotWithoutLeaseMarksReady(t *testing.T) {
-	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
+func TestReconcileCleaningTestSlotWithoutLeaseMarksReady(t *testing.T) {
+	now := time.Now().UTC()
+	stale := now.Add(-2 * time.Minute)
 	store := &fakeLeaseStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{
 			ID:   "recover",
@@ -321,7 +324,7 @@ func TestRecoverCleaningTestSlotWithoutLeaseMarksReady(t *testing.T) {
 						"slot_index": float64(1),
 						"slot_name":  "recover-slot-1",
 						"state":      testSlotStateCleaning,
-						"updated_at": now.Add(-2 * time.Minute).Format(time.RFC3339Nano),
+						"updated_at": stale.Format(time.RFC3339Nano),
 					},
 				},
 			}},
@@ -330,12 +333,123 @@ func TestRecoverCleaningTestSlotWithoutLeaseMarksReady(t *testing.T) {
 	}
 	preparer := &fakeTestSlotPreparer{}
 
-	if got := recoverActivatingTestSlots(context.Background(), store, preparer, nil, 30*time.Second, nil); got != 1 {
-		t.Fatalf("recoveries=%d, want 1", got)
+	if got := reconcileTestSlots(context.Background(), store, preparer, nil, 30*time.Second, nil); got != 1 {
+		t.Fatalf("reconciled=%d, want 1", got)
 	}
 	waitForSlotStatus(t, store, testSlotStateReady)
 	if store.cancelledRef != "" {
 		t.Fatalf("cancelledRef=%q, want empty", store.cancelledRef)
+	}
+}
+
+func TestReconcileExpiredTestSlotLeaseStartsCleanup(t *testing.T) {
+	now := time.Now().UTC().Add(-30 * time.Minute)
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "expire",
+			Name: "expire",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"slot_prefix": "expire-slot",
+				"count":       float64(1),
+				"slots": []any{
+					map[string]any{
+						"slot_index": float64(1),
+						"slot_name":  "expire-slot-1",
+						"state":      testSlotStateActive,
+						"updated_at": now.Format(time.RFC3339Nano),
+					},
+				},
+			}},
+		}}},
+		lease: Lease{
+			Project:     "expire",
+			LeaseNumber: intPtr(7),
+			Host:        stringPtr("native-k8s"),
+			State:       "claimed",
+			Metadata: map[string]any{
+				"test_slot_checkout": true,
+				"native_k8s":         true,
+				"native_slot_index":  "1",
+				"native_slot_name":   "expire-slot-1",
+			},
+			RequestedAt: now,
+			AssignedAt:  &now,
+			TTLSeconds:  60,
+		},
+		host: &Host{Name: "native-k8s"},
+	}
+	preparer := &fakeTestSlotPreparer{
+		returnStarted: make(chan struct{}, 1),
+		returnRelease: make(chan struct{}),
+		returnDone:    make(chan struct{}, 1),
+	}
+
+	if got := reconcileTestSlots(context.Background(), store, preparer, nil, 30*time.Second, nil); got != 1 {
+		t.Fatalf("reconciled=%d, want 1", got)
+	}
+	if len(store.slotStatuses) == 0 || store.slotStatuses[0].State != testSlotStateCleaning {
+		t.Fatalf("slot statuses=%#v, want cleaning", store.slotStatuses)
+	}
+	select {
+	case <-preparer.returnStarted:
+	case <-time.After(time.Second):
+		t.Fatal("expired cleanup did not start")
+	}
+	close(preparer.returnRelease)
+	select {
+	case <-preparer.returnDone:
+	case <-time.After(time.Second):
+		t.Fatal("expired cleanup did not finish")
+	}
+	waitForSlotStatus(t, store, testSlotStateReady)
+	if store.cancelledRef != "expire-slot-1" {
+		t.Fatalf("cancelledRef=%q, want expire-slot-1", store.cancelledRef)
+	}
+}
+
+func TestReconcileActiveTestSlotCleansInstaller(t *testing.T) {
+	now := time.Now().UTC()
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "active",
+			Name: "active",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"slot_prefix": "active-slot",
+				"count":       float64(1),
+				"slots": []any{
+					map[string]any{
+						"slot_index": float64(1),
+						"slot_name":  "active-slot-1",
+						"state":      testSlotStateActive,
+						"updated_at": now.Format(time.RFC3339Nano),
+					},
+				},
+			}},
+		}}},
+		lease: Lease{
+			Project:     "active",
+			LeaseNumber: intPtr(8),
+			Host:        stringPtr("native-k8s"),
+			State:       "claimed",
+			Metadata: map[string]any{
+				"test_slot_checkout": true,
+				"native_k8s":         true,
+				"native_slot_index":  "1",
+				"native_slot_name":   "active-slot-1",
+			},
+			RequestedAt: now,
+			AssignedAt:  &now,
+			TTLSeconds:  900,
+		},
+		host: &Host{Name: "native-k8s"},
+	}
+	preparer := &fakeTestSlotPreparer{}
+
+	if got := reconcileTestSlots(context.Background(), store, preparer, nil, 30*time.Second, nil); got != 0 {
+		t.Fatalf("reconciled=%d, want 0", got)
+	}
+	if !preparer.installerCleaned {
+		t.Fatal("expected installer cleanup for active slot")
 	}
 }
 
@@ -574,6 +688,106 @@ func TestReturnTestSlotReleasesLease(t *testing.T) {
 	}
 	if finalStatus.CleanupCompletedAt == nil {
 		t.Fatalf("cleanup completion missing: %#v", finalStatus)
+	}
+}
+
+func TestRepairTestEnvironmentSlotStartsCleanupWithoutLease(t *testing.T) {
+	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "tank",
+			Name: "tank",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"slot_prefix": "tank-slot",
+				"count":       float64(1),
+				"slots": []any{
+					map[string]any{
+						"slot_index": float64(1),
+						"slot_name":  "tank-slot-1",
+						"state":      "error",
+						"updated_at": now.Format(time.RFC3339Nano),
+					},
+				},
+			}},
+		}}},
+		leases: []Lease{},
+	}
+	preparer := &fakeTestSlotPreparer{
+		returnStarted: make(chan struct{}, 1),
+		returnRelease: make(chan struct{}),
+		returnDone:    make(chan struct{}, 1),
+	}
+	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil, preparer)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/projects/tank/test-environments/tank-slot-1/repair", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	select {
+	case <-preparer.returnStarted:
+	case <-time.After(time.Second):
+		t.Fatal("repair cleanup did not start")
+	}
+	close(preparer.returnRelease)
+	select {
+	case <-preparer.returnDone:
+	case <-time.After(time.Second):
+		t.Fatal("repair cleanup did not finish")
+	}
+	waitForSlotStatus(t, store, testSlotStateReady)
+	if store.cancelledRef != "" {
+		t.Fatalf("cancelledRef=%q, want empty for unleased repair", store.cancelledRef)
+	}
+}
+
+func TestRepairTestEnvironmentSlotRejectsActiveLease(t *testing.T) {
+	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "tank",
+			Name: "tank",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"slot_prefix": "tank-slot",
+				"count":       float64(1),
+				"slots": []any{
+					map[string]any{
+						"slot_index": float64(1),
+						"slot_name":  "tank-slot-1",
+						"state":      testSlotStateActive,
+						"updated_at": now.Format(time.RFC3339Nano),
+					},
+				},
+			}},
+		}}},
+		leases: []Lease{{
+			Project:     "tank",
+			LeaseNumber: intPtr(2),
+			State:       "claimed",
+			Metadata: map[string]any{
+				"test_slot_checkout": true,
+				"native_slot_index":  "1",
+				"native_slot_name":   "tank-slot-1",
+			},
+			RequestedAt: now,
+		}},
+	}
+	preparer := &fakeTestSlotPreparer{}
+	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil, preparer)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/projects/tank/test-environments/tank-slot-1/repair", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if preparer.returned {
+		t.Fatal("repair should not clean an active healthy lease")
 	}
 }
 

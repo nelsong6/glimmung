@@ -13,6 +13,9 @@ import (
 type fakeLeaseCallbackStore struct {
 	fakeReadStore
 	lease        Lease
+	leases       []Lease
+	slotStatuses []TestEnvironmentSlotStatus
+	cancelledRef string
 	err          error
 	heartbeatErr error
 	releaseErr   error
@@ -64,6 +67,63 @@ func (s *fakeLeaseCallbackStore) HeartbeatLeaseByCallbackToken(_ context.Context
 		return Lease{}, ErrInactive
 	}
 	return s.lease, nil
+}
+
+func (s *fakeLeaseCallbackStore) ListHosts(context.Context) ([]Host, error) {
+	return nil, s.err
+}
+
+func (s *fakeLeaseCallbackStore) ListLeases(context.Context) ([]Lease, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	if s.leases != nil {
+		return s.leases, nil
+	}
+	return []Lease{s.lease}, nil
+}
+
+func (s *fakeLeaseCallbackStore) CancelLeaseByRef(_ context.Context, _, ref string) (CancelLeaseResult, error) {
+	s.cancelledRef = ref
+	if s.err != nil {
+		return CancelLeaseResult{}, s.err
+	}
+	return CancelLeaseResult{State: "no_active_run", LeaseRef: ref}, nil
+}
+
+func (s *fakeLeaseCallbackStore) SetProjectTestEnvironmentSlotStatus(_ context.Context, project string, status TestEnvironmentSlotStatus) (Project, error) {
+	s.slotStatuses = append(s.slotStatuses, status)
+	for i := range s.projects {
+		if s.projects[i].Name != project && s.projects[i].ID != project {
+			continue
+		}
+		if s.projects[i].Metadata == nil {
+			s.projects[i].Metadata = map[string]any{}
+		}
+		standby, _ := s.projects[i].Metadata["native_standby_dns"].(map[string]any)
+		if standby == nil {
+			standby = map[string]any{}
+		}
+		slots, _ := standby["slots"].([]any)
+		replaced := false
+		for j, raw := range slots {
+			slot, _ := raw.(map[string]any)
+			if slot == nil {
+				continue
+			}
+			if index, ok := positiveIntFromMap(slot, "slot_index"); ok && index == status.SlotIndex {
+				slots[j] = testSlotStatusMap(status)
+				replaced = true
+			}
+		}
+		if !replaced {
+			slots = append(slots, testSlotStatusMap(status))
+		}
+		standby["slots"] = slots
+		s.projects[i].Metadata["native_standby_dns"] = standby
+		return s.projects[i], nil
+	}
+	return Project{}, ErrNotFound
 }
 
 func TestReadLeaseByCallbackTokenReturnsPublicLease(t *testing.T) {
@@ -216,6 +276,77 @@ func TestReleaseLeaseByCallbackTokenReturnsPublicLease(t *testing.T) {
 	}
 }
 
+func TestReleaseLeaseByCallbackTokenStartsTestSlotCleanup(t *testing.T) {
+	now := time.Date(2026, 5, 11, 5, 15, 0, 0, time.UTC)
+	store := &fakeLeaseCallbackStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "tank",
+			Name: "tank",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"slot_prefix": "tank-slot",
+				"count":       float64(1),
+				"slots": []any{
+					map[string]any{"slot_index": float64(1), "slot_name": "tank-slot-1", "state": testSlotStateActive},
+				},
+			}},
+		}}},
+		token: "callback-token",
+		lease: Lease{
+			ID:           "01JLEASEBACKING",
+			LeaseNumber:  intPtr(10),
+			Project:      "tank",
+			Workflow:     stringPtr("test-slot-checkout"),
+			Host:         stringPtr("native-k8s"),
+			State:        "claimed",
+			Requirements: map[string]any{},
+			Metadata: map[string]any{
+				"lease_callback_token": "callback-token",
+				"test_slot_checkout":   true,
+				"native_slot_index":    "1",
+				"native_slot_name":     "tank-slot-1",
+			},
+			RequestedAt: now,
+			AssignedAt:  &now,
+			TTLSeconds:  900,
+		},
+	}
+	store.leases = []Lease{store.lease}
+	preparer := &fakeTestSlotPreparer{
+		returnStarted: make(chan struct{}, 1),
+		returnRelease: make(chan struct{}),
+		returnDone:    make(chan struct{}, 1),
+	}
+	handler := newHandler(Settings{}, store, nil, nil, nil, preparer)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/lease-callbacks/callback-token/release", nil))
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(store.slotStatuses) != 1 || store.slotStatuses[0].State != testSlotStateCleaning {
+		t.Fatalf("slot statuses=%#v, want cleaning", store.slotStatuses)
+	}
+	select {
+	case <-preparer.returnStarted:
+	case <-time.After(time.Second):
+		t.Fatal("callback cleanup did not start")
+	}
+	close(preparer.returnRelease)
+	select {
+	case <-preparer.returnDone:
+	case <-time.After(time.Second):
+		t.Fatal("callback cleanup did not finish")
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && store.cancelledRef == "" {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if store.cancelledRef != "tank-slot-1" {
+		t.Fatalf("cancelledRef=%q, want tank-slot-1", store.cancelledRef)
+	}
+}
+
 func TestReleaseLeaseByCallbackTokenRequiresStore(t *testing.T) {
 	handler := NewWithStore(Settings{}, fakeReadStore{})
 	rec := httptest.NewRecorder()
@@ -237,7 +368,19 @@ func TestReleaseLeaseByCallbackTokenMapsErrors(t *testing.T) {
 		{name: "generic", err: errors.New("boom"), want: http.StatusInternalServerError},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			handler := NewWithStore(Settings{}, &fakeLeaseCallbackStore{releaseErr: tc.err})
+			now := time.Date(2026, 5, 11, 5, 30, 0, 0, time.UTC)
+			handler := NewWithStore(Settings{}, &fakeLeaseCallbackStore{
+				token:      "token",
+				releaseErr: tc.err,
+				lease: Lease{
+					Project:     "glimmung",
+					LeaseNumber: intPtr(9),
+					State:       "claimed",
+					Metadata:    map[string]any{"lease_callback_token": "token"},
+					RequestedAt: now,
+					AssignedAt:  &now,
+				},
+			})
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/lease-callbacks/token/release", nil))
 			if rec.Code != tc.want {
