@@ -103,6 +103,7 @@ jobs:
             --subscription "$AZURE_AKS_SUBSCRIPTION_ID" \
             --resource-group "$AZURE_AKS_RESOURCE_GROUP" \
             --name "$AZURE_AKS_CLUSTER_NAME" \
+            --admin \
             --overwrite-existing
 
       - name: Exercise checkout and return
