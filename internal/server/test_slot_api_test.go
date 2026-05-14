@@ -521,9 +521,7 @@ func TestAsyncCheckoutFailureMarksErrorAndReleasesLease(t *testing.T) {
 	if finalStatus.ActivationError == nil || !strings.Contains(*finalStatus.ActivationError, "render/apply failed") {
 		t.Fatalf("activation error=%v, want render/apply failed", finalStatus.ActivationError)
 	}
-	if !preparer.returned {
-		t.Fatal("expected failed activation cleanup")
-	}
+	waitForFailedActivationCleanup(t, store, preparer)
 	if store.cancelledRef != "tank-slot-1" {
 		t.Fatalf("cancelledRef=%q, want tank-slot-1", store.cancelledRef)
 	}
@@ -554,6 +552,18 @@ func waitForInstallerCleanup(t *testing.T, preparer *fakeTestSlotPreparer) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("installer cleanup did not run")
+}
+
+func waitForFailedActivationCleanup(t *testing.T, store *fakeLeaseStore, preparer *fakeTestSlotPreparer) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if preparer.returned && store.cancelledRef != "" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("failed activation cleanup did not run")
 }
 
 func TestCheckoutTestSlotRejectsModeField(t *testing.T) {
