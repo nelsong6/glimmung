@@ -11,31 +11,29 @@ type Props = {
   onSuccess: () => void;
 };
 
-type Tab = "project" | "host" | "issue";
+type Tab = "project" | "issue";
 
 export function AdminPanel({ projects, onSuccess }: Props) {
   const [tab, setTab] = useState<Tab>("project");
   return (
     <div className="admin-panel">
       <div className="admin-tabs">
-        {(["project", "host", "issue"] as Tab[]).map((t) => (
+        {(["project", "issue"] as Tab[]).map((t) => (
           <button
             type="button"
             key={t}
             className={`tab ${tab === t ? "selected" : ""}`}
             onClick={() => setTab(t)}
           >
-            {t === "issue" ? "create issue" : t === "host" ? "register legacy host" : `register ${t}`}
+            {t === "issue" ? "create issue" : `register ${t}`}
           </button>
         ))}
       </div>
       {tab === "project" && <ProjectForm onSuccess={onSuccess} />}
-      {tab === "host" && <HostForm onSuccess={onSuccess} />}
       {tab === "issue" && <IssueForm projects={projects} onSuccess={onSuccess} />}
     </div>
   );
 }
-
 function ProjectForm({ onSuccess }: { onSuccess: () => void }) {
   const [name, setName] = useState("");
   const [githubRepo, setGithubRepo] = useState("");
@@ -88,7 +86,6 @@ function ProjectForm({ onSuccess }: { onSuccess: () => void }) {
     </form>
   );
 }
-
 function IssueForm({ projects, onSuccess }: { projects: Project[]; onSuccess: () => void }) {
   const [project, setProject] = useState(projects[0]?.name ?? "");
   const [title, setTitle] = useState("");
@@ -162,59 +159,6 @@ function IssueForm({ projects, onSuccess }: { projects: Project[]; onSuccess: ()
       {error && <div className="error">{error}</div>}
       <button type="submit" disabled={busy}>
         {busy ? "creating..." : "create"}
-      </button>
-    </form>
-  );
-}
-
-function HostForm({ onSuccess }: { onSuccess: () => void }) {
-  const [name, setName] = useState("");
-  const [capabilities, setCapabilities] = useState('{"os":"windows","apps":["sts2"]}');
-  const [drained, setDrained] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError(null);
-    setBusy(true);
-    try {
-      const caps = JSON.parse(capabilities || "{}");
-      const r = await authedFetch("/v1/hosts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, capabilities: caps, drained }),
-      });
-      if (!r.ok) {
-        setError(`${r.status}: ${await r.text()}`);
-        return;
-      }
-      setName("");
-      onSuccess();
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <form onSubmit={submit} className="admin-form">
-      <label>
-        <span>Name</span>
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="nelsonpc" required />
-      </label>
-      <label>
-        <span>Capabilities (JSON)</span>
-        <input value={capabilities} onChange={(e) => setCapabilities(e.target.value)} className="mono" />
-      </label>
-      <label className="checkbox">
-        <input type="checkbox" checked={drained} onChange={(e) => setDrained(e.target.checked)} />
-        <span>Drained</span>
-      </label>
-      {error && <div className="error">{error}</div>}
-      <button type="submit" disabled={busy}>
-        {busy ? "submitting..." : "register legacy host"}
       </button>
     </form>
   );

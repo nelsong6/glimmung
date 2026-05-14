@@ -59,7 +59,7 @@ config:
   name: glimmung-config
 
 # In-cluster admin auth via Kubernetes service-account tokens. When enabled,
-# admin endpoints (/v1/projects, /v1/workflows, /v1/hosts) accept a bearer
+# admin endpoints (/v1/projects, /v1/workflows, /v1/issues) accept a bearer
 # token whose subject — resolved through TokenReview — matches an entry in
 # K8S_SA_ALLOWLIST. Toggling this off removes the ClusterRoleBinding that grants
 # the pod's SA `system:auth-delegator`, leaving Entra as the only admin path.

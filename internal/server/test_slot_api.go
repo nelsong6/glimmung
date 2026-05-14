@@ -106,7 +106,7 @@ func checkoutTestSlot(store ReadStore, preparer TestSlotPreparer, minter NativeG
 		if strings.TrimSpace(requester.Ref) == "" {
 			requester.Ref = testSlotRequesterRef(req)
 		}
-		lease, host, err := leaseStore.AcquireLease(r.Context(), LeaseAcquireRequest{
+		lease, err := leaseStore.AcquireLease(r.Context(), LeaseAcquireRequest{
 			Project:    req.Project,
 			Workflow:   &workflow,
 			Metadata:   metadata,
@@ -133,10 +133,10 @@ func checkoutTestSlot(store ReadStore, preparer TestSlotPreparer, minter NativeG
 				return
 			}
 			beginTestSlotActivation(store, preparer, minter, project, lease, nil)
-			writeJSON(w, http.StatusAccepted, testSlotCheckoutResponse(project, workflow, lease, host, testSlotStateActivating))
+			writeJSON(w, http.StatusAccepted, testSlotCheckoutResponse(project, workflow, lease, testSlotStateActivating))
 			return
 		}
-		writeJSON(w, http.StatusOK, testSlotCheckoutResponse(project, workflow, lease, host, lease.State))
+		writeJSON(w, http.StatusOK, testSlotCheckoutResponse(project, workflow, lease, lease.State))
 	}
 }
 
@@ -541,17 +541,14 @@ func findProjectForTestSlot(r *http.Request, w http.ResponseWriter, store ReadSt
 	return Project{}, false
 }
 
-func testSlotCheckoutResponse(project Project, workflow string, lease Lease, host *Host, state string) TestSlotCheckoutResult {
+func testSlotCheckoutResponse(project Project, workflow string, lease Lease, state string) TestSlotCheckoutResult {
 	slotIndex := nativeSlotIndexFromMetadata(lease.Metadata)
 	slotName := nativeSlotNameFromMetadata(lease.Metadata)
 	url := testSlotURL(project, slotName)
 	ref := LeasePublicRefFromLease(lease)
-	var hostName *string
-	if host != nil {
-		hostName = &host.Name
-	}
+	hostName := lease.Host
 	var detail *string
-	if host == nil {
+	if hostName == nil {
 		text := "slot unavailable; checkout request is waiting"
 		detail = &text
 	}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -109,7 +110,7 @@ func (c Contract) Validate() error {
 				return fmt.Errorf("test_slot_hot_swap.backend.%s is required", field.name)
 			}
 		}
-		if !strings.HasPrefix(strings.TrimSpace(c.Backend.Artifact), "/") {
+		if !isLocalAbsolutePath(strings.TrimSpace(c.Backend.Artifact)) {
 			return errors.New("test_slot_hot_swap.backend.artifact must be an absolute local path")
 		}
 		if !strings.HasPrefix(strings.TrimSpace(c.Backend.Target), "/") {
@@ -120,6 +121,10 @@ func (c Contract) Validate() error {
 		}
 	}
 	return nil
+}
+
+func isLocalAbsolutePath(value string) bool {
+	return filepath.IsAbs(value) || strings.HasPrefix(value, "/")
 }
 
 func ClassifyPaths(paths []string) ChangeClassification {

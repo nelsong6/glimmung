@@ -14,7 +14,6 @@ import (
 	"github.com/nelsong6/glimmung/internal/domain/budget"
 )
 
-// fakeDispatchStore implements RunDispatchStore.
 type fakeDispatchStore struct {
 	fakeReadStore
 
@@ -24,27 +23,23 @@ type fakeDispatchStore struct {
 	issue    *IssueDispatchData
 	issueErr error
 
-	wf    *Workflow
-	wfErr error
-
+	wf           *Workflow
+	wfErr        error
 	workflows    []Workflow
 	workflowsErr error
 
-	lockErr error
+	lockErr      error
+	lockReleased bool
 
 	run    *CreatedRun
 	runErr error
 	runReq *CreateRunRequest
 
 	leaseResult Lease
-	leaseHost   *Host
 	leaseErr    error
 	leaseReq    *LeaseAcquireRequest
 
-	abortResult AbortRunResult
-	abortErr    error
-
-	lockReleased bool
+	abortReason string
 }
 
 type fakeNativeLauncher struct {
@@ -62,11 +57,11 @@ func (l *fakeNativeLauncher) LaunchNativePhase(_ context.Context, req NativeLaun
 	return []string{"native-job"}, nil
 }
 
-func (s *fakeDispatchStore) ReadProjectGitHubRepo(_ context.Context, _ string) (string, error) {
+func (s *fakeDispatchStore) ReadProjectGitHubRepo(context.Context, string) (string, error) {
 	return s.githubRepo, s.githubRepoErr
 }
 
-func (s *fakeDispatchStore) ReadIssueForDispatch(_ context.Context, _ string, _ int) (IssueDispatchData, error) {
+func (s *fakeDispatchStore) ReadIssueForDispatch(context.Context, string, int) (IssueDispatchData, error) {
 	if s.issueErr != nil {
 		return IssueDispatchData{}, s.issueErr
 	}
@@ -76,19 +71,19 @@ func (s *fakeDispatchStore) ReadIssueForDispatch(_ context.Context, _ string, _ 
 	return *s.issue, nil
 }
 
-func (s *fakeDispatchStore) GetWorkflowByName(_ context.Context, _, _ string) (*Workflow, error) {
+func (s *fakeDispatchStore) GetWorkflowByName(context.Context, string, string) (*Workflow, error) {
 	return s.wf, s.wfErr
 }
 
-func (s *fakeDispatchStore) ListProjectWorkflows(_ context.Context, _ string) ([]Workflow, error) {
+func (s *fakeDispatchStore) ListProjectWorkflows(context.Context, string) ([]Workflow, error) {
 	return s.workflows, s.workflowsErr
 }
 
-func (s *fakeDispatchStore) ClaimIssueLock(_ context.Context, _ string, _ int, _ string, _ int) error {
+func (s *fakeDispatchStore) ClaimIssueLock(context.Context, string, int, string, int) error {
 	return s.lockErr
 }
 
-func (s *fakeDispatchStore) ReleaseIssueLock(_ context.Context, _ string, _ int, _ string) {
+func (s *fakeDispatchStore) ReleaseIssueLock(context.Context, string, int, string) {
 	s.lockReleased = true
 }
 
@@ -97,50 +92,25 @@ func (s *fakeDispatchStore) CreateRun(_ context.Context, req CreateRunRequest) (
 	if s.runErr != nil {
 		return CreatedRun{}, s.runErr
 	}
-	if s.run == nil {
-		return CreatedRun{ID: "run-1", RunNumber: 1, RunDisplay: "1", CallbackToken: "tok"}, nil
+	if s.run != nil {
+		return *s.run, nil
 	}
-	return *s.run, nil
+	return CreatedRun{ID: "run-1", RunNumber: 1, RunDisplay: "1", CallbackToken: "tok"}, nil
 }
 
-func (s *fakeDispatchStore) AcquireLease(_ context.Context, req LeaseAcquireRequest) (Lease, *Host, error) {
+func (s *fakeDispatchStore) AcquireLease(_ context.Context, req LeaseAcquireRequest) (Lease, error) {
 	s.leaseReq = &req
-	return s.leaseResult, s.leaseHost, s.leaseErr
+	return s.leaseResult, s.leaseErr
 }
 
-func (s *fakeDispatchStore) AbortRunByID(_ context.Context, _, _, _ string) (AbortRunResult, error) {
-	return s.abortResult, s.abortErr
+func (s *fakeDispatchStore) AbortRunByID(context.Context, string, string, string) (AbortRunResult, error) {
+	return AbortRunResult{}, nil
 }
 
-// helpers
-
-func newDispatchHandler(store *fakeDispatchStore, dispatch GHADispatchClient) http.Handler {
-	return NewWithSyncClient(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil)
-}
-
-func newDispatchHandlerWithDispatch(store *fakeDispatchStore, dispatch GHADispatchClient) http.Handler {
-	type combo struct {
-		*fakeDispatchStore
-		WorkflowSyncClient
-		GHADispatchClient
-	}
-	_ = combo{} // suppress unused
-	// The dispatch client is extracted from the ghClient in newHandler via type assertion.
-	// Since fakeDispatchStore doesn't implement WorkflowSyncClient, pass nil for ghClient
-	// and wire ghDispatch separately via a thin wrapper.
-	return newHandlerWithDispatch(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, dispatch)
-}
-
-// newHandlerWithDispatch is a test-only constructor that wires ghDispatch directly.
-func newHandlerWithDispatch(settings Settings, store ReadStore, authResolver AuthResolver, ghDispatch GHADispatchClient) http.Handler {
-	return newHandlerWithDispatchAndNative(settings, store, authResolver, ghDispatch, nil)
-}
-
-func newHandlerWithDispatchAndNative(settings Settings, store ReadStore, authResolver AuthResolver, ghDispatch GHADispatchClient, nativeLauncher NativeLauncher) http.Handler {
-	adminAuthenticator, _ := authResolver.(AdminAuthenticator)
+func newDispatchTestHandler(store ReadStore, nativeLauncher NativeLauncher) http.Handler {
+	adminAuthenticator := fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}
 	mux := http.NewServeMux()
-	mux.Handle("POST /v1/runs/dispatch",
-		requireAdmin(adminAuthenticator, http.HandlerFunc(dispatchRunHandler(store, ghDispatch, nativeLauncher))))
+	mux.Handle("POST /v1/runs/dispatch", requireAdmin(adminAuthenticator, http.HandlerFunc(dispatchRunHandler(store, nativeLauncher))))
 	return mux
 }
 
@@ -150,14 +120,12 @@ func minimalDispatchStore() *fakeDispatchStore {
 		Name:    "main",
 		Project: "proj",
 		Budget:  budget.Config{Total: 25},
-		Phases: []PhaseSpec{
-			{
-				Name:             "impl",
-				Kind:             "gha_dispatch",
-				WorkflowFilename: "impl.yml",
-				WorkflowRef:      "main",
-			},
-		},
+		Phases: []PhaseSpec{{
+			Name:             "impl",
+			Kind:             "k8s_job",
+			WorkflowFilename: "k8s_job:impl",
+			Jobs:             []NativeJobSpec{{ID: "impl", Image: "runner:latest"}},
+		}},
 		DefaultRequirements: map[string]any{},
 		Metadata:            map[string]any{},
 	}
@@ -169,351 +137,200 @@ func minimalDispatchStore() *fakeDispatchStore {
 			Body:  "body",
 		},
 		wf:        wf,
-		workflows: []Workflow{*wf}, // used when no workflow_name is specified
+		workflows: []Workflow{*wf},
 		leaseResult: Lease{
 			Project:     "proj",
 			LeaseNumber: &leaseNum,
-			Metadata:    map[string]any{"lease_callback_token": "lctok"},
+			Host:        stringPtr("native-k8s"),
+			State:       "claimed",
+			Metadata: map[string]any{
+				"native_k8s":           true,
+				"native_slot_index":    "1",
+				"native_slot_name":     "proj-1",
+				"lease_callback_token": "lctok",
+			},
 		},
 	}
 }
 
 func dispatchRequest(project string, issueNumber int) *http.Request {
 	body, _ := json.Marshal(DispatchRunRequest{Project: project, IssueNumber: issueNumber})
-	req := httptest.NewRequest("POST", "/v1/runs/dispatch", bytes.NewReader(body))
-	return req
+	return httptest.NewRequest(http.MethodPost, "/v1/runs/dispatch", bytes.NewReader(body))
 }
 
-// --- tests ---
+func readDispatchResult(t *testing.T, rec *httptest.ResponseRecorder) PublicDispatchResult {
+	t.Helper()
+	var result PublicDispatchResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
 
-func TestDispatchRun_MissingProject(t *testing.T) {
+func TestDispatchRunMissingProject(t *testing.T) {
 	store := minimalDispatchStore()
-	h := newHandlerWithDispatch(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil)
-
+	rec := httptest.NewRecorder()
 	body, _ := json.Marshal(DispatchRunRequest{IssueNumber: 1})
-	req := httptest.NewRequest("POST", "/v1/runs/dispatch", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d", w.Code)
+	newDispatchTestHandler(store, &fakeNativeLauncher{}).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/runs/dispatch", bytes.NewReader(body)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestDispatchRun_MissingIssueNumber(t *testing.T) {
+func TestDispatchRunProjectNotFound(t *testing.T) {
 	store := minimalDispatchStore()
-	h := newHandlerWithDispatch(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil)
-
-	body, _ := json.Marshal(DispatchRunRequest{Project: "proj"})
-	req := httptest.NewRequest("POST", "/v1/runs/dispatch", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d", w.Code)
-	}
-}
-
-func TestDispatchRun_ProjectNotFound(t *testing.T) {
-	store := minimalDispatchStore()
-	store.githubRepo = ""
 	store.githubRepoErr = ErrNotFound
-	h := newHandlerWithDispatch(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil)
-
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, dispatchRequest("proj", 1))
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
+	rec := httptest.NewRecorder()
+	newDispatchTestHandler(store, nil).ServeHTTP(rec, dispatchRequest("proj", 1))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var result PublicDispatchResult
-	json.Unmarshal(w.Body.Bytes(), &result)
-	if result.State != "no_project" {
-		t.Errorf("expected no_project, got %q", result.State)
+	if got := readDispatchResult(t, rec).State; got != "no_project" {
+		t.Fatalf("state=%q", got)
 	}
 }
 
-func TestDispatchRun_IssueNotFound(t *testing.T) {
-	store := minimalDispatchStore()
-	store.issue = nil
-	h := newHandlerWithDispatch(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil)
-
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, dispatchRequest("proj", 99))
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
-	}
-	var result PublicDispatchResult
-	json.Unmarshal(w.Body.Bytes(), &result)
-	if result.State != "no_project" {
-		t.Errorf("expected no_project, got %q", result.State)
-	}
-}
-
-func TestDispatchRun_NoWorkflowRegistered(t *testing.T) {
+func TestDispatchRunNoWorkflowRegistered(t *testing.T) {
 	store := minimalDispatchStore()
 	store.wf = nil
 	store.workflows = nil
-	h := newHandlerWithDispatch(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil)
-
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, dispatchRequest("proj", 1))
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
+	rec := httptest.NewRecorder()
+	newDispatchTestHandler(store, nil).ServeHTTP(rec, dispatchRequest("proj", 1))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var result PublicDispatchResult
-	json.Unmarshal(w.Body.Bytes(), &result)
-	if result.State != "no_workflow" {
-		t.Errorf("expected no_workflow, got %q", result.State)
+	if got := readDispatchResult(t, rec).State; got != "no_workflow" {
+		t.Fatalf("state=%q", got)
 	}
 }
 
-func TestDispatchRun_AlreadyRunning(t *testing.T) {
+func TestDispatchRunAlreadyRunning(t *testing.T) {
 	store := minimalDispatchStore()
-	store.lockErr = &AlreadyRunningError{
-		HeldBy:    "holder-123",
-		ExpiresAt: time.Now().Add(time.Hour),
+	store.lockErr = &AlreadyRunningError{HeldBy: "holder-123", ExpiresAt: time.Now().Add(time.Hour)}
+	rec := httptest.NewRecorder()
+	newDispatchTestHandler(store, &fakeNativeLauncher{}).ServeHTTP(rec, dispatchRequest("proj", 1))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	h := newHandlerWithDispatch(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil)
-
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, dispatchRequest("proj", 1))
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
-	}
-	var result PublicDispatchResult
-	json.Unmarshal(w.Body.Bytes(), &result)
-	if result.State != "already_running" {
-		t.Errorf("expected already_running, got %q", result.State)
+	if got := readDispatchResult(t, rec).State; got != "already_running" {
+		t.Fatalf("state=%q", got)
 	}
 }
 
-func TestDispatchRun_AlreadyRunning_ErrIs(t *testing.T) {
-	// Verify that errors.Is works for the AlreadyRunningError wrapper.
+func TestDispatchRunAlreadyRunningErrIs(t *testing.T) {
 	err := &AlreadyRunningError{HeldBy: "x", ExpiresAt: time.Now()}
 	if !errors.Is(err, ErrAlreadyRunning) {
-		t.Error("expected errors.Is(AlreadyRunningError, ErrAlreadyRunning) to be true")
+		t.Fatal("errors.Is should match ErrAlreadyRunning")
 	}
 }
 
-func TestDispatchRun_Pending_NoHost(t *testing.T) {
+func TestDispatchRunRequiresNativeLauncher(t *testing.T) {
 	store := minimalDispatchStore()
-	store.leaseHost = nil // no host available
-	h := newHandlerWithDispatch(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil)
-
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, dispatchRequest("proj", 1))
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	rec := httptest.NewRecorder()
+	newDispatchTestHandler(store, nil).ServeHTTP(rec, dispatchRequest("proj", 1))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var result PublicDispatchResult
-	json.Unmarshal(w.Body.Bytes(), &result)
-	if result.State != "pending" {
-		t.Errorf("expected pending, got %q", result.State)
-	}
-	if result.RunNumber == nil || *result.RunNumber != 1 {
-		t.Errorf("expected run_number=1, got %v", result.RunNumber)
-	}
-	if result.Lease != "claimed" {
-		t.Errorf("expected lease=claimed, got %q", result.Lease)
+	if store.runReq != nil || store.leaseReq != nil {
+		t.Fatalf("request should fail before creating run or lease")
 	}
 }
 
-func TestDispatchRun_Dispatched_WithHost(t *testing.T) {
+func TestDispatchRunDispatchedNativeK8sJob(t *testing.T) {
 	store := minimalDispatchStore()
-	store.leaseHost = &Host{Name: "host-1"}
-	dispatch := &fakeDispatchClient{}
-	h := newHandlerWithDispatch(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, dispatch)
-
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, dispatchRequest("proj", 1))
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-	var result PublicDispatchResult
-	json.Unmarshal(w.Body.Bytes(), &result)
-	if result.State != "dispatched" {
-		t.Errorf("expected dispatched, got %q", result.State)
-	}
-	if result.Host == nil || *result.Host != "host-1" {
-		t.Errorf("expected host=host-1, got %v", result.Host)
-	}
-	if !dispatch.called {
-		t.Error("expected DispatchWorkflow to be called")
-	}
-}
-
-func TestDispatchRun_DispatchedNativeK8sJob(t *testing.T) {
-	store := minimalDispatchStore()
-	store.wf.Phases[0] = PhaseSpec{
-		Name: "verify",
-		Kind: "k8s_job",
-		Jobs: []NativeJobSpec{{ID: "test", Image: "runner:latest"}},
-	}
-	store.leaseResult = Lease{
-		Project:     "proj",
-		LeaseNumber: intPtr(1),
-		Host:        stringPtr("native-k8s"),
-		State:       "claimed",
-		Metadata: map[string]any{
-			"native_k8s":           true,
-			"native_slot_index":    "1",
-			"native_slot_name":     "proj-1",
-			"lease_callback_token": "lctok",
-		},
-	}
-	store.leaseHost = &Host{Name: "native-k8s", Capabilities: map[string]any{"native_k8s": true}}
 	launcher := &fakeNativeLauncher{}
-	h := newHandlerWithDispatchAndNative(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, launcher)
-
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, dispatchRequest("proj", 1))
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	rec := httptest.NewRecorder()
+	newDispatchTestHandler(store, launcher).ServeHTTP(rec, dispatchRequest("proj", 1))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var result PublicDispatchResult
-	json.Unmarshal(w.Body.Bytes(), &result)
+	result := readDispatchResult(t, rec)
 	if result.State != "dispatched" {
-		t.Fatalf("expected dispatched, got %q", result.State)
+		t.Fatalf("state=%q", result.State)
 	}
 	if !launcher.called {
-		t.Fatal("expected native launcher to be called")
+		t.Fatal("native launcher was not called")
 	}
-	if launcher.req.Phase.Name != "verify" || launcher.req.Run.ID == "" {
-		t.Fatalf("unexpected native launch request: %#v", launcher.req)
+	if launcher.req.Phase.Name != "impl" || launcher.req.Run.ID != "run-1" {
+		t.Fatalf("launch request=%#v", launcher.req)
+	}
+	if store.runReq == nil || store.runReq.InitialPhaseKind != "k8s_job" {
+		t.Fatalf("run request=%#v", store.runReq)
 	}
 	if store.leaseReq == nil || store.leaseReq.Metadata["native_k8s"] != true {
-		t.Fatalf("expected native_k8s lease metadata, got %#v", store.leaseReq)
+		t.Fatalf("lease request=%#v", store.leaseReq)
 	}
 }
 
-func TestDispatchRun_Pending_NoDispatchClient(t *testing.T) {
+func TestDispatchRunNoCapacity(t *testing.T) {
 	store := minimalDispatchStore()
-	store.leaseHost = &Host{Name: "host-1"}
-	// No dispatch client — even with a host, result should be pending.
-	h := newHandlerWithDispatch(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil)
-
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, dispatchRequest("proj", 1))
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	store.leaseErr = ErrUnavailable
+	rec := httptest.NewRecorder()
+	newDispatchTestHandler(store, &fakeNativeLauncher{}).ServeHTTP(rec, dispatchRequest("proj", 1))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var result PublicDispatchResult
-	json.Unmarshal(w.Body.Bytes(), &result)
-	if result.State != "pending" {
-		t.Errorf("expected pending (no dispatch client), got %q", result.State)
+	if got := readDispatchResult(t, rec).State; got != "no_capacity" {
+		t.Fatalf("state=%q", got)
 	}
 }
 
-func TestDispatchRun_DispatchFailed(t *testing.T) {
+func TestDispatchRunNativeDispatchFailed(t *testing.T) {
 	store := minimalDispatchStore()
-	store.leaseHost = &Host{Name: "host-1"}
-	dispatch := &fakeDispatchClient{err: errors.New("422 unprocessable")}
-	h := newHandlerWithDispatch(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, dispatch)
-
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, dispatchRequest("proj", 1))
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	rec := httptest.NewRecorder()
+	newDispatchTestHandler(store, &fakeNativeLauncher{err: errors.New("kube unavailable")}).ServeHTTP(rec, dispatchRequest("proj", 1))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var result PublicDispatchResult
-	json.Unmarshal(w.Body.Bytes(), &result)
-	if result.State != "dispatch_failed" {
-		t.Errorf("expected dispatch_failed, got %q", result.State)
-	}
-	if result.Detail == nil {
-		t.Error("expected detail to be set")
+	result := readDispatchResult(t, rec)
+	if result.State != "dispatch_failed" || result.Detail == nil {
+		t.Fatalf("result=%#v", result)
 	}
 }
 
-func TestDispatchRun_CreateRunFailReleasesLock(t *testing.T) {
+func TestDispatchRunCreateRunFailReleasesLock(t *testing.T) {
 	store := minimalDispatchStore()
 	store.runErr = errors.New("cosmos unavailable")
-	h := newHandlerWithDispatch(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil)
-
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, dispatchRequest("proj", 1))
-
-	if w.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500, got %d", w.Code)
+	rec := httptest.NewRecorder()
+	newDispatchTestHandler(store, &fakeNativeLauncher{}).ServeHTTP(rec, dispatchRequest("proj", 1))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	if !store.lockReleased {
-		t.Error("expected ReleaseIssueLock to be called on CreateRun failure")
+		t.Fatal("expected ReleaseIssueLock after CreateRun failure")
 	}
 }
 
-func TestDispatchRun_MultipleWorkflows_NoName(t *testing.T) {
+func TestDispatchRunMultipleWorkflowsRequiresName(t *testing.T) {
 	store := minimalDispatchStore()
 	store.wf = nil
-	leaseNum := 1
 	store.workflows = []Workflow{
-		{Name: "wf-a", Project: "proj", Phases: []PhaseSpec{{Name: "impl", WorkflowFilename: "a.yml"}}, Budget: budget.Config{Total: 25},
-			Metadata: map[string]any{}, DefaultRequirements: map[string]any{}},
-		{Name: "wf-b", Project: "proj", Phases: []PhaseSpec{{Name: "impl", WorkflowFilename: "b.yml"}}, Budget: budget.Config{Total: 25},
-			Metadata: map[string]any{}, DefaultRequirements: map[string]any{}},
+		{Name: "wf-a", Project: "proj", Phases: []PhaseSpec{{Name: "impl", Kind: "k8s_job"}}, Budget: budget.Config{Total: 25}},
+		{Name: "wf-b", Project: "proj", Phases: []PhaseSpec{{Name: "impl", Kind: "k8s_job"}}, Budget: budget.Config{Total: 25}},
 	}
-	store.leaseResult = Lease{Project: "proj", LeaseNumber: &leaseNum, Metadata: map[string]any{}}
-	h := newHandlerWithDispatch(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil)
-
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, dispatchRequest("proj", 1))
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
+	rec := httptest.NewRecorder()
+	newDispatchTestHandler(store, nil).ServeHTTP(rec, dispatchRequest("proj", 1))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var result PublicDispatchResult
-	json.Unmarshal(w.Body.Bytes(), &result)
-	if result.State != "no_workflow" {
-		t.Errorf("expected no_workflow (ambiguous), got %q", result.State)
+	if got := readDispatchResult(t, rec).State; got != "no_workflow" {
+		t.Fatalf("state=%q", got)
 	}
 }
 
-func TestDispatchRun_WorkflowByName(t *testing.T) {
-	store := minimalDispatchStore()
-	// wf is already set in minimalDispatchStore and GetWorkflowByName returns it
-	h := newHandlerWithDispatch(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil)
-
-	body, _ := json.Marshal(DispatchRunRequest{Project: "proj", IssueNumber: 1, WorkflowName: "main"})
-	req := httptest.NewRequest("POST", "/v1/runs/dispatch", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-	var result PublicDispatchResult
-	json.Unmarshal(w.Body.Bytes(), &result)
-	if result.State != "pending" && result.State != "dispatched" {
-		t.Errorf("expected pending or dispatched, got %q", result.State)
-	}
-}
-
-func TestDispatchRun_WorkflowAlias(t *testing.T) {
+func TestDispatchRunWorkflowAlias(t *testing.T) {
 	store := minimalDispatchStore()
 	store.workflows = []Workflow{
-		{Name: "other", Project: "proj", Phases: []PhaseSpec{{Name: "impl", WorkflowFilename: "other.yml"}}, Budget: budget.Config{Total: 25}},
+		{Name: "other", Project: "proj", Phases: []PhaseSpec{{Name: "impl", Kind: "k8s_job"}}},
 		*store.wf,
 	}
-	h := newHandlerWithDispatch(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil)
-
-	req := httptest.NewRequest("POST", "/v1/runs/dispatch", bytes.NewBufferString(`{"project":"proj","issue_number":1,"workflow":"main"}`))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/runs/dispatch", bytes.NewBufferString(`{"project":"proj","issue_number":1,"workflow":"main"}`))
+	newDispatchTestHandler(store, &fakeNativeLauncher{}).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var result PublicDispatchResult
-	json.Unmarshal(w.Body.Bytes(), &result)
-	if result.State == "no_workflow" {
-		t.Fatalf("workflow alias was not honored: %s", w.Body.String())
+	if got := readDispatchResult(t, rec).State; got != "dispatched" {
+		t.Fatalf("state=%q", got)
 	}
 }

@@ -22,7 +22,7 @@ type SignalDrainStore interface {
 	ClaimIssueLock(ctx context.Context, project string, issueNumber int, holderID string, ttlSeconds int) error
 	ReleaseIssueLock(ctx context.Context, project string, issueNumber int, holderID string)
 	ReopenRunForTriage(ctx context.Context, req TriageReopenRequest) (RunReplayData, int, error)
-	AcquireLease(ctx context.Context, req LeaseAcquireRequest) (Lease, *Host, error)
+	AcquireLease(ctx context.Context, req LeaseAcquireRequest) (Lease, error)
 	AbortRunByID(ctx context.Context, project, runID, reason string) (AbortRunResult, error)
 }
 
@@ -79,9 +79,9 @@ const (
 	defaultSignalDrainBatchSize = 50
 )
 
-func drainSignalsHandler(store ReadStore, ghDispatch GHADispatchClient) http.HandlerFunc {
+func drainSignalsHandler(store ReadStore, nativeLauncher NativeLauncher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		result, err := DrainSignals(r.Context(), store, ghDispatch, defaultSignalDrainBatchSize)
+		result, err := DrainSignals(r.Context(), store, nativeLauncher, defaultSignalDrainBatchSize)
 		if err != nil {
 			writeProblem(w, http.StatusServiceUnavailable, err.Error())
 			return
@@ -90,7 +90,7 @@ func drainSignalsHandler(store ReadStore, ghDispatch GHADispatchClient) http.Han
 	}
 }
 
-func DrainSignals(ctx context.Context, store ReadStore, ghDispatch GHADispatchClient, limit int) (SignalDrainResult, error) {
+func DrainSignals(ctx context.Context, store ReadStore, nativeLauncher NativeLauncher, limit int) (SignalDrainResult, error) {
 	drainStore, ok := store.(SignalDrainStore)
 	if !ok || drainStore == nil {
 		return SignalDrainResult{}, errors.New("signal drain store not configured")
@@ -147,7 +147,7 @@ func DrainSignals(ctx context.Context, store ReadStore, ghDispatch GHADispatchCl
 		signal = processed
 
 		if decision.Decision == triageDispatch {
-			if err := dispatchTriage(ctx, drainStore, ghDispatch, signal, holderID, decision); err != nil {
+			if err := dispatchTriage(ctx, drainStore, nativeLauncher, signal, holderID, decision); err != nil {
 				_ = drainStore.MarkSignalFailed(ctx, signal, err.Error())
 				drainStore.ReleaseLock(ctx, scope, key, holderID)
 				result.Failed++
@@ -274,17 +274,24 @@ func triageAbortExplanation(decision string, signal QueuedSignal, run RunReplayD
 	}
 }
 
-func dispatchTriage(ctx context.Context, store SignalDrainStore, ghDispatch GHADispatchClient, signal QueuedSignal, holderID string, decision triageDecisionResult) error {
+func dispatchTriage(ctx context.Context, store SignalDrainStore, nativeLauncher NativeLauncher, signal QueuedSignal, holderID string, decision triageDecisionResult) error {
 	run := decision.Run
 	target := decision.Target
 	if target == nil || decision.Workflow == nil {
 		return errors.New("triage dispatch missing workflow target")
 	}
+	if nativeLauncher == nil {
+		return errors.New("no native launcher configured")
+	}
 	if err := store.ClaimIssueLock(ctx, run.Project, run.IssueNumber, holderID, defaultIssueLockTTLSeconds); err != nil {
 		return fmt.Errorf("claim triage issue lock: %w", err)
 	}
 
-	phaseKind := firstNonEmpty(target.Kind, "gha_dispatch")
+	phaseKind := workflowPhaseKind(target.Kind)
+	if err := validateNativeWorkflowKind(phaseKind); err != nil {
+		store.ReleaseIssueLock(ctx, run.Project, run.IssueNumber, holderID)
+		return err
+	}
 	workflowFilename := target.WorkflowFilename
 	if workflowFilename == "" {
 		workflowFilename = fmt.Sprintf("%s:%s", phaseKind, target.Name)
@@ -305,15 +312,15 @@ func dispatchTriage(ctx context.Context, store SignalDrainStore, ghDispatch GHAD
 
 	wfName := decision.Workflow.Name
 	metadata := map[string]any{
-		"run_id":                          reopened.ID,
-		"run_ref":                         runRefFromData(reopened),
-		"phase_name":                      target.Name,
-		"attempt_index":                   strconv.Itoa(attemptIndex),
-		"issue_number":                    strconv.Itoa(reopened.IssueNumber),
-		"issue_lock_holder_id":            holderID,
-		"triage_signal_id":                signal.ID,
-		"feedback":                        decision.Feedback,
-		"prior_verification_artifact_url": "",
+		"run_id":               reopened.ID,
+		"run_ref":              runRefFromData(reopened),
+		"phase_name":           target.Name,
+		"attempt_index":        strconv.Itoa(attemptIndex),
+		"issue_number":         strconv.Itoa(reopened.IssueNumber),
+		"issue_lock_holder_id": holderID,
+		"triage_signal_id":     signal.ID,
+		"feedback":             decision.Feedback,
+		"native_k8s":           true,
 	}
 	if reopened.CallbackToken != nil && *reopened.CallbackToken != "" {
 		metadata["run_callback_token"] = *reopened.CallbackToken
@@ -322,7 +329,7 @@ func dispatchTriage(ctx context.Context, store SignalDrainStore, ghDispatch GHAD
 	if len(requirements) == 0 {
 		requirements = decision.Workflow.DefaultRequirements
 	}
-	lease, host, err := store.AcquireLease(ctx, LeaseAcquireRequest{
+	lease, err := store.AcquireLease(ctx, LeaseAcquireRequest{
 		Project:      reopened.Project,
 		Workflow:     &wfName,
 		Requirements: requirements,
@@ -332,29 +339,23 @@ func dispatchTriage(ctx context.Context, store SignalDrainStore, ghDispatch GHAD
 		_, _ = store.AbortRunByID(ctx, reopened.Project, reopened.ID, "triage_lease_acquire_failed: "+err.Error())
 		return fmt.Errorf("acquire triage lease: %w", err)
 	}
-	if phaseKind != "gha_dispatch" || host == nil {
-		return nil
+	if lease.State != "claimed" {
+		_, _ = store.AbortRunByID(ctx, reopened.Project, reopened.ID, "triage_dispatch_failed: native lease was not claimed")
+		return errors.New("native lease was not claimed")
 	}
-	if ghDispatch == nil {
-		_, _ = store.AbortRunByID(ctx, reopened.Project, reopened.ID, "triage_dispatch_failed: no GHA dispatch client configured")
-		return errors.New("no GHA dispatch client configured")
-	}
-	runRef := runRefFromData(reopened)
-	inputs := buildForwardDispatchInputs(lease, host, reopened, runRef, *target, attemptIndex, map[string]string{})
-	inputs["feedback"] = decision.Feedback
-	inputs["prior_verification_artifact_url"] = ""
-	if reopened.PRNumber != nil {
-		inputs["pr_number"] = strconv.Itoa(*reopened.PRNumber)
-	}
-	ref := firstNonEmpty(target.WorkflowRef, "main")
-	if err := ghDispatch.DispatchWorkflow(ctx, reopened.IssueRepo, workflowFilename, ref, inputs); err != nil {
+	if _, err := nativeLauncher.LaunchNativePhase(ctx, NativeLaunchRequest{
+		Lease:    lease,
+		Workflow: *decision.Workflow,
+		Phase:    *target,
+		Run:      runWithAttempt(reopened, attemptIndex, target.Name),
+	}); err != nil {
 		_, _ = store.AbortRunByID(ctx, reopened.Project, reopened.ID, "triage_dispatch_failed: "+err.Error())
-		return fmt.Errorf("workflow_dispatch: %w", err)
+		return fmt.Errorf("native dispatch: %w", err)
 	}
 	return nil
 }
 
-func StartSignalDrainLoop(ctx context.Context, store ReadStore, ghDispatch GHADispatchClient, interval time.Duration, logf func(string, ...any)) {
+func StartSignalDrainLoop(ctx context.Context, store ReadStore, nativeLauncher NativeLauncher, interval time.Duration, logf func(string, ...any)) {
 	if interval <= 0 {
 		interval = 15 * time.Second
 	}
@@ -365,7 +366,7 @@ func StartSignalDrainLoop(ctx context.Context, store ReadStore, ghDispatch GHADi
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			result, err := DrainSignals(ctx, store, ghDispatch, defaultSignalDrainBatchSize)
+			result, err := DrainSignals(ctx, store, nativeLauncher, defaultSignalDrainBatchSize)
 			if err != nil {
 				if logf != nil {
 					logf("signal drain failed: %v", err)

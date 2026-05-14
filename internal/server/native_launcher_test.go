@@ -273,6 +273,68 @@ func TestActivateTestSlotRuntimeRunsHelmInstallerAfterLeaseAssignment(t *testing
 	}
 }
 
+func TestActivateTestSlotRuntimeCreatesReadyPlaywrightRuntime(t *testing.T) {
+	tokenPath := tempTokenFile(t)
+	var paths []string
+	launcher := &KubernetesNativeLauncher{
+		Settings: Settings{
+			K8sAPIHost:                    "https://kube.test",
+			K8sSATokenPath:                tokenPath,
+			NativeRunnerNamespace:         "glimmung-runs",
+			NativeRunnerServiceAccount:    "glimmung-native-runner",
+			NativeRunnerNamespaceRole:     "cluster-admin",
+			NativeRunnerJobTTLSeconds:     3600,
+			NativeRunnerPlaywrightEnabled: true,
+			NativeRunnerPlaywrightImage:   "playwright:latest",
+			NativeRunnerPlaywrightPort:    "3000",
+		},
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			paths = append(paths, req.Method+" "+req.URL.Path)
+			body := `{}`
+			if req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/jobs/glim-slot-apply-") {
+				body = `{"status":{"conditions":[{"type":"Complete","status":"True"}]}}`
+			}
+			if req.Method == http.MethodGet && req.URL.Path == "/apis/apps/v1/namespaces/tank-operator-slot-2/deployments/slot-playwright" {
+				body = `{"status":{"readyReplicas":1,"availableReplicas":1}}`
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		})},
+	}
+	leaseNumber := 12
+	lease := Lease{
+		Project:     "tank-operator",
+		LeaseNumber: &leaseNumber,
+		State:       "claimed",
+		Metadata: map[string]any{
+			"native_slot_name":          "tank-operator-slot-2",
+			"native_slot_index":         "2",
+			"native_sessions_namespace": "tank-operator-slot-2-sessions",
+		},
+	}
+	project := Project{
+		Name:       "tank-operator",
+		GitHubRepo: "nelsong6/tank-operator",
+		Metadata:   map[string]any{"test_slot_helm": map[string]any{"enabled": true}},
+	}
+
+	if err := launcher.ActivateTestSlotRuntime(context.Background(), lease, project, fakeNativeGitHubTokenMinter{token: "ghs_test"}); err != nil {
+		t.Fatalf("ActivateTestSlotRuntime: %v", err)
+	}
+	for _, want := range []string{
+		"POST /apis/apps/v1/namespaces/tank-operator-slot-2/deployments",
+		"POST /api/v1/namespaces/tank-operator-slot-2/services",
+		"GET /apis/apps/v1/namespaces/tank-operator-slot-2/deployments/slot-playwright",
+	} {
+		if !containsPath(paths, want) {
+			t.Fatalf("missing Playwright activation path %s, paths=%#v", want, paths)
+		}
+	}
+}
+
 func TestLaunchNativePhaseCreatesSlotPlaywrightRuntime(t *testing.T) {
 	tokenPath := tempTokenFile(t)
 	var paths []string
@@ -291,10 +353,14 @@ func TestLaunchNativePhaseCreatesSlotPlaywrightRuntime(t *testing.T) {
 		},
 		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			paths = append(paths, req.Method+" "+req.URL.Path)
+			body := `{}`
+			if req.Method == http.MethodGet && req.URL.Path == "/apis/apps/v1/namespaces/tank-operator-slot-1/deployments/slot-playwright" {
+				body = `{"status":{"readyReplicas":1,"availableReplicas":1}}`
+			}
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Header:     make(http.Header),
-				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Body:       io.NopCloser(strings.NewReader(body)),
 			}, nil
 		})},
 	}
@@ -330,6 +396,9 @@ func TestLaunchNativePhaseCreatesSlotPlaywrightRuntime(t *testing.T) {
 	}
 	if !containsPath(paths, "POST /api/v1/namespaces/tank-operator-slot-1/services") {
 		t.Fatalf("launch should create slot Playwright service, paths=%#v", paths)
+	}
+	if !containsPath(paths, "GET /apis/apps/v1/namespaces/tank-operator-slot-1/deployments/slot-playwright") {
+		t.Fatalf("launch should wait for slot Playwright readiness, paths=%#v", paths)
 	}
 	if containsPath(paths, "POST /apis/apps/v1/namespaces/glimmung-runs/deployments") {
 		t.Fatalf("launch should not create Playwright in glimmung-runs, paths=%#v", paths)

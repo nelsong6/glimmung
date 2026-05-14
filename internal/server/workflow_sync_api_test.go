@@ -172,7 +172,7 @@ func TestSyncWorkflow(t *testing.T) {
 	}
 }
 
-func TestSyncWorkflowNativeWebappDefaultsOmittedKindsToK8sJob(t *testing.T) {
+func TestSyncWorkflowDefaultsOmittedKindsToK8sJob(t *testing.T) {
 	store := &fakeWorkflowSyncStore{
 		projects: []Project{{Name: "myproject", GitHubRepo: "nelsong6/myproject", Metadata: map[string]any{"app_type": "native_web_app"}}},
 	}
@@ -195,14 +195,14 @@ func TestSyncWorkflowNativeWebappDefaultsOmittedKindsToK8sJob(t *testing.T) {
 	}
 }
 
-func TestSyncWorkflowNativeWebappRejectsExplicitGHA(t *testing.T) {
+func TestSyncWorkflowRejectsNonNativeKind(t *testing.T) {
 	store := &fakeWorkflowSyncStore{
 		projects: []Project{{Name: "myproject", GitHubRepo: "nelsong6/myproject", Metadata: map[string]any{"app_type": "native_web_app"}}},
 	}
 	client := &fakeWorkflowSyncClient{content: []byte(`
 phases:
   - name: entry
-    kind: gha_dispatch
+    kind: container
   - name: test
     kind: k8s_job
     verify: true
@@ -216,7 +216,7 @@ phases:
 	req.Header.Set("Authorization", "Bearer admin")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
+	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	if store.upserted != nil {
@@ -257,7 +257,7 @@ func TestSyncWorkflowAlreadyInSync(t *testing.T) {
 }
 
 func TestParseWorkflowYAML(t *testing.T) {
-	reg, err := parseWorkflowYAML(exampleWorkflowYAML, "testproject", "my-workflow", "gha_dispatch")
+	reg, err := parseWorkflowYAML(exampleWorkflowYAML, "testproject", "my-workflow", "k8s_job")
 	if err != nil {
 		t.Fatalf("parseWorkflowYAML error: %v", err)
 	}

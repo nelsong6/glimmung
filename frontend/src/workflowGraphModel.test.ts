@@ -13,7 +13,7 @@ describe("workflowToPhaseGraphModel", () => {
       phases: [
         {
           name: "implementation",
-          kind: "native",
+          kind: "k8s_job",
           verify: true,
           depends_on: [],
           recycle_policy: {
@@ -24,7 +24,7 @@ describe("workflowToPhaseGraphModel", () => {
         },
         {
           name: "verification",
-          kind: "gha_dispatch",
+          kind: "k8s_job",
           always: true,
           evidence_verification_gate: true,
           depends_on: ["implementation"],
@@ -37,7 +37,7 @@ describe("workflowToPhaseGraphModel", () => {
       phases: [
         {
           name: "implementation",
-          kind: "native",
+          kind: "k8s_job",
           verify: true,
           always: undefined,
           evidence_verification_gate: undefined,
@@ -45,7 +45,7 @@ describe("workflowToPhaseGraphModel", () => {
         },
         {
           name: "verification",
-          kind: "gha_dispatch",
+          kind: "k8s_job",
           verify: undefined,
           always: true,
           evidence_verification_gate: true,
@@ -68,7 +68,7 @@ describe("workflowToPhaseGraphModel", () => {
 
   it("uses a fallback phase when a workflow definition has no phases", () => {
     const workflow: WorkflowGraphSource = {
-      name: "legacy-workflow",
+      name: "native-workflow",
       phases: [],
       pr: {
         enabled: false,
@@ -84,7 +84,7 @@ describe("workflowToPhaseGraphModel", () => {
       phases: [
         {
           name: "dispatch",
-          kind: "gha_dispatch",
+          kind: "k8s_job",
           verify: false,
           always: undefined,
           evidence_verification_gate: undefined,

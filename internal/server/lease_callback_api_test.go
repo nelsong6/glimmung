@@ -69,10 +69,6 @@ func (s *fakeLeaseCallbackStore) HeartbeatLeaseByCallbackToken(_ context.Context
 	return s.lease, nil
 }
 
-func (s *fakeLeaseCallbackStore) ListHosts(context.Context) ([]Host, error) {
-	return nil, s.err
-}
-
 func (s *fakeLeaseCallbackStore) ListLeases(context.Context) ([]Lease, error) {
 	if s.err != nil {
 		return nil, s.err

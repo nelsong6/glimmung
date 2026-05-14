@@ -2,7 +2,7 @@
 
 This document is the active contract for the Go-first Glimmung runtime. The
 older migration pilot is complete: production images start `cmd/glimmung-go`,
-and the legacy Python app/test tree has been removed.
+and the retired Python app/test tree has been removed.
 
 The detailed cleanup inventory lives in
 [`docs/go-runtime-cleanup-inventory.md`](go-runtime-cleanup-inventory.md).
@@ -15,7 +15,7 @@ The detailed cleanup inventory lives in
 - Auth boundary: `internal/auth` for Entra JWKS auth and Kubernetes
   service-account TokenReview auth.
 - GitHub App client: `internal/github` for token minting, upstream workflow
-  fetch, workflow dispatch, and workflow-run cancellation.
+  fetch, and workflow-run cancellation.
 - Domain helpers: `internal/domain/*` for budget, decision, paths, phase refs,
   and public IDs.
 
@@ -27,16 +27,16 @@ The detailed cleanup inventory lives in
 - `docs/workflow-shape.md` owns the workflow model and native job conventions.
 - `docs/test-slot-lifecycle.md` owns the native test-slot terms, lifecycle
   states, and warm-versus-hot resource boundary.
-- `docs/go-runtime-cleanup-inventory.md` records the final compatibility notes
-  for the Python retirement.
+- `docs/go-runtime-cleanup-inventory.md` records the final cleanup notes for
+  the Python retirement.
 - `CLAUDE.md` owns architecture direction for human and agent contributors.
 
 ## API authority
 
 - Go route registration is canonical. `internal/server/route_inventory_test.go`
   verifies the active route list from `internal/server/server.go`.
-- Do not add, remove, or rename MCP-used routes without an explicit
-  compatibility window in `docs/mcp-surface-rollout.md`.
+- Do not add, remove, or rename MCP-used routes without an explicit rollout
+  issue in `docs/mcp-surface-rollout.md`.
 - Keep callback-token routes stable. Native runners and lease clients call
   those endpoints directly.
 - Keep `/healthz`, `/v1/config`, `/v1/auth/me`, `/v1/state`, and `/v1/events`
@@ -46,20 +46,15 @@ The detailed cleanup inventory lives in
 - Canonical graph routes are Go-owned: `/v1/issues/by-number/{project}/{issue_number}/graph`
   and `/v1/graph`. GitHub Issue-coordinate graph routes remain `410 Gone`.
 
-## Data compatibility
+## Data contract
 
-- Preserve JSON field names and enum values for documents already stored in
-  Cosmos until a migration window exists.
-- Preserve document shapes for `projects`, `workflows`, `hosts`, `leases`,
-  `runs`, `run_events`, `issues`, `locks`, `reports`, `playbooks`, and
-  `signals`.
-- Keep `gha_dispatch` readable as a workflow phase kind. It is legacy support,
-  not the default for new native web work.
-- Empty workflow phase `kind` normalizes to `gha_dispatch` only for legacy or
-  non-native projects. Projects marked `native_webapp`, `native_web_app`, or
-  `app_type=native_web_app` default blank phase kinds to `k8s_job` and reject
-  explicit `gha_dispatch` phases.
-- Native `k8s_job` workflows are the default direction for new web-native work.
+- The active Cosmos containers are `projects`, `workflows`, `leases`, `runs`,
+  `run_events`, `issues`, `locks`, `reports`, `playbooks`, and `signals`.
+- Workflow phases must use `k8s_job`. Blank workflow phase `kind` values
+  normalize to `k8s_job`; any other executor kind is rejected before it can
+  become the project runtime contract.
+- Lease acquisition is native-only. Lease requests must identify native
+  Kubernetes capacity and cannot fall back to registered host allocation.
 
 ## Hot-swap rules
 
@@ -108,7 +103,7 @@ run a Go-native live Cosmos smoke for the lock lifecycle.
 The repository root has no Python package metadata. Repo-local agent workflow
 operations live in the Go CLI under `cmd/glimmung-agent`. The old one-shot
 Python migration scripts under `scripts/` have been retired because they
-imported the legacy app package or encoded pre-Go workflow shapes.
+imported the retired app package or encoded pre-Go workflow shapes.
 
 ## Cleanup contract
 

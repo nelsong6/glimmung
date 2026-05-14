@@ -618,7 +618,6 @@ func attemptGraphMetadata(run RunReport, attempt RunReportAttempt, workflow Work
 		"phase":                attempt.Phase,
 		"phase_kind":           attempt.PhaseKind,
 		"workflow_filename":    attempt.WorkflowFilename,
-		"workflow_run_id":      attempt.WorkflowRunID,
 		"completed_at":         attempt.CompletedAt,
 		"decision":             attempt.Decision,
 		"verification":         verification,
@@ -819,7 +818,7 @@ func runGraphMetadata(run RunReport) map[string]any {
 			"stages": []map[string]any{{
 				"stage_id": attempt.Phase,
 				"name":     attempt.Phase,
-				"kind":     firstNonEmpty(attempt.PhaseKind, "gha_dispatch"),
+				"kind":     firstNonEmpty(attempt.PhaseKind, workflowKindNativeK8sJob),
 				"state":    state,
 				"jobs": []map[string]any{{
 					"job_id":       firstNonEmpty(attempt.WorkflowFilename, attempt.Phase, "phase"),
@@ -904,7 +903,7 @@ func runProjectionPhases(run RunReport, workflow Workflow) []RunProjectionPhase 
 			state := projectionPhaseState(phase.Name, run.CurrentPhase, attempts)
 			phases = append(phases, RunProjectionPhase{
 				Name:      phase.Name,
-				Kind:      firstNonEmpty(phase.Kind, "gha_dispatch"),
+				Kind:      workflowPhaseKind(phase.Kind),
 				State:     state,
 				Verify:    phase.Verify,
 				Always:    phase.Always,
@@ -928,7 +927,7 @@ func runProjectionPhases(run RunReport, workflow Workflow) []RunProjectionPhase 
 		state := projectionPhaseState(name, run.CurrentPhase, attempts)
 		phase := PhaseSpec{
 			Name:             name,
-			Kind:             firstNonEmpty(attempt.PhaseKind, "gha_dispatch"),
+			Kind:             firstNonEmpty(attempt.PhaseKind, workflowKindNativeK8sJob),
 			WorkflowFilename: attempt.WorkflowFilename,
 		}
 		phases = append(phases, RunProjectionPhase{
@@ -1111,7 +1110,7 @@ func runProjectionAttempts(attempts []RunReportAttempt) []RunProjectionAttempt {
 		out = append(out, RunProjectionAttempt{
 			AttemptIndex:       attempt.AttemptIndex,
 			Phase:              attempt.Phase,
-			PhaseKind:          firstNonEmpty(attempt.PhaseKind, "gha_dispatch"),
+			PhaseKind:          firstNonEmpty(attempt.PhaseKind, workflowKindNativeK8sJob),
 			State:              projectionAttemptState(attempt),
 			Conclusion:         attempt.Conclusion,
 			VerificationStatus: attempt.VerificationStatus,

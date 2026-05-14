@@ -180,7 +180,7 @@ func patchPortfolioElement(store ReadStore) http.HandlerFunc {
 	}
 }
 
-func dispatchPortfolioElements(store ReadStore, ghDispatch GHADispatchClient) http.HandlerFunc {
+func dispatchPortfolioElements(store ReadStore, nativeLauncher NativeLauncher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		dispatchStore, ok := store.(PortfolioDispatchStore)
 		if !ok || dispatchStore == nil {
@@ -264,7 +264,7 @@ func dispatchPortfolioElements(store ReadStore, ghDispatch GHADispatchClient) ht
 			return
 		}
 
-		result, problem := dispatchRun(r.Context(), dispatchStore, ghDispatch, nil, DispatchRunRequest{
+		result, problem := dispatchRun(r.Context(), dispatchStore, nativeLauncher, DispatchRunRequest{
 			Project:     project,
 			IssueNumber: *issue.Number,
 			Workflow:    stringPtrValue(workflow),

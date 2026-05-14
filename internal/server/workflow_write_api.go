@@ -10,6 +10,8 @@ import (
 	"github.com/nelsong6/glimmung/internal/domain/budget"
 )
 
+const workflowKindNativeK8sJob = "k8s_job"
+
 type WorkflowRegisterStore interface {
 	UpsertWorkflow(ctx context.Context, req WorkflowRegister) (Workflow, error)
 }
@@ -132,16 +134,16 @@ func deleteWorkflow(store ReadStore) http.HandlerFunc {
 }
 
 func normalizeWorkflowRegister(req *WorkflowRegister) {
-	normalizeWorkflowRegisterWithDefaultKind(req, "gha_dispatch")
+	normalizeWorkflowRegisterWithDefaultKind(req, workflowKindNativeK8sJob)
 }
 
 func normalizeWorkflowRegisterForProject(req *WorkflowRegister, project Project) {
-	normalizeWorkflowRegisterWithDefaultKind(req, workflowDefaultPhaseKind(project))
+	normalizeWorkflowRegisterWithDefaultKind(req, workflowKindNativeK8sJob)
 }
 
 func normalizeWorkflowRegisterWithDefaultKind(req *WorkflowRegister, defaultKind string) {
 	if strings.TrimSpace(defaultKind) == "" {
-		defaultKind = "gha_dispatch"
+		defaultKind = workflowKindNativeK8sJob
 	}
 	if req.Budget.Total == 0 {
 		req.Budget = budget.DefaultConfig()
@@ -165,13 +167,6 @@ func normalizeWorkflowRegisterWithDefaultKind(req *WorkflowRegister, defaultKind
 	}
 }
 
-func workflowDefaultPhaseKind(project Project) string {
-	if projectRequiresNativeWorkflows(project) {
-		return "k8s_job"
-	}
-	return "gha_dispatch"
-}
-
 func lookupProject(ctx context.Context, store ReadStore, name string) (Project, bool, error) {
 	projects, err := store.ListProjects(ctx)
 	if err != nil {
@@ -186,15 +181,27 @@ func lookupProject(ctx context.Context, store ReadStore, name string) (Project, 
 }
 
 func validateWorkflowAllowedForProject(project Project, req WorkflowRegister) error {
-	if !projectRequiresNativeWorkflows(project) {
-		return nil
-	}
 	for _, phase := range req.Phases {
-		if strings.TrimSpace(phase.Kind) != "k8s_job" {
-			return ValidationError{Message: "project is marked native_webapp; workflow phases must use kind='k8s_job' instead of GitHub Actions dispatch"}
+		if err := validateNativeWorkflowKind(phase.Kind); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func workflowPhaseKind(kind string) string {
+	kind = strings.TrimSpace(kind)
+	if kind == "" {
+		return workflowKindNativeK8sJob
+	}
+	return kind
+}
+
+func validateNativeWorkflowKind(kind string) error {
+	if workflowPhaseKind(kind) == workflowKindNativeK8sJob {
+		return nil
+	}
+	return ValidationError{Message: "workflow phases must use kind='k8s_job'"}
 }
 
 func projectRequiresNativeWorkflows(project Project) bool {

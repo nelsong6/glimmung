@@ -45,84 +45,14 @@ export function installMockFetch(): void {
 }
 
 export const mockSnapshot = {
-  hosts: [
-    {
-      name: "nelsonpc",
-      capabilities: { os: "windows", apps: ["sts2", "visual-studio"], gpu: false },
-      current_lease_ref: "glimmung/leases/11",
-      last_heartbeat: ago(1),
-      last_used_at: ago(4),
-      drained: false,
-      created_at: ago(1440),
-    },
-    {
-      name: "buildbox-01",
-      capabilities: { os: "linux", apps: ["node", "python", "kubectl"], gpu: false },
-      current_lease_ref: null,
-      last_heartbeat: ago(2),
-      last_used_at: ago(38),
-      drained: false,
-      created_at: ago(2200),
-    },
-    {
-      name: "design-lab",
-      capabilities: { os: "linux", apps: ["node", "playwright", "figma-export"], gpu: true },
-      current_lease_ref: null,
-      last_heartbeat: ago(5),
-      last_used_at: ago(71),
-      drained: false,
-      created_at: ago(3200),
-    },
-    {
-      name: "legacy-runner",
-      capabilities: { os: "windows", apps: ["sts2"], gpu: false },
-      current_lease_ref: null,
-      last_heartbeat: ago(90),
-      last_used_at: ago(560),
-      drained: true,
-      created_at: ago(8200),
-    },
-  ],
-  pending_leases: [
-    {
-      ref: "glimmung/leases/12",
-      lease_number: 12,
-      project: "glimmung",
-      workflow: "issue-agent",
-      host: null,
-      state: "pending",
-      requirements: { os: "linux", apps: ["node", "playwright"] },
-      metadata: { issue: 217, title: "Generate UI portfolio for existing repo" },
-      requester: null,
-      requested_at: ago(7),
-      assigned_at: null,
-      released_at: null,
-      ttl_seconds: 7200,
-    },
-    {
-      ref: "ambience/leases/7",
-      lease_number: 7,
-      project: "ambience",
-      workflow: "preview-agent",
-      host: null,
-      state: "pending",
-      requirements: { os: "linux", apps: ["node"] },
-      metadata: { issue: 44, preview: "mock checkout flow" },
-      requester: null,
-      requested_at: ago(16),
-      assigned_at: null,
-      released_at: null,
-      ttl_seconds: 3600,
-    },
-  ],
   active_leases: [
     {
       ref: "glimmung/leases/11",
       lease_number: 11,
       project: "glimmung",
       workflow: "issue-agent",
-      host: "nelsonpc",
-      state: "active",
+      host: "native-k8s",
+      state: "claimed",
       requirements: { os: "windows", apps: ["sts2"] },
       metadata: { issue: 206, run: "run-glimmung-206-live" },
       requester: null,
@@ -158,7 +88,7 @@ export const mockSnapshot = {
       phases: [
         {
           name: "design",
-          kind: "gha_dispatch",
+          kind: "k8s_job",
           workflow_filename: "issue-agent.yaml",
           workflow_ref: "main",
           inputs: {},
@@ -169,7 +99,7 @@ export const mockSnapshot = {
         },
         {
           name: "implement",
-          kind: "gha_dispatch",
+          kind: "k8s_job",
           workflow_filename: "issue-agent.yaml",
           workflow_ref: "main",
           inputs: { design_brief: "${{ phases.design.outputs.design_brief }}" },
@@ -180,7 +110,7 @@ export const mockSnapshot = {
         },
         {
           name: "verify",
-          kind: "gha_dispatch",
+          kind: "k8s_job",
           workflow_filename: "issue-agent.yaml",
           workflow_ref: "main",
           inputs: { branch: "${{ phases.implement.outputs.branch }}" },
@@ -208,7 +138,7 @@ export const mockSnapshot = {
       phases: [
         {
           name: "generate",
-          kind: "gha_dispatch",
+          kind: "k8s_job",
           workflow_filename: "design-portfolio.yaml",
           workflow_ref: "main",
           inputs: {},
@@ -233,7 +163,7 @@ export const mockSnapshot = {
       phases: [
         {
           name: "preview",
-          kind: "gha_dispatch",
+          kind: "k8s_job",
           workflow_filename: "preview.yaml",
           workflow_ref: "main",
           inputs: {},
@@ -373,7 +303,7 @@ const mockPlaybooks = [
     ],
     concurrency_limit: 1,
     integration_strategy: "isolated_prs",
-    state: "active",
+    state: "claimed",
     metadata: {},
     created_at: ago(90),
     updated_at: ago(5),
@@ -609,7 +539,7 @@ const issueGraph = {
       phases: [
         { name: "design", kind: "k8s_job", state: "succeeded", verify: false, always: false, depends_on: [], jobs: [{ id: "design", name: "design", state: "succeeded", steps: [{ slug: "read-docs", title: "read docs", state: "succeeded" }] }], attempts: [] },
         { name: "implement", kind: "k8s_job", state: "succeeded", verify: false, always: false, depends_on: ["design"], jobs: [{ id: "implement", name: "implement", state: "succeeded", steps: [{ slug: "build", title: "build", state: "succeeded" }] }], attempts: [] },
-        { name: "verify", kind: "k8s_job", state: "active", verify: true, always: false, depends_on: ["implement"], jobs: [{ id: "verify-ui", name: "verify ui", state: "active", steps: [{ slug: "screenshot", title: "screenshot", state: "active" }] }], attempts: [] },
+        { name: "verify", kind: "k8s_job", state: "claimed", verify: true, always: false, depends_on: ["implement"], jobs: [{ id: "verify-ui", name: "verify ui", state: "claimed", steps: [{ slug: "screenshot", title: "screenshot", state: "claimed" }] }], attempts: [] },
       ],
       evidence: [
         { kind: "validation", ref: "https://design-portfolio-pr-216.glimmung.dev.romaine.life/?mock=1", label: "validation", url: "https://design-portfolio-pr-216.glimmung.dev.romaine.life/?mock=1" },
@@ -743,7 +673,7 @@ function handleMockRequest(url: URL, init?: RequestInit): Response {
   }
   if (path === "/v1/leases/cancel" && method === "POST") return json({ state: "cancelled", lease_ref: "glimmung/leases/11" });
   if (path === "/v1/signals" && method === "POST") return json({ ref: `signal:mock:${Date.now()}`, state: "pending" });
-  if (["/v1/projects", "/v1/workflows", "/v1/hosts", "/v1/issues"].includes(path) && method === "POST") {
+  if (["/v1/projects", "/v1/workflows", "/v1/issues"].includes(path) && method === "POST") {
     return json({ id: `mock-${Date.now()}`, ok: true }, { status: 201 });
   }
 
@@ -761,8 +691,8 @@ function handleMockRequest(url: URL, init?: RequestInit): Response {
       validation_url: "https://design-portfolio-pr-216.glimmung.dev.romaine.life/?mock=1",
       session_launch_url: null,
       run_attempt_history: [
-        { attempt_index: 0, phase: "design", workflow_filename: "issue-agent.yaml", workflow_run_id: 9123401, dispatched_at: ago(88), completed_at: ago(75), conclusion: "success", verification_status: "pass", evidence_refs: [], summary_markdown: "Mapped the requested interaction and identified the dashboard route to update.", log_archive_url: null, decision: "continue" },
-        { attempt_index: 1, phase: "implement", workflow_filename: "issue-agent.yaml", workflow_run_id: 9123448, dispatched_at: ago(70), completed_at: row.pr_lock_held ? null : ago(42), conclusion: row.pr_lock_held ? null : "success", verification_status: row.pr_lock_held ? null : "pass", evidence_refs: [], summary_markdown: row.pr_lock_held ? null : "Implemented the touchpoint change, rebuilt the preview, and captured review evidence.", log_archive_url: null, decision: row.pr_lock_held ? null : "report" },
+        { attempt_index: 0, phase: "design", workflow_filename: "k8s_job:design", dispatched_at: ago(88), completed_at: ago(75), conclusion: "success", verification_status: "pass", evidence_refs: [], summary_markdown: "Mapped the requested interaction and identified the dashboard route to update.", log_archive_url: null, decision: "continue" },
+        { attempt_index: 1, phase: "implement", workflow_filename: "k8s_job:implement", dispatched_at: ago(70), completed_at: row.pr_lock_held ? null : ago(42), conclusion: row.pr_lock_held ? null : "success", verification_status: row.pr_lock_held ? null : "pass", evidence_refs: [], summary_markdown: row.pr_lock_held ? null : "Implemented the touchpoint change, rebuilt the preview, and captured review evidence.", log_archive_url: null, decision: row.pr_lock_held ? null : "report" },
       ],
       comments: [],
       reviews: [],
@@ -881,8 +811,7 @@ function attempt(
       phase,
       phase_kind: "k8s_job",
       attempt_index: index,
-      workflow_filename: "issue-agent.yaml",
-      workflow_run_id: index < 2 ? 9123400 + index : null,
+      workflow_filename: `k8s_job:${phase}`,
       completed_at: completedAt,
       conclusion,
       cost_usd: index === 0 ? 1.12 : index === 1 ? 5.37 : null,

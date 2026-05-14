@@ -76,14 +76,14 @@ type RunResumeStore interface {
 	ClaimIssueLock(ctx context.Context, project string, issueNumber int, holderID string, ttlSeconds int) error
 	ReleaseIssueLock(ctx context.Context, project string, issueNumber int, holderID string)
 	CreateResumedRun(ctx context.Context, req CreateResumedRunRequest) (CreatedRun, error)
-	AcquireLease(ctx context.Context, req LeaseAcquireRequest) (Lease, *Host, error)
+	AcquireLease(ctx context.Context, req LeaseAcquireRequest) (Lease, error)
 	AbortRunByID(ctx context.Context, project, runID, reason string) (AbortRunResult, error)
 	SubstitutePhaseInputs(phase PhaseSpec, priorOutputs map[string]map[string]string) (map[string]string, error)
 	CollectPriorOutputs(attempts []AttemptForResume) map[string]map[string]string
 }
 
 // resumeRunHandler handles POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/resume (admin-only).
-func resumeRunHandler(store ReadStore, ghDispatch GHADispatchClient) http.HandlerFunc {
+func resumeRunHandler(store ReadStore, nativeLauncher NativeLauncher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		resumeStore, ok := store.(RunResumeStore)
 		if !ok || resumeStore == nil {
@@ -169,10 +169,19 @@ func resumeRunHandler(store ReadStore, ghDispatch GHADispatchClient) http.Handle
 			return
 		}
 		entryPhase := wf.Phases[entrypointIndex]
+		phaseKind := workflowPhaseKind(entryPhase.Kind)
+		if err := validateNativeWorkflowKind(phaseKind); err != nil {
+			writeProblem(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		if nativeLauncher == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "native launcher not configured")
+			return
+		}
 
 		// 5. Validate step-boundary params (k8s_job only).
 		if req.EntrypointJobID != nil || req.EntrypointStepSlug != nil {
-			if entryPhase.Kind != "k8s_job" {
+			if phaseKind != "k8s_job" {
 				writeProblem(w, http.StatusUnprocessableEntity, "step-boundary resume is only valid for k8s_job phases")
 				return
 			}
@@ -252,6 +261,7 @@ func resumeRunHandler(store ReadStore, ghDispatch GHADispatchClient) http.Handle
 		issueNum := issueNumber
 		issueRef := publicids.IssueRef(project, &issueNum)
 		runRef := publicids.RunRef(project, &issueNum, newRun.RunDisplay)
+		priorRef := publicids.RunRef(project, &issueNum, runNumberStr)
 		priorOutputs := resumeStore.CollectPriorOutputs(priorRun.Attempts)
 		substituted, subErr := resumeStore.SubstitutePhaseInputs(entryPhase, priorOutputs)
 		if subErr != nil {
@@ -281,6 +291,7 @@ func resumeRunHandler(store ReadStore, ghDispatch GHADispatchClient) http.Handle
 			"issue_number":         strconv.Itoa(issueNumber),
 			"work_context_branch":  fmt.Sprintf("issue-%d-run-%s", issueNumber, newRun.RunDisplay),
 			"phase_inputs":         substituted,
+			"native_k8s":           true,
 		}
 		if req.EntrypointJobID != nil {
 			metadata["entrypoint_job_id"] = *req.EntrypointJobID
@@ -301,7 +312,7 @@ func resumeRunHandler(store ReadStore, ghDispatch GHADispatchClient) http.Handle
 			requirements = wf.DefaultRequirements
 		}
 		wfName := wf.Name
-		lease, host, err := resumeStore.AcquireLease(ctx, LeaseAcquireRequest{
+		lease, err := resumeStore.AcquireLease(ctx, LeaseAcquireRequest{
 			Project:      project,
 			Workflow:     &wfName,
 			Requirements: requirements,
@@ -309,97 +320,74 @@ func resumeRunHandler(store ReadStore, ghDispatch GHADispatchClient) http.Handle
 		})
 		if err != nil {
 			resumeStore.AbortRunByID(ctx, project, newRun.ID, "lease_acquire_failed") //nolint:errcheck
+			if errors.Is(err, ErrUnavailable) {
+				detail := "native capacity unavailable"
+				writeJSON(w, http.StatusOK, PublicResumeResult{
+					State:       "no_capacity",
+					NewRunRef:   &runRef,
+					PriorRunRef: &priorRef,
+					Detail:      &detail,
+				})
+				return
+			}
 			writeProblem(w, http.StatusInternalServerError, "acquire lease failed")
 			return
 		}
-
-		priorRef := publicids.RunRef(project, &issueNum, runNumberStr)
-		newRef := runRef
-		phaseKind := entryPhase.Kind
-		if phaseKind == "" {
-			phaseKind = "gha_dispatch"
+		if lease.State != "claimed" {
+			resumeStore.AbortRunByID(ctx, project, newRun.ID, "native_lease_not_claimed") //nolint:errcheck
+			detail := "native lease was not claimed"
+			writeJSON(w, http.StatusOK, PublicResumeResult{
+				State:       "dispatch_failed",
+				NewRunRef:   &runRef,
+				PriorRunRef: &priorRef,
+				Detail:      &detail,
+			})
+			return
 		}
+
+		newRef := runRef
 		result := PublicResumeResult{
 			NewRunRef:   &newRef,
 			PriorRunRef: &priorRef,
 		}
 		leaseStr := "claimed"
 
-		// 10. If host assigned and gha_dispatch, fire workflow_dispatch.
-		if host != nil && phaseKind == "gha_dispatch" && ghDispatch != nil {
-			inputs := buildResumeDispatchInputs(lease, host, newRun, runRef, entryPhase, issueNumber, issueRef, entrypointIndex, substituted)
-			wfRef := entryPhase.WorkflowRef
-			if wfRef == "" {
-				wfRef = "main"
-			}
-			workflowFilename := entryPhase.WorkflowFilename
-			if workflowFilename == "" {
-				workflowFilename = fmt.Sprintf("%s:%s", phaseKind, entryPhase.Name)
-			}
-			if err := ghDispatch.DispatchWorkflow(ctx, priorRun.IssueRepo, workflowFilename, wfRef, inputs); err != nil {
-				resumeStore.AbortRunByID(ctx, project, newRun.ID, "dispatch_failed: "+err.Error()) //nolint:errcheck
-				detail := fmt.Sprintf("runner dispatch failed: %s", err)
-				writeJSON(w, http.StatusOK, PublicResumeResult{
-					State:       "dispatch_failed",
-					NewRunRef:   &newRef,
-					PriorRunRef: &priorRef,
-					Detail:      &detail,
-				})
-				return
-			}
-			result.State = "dispatched"
-			hostName := host.Name
-			result.Host = &hostName
-		} else {
-			result.State = "pending"
+		runData := RunReplayData{
+			ID:               newRun.ID,
+			Project:          project,
+			WorkflowName:     wf.Name,
+			IssueNumber:      issueNumber,
+			RunNumber:        &newRun.RunNumber,
+			RunDisplayNumber: &newRun.RunDisplay,
+			IssueRepo:        priorRun.IssueRepo,
+			CallbackToken:    &newRun.CallbackToken,
+			Attempts: []RunAttemptData{{
+				AttemptIndex: entrypointIndex,
+				Phase:        req.EntrypointPhase,
+			}},
 		}
+		if _, err := nativeLauncher.LaunchNativePhase(ctx, NativeLaunchRequest{
+			Lease:    lease,
+			Workflow: *wf,
+			Phase:    entryPhase,
+			Run:      runData,
+		}); err != nil {
+			resumeStore.AbortRunByID(ctx, project, newRun.ID, "native_dispatch_failed: "+err.Error()) //nolint:errcheck
+			detail := fmt.Sprintf("native dispatch failed: %s", err)
+			writeJSON(w, http.StatusOK, PublicResumeResult{
+				State:       "dispatch_failed",
+				NewRunRef:   &newRef,
+				PriorRunRef: &priorRef,
+				Detail:      &detail,
+			})
+			return
+		}
+		result.State = "dispatched"
+		result.Host = lease.Host
 		result.Lease = &leaseStr
 
 		writeJSON(w, http.StatusOK, result)
 	}
-}
-
-// buildResumeDispatchInputs constructs the workflow_dispatch input map for a resumed run.
-func buildResumeDispatchInputs(
-	lease Lease,
-	host *Host,
-	run CreatedRun,
-	runRef string,
-	phase PhaseSpec,
-	issueNumber int,
-	issueRef string,
-	entrypointIndex int,
-	substituted map[string]string,
-) map[string]string {
-	inputs := map[string]string{
-		"attempt_index":      strconv.Itoa(entrypointIndex),
-		"issue_ref":          issueRef,
-		"issue_number":       strconv.Itoa(issueNumber),
-		"run_callback_token": run.CallbackToken,
-		"run_number":         strconv.Itoa(run.RunNumber),
-		"run_display_number": run.RunDisplay,
-		"run_ref":            runRef,
-		"phase_name":         phase.Name,
-	}
-	if host != nil {
-		inputs["host"] = host.Name
-	}
-	var slotName string
-	if m, ok := lease.Metadata["native_slot_name"].(string); ok {
-		slotName = m
-	}
-	inputs["lease_ref"] = publicids.LeaseRef(lease.Project, slotName, lease.LeaseNumber)
-	if t, ok := lease.Metadata["lease_callback_token"].(string); ok && t != "" {
-		inputs["lease_callback_token"] = t
-	}
-	if lease.LeaseNumber != nil {
-		inputs["lease_number"] = strconv.Itoa(*lease.LeaseNumber)
-	}
-	// Substituted phase inputs (resolved from prior run outputs) override standard fields.
-	for k, v := range substituted {
-		inputs[k] = v
-	}
-	return inputs
 }
 
 // phaseNames extracts phase names for error messages.

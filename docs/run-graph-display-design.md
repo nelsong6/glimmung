@@ -2,9 +2,8 @@
 
 ## Context
 
-Glimmung owns the run display. Argo Workflows, GitHub Actions, Azure
-DevOps, and other workflow systems are useful references, but the graph
-shown to the user must follow Glimmung's product model:
+Glimmung owns the run display. Other workflow systems are useful references,
+but the graph shown to the user must follow Glimmung's product model:
 
 ```text
 Issue
@@ -16,10 +15,8 @@ Issue
   -> Touchpoint
 ```
 
-The executor behind a phase may be GitHub Actions, a native Kubernetes
-job, a future Argo Workflow, or something else. That executor is an
-implementation detail. The user-facing graph is Glimmung's explanation
-of agent work, review evidence, and next decisions.
+The executor behind a phase is a native Kubernetes job. The user-facing graph
+is Glimmung's explanation of agent work, review evidence, and next decisions.
 
 ## Terminology
 
@@ -34,8 +31,8 @@ Issue          -> Issue / origin
 Run            -> One durable execution record
 Cycle          -> A run whose origin is recycle/resume/request-changes
 Workflow phase -> Phase
-Native/GHA job -> Job
-Native/GHA step -> Step
+Native job -> Job
+Native step -> Step
 Attempt        -> Display counter or executor-level retry attribute only
 Report         -> Touchpoint / evidence, depending on context
 ```
@@ -202,7 +199,7 @@ phase-level summary affordance.
 
 ## Job and Step Detail
 
-Step visibility should follow the proven pattern from GitHub Actions and
+Step visibility should follow the proven pattern from CI systems and
 Azure DevOps:
 
 ```text
@@ -300,7 +297,7 @@ Add portfolio rows for at least:
 - resumed run with skipped earlier phases,
 - phase recycle/retry,
 - cycle run created by recycle/retry,
-- pending/no-host state,
+- waiting/no-capacity state,
 - aborted/cancelled state,
 - Touchpoint evidence checklist.
 
@@ -376,11 +373,10 @@ Signal
   feedback
 ```
 
-The projection normalizes GitHub Actions phases, native Kubernetes
-jobs, PR evidence, touchpoint state, and future executor kinds into one
-display vocabulary. Native job completions are job-scoped in the run attempt
-record so the projection can show one sibling job as complete while the phase
-waits for the remaining jobs.
+The projection normalizes native Kubernetes jobs, PR evidence, and touchpoint
+state into one display vocabulary. Native job completions are job-scoped in the
+run attempt record so the projection can show one sibling job as complete while
+the phase waits for the remaining jobs.
 
 GitHub Check Runs are intentionally not part of this contract. Glimmung
 keeps run state canonical in the issue workspace and syndicates PR URLs as
@@ -393,8 +389,8 @@ issue if GitHub-native status boxes become necessary.
 2. Add portfolio specimens for the run graph and job/step inspector.
 3. Update the issue/run frontend toward breadcrumb-based navigation.
 4. Build the live run graph against the projection.
-5. Move current tab-only issue detail behavior behind compatibility
-   routes or redirects.
+5. Move current tab-only issue detail behavior behind retired-route tombstones
+   or redirects.
 6. Add Touchpoint surfaces once the graph and evidence model are stable.
 
 This order keeps the refactor visible and reviewable while avoiding a

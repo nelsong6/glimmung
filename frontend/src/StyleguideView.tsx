@@ -323,7 +323,7 @@ const DESIGN_FILE_ITEMS: PortfolioItem[] = [
   {
     id: "capacity-view",
     title: "Front page - Capacity",
-    caption: "The dashboard landing surface: project scope, legacy host capacity, queue, and active work",
+    caption: "The dashboard landing surface: project scope, native leases, and active work",
     initialOpen: true,
     render: () => (
       <Specimen title="front page - capacity">
@@ -335,7 +335,7 @@ const DESIGN_FILE_ITEMS: PortfolioItem[] = [
                   <h1>glimmung</h1>
                   <span className="connection live">live</span>
                 </div>
-                <div className="epigraph">glimmung / agent-run capacity and work queue</div>
+                <div className="epigraph">glimmung / agent-run native capacity</div>
               </div>
               <div className="user-cluster">
                 <button type="button" className="gb sm"><span className="sigil">∷</span><span className="label">admin</span></button>
@@ -343,35 +343,35 @@ const DESIGN_FILE_ITEMS: PortfolioItem[] = [
               </div>
             </header>
             <div className="kpi-strip frontpage-kpis">
-              <div className="kpi"><span className="k">legacy hosts</span><span className="v">8</span></div>
-              <div className="kpi"><span className="k">free</span><span className="v green">5</span></div>
-              <div className="kpi"><span className="k">busy</span><span className="v amber">2</span></div>
-              <div className="kpi"><span className="k">drained</span><span className="v red">1</span></div>
-              <div className="kpi"><span className="k">pending</span><span className="v">3</span></div>
+              <div className="kpi"><span className="k">native leases</span><span className="v">3</span></div>
+              <div className="kpi"><span className="k">claimed</span><span className="v amber">2</span></div>
+              <div className="kpi"><span className="k">waiting slots</span><span className="v">1</span></div>
+              <div className="kpi"><span className="k">running jobs</span><span className="v green">5</span></div>
+              <div className="kpi"><span className="k">failed jobs</span><span className="v red">0</span></div>
             </div>
             <div className="frontpage-grid">
               <section>
-                <h2>Legacy hosts</h2>
+                <h2>Native leases</h2>
                 <table>
                   <thead>
-                    <tr><th>Name</th><th>State</th><th>Lease</th></tr>
+                    <tr><th>Lease</th><th>State</th><th>Run</th></tr>
                   </thead>
                   <tbody>
-                    <tr className="eligible"><td className="mono">glimmung-slot-1</td><td><span className="pill free">free</span></td><td className="mono dim">-</td></tr>
-                    <tr><td className="mono">glimmung-slot-2</td><td><span className="pill busy">busy</span></td><td className="mono dim">01KQWF...</td></tr>
-                    <tr><td className="mono">glimmung-slot-3</td><td><span className="pill drain">drained</span></td><td className="mono dim">-</td></tr>
+                    <tr className="eligible"><td className="mono">lease-glimmung-206</td><td><span className="pill busy">claimed</span></td><td className="mono dim">glimmung#206/runs/1</td></tr>
+                    <tr><td className="mono">lease-glimmung-217</td><td><span className="pill busy">claimed</span></td><td className="mono dim">glimmung#217/runs/1</td></tr>
+                    <tr><td className="mono">slot-glimmung-3</td><td><span className="pill info">waiting</span></td><td className="mono dim">test slot</td></tr>
                   </tbody>
                 </table>
               </section>
               <section>
-                <h2>Pending queue</h2>
+                <h2>Ready issues</h2>
                 <table>
                   <thead>
-                    <tr><th>Lease</th><th>Issue</th><th>Requested</th></tr>
+                    <tr><th>Issue</th><th>Workflow</th><th>Ready</th></tr>
                   </thead>
                   <tbody>
-                    <tr><td className="mono">01KQWX...</td><td>design portfolio bootstrap</td><td className="mono dim">14s ago</td></tr>
-                    <tr><td className="mono">01KQWY...</td><td>ui package bridge</td><td className="mono dim">2m ago</td></tr>
+                    <tr><td className="mono">#218</td><td>design portfolio bootstrap</td><td className="mono dim">14s ago</td></tr>
+                    <tr><td className="mono">#219</td><td>ui package bridge</td><td className="mono dim">2m ago</td></tr>
                   </tbody>
                 </table>
               </section>
@@ -409,8 +409,8 @@ const DESIGN_FILE_ITEMS: PortfolioItem[] = [
         <div className="project-info">
           <div className="row"><span className="key">project</span><span className="val mono">glimmung</span></div>
           <div className="row"><span className="key">github</span><span className="val mono">nelsong6/glimmung</span></div>
-          <div className="row"><span className="key">work</span><span className="val mono">1 active / 2 pending</span></div>
-          <div className="row"><span className="key">legacy hosts</span><span className="val mono">nelsonpc</span></div>
+          <div className="row"><span className="key">work</span><span className="val mono">1 active</span></div>
+          <div className="row"><span className="key">executor</span><span className="val mono">native k8s jobs</span></div>
         </div>
         <h2>Workflows</h2>
         <table>
@@ -418,8 +418,8 @@ const DESIGN_FILE_ITEMS: PortfolioItem[] = [
             <tr><th>Name</th><th>File</th><th>Trigger</th><th>Work</th></tr>
           </thead>
           <tbody>
-            <tr><td>issue-agent</td><td className="mono dim">issue-agent.yaml@main</td><td className="mono dim">issue-agent</td><td className="mono dim">1 active / 1 pending</td></tr>
-            <tr><td>portfolio-agent</td><td className="mono dim">design-portfolio.yaml@main</td><td className="mono dim">design-portfolio</td><td className="mono dim">0 active / 1 pending</td></tr>
+            <tr><td>issue-agent</td><td className="mono dim">issue-agent.yaml@main</td><td className="mono dim">issue-agent</td><td className="mono dim">1 active</td></tr>
+            <tr><td>portfolio-agent</td><td className="mono dim">design-portfolio.yaml@main</td><td className="mono dim">design-portfolio</td><td className="mono dim">0 active</td></tr>
           </tbody>
         </table>
         <h2>Issues</h2>

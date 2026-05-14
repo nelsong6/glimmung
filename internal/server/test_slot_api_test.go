@@ -133,7 +133,6 @@ func TestCheckoutTestSlotStartsAsyncActivation(t *testing.T) {
 			},
 			RequestedAt: now,
 		},
-		host: &Host{Name: "native-k8s"},
 	}
 	preparer := &fakeTestSlotPreparer{
 		activateStarted: make(chan struct{}, 1),
@@ -229,7 +228,6 @@ func TestReconcileActivatingTestSlotsRestartsOldActivation(t *testing.T) {
 			},
 			RequestedAt: now,
 		},
-		host: &Host{Name: "native-k8s"},
 	}
 	preparer := &fakeTestSlotPreparer{
 		activateStarted: make(chan struct{}, 1),
@@ -288,7 +286,6 @@ func TestReconcileCleaningTestSlotsRestartsOldCleanup(t *testing.T) {
 			},
 			RequestedAt: now,
 		},
-		host: &Host{Name: "native-k8s"},
 	}
 	preparer := &fakeTestSlotPreparer{
 		returnStarted: make(chan struct{}, 1),
@@ -384,7 +381,6 @@ func TestReconcileExpiredTestSlotLeaseStartsCleanup(t *testing.T) {
 			AssignedAt:  &now,
 			TTLSeconds:  60,
 		},
-		host: &Host{Name: "native-k8s"},
 	}
 	preparer := &fakeTestSlotPreparer{
 		returnStarted: make(chan struct{}, 1),
@@ -452,7 +448,6 @@ func TestReconcileActiveTestSlotCleansInstaller(t *testing.T) {
 			AssignedAt:  &now,
 			TTLSeconds:  900,
 		},
-		host: &Host{Name: "native-k8s"},
 	}
 	preparer := &fakeTestSlotPreparer{}
 
@@ -492,11 +487,11 @@ func TestAsyncCheckoutFailureMarksErrorAndReleasesLease(t *testing.T) {
 			},
 			RequestedAt: now,
 		},
-		host: &Host{Name: "native-k8s"},
 	}
 	preparer := &fakeTestSlotPreparer{
 		activateErr:  errors.New("render/apply failed"),
 		activateDone: make(chan struct{}, 1),
+		returnDone:   make(chan struct{}, 1),
 	}
 	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil, preparer)
 
@@ -514,6 +509,11 @@ func TestAsyncCheckoutFailureMarksErrorAndReleasesLease(t *testing.T) {
 		t.Fatal("background activation did not finish")
 	}
 	waitForSlotStatus(t, store, "error")
+	select {
+	case <-preparer.returnDone:
+	case <-time.After(time.Second):
+		t.Fatal("failed activation cleanup did not finish")
+	}
 	finalStatus := store.slotStatuses[len(store.slotStatuses)-1]
 	if finalStatus.ActivationState == nil || *finalStatus.ActivationState != "error" {
 		t.Fatalf("activation state=%v, want error", finalStatus.ActivationState)

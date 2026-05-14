@@ -18,7 +18,6 @@ type RunReportAttempt struct {
 	Phase              string                    `json:"phase"`
 	PhaseKind          string                    `json:"phase_kind"`
 	WorkflowFilename   string                    `json:"workflow_filename"`
-	WorkflowRunID      *int64                    `json:"workflow_run_id"`
 	DispatchedAt       time.Time                 `json:"dispatched_at"`
 	CompletedAt        *time.Time                `json:"completed_at"`
 	Conclusion         *string                   `json:"conclusion"`

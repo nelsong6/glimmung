@@ -20,8 +20,6 @@ type RunMutationStore interface {
 	ReadRunIDForNumber(ctx context.Context, project string, issueNumber int, runNumber string) (string, string, error)
 	// ReadRunIDForCallbackToken resolves a run callback token to (runID, project, runRef).
 	ReadRunIDForCallbackToken(ctx context.Context, token string) (string, string, string, error)
-	// RecordRunStarted stamps the workflow_run_id on the latest attempt of the given run.
-	RecordRunStarted(ctx context.Context, project, runID string, req RunStartedRequest) (string, error)
 }
 
 // AbortRunResult is the response for run abort operations.
@@ -30,12 +28,11 @@ type AbortRunResult struct {
 	RunRef            string  `json:"run_ref"`
 	RunNumber         *int    `json:"run_number"`
 	RunDisplayNumber  *string `json:"run_display_number"`
-	GHRunCancelled    *bool   `json:"gh_run_cancelled"`
 	IssueLockReleased *bool   `json:"issue_lock_released"`
 	PRLockReleased    *bool   `json:"pr_lock_released"`
 }
 
-// RunCallbackResult is the response for GHA run callback operations.
+// RunCallbackResult is the response for run callback operations.
 type RunCallbackResult struct {
 	RunRef            string   `json:"run_ref"`
 	Decision          *string  `json:"decision"`
@@ -45,12 +42,6 @@ type RunCallbackResult struct {
 	CompletedJobIDs   []string `json:"completed_job_ids,omitempty"`
 	PendingJobIDs     []string `json:"pending_job_ids,omitempty"`
 	FailedJobIDs      []string `json:"failed_job_ids,omitempty"`
-}
-
-// RunStartedRequest is the request body for /run-callbacks/{token}/started.
-type RunStartedRequest struct {
-	WorkflowRunID int64   `json:"workflow_run_id"`
-	ValidationURL *string `json:"validation_url"`
 }
 
 // RunAbortedRequest is the request body for /run-callbacks/{token}/aborted.
@@ -98,44 +89,6 @@ func abortRunByNumber(store ReadStore) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, result)
-	}
-}
-
-// runStartedByCallbackToken handles POST /v1/run-callbacks/{callback_token}/started
-func runStartedByCallbackToken(store ReadStore) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		mutStore, ok := store.(RunMutationStore)
-		if !ok || mutStore == nil {
-			writeProblem(w, http.StatusServiceUnavailable, "run mutation store not configured")
-			return
-		}
-		token := r.PathValue("callback_token")
-		runID, project, _, err := mutStore.ReadRunIDForCallbackToken(r.Context(), token)
-		if errors.Is(err, ErrNotFound) {
-			writeProblem(w, http.StatusNotFound, "run callback token not found")
-			return
-		}
-		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "read run by callback token failed")
-			return
-		}
-
-		var req RunStartedRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeProblem(w, http.StatusBadRequest, "invalid request body")
-			return
-		}
-
-		runRef, err := mutStore.RecordRunStarted(r.Context(), project, runID, req)
-		if errors.Is(err, ErrNotFound) {
-			writeProblem(w, http.StatusNotFound, "run not found")
-			return
-		}
-		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "record run started failed")
-			return
-		}
-		writeJSON(w, http.StatusOK, RunCallbackResult{RunRef: runRef})
 	}
 }
 

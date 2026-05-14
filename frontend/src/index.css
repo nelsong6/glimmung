@@ -2203,10 +2203,8 @@ h2 .inline-action,
 .attempt-card.running {
   border-color: var(--state-busy-fg);
 }
-/* Stuck-in-dispatching (#83): no workflow_run_id received past the
-   STUCK_DISPATCHING_MS threshold. Borrows the danger rail so it pulls
-   the eye, but stays a tinted border (not a fill) so the card body
-   still reads cleanly while the user investigates. */
+/* Stuck-in-dispatching (#83): no native job activity recorded past the
+   STUCK_DISPATCHING_MS threshold. */
 .attempt-card.stuck {
   border-color: var(--state-danger-fg);
 }

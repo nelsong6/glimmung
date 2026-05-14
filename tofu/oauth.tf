@@ -1,4 +1,4 @@
-# Entra app reg for glimmung's admin endpoints (POST /v1/projects, /v1/hosts).
+# Entra app reg for glimmung's admin endpoints (POST /v1/projects, /v1/issues).
 # Mirrors tank-operator/infra/oauth_app.tf — public SPA + MSAL pattern. Phase 3
 # will add a dashboard SPA that consumes the same client; Phase 2 only needs
 # the audience for validating CLI-minted tokens

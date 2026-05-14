@@ -17,7 +17,7 @@ Glimmung embraces the shift in the human's role from *coder* to *curator and man
 - **Make review easy; trust through test evidence.** Humans still review every PR — that's load-bearing. The job glimmung does is making review easy: the agent's test artifacts (`verification.json` + evidence refs) sit alongside the diff, the predictable fields are surfaced where you expect them, and the human can trust the agent knew it had to prove its work. The reject button exists for when something's still off; rejecting re-enters the verify loop with the human's feedback as additional context.
 - **Elaborate queuing on stateful, host-pinned, scarce resources.** The agent-run model GitHub Actions doesn't have a clean shape for, and that kept getting rebuilt badly across spirelens, ambience, tank-operator. Glimmung owns this primitive — leases against capability-matched hosts, with a real queue and a real dashboard.
 - **Per-issue test environments**, when the workflow opts in. Spin up an ephemeral environment per agent run on a wildcard hostname so the verify step has somewhere isolated to exercise the change. Some workflows don't need this and have no opt-in; the support is there when it is.
-- **Absorbs GitHub's tech debt for this workload.** GHA's queueing and state model. Markdown rendering that can't carry rich evidence cleanly (no external links, awkward at the predictable structured fields glimmung tracks like cost / tokens / attempt count / test evidence). Issue and PR formats that weren't designed for the agent-driven shape. Where GitHub falls short for agentic SDLC, glimmung covers.
+- **Absorbs GitHub's tech debt for this workload.** GitHub's queueing and state model. Markdown rendering that can't carry rich evidence cleanly (no external links, awkward at the predictable structured fields glimmung tracks like cost / tokens / attempt count / test evidence). Issue and PR formats that weren't designed for the agent-driven shape. Where GitHub falls short for agentic SDLC, glimmung covers.
 
 ## Migration policy
 
@@ -45,7 +45,7 @@ At its best: humans set direction, agents execute in lanes, and the system grace
 
 GitHub Issues are not part of the live Glimmung issue/run loop. GitHub Issues may still be used as temporary backlog/tracker notes until Glimmung is self-hosting that surface.
 
-For web-native apps, Glimmung is moving off GitHub Actions as the runner source and onto Glimmung-managed Kubernetes Jobs. Keep `gha_dispatch` supported for legacy/exception flows, especially Spirelens for now, but do not route new Ambience-native work through GitHub Actions. GitHub PRs remain a syndication/review target; the canonical Glimmung review object is Report.
+Glimmung-managed workflows run on Glimmung-managed Kubernetes Jobs. Workflow phases use `k8s_job`; GitHub Actions is not a supported allocator, executor, fallback, or exception path. GitHub PRs remain a syndication/review target; the canonical Glimmung review object is Report.
 
 ## Container build verification
 

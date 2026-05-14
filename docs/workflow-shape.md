@@ -59,10 +59,8 @@ The mandatory-phase enforcement is active in the Go workflow writer and sync
 path. Registrations that miss an entry phase, a testing phase, or an always-run
 cleanup phase are rejected before they can become the project runtime contract.
 
-For native web app projects, blank phase `kind` values default to `k8s_job`.
-Legacy or non-native projects keep the backward-compatible blank-kind default
-of `gha_dispatch`, but those phases are explicit exception support, not the
-normal path for new web-native work.
+Blank phase `kind` values default to `k8s_job`. Registered workflow phases must
+use `k8s_job`; any other executor kind is rejected before dispatch.
 
 ## Job-level concurrency within a phase
 

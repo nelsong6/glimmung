@@ -27,10 +27,6 @@ type fakeProjectScalerStore struct {
 	err          error
 }
 
-func (s *fakeProjectScalerStore) ListHosts(context.Context) ([]Host, error) {
-	return nil, s.err
-}
-
 func (s *fakeProjectScalerStore) ListLeases(context.Context) ([]Lease, error) {
 	if s.leaseErr != nil {
 		return nil, s.leaseErr

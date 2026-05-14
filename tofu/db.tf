@@ -1,4 +1,4 @@
-# Cosmos DB NoSQL Database. Containers: projects, hosts, workflows, leases,
+# Cosmos DB NoSQL Database. Containers: projects, workflows, leases,
 # runs, run_events, locks, signals, issues, playbooks, reports,
 # report_versions, and legacy prs.
 # Created here at the control plane; the runtime pod uses glimmung-identity
@@ -15,21 +15,6 @@ resource "azurerm_cosmosdb_sql_database" "glimmung" {
 
 resource "azurerm_cosmosdb_sql_container" "projects" {
   name                = "projects"
-  resource_group_name = local.infra.resource_group_name
-  account_name        = data.azurerm_cosmosdb_account.infra.name
-  database_name       = azurerm_cosmosdb_sql_database.glimmung.name
-  partition_key_paths = ["/name"]
-
-  indexing_policy {
-    indexing_mode = "consistent"
-    included_path {
-      path = "/*"
-    }
-  }
-}
-
-resource "azurerm_cosmosdb_sql_container" "hosts" {
-  name                = "hosts"
   resource_group_name = local.infra.resource_group_name
   account_name        = data.azurerm_cosmosdb_account.infra.name
   database_name       = azurerm_cosmosdb_sql_database.glimmung.name

@@ -57,8 +57,8 @@ Validation env: ${VALIDATION_URL}
 EOF
 cat /agent-config/prompt.md /tmp/issue-context.md > /tmp/agent-input.md
 
-# stream-json + verbose so the GHA step surfaces tool calls + partial messages
-# live instead of going silent for the whole run.
+# stream-json + verbose surfaces tool calls + partial messages live instead of
+# going silent for the whole run.
 cat /tmp/agent-input.md | claude \
   --print \
   --output-format stream-json \

@@ -160,7 +160,7 @@ func fetchUpstreamResult(
 		}, nil
 	}
 
-	upstream, err := parseWorkflowYAML(raw, project, name, workflowDefaultPhaseKind(*proj))
+	upstream, err := parseWorkflowYAML(raw, project, name, workflowKindNativeK8sJob)
 	if err != nil {
 		return nil, &upstreamError{http.StatusUnprocessableEntity, fmt.Sprintf("parse workflow upstream: %s", err)}
 	}
@@ -225,6 +225,11 @@ func parseWorkflowYAML(data []byte, project, name, defaultPhaseKind string) (Wor
 		return WorkflowRegister{}, fmt.Errorf("unmarshal workflow register: %w", err)
 	}
 	normalizeWorkflowRegisterWithDefaultKind(&reg, defaultPhaseKind)
+	for _, phase := range reg.Phases {
+		if err := validateNativeWorkflowKind(phase.Kind); err != nil {
+			return WorkflowRegister{}, err
+		}
+	}
 	return reg, nil
 }
 

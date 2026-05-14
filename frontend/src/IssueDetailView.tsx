@@ -1695,7 +1695,6 @@ function phaseStatus(attempt: GraphNode): { cls: string; text: string } {
   const conclusion = stringOrNull(meta.conclusion);
   const verification = isRecord(meta.verification) ? meta.verification : null;
   const verStatus = verification ? stringOrNull(verification.status) : null;
-  const workflowRunId = meta.workflow_run_id != null ? String(meta.workflow_run_id) : null;
   const nativeJobs = nativeAttemptJobs(meta.jobs);
   const nativeRunning = nativeJobs.some((j) => j.state === "active" || j.steps.some((s) => s.state === "active"));
   const nativeFailed = nativeJobs.some((j) => j.state === "failed" || j.steps.some((s) => s.state === "failed"));
@@ -1709,7 +1708,7 @@ function phaseStatus(attempt: GraphNode): { cls: string; text: string } {
     return { cls: "", text: "skipped" };
   }
   if (!completed) {
-    if (nativeRunning || (workflowRunId && nativeJobs.length === 0)) {
+    if (nativeRunning) {
       return { cls: "busy", text: "running" };
     }
     if (verStatus === "pass") return { cls: "free", text: "pass" };
@@ -1871,7 +1870,7 @@ function DrillIn({
         ) : (
           <div className="attempt-list">
             {rollup.attempts.map((a) => (
-              <AttemptCard key={a.id} attempt={a} project={project} repo={repo} />
+              <AttemptCard key={a.id} attempt={a} project={project} />
             ))}
           </div>
         )}
@@ -2435,7 +2434,7 @@ function RunDetailView({
       {attempts.length > 0 ? (
         <div className="attempt-list">
           {attempts.map((attempt) => (
-            <AttemptCard key={attempt.id} attempt={attempt} project={project} repo={repo} />
+            <AttemptCard key={attempt.id} attempt={attempt} project={project} />
           ))}
         </div>
       ) : (
@@ -2693,11 +2692,9 @@ function prNumberFromNode(node: GraphNode | null): number | null {
 function AttemptCard({
   attempt,
   project,
-  repo,
 }: {
   attempt: GraphNode;
   project: string;
-  repo: string | null;
 }) {
   const meta = attempt.metadata;
   const phase = stringOrNull(meta.phase) ?? "attempt";
@@ -2705,7 +2702,6 @@ function AttemptCard({
   const completedAt = stringOrNull(meta.completed_at);
   const conclusion = stringOrNull(meta.conclusion);
   const decision = stringOrNull(meta.decision);
-  const workflowRunId = meta.workflow_run_id != null ? String(meta.workflow_run_id) : null;
   const workflowFilename = stringOrNull(meta.workflow_filename);
   const verification = isRecord(meta.verification) ? meta.verification : null;
   const verificationStatus = verification ? stringOrNull(verification.status) : null;
@@ -2733,13 +2729,13 @@ function AttemptCard({
   const nativeSucceeded = nativeJobs.length > 0 && nativeJobs.every((j) => j.state === "succeeded" || j.state === "skipped");
 
   // Pre-start progression:
-  //   no completed_at + no active native step / GHA run → pending
-  //   active native step or started GHA run             → running
-  //   completed_at or terminal native job              → terminal
+  //   no completed_at + no active native step -> pending
+  //   active native step                      -> running
+  //   completed_at or terminal native job     -> terminal
   // The native runner can leave completed_at unset if a callback failed;
   // do not keep showing those terminal jobs as active after the run aborts.
   const nativeTerminal = nativeFailed || nativeSucceeded;
-  const running = !completedAt && !nativeTerminal && (nativeRunning || Boolean(workflowRunId));
+  const running = !completedAt && !nativeTerminal && nativeRunning;
   const dispatching = !completedAt && !nativeTerminal && !running;
   const elapsedMs = dispatchedAt && running ? now() - parseTs(dispatchedAt) : null;
   const stuckDispatching =
@@ -2767,18 +2763,10 @@ function AttemptCard({
     return { cls: "", text: "completed" };
   })();
 
-  // Fallback link for the dispatching window: GHA's actions-by-workflow
-  // page filtered to the public run ref lets the user find
-  // their run when the started callback hasn't landed yet. Derives
-  // the run ref from the attempt id (`attempt:<run_ref>:<idx>`).
   const runIdFromAttempt = attempt.id.startsWith("attempt:")
     ? attempt.id.split(":")[1] ?? ""
     : "";
   const branchName = runIdFromAttempt ? `glimmung/${runIdFromAttempt}` : null;
-  const dispatchingFallback =
-    dispatching && repo && workflowFilename && branchName
-      ? `https://github.com/${repo}/actions/workflows/${workflowFilename}?query=${encodeURIComponent(`branch:${branchName}`)}`
-      : null;
 
   return (
     <div
@@ -2799,7 +2787,7 @@ function AttemptCard({
         <span className="dim mono">{phase}</span>
         {elapsedLabel && !skippedFromRunId && <span className="dim mono">{elapsedLabel}</span>}
         {stuckDispatching && (
-          <span className="pill drain" title="No workflow_run_id received from GHA. Possible orphan dispatch.">
+          <span className="pill drain" title="No native job activity recorded after dispatch.">
             stuck
           </span>
         )}
@@ -2829,41 +2817,10 @@ function AttemptCard({
             <span className="mono">{workflowFilename}</span>
           </div>
         )}
-        {workflowRunId && (
-          <div>
-            <span className="key">gh run</span>{" "}
-            {repo ? (
-              <a
-                className="mono"
-                href={`https://github.com/${repo}/actions/runs/${workflowRunId}`}
-                target="_blank"
-                rel="noreferrer"
-              >
-                {workflowRunId}
-              </a>
-            ) : (
-              <span className="mono">{workflowRunId}</span>
-            )}
-          </div>
-        )}
-        {!workflowRunId && branchName && (
+        {branchName && (
           <div>
             <span className="key">branch</span>{" "}
             <span className="mono">{branchName}</span>
-          </div>
-        )}
-        {dispatchingFallback && (
-          <div>
-            <span className="key">find run</span>{" "}
-            <a
-              className="mono"
-              href={dispatchingFallback}
-              target="_blank"
-              rel="noreferrer"
-              title="GHA workflow runs filtered to this attempt's branch — useful when the started callback hasn't landed yet"
-            >
-              gh actions ↗
-            </a>
           </div>
         )}
         {displayedCost !== null && (

@@ -11,16 +11,14 @@ import (
 	"testing"
 )
 
-// resumeFakeStore implements both ReadStore (via fakeDispatchStore) and RunResumeStore.
 type resumeFakeStore struct {
 	fakeDispatchStore
-	runIDByNumber      map[string]string // "project#N#runNum" -> runID
+	runIDByNumber      map[string]string
 	runsByID           map[string]RunForResume
 	resumeWorkflows    map[string]*Workflow
 	claimLockErr       error
 	createResumedRunFn func(req CreateResumedRunRequest) (CreatedRun, error)
 	resumeLeaseResult  Lease
-	resumeLeaseHost    *Host
 	resumeLeaseErr     error
 	substituteErr      error
 }
@@ -33,37 +31,41 @@ func (s *resumeFakeStore) ReadRunByNumber(_ context.Context, project string, iss
 	}
 	return id, nil
 }
-func (s *resumeFakeStore) ReadRunForResume(_ context.Context, _, runID string) (RunForResume, error) {
+
+func (s *resumeFakeStore) ReadRunForResume(_ context.Context, _ string, runID string) (RunForResume, error) {
 	r, ok := s.runsByID[runID]
 	if !ok {
 		return RunForResume{}, ErrNotFound
 	}
 	return r, nil
 }
-func (s *resumeFakeStore) GetWorkflowByName(_ context.Context, _, name string) (*Workflow, error) {
-	wf, ok := s.resumeWorkflows[name]
-	if !ok {
-		return nil, nil
-	}
-	return wf, nil
+
+func (s *resumeFakeStore) GetWorkflowByName(_ context.Context, _ string, name string) (*Workflow, error) {
+	return s.resumeWorkflows[name], nil
 }
-func (s *resumeFakeStore) ClaimIssueLock(_ context.Context, _ string, _ int, _ string, _ int) error {
+
+func (s *resumeFakeStore) ClaimIssueLock(context.Context, string, int, string, int) error {
 	return s.claimLockErr
 }
-func (s *resumeFakeStore) ReleaseIssueLock(_ context.Context, _ string, _ int, _ string) {}
+
+func (s *resumeFakeStore) ReleaseIssueLock(context.Context, string, int, string) {}
+
 func (s *resumeFakeStore) CreateResumedRun(_ context.Context, req CreateResumedRunRequest) (CreatedRun, error) {
 	if s.createResumedRunFn != nil {
 		return s.createResumedRunFn(req)
 	}
 	return CreatedRun{ID: "new-run-id", RunNumber: 2, RunDisplay: "1.1", CallbackToken: "tok"}, nil
 }
-func (s *resumeFakeStore) AcquireLease(_ context.Context, _ LeaseAcquireRequest) (Lease, *Host, error) {
-	return s.resumeLeaseResult, s.resumeLeaseHost, s.resumeLeaseErr
+
+func (s *resumeFakeStore) AcquireLease(context.Context, LeaseAcquireRequest) (Lease, error) {
+	return s.resumeLeaseResult, s.resumeLeaseErr
 }
-func (s *resumeFakeStore) AbortRunByID(_ context.Context, _, _, _ string) (AbortRunResult, error) {
+
+func (s *resumeFakeStore) AbortRunByID(context.Context, string, string, string) (AbortRunResult, error) {
 	return AbortRunResult{}, nil
 }
-func (s *resumeFakeStore) SubstitutePhaseInputs(phase PhaseSpec, priorOutputs map[string]map[string]string) (map[string]string, error) {
+
+func (s *resumeFakeStore) SubstitutePhaseInputs(phase PhaseSpec, _ map[string]map[string]string) (map[string]string, error) {
 	if s.substituteErr != nil {
 		return nil, s.substituteErr
 	}
@@ -73,6 +75,7 @@ func (s *resumeFakeStore) SubstitutePhaseInputs(phase PhaseSpec, priorOutputs ma
 	}
 	return resolved, nil
 }
+
 func (s *resumeFakeStore) CollectPriorOutputs(attempts []AttemptForResume) map[string]map[string]string {
 	result := map[string]map[string]string{}
 	for _, a := range attempts {
@@ -83,10 +86,9 @@ func (s *resumeFakeStore) CollectPriorOutputs(attempts []AttemptForResume) map[s
 	return result
 }
 
-func newResumeTestHandler(store ReadStore, ghDispatch GHADispatchClient) http.Handler {
+func newResumeTestHandler(store ReadStore, nativeLauncher NativeLauncher) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/resume",
-		resumeRunHandler(store, ghDispatch))
+	mux.HandleFunc("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/resume", resumeRunHandler(store, nativeLauncher))
 	return mux
 }
 
@@ -94,15 +96,13 @@ func minimalResumeStore() *resumeFakeStore {
 	wf := &Workflow{
 		Name: "ci",
 		Phases: []PhaseSpec{
-			{Name: "env-prep", Kind: "gha_dispatch", WorkflowFilename: "env-prep.yml"},
-			{Name: "agent-execute", Kind: "gha_dispatch", WorkflowFilename: "agent-execute.yml"},
+			{Name: "env-prep", Kind: "k8s_job", WorkflowFilename: "k8s_job:env-prep", Jobs: []NativeJobSpec{{ID: "env-prep"}}},
+			{Name: "agent-execute", Kind: "k8s_job", WorkflowFilename: "k8s_job:agent-execute", Jobs: []NativeJobSpec{{ID: "agent"}}},
 		},
 	}
 	leaseNum := 7
-	s := &resumeFakeStore{
-		runIDByNumber: map[string]string{
-			"myproject#10#1": "prior-run-id",
-		},
+	return &resumeFakeStore{
+		runIDByNumber: map[string]string{"myproject#10#1": "prior-run-id"},
 		runsByID: map[string]RunForResume{
 			"prior-run-id": {
 				ID:               "prior-run-id",
@@ -118,223 +118,194 @@ func minimalResumeStore() *resumeFakeStore {
 				},
 			},
 		},
-		resumeWorkflows:   map[string]*Workflow{"ci": wf},
-		resumeLeaseResult: Lease{Project: "myproject", LeaseNumber: &leaseNum},
+		resumeWorkflows: map[string]*Workflow{"ci": wf},
+		resumeLeaseResult: Lease{
+			Project:     "myproject",
+			LeaseNumber: &leaseNum,
+			Host:        stringPtr("native-k8s"),
+			State:       "claimed",
+			Metadata:    map[string]any{"native_k8s": true, "lease_callback_token": "lease-token"},
+		},
 	}
-	return s
 }
 
 func resumeReq(phase string) *http.Request {
 	body, _ := json.Marshal(ResumeRunRequest{EntrypointPhase: phase})
-	r := httptest.NewRequest(http.MethodPost,
-		"/v1/projects/myproject/issues/10/runs/1/resume",
-		bytes.NewReader(body))
-	r.Header.Set("Content-Type", "application/json")
-	return r
+	req := httptest.NewRequest(http.MethodPost, "/v1/projects/myproject/issues/10/runs/1/resume", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	return req
 }
 
-func TestResumeRun_RunNotFound(t *testing.T) {
+func readResumeResult(t *testing.T, rec *httptest.ResponseRecorder) PublicResumeResult {
+	t.Helper()
+	var result PublicResumeResult
+	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func TestResumeRunRunNotFound(t *testing.T) {
 	store := minimalResumeStore()
 	store.runIDByNumber = map[string]string{}
-	h := newResumeTestHandler(store, nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, resumeReq("agent-execute"))
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("want 404, got %d", w.Code)
+	rec := httptest.NewRecorder()
+	newResumeTestHandler(store, nil).ServeHTTP(rec, resumeReq("agent-execute"))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestResumeRun_PriorInProgress(t *testing.T) {
+func TestResumeRunPriorInProgress(t *testing.T) {
 	store := minimalResumeStore()
 	prior := store.runsByID["prior-run-id"]
 	prior.State = "in_progress"
 	store.runsByID["prior-run-id"] = prior
-	h := newResumeTestHandler(store, nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, resumeReq("agent-execute"))
-	if w.Code != http.StatusConflict {
-		t.Fatalf("want 409, got %d", w.Code)
+	rec := httptest.NewRecorder()
+	newResumeTestHandler(store, nil).ServeHTTP(rec, resumeReq("agent-execute"))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestResumeRun_WorkflowMissing(t *testing.T) {
+func TestResumeRunWorkflowMissing(t *testing.T) {
 	store := minimalResumeStore()
 	store.resumeWorkflows = map[string]*Workflow{}
-	h := newResumeTestHandler(store, nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, resumeReq("agent-execute"))
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("want 404, got %d", w.Code)
+	rec := httptest.NewRecorder()
+	newResumeTestHandler(store, nil).ServeHTTP(rec, resumeReq("agent-execute"))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestResumeRun_PhaseInvalid(t *testing.T) {
-	store := minimalResumeStore()
-	h := newResumeTestHandler(store, nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, resumeReq("no-such-phase"))
-	if w.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("want 422, got %d", w.Code)
+func TestResumeRunPhaseInvalid(t *testing.T) {
+	rec := httptest.NewRecorder()
+	newResumeTestHandler(minimalResumeStore(), nil).ServeHTTP(rec, resumeReq("no-such-phase"))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestResumeRun_AlreadyRunning(t *testing.T) {
+func TestResumeRunRequiresNativeLauncher(t *testing.T) {
+	rec := httptest.NewRecorder()
+	newResumeTestHandler(minimalResumeStore(), nil).ServeHTTP(rec, resumeReq("agent-execute"))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestResumeRunAlreadyRunning(t *testing.T) {
 	store := minimalResumeStore()
 	store.claimLockErr = &AlreadyRunningError{HeldBy: "other"}
-	h := newResumeTestHandler(store, nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, resumeReq("agent-execute"))
-	if w.Code != http.StatusConflict {
-		t.Fatalf("want 409, got %d", w.Code)
+	rec := httptest.NewRecorder()
+	newResumeTestHandler(store, &fakeNativeLauncher{}).ServeHTTP(rec, resumeReq("agent-execute"))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestResumeRun_OutputsMissing(t *testing.T) {
+func TestResumeRunOutputsMissing(t *testing.T) {
 	store := minimalResumeStore()
-	store.createResumedRunFn = func(_ CreateResumedRunRequest) (CreatedRun, error) {
+	store.createResumedRunFn = func(CreateResumedRunRequest) (CreatedRun, error) {
 		return CreatedRun{}, fmt.Errorf("%w: env-prep has no outputs", ErrOutputsMissing)
 	}
-	h := newResumeTestHandler(store, nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, resumeReq("agent-execute"))
-	if w.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("want 422, got %d", w.Code)
+	rec := httptest.NewRecorder()
+	newResumeTestHandler(store, &fakeNativeLauncher{}).ServeHTTP(rec, resumeReq("agent-execute"))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestResumeRun_AcquireLeaseFails(t *testing.T) {
+func TestResumeRunAcquireLeaseFails(t *testing.T) {
 	store := minimalResumeStore()
-	store.resumeLeaseErr = errors.New("no capacity")
-	h := newResumeTestHandler(store, nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, resumeReq("agent-execute"))
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("want 500, got %d", w.Code)
+	store.resumeLeaseErr = errors.New("cosmos unavailable")
+	rec := httptest.NewRecorder()
+	newResumeTestHandler(store, &fakeNativeLauncher{}).ServeHTTP(rec, resumeReq("agent-execute"))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestResumeRun_Pending(t *testing.T) {
+func TestResumeRunNoCapacity(t *testing.T) {
 	store := minimalResumeStore()
-	store.resumeLeaseHost = nil
-	h := newResumeTestHandler(store, nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, resumeReq("agent-execute"))
-	if w.Code != http.StatusOK {
-		t.Fatalf("want 200, got %d", w.Code)
+	store.resumeLeaseErr = ErrUnavailable
+	rec := httptest.NewRecorder()
+	newResumeTestHandler(store, &fakeNativeLauncher{}).ServeHTTP(rec, resumeReq("agent-execute"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var result PublicResumeResult
-	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
-		t.Fatal(err)
-	}
-	if result.State != "pending" {
-		t.Errorf("want pending, got %q", result.State)
-	}
-	if result.Lease == nil || *result.Lease != "claimed" {
-		t.Errorf("want lease=claimed, got %v", result.Lease)
+	if got := readResumeResult(t, rec).State; got != "no_capacity" {
+		t.Fatalf("state=%q", got)
 	}
 }
 
-func TestResumeRun_Dispatched(t *testing.T) {
-	store := minimalResumeStore()
-	store.resumeLeaseHost = &Host{Name: "worker-1"}
-	gh := &fakeDispatchClient{}
-	h := newResumeTestHandler(store, gh)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, resumeReq("agent-execute"))
-	if w.Code != http.StatusOK {
-		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+func TestResumeRunDispatched(t *testing.T) {
+	launcher := &fakeNativeLauncher{}
+	rec := httptest.NewRecorder()
+	newResumeTestHandler(minimalResumeStore(), launcher).ServeHTTP(rec, resumeReq("agent-execute"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var result PublicResumeResult
-	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
-		t.Fatal(err)
-	}
+	result := readResumeResult(t, rec)
 	if result.State != "dispatched" {
-		t.Errorf("want dispatched, got %q", result.State)
+		t.Fatalf("state=%q", result.State)
 	}
-	if !gh.called {
-		t.Error("expected DispatchWorkflow to be called")
+	if result.Host == nil || *result.Host != "native-k8s" {
+		t.Fatalf("host=%v", result.Host)
 	}
-	if result.Host == nil || *result.Host != "worker-1" {
-		t.Errorf("want host=worker-1, got %v", result.Host)
-	}
-}
-
-func TestResumeRun_DispatchFailed(t *testing.T) {
-	store := minimalResumeStore()
-	store.resumeLeaseHost = &Host{Name: "worker-1"}
-	gh := &fakeDispatchClient{err: errors.New("github unavailable")}
-	h := newResumeTestHandler(store, gh)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, resumeReq("agent-execute"))
-	if w.Code != http.StatusOK {
-		t.Fatalf("want 200, got %d", w.Code)
-	}
-	var result PublicResumeResult
-	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
-		t.Fatal(err)
-	}
-	if result.State != "dispatch_failed" {
-		t.Errorf("want dispatch_failed, got %q", result.State)
+	if !launcher.called || launcher.req.Phase.Name != "agent-execute" {
+		t.Fatalf("launch=%#v", launcher.req)
 	}
 }
 
-func TestResumeRun_MissingEntrypointPhase(t *testing.T) {
-	body := `{}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/projects/myproject/issues/10/runs/1/resume",
-		bytes.NewBufferString(body))
+func TestResumeRunDispatchFailed(t *testing.T) {
+	rec := httptest.NewRecorder()
+	newResumeTestHandler(minimalResumeStore(), &fakeNativeLauncher{err: errors.New("kube unavailable")}).ServeHTTP(rec, resumeReq("agent-execute"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := readResumeResult(t, rec).State; got != "dispatch_failed" {
+		t.Fatalf("state=%q", got)
+	}
+}
+
+func TestResumeRunMissingEntrypointPhase(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/projects/myproject/issues/10/runs/1/resume", bytes.NewBufferString(`{}`))
 	req.Header.Set("Content-Type", "application/json")
-	h := newResumeTestHandler(minimalResumeStore(), nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("want 400, got %d", w.Code)
+	rec := httptest.NewRecorder()
+	newResumeTestHandler(minimalResumeStore(), nil).ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestResumeRun_StepBoundaryNonK8s(t *testing.T) {
+func TestResumeRunRejectsNonNativeEntrypoint(t *testing.T) {
 	store := minimalResumeStore()
-	jobID := "job-1"
-	body, _ := json.Marshal(ResumeRunRequest{
-		EntrypointPhase: "agent-execute",
-		EntrypointJobID: &jobID,
-	})
-	req := httptest.NewRequest(http.MethodPost, "/v1/projects/myproject/issues/10/runs/1/resume",
-		bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	h := newResumeTestHandler(store, nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-	if w.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("want 422, got %d: %s", w.Code, w.Body.String())
+	store.resumeWorkflows["ci"].Phases[1].Kind = "container"
+	rec := httptest.NewRecorder()
+	newResumeTestHandler(store, &fakeNativeLauncher{}).ServeHTTP(rec, resumeReq("agent-execute"))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestResumeRun_SubstitutionFails(t *testing.T) {
+func TestResumeRunSubstitutionFails(t *testing.T) {
 	store := minimalResumeStore()
 	store.substituteErr = errors.New("missing ref")
-	h := newResumeTestHandler(store, nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, resumeReq("agent-execute"))
-	if w.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("want 422, got %d: %s", w.Code, w.Body.String())
+	rec := httptest.NewRecorder()
+	newResumeTestHandler(store, &fakeNativeLauncher{}).ServeHTTP(rec, resumeReq("agent-execute"))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestResumeRun_EntriesAtPhaseZero(t *testing.T) {
-	// Resuming at the very first phase — no skipped phases, no outputs needed.
-	store := minimalResumeStore()
-	store.resumeLeaseHost = nil
-	h := newResumeTestHandler(store, nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, resumeReq("env-prep")) // first phase
-	if w.Code != http.StatusOK {
-		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+func TestResumeRunEntriesAtPhaseZero(t *testing.T) {
+	launcher := &fakeNativeLauncher{}
+	rec := httptest.NewRecorder()
+	newResumeTestHandler(minimalResumeStore(), launcher).ServeHTTP(rec, resumeReq("env-prep"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var result PublicResumeResult
-	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
-		t.Fatal(err)
-	}
-	if result.State != "pending" {
-		t.Errorf("want pending, got %q", result.State)
+	if got := readResumeResult(t, rec).State; got != "dispatched" {
+		t.Fatalf("state=%q", got)
 	}
 }

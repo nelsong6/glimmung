@@ -189,8 +189,8 @@ func (s *fakeSignalDrainStore) ReopenRunForTriage(_ context.Context, req TriageR
 	}, 1, nil
 }
 
-func (s *fakeSignalDrainStore) AcquireLease(context.Context, LeaseAcquireRequest) (Lease, *Host, error) {
-	return Lease{Project: "glimmung", Metadata: map[string]any{}}, nil, nil
+func (s *fakeSignalDrainStore) AcquireLease(context.Context, LeaseAcquireRequest) (Lease, error) {
+	return Lease{Project: "glimmung", Host: stringPtr("native-k8s"), State: "claimed", Metadata: map[string]any{"native_k8s": true}}, nil
 }
 
 func (s *fakeSignalDrainStore) AbortRunByID(context.Context, string, string, string) (AbortRunResult, error) {
@@ -213,9 +213,13 @@ func TestDrainSignalsDispatchesRequestChangesTriage(t *testing.T) {
 		EnqueuedAt: time.Now(),
 	}}}
 
-	result, err := DrainSignals(context.Background(), store, nil, 10)
+	launcher := &fakeNativeLauncher{}
+	result, err := DrainSignals(context.Background(), store, launcher, 10)
 	if err != nil {
 		t.Fatalf("DrainSignals: %v", err)
+	}
+	if !launcher.called {
+		t.Fatal("expected native launcher to be called")
 	}
 	if result.Processed != 1 || store.processedDecision != triageDispatch {
 		t.Fatalf("result=%#v decision=%q", result, store.processedDecision)

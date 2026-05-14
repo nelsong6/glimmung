@@ -13,16 +13,8 @@ import (
 
 type fakeStateStore struct {
 	fakeReadStore
-	hosts  []Host
 	leases []Lease
 	err    error
-}
-
-func (s fakeStateStore) ListHosts(context.Context) ([]Host, error) {
-	if s.err != nil {
-		return nil, s.err
-	}
-	return s.hosts, nil
 }
 
 func (s fakeStateStore) ListLeases(context.Context) ([]Lease, error) {
@@ -36,15 +28,6 @@ func TestStateSnapshotUsesPublicLeaseRefs(t *testing.T) {
 	now := time.Date(2026, 5, 11, 3, 0, 0, 0, time.UTC)
 	leaseID := "01JLEASEBACKING"
 	store := fakeStateStore{
-		hosts: []Host{{
-			ID:             "runner-1",
-			Name:           "runner-1",
-			Capabilities:   map[string]any{},
-			CurrentLeaseID: &leaseID,
-			LastHeartbeat:  &now,
-			LastUsedAt:     &now,
-			CreatedAt:      now,
-		}},
 		leases: []Lease{{
 			ID:           leaseID,
 			LeaseNumber:  intPtr(17),
@@ -68,9 +51,6 @@ func TestStateSnapshotUsesPublicLeaseRefs(t *testing.T) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, `"current_lease_ref":"ambience/leases/17"`) {
-		t.Fatalf("body=%s, missing public host lease ref", body)
-	}
 	if !strings.Contains(body, `"ref":"ambience/leases/17"`) {
 		t.Fatalf("body=%s, missing public lease ref", body)
 	}
@@ -206,7 +186,7 @@ func TestStateSnapshotDoesNotInferNativeSlotsFromAppType(t *testing.T) {
 	}
 }
 
-func TestStateSnapshotIgnoresOutOfRangeLegacyNativeSlots(t *testing.T) {
+func TestStateSnapshotIgnoresOutOfRangeNativeSlots(t *testing.T) {
 	now := time.Date(2026, 5, 11, 3, 0, 0, 0, time.UTC)
 	store := fakeStateStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{
@@ -221,7 +201,7 @@ func TestStateSnapshotIgnoresOutOfRangeLegacyNativeSlots(t *testing.T) {
 			CreatedAt: now,
 		}}},
 		leases: []Lease{{
-			ID:          "legacy-slot",
+			ID:          "old-slot",
 			Project:     "tank-operator",
 			Workflow:    stringPtr("test-slot-checkout"),
 			State:       "claimed",
@@ -239,7 +219,7 @@ func TestStateSnapshotIgnoresOutOfRangeLegacyNativeSlots(t *testing.T) {
 	}
 	for _, env := range snapshot.TestEnvironments {
 		if strings.Contains(env.SlotName, "99") {
-			t.Fatalf("legacy slot leaked into queue: %#v", snapshot.TestEnvironments)
+			t.Fatalf("out-of-range slot leaked into queue: %#v", snapshot.TestEnvironments)
 		}
 	}
 }

@@ -25,9 +25,6 @@ type fakeRunMutationStore struct {
 	abortResult AbortRunResult
 	abortErr    error
 
-	startedRunRef string
-	startedErr    error
-
 	nativeStatus      NativeRunStatusResponse
 	nativeStatusErr   error
 	nativeEventResult NativeRunEventResult
@@ -52,10 +49,6 @@ func (s *fakeRunMutationStore) ReadRunIDForCallbackToken(_ context.Context, toke
 
 func (s *fakeRunMutationStore) AbortRunByID(_ context.Context, project, runID, reason string) (AbortRunResult, error) {
 	return s.abortResult, s.abortErr
-}
-
-func (s *fakeRunMutationStore) RecordRunStarted(_ context.Context, project, runID string, req RunStartedRequest) (string, error) {
-	return s.startedRunRef, s.startedErr
 }
 
 func (s *fakeRunMutationStore) GetNativeRunStatusByID(_ context.Context, project, runID string) (NativeRunStatusResponse, error) {
@@ -161,45 +154,6 @@ func TestAbortRunByNumberBadIssueNumber(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-// --- run-callbacks/started tests ---
-
-func TestRunStartedByCallbackToken(t *testing.T) {
-	store := &fakeRunMutationStore{
-		runID:         "run-abc",
-		runRef:        "myproject#5/runs/3",
-		startedRunRef: "myproject#5/runs/3",
-	}
-	handler := newRunMutHandlerNoAuth(store)
-
-	body := `{"workflow_run_id":99887766}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/run-callbacks/tok123/started", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), `"run_ref"`) {
-		t.Fatalf("body missing run_ref: %s", rec.Body.String())
-	}
-}
-
-func TestRunStartedByCallbackTokenNotFound(t *testing.T) {
-	store := &fakeRunMutationStore{notFound: true}
-	handler := newRunMutHandlerNoAuth(store)
-
-	body := `{"workflow_run_id":1}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/run-callbacks/badtoken/started", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
@@ -412,9 +366,9 @@ func TestNativeRunEventWriteByCallbackToken(t *testing.T) {
 
 func TestNativeRunEventWriteByNumberValidation(t *testing.T) {
 	store := &fakeRunMutationStore{
-		runID:  "run-ev",
-		runRef: "proj#11/runs/2",
-		nativeStatus: NativeRunStatusResponse{AttemptIndex: 0, State: "in_progress"},
+		runID:             "run-ev",
+		runRef:            "proj#11/runs/2",
+		nativeStatus:      NativeRunStatusResponse{AttemptIndex: 0, State: "in_progress"},
 		nativeEventResult: NativeRunEventResult{Accepted: true},
 	}
 	handler := newRunMutHandlerNoAuth(store)

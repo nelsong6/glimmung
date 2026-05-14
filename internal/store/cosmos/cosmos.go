@@ -27,7 +27,6 @@ import (
 type Store struct {
 	projects                 *azcosmos.ContainerClient
 	workflows                *azcosmos.ContainerClient
-	hosts                    *azcosmos.ContainerClient
 	leases                   *azcosmos.ContainerClient
 	runs                     *azcosmos.ContainerClient
 	runEvents                *azcosmos.ContainerClient
@@ -59,10 +58,6 @@ func NewFromSettings(settings server.Settings) (*Store, error) {
 	workflows, err := client.NewContainer(settings.CosmosDatabase, "workflows")
 	if err != nil {
 		return nil, fmt.Errorf("create workflows container client: %w", err)
-	}
-	hosts, err := client.NewContainer(settings.CosmosDatabase, "hosts")
-	if err != nil {
-		return nil, fmt.Errorf("create hosts container client: %w", err)
 	}
 	leases, err := client.NewContainer(settings.CosmosDatabase, "leases")
 	if err != nil {
@@ -99,7 +94,6 @@ func NewFromSettings(settings server.Settings) (*Store, error) {
 	return &Store{
 		projects:                 projects,
 		workflows:                workflows,
-		hosts:                    hosts,
 		leases:                   leases,
 		runs:                     runs,
 		runEvents:                runEvents,
@@ -527,105 +521,6 @@ func (s *Store) PatchWorkflow(ctx context.Context, project string, name string, 
 	return workflowFromMap(doc)
 }
 
-func (s *Store) ListHosts(ctx context.Context) ([]server.Host, error) {
-	var docs []hostDoc
-	if err := queryAll(ctx, s.hosts, &docs); err != nil {
-		return nil, err
-	}
-	rows := make([]server.Host, 0, len(docs))
-	for _, doc := range docs {
-		rows = append(rows, hostFromDoc(doc))
-	}
-	return rows, nil
-}
-
-func (s *Store) UpsertHost(ctx context.Context, input server.HostRegistration) (server.Host, error) {
-	pk := azcosmos.NewPartitionKeyString(input.Name)
-	read, err := s.hosts.ReadItem(ctx, pk, input.Name, nil)
-	if err == nil {
-		var doc map[string]any
-		if err := json.Unmarshal(read.Value, &doc); err != nil {
-			return server.Host{}, err
-		}
-		if input.Capabilities != nil {
-			doc["capabilities"] = input.Capabilities
-		} else if _, ok := doc["capabilities"]; !ok {
-			doc["capabilities"] = map[string]any{}
-		}
-		if input.Drained != nil {
-			doc["drained"] = *input.Drained
-		}
-		body, err := json.Marshal(doc)
-		if err != nil {
-			return server.Host{}, err
-		}
-		if _, err := s.hosts.ReplaceItem(ctx, pk, input.Name, body, nil); err != nil {
-			return server.Host{}, err
-		}
-		return hostFromMap(doc)
-	}
-	if !isCosmosStatus(err, http.StatusNotFound) {
-		return server.Host{}, err
-	}
-
-	doc := hostWriteDoc{
-		ID:             input.Name,
-		Name:           input.Name,
-		Capabilities:   mapOrEmpty(input.Capabilities),
-		CurrentLeaseID: nil,
-		LastHeartbeat:  nil,
-		LastUsedAt:     nil,
-		Drained:        boolPtrValue(input.Drained),
-		CreatedAt:      time.Now().UTC().Format(time.RFC3339Nano),
-	}
-	body, err := json.Marshal(doc)
-	if err != nil {
-		return server.Host{}, err
-	}
-	if _, err := s.hosts.CreateItem(ctx, pk, body, nil); err != nil {
-		return server.Host{}, err
-	}
-	return hostFromMap(map[string]any{
-		"id":             doc.ID,
-		"name":           doc.Name,
-		"capabilities":   doc.Capabilities,
-		"currentLeaseId": doc.CurrentLeaseID,
-		"lastHeartbeat":  doc.LastHeartbeat,
-		"lastUsedAt":     doc.LastUsedAt,
-		"drained":        doc.Drained,
-		"createdAt":      doc.CreatedAt,
-	})
-}
-
-func (s *Store) DeleteHost(ctx context.Context, name string) error {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return server.ErrNotFound
-	}
-	pk := azcosmos.NewPartitionKeyString(name)
-	read, err := s.hosts.ReadItem(ctx, pk, name, nil)
-	if err != nil {
-		if isCosmosStatus(err, http.StatusNotFound) {
-			return server.ErrNotFound
-		}
-		return err
-	}
-	var doc hostDoc
-	if err := json.Unmarshal(read.Value, &doc); err != nil {
-		return err
-	}
-	if doc.CurrentLeaseID != nil && strings.TrimSpace(*doc.CurrentLeaseID) != "" {
-		return server.ErrConflict
-	}
-	if _, err := s.hosts.DeleteItem(ctx, pk, name, nil); err != nil {
-		if isCosmosStatus(err, http.StatusNotFound) {
-			return server.ErrNotFound
-		}
-		return err
-	}
-	return nil
-}
-
 func (s *Store) ListLeases(ctx context.Context) ([]server.Lease, error) {
 	var docs []leaseDoc
 	if err := queryAll(ctx, s.leases, &docs); err != nil {
@@ -658,11 +553,6 @@ func (s *Store) HeartbeatLeaseByCallbackToken(ctx context.Context, token string)
 	if doc.State != "claimed" {
 		return server.Lease{}, server.ErrInactive
 	}
-	if doc.Host != nil && *doc.Host != "" && *doc.Host != "native-k8s" {
-		if err := s.touchHostHeartbeat(ctx, *doc.Host); err != nil {
-			return server.Lease{}, err
-		}
-	}
 	return leaseFromDoc(doc), nil
 }
 
@@ -676,11 +566,6 @@ func (s *Store) ReleaseLeaseByCallbackToken(ctx context.Context, token string) (
 	}
 	if boolValue(doc.Metadata["test_slot_checkout"]) {
 		return server.Lease{}, server.ErrUnsupported
-	}
-	if doc.Host != nil && *doc.Host != "" && *doc.Host != "native-k8s" {
-		if err := s.clearHostLease(ctx, *doc.Host, doc.ID); err != nil {
-			return server.Lease{}, err
-		}
 	}
 
 	doc.State = "released"
@@ -1307,50 +1192,6 @@ func (s *Store) readLeaseDocByCallbackToken(ctx context.Context, token string) (
 	return docs[0], nil
 }
 
-func (s *Store) touchHostHeartbeat(ctx context.Context, hostName string) error {
-	partitionKey := azcosmos.NewPartitionKeyString(hostName)
-	response, err := s.hosts.ReadItem(ctx, partitionKey, hostName, nil)
-	if err != nil {
-		return err
-	}
-	var doc map[string]any
-	if err := json.Unmarshal(response.Value, &doc); err != nil {
-		return err
-	}
-	doc["lastHeartbeat"] = time.Now().UTC().Format(time.RFC3339Nano)
-	payload, err := json.Marshal(doc)
-	if err != nil {
-		return err
-	}
-	_, err = s.hosts.ReplaceItem(ctx, partitionKey, hostName, payload, nil)
-	return err
-}
-
-func (s *Store) clearHostLease(ctx context.Context, hostName string, leaseID string) error {
-	partitionKey := azcosmos.NewPartitionKeyString(hostName)
-	response, err := s.hosts.ReadItem(ctx, partitionKey, hostName, nil)
-	if isCosmosStatus(err, http.StatusNotFound) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	var doc map[string]any
-	if err := json.Unmarshal(response.Value, &doc); err != nil {
-		return err
-	}
-	if stringValue(doc["currentLeaseId"]) != leaseID {
-		return nil
-	}
-	doc["currentLeaseId"] = nil
-	payload, err := json.Marshal(doc)
-	if err != nil {
-		return err
-	}
-	_, err = s.hosts.ReplaceItem(ctx, partitionKey, hostName, payload, nil)
-	return err
-}
-
 func queryAll[T any](ctx context.Context, container *azcosmos.ContainerClient, target *[]T) error {
 	return queryAllWhere(ctx, container, "SELECT * FROM c", nil, target)
 }
@@ -1403,28 +1244,6 @@ type workflowDoc struct {
 	DefaultRequirements map[string]any `json:"defaultRequirements"`
 	Metadata            map[string]any `json:"metadata"`
 	CreatedAt           string         `json:"createdAt"`
-}
-
-type hostDoc struct {
-	ID             string         `json:"id"`
-	Name           string         `json:"name"`
-	Capabilities   map[string]any `json:"capabilities"`
-	CurrentLeaseID *string        `json:"currentLeaseId"`
-	LastHeartbeat  string         `json:"lastHeartbeat"`
-	LastUsedAt     string         `json:"lastUsedAt"`
-	Drained        bool           `json:"drained"`
-	CreatedAt      string         `json:"createdAt"`
-}
-
-type hostWriteDoc struct {
-	ID             string         `json:"id"`
-	Name           string         `json:"name"`
-	Capabilities   map[string]any `json:"capabilities"`
-	CurrentLeaseID *string        `json:"currentLeaseId"`
-	LastHeartbeat  *string        `json:"lastHeartbeat"`
-	LastUsedAt     *string        `json:"lastUsedAt"`
-	Drained        bool           `json:"drained"`
-	CreatedAt      string         `json:"createdAt"`
 }
 
 type leaseDoc struct {
@@ -1523,7 +1342,6 @@ type attemptDoc struct {
 	Phase                 string                            `json:"phase"`
 	PhaseKind             string                            `json:"phase_kind"`
 	WorkflowFilename      string                            `json:"workflow_filename"`
-	WorkflowRunID         *int64                            `json:"workflow_run_id"`
 	DispatchedAt          string                            `json:"dispatched_at"`
 	CompletedAt           string                            `json:"completed_at"`
 	Conclusion            *string                           `json:"conclusion"`
@@ -1663,31 +1481,6 @@ func workflowFromDoc(doc workflowDoc) server.Workflow {
 		Metadata:            mapOrEmpty(doc.Metadata),
 		CreatedAt:           parseTimeOrNow(doc.CreatedAt),
 	}
-}
-
-func hostFromDoc(doc hostDoc) server.Host {
-	return server.Host{
-		ID:             firstNonEmpty(doc.ID, doc.Name),
-		Name:           doc.Name,
-		Capabilities:   mapOrEmpty(doc.Capabilities),
-		CurrentLeaseID: doc.CurrentLeaseID,
-		LastHeartbeat:  parseOptionalTime(doc.LastHeartbeat),
-		LastUsedAt:     parseOptionalTime(doc.LastUsedAt),
-		Drained:        doc.Drained,
-		CreatedAt:      parseTimeOrNow(doc.CreatedAt),
-	}
-}
-
-func hostFromMap(doc map[string]any) (server.Host, error) {
-	payload, err := json.Marshal(doc)
-	if err != nil {
-		return server.Host{}, err
-	}
-	var typed hostDoc
-	if err := json.Unmarshal(payload, &typed); err != nil {
-		return server.Host{}, err
-	}
-	return hostFromDoc(typed), nil
 }
 
 func leaseFromDoc(doc leaseDoc) server.Lease {
@@ -1980,9 +1773,8 @@ func runReportAttemptFromDoc(doc attemptDoc, lineageByID map[string]string) serv
 	return server.RunReportAttempt{
 		AttemptIndex:       doc.AttemptIndex,
 		Phase:              doc.Phase,
-		PhaseKind:          firstNonEmpty(doc.PhaseKind, "gha_dispatch"),
+		PhaseKind:          firstNonEmpty(doc.PhaseKind, "k8s_job"),
 		WorkflowFilename:   doc.WorkflowFilename,
-		WorkflowRunID:      doc.WorkflowRunID,
 		DispatchedAt:       parseTimeOrNow(doc.DispatchedAt),
 		CompletedAt:        parseOptionalTime(doc.CompletedAt),
 		Conclusion:         emptyStringNil(doc.Conclusion),
@@ -2083,7 +1875,7 @@ func phaseDocFromSpec(phase server.PhaseSpec) phaseDoc {
 	}
 	return phaseDoc{
 		Name:                     phase.Name,
-		Kind:                     firstNonEmpty(phase.Kind, "gha_dispatch"),
+		Kind:                     firstNonEmpty(phase.Kind, "k8s_job"),
 		WorkflowFilename:         phase.WorkflowFilename,
 		WorkflowRef:              firstNonEmpty(phase.WorkflowRef, "main"),
 		Inputs:                   stringMapOrEmpty(phase.Inputs),
@@ -2143,17 +1935,9 @@ func workflowFromMap(doc map[string]any) (server.Workflow, error) {
 }
 
 func validateWorkflowForProject(project projectDoc, req server.WorkflowRegister) error {
-	if projectRequiresNativeWorkflows(project) {
-		ghaPhases := make([]string, 0)
-		for _, phase := range req.Phases {
-			if strings.TrimSpace(phase.Kind) == "gha_dispatch" {
-				ghaPhases = append(ghaPhases, phase.Name)
-			}
-		}
-		if len(ghaPhases) > 0 {
-			return server.ValidationError{
-				Message: "project is marked native_webapp; workflow phases must use kind='k8s_job' (gha_dispatch phases: " + strings.Join(ghaPhases, ", ") + ")",
-			}
+	for _, phase := range req.Phases {
+		if strings.TrimSpace(phase.Kind) != "k8s_job" {
+			return server.ValidationError{Message: "workflow phases must use kind='k8s_job'"}
 		}
 	}
 
@@ -2188,14 +1972,10 @@ func validateWorkflowForProject(project projectDoc, req server.WorkflowRegister)
 }
 
 func normalizeWorkflowRegisterForProjectDoc(req *server.WorkflowRegister, project projectDoc) {
-	defaultKind := "gha_dispatch"
-	if projectRequiresNativeWorkflows(project) {
-		defaultKind = "k8s_job"
-	}
 	for i := range req.Phases {
 		req.Phases[i].Kind = strings.TrimSpace(req.Phases[i].Kind)
 		if req.Phases[i].Kind == "" {
-			req.Phases[i].Kind = defaultKind
+			req.Phases[i].Kind = "k8s_job"
 		}
 		if req.Phases[i].WorkflowRef == "" {
 			req.Phases[i].WorkflowRef = "main"
@@ -2304,7 +2084,7 @@ func phaseFromDoc(doc phaseDoc) server.PhaseSpec {
 	}
 	return server.PhaseSpec{
 		Name:                     doc.Name,
-		Kind:                     firstNonEmpty(doc.Kind, "gha_dispatch"),
+		Kind:                     firstNonEmpty(doc.Kind, "k8s_job"),
 		WorkflowFilename:         doc.WorkflowFilename,
 		WorkflowRef:              firstNonEmpty(doc.WorkflowRef, "main"),
 		Inputs:                   stringMapOrEmpty(doc.Inputs),
@@ -2459,7 +2239,7 @@ func sliceOrEmpty[T any](values []T) []T {
 	return values
 }
 
-// ── Touchpoint / Report store ─────────────────────────────────────────────────
+// â”€â”€ Touchpoint / Report store â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 type reportDoc struct {
 	ID            string           `json:"id"`
@@ -2794,7 +2574,7 @@ func (s *Store) prLockHeld(ctx context.Context, repo string, prNumber int) (bool
 }
 
 func (s *Store) resolveIssueIDByRef(ctx context.Context, project, ref string) *string {
-	// ref format: "{project}#{number}" — parse the number part.
+	// ref format: "{project}#{number}" â€” parse the number part.
 	parts := strings.SplitN(ref, "#", 2)
 	if len(parts) != 2 {
 		return nil
@@ -2848,7 +2628,7 @@ func (d reportDoc) PRBranchStr() string {
 	return d.Branch
 }
 
-// buildIssueIndexes builds maps from issue ID → ref and issue ID → number.
+// buildIssueIndexes builds maps from issue ID â†’ ref and issue ID â†’ number.
 func buildIssueIndexes(docs []issueDoc) (map[string]string, map[string]int) {
 	refByID := make(map[string]string, len(docs))
 	numByID := make(map[string]int, len(docs))
@@ -2860,7 +2640,7 @@ func buildIssueIndexes(docs []issueDoc) (map[string]string, map[string]int) {
 	return refByID, numByID
 }
 
-// buildRunIndexes builds maps: run ID → ref, linked_issue_id → run, (repo,pr) → run.
+// buildRunIndexes builds maps: run ID â†’ ref, linked_issue_id â†’ run, (repo,pr) â†’ run.
 func buildRunIndexes(docs []runDoc) (map[string]string, map[string]*runDoc, map[string]*runDoc) {
 	refByID := runRefMapFromDocs(docs)
 	byLinkedIssue := make(map[string]*runDoc)
@@ -2884,7 +2664,7 @@ func buildRunIndexes(docs []runDoc) (map[string]string, map[string]*runDoc, map[
 	return refByID, byLinkedIssue, byRepoPR
 }
 
-// buildPRLockIndex maps "{repo}#{pr_number}" → whether a held, unexpired lock exists.
+// buildPRLockIndex maps "{repo}#{pr_number}" â†’ whether a held, unexpired lock exists.
 func buildPRLockIndex(docs []lockDoc) map[string]bool {
 	m := make(map[string]bool, len(docs))
 	now := time.Now().UTC()
@@ -2969,7 +2749,6 @@ func buildAttemptHistory(attempts []attemptDoc) []map[string]any {
 			"attempt_index":     a.AttemptIndex,
 			"phase":             a.Phase,
 			"workflow_filename": a.WorkflowFilename,
-			"workflow_run_id":   a.WorkflowRunID,
 			"dispatched_at":     a.DispatchedAt,
 			"completed_at":      a.CompletedAt,
 			"conclusion":        a.Conclusion,
@@ -3005,7 +2784,7 @@ func parseTimeOrZero(s string) time.Time {
 	return t
 }
 
-// ── Playbook store ────────────────────────────────────────────────────────────
+// â”€â”€ Playbook store â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 type playbookEntryDoc struct {
 	ID              string         `json:"id"`
@@ -3253,7 +3032,7 @@ func playbookIssueSpecFromMap(m map[string]any) server.PlaybookIssueSpec {
 	return spec
 }
 
-// ── Portfolio store ───────────────────────────────────────────────────────────
+// â”€â”€ Portfolio store â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 type portfolioElementDoc struct {
 	ID               string         `json:"id"`
@@ -3404,7 +3183,7 @@ func (s *Store) UpsertPortfolioElement(ctx context.Context, req server.Portfolio
 }
 
 func (s *Store) PatchPortfolioElement(ctx context.Context, project, ref string, req server.PortfolioElementPatch) (server.PortfolioElementPublic, error) {
-	// Resolve ref → doc ID by scanning project's portfolio elements.
+	// Resolve ref â†’ doc ID by scanning project's portfolio elements.
 	var docs []portfolioElementDoc
 	if err := queryAllWhere(ctx, s.issues,
 		"SELECT * FROM c WHERE c.kind = @kind AND c.project = @project",
@@ -3465,7 +3244,7 @@ func (s *Store) PatchPortfolioElement(ctx context.Context, project, ref string, 
 	return portfolioElementDocToPublic(*target, runRef), nil
 }
 
-// ── Playbook gate ─────────────────────────────────────────────────────────────
+// â”€â”€ Playbook gate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 func (s *Store) PatchPlaybookEntryGate(ctx context.Context, project, ref, entryID string, manualGate bool) (server.PlaybookPublic, error) {
 	var docs []playbookDoc
@@ -3926,140 +3705,23 @@ type signalDoc struct {
 const leaseCounterPrefix = "__counter:lease-number:"
 const maxLeaseConflictRetries = 3
 
-func (s *Store) AcquireLease(ctx context.Context, req server.LeaseAcquireRequest) (server.Lease, *server.Host, error) {
-	if isNativeLeaseRequest(req) {
-		return s.acquireNativeLease(ctx, req)
+func (s *Store) AcquireLease(ctx context.Context, req server.LeaseAcquireRequest) (server.Lease, error) {
+	if !isNativeLeaseRequest(req) {
+		return server.Lease{}, server.ValidationError{Message: "native_k8s lease required"}
 	}
-	now := time.Now().UTC()
-	leaseID := uuid.New().String()
-	leaseNumber, err := s.nextLeaseNumber(ctx, req.Project)
-	if err != nil {
-		return server.Lease{}, nil, fmt.Errorf("next lease number: %w", err)
-	}
-	ttl := 900
-	if req.TTLSeconds != nil && *req.TTLSeconds > 0 {
-		ttl = *req.TTLSeconds
-	}
-	metadata := buildLeaseMetadata(req)
-	callbackToken := uuid.New().String()[:32]
-	metadata["lease_callback_token"] = callbackToken
-
-	// Query all free hosts.
-	var rawHosts []map[string]any
-	if err := queryAllWhere(
-		ctx, s.hosts,
-		"SELECT * FROM c WHERE (NOT IS_DEFINED(c.currentLeaseId) OR c.currentLeaseId = null) AND c.drained = false",
-		nil, &rawHosts,
-	); err != nil {
-		return server.Lease{}, nil, fmt.Errorf("query free hosts: %w", err)
-	}
-	// Filter by requirements and sort by lastUsedAt (idle-longest first).
-	candidates := make([]map[string]any, 0, len(rawHosts))
-	for _, h := range rawHosts {
-		caps, _ := h["capabilities"].(map[string]any)
-		if matchesRequirements(caps, req.Requirements) {
-			candidates = append(candidates, h)
-		}
-	}
-	sort.Slice(candidates, func(i, j int) bool {
-		ai, _ := candidates[i]["lastUsedAt"].(string)
-		aj, _ := candidates[j]["lastUsedAt"].(string)
-		return ai < aj
-	})
-
-	nowStr := now.Format(time.RFC3339Nano)
-	for _, candidate := range candidates {
-		hostID, _ := candidate["id"].(string)
-		etag, _ := candidate["_etag"].(string)
-		if hostID == "" || etag == "" {
-			continue
-		}
-		updated := cloneMap(candidate)
-		delete(updated, "_etag")
-		delete(updated, "_rid")
-		delete(updated, "_self")
-		delete(updated, "_attachments")
-		delete(updated, "_ts")
-		updated["currentLeaseId"] = leaseID
-		updated["lastUsedAt"] = nowStr
-		updated["lastHeartbeat"] = nowStr
-
-		payload, err := json.Marshal(updated)
-		if err != nil {
-			continue
-		}
-		pk := azcosmos.NewPartitionKeyString(hostID)
-		etagVal := azcore.ETag(etag)
-		opts := &azcosmos.ItemOptions{IfMatchEtag: &etagVal}
-		if _, err := s.hosts.ReplaceItem(ctx, pk, hostID, payload, opts); err != nil {
-			if isCosmosStatus(err, http.StatusPreconditionFailed) {
-				continue // lost the race — try next candidate
-			}
-			return server.Lease{}, nil, fmt.Errorf("claim host: %w", err)
-		}
-
-		hostName, _ := candidate["name"].(string)
-		leaseDoc := leaseDoc{
-			ID:           leaseID,
-			LeaseNumber:  &leaseNumber,
-			Project:      req.Project,
-			Workflow:     req.Workflow,
-			Host:         &hostName,
-			State:        "claimed",
-			Requirements: req.Requirements,
-			Metadata:     metadata,
-			RequestedAt:  nowStr,
-			AssignedAt:   nowStr,
-			TTLSeconds:   ttl,
-		}
-		docPayload, err := json.Marshal(leaseDoc)
-		if err != nil {
-			return server.Lease{}, nil, err
-		}
-		leasePK := azcosmos.NewPartitionKeyString(req.Project)
-		if _, err := s.leases.CreateItem(ctx, leasePK, docPayload, nil); err != nil {
-			return server.Lease{}, nil, fmt.Errorf("create lease doc: %w", err)
-		}
-		lease := leaseFromDoc(leaseDoc)
-		hostModel, _ := hostFromMap(updated)
-		hostModel.ID = hostID
-		return lease, &hostModel, nil
-	}
-
-	// No host found — create pending lease.
-	pendingDoc := leaseDoc{
-		ID:           leaseID,
-		LeaseNumber:  &leaseNumber,
-		Project:      req.Project,
-		Workflow:     req.Workflow,
-		Host:         nil,
-		State:        "pending",
-		Requirements: req.Requirements,
-		Metadata:     metadata,
-		RequestedAt:  nowStr,
-		TTLSeconds:   ttl,
-	}
-	docPayload, err := json.Marshal(pendingDoc)
-	if err != nil {
-		return server.Lease{}, nil, err
-	}
-	leasePK := azcosmos.NewPartitionKeyString(req.Project)
-	if _, err := s.leases.CreateItem(ctx, leasePK, docPayload, nil); err != nil {
-		return server.Lease{}, nil, fmt.Errorf("create pending lease doc: %w", err)
-	}
-	return leaseFromDoc(pendingDoc), nil, nil
+	return s.acquireNativeLease(ctx, req)
 }
 
-func (s *Store) acquireNativeLease(ctx context.Context, req server.LeaseAcquireRequest) (server.Lease, *server.Host, error) {
+func (s *Store) acquireNativeLease(ctx context.Context, req server.LeaseAcquireRequest) (server.Lease, error) {
 	if err := validateNativeLeaseSlotIdentity(req.Metadata); err != nil {
-		return server.Lease{}, nil, err
+		return server.Lease{}, err
 	}
 	now := time.Now().UTC()
 	nowStr := now.Format(time.RFC3339Nano)
 	leaseID := uuid.New().String()
 	leaseNumber, err := s.nextLeaseNumber(ctx, req.Project)
 	if err != nil {
-		return server.Lease{}, nil, fmt.Errorf("next lease number: %w", err)
+		return server.Lease{}, fmt.Errorf("next lease number: %w", err)
 	}
 	ttl := 900
 	if req.TTLSeconds != nil && *req.TTLSeconds > 0 {
@@ -4072,10 +3734,10 @@ func (s *Store) acquireNativeLease(ctx context.Context, req server.LeaseAcquireR
 
 	slotIndex, err := s.availableNativeSlot(ctx, req.Project)
 	if err != nil {
-		return server.Lease{}, nil, err
+		return server.Lease{}, err
 	}
 	if slotIndex == nil {
-		return server.Lease{}, nil, server.ErrUnavailable
+		return server.Lease{}, server.ErrUnavailable
 	}
 	hostName := "native-k8s"
 	setNativeSlotMetadata(metadata, req.Project, *slotIndex, s.nativeSlotPrefix(ctx, req.Project))
@@ -4094,19 +3756,13 @@ func (s *Store) acquireNativeLease(ctx context.Context, req server.LeaseAcquireR
 	}
 	payload, err := json.Marshal(doc)
 	if err != nil {
-		return server.Lease{}, nil, err
+		return server.Lease{}, err
 	}
 	if _, err := s.leases.CreateItem(ctx, azcosmos.NewPartitionKeyString(req.Project), payload, nil); err != nil {
-		return server.Lease{}, nil, fmt.Errorf("create native lease doc: %w", err)
+		return server.Lease{}, fmt.Errorf("create native lease doc: %w", err)
 	}
 	lease := leaseFromDoc(doc)
-	return lease, &server.Host{
-		ID:            "native-k8s",
-		Name:          "native-k8s",
-		Capabilities:  map[string]any{"native_k8s": true},
-		LastHeartbeat: &now,
-		LastUsedAt:    &now,
-	}, nil
+	return lease, nil
 }
 
 func (s *Store) availableNativeSlot(ctx context.Context, project string) (*int, error) {
@@ -4222,13 +3878,6 @@ func (s *Store) CancelLeaseByRef(ctx context.Context, project, ref string) (serv
 		}, nil
 	}
 
-	// Release the host claim.
-	if found.Host != nil && *found.Host != "" && *found.Host != "native-k8s" {
-		if err := s.clearHostLease(ctx, *found.Host, found.ID); err != nil {
-			return server.CancelLeaseResult{}, fmt.Errorf("clear host lease: %w", err)
-		}
-	}
-
 	found.State = "released"
 	found.ReleasedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	payload, err := json.Marshal(found)
@@ -4315,12 +3964,10 @@ func cancelLeaseCandidateRank(doc leaseDoc) int {
 	switch doc.State {
 	case "claimed":
 		return 0
-	case "pending":
-		return 1
 	case "waiting":
-		return 2
+		return 1
 	default:
-		return 3
+		return 2
 	}
 }
 
@@ -5065,69 +4712,6 @@ func lockDocID(scope, key string) string {
 	return scope + "::" + encoded
 }
 
-// RecordRunStarted stamps the workflow_run_id on the latest PhaseAttempt of the run.
-func (s *Store) RecordRunStarted(ctx context.Context, project, runID string, req server.RunStartedRequest) (string, error) {
-	pk := azcosmos.NewPartitionKeyString(project)
-	const maxRetries = 3
-	for i := 0; i < maxRetries; i++ {
-		resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
-		if isCosmosStatus(err, http.StatusNotFound) {
-			return "", server.ErrNotFound
-		}
-		if err != nil {
-			return "", err
-		}
-
-		var raw map[string]any
-		if err := json.Unmarshal(resp.Value, &raw); err != nil {
-			return "", err
-		}
-
-		attempts, _ := raw["attempts"].([]any)
-		if len(attempts) == 0 {
-			return "", fmt.Errorf("run has no attempts")
-		}
-		// Stamp workflow_run_id on the latest attempt if not already set.
-		latest, ok := attempts[len(attempts)-1].(map[string]any)
-		if !ok {
-			return "", fmt.Errorf("invalid attempt document")
-		}
-		if _, alreadySet := latest["workflow_run_id"]; !alreadySet || latest["workflow_run_id"] == nil {
-			latest["workflow_run_id"] = req.WorkflowRunID
-		}
-		if req.ValidationURL != nil && *req.ValidationURL != "" {
-			if _, alreadySet := raw["validation_url"]; !alreadySet || raw["validation_url"] == nil {
-				raw["validation_url"] = *req.ValidationURL
-			}
-		}
-		attempts[len(attempts)-1] = latest
-		raw["attempts"] = attempts
-		raw["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
-
-		payload, err := json.Marshal(raw)
-		if err != nil {
-			return "", err
-		}
-		etag := azcore.ETag(resp.ETag)
-		if _, err := s.runs.ReplaceItem(ctx, pk, runID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
-			if isCosmosStatus(err, http.StatusPreconditionFailed) {
-				continue
-			}
-			return "", err
-		}
-
-		// Compute runRef from the updated doc.
-		var doc runDoc
-		if err := json.Unmarshal(resp.Value, &doc); err != nil {
-			return "", err
-		}
-		siblings, _ := s.issueRunDocs(ctx, project, doc.IssueNumber)
-		numbers := runNumberMap(siblings)
-		return publicids.RunRef(doc.Project, positiveIssueNumberPtr(doc.IssueNumber), runDisplayNumber(doc, numbers[doc.ID])), nil
-	}
-	return "", fmt.Errorf("record run started: too many conflicts")
-}
-
 // ---- NativeRunStore implementation ----
 
 // GetNativeRunStatusByID returns the native run status for the latest in-progress k8s_job attempt.
@@ -5699,11 +5283,6 @@ func (s *Store) StampRunCompletion(ctx context.Context, project, runID string, p
 		now := time.Now().UTC().Format(time.RFC3339Nano)
 		attempt["completed_at"] = now
 		attempt["conclusion"] = p.Conclusion
-		if p.WorkflowRunID != nil {
-			if _, alreadySet := attempt["workflow_run_id"]; !alreadySet || attempt["workflow_run_id"] == nil {
-				attempt["workflow_run_id"] = *p.WorkflowRunID
-			}
-		}
 		if p.SummaryMarkdown != nil {
 			attempt["summary_markdown"] = *p.SummaryMarkdown
 		}
@@ -5938,7 +5517,7 @@ func (s *Store) ClaimLock(ctx context.Context, scope, key, holderID string, ttlS
 
 		resp, readErr := s.locks.ReadItem(ctx, pk, docID, nil)
 		if isCosmosStatus(readErr, http.StatusNotFound) {
-			// No existing lock — try to create.
+			// No existing lock â€” try to create.
 			if _, createErr := s.locks.CreateItem(ctx, pk, payload, nil); createErr == nil {
 				return nil
 			} else if isCosmosStatus(createErr, http.StatusConflict) {
@@ -6224,7 +5803,7 @@ func (s *Store) CreateResumedRun(ctx context.Context, req server.CreateResumedRu
 		if wfFilename == "" {
 			phaseKind := phase.Kind
 			if phaseKind == "" {
-				phaseKind = "gha_dispatch"
+				phaseKind = "k8s_job"
 			}
 			wfFilename = fmt.Sprintf("%s:%s", phaseKind, phase.Name)
 		}
@@ -6247,7 +5826,7 @@ func (s *Store) CreateResumedRun(ctx context.Context, req server.CreateResumedRu
 	entryPhase := wf.Phases[entrypointIndex]
 	entryKind := entryPhase.Kind
 	if entryKind == "" {
-		entryKind = "gha_dispatch"
+		entryKind = "k8s_job"
 	}
 	entryFilename := entryPhase.WorkflowFilename
 	if entryFilename == "" {
@@ -6285,7 +5864,7 @@ func (s *Store) CreateResumedRun(ctx context.Context, req server.CreateResumedRu
 		rootDisplay = *prior.RunDisplayNumber
 	}
 	if prior.IsCycle && rootDisplay != "" {
-		// Strip any existing suffix (e.g. "3.2" → "3").
+		// Strip any existing suffix (e.g. "3.2" â†’ "3").
 		if i := strings.Index(rootDisplay, "."); i >= 0 {
 			rootDisplay = rootDisplay[:i]
 		}

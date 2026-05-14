@@ -9,15 +9,13 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/nelsong6/glimmung/internal/auth"
 	"github.com/nelsong6/glimmung/internal/domain/budget"
 	"github.com/nelsong6/glimmung/internal/domain/decision"
 )
 
-// fakeCompletionStore implements RunCompletionStore.
 type fakeCompletionStore struct {
 	fakeReadStore
-	// token → (runID, project, runRef)
+
 	tokenRunID   string
 	tokenProject string
 	tokenRef     string
@@ -32,8 +30,7 @@ type fakeCompletionStore struct {
 	wf    *Workflow
 	wfErr error
 
-	stampResult RunReplayData
-	stampErr    error
+	stampErr error
 
 	decisionErr error
 
@@ -47,7 +44,6 @@ type fakeCompletionStore struct {
 	appendFile  string
 
 	leaseResult Lease
-	leaseHost   *Host
 	leaseErr    error
 	leaseReq    LeaseAcquireRequest
 
@@ -56,7 +52,7 @@ type fakeCompletionStore struct {
 	nativeErr          error
 }
 
-func (s *fakeCompletionStore) ReadRunIDForCallbackToken(_ context.Context, token string) (string, string, string, error) {
+func (s *fakeCompletionStore) ReadRunIDForCallbackToken(context.Context, string) (string, string, string, error) {
 	if s.tokenErr != nil {
 		return "", "", "", s.tokenErr
 	}
@@ -66,11 +62,11 @@ func (s *fakeCompletionStore) ReadRunIDForCallbackToken(_ context.Context, token
 	return s.tokenRunID, s.tokenProject, s.tokenRef, nil
 }
 
-func (s *fakeCompletionStore) AbortRunByID(_ context.Context, _, _, _ string) (AbortRunResult, error) {
+func (s *fakeCompletionStore) AbortRunByID(context.Context, string, string, string) (AbortRunResult, error) {
 	return s.abortResult, s.abortErr
 }
 
-func (s *fakeCompletionStore) ReadRunForReplay(_ context.Context, _, _ string) (RunReplayData, error) {
+func (s *fakeCompletionStore) ReadRunForReplay(context.Context, string, string) (RunReplayData, error) {
 	if s.readErr != nil {
 		return RunReplayData{}, s.readErr
 	}
@@ -80,7 +76,7 @@ func (s *fakeCompletionStore) ReadRunForReplay(_ context.Context, _, _ string) (
 	return *s.run, nil
 }
 
-func (s *fakeCompletionStore) GetWorkflowByName(_ context.Context, _, _ string) (*Workflow, error) {
+func (s *fakeCompletionStore) GetWorkflowByName(context.Context, string, string) (*Workflow, error) {
 	return s.wf, s.wfErr
 }
 
@@ -91,8 +87,8 @@ func (s *fakeCompletionStore) StampRunCompletion(_ context.Context, _, _ string,
 	if s.run == nil {
 		return RunReplayData{}, ErrNotFound
 	}
-	// Apply the completion payload to a copy of the run so the decision engine sees updated state.
 	copy := *s.run
+	copy.Attempts = append([]RunAttemptData{}, s.run.Attempts...)
 	if len(copy.Attempts) > 0 {
 		last := copy.Attempts[len(copy.Attempts)-1]
 		last.Conclusion = p.Conclusion
@@ -101,10 +97,7 @@ func (s *fakeCompletionStore) StampRunCompletion(_ context.Context, _, _ string,
 			last.PhaseOutputs = p.PhaseOutputs
 		}
 		if p.VerificationStatus != "" {
-			last.Verification = &RunVerificationData{
-				Status:  p.VerificationStatus,
-				Reasons: p.VerificationReasons,
-			}
+			last.Verification = &RunVerificationData{Status: p.VerificationStatus, Reasons: p.VerificationReasons}
 		} else {
 			last.Verification = nil
 		}
@@ -113,11 +106,11 @@ func (s *fakeCompletionStore) StampRunCompletion(_ context.Context, _, _ string,
 	return copy, nil
 }
 
-func (s *fakeCompletionStore) StampRunDecision(_ context.Context, _, _, _ string) error {
+func (s *fakeCompletionStore) StampRunDecision(context.Context, string, string, string) error {
 	return s.decisionErr
 }
 
-func (s *fakeCompletionStore) SetRunTerminalState(_ context.Context, _, _, _ string, _ *string) (AbortRunResult, error) {
+func (s *fakeCompletionStore) SetRunTerminalState(context.Context, string, string, string, *string) (AbortRunResult, error) {
 	return s.terminalResult, s.terminalErr
 }
 
@@ -128,9 +121,9 @@ func (s *fakeCompletionStore) AppendRunAttempt(_ context.Context, _, _, phase, p
 	return s.appendIdx, s.appendErr
 }
 
-func (s *fakeCompletionStore) AcquireLease(_ context.Context, req LeaseAcquireRequest) (Lease, *Host, error) {
+func (s *fakeCompletionStore) AcquireLease(_ context.Context, req LeaseAcquireRequest) (Lease, error) {
 	s.leaseReq = req
-	return s.leaseResult, s.leaseHost, s.leaseErr
+	return s.leaseResult, s.leaseErr
 }
 
 func (s *fakeCompletionStore) RecordNativeJobCompletion(_ context.Context, _, _ string, p CompletionPayload) (NativeJobCompletionResult, error) {
@@ -176,7 +169,6 @@ func (s *fakeCompletionStore) RecordNativeJobCompletion(_ context.Context, _, _ 
 			failed = append(failed, id)
 		}
 	}
-	phasePayload := aggregateFakeNativePayload(expected, s.nativeCompletions)
 	return NativeJobCompletionResult{
 		Run:             *s.run,
 		PhaseComplete:   phaseComplete,
@@ -184,7 +176,7 @@ func (s *fakeCompletionStore) RecordNativeJobCompletion(_ context.Context, _, _ 
 		CompletedJobIDs: completed,
 		PendingJobIDs:   pending,
 		FailedJobIDs:    failed,
-		PhasePayload:    phasePayload,
+		PhasePayload:    aggregateFakeNativePayload(expected, s.nativeCompletions),
 	}, nil
 }
 
@@ -219,37 +211,10 @@ func containsTestString(values []string, target string) bool {
 	return false
 }
 
-// fakeDispatchClient records dispatch calls.
-type fakeDispatchClient struct {
-	called bool
-	repo   string
-	file   string
-	ref    string
-	inputs map[string]string
-	err    error
-}
-
-func (f *fakeDispatchClient) DispatchWorkflow(_ context.Context, repo, file, ref string, inputs map[string]string) error {
-	f.called = true
-	f.repo = repo
-	f.file = file
-	f.ref = ref
-	f.inputs = inputs
-	return f.err
-}
-
-type fakeGitHubClient struct {
-	fakeDispatchClient
-}
-
-func (f *fakeGitHubClient) FetchWorkflowFile(context.Context, string, string, string) ([]byte, int, error) {
-	return nil, 404, ErrNotFound
-}
-
-// --- helpers ---
-
-func newCompletionHandler(store *fakeCompletionStore, ghClient WorkflowSyncClient) http.Handler {
-	return NewWithSyncClient(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, ghClient)
+func newCompletionHandler(store *fakeCompletionStore, nativeLauncher NativeLauncher) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/completed", nativeRunCompletedByCallbackToken(store, nativeLauncher))
+	return mux
 }
 
 func singlePhaseWorkflowForCompletion(name string, verify bool) *Workflow {
@@ -257,27 +222,43 @@ func singlePhaseWorkflowForCompletion(name string, verify bool) *Workflow {
 		Project: "proj",
 		Name:    "wf",
 		Budget:  budget.Config{Total: 25},
-		Phases: []PhaseSpec{
-			{
-				Name:          name,
-				Verify:        verify,
-				RecyclePolicy: &RecyclePolicy{MaxAttempts: 3, On: []string{"verify_fail"}},
-			},
-		},
+		Phases: []PhaseSpec{{
+			Name:          name,
+			Kind:          "k8s_job",
+			Jobs:          []NativeJobSpec{{ID: name, Image: "runner:latest"}},
+			Verify:        verify,
+			RecyclePolicy: &RecyclePolicy{MaxAttempts: 3, On: []string{"verify_fail"}},
+		}},
 	}
 }
 
 func runDataForCompletion(phase string) *RunReplayData {
+	callback := "run-token"
 	return &RunReplayData{
-		ID:           "run-1",
-		Project:      "proj",
-		WorkflowName: "wf",
-		IssueNumber:  7,
-		IssueRepo:    "owner/repo",
+		ID:            "run-1",
+		Project:       "proj",
+		WorkflowName:  "wf",
+		IssueNumber:   7,
+		IssueRepo:     "owner/repo",
+		CallbackToken: &callback,
 		Attempts: []RunAttemptData{
 			{AttemptIndex: 0, Phase: phase, Conclusion: "failure"},
 		},
 		CumulativeCostUSD: 0.1,
+	}
+}
+
+func nativeCompletionRequest(token string, body NativeRunCompletedRequest) *http.Request {
+	data, _ := json.Marshal(body)
+	return httptest.NewRequest(http.MethodPost, "/v1/run-callbacks/"+token+"/native/completed", bytes.NewReader(data))
+}
+
+func completedJob(id, conclusion string, verification map[string]any, outputs map[string]string) NativeRunCompletedRequest {
+	return NativeRunCompletedRequest{
+		JobID:        &id,
+		Conclusion:   conclusion,
+		Verification: verification,
+		Outputs:      outputs,
 	}
 }
 
@@ -297,92 +278,72 @@ func assertPhaseTargets(t *testing.T, phases []PhaseSpec, want ...string) {
 	}
 }
 
-// --- run_completed tests ---
+func readCallbackResult(t *testing.T, rec *httptest.ResponseRecorder) RunCallbackResult {
+	t.Helper()
+	var result RunCallbackResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
 
-func TestRunCompletedByCallbackToken_TokenNotFound(t *testing.T) {
-	store := &fakeCompletionStore{}
-	h := newCompletionHandler(store, nil)
-
-	body, _ := json.Marshal(RunCompletedRequest{WorkflowRunID: 1, Conclusion: "success"})
-	req := httptest.NewRequest("POST", "/v1/run-callbacks/badtoken/completed", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Errorf("expected 404, got %d", w.Code)
+func TestNativeRunCompletedByCallbackTokenTokenNotFound(t *testing.T) {
+	rec := httptest.NewRecorder()
+	newCompletionHandler(&fakeCompletionStore{}, nil).ServeHTTP(rec, nativeCompletionRequest("badtoken", completedJob("impl", "success", nil, nil)))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestRunCompletedByCallbackToken_MissingConclusion(t *testing.T) {
+func TestNativeRunCompletedByCallbackTokenMissingJobID(t *testing.T) {
 	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
 	store.run = runDataForCompletion("impl")
 	store.wf = singlePhaseWorkflowForCompletion("impl", false)
-	h := newCompletionHandler(store, nil)
-
-	body, _ := json.Marshal(RunCompletedRequest{WorkflowRunID: 1})
-	req := httptest.NewRequest("POST", "/v1/run-callbacks/tok/completed", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d", w.Code)
+	rec := httptest.NewRecorder()
+	newCompletionHandler(store, nil).ServeHTTP(rec, nativeCompletionRequest("tok", NativeRunCompletedRequest{Conclusion: "success"}))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestRunCompletedByCallbackToken_Advance_Passed(t *testing.T) {
+func TestNativeRunCompletedByCallbackTokenAdvancePassed(t *testing.T) {
 	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
 	store.run = runDataForCompletion("impl")
 	store.wf = singlePhaseWorkflowForCompletion("impl", false)
 	store.terminalResult = AbortRunResult{State: "passed", RunRef: "proj#7/runs/1"}
-	h := newCompletionHandler(store, nil)
-
-	body, _ := json.Marshal(RunCompletedRequest{WorkflowRunID: 1, Conclusion: "success"})
-	req := httptest.NewRequest("POST", "/v1/run-callbacks/tok/completed", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	rec := httptest.NewRecorder()
+	newCompletionHandler(store, nil).ServeHTTP(rec, nativeCompletionRequest("tok", completedJob("impl", "success", nil, nil)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var result RunCallbackResult
-	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
-		t.Fatal(err)
-	}
+	result := readCallbackResult(t, rec)
 	if result.Decision == nil || *result.Decision != "advance" {
-		t.Errorf("expected decision=advance, got %v", result.Decision)
+		t.Fatalf("decision=%v", result.Decision)
+	}
+	if result.PhaseComplete == nil || !*result.PhaseComplete {
+		t.Fatalf("phase_complete=%v", result.PhaseComplete)
 	}
 }
 
-func TestRunCompletedByCallbackToken_Advance_ReviewRequired(t *testing.T) {
+func TestNativeRunCompletedByCallbackTokenAdvanceReviewRequired(t *testing.T) {
 	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
 	store.run = runDataForCompletion("impl")
 	wf := singlePhaseWorkflowForCompletion("impl", false)
 	wf.PR.Enabled = true
 	store.wf = wf
 	store.terminalResult = AbortRunResult{State: "review_required", RunRef: "proj#7/runs/1"}
-	h := newCompletionHandler(store, nil)
-
-	body, _ := json.Marshal(RunCompletedRequest{WorkflowRunID: 1, Conclusion: "success"})
-	req := httptest.NewRequest("POST", "/v1/run-callbacks/tok/completed", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	rec := httptest.NewRecorder()
+	newCompletionHandler(store, nil).ServeHTTP(rec, nativeCompletionRequest("tok", completedJob("impl", "success", nil, nil)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var result RunCallbackResult
-	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
-		t.Fatal(err)
-	}
-	if result.Decision == nil || *result.Decision != "advance" {
-		t.Errorf("expected decision=advance, got %v", result.Decision)
+	if got := readCallbackResult(t, rec).Decision; got == nil || *got != "advance" {
+		t.Fatalf("decision=%v", got)
 	}
 }
 
-func TestRunCompletedByCallbackToken_AdvanceDispatchesNextPhase(t *testing.T) {
+func TestNativeRunCompletedByCallbackTokenAdvanceDispatchesNextPhase(t *testing.T) {
 	leaseNumber := 12
-	token := "lease-token"
-	runCallback := "run-token"
 	store := &fakeCompletionStore{
 		tokenRunID:   "r1",
 		tokenProject: "proj",
@@ -390,118 +351,85 @@ func TestRunCompletedByCallbackToken_AdvanceDispatchesNextPhase(t *testing.T) {
 		leaseResult: Lease{
 			Project:     "proj",
 			LeaseNumber: &leaseNumber,
-			Metadata:    map[string]any{"lease_callback_token": token},
+			Host:        stringPtr("native-k8s"),
+			State:       "claimed",
+			Metadata:    map[string]any{"lease_callback_token": "lease-token", "native_k8s": true},
 		},
-		leaseHost: &Host{Name: "runner-1"},
 	}
 	store.run = &RunReplayData{
-		ID:            "r1",
-		Project:       "proj",
-		WorkflowName:  "wf",
-		IssueNumber:   7,
-		IssueRepo:     "owner/repo",
-		CallbackToken: &runCallback,
-		Attempts: []RunAttemptData{
-			{AttemptIndex: 0, Phase: "env-prep", Conclusion: "failure"},
-		},
-		CumulativeCostUSD: 0.1,
+		ID:           "r1",
+		Project:      "proj",
+		WorkflowName: "wf",
+		IssueNumber:  7,
+		IssueRepo:    "owner/repo",
+		Attempts:     []RunAttemptData{{AttemptIndex: 0, Phase: "env-prep", Conclusion: "failure"}},
 	}
 	store.wf = &Workflow{
 		Project: "proj",
 		Name:    "wf",
 		Budget:  budget.Config{Total: 25},
 		Phases: []PhaseSpec{
-			{Name: "env-prep", Outputs: []string{"validation_url"}},
+			{Name: "env-prep", Kind: "k8s_job", Jobs: []NativeJobSpec{{ID: "env-prep"}}, Outputs: []string{"validation_url"}},
 			{
 				Name:             "agent-execute",
-				Kind:             "gha_dispatch",
-				WorkflowFilename: "agent.yml",
-				WorkflowRef:      "feature",
+				Kind:             "k8s_job",
+				WorkflowFilename: "k8s_job:agent-execute",
 				DependsOn:        []string{"env-prep"},
+				Jobs:             []NativeJobSpec{{ID: "agent", Image: "runner:latest"}},
 				Inputs: map[string]string{
 					"validation_url": "${{ phases.env-prep.outputs.validation_url }}",
 				},
 			},
 		},
 	}
-	gh := &fakeGitHubClient{}
-	h := newCompletionHandler(store, gh)
-
-	body, _ := json.Marshal(RunCompletedRequest{
-		WorkflowRunID: 1,
-		Conclusion:    "success",
-		Outputs:       map[string]string{"validation_url": "https://preview.example"},
-	})
-	req := httptest.NewRequest("POST", "/v1/run-callbacks/tok/completed", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	launcher := &fakeNativeLauncher{}
+	rec := httptest.NewRecorder()
+	newCompletionHandler(store, launcher).ServeHTTP(rec, nativeCompletionRequest("tok", completedJob("env-prep", "success", nil, map[string]string{"validation_url": "https://preview.example"})))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var result RunCallbackResult
-	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
-		t.Fatal(err)
-	}
+	result := readCallbackResult(t, rec)
 	if result.Decision == nil || *result.Decision != "advance_phase" {
-		t.Fatalf("decision=%v, want advance_phase", result.Decision)
+		t.Fatalf("decision=%v", result.Decision)
 	}
-	if store.appendPhase != "agent-execute" || store.appendKind != "gha_dispatch" || store.appendFile != "agent.yml" {
+	if store.appendPhase != "agent-execute" || store.appendKind != "k8s_job" || store.appendFile != "k8s_job:agent-execute" {
 		t.Fatalf("append=(%q,%q,%q)", store.appendPhase, store.appendKind, store.appendFile)
+	}
+	if !launcher.called || launcher.req.Phase.Name != "agent-execute" {
+		t.Fatalf("native launch=%#v", launcher.req)
 	}
 	phaseInputs, ok := store.leaseReq.Metadata["phase_inputs"].(map[string]string)
 	if !ok || phaseInputs["validation_url"] != "https://preview.example" {
 		t.Fatalf("phase_inputs=%#v", store.leaseReq.Metadata["phase_inputs"])
 	}
-	if !gh.called {
-		t.Fatal("expected workflow dispatch")
-	}
-	if gh.repo != "owner/repo" || gh.file != "agent.yml" || gh.ref != "feature" {
-		t.Fatalf("dispatch=(%q,%q,%q)", gh.repo, gh.file, gh.ref)
-	}
-	if gh.inputs["validation_url"] != "https://preview.example" {
-		t.Fatalf("dispatch inputs=%#v", gh.inputs)
-	}
-	if gh.inputs["lease_callback_token"] != token {
-		t.Fatalf("lease callback input=%q", gh.inputs["lease_callback_token"])
+	if store.leaseReq.Metadata["native_k8s"] != true {
+		t.Fatalf("lease metadata=%#v", store.leaseReq.Metadata)
 	}
 }
 
 func TestAllReadyDispatchTargetsHandlesFanOutFanInAndTeardown(t *testing.T) {
-	wf := &Workflow{
-		Phases: []PhaseSpec{
-			{Name: "prepare"},
-			{Name: "work-a", DependsOn: []string{"prepare"}},
-			{Name: "work-b", DependsOn: []string{"prepare"}},
-			{Name: "verify", Verify: true, DependsOn: []string{"work-a", "work-b"}},
-			{Name: "cleanup", Always: true},
-		},
-	}
-
-	run := RunReplayData{Attempts: []RunAttemptData{
-		{AttemptIndex: 0, Phase: "prepare", Completed: true, Decision: string(decision.Advance)},
+	wf := &Workflow{Phases: []PhaseSpec{
+		{Name: "prepare"},
+		{Name: "work-a", DependsOn: []string{"prepare"}},
+		{Name: "work-b", DependsOn: []string{"prepare"}},
+		{Name: "verify", Verify: true, DependsOn: []string{"work-a", "work-b"}},
+		{Name: "cleanup", Always: true},
 	}}
+	run := RunReplayData{Attempts: []RunAttemptData{{AttemptIndex: 0, Phase: "prepare", Completed: true, Decision: string(decision.Advance)}}}
 	assertPhaseTargets(t, allReadyDispatchTargets(wf, run, decision.Advance), "work-a", "work-b")
 
-	run.Attempts = append(run.Attempts,
-		RunAttemptData{AttemptIndex: 1, Phase: "work-a", Completed: true, Decision: string(decision.Advance)},
-	)
+	run.Attempts = append(run.Attempts, RunAttemptData{AttemptIndex: 1, Phase: "work-a", Completed: true, Decision: string(decision.Advance)})
 	assertPhaseTargets(t, allReadyDispatchTargets(wf, run, decision.Advance), "work-b")
 
-	run.Attempts = append(run.Attempts,
-		RunAttemptData{AttemptIndex: 2, Phase: "work-b", Completed: true, Decision: string(decision.Advance)},
-	)
+	run.Attempts = append(run.Attempts, RunAttemptData{AttemptIndex: 2, Phase: "work-b", Completed: true, Decision: string(decision.Advance)})
 	assertPhaseTargets(t, allReadyDispatchTargets(wf, run, decision.Advance), "verify")
 
-	run.Attempts = append(run.Attempts,
-		RunAttemptData{AttemptIndex: 3, Phase: "verify", Completed: true, Decision: string(decision.AbortBudgetAttempts)},
-	)
+	run.Attempts = append(run.Attempts, RunAttemptData{AttemptIndex: 3, Phase: "verify", Completed: true, Decision: string(decision.AbortBudgetAttempts)})
 	assertPhaseTargets(t, allReadyDispatchTargets(wf, run, decision.AbortBudgetAttempts), "cleanup")
 }
 
-func TestRunCompletedByCallbackToken_AbortBudgetAttempts(t *testing.T) {
+func TestNativeRunCompletedByCallbackTokenAbortBudgetAttempts(t *testing.T) {
 	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
-	// 3 attempts already at max
 	store.run = &RunReplayData{
 		ID: "r1", Project: "proj", WorkflowName: "wf", IssueNumber: 7,
 		Attempts: []RunAttemptData{
@@ -513,137 +441,42 @@ func TestRunCompletedByCallbackToken_AbortBudgetAttempts(t *testing.T) {
 	}
 	store.wf = singlePhaseWorkflowForCompletion("impl", true)
 	store.terminalResult = AbortRunResult{State: "aborted", RunRef: "proj#7/runs/1"}
-	h := newCompletionHandler(store, nil)
-
-	body, _ := json.Marshal(RunCompletedRequest{
-		WorkflowRunID: 1,
-		Conclusion:    "failure",
-		Verification:  map[string]any{"status": "fail"},
-	})
-	req := httptest.NewRequest("POST", "/v1/run-callbacks/tok/completed", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	rec := httptest.NewRecorder()
+	newCompletionHandler(store, nil).ServeHTTP(rec, nativeCompletionRequest("tok", completedJob("impl", "failure", map[string]any{"status": "fail"}, nil)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var result RunCallbackResult
-	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
-		t.Fatal(err)
-	}
-	if result.Decision == nil || *result.Decision != "abort_budget_attempts" {
-		t.Errorf("expected abort_budget_attempts, got %v", result.Decision)
+	if got := readCallbackResult(t, rec).Decision; got == nil || *got != "abort_budget_attempts" {
+		t.Fatalf("decision=%v", got)
 	}
 }
 
-func TestRunCompletedByCallbackToken_Retry_NoDispatchClient(t *testing.T) {
+func TestNativeRunCompletedByCallbackTokenRetryRequiresNativeLauncher(t *testing.T) {
 	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
 	store.run = runDataForCompletion("impl")
 	store.wf = singlePhaseWorkflowForCompletion("impl", true)
 	store.abortResult = AbortRunResult{State: "aborted", RunRef: "proj#7/runs/1"}
-	h := newCompletionHandler(store, nil)
-
-	body, _ := json.Marshal(RunCompletedRequest{
-		WorkflowRunID: 1,
-		Conclusion:    "failure",
-		Verification:  map[string]any{"status": "fail"},
-	})
-	req := httptest.NewRequest("POST", "/v1/run-callbacks/tok/completed", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	rec := httptest.NewRecorder()
+	newCompletionHandler(store, nil).ServeHTTP(rec, nativeCompletionRequest("tok", completedJob("impl", "failure", map[string]any{"status": "fail"}, nil)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	// Without a dispatch client, retry falls back to abort
-	var result RunCallbackResult
-	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
-		t.Fatal(err)
-	}
-	if result.Decision == nil {
-		t.Errorf("expected a decision in response, got nil")
+	if got := readCallbackResult(t, rec).Decision; got == nil || *got != "abort_budget_attempts" {
+		t.Fatalf("decision=%v", got)
 	}
 }
 
-func TestRunCompletedByCallbackToken_StampError(t *testing.T) {
-	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
-	store.stampErr = errors.New("cosmos unavailable")
-	h := newCompletionHandler(store, nil)
-
-	body, _ := json.Marshal(RunCompletedRequest{WorkflowRunID: 1, Conclusion: "success"})
-	req := httptest.NewRequest("POST", "/v1/run-callbacks/tok/completed", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500, got %d", w.Code)
-	}
-}
-
-// --- native_completed tests ---
-
-func TestNativeRunCompletedByCallbackToken_Advance(t *testing.T) {
-	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
+func TestNativeRunCompletedByCallbackTokenStampError(t *testing.T) {
+	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj", stampErr: errors.New("cosmos unavailable")}
 	store.run = runDataForCompletion("impl")
-	store.wf = singlePhaseWorkflowForCompletion("impl", false)
-	store.terminalResult = AbortRunResult{State: "passed", RunRef: "proj#7/runs/1"}
-	h := newCompletionHandler(store, nil)
-
-	jobID := "impl"
-	body, _ := json.Marshal(NativeRunCompletedRequest{JobID: &jobID, Conclusion: "success"})
-	req := httptest.NewRequest("POST", "/v1/run-callbacks/tok/native/completed", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-	var result RunCallbackResult
-	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
-		t.Fatal(err)
-	}
-	if result.Decision == nil || *result.Decision != "advance" {
-		t.Errorf("expected advance, got %v", result.Decision)
-	}
-	if result.PhaseComplete == nil || !*result.PhaseComplete {
-		t.Errorf("phase_complete=%v, want true", result.PhaseComplete)
-	}
-	if len(result.CompletedJobIDs) != 1 || result.CompletedJobIDs[0] != "impl" {
-		t.Errorf("completed_job_ids=%v", result.CompletedJobIDs)
+	rec := httptest.NewRecorder()
+	newCompletionHandler(store, nil).ServeHTTP(rec, nativeCompletionRequest("tok", completedJob("impl", "success", nil, nil)))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestNativeRunCompletedByCallbackToken_TokenNotFound(t *testing.T) {
-	store := &fakeCompletionStore{}
-	h := newCompletionHandler(store, nil)
-
-	body, _ := json.Marshal(NativeRunCompletedRequest{Conclusion: "success"})
-	req := httptest.NewRequest("POST", "/v1/run-callbacks/badtoken/native/completed", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Errorf("expected 404, got %d", w.Code)
-	}
-}
-
-func TestNativeRunCompletedByCallbackToken_MissingJobID(t *testing.T) {
-	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
-	store.run = runDataForCompletion("impl")
-	store.wf = singlePhaseWorkflowForCompletion("impl", false)
-	h := newCompletionHandler(store, nil)
-
-	body, _ := json.Marshal(NativeRunCompletedRequest{Conclusion: "success"})
-	req := httptest.NewRequest("POST", "/v1/run-callbacks/tok/native/completed", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestNativeRunCompletedByCallbackToken_WaitsForSiblingJobs(t *testing.T) {
+func TestNativeRunCompletedByCallbackTokenWaitsForSiblingJobs(t *testing.T) {
 	store := &fakeCompletionStore{
 		tokenRunID:         "r1",
 		tokenProject:       "proj",
@@ -654,66 +487,31 @@ func TestNativeRunCompletedByCallbackToken_WaitsForSiblingJobs(t *testing.T) {
 		Project: "proj",
 		Name:    "wf",
 		Budget:  budget.Config{Total: 25},
-		Phases: []PhaseSpec{{
-			Name: "work",
-			Kind: "k8s_job",
-			Jobs: []NativeJobSpec{{ID: "plan"}, {ID: "impl"}},
-		}},
+		Phases:  []PhaseSpec{{Name: "work", Kind: "k8s_job", Jobs: []NativeJobSpec{{ID: "plan"}, {ID: "impl"}}}},
 	}
 	store.terminalResult = AbortRunResult{State: "passed", RunRef: "proj#7/runs/1"}
-	h := newCompletionHandler(store, nil)
+	handler := newCompletionHandler(store, nil)
 
-	planJob := "plan"
-	body, _ := json.Marshal(NativeRunCompletedRequest{
-		JobID:      &planJob,
-		Conclusion: "success",
-		Outputs:    map[string]string{"plan": "ready"},
-	})
-	req := httptest.NewRequest("POST", "/v1/run-callbacks/tok/native/completed", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("first completion expected 200, got %d: %s", w.Code, w.Body.String())
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, nativeCompletionRequest("tok", completedJob("plan", "success", nil, map[string]string{"plan": "ready"})))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var first RunCallbackResult
-	if err := json.Unmarshal(w.Body.Bytes(), &first); err != nil {
-		t.Fatal(err)
-	}
-	if first.Decision == nil || *first.Decision != "wait_jobs" {
-		t.Fatalf("first decision=%v, want wait_jobs", first.Decision)
-	}
-	if first.PhaseComplete == nil || *first.PhaseComplete {
-		t.Fatalf("first phase_complete=%v, want false", first.PhaseComplete)
-	}
-	if len(first.PendingJobIDs) != 1 || first.PendingJobIDs[0] != "impl" {
-		t.Fatalf("pending_job_ids=%v, want [impl]", first.PendingJobIDs)
+	first := readCallbackResult(t, rec)
+	if first.Decision == nil || *first.Decision != "wait_jobs" || first.PhaseComplete == nil || *first.PhaseComplete {
+		t.Fatalf("first result=%#v", first)
 	}
 
-	implJob := "impl"
-	body, _ = json.Marshal(NativeRunCompletedRequest{
-		JobID:      &implJob,
-		Conclusion: "success",
-		Outputs:    map[string]string{"impl": "done"},
-	})
-	req = httptest.NewRequest("POST", "/v1/run-callbacks/tok/native/completed", bytes.NewReader(body))
-	w = httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("second completion expected 200, got %d: %s", w.Code, w.Body.String())
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, nativeCompletionRequest("tok", completedJob("impl", "success", nil, map[string]string{"impl": "done"})))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var second RunCallbackResult
-	if err := json.Unmarshal(w.Body.Bytes(), &second); err != nil {
-		t.Fatal(err)
-	}
-	if second.Decision == nil || *second.Decision != "advance" {
-		t.Fatalf("second decision=%v, want advance", second.Decision)
-	}
-	if second.PhaseComplete == nil || !*second.PhaseComplete {
-		t.Fatalf("second phase_complete=%v, want true", second.PhaseComplete)
+	second := readCallbackResult(t, rec)
+	if second.Decision == nil || *second.Decision != "advance" || second.PhaseComplete == nil || !*second.PhaseComplete {
+		t.Fatalf("second result=%#v", second)
 	}
 	if len(second.CompletedJobIDs) != 2 {
-		t.Fatalf("completed_job_ids=%v, want two jobs", second.CompletedJobIDs)
+		t.Fatalf("completed_job_ids=%v", second.CompletedJobIDs)
 	}
 }

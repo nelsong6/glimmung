@@ -240,14 +240,14 @@ func patchPlaybookEntryGate(store ReadStore) http.HandlerFunc {
 	}
 }
 
-func runPlaybook(store ReadStore, ghDispatch GHADispatchClient) http.HandlerFunc {
+func runPlaybook(store ReadStore, nativeLauncher NativeLauncher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		pbStore, ok := store.(PlaybookRunStore)
 		if !ok || pbStore == nil {
 			writeProblem(w, http.StatusServiceUnavailable, "playbook run store not configured")
 			return
 		}
-		dispatcher, ok := playbookEntryDispatcher(store, ghDispatch)
+		dispatcher, ok := playbookEntryDispatcher(store, nativeLauncher)
 		if !ok {
 			writeProblem(w, http.StatusServiceUnavailable, "playbook dispatch dependencies not configured")
 			return
@@ -265,13 +265,16 @@ func runPlaybook(store ReadStore, ghDispatch GHADispatchClient) http.HandlerFunc
 	}
 }
 
-func playbookEntryDispatcher(store ReadStore, ghDispatch GHADispatchClient) (PlaybookEntryDispatcher, bool) {
+func playbookEntryDispatcher(store ReadStore, nativeLauncher NativeLauncher) (PlaybookEntryDispatcher, bool) {
 	issueStore, ok := store.(IssueStore)
 	if !ok || issueStore == nil {
 		return nil, false
 	}
 	dispatchStore, ok := store.(RunDispatchStore)
 	if !ok || dispatchStore == nil {
+		return nil, false
+	}
+	if nativeLauncher == nil {
 		return nil, false
 	}
 	return func(ctx context.Context, entry PlaybookEntryDispatch) (PlaybookEntryDispatchResult, error) {
@@ -312,7 +315,7 @@ func playbookEntryDispatcher(store ReadStore, ghDispatch GHADispatchClient) (Pla
 			"integration_strategy": entry.IntegrationStrategy,
 			"work_context":         entry.WorkContext,
 		}
-		result, problem := dispatchRun(ctx, dispatchStore, ghDispatch, nil, DispatchRunRequest{
+		result, problem := dispatchRun(ctx, dispatchStore, nativeLauncher, DispatchRunRequest{
 			Project:       entry.Project,
 			IssueNumber:   issueNumber,
 			WorkflowName:  workflow,

@@ -76,8 +76,8 @@ func TestListWorkflowsFiltersAndLimits(t *testing.T) {
 			Phases: []PhaseSpec{
 				{
 					Name:             "agent",
-					Kind:             "gha_dispatch",
-					WorkflowFilename: "agent.yml",
+					Kind:             "k8s_job",
+					WorkflowFilename: "k8s_job:agent",
 					WorkflowRef:      "main",
 					Verify:           true,
 					RecyclePolicy:    &RecyclePolicy{MaxAttempts: 3, On: []string{"verify_fail"}, LandsAt: "self"},

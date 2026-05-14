@@ -2,8 +2,7 @@
 
 Go service for issue-driven agentic development. Glimmung stores projects,
 workflows, issues, runs, leases, reports, and signals in Cosmos DB; serves the
-Vite + React dashboard; and coordinates native Kubernetes jobs plus the legacy
-GitHub Actions dispatch path.
+Vite + React dashboard; and coordinates native Kubernetes jobs.
 
 > *The Glimmung scanned the assembled list of beings he had summoned. From a thousand worlds they had come, each with a craft to contribute.*
 > — paraphrased from Philip K. Dick, *Galactic Pot-Healer*
@@ -16,10 +15,9 @@ systems do not model the orchestration cleanly. Glimmung owns the queue, the
 database-backed workflow shape, the run/lease lifecycle, the callback surface,
 the verify-loop decision engine, the dashboard, and the signal bus.
 
-Native Kubernetes jobs are the default execution layer for web-native apps.
-Legacy GitHub Actions dispatch is still present for older consumers, but new
-native apps should not register app-specific GitHub runner pools or keep
-repo-backed workflow files as the runtime source of truth.
+Native Kubernetes jobs are the execution layer for managed workflow phases.
+Apps should not register app-specific GitHub runner pools or keep repo-backed
+workflow files as the runtime source of truth.
 
 Full design + intent: [issue #1](https://github.com/nelsong6/glimmung/issues/1).
 
@@ -35,19 +33,17 @@ Project -> Workflow -> Issue -> Run -> Phase/Job -> Report
 - **Project** = a repo (e.g. `spirelens`), declares the github_repo only.
 - **Workflow** = a database-backed automation shape under a project. Dispatch
   reads the Workflow row from Cosmos: phases, native jobs, PR policy, budget,
-  and requirements. Trigger labels are legacy metadata and are not a dispatch
-  primitive. Native web app projects default omitted phase kinds to `k8s_job`;
-  legacy/non-native projects keep the compatibility default of `gha_dispatch`.
+  and requirements. Trigger labels are import metadata and are not a dispatch
+  primitive. Omitted phase kinds default to `k8s_job`; registered phases must
+  use `k8s_job`.
 - **Issue** = the canonical Glimmung issue row. GitHub Issues may still feed
   temporary backlog/tracker workflows, but the live run loop is issue-row based.
 - **Run** = durable execution record for one issue/workflow invocation. Runs
   hold attempts, phase state, evidence refs, cost, terminal decision, and
   callback-token metadata.
-- **Lease** = capacity claim for a run phase. Native `k8s_job` phases use the
-  native capacity path and callback-token APIs; legacy `gha_dispatch` phases may
-  still claim a registered Host and fire `workflow_dispatch`.
-- **Host** = a legacy/self-hosted-runner venue kept for exception workflows and
-  dashboard visibility.
+- **Lease** = native capacity claim for a `k8s_job` run phase. Lease records are
+  claimed only when native capacity is assigned, heartbeat/release through
+  callback-token APIs, and complete through the native run completion callback.
 
 Workflow registration is an admin/control-plane operation. Consumer repos do
 not need `.glimmung/workflows/<name>.yaml` files for runtime dispatch; changing
@@ -95,7 +91,7 @@ Dockerfile            # multi-stage: node frontend build -> Go backend
 .github/workflows/    # build + ACR push + chart bump + tofu plan/apply
 ```
 
-The legacy Python app and root Python test suite have been removed. The app
+The retired Python app and root Python test suite have been removed. The app
 runtime, local dev path, repo-local ops CLI, and default CI authority are Go
 plus the Vite dashboard.
 
@@ -114,7 +110,7 @@ matching surface in the same PR:
   not enough; stale MCP schemas are still advertised to running sessions.
 - For MCP server renames/removals, follow the rollout sequence in
   [MCP Surface Rollout](docs/mcp-surface-rollout.md) so stale sessions have a
-  clear compatibility or restart path.
+  clear restart path.
 - If the endpoint is intentionally system-only (webhooks, lease lifecycle,
   run callbacks, health/config/events), call that out in the PR so the HTTP
   API and MCP surface do not drift silently.
@@ -125,18 +121,17 @@ The Go route registration in
 [`internal/server/server.go`](internal/server/server.go) is the active HTTP
 surface. [`internal/server/route_inventory_test.go`](internal/server/route_inventory_test.go)
 keeps that route list explicit; the tables below summarize the operator-facing
-surface rather than every compatibility tombstone.
+surface rather than every retired-route tombstone.
 
 ### Lease lifecycle
 
 | Method | Path                              | Purpose |
 |---|---|---|
-| POST   | `/v1/lease`                       | Acquire (`{project, workflow?, requirements, metadata, requester}`). Admin-auth guarded; returns a public lease ref, callback token metadata, and host when capacity is immediately available. |
 | GET    | `/v1/lease-callbacks/{callback_token}` | Read the public lease by callback token. Used by runner clients. |
 | POST   | `/v1/lease-callbacks/{callback_token}/heartbeat` | Keep the lease alive. |
 | POST   | `/v1/lease-callbacks/{callback_token}/release` | Release the lease. Idempotent. |
 | POST   | `/v1/leases/cancel`               | Cancel a lease by public ref. Admin-auth guarded. |
-| GET    | `/v1/state`                       | Snapshot: hosts + workflows + projects + pending + active leases. |
+| GET    | `/v1/state`                       | Snapshot: projects, workflows, active leases, test environments, and waiting test-slot requests. |
 | GET    | `/v1/events`                      | Server-Sent Events stream — yields `{event: "state", data: <snapshot>}` every 2s. |
 | GET    | `/v1/config`                      | Public — `{entra_client_id, authority}` for SPA MSAL bootstrap. |
 | GET    | `/healthz`                        | Liveness/readiness. |
@@ -158,7 +153,6 @@ surface rather than every compatibility tombstone.
 | GET    | `/v1/playbooks/{project}/{id}`    | Inspect a Playbook. |
 | POST   | `/v1/playbooks/{project}/{id}/run` | Advance a Playbook: create ready entry Issues and dispatch their Runs through the canonical run path. |
 | POST   | `/v1/playbooks/{project}/{id}/entries/{entry_id}/gate` | Set or clear a manual Playbook entry gate; optionally advances the Playbook after clearing. |
-| POST   | `/v1/hosts`                       | Register/update a host. |
 | GET    | `/v1/issues`                      | List Glimmung issues across registered projects. |
 | GET    | `/v1/issues/by-number/{project}/{issue_number}` | Issue detail by canonical project issue number. |
 | POST   | `/v1/runs/dispatch`               | UI/API-initiated dispatch (`{project, issue_number, workflow_name?}`); per-issue lock-serialized. |
@@ -233,10 +227,12 @@ identity credentials, namespaces, service accounts, RBAC, ExternalSecrets, and
 other zero-steady-runtime scaffolding. It must not keep project app, API proxy,
 session, Playwright, or validation workload pods running.
 
-Runtime materialization belongs after Glimmung assigns a lease. Returning a slot
-tears down that lease-scoped runtime and keeps the preliminary slot capacity.
-Changing queue size is the destructive path that may remove slot capacity.
-Callback release for a test-slot lease uses the same cleanup path as
+Runtime materialization belongs after Glimmung assigns a lease. Activation
+creates the lease-scoped runtime and, when native Playwright is enabled, waits
+for the slot-local `slot-playwright` Deployment before the slot becomes usable.
+Returning a slot tears down that lease-scoped runtime and keeps the preliminary
+slot capacity. Changing queue size is the destructive path that may remove slot
+capacity. Callback release for a test-slot lease uses the same cleanup path as
 `/v1/test-slots/return`, and an expired claimed test-slot lease is cleaned by
 the in-process test-slot reconciler.
 
@@ -322,11 +318,10 @@ Glimmung dogfood metadata:
 
 The Go handler verifies `X-Hub-Signature-256` against `GITHUB_WEBHOOK_SECRET`
 when configured and acknowledges the event. Rich issue/workflow_run processing
-from the legacy app is part of the runtime cleanup inventory and should be
-ported only if live consumers still need it.
+from the retired app is not part of the native lease dispatch path.
 
 Current event contract: Glimmung accepts GitHub `issues` and `workflow_run`
-webhooks for compatibility and repair hooks. PR review decisions enter through
+webhooks for repair hooks. PR review decisions enter through
 the `/v1/signals` contract instead of GitHub webhook side effects. `pull_request`,
 `check_run`, `check_suite`, `deployment`, and `push` events are intentionally not
 canonical run-state inputs unless a future syndication issue explicitly adds
@@ -342,15 +337,13 @@ Cosmos operations in [`internal/store/cosmos`](internal/store/cosmos). It:
 2. Reads the Glimmung issue by project issue number.
 3. Claims the `("issue", "<project>#<number>")` lock; concurrent dispatches on the same issue return `state="already_running"`.
 4. Creates the Run record while the issue lock serializes run-number allocation.
-5. Acquires a lease. If no capacity is immediately available, the run stays
-   pending.
+5. Acquires a native lease. If no native capacity is immediately available, the
+   run waits without launching executor work.
 6. Returns the callback-token metadata needed by the executor.
-7. Fires `workflow_dispatch` only for `gha_dispatch` phases when a host and
-   GitHub dispatch client are available. Native `k8s_job` phases stay in the
-   Go-managed native path and report through the native run callback APIs.
-8. Records completion through `/v1/run-callbacks/{callback_token}/completed`
-   for GitHub Actions phases or `/v1/run-callbacks/{callback_token}/native/completed`
-   for native phases. Native completion is job-scoped: every callback must
+7. Launches the claimed `k8s_job` phase through the Go-managed native launcher.
+8. Records completion through
+   `/v1/run-callbacks/{callback_token}/native/completed`. Native completion is
+   job-scoped: every callback must
    include `job_id`, and the Go decision engine only advances the phase after
    every registered job in that phase has completed.
 
@@ -369,7 +362,6 @@ Cosmos DB NoSQL on the shared `infra-cosmos-serverless` account. Database `glimm
 
 - `projects` (partition key `/name`)
 - `workflows` (partition key `/project`)
-- `hosts` (partition key `/name`)
 - `leases` (partition key `/project`)
 - `runs` (partition key `/project`) — verify-loop run state, see below
 - `locks` (partition key `/scope`) — generic mutual-exclusion primitive, see below
@@ -384,18 +376,17 @@ Runtime pod auth via the `infra-shared-identity` workload identity, which has `C
 
 ## Lock semantics
 
-Optimistic concurrency on the host doc's `_etag`. Acquire reads matching
-candidates, sorts by `lastUsedAt` (NULLs first, so unused venues are preferred),
-tries each via ETag-protected replace, and moves to the next candidate on a
-precondition failure. The loop is bounded and terminates after exhausting
-candidates.
+Native lease acquisition is slot-backed. The allocator reads active native
+leases, checks project and global concurrency, selects the first ready
+unclaimed test slot, and writes one claimed lease document. If capacity is not
+available, callers get `no_capacity`; executor work is not launched.
 
 Release paths:
 - **Fast**: workflow's own release step (if it has one).
 - **Run terminal paths**: Go completion, abort, replay, and native failure
   handlers release related issue/PR locks and update run state.
-- **Backstop**: lease TTL and stale heartbeat handling remain compatibility
-  behavior to preserve while the legacy cleanup completes.
+- **Backstop**: lease TTL and stale heartbeat handling clean abandoned native
+  claims so capacity can return to the allocator.
 
 ## One-time setup
 
@@ -422,14 +413,12 @@ The Entra side is fully tofu-managed. The GitHub App is created via the GitHub U
 Visit https://glimmung.romaine.life/, click **sign in** (top right) — MSAL popup against the `glimmung-oauth` Entra app. Once signed in (email must be in the allowlist), click **admin** to reveal the registration tabs:
 
 - **Register project** → name + github_repo
-- **Register legacy host** -> name + capabilities for explicit `gha_dispatch`
-  exception workflows
+- **Register issue** → project + title + body for a Glimmung-owned run target
 
 Workflow registrations are structural control-plane data. Apply them through
 the Glimmung API/MCP workflow registration path with a full phase shape, not as
 a project-creation side effect. The dashboard shows projects, workflows, leases,
-runs, and legacy host pools. Host tables are retained for self-hosted GitHub
-Actions exceptions, not the normal native web app path.
+runs, reports, and native test slots.
 
 ## Running locally
 
@@ -468,7 +457,7 @@ throwaway app image build with `push: false`. Pushes to `main` also run a
 Go-native live Cosmos smoke test for the lock lifecycle with GitHub OIDC, using
 the database-scoped CI role assignment in [`tofu/test-access.tf`](tofu/test-access.tf).
 
-The repository root no longer carries Python packaging, the legacy
+The repository root no longer carries Python packaging; the retired
 `src/glimmung/` app tree is gone, and the root Python `tests/` suite has been
 deleted. Repo-local agent workflow operations live in the Go CLI under
 `cmd/glimmung-agent` and reusable functions under `internal/ops/agentops`;
@@ -534,7 +523,11 @@ the PR body, to tank-operator, which gives the session its
 
 ## Verify-loop substrate (#18)
 
-Glimmung-as-orchestrator wedge: when a verify phase fails, glimmung re-dispatches an implementation phase with the prior verification artifact as additional context, repeating until verification passes, attempt count exceeds N, or cumulative cost exceeds $X. The substrate that lands here is reused by every other [meta #17](https://github.com/nelsong6/glimmung/issues/17) child.
+Glimmung-as-orchestrator wedge: when a verify phase fails, glimmung launches
+the configured native recycle phase with the prior verification context,
+repeating until verification passes, attempt count exceeds N, or cumulative
+cost exceeds $X. The substrate that lands here is reused by every other
+[meta #17](https://github.com/nelsong6/glimmung/issues/17) child.
 
 ### Opting a workflow in
 
@@ -557,9 +550,11 @@ value after `x` as the dollar ceiling; new labels should use the direct total.
 
 The budget is **frozen at run-creation time** — relabeling mid-run does not move the goalposts. Resolution order: issue label → `Workflow.budget` → glimmung global default ($25).
 
-### `verification.json` contract
+### Verification contract
 
-Every consumer workflow that opts into the verify-loop **must** upload a GHA artifact named `verification` containing `verification.json` at its root. The decision engine reads the typed verdict, never the workflow_run conclusion alone. Schema:
+Every verification `k8s_job` phase must report a typed verification payload
+through the native completion callback. The decision engine reads the typed
+verdict, never executor exit state alone. Schema:
 
 ```json
 {
@@ -575,24 +570,24 @@ Every consumer workflow that opts into the verify-loop **must** upload a GHA art
 
 `status` semantics:
 
-- `pass` — verification reached a positive verdict; glimmung records `ADVANCE` and the consumer's PR-open step proceeds.
-- `fail` — verification reached a negative verdict; glimmung dispatches the retry workflow if budget allows, otherwise aborts.
-- `error` — verifier itself crashed before reaching a verdict. Treated as a substantive negative verdict (retry up to budget), distinct from a missing artifact.
+- `pass`: verification reached a positive verdict; glimmung records `ADVANCE` and the next phase proceeds.
+- `fail`: verification reached a negative verdict; glimmung launches the recycle phase if budget allows, otherwise aborts.
+- `error`: verifier itself crashed before reaching a verdict. Treated as a substantive negative verdict, distinct from a missing payload.
 
-A missing or schema-invalid artifact is itself a decision input: the engine returns `ABORT_MALFORMED` and posts an issue comment explaining the contract violation. (Retrying the same producer would just reproduce the broken artifact.)
+A missing or schema-invalid verification payload is itself a decision input:
+the engine returns `ABORT_MALFORMED` and records the contract violation.
 
-### Retry workflow inputs
+### Recycle attempt inputs
 
-When glimmung dispatches the retry workflow, it sets:
+When glimmung launches a recycled native phase, the job environment includes:
 
 | Input | Description |
 |---|---|
-| `lease_id`                            | Fresh lease ID for the retry attempt. |
-| `host`                                | Host the retry was scheduled onto. |
-| `issue_number`                        | Issue under which the run is tracked. |
-| `run_id`                              | Glimmung Run ULID (for log correlation). |
-| `attempt_index`                       | 0-based attempt index (initial=0, first retry=1, …). |
-| `prior_verification_artifact_url`     | GHA Actions API URL of the previous attempt's `verification` artifact. The retry workflow pulls it via its own `GITHUB_TOKEN`; redirect resolves to a short-lived presigned blob. |
+| `GLIMMUNG_LEASE_REF`                  | Fresh native lease ref for the attempt. |
+| `GLIMMUNG_RUN_ID`                     | Glimmung Run ULID for log correlation. |
+| `GLIMMUNG_RUN_REF`                    | Public run ref. |
+| `GLIMMUNG_ATTEMPT_INDEX`              | 0-based attempt index (initial=0, first recycle=1, ...). |
+| `GLIMMUNG_INPUT_*`                    | Resolved phase inputs, including prior phase outputs where the workflow declares them. |
 
 ### Decision engine
 
@@ -602,8 +597,8 @@ Side effects live at the server call sites, primarily
 [`internal/server/completion_api.go`](internal/server/completion_api.go) and
 [`internal/server/replay_api.go`](internal/server/replay_api.go). Outputs:
 
-- `advance` - verification passed; consumer's PR step runs.
-- `retry` - dispatch retry workflow with `prior_verification_artifact_url`.
+- `advance` - verification passed; the next ready phase runs.
+- `retry` - launch the configured recycle phase through the native path.
 - `abort_budget_attempts` - `len(attempts) >= max_attempts`.
 - `abort_budget_cost` - `cumulative_cost_usd >= max_cost_usd` (checked first; harder cap).
 - `abort_malformed` - verification artifact missing or schema-invalid.
@@ -640,7 +635,7 @@ Deterministic: `f"{scope}::{urllib.parse.quote(key, safe='')}"`. Cosmos forbids 
 ### Test coverage
 
 Remaining generic lock edge cases identified in the cleanup inventory should be
-ported to Go store tests before the legacy lock module is deleted.
+ported to Go store tests before the retired lock module is deleted.
 
 ## Signal bus + PR triage (#19)
 
@@ -662,33 +657,29 @@ Active triage behavior:
   and `target_ref` is the PR number. Glimmung project names and Touchpoint refs
   are resolved after the signal lands, not accepted as alternate PR targets.
 
-### Triage workflow contract
+### Triage recycle contract
 
-Triage dispatch sets:
+Triage recycle launches a native phase with:
 
 | Input | Description |
 |---|---|
-| `lease_id`                            | Fresh lease ID for the triage attempt. |
-| `host`                                | Host the triage was scheduled onto. |
-| `issue_number`                        | Originating issue number. |
-| `pr_number`                           | The PR receiving the feedback. |
-| `run_id`                              | Glimmung Run ULID. |
-| `attempt_index`                       | 0-based attempt index. |
-| `feedback`                            | Human-readable feedback text from the reject signal. |
-| `prior_verification_artifact_url`     | Empty for triage (the prior attempt PASSED to open the PR; no failure context to feed back). |
+| `GLIMMUNG_LEASE_REF`                  | Fresh native lease ref for the triage run. |
+| `GLIMMUNG_RUN_ID`                     | Glimmung Run ULID. |
+| `GLIMMUNG_RUN_REF`                    | Public run ref. |
+| `GLIMMUNG_ATTEMPT_INDEX`              | 0-based attempt index. |
+| `GLIMMUNG_INPUT_*`                    | Resolved phase inputs, including human feedback when the workflow declares it. |
 
-The triage workflow contract runs impl + verify with feedback in
-context, force-pushes the result, and uploads `verification.json` (same
-contract as retry workflows; see verify-loop substrate).
+The triage contract runs implementation and verification with feedback in
+context through the same native phase and verification callback contract.
 
 ## Historical Platform Phases
 
 These are the original product build phases. The Go-runtime cleanup finished
-the app/runtime retirement of the legacy Python tree; final compatibility notes
+the app/runtime retirement of the Python tree; final cleanup notes
 live in [`docs/go-runtime-cleanup-inventory.md`](docs/go-runtime-cleanup-inventory.md).
 
 1. **Phase 1** ✓ — lease primitive, sweep job, Cosmos backend.
-2. **Phase 2** ✓ — GitHub App webhook receiver, `workflow_dispatch` firing, ingress at `glimmung.romaine.life`, Entra ID auth on admin endpoints.
+2. **Phase 2** ✓ — GitHub App webhook receiver, ingress at `glimmung.romaine.life`, Entra ID auth on admin endpoints.
 3. **Phase 3** ✓ — Dashboard with SSE, project side pane, workflow as first-class abstraction, MSAL sign-in + admin panel.
 4. **Phase 2.5** ✓ — Migrate spirelens `issue-agent.yaml` to consume glimmung leases. (Numbered out of order; see [glimmung issue #2](https://github.com/nelsong6/glimmung/issues/2) for the build order that actually happened.)
-5. **Phase 4** — Runner-grounding (verify GHA runner is online before dispatching), dashboard cancel/preempt, migrate ambience + tank-operator agent flows.
+5. **Phase 4** — Native-runner grounding, dashboard cancel/preempt, and project migrations onto the single native lease path.

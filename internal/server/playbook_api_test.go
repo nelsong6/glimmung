@@ -240,11 +240,11 @@ func (s *fakePlayableStore) ReadIssueForDispatch(context.Context, string, int) (
 }
 
 func (s *fakePlayableStore) GetWorkflowByName(context.Context, string, string) (*Workflow, error) {
-	return &Workflow{Name: "agent", Phases: []PhaseSpec{{Name: "impl", Kind: "k8s_job"}}}, nil
+	return &Workflow{Name: "agent", Phases: []PhaseSpec{{Name: "impl", Kind: "k8s_job", Jobs: []NativeJobSpec{{ID: "impl"}}}}}, nil
 }
 
 func (s *fakePlayableStore) ListProjectWorkflows(context.Context, string) ([]Workflow, error) {
-	return []Workflow{{Name: "agent", Phases: []PhaseSpec{{Name: "impl", Kind: "k8s_job"}}}}, nil
+	return []Workflow{{Name: "agent", Phases: []PhaseSpec{{Name: "impl", Kind: "k8s_job", Jobs: []NativeJobSpec{{ID: "impl"}}}}}}, nil
 }
 
 func (s *fakePlayableStore) ClaimIssueLock(context.Context, string, int, string, int) error {
@@ -257,8 +257,8 @@ func (s *fakePlayableStore) CreateRun(context.Context, CreateRunRequest) (Create
 	return CreatedRun{ID: "run-1", RunNumber: 1, RunDisplay: "1", CallbackToken: "tok"}, nil
 }
 
-func (s *fakePlayableStore) AcquireLease(context.Context, LeaseAcquireRequest) (Lease, *Host, error) {
-	return Lease{Project: "glimmung", Metadata: map[string]any{}}, nil, nil
+func (s *fakePlayableStore) AcquireLease(context.Context, LeaseAcquireRequest) (Lease, error) {
+	return Lease{Project: "glimmung", Host: stringPtr("native-k8s"), State: "claimed", Metadata: map[string]any{"native_k8s": true}}, nil
 }
 
 func (s *fakePlayableStore) AbortRunByID(context.Context, string, string, string) (AbortRunResult, error) {
@@ -267,7 +267,7 @@ func (s *fakePlayableStore) AbortRunByID(context.Context, string, string, string
 
 func TestRunPlaybookDispatchesReadyEntries(t *testing.T) {
 	store := &fakePlayableStore{}
-	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}})
+	handler := NewWithRuntimeClients(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil, &fakeNativeLauncher{})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/playbooks/glimmung/pb-ref/run", nil)

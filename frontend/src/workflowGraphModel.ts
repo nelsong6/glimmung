@@ -61,7 +61,7 @@ export function workflowToPhaseGraphModel(
 ): WorkflowGraphModel {
   const fallbackPhase: WorkflowGraphPhase = {
     name: options.fallbackPhaseName ?? workflow.name,
-    kind: "gha_dispatch",
+    kind: "k8s_job",
     verify: false,
     recycle_policy: null,
     depends_on: [],

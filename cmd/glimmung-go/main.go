@@ -43,14 +43,10 @@ func main() {
 		Issuer:                  settings.NativeWorkloadIdentityIssuer,
 		ServiceAccountTokenPath: settings.K8sSATokenPath,
 	}
-	var ghDispatch server.GHADispatchClient
-	if d, ok := ghClient.(server.GHADispatchClient); ok {
-		ghDispatch = d
-	}
-	if store != nil {
-		go server.StartSignalDrainLoop(context.Background(), store, ghDispatch, 15*time.Second, log.Printf)
-	}
 	nativeLauncher := server.NewKubernetesNativeLauncher(settings)
+	if store != nil {
+		go server.StartSignalDrainLoop(context.Background(), store, nativeLauncher, 15*time.Second, log.Printf)
+	}
 	if store != nil {
 		if nativeMinter, ok := ghClient.(server.NativeGitHubTokenMinter); ok {
 			go server.StartTestSlotReconcilerLoop(context.Background(), store, nativeLauncher, nativeMinter, 15*time.Second, log.Printf)
@@ -85,10 +81,6 @@ func (a *gitHubClientAdapter) FetchWorkflowFile(ctx context.Context, repo, name,
 		return nil, 502, err
 	}
 	return data, 200, nil
-}
-
-func (a *gitHubClientAdapter) DispatchWorkflow(ctx context.Context, repo, filename, ref string, inputs map[string]string) error {
-	return a.client.DispatchWorkflow(ctx, repo, filename, ref, inputs)
 }
 
 func (a *gitHubClientAdapter) InstallationToken(ctx context.Context) (string, error) {

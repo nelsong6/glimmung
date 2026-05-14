@@ -15,23 +15,13 @@ import { authedFetch, currentAccount, initAuth, signIn, signOut } from "./auth";
 import { isMockMode, mockRuns, mockSnapshot } from "./mockApi";
 import type { AccountInfo } from "@azure/msal-browser";
 
-type Host = {
-  name: string;
-  capabilities: Record<string, unknown>;
-  current_lease_ref: string | null;
-  last_heartbeat: string | null;
-  last_used_at: string | null;
-  drained: boolean;
-  created_at: string;
-};
-
 type Lease = {
   ref: string;
   lease_number?: number | null;
   project: string;
   workflow: string | null;
   host: string | null;
-  state: "pending" | "active" | "claimed" | "released" | "expired";
+  state: "active" | "claimed" | "released" | "expired";
   requirements: Record<string, unknown>;
   metadata: Record<string, unknown>;
   requester: Record<string, unknown> | null;
@@ -146,7 +136,6 @@ type RunReportAttempt = {
   phase: string;
   phase_kind: string;
   workflow_filename: string;
-  workflow_run_id: number | null;
   dispatched_at: string;
   completed_at: string | null;
   conclusion: string | null;
@@ -188,8 +177,6 @@ type RunReport = {
 };
 
 type Snapshot = {
-  hosts: Host[];
-  pending_leases: Lease[];
   active_leases: Lease[];
   test_environments?: TestEnvironment[];
   waiting_test_slot_requests?: TestSlotRequest[];
@@ -211,12 +198,6 @@ type LayoutContext = {
   signedIn: boolean;
   isAdmin: boolean;
   selected: Selection;
-  filteredPending: Lease[];
-  filteredActive: Lease[];
-  selectedWorkflow: Workflow | null;
-  selectedProject: Project | null;
-  eligibilityReqs: Record<string, unknown> | null;
-  matchesRequirements: (host: Host, reqs: Record<string, unknown>) => boolean;
 };
 
 const ALL: Selection = { kind: "all" };
@@ -273,7 +254,6 @@ export function App() {
           <Route path="lineage" element={null} />
         </Route>
         <Route path="projects/:project/needs-attention" element={<ProjectNeedsAttentionRoute />} />
-        <Route path="projects/:project/hosts" element={<ProjectHostsRoute />} />
         <Route path="projects/:project/runs" element={<ProjectRunsRoute />} />
         <Route path="projects/:project/runs/:runId" element={<ProjectRunRedirectRoute />} />
         <Route path="issues" element={<Navigate to="/needs-attention" replace />} />
@@ -443,57 +423,11 @@ function Layout() {
     };
   }, []);
 
-  const matchesSelection = (l: Lease): boolean => {
-    if (selected.kind === "all") return true;
-    if (selected.kind === "project") return l.project === selected.project;
-    return l.project === selected.project && l.workflow === selected.workflow;
-  };
-
-  const filteredPending = useMemo(
-    () => (snap ? snap.pending_leases.filter(matchesSelection) : []),
-    [snap, selected]
-  );
-  const filteredActive = useMemo(
-    () => (snap ? snap.active_leases.filter(matchesSelection) : []),
-    [snap, selected]
-  );
-
-  const selectedWorkflow = useMemo(() => {
-    if (!snap || selected.kind !== "workflow") return null;
-    return snap.workflows.find((w) => w.project === selected.project && w.name === selected.workflow) ?? null;
-  }, [snap, selected]);
-
-  const selectedProject = useMemo(() => {
-    if (!snap || selected.kind === "all") return null;
-    return snap.projects.find((p) => p.name === selected.project) ?? null;
-  }, [snap, selected]);
-
-  const matchesRequirements = (host: Host, reqs: Record<string, unknown>): boolean => {
-    for (const [k, want] of Object.entries(reqs)) {
-      const have = (host.capabilities as Record<string, unknown>)[k];
-      if (Array.isArray(want)) {
-        if (!Array.isArray(have)) return false;
-        for (const v of want) if (!have.includes(v)) return false;
-      } else if (have !== want) {
-        return false;
-      }
-    }
-    return true;
-  };
-
-  const eligibilityReqs = selectedWorkflow?.default_requirements ?? null;
-
   const ctx: LayoutContext = {
     snap,
     signedIn: !!account,
     isAdmin,
     selected,
-    filteredPending,
-    filteredActive,
-    selectedWorkflow,
-    selectedProject,
-    eligibilityReqs,
-    matchesRequirements,
   };
 
   const dashboardLinkClass = ({ isActive }: { isActive: boolean }) =>
@@ -911,12 +845,6 @@ function ProjectRunsRoute() {
   return <ProjectRunsView {...ctx} projectName={decodeURIComponent(params.project ?? "")} />;
 }
 
-function ProjectHostsRoute() {
-  const params = useParams<{ project?: string }>();
-  const ctx = useOutletContext<LayoutContext>();
-  return <ProjectHostsView {...ctx} projectName={decodeURIComponent(params.project ?? "")} />;
-}
-
 function ProjectRunRedirectRoute() {
   const params = useParams<{ project?: string; runId?: string }>();
   const ctx = useOutletContext<LayoutContext>();
@@ -1014,7 +942,6 @@ function HomeView({ snap }: LayoutContext) {
   const projects = snap?.projects.length ?? 0;
   const workflows = snap?.workflows.length ?? 0;
   const active = snap?.active_leases.length ?? 0;
-  const pending = snap?.pending_leases.length ?? 0;
 
   return (
     <div className="project-workspace">
@@ -1039,10 +966,6 @@ function HomeView({ snap }: LayoutContext) {
             <span>active</span>
             <strong>{active}</strong>
           </div>
-          <div className="project-fact">
-            <span>pending</span>
-            <strong>{pending}</strong>
-          </div>
         </div>
       </section>
 
@@ -1057,7 +980,7 @@ function HomeView({ snap }: LayoutContext) {
         </Link>
         <Link to="/leases/agent" className="home-link">
           <span className="key">Agent leases</span>
-          <strong>Active agent capacity and pending work leases</strong>
+          <strong>Active native agent work leases</strong>
         </Link>
         <Link to="/needs-attention" className="home-link">
           <span className="key">Needs attention</span>
@@ -1096,10 +1019,6 @@ function ProjectsView({ snap }: LayoutContext) {
             <span>active</span>
             <strong>{snap.active_leases.length}</strong>
           </div>
-          <div className="project-fact">
-            <span>pending</span>
-            <strong>{snap.pending_leases.length}</strong>
-          </div>
         </div>
       </section>
 
@@ -1118,19 +1037,14 @@ function ProjectsView({ snap }: LayoutContext) {
               <th>Workflows</th>
               <th>Test leases</th>
               <th>Agent leases</th>
-              <th>Legacy hosts</th>
             </tr>
           </thead>
           <tbody>
             {projects.map((project) => {
               const workflows = snap.workflows.filter((w) => w.project === project.name);
-              const pending = snap.pending_leases.filter((l) => l.project === project.name);
               const active = snap.active_leases.filter((l) => l.project === project.name);
-              const leases = [...active, ...pending];
-              const testLeases = leases.filter((l) => leaseKind(l) === "test");
-              const agentLeases = leases.filter((l) => leaseKind(l) === "agent");
-              const isNativeK8sProject = projectUsesNativeWorkflows(project);
-              const activeHosts = new Set(isNativeK8sProject ? [] : active.flatMap((l) => (l.host ? [l.host] : [])));
+              const testLeases = active.filter((l) => leaseKind(l) === "test");
+              const agentLeases = active.filter((l) => leaseKind(l) === "agent");
               return (
                 <tr key={project.id}>
                   <td>
@@ -1153,16 +1067,9 @@ function ProjectsView({ snap }: LayoutContext) {
                     </Link>
                   </td>
                   <td className="mono dim">
-                    {isNativeK8sProject ? (
-                      "—"
-                    ) : (
-                      <Link className="link mono" to={`/projects/${encodeURIComponent(project.name)}/leases/agent`}>
-                        {agentLeases.length}
-                      </Link>
-                    )}
-                  </td>
-                  <td className="mono dim">
-                    {activeHosts.size > 0 ? Array.from(activeHosts).join(", ") : "—"}
+                    <Link className="link mono" to={`/projects/${encodeURIComponent(project.name)}/leases/agent`}>
+                      {agentLeases.length}
+                    </Link>
                   </td>
                 </tr>
               );
@@ -1177,7 +1084,6 @@ function ProjectsView({ snap }: LayoutContext) {
 function ProjectView({
   snap,
   signedIn,
-  matchesRequirements,
   projectName,
 }: LayoutContext & { projectName: string }) {
   if (snap === null) return <div className="empty">Connecting…</div>;
@@ -1191,20 +1097,10 @@ function ProjectView({
     .filter((w) => w.project === project.name)
     .slice()
     .sort((a, b) => a.name.localeCompare(b.name));
-  const pending = snap.pending_leases.filter((l) => l.project === project.name);
   const active = snap.active_leases.filter((l) => l.project === project.name);
-  const projectLeases = [...active, ...pending];
-  const testLeases = projectLeases.filter((l) => leaseKind(l) === "test");
-  const agentLeases = projectLeases.filter((l) => leaseKind(l) === "agent");
+  const testLeases = active.filter((l) => leaseKind(l) === "test");
+  const agentLeases = active.filter((l) => leaseKind(l) === "agent");
   const projectPath = `/projects/${encodeURIComponent(project.name)}`;
-  const isNativeK8sProject = projectUsesNativeWorkflows(project);
-
-  const nonEmptyReqs = workflows
-    .map((w) => w.default_requirements)
-    .filter((r) => Object.keys(r).length > 0);
-  const hasHosts = !isNativeK8sProject && snap.hosts.some((h) =>
-    nonEmptyReqs.some((reqs) => matchesRequirements(h, reqs))
-  );
 
   return (
     <div className="project-workspace">
@@ -1240,24 +1136,18 @@ function ProjectView({
             <span>active</span>
             <strong>{active.length}</strong>
           </div>
-          <div className="project-fact">
-            <span>pending</span>
-            <strong>{pending.length}</strong>
-          </div>
         </div>
       </section>
 
       <section className="home-links" aria-label={`${project.name} destinations`}>
         <Link to={`${projectPath}/leases/test`} className="home-link">
           <span className="key">Test leases</span>
-          <strong>{testLeases.length} active or pending test environment lease{testLeases.length === 1 ? "" : "s"}</strong>
+          <strong>{testLeases.length} active test environment lease{testLeases.length === 1 ? "" : "s"}</strong>
         </Link>
-        {!isNativeK8sProject && (
-          <Link to={`${projectPath}/leases/agent`} className="home-link">
-            <span className="key">Agent leases</span>
-            <strong>{agentLeases.length} active or pending agent lease{agentLeases.length === 1 ? "" : "s"}</strong>
-          </Link>
-        )}
+        <Link to={`${projectPath}/leases/agent`} className="home-link">
+          <span className="key">Agent leases</span>
+          <strong>{agentLeases.length} active agent lease{agentLeases.length === 1 ? "" : "s"}</strong>
+        </Link>
         <Link to={`${projectPath}/workflows`} className="home-link">
           <span className="key">Workflows</span>
           <strong>Definitions, triggers, requirements, and workflow-scoped work</strong>
@@ -1282,12 +1172,6 @@ function ProjectView({
           <span className="key">Runs</span>
           <strong>Run and cycle history for project work</strong>
         </Link>
-        {hasHosts && (
-          <Link to={`${projectPath}/hosts`} className="home-link">
-            <span className="key">Legacy hosts</span>
-            <strong>Self-hosted gha_dispatch capacity for exception workflows</strong>
-          </Link>
-        )}
       </section>
 
       <IssuesView
@@ -1316,7 +1200,6 @@ function ProjectWorkflowsView({
     .filter((w) => w.project === project.name)
     .slice()
     .sort((a, b) => a.name.localeCompare(b.name));
-  const pending = snap.pending_leases.filter((l) => l.project === project.name);
   const active = snap.active_leases.filter((l) => l.project === project.name);
 
   return (
@@ -1336,10 +1219,6 @@ function ProjectWorkflowsView({
             <span>active</span>
             <strong>{active.length}</strong>
           </div>
-          <div className="project-fact">
-            <span>pending</span>
-            <strong>{pending.length}</strong>
-          </div>
         </div>
       </section>
 
@@ -1358,7 +1237,6 @@ function ProjectWorkflowsView({
           </thead>
           <tbody>
             {workflows.map((w) => {
-              const wPending = pending.filter((l) => l.workflow === w.name).length;
               const wActive = active.filter((l) => l.workflow === w.name).length;
               const fileUrl = githubFileUrl(project.github_repo, w.workflow_ref, w.workflow_filename);
               const sourceLabel = workflowSourceLabel(w);
@@ -1378,7 +1256,7 @@ function ProjectWorkflowsView({
                   </td>
                   <td className="mono dim">{w.trigger_label}</td>
                   <td><RequirementPills requirements={w.default_requirements} /></td>
-                  <td className="mono dim">{wActive} active / {wPending} pending</td>
+                  <td className="mono dim">{wActive} active</td>
                 </tr>
               );
             })}
@@ -1487,9 +1365,8 @@ function ProjectWorkflowView({
     return <div className="empty">Workflow {workflowName || "(missing)"} was not found.</div>;
   }
 
-  const pending = snap.pending_leases.filter((l) => l.project === project.name && l.workflow === workflow.name);
   const active = snap.active_leases.filter((l) => l.project === project.name && l.workflow === workflow.name);
-  const currentWork = [...active, ...pending];
+  const currentWork = active;
 
   return (
     <div className="project-workspace">
@@ -1503,10 +1380,6 @@ function ProjectWorkflowView({
           <div className="project-fact">
             <span>active</span>
             <strong>{active.length}</strong>
-          </div>
-          <div className="project-fact">
-            <span>pending</span>
-            <strong>{pending.length}</strong>
           </div>
           <div className="project-fact">
             <span>trigger</span>
@@ -1529,7 +1402,7 @@ function ProjectWorkflowView({
       <WorkflowDefinitionGraph workflow={workflow} />
 
       <h2>Current work</h2>
-      <CurrentWorkTable leases={currentWork} emptyText={`No active or pending work for ${workflow.name}.`} />
+      <CurrentWorkTable leases={currentWork} emptyText={`No active work for ${workflow.name}.`} />
 
       <IssuesView
         signedIn={signedIn}
@@ -1859,8 +1732,7 @@ function ProjectRunsView({
   }
 
   const active = snap.active_leases.filter((l) => l.project === project.name);
-  const pending = snap.pending_leases.filter((l) => l.project === project.name);
-  const currentWork = [...active, ...pending];
+  const currentWork = active;
 
   const runs = isMockMode()
     ? mockRuns.filter((run) => run.project === project.name)
@@ -1879,10 +1751,6 @@ function ProjectRunsView({
           <div className="project-fact">
             <span>active</span>
             <strong>{active.length}</strong>
-          </div>
-          <div className="project-fact">
-            <span>pending</span>
-            <strong>{pending.length}</strong>
           </div>
           {runs.length > 0 && (
             <div className="project-fact">
@@ -1912,92 +1780,9 @@ function ProjectRunsView({
         ) : currentWork.length === 0 ? (
           <CurrentWorkTable
             leases={currentWork}
-            emptyText={`No active, pending, or completed runs for ${project.name}.`}
+            emptyText={`No active or completed runs for ${project.name}.`}
           />
         ) : null
-      )}
-    </div>
-  );
-}
-
-function ProjectHostsView({
-  snap,
-  projectName,
-  matchesRequirements,
-}: LayoutContext & { projectName: string }) {
-  if (snap === null) return <div className="empty">Connecting…</div>;
-
-  const project = snap.projects.find((p) => p.name === projectName);
-  if (!project) return <div className="empty">Project {projectName || "(missing)"} was not found.</div>;
-
-  const workflows = snap.workflows.filter((w) => w.project === project.name);
-  const nonEmptyReqs = workflows
-    .map((w) => w.default_requirements)
-    .filter((r) => Object.keys(r).length > 0);
-
-  const hosts = snap.hosts.filter((h) =>
-    nonEmptyReqs.some((reqs) => matchesRequirements(h, reqs))
-  );
-  const leaseLabels = new Map(
-    [...snap.active_leases, ...snap.pending_leases].map((lease) => [
-      lease.ref,
-      leaseDisplayName(lease),
-    ]),
-  );
-
-  return (
-    <div className="project-workspace">
-      <section className="project-hero">
-        <div className="project-hero-main">
-          <div className="project-kicker mono">legacy gha capacity / {project.name}</div>
-          <h2>Legacy hosts</h2>
-          <div className="project-repo mono">self-hosted runner pool for explicit gha_dispatch workflows</div>
-        </div>
-        <div className="project-facts">
-          <div className="project-fact"><span>total</span><strong>{hosts.length}</strong></div>
-          <div className="project-fact"><span>free</span><strong>{hosts.filter((h) => !h.drained && !h.current_lease_ref).length}</strong></div>
-          <div className="project-fact"><span>busy</span><strong>{hosts.filter((h) => !h.drained && h.current_lease_ref).length}</strong></div>
-          <div className="project-fact"><span>drained</span><strong>{hosts.filter((h) => h.drained).length}</strong></div>
-        </div>
-      </section>
-
-      {hosts.length === 0 ? (
-        <div className="empty">No legacy hosts match this project's workflow requirements.</div>
-      ) : (
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Capabilities</th>
-              <th>State</th>
-              <th>Current lease</th>
-              <th>Last heartbeat</th>
-              <th>Last used</th>
-            </tr>
-          </thead>
-          <tbody>
-            {hosts.map((h) => (
-              <tr key={h.name}>
-                <td className="mono">{h.name}</td>
-                <td className="mono">{JSON.stringify(h.capabilities)}</td>
-                <td>
-                  {h.drained ? (
-                    <span className="pill drain">drained</span>
-                  ) : h.current_lease_ref ? (
-                    <span className="pill busy">busy</span>
-                  ) : (
-                    <span className="pill free">free</span>
-                  )}
-                </td>
-                <td className="mono dim">
-                  {h.current_lease_ref ? leaseLabels.get(h.current_lease_ref) ?? "active lease" : "—"}
-                </td>
-                <td className="mono dim">{relTime(h.last_heartbeat)}</td>
-                <td className="mono dim">{relTime(h.last_used_at)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
       )}
     </div>
   );
@@ -2282,7 +2067,6 @@ function projectRunReportGraph(report: RunReport, workflow: Workflow | undefined
       phase: attempt.phase,
       phase_kind: attempt.phase_kind,
       workflow_filename: attempt.workflow_filename,
-      workflow_run_id: attempt.workflow_run_id,
       completed_at: attempt.completed_at,
       conclusion: attempt.conclusion,
       verification_status: attempt.verification_status,
@@ -2493,7 +2277,7 @@ function ProjectRunView({
 function runStatePill(state: string): string {
   if (state === "passed") return "free";
   if (state === "in_progress" || state === "needs_review") return "busy";
-  if (state === "pending") return "pending";
+  if (state === "pending") return "info";
   if (state === "aborted" || state === "failed") return "drain";
   return "info";
 }
@@ -2535,8 +2319,6 @@ function LeaseIndexView({
   }
 
   const leases = leasesFor(snap, kind, projectName);
-  const pending = leases.filter((l) => l.state === "pending");
-  const active = leases.filter((l) => l.state === "active");
   const basePath = projectName
     ? `/projects/${encodeURIComponent(projectName)}/leases/${kind}`
     : `/leases/${kind}`;
@@ -2552,28 +2334,15 @@ function LeaseIndexView({
         <div className="project-facts">
           <div className="project-fact">
             <span>active</span>
-            <strong>{active.length}</strong>
-          </div>
-          <div className="project-fact">
-            <span>pending</span>
-            <strong>{pending.length}</strong>
+            <strong>{leases.length}</strong>
           </div>
         </div>
       </section>
 
-      <h2>Active ({active.length})</h2>
+      <h2>Active ({leases.length})</h2>
       <LeaseTable
-        leases={active}
+        leases={leases}
         emptyText={`No active ${leaseKindNoun(kind)} leases.`}
-        detailBasePath={basePath}
-        showProject={!projectName}
-        signedIn={signedIn}
-      />
-
-      <h2>Pending ({pending.length})</h2>
-      <LeaseTable
-        leases={pending}
-        emptyText={`No pending ${leaseKindNoun(kind)} leases.`}
         detailBasePath={basePath}
         showProject={!projectName}
         signedIn={signedIn}
@@ -2981,7 +2750,7 @@ function LeaseCancelAction({ lease, compact = false }: { lease: Lease; compact?:
 }
 
 function leasesFor(snap: Snapshot, kind: LeaseKind, projectName?: string): Lease[] {
-  return [...snap.active_leases, ...snap.pending_leases]
+  return snap.active_leases
     .filter((lease) => leaseKind(lease) === kind)
     .filter((lease) => !projectName || lease.project === projectName)
     .sort((a, b) => {
@@ -3059,32 +2828,6 @@ function compactWorkLabel(kind: string, state?: string | null, startedAt?: strin
   if (state) return `${kind}${suffix} ${state}`;
   if (startedAt) return `${kind}${suffix} running`;
   return `${kind}${suffix}`;
-}
-
-function projectUsesNativeWorkflows(project: Project): boolean {
-  const metadata = project.metadata ?? {};
-  return metadata.native_webapp === true
-    || metadata.nativeWebapp === true
-    || isNativeWebappMetadataValue(metadata.app_kind)
-    || isNativeWebappMetadataValue(metadata.appKind)
-    || isNativeWebappMetadataValue(metadata.app_type)
-    || isNativeWebappMetadataValue(metadata.appType)
-    || isNativeWebappMetadataValue(metadata.kind);
-}
-
-function isNativeWebappMetadataValue(value: unknown): boolean {
-  if (typeof value !== "string") return false;
-  switch (value.trim().toLowerCase()) {
-    case "native_webapp":
-    case "native-webapp":
-    case "native webapp":
-    case "native_web_app":
-    case "native-web-app":
-    case "native web app":
-      return true;
-    default:
-      return false;
-  }
 }
 
 function projectTestEnvironmentCount(project: Project, fallback: number): number {

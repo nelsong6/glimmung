@@ -15,39 +15,15 @@ import (
 
 type StateStore interface {
 	ReadStore
-	ListHosts(ctx context.Context) ([]Host, error)
 	ListLeases(ctx context.Context) ([]Lease, error)
 }
 
 type StateSnapshot struct {
-	Hosts                   []HostPublic            `json:"hosts"`
-	PendingLeases           []LeasePublic           `json:"pending_leases"`
 	ActiveLeases            []LeasePublic           `json:"active_leases"`
 	TestEnvironments        []TestEnvironmentPublic `json:"test_environments"`
 	WaitingTestSlotRequests []TestSlotRequestPublic `json:"waiting_test_slot_requests"`
 	Projects                []Project               `json:"projects"`
 	Workflows               []Workflow              `json:"workflows"`
-}
-
-type Host struct {
-	ID             string         `json:"-"`
-	Name           string         `json:"name"`
-	Capabilities   map[string]any `json:"capabilities"`
-	CurrentLeaseID *string        `json:"-"`
-	LastHeartbeat  *time.Time     `json:"last_heartbeat"`
-	LastUsedAt     *time.Time     `json:"last_used_at"`
-	Drained        bool           `json:"drained"`
-	CreatedAt      time.Time      `json:"created_at"`
-}
-
-type HostPublic struct {
-	Name            string         `json:"name"`
-	Capabilities    map[string]any `json:"capabilities"`
-	CurrentLeaseRef *string        `json:"current_lease_ref"`
-	LastHeartbeat   *time.Time     `json:"last_heartbeat"`
-	LastUsedAt      *time.Time     `json:"last_used_at"`
-	Drained         bool           `json:"drained"`
-	CreatedAt       time.Time      `json:"created_at"`
 }
 
 type Lease struct {
@@ -235,16 +211,12 @@ func loadStateSnapshot(ctx context.Context, settings Settings, store ReadStore) 
 	if err != nil {
 		return StateSnapshot{}, stateSnapshotError{status: http.StatusInternalServerError, message: "list workflows failed"}
 	}
-	hosts, err := stateStore.ListHosts(ctx)
-	if err != nil {
-		return StateSnapshot{}, stateSnapshotError{status: http.StatusInternalServerError, message: "list hosts failed"}
-	}
 	leases, err := stateStore.ListLeases(ctx)
 	if err != nil {
 		return StateSnapshot{}, stateSnapshotError{status: http.StatusInternalServerError, message: "list leases failed"}
 	}
 
-	return computeStateSnapshot(settings, projects, workflows, hosts, leases), nil
+	return computeStateSnapshot(settings, projects, workflows, leases), nil
 }
 
 func writeStateSnapshotError(w http.ResponseWriter, err error) {
@@ -259,65 +231,30 @@ func computeStateSnapshot(
 	settings Settings,
 	projects []Project,
 	workflows []Workflow,
-	hosts []Host,
 	leases []Lease,
 ) StateSnapshot {
-	pending := make([]Lease, 0)
 	active := make([]Lease, 0)
 	waiting := make([]TestSlotRequestPublic, 0)
-	leaseRefsByID := map[string]string{}
 	for _, lease := range leases {
 		switch {
 		case lease.Kind == "test_slot_request" && lease.State == "waiting":
 			waiting = append(waiting, testRequestToPublic(lease))
-		case lease.State == "pending":
-			pending = append(pending, lease)
-			leaseRefsByID[lease.ID] = leasePublicRef(lease)
 		case lease.State == "claimed":
 			active = append(active, lease)
-			leaseRefsByID[lease.ID] = leasePublicRef(lease)
 		}
 	}
 
-	publicHosts := make([]HostPublic, 0, len(hosts))
-	for _, host := range hosts {
-		publicHosts = append(publicHosts, hostToPublic(host, leaseRefsByID))
-	}
-	pendingPublic := make([]LeasePublic, 0, len(pending))
-	for _, lease := range pending {
-		pendingPublic = append(pendingPublic, leaseToPublic(lease))
-	}
 	activePublic := make([]LeasePublic, 0, len(active))
 	for _, lease := range active {
 		activePublic = append(activePublic, leaseToPublic(lease))
 	}
 
 	return StateSnapshot{
-		Hosts:                   publicHosts,
-		PendingLeases:           pendingPublic,
 		ActiveLeases:            activePublic,
 		TestEnvironments:        testEnvironmentsFromSnapshot(settings, projects, active, waiting),
 		WaitingTestSlotRequests: waiting,
 		Projects:                sliceOrEmpty(projects),
 		Workflows:               sliceOrEmpty(workflows),
-	}
-}
-
-func hostToPublic(host Host, leaseRefsByID map[string]string) HostPublic {
-	var leaseRef *string
-	if host.CurrentLeaseID != nil {
-		if value, ok := leaseRefsByID[*host.CurrentLeaseID]; ok {
-			leaseRef = &value
-		}
-	}
-	return HostPublic{
-		Name:            host.Name,
-		Capabilities:    mapOrEmpty(host.Capabilities),
-		CurrentLeaseRef: leaseRef,
-		LastHeartbeat:   host.LastHeartbeat,
-		LastUsedAt:      host.LastUsedAt,
-		Drained:         host.Drained,
-		CreatedAt:       host.CreatedAt,
 	}
 }
 

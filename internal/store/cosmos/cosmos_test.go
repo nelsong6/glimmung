@@ -61,8 +61,8 @@ func TestWorkflowFromDocConvertsNestedShapeAndInfersSequentialDependsOn(t *testi
 			},
 			{
 				"name": "agent",
-				"kind": "gha_dispatch",
-				"workflowFilename": "agent.yml",
+				"kind": "k8s_job",
+				"workflowFilename": "k8s_job:agent",
 				"verify": true,
 				"recyclePolicy": {"maxAttempts": 4, "on": ["verify_fail"], "landsAt": "self"}
 			},
@@ -130,7 +130,7 @@ func TestWorkflowFromDocRespectsExplicitDependsOn(t *testing.T) {
 	}
 }
 
-func TestNormalizeWorkflowRegisterForNativeWebappProjectDefaultsToK8sJob(t *testing.T) {
+func TestNormalizeWorkflowRegisterForProjectDefaultsToK8sJob(t *testing.T) {
 	req := server.WorkflowRegister{
 		Project: "glimmung",
 		Name:    "agent-run",
@@ -157,12 +157,12 @@ func TestNormalizeWorkflowRegisterForNativeWebappProjectDefaultsToK8sJob(t *test
 	}
 }
 
-func TestValidateWorkflowForNativeWebappProjectRejectsExplicitGHA(t *testing.T) {
+func TestValidateWorkflowForProjectRejectsNonNativeKind(t *testing.T) {
 	req := server.WorkflowRegister{
 		Project: "glimmung",
 		Name:    "agent-run",
 		Phases: []server.PhaseSpec{
-			{Name: "prepare", Kind: "gha_dispatch"},
+			{Name: "prepare", Kind: "container"},
 			{Name: "test", Kind: "k8s_job", Verify: true},
 			{Name: "cleanup", Kind: "k8s_job", Always: true},
 		},
@@ -174,35 +174,6 @@ func TestValidateWorkflowForNativeWebappProjectRejectsExplicitGHA(t *testing.T) 
 
 	if err := validateWorkflowForProject(project, req); err == nil {
 		t.Fatal("validateWorkflowForProject succeeded, want error")
-	}
-}
-
-func TestHostFromDocConvertsLeaseAndTimes(t *testing.T) {
-	raw := []byte(`{
-		"id": "runner-1",
-		"name": "runner-1",
-		"capabilities": {"gpu": "none"},
-		"currentLeaseId": "lease-1",
-		"lastHeartbeat": "2026-05-11T03:00:00Z",
-		"lastUsedAt": "2026-05-11T02:00:00Z",
-		"drained": true,
-		"createdAt": "2026-05-10T03:00:00Z"
-	}`)
-	var doc hostDoc
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		t.Fatalf("decode doc: %v", err)
-	}
-
-	host := hostFromDoc(doc)
-
-	if host.CurrentLeaseID == nil || *host.CurrentLeaseID != "lease-1" {
-		t.Fatalf("CurrentLeaseID=%v", host.CurrentLeaseID)
-	}
-	if host.LastHeartbeat == nil || host.LastUsedAt == nil {
-		t.Fatalf("host times=%#v", host)
-	}
-	if !host.Drained {
-		t.Fatal("Drained=false, want true")
 	}
 }
 
@@ -319,7 +290,7 @@ func TestListedLeaseFromDocSkipsLeaseNumberCounters(t *testing.T) {
 			Project: "ambience",
 		},
 		{
-			ID:      "legacy-counter",
+			ID:      "old-counter",
 			Kind:    "lease_number_counter",
 			Project: "ambience",
 		},
@@ -346,7 +317,6 @@ func TestListedLeaseFromDocSkipsLeaseNumberCounters(t *testing.T) {
 
 func TestRunReportsFromDocsBuildsPublicRefsAndAttempts(t *testing.T) {
 	cost := 1.25
-	workflowRunID := int64(123)
 	completed := "2026-05-11T03:05:00Z"
 	docs := []runDoc{
 		{
@@ -363,9 +333,8 @@ func TestRunReportsFromDocsBuildsPublicRefsAndAttempts(t *testing.T) {
 			Attempts: []attemptDoc{{
 				AttemptIndex:     0,
 				Phase:            "implement",
-				PhaseKind:        "gha_dispatch",
-				WorkflowFilename: "agent.yml",
-				WorkflowRunID:    &workflowRunID,
+				PhaseKind:        "k8s_job",
+				WorkflowFilename: "k8s_job:implement",
 				DispatchedAt:     "2026-05-11T03:01:00Z",
 				CompletedAt:      completed,
 				Conclusion:       stringPtr("success"),
@@ -404,7 +373,7 @@ func TestRunReportsFromDocsBuildsPublicRefsAndAttempts(t *testing.T) {
 		t.Fatalf("new refs=%#v", reports[0])
 	}
 	if reports[1].RunRef != "glimmung#141/runs/1" {
-		t.Fatalf("legacy fallback ref=%#v", reports[1])
+		t.Fatalf("numberless fallback ref=%#v", reports[1])
 	}
 	if reports[0].AttemptsCount != 1 || reports[0].CurrentPhase == nil || *reports[0].CurrentPhase != "implement" {
 		t.Fatalf("attempt summary=%#v", reports[0])
@@ -447,7 +416,7 @@ func TestIssueDetailFromDocBuildsPublicShape(t *testing.T) {
 		t.Fatalf("detail refs=%#v", detail)
 	}
 	if detail.Repo != nil || detail.HTMLURL != nil {
-		t.Fatalf("legacy github fields should be nil: %#v", detail)
+		t.Fatalf("github fields should be nil: %#v", detail)
 	}
 	if len(detail.Comments) != 1 || detail.Comments[0].ID != "comment-1" {
 		t.Fatalf("comments=%#v", detail.Comments)
@@ -496,13 +465,13 @@ func TestIssueRunContextMapsLatestRunAndNeedsAttention(t *testing.T) {
 func TestCancelLeaseCandidateRankPrefersActiveLease(t *testing.T) {
 	claimed := leaseDoc{State: "claimed"}
 	released := leaseDoc{State: "released"}
-	pending := leaseDoc{State: "pending"}
+	waiting := leaseDoc{State: "waiting"}
 
 	if cancelLeaseCandidateRank(claimed) >= cancelLeaseCandidateRank(released) {
 		t.Fatal("claimed lease should rank ahead of released lease")
 	}
-	if cancelLeaseCandidateRank(pending) >= cancelLeaseCandidateRank(released) {
-		t.Fatal("pending lease should rank ahead of released lease")
+	if cancelLeaseCandidateRank(waiting) >= cancelLeaseCandidateRank(released) {
+		t.Fatal("waiting lease should rank ahead of released lease")
 	}
 }
 
@@ -514,13 +483,13 @@ func TestSelectLeaseDocByPublicRefSkipsCountersAndPrefersActive(t *testing.T) {
 			Project: "ambience",
 		},
 		{
-			ID:         "released-legacy",
+			ID:         "released-old",
 			Project:    "ambience",
 			State:      "released",
 			ReleasedAt: "2026-05-11T04:00:00Z",
 		},
 		{
-			ID:          "claimed-legacy",
+			ID:          "claimed-old",
 			Project:     "ambience",
 			State:       "claimed",
 			RequestedAt: "2026-05-11T05:00:00Z",
@@ -529,8 +498,8 @@ func TestSelectLeaseDocByPublicRefSkipsCountersAndPrefersActive(t *testing.T) {
 
 	found := selectLeaseDocByPublicRef(docs, "ambience/lease")
 
-	if found == nil || found.ID != "claimed-legacy" {
-		t.Fatalf("selected=%#v, want claimed legacy lease", found)
+	if found == nil || found.ID != "claimed-old" {
+		t.Fatalf("selected=%#v, want claimed lease", found)
 	}
 }
 

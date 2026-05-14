@@ -74,6 +74,10 @@ continue activation from those records. On success Glimmung records
 `activation_completed_at`; on failure it records `activation_error`, marks the
 slot `error`, and releases the lease after cleanup.
 
+When native Playwright support is enabled, activation must create the
+slot-local `slot-playwright` Deployment and Service and wait for the Deployment
+to report ready and available replicas before recording the slot as active.
+
 ### MCP Checkout Surface
 
 `nelsong6/mcp-glimmung` exposes `checkout_test_slot` as the session-facing MCP
@@ -193,6 +197,8 @@ The slot system is not complete until all of these are true:
   fields, lease metadata, or phase inputs.
 - Checkout returns quickly. Runtime activation is durable, async, recoverable,
   and pollable through slot status.
+- Playwright-enabled slots do not report `usable: true` until the
+  lease-scoped `slot-playwright` Deployment is ready.
 - Return returns quickly. Runtime cleanup is durable, async, recoverable, and
   keeps the lease claimed until the slot is safe to allocate again.
 - Lease callback release follows the same cleanup path as public test-slot
@@ -208,5 +214,5 @@ The slot system is not complete until all of these are true:
 - CI or a dispatchable smoke workflow exercises checkout, activation, return,
   cleanup, and no-runtime-after-return against a live configured project.
 - Function names, resource names, and documentation use the slot lifecycle
-  terms in this document. Legacy names may remain only for compatibility
-  cleanup of old resources.
+  terms in this document. Retired names are cleanup targets, not supported
+  aliases.

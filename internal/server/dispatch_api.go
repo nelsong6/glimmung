@@ -71,7 +71,7 @@ type RunDispatchStore interface {
 	ClaimIssueLock(ctx context.Context, project string, issueNumber int, holderID string, ttlSeconds int) error
 	ReleaseIssueLock(ctx context.Context, project string, issueNumber int, holderID string)
 	CreateRun(ctx context.Context, req CreateRunRequest) (CreatedRun, error)
-	AcquireLease(ctx context.Context, req LeaseAcquireRequest) (Lease, *Host, error)
+	AcquireLease(ctx context.Context, req LeaseAcquireRequest) (Lease, error)
 	AbortRunByID(ctx context.Context, project, runID, reason string) (AbortRunResult, error)
 }
 
@@ -99,7 +99,7 @@ type PublicDispatchResult struct {
 }
 
 // dispatchRunHandler handles POST /v1/runs/dispatch (admin-only).
-func dispatchRunHandler(store ReadStore, ghDispatch GHADispatchClient, nativeLauncher NativeLauncher) http.HandlerFunc {
+func dispatchRunHandler(store ReadStore, nativeLauncher NativeLauncher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		dispatchStore, ok := store.(RunDispatchStore)
 		if !ok || dispatchStore == nil {
@@ -112,7 +112,7 @@ func dispatchRunHandler(store ReadStore, ghDispatch GHADispatchClient, nativeLau
 			writeProblem(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
-		result, problem := dispatchRun(r.Context(), dispatchStore, ghDispatch, nativeLauncher, req)
+		result, problem := dispatchRun(r.Context(), dispatchStore, nativeLauncher, req)
 		if problem != nil {
 			writeProblem(w, problem.status, problem.message)
 			return
@@ -126,7 +126,7 @@ type dispatchProblem struct {
 	message string
 }
 
-func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, ghDispatch GHADispatchClient, nativeLauncher NativeLauncher, req DispatchRunRequest) (PublicDispatchResult, *dispatchProblem) {
+func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, nativeLauncher NativeLauncher, req DispatchRunRequest) (PublicDispatchResult, *dispatchProblem) {
 	if req.Project == "" {
 		return PublicDispatchResult{}, &dispatchProblem{status: http.StatusBadRequest, message: "project required"}
 	}
@@ -171,6 +171,16 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, ghDispatch
 		}, nil
 	}
 
+	if nativeLauncher == nil {
+		return PublicDispatchResult{}, &dispatchProblem{status: http.StatusServiceUnavailable, message: "native launcher not configured"}
+	}
+
+	initPhase := wf.Phases[0]
+	phaseKind := workflowPhaseKind(initPhase.Kind)
+	if err := validateNativeWorkflowKind(phaseKind); err != nil {
+		return PublicDispatchResult{}, &dispatchProblem{status: http.StatusUnprocessableEntity, message: err.Error()}
+	}
+
 	holderID := newDispatchID()
 	if err := dispatchStore.ClaimIssueLock(ctx, req.Project, req.IssueNumber, holderID, defaultIssueLockTTLSeconds); err != nil {
 		if errors.Is(err, ErrAlreadyRunning) {
@@ -190,11 +200,6 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, ghDispatch
 	}
 	resolvedBudget := budget.ResolveBudget(issue.Labels, wfBudget)
 
-	initPhase := wf.Phases[0]
-	phaseKind := initPhase.Kind
-	if phaseKind == "" {
-		phaseKind = "gha_dispatch"
-	}
 	workflowFilename := initPhase.WorkflowFilename
 	if workflowFilename == "" {
 		workflowFilename = fmt.Sprintf("%s:%s", phaseKind, initPhase.Name)
@@ -241,16 +246,14 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, ghDispatch
 		"issue_number":         strconv.Itoa(req.IssueNumber),
 		"work_context_branch":  fmt.Sprintf("issue-%d-run-%s", req.IssueNumber, run.RunDisplay),
 	}
-	if phaseKind == "k8s_job" {
-		metadata["native_k8s"] = true
-	}
+	metadata["native_k8s"] = true
 
 	requirements := initPhase.Requirements
 	if len(requirements) == 0 {
 		requirements = wf.DefaultRequirements
 	}
 	wfName := wf.Name
-	lease, host, err := dispatchStore.AcquireLease(ctx, LeaseAcquireRequest{
+	lease, err := dispatchStore.AcquireLease(ctx, LeaseAcquireRequest{
 		Project:      req.Project,
 		Workflow:     &wfName,
 		Requirements: requirements,
@@ -258,7 +261,32 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, ghDispatch
 	})
 	if err != nil {
 		dispatchStore.AbortRunByID(ctx, req.Project, run.ID, "lease_acquire_failed") //nolint:errcheck
+		if errors.Is(err, ErrUnavailable) {
+			return PublicDispatchResult{
+				State:       "no_capacity",
+				IssueRef:    &issueRef,
+				IssueNumber: &issueNum,
+				RunNumber:   &run.RunNumber,
+				RunID:       &run.ID,
+				RunRef:      &runRef,
+				Workflow:    &wf.Name,
+				Detail:      stringPtr("native capacity unavailable"),
+			}, nil
+		}
 		return PublicDispatchResult{}, &dispatchProblem{status: http.StatusInternalServerError, message: "acquire lease failed"}
+	}
+	if lease.State != "claimed" {
+		dispatchStore.AbortRunByID(ctx, req.Project, run.ID, "native_lease_not_claimed") //nolint:errcheck
+		return PublicDispatchResult{
+			State:       "dispatch_failed",
+			IssueRef:    &issueRef,
+			IssueNumber: &issueNum,
+			RunNumber:   &run.RunNumber,
+			RunID:       &run.ID,
+			RunRef:      &runRef,
+			Workflow:    &wf.Name,
+			Detail:      stringPtr("native lease was not claimed"),
+		}, nil
 	}
 
 	wfNameStr := wf.Name
@@ -272,25 +300,7 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, ghDispatch
 		Lease:       "claimed",
 	}
 
-	if host != nil && phaseKind == "gha_dispatch" && ghDispatch != nil {
-		inputs := buildInitialDispatchInputs(lease, host, run, runRef, initPhase, req.IssueNumber, issueRef)
-		wfRef := initPhase.WorkflowRef
-		if wfRef == "" {
-			wfRef = "main"
-		}
-		if err := ghDispatch.DispatchWorkflow(ctx, issueRepo, workflowFilename, wfRef, inputs); err != nil {
-			dispatchStore.AbortRunByID(ctx, req.Project, run.ID, "dispatch_failed: "+err.Error()) //nolint:errcheck
-			detail := fmt.Sprintf("runner dispatch failed: %s", err)
-			return PublicDispatchResult{
-				State:    "dispatch_failed",
-				Workflow: &wfNameStr,
-				Detail:   &detail,
-			}, nil
-		}
-		result.State = "dispatched"
-		hostName := host.Name
-		result.Host = &hostName
-	} else if phaseKind == "k8s_job" && nativeLauncher != nil && lease.State == "claimed" {
+	if lease.State == "claimed" {
 		runData := RunReplayData{
 			ID:               run.ID,
 			Project:          req.Project,
@@ -318,13 +328,7 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, ghDispatch
 			return result, nil
 		}
 		result.State = "dispatched"
-		hostName := "native-k8s"
-		if host != nil {
-			hostName = host.Name
-		}
-		result.Host = &hostName
-	} else {
-		result.State = "pending"
+		result.Host = lease.Host
 	}
 
 	return result, nil
@@ -366,40 +370,6 @@ func resolveDispatchWorkflow(ctx context.Context, store RunDispatchStore, projec
 		}
 		return nil, fmt.Sprintf("project %q has multiple workflows; specify one of %v", project, names), nil
 	}
-}
-
-// buildInitialDispatchInputs constructs the workflow_dispatch input map for the first attempt.
-func buildInitialDispatchInputs(lease Lease, host *Host, run CreatedRun, runRef string, phase PhaseSpec, issueNumber int, issueRef string) map[string]string {
-	inputs := map[string]string{
-		"attempt_index":      "0",
-		"issue_ref":          issueRef,
-		"issue_number":       strconv.Itoa(issueNumber),
-		"run_callback_token": run.CallbackToken,
-		"run_number":         strconv.Itoa(run.RunNumber),
-		"run_display_number": run.RunDisplay,
-		"run_ref":            runRef,
-		"phase_name":         phase.Name,
-	}
-	if host != nil {
-		inputs["host"] = host.Name
-	}
-	var slotName string
-	if m, ok := lease.Metadata["native_slot_name"].(string); ok {
-		slotName = m
-	}
-	inputs["lease_ref"] = publicids.LeaseRef(lease.Project, slotName, lease.LeaseNumber)
-	if t, ok := lease.Metadata["lease_callback_token"].(string); ok && t != "" {
-		inputs["lease_callback_token"] = t
-	}
-	if lease.LeaseNumber != nil {
-		inputs["lease_number"] = strconv.Itoa(*lease.LeaseNumber)
-	}
-	for k, v := range phase.Inputs {
-		if _, exists := inputs[k]; !exists {
-			inputs[k] = v
-		}
-	}
-	return inputs
 }
 
 // newDispatchID generates a random 32-char hex string to use as an issue lock holder ID.

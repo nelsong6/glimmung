@@ -114,36 +114,38 @@ func (l *KubernetesNativeLauncher) EnsureTestSlotPreliminaries(ctx context.Conte
 
 func (l *KubernetesNativeLauncher) ActivateTestSlotRuntime(ctx context.Context, lease Lease, project Project, minter NativeGitHubTokenMinter) error {
 	slotName, _ := stringFromMap(lease.Metadata, "native_slot_name")
-	if strings.TrimSpace(slotName) == "" {
+	slotName = strings.TrimSpace(slotName)
+	if slotName == "" {
 		return nil
-	}
-	config, ok := testSlotHelmConfig(project)
-	if !ok {
-		return nil
-	}
-	if strings.TrimSpace(project.GitHubRepo) == "" {
-		return fmt.Errorf("github_repo is required for test slot runtime activation")
-	}
-	if minter == nil {
-		return fmt.Errorf("github token minter is required for test slot runtime activation")
 	}
 	if err := l.EnsureTestSlotPreliminaries(ctx, lease, project); err != nil {
 		return err
 	}
-	sessionsNamespace := testSlotSessionsNamespaceForLease(lease, project, slotName)
-	substitutions := testSlotSubstitutions(lease, project, slotName, sessionsNamespace)
-	token, err := minter.InstallationToken(ctx)
-	if err != nil {
-		return fmt.Errorf("mint github token for test slot install: %w", err)
+	if config, ok := testSlotHelmConfig(project); ok {
+		if strings.TrimSpace(project.GitHubRepo) == "" {
+			return fmt.Errorf("github_repo is required for test slot runtime activation")
+		}
+		if minter == nil {
+			return fmt.Errorf("github token minter is required for test slot runtime activation")
+		}
+		sessionsNamespace := testSlotSessionsNamespaceForLease(lease, project, slotName)
+		substitutions := testSlotSubstitutions(lease, project, slotName, sessionsNamespace)
+		token, err := minter.InstallationToken(ctx)
+		if err != nil {
+			return fmt.Errorf("mint github token for test slot install: %w", err)
+		}
+		if err := l.ensureCloneTokenSecret(ctx, testSlotInstallerSecretName(lease), token, lease, slotName); err != nil {
+			return err
+		}
+		jobName := testSlotInstallerJobName(lease)
+		if err := l.createJob(ctx, testSlotInstallJobManifest(l.Settings, config, lease, project, substitutions)); err != nil {
+			return err
+		}
+		if err := l.waitForJobComplete(ctx, l.Settings.NativeRunnerNamespace, jobName, 5*time.Minute); err != nil {
+			return err
+		}
 	}
-	if err := l.ensureCloneTokenSecret(ctx, testSlotInstallerSecretName(lease), token, lease, slotName); err != nil {
-		return err
-	}
-	jobName := testSlotInstallerJobName(lease)
-	if err := l.createJob(ctx, testSlotInstallJobManifest(l.Settings, config, lease, project, substitutions)); err != nil {
-		return err
-	}
-	return l.waitForJobComplete(ctx, l.Settings.NativeRunnerNamespace, jobName, 5*time.Minute)
+	return l.ensurePlaywrightForSlot(ctx, lease, slotName)
 }
 
 func (l *KubernetesNativeLauncher) ReturnTestSlotRuntime(ctx context.Context, lease Lease, project Project) error {
@@ -301,23 +303,31 @@ func (l *KubernetesNativeLauncher) remainingPodsInNamespaces(ctx context.Context
 }
 
 func (l *KubernetesNativeLauncher) ensurePlaywrightForNativePhase(ctx context.Context, req NativeLaunchRequest) error {
+	slotName, _ := stringFromMap(req.Lease.Metadata, "native_slot_name")
+	slotName = strings.TrimSpace(slotName)
+	return l.ensurePlaywrightForSlot(ctx, req.Lease, slotName)
+}
+
+func (l *KubernetesNativeLauncher) ensurePlaywrightForSlot(ctx context.Context, lease Lease, slotName string) error {
 	if !l.Settings.NativeRunnerPlaywrightEnabled {
 		return nil
 	}
-	slotName, _ := stringFromMap(req.Lease.Metadata, "native_slot_name")
 	slotName = strings.TrimSpace(slotName)
 	if slotName == "" {
 		return nil
 	}
-	name := playwrightResourceName(req.Lease.Project, slotName)
+	name := playwrightResourceName(lease.Project, slotName)
 	if name == "" {
 		return nil
 	}
-	labels := playwrightLabels(req.Lease, name)
+	labels := playwrightLabels(lease, name)
 	if err := l.createDeploymentInNamespace(ctx, slotName, playwrightDeployment(l.Settings, slotName, name, labels)); err != nil {
 		return err
 	}
-	return l.createServiceInNamespace(ctx, slotName, playwrightService(l.Settings, slotName, name, labels))
+	if err := l.createServiceInNamespace(ctx, slotName, playwrightService(l.Settings, slotName, name, labels)); err != nil {
+		return err
+	}
+	return l.waitForDeploymentReady(ctx, slotName, name, 2*time.Minute)
 }
 
 func (l *KubernetesNativeLauncher) ensureNamespace(ctx context.Context, name string, labels map[string]string) error {
@@ -634,6 +644,39 @@ func (l *KubernetesNativeLauncher) waitForJobComplete(ctx context.Context, names
 			return ctx.Err()
 		case <-deadline.C:
 			return fmt.Errorf("test slot runtime installer job %s/%s did not complete before timeout", namespace, name)
+		case <-ticker.C:
+		}
+	}
+}
+
+func (l *KubernetesNativeLauncher) waitForDeploymentReady(ctx context.Context, namespace, name string, timeout time.Duration) error {
+	if strings.TrimSpace(namespace) == "" || strings.TrimSpace(name) == "" {
+		return nil
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	path := "/apis/apps/v1/namespaces/" + namespace + "/deployments/" + name
+	for {
+		status, deployment, err := l.request(ctx, http.MethodGet, path, nil)
+		if err != nil {
+			if status == http.StatusNotFound {
+				return fmt.Errorf("test slot runtime deployment %s/%s not found", namespace, name)
+			}
+			return err
+		}
+		statusMap := anyMap(deployment["status"])
+		readyReplicas, _ := positiveIntFromMap(statusMap, "readyReplicas")
+		availableReplicas, _ := positiveIntFromMap(statusMap, "availableReplicas")
+		if readyReplicas > 0 && availableReplicas > 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("test slot runtime deployment %s/%s did not become ready before timeout", namespace, name)
 		case <-ticker.C:
 		}
 	}
