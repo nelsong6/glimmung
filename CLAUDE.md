@@ -19,6 +19,13 @@ Glimmung embraces the shift in the human's role from *coder* to *curator and man
 - **Per-issue test environments**, when the workflow opts in. Spin up an ephemeral environment per agent run on a wildcard hostname so the verify step has somewhere isolated to exercise the change. Some workflows don't need this and have no opt-in; the support is there when it is.
 - **Absorbs GitHub's tech debt for this workload.** GHA's queueing and state model. Markdown rendering that can't carry rich evidence cleanly (no external links, awkward at the predictable structured fields glimmung tracks like cost / tokens / attempt count / test evidence). Issue and PR formats that weren't designed for the agent-driven shape. Where GitHub falls short for agentic SDLC, glimmung covers.
 
+## Migration policy
+
+When work is a migration or cleanup, [`docs/migration-policy.md`](docs/migration-policy.md)
+is binding. Compatibility is prohibited. Existing language such as `legacy`,
+`compatibility`, `fallback`, `temporary`, or `exception` is evidence of old
+system surface to delete, not permission to preserve it.
+
 ## The four levers
 
 Every feature glimmung adds is one or more of:
