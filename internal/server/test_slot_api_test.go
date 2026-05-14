@@ -398,6 +398,9 @@ func TestReconcileExpiredTestSlotLeaseStartsCleanup(t *testing.T) {
 	if len(store.slotStatuses) == 0 || store.slotStatuses[0].State != testSlotStateCleaning {
 		t.Fatalf("slot statuses=%#v, want cleaning", store.slotStatuses)
 	}
+	if len(store.slotStatuses[0].ReturnHistory) != 1 || store.slotStatuses[0].ReturnHistory[0].Source != "reconciler.test_slot_ttl" {
+		t.Fatalf("return history=%#v, want ttl source", store.slotStatuses[0].ReturnHistory)
+	}
 	select {
 	case <-preparer.returnStarted:
 	case <-time.After(time.Second):
@@ -658,7 +661,7 @@ func TestReturnTestSlotReleasesLease(t *testing.T) {
 	}
 	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil, preparer)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/test-slots/return", strings.NewReader(`{"project":"tank-operator","slot_name":"tank-slot-1"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/test-slots/return", strings.NewReader(`{"project":"tank-operator","slot_name":"tank-slot-1","caller_pod_ip":"10.244.1.166","caller_session_id":"14","source":"mcp-glimmung.return_test_slot","reason":"done"}`))
 	req.Header.Set("Authorization", "Bearer admin")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -671,6 +674,19 @@ func TestReturnTestSlotReleasesLease(t *testing.T) {
 	}
 	if len(store.slotStatuses) != 1 || store.slotStatuses[0].State != testSlotStateCleaning {
 		t.Fatalf("slot statuses=%#v, want cleaning", store.slotStatuses)
+	}
+	if len(store.slotStatuses[0].ReturnHistory) != 1 {
+		t.Fatalf("return history=%#v, want one entry", store.slotStatuses[0].ReturnHistory)
+	}
+	history := store.slotStatuses[0].ReturnHistory[0]
+	if history.Source != "mcp-glimmung.return_test_slot" || history.CallerPodIP == nil || *history.CallerPodIP != "10.244.1.166" {
+		t.Fatalf("return history=%#v", history)
+	}
+	if history.CallerSessionID == nil || *history.CallerSessionID != "14" || history.Reason == nil || *history.Reason != "done" {
+		t.Fatalf("return caller/reason history=%#v", history)
+	}
+	if history.LeaseNumber == nil || *history.LeaseNumber != 2 || history.LeaseRequester != nil {
+		t.Fatalf("return lease history=%#v", history)
 	}
 	if store.slotStatuses[0].CleanupState == nil || *store.slotStatuses[0].CleanupState != testSlotStateCleaning {
 		t.Fatalf("cleanup state=%v, want cleaning", store.slotStatuses[0].CleanupState)

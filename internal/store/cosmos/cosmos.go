@@ -392,6 +392,9 @@ func projectTestEnvironmentSlotStatusMap(status server.TestEnvironmentSlotStatus
 	if status.CleanupError != nil && strings.TrimSpace(*status.CleanupError) != "" {
 		slot["cleanup_error"] = strings.TrimSpace(*status.CleanupError)
 	}
+	if len(status.ReturnHistory) > 0 {
+		slot["test_slot_return_history"] = status.ReturnHistory
+	}
 	return slot
 }
 

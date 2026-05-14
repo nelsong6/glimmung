@@ -25,22 +25,39 @@ type TestEnvironmentScaleRequest struct {
 }
 
 type TestEnvironmentSlotStatus struct {
-	SlotIndex             int        `json:"slot_index"`
-	SlotName              string     `json:"slot_name"`
-	State                 string     `json:"state"`
-	UpdatedAt             time.Time  `json:"updated_at"`
-	Detail                *string    `json:"detail,omitempty"`
-	ReadyAt               *time.Time `json:"ready_at,omitempty"`
-	ActivationAttempt     *int       `json:"activation_attempt,omitempty"`
-	ActivationState       *string    `json:"activation_state,omitempty"`
-	ActivationStartedAt   *time.Time `json:"activation_started_at,omitempty"`
-	ActivationCompletedAt *time.Time `json:"activation_completed_at,omitempty"`
-	ActivationJobName     *string    `json:"activation_job_name,omitempty"`
-	ActivationError       *string    `json:"activation_error,omitempty"`
-	CleanupState          *string    `json:"cleanup_state,omitempty"`
-	CleanupStartedAt      *time.Time `json:"cleanup_started_at,omitempty"`
-	CleanupCompletedAt    *time.Time `json:"cleanup_completed_at,omitempty"`
-	CleanupError          *string    `json:"cleanup_error,omitempty"`
+	SlotIndex             int                          `json:"slot_index"`
+	SlotName              string                       `json:"slot_name"`
+	State                 string                       `json:"state"`
+	UpdatedAt             time.Time                    `json:"updated_at"`
+	Detail                *string                      `json:"detail,omitempty"`
+	ReadyAt               *time.Time                   `json:"ready_at,omitempty"`
+	ActivationAttempt     *int                         `json:"activation_attempt,omitempty"`
+	ActivationState       *string                      `json:"activation_state,omitempty"`
+	ActivationStartedAt   *time.Time                   `json:"activation_started_at,omitempty"`
+	ActivationCompletedAt *time.Time                   `json:"activation_completed_at,omitempty"`
+	ActivationJobName     *string                      `json:"activation_job_name,omitempty"`
+	ActivationError       *string                      `json:"activation_error,omitempty"`
+	CleanupState          *string                      `json:"cleanup_state,omitempty"`
+	CleanupStartedAt      *time.Time                   `json:"cleanup_started_at,omitempty"`
+	CleanupCompletedAt    *time.Time                   `json:"cleanup_completed_at,omitempty"`
+	CleanupError          *string                      `json:"cleanup_error,omitempty"`
+	ReturnHistory         []TestSlotReturnHistoryEntry `json:"test_slot_return_history,omitempty"`
+}
+
+type TestSlotReturnHistoryEntry struct {
+	Event           string    `json:"event"`
+	CreatedAt       time.Time `json:"created_at"`
+	Project         string    `json:"project"`
+	SlotIndex       *int      `json:"slot_index,omitempty"`
+	SlotName        *string   `json:"slot_name,omitempty"`
+	LeaseRef        string    `json:"lease_ref"`
+	LeaseNumber     *int      `json:"lease_number,omitempty"`
+	LeaseRequester  *string   `json:"lease_requester,omitempty"`
+	CallerPodIP     *string   `json:"caller_pod_ip,omitempty"`
+	CallerSessionID *string   `json:"caller_session_id,omitempty"`
+	Source          string    `json:"source"`
+	Reason          *string   `json:"reason,omitempty"`
+	CleanupStarted  bool      `json:"cleanup_started"`
 }
 
 func scaleProjectTestEnvironments(store ReadStore, authRedirects NativeAuthRedirectReconciler, workloadIdentities NativeWorkloadIdentityReconciler, preparer TestSlotPreparer, _ NativeGitHubTokenMinter) http.HandlerFunc {

@@ -139,6 +139,9 @@ func testSlotStatusMap(status TestEnvironmentSlotStatus) map[string]any {
 	if status.CleanupError != nil {
 		slot["cleanup_error"] = *status.CleanupError
 	}
+	if len(status.ReturnHistory) > 0 {
+		slot["test_slot_return_history"] = status.ReturnHistory
+	}
 	return slot
 }
 

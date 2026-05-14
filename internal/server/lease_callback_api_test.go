@@ -327,6 +327,9 @@ func TestReleaseLeaseByCallbackTokenStartsTestSlotCleanup(t *testing.T) {
 	if len(store.slotStatuses) != 1 || store.slotStatuses[0].State != testSlotStateCleaning {
 		t.Fatalf("slot statuses=%#v, want cleaning", store.slotStatuses)
 	}
+	if len(store.slotStatuses[0].ReturnHistory) != 1 || store.slotStatuses[0].ReturnHistory[0].Source != "lease_callback.release" {
+		t.Fatalf("return history=%#v, want callback source", store.slotStatuses[0].ReturnHistory)
+	}
 	select {
 	case <-preparer.returnStarted:
 	case <-time.After(time.Second):

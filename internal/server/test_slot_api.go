@@ -42,9 +42,13 @@ type TestSlotCheckoutResult struct {
 }
 
 type TestSlotReturnRequest struct {
-	Project   string  `json:"project"`
-	SlotIndex *int    `json:"slot_index"`
-	SlotName  *string `json:"slot_name"`
+	Project         string  `json:"project"`
+	SlotIndex       *int    `json:"slot_index"`
+	SlotName        *string `json:"slot_name"`
+	CallerPodIP     *string `json:"caller_pod_ip"`
+	CallerSessionID *string `json:"caller_session_id"`
+	Source          *string `json:"source"`
+	Reason          *string `json:"reason"`
 }
 
 type TestSlotReturnResult struct {
@@ -164,12 +168,19 @@ func returnTestSlot(store ReadStore, preparer TestSlotPreparer, _ NativeGitHubTo
 			return
 		}
 		cleanupStarted := lease.State == "claimed" && boolFromMap(lease.Metadata, "test_slot_checkout")
+		historyEntry := testSlotReturnHistoryEntry(lease, testSlotReturnAudit{
+			Source:          stringPointerOrDefault(req.Source, "api.test_slots.return"),
+			Reason:          trimmedOptionalString(req.Reason),
+			CallerPodIP:     trimmedOptionalString(req.CallerPodIP),
+			CallerSessionID: trimmedOptionalString(req.CallerSessionID),
+			CleanupStarted:  cleanupStarted,
+		})
 		if preparer != nil && cleanupStarted {
 			project, ok := findProjectForTestSlot(r, w, store, req.Project)
 			if !ok {
 				return
 			}
-			if _, err := setLeaseSlotCleanupStarting(r.Context(), store, project, lease); err != nil {
+			if _, err := setLeaseSlotCleanupStarting(r.Context(), store, project, lease, historyEntry); err != nil {
 				writeProblem(w, http.StatusInternalServerError, "record test-slot cleanup state failed")
 				return
 			}
@@ -181,6 +192,9 @@ func returnTestSlot(store ReadStore, preparer TestSlotPreparer, _ NativeGitHubTo
 		if err != nil {
 			writeProblem(w, http.StatusInternalServerError, "test-slot return failed")
 			return
+		}
+		if project, ok, err := findProjectByKey(r.Context(), store, req.Project); err == nil && ok {
+			_, _ = appendLeaseSlotReturnHistory(r.Context(), store, project, lease, historyEntry)
 		}
 		resp := TestSlotReturnResult{
 			State:          result.State,
@@ -230,7 +244,10 @@ func repairTestEnvironmentSlot(store ReadStore, preparer TestSlotPreparer) http.
 		if !claimed {
 			lease = testEnvironmentWarmupLease(project, slot.SlotIndex, slot.SlotName)
 		}
-		if _, err := setLeaseSlotCleanupStarting(r.Context(), store, project, lease); err != nil {
+		if _, err := setLeaseSlotCleanupStarting(r.Context(), store, project, lease, testSlotReturnHistoryEntry(lease, testSlotReturnAudit{
+			Source:         "api.test_environments.repair",
+			CleanupStarted: true,
+		})); err != nil {
 			writeProblem(w, http.StatusInternalServerError, "record test-slot repair state failed")
 			return
 		}
@@ -283,6 +300,14 @@ func markLeaseSlotStatus(ctx context.Context, store ReadStore, project Project, 
 
 type testSlotStatusMutation func(*TestEnvironmentSlotStatus, time.Time)
 
+type testSlotReturnAudit struct {
+	Source          string
+	Reason          *string
+	CallerPodIP     *string
+	CallerSessionID *string
+	CleanupStarted  bool
+}
+
 func setLeaseSlotActivationStarting(ctx context.Context, store ReadStore, project Project, lease Lease) (Project, error) {
 	return setLeaseSlotStatus(ctx, store, project, lease, testSlotStateActivating, nil, func(status *TestEnvironmentSlotStatus, now time.Time) {
 		if attempt := testSlotActivationAttempt(lease); attempt != nil {
@@ -319,14 +344,107 @@ func setLeaseSlotActivationFinished(ctx context.Context, store ReadStore, projec
 	})
 }
 
-func setLeaseSlotCleanupStarting(ctx context.Context, store ReadStore, project Project, lease Lease) (Project, error) {
+func testSlotReturnHistoryEntry(lease Lease, audit testSlotReturnAudit) TestSlotReturnHistoryEntry {
+	source := strings.TrimSpace(audit.Source)
+	if source == "" {
+		source = "api.test_slots.return"
+	}
+	var requester *string
+	if value, ok := stringFromMap(lease.Metadata, "requester_ref"); ok && strings.TrimSpace(value) != "" {
+		clean := strings.TrimSpace(value)
+		requester = &clean
+	}
+	return TestSlotReturnHistoryEntry{
+		Event:           "return_requested",
+		CreatedAt:       time.Now().UTC(),
+		Project:         lease.Project,
+		SlotIndex:       nativeSlotIndexFromMetadata(lease.Metadata),
+		SlotName:        nativeSlotNameFromMetadata(lease.Metadata),
+		LeaseRef:        LeasePublicRefFromLease(lease),
+		LeaseNumber:     lease.LeaseNumber,
+		LeaseRequester:  requester,
+		CallerPodIP:     audit.CallerPodIP,
+		CallerSessionID: audit.CallerSessionID,
+		Source:          source,
+		Reason:          audit.Reason,
+		CleanupStarted:  audit.CleanupStarted,
+	}
+}
+
+func appendBoundedTestSlotReturnHistory(current []TestSlotReturnHistoryEntry, entries ...TestSlotReturnHistoryEntry) []TestSlotReturnHistoryEntry {
+	history := append([]TestSlotReturnHistoryEntry{}, current...)
+	for _, entry := range entries {
+		if entry.Event == "" {
+			continue
+		}
+		history = append(history, entry)
+	}
+	if len(history) > 20 {
+		history = history[len(history)-20:]
+	}
+	return history
+}
+
+func trimmedOptionalString(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	clean := strings.TrimSpace(*value)
+	if clean == "" {
+		return nil
+	}
+	return &clean
+}
+
+func stringPointerOrDefault(value *string, fallback string) string {
+	if cleaned := trimmedOptionalString(value); cleaned != nil {
+		return *cleaned
+	}
+	return fallback
+}
+
+func setLeaseSlotCleanupStarting(ctx context.Context, store ReadStore, project Project, lease Lease, historyEntries ...TestSlotReturnHistoryEntry) (Project, error) {
 	return setLeaseSlotStatus(ctx, store, project, lease, testSlotStateCleaning, nil, func(status *TestEnvironmentSlotStatus, now time.Time) {
 		state := testSlotStateCleaning
 		status.CleanupState = &state
 		status.CleanupStartedAt = &now
 		status.CleanupCompletedAt = nil
 		status.CleanupError = nil
+		status.ReturnHistory = appendBoundedTestSlotReturnHistory(status.ReturnHistory, historyEntries...)
 	})
+}
+
+func appendLeaseSlotReturnHistory(ctx context.Context, store ReadStore, project Project, lease Lease, historyEntry TestSlotReturnHistoryEntry) (Project, error) {
+	if historyEntry.Event == "" {
+		return Project{}, nil
+	}
+	writer, ok := store.(ProjectTestEnvironmentSlotStatusWriter)
+	if !ok || writer == nil {
+		return Project{}, errors.New("test-slot status store not configured")
+	}
+	slotIndex := nativeSlotIndexFromMetadata(lease.Metadata)
+	slotName := nativeSlotNameFromMetadata(lease.Metadata)
+	if slotIndex == nil || slotName == nil {
+		return Project{}, errors.New("test-slot lease is missing slot metadata")
+	}
+	status := TestEnvironmentSlotStatus{
+		SlotIndex: *slotIndex,
+		SlotName:  *slotName,
+		State:     testSlotStateReady,
+		UpdatedAt: time.Now().UTC(),
+	}
+	if current, ok := currentLeaseSlotStatus(ctx, store, project, lease, *slotIndex); ok {
+		status = current
+		if status.SlotName == "" {
+			status.SlotName = *slotName
+		}
+		if status.State == "" {
+			status.State = testSlotStateReady
+		}
+		status.UpdatedAt = time.Now().UTC()
+	}
+	status.ReturnHistory = appendBoundedTestSlotReturnHistory(status.ReturnHistory, historyEntry)
+	return writer.SetProjectTestEnvironmentSlotStatus(ctx, firstNonEmpty(lease.Project, project.ID, project.Name), status)
 }
 
 func setLeaseSlotCleanupFinished(ctx context.Context, store ReadStore, project Project, lease Lease, state string, cause error) (Project, error) {
@@ -752,7 +870,10 @@ func reconcileTestSlots(ctx context.Context, store ReadStore, preparer TestSlotP
 		}
 		claimedSlots[projectKey][*slotIndex] = true
 		if testSlotLeaseExpired(now, lease) {
-			if _, err := setLeaseSlotCleanupStarting(ctx, store, project, lease); err != nil {
+			if _, err := setLeaseSlotCleanupStarting(ctx, store, project, lease, testSlotReturnHistoryEntry(lease, testSlotReturnAudit{
+				Source:         "reconciler.test_slot_ttl",
+				CleanupStarted: true,
+			})); err != nil {
 				if logf != nil {
 					logf("record expired test-slot cleanup failed project=%s lease=%s: %v", lease.Project, LeasePublicRefFromLease(lease), err)
 				}
