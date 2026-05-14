@@ -109,26 +109,27 @@ type TestSlotRequestPublic struct {
 }
 
 type TestEnvironmentPublic struct {
-	Project               string                  `json:"project"`
-	SlotIndex             int                     `json:"slot_index"`
-	SlotName              string                  `json:"slot_name"`
-	State                 string                  `json:"state"`
-	Usable                bool                    `json:"usable"`
-	Detail                *string                 `json:"detail,omitempty"`
-	UpdatedAt             *time.Time              `json:"updated_at,omitempty"`
-	ReadyAt               *time.Time              `json:"ready_at,omitempty"`
-	ActivationAttempt     *int                    `json:"activation_attempt,omitempty"`
-	ActivationState       *string                 `json:"activation_state,omitempty"`
-	ActivationStartedAt   *time.Time              `json:"activation_started_at,omitempty"`
-	ActivationCompletedAt *time.Time              `json:"activation_completed_at,omitempty"`
-	ActivationJobName     *string                 `json:"activation_job_name,omitempty"`
-	ActivationError       *string                 `json:"activation_error,omitempty"`
-	CleanupState          *string                 `json:"cleanup_state,omitempty"`
-	CleanupStartedAt      *time.Time              `json:"cleanup_started_at,omitempty"`
-	CleanupCompletedAt    *time.Time              `json:"cleanup_completed_at,omitempty"`
-	CleanupError          *string                 `json:"cleanup_error,omitempty"`
-	Lease                 *LeasePublic            `json:"lease"`
-	WaitingRequests       []TestSlotRequestPublic `json:"waiting_requests"`
+	Project               string                       `json:"project"`
+	SlotIndex             int                          `json:"slot_index"`
+	SlotName              string                       `json:"slot_name"`
+	State                 string                       `json:"state"`
+	Usable                bool                         `json:"usable"`
+	Detail                *string                      `json:"detail,omitempty"`
+	UpdatedAt             *time.Time                   `json:"updated_at,omitempty"`
+	ReadyAt               *time.Time                   `json:"ready_at,omitempty"`
+	ActivationAttempt     *int                         `json:"activation_attempt,omitempty"`
+	ActivationState       *string                      `json:"activation_state,omitempty"`
+	ActivationStartedAt   *time.Time                   `json:"activation_started_at,omitempty"`
+	ActivationCompletedAt *time.Time                   `json:"activation_completed_at,omitempty"`
+	ActivationJobName     *string                      `json:"activation_job_name,omitempty"`
+	ActivationError       *string                      `json:"activation_error,omitempty"`
+	CleanupState          *string                      `json:"cleanup_state,omitempty"`
+	CleanupStartedAt      *time.Time                   `json:"cleanup_started_at,omitempty"`
+	CleanupCompletedAt    *time.Time                   `json:"cleanup_completed_at,omitempty"`
+	CleanupError          *string                      `json:"cleanup_error,omitempty"`
+	ReturnHistory         []TestSlotReturnHistoryEntry `json:"test_slot_return_history,omitempty"`
+	Lease                 *LeasePublic                 `json:"lease"`
+	WaitingRequests       []TestSlotRequestPublic      `json:"waiting_requests"`
 }
 
 func stateSnapshot(settings Settings, store ReadStore) http.HandlerFunc {
@@ -473,6 +474,7 @@ func testEnvironmentsFromSnapshot(
 				CleanupStartedAt:      slotStatus.CleanupStartedAt,
 				CleanupCompletedAt:    slotStatus.CleanupCompletedAt,
 				CleanupError:          slotStatus.CleanupError,
+				ReturnHistory:         slotStatus.ReturnHistory,
 				Lease:                 publicLease,
 				WaitingRequests:       sliceOrEmpty(waitingByProject[projectName][slotIndex]),
 			})
@@ -563,10 +565,45 @@ func testEnvironmentSlotStatuses(project Project) map[int]TestEnvironmentSlotSta
 			status.CleanupStartedAt = slotTimePointer(slot, "cleanup_started_at", "cleanupStartedAt")
 			status.CleanupCompletedAt = slotTimePointer(slot, "cleanup_completed_at", "cleanupCompletedAt")
 			status.CleanupError = slotStringPointer(slot, "cleanup_error", "cleanupError")
+			status.ReturnHistory = testSlotReturnHistoryFromAny(slot["test_slot_return_history"])
 			statuses[index] = status
 		}
 	}
 	return statuses
+}
+
+func testSlotReturnHistoryFromAny(raw any) []TestSlotReturnHistoryEntry {
+	var history []TestSlotReturnHistoryEntry
+	for _, item := range anySlice(raw) {
+		entryMap, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		event, _ := stringFromMap(entryMap, "event")
+		source, _ := stringFromMap(entryMap, "source")
+		leaseRef, _ := stringFromMap(entryMap, "lease_ref")
+		createdAt := slotTimePointer(entryMap, "created_at", "createdAt")
+		if event == "" || source == "" || leaseRef == "" || createdAt == nil {
+			continue
+		}
+		entry := TestSlotReturnHistoryEntry{
+			Event:           event,
+			CreatedAt:       *createdAt,
+			Project:         stringValue(entryMap["project"]),
+			SlotIndex:       slotPositiveIntPointer(entryMap, "slot_index", "slotIndex"),
+			SlotName:        slotStringPointer(entryMap, "slot_name", "slotName"),
+			LeaseRef:        leaseRef,
+			LeaseNumber:     slotPositiveIntPointer(entryMap, "lease_number", "leaseNumber"),
+			LeaseRequester:  slotStringPointer(entryMap, "lease_requester", "leaseRequester"),
+			CallerPodIP:     slotStringPointer(entryMap, "caller_pod_ip", "callerPodIP"),
+			CallerSessionID: slotStringPointer(entryMap, "caller_session_id", "callerSessionID"),
+			Source:          source,
+			Reason:          slotStringPointer(entryMap, "reason"),
+			CleanupStarted:  boolFromMap(entryMap, "cleanup_started"),
+		}
+		history = append(history, entry)
+	}
+	return history
 }
 
 func slotStringPointer(slot map[string]any, keys ...string) *string {

@@ -130,7 +130,10 @@ func releaseTestSlotLeaseByCallback(w http.ResponseWriter, r *http.Request, stor
 		writeProblem(w, http.StatusBadRequest, "project not registered")
 		return
 	}
-	if _, err := setLeaseSlotCleanupStarting(r.Context(), store, project, lease); err != nil {
+	if _, err := setLeaseSlotCleanupStarting(r.Context(), store, project, lease, testSlotReturnHistoryEntry(lease, testSlotReturnAudit{
+		Source:         "lease_callback.release",
+		CleanupStarted: true,
+	})); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "record test-slot cleanup state failed")
 		return
 	}
