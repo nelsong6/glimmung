@@ -55,24 +55,12 @@ function reportRecycleArrow(policy: RecyclePolicy | null | undefined, active: bo
 export function workflowToPhaseGraphModel(
   workflow: WorkflowGraphSource,
   options: {
-    fallbackPhaseName?: string;
     recycleActive?: boolean;
   } = {},
 ): WorkflowGraphModel {
-  const fallbackPhase: WorkflowGraphPhase = {
-    name: options.fallbackPhaseName ?? workflow.name,
-    kind: "k8s_job",
-    verify: false,
-    recycle_policy: null,
-    depends_on: [],
-  };
-  const phases: WorkflowGraphPhase[] = workflow.phases.length > 0
-    ? workflow.phases
-    : [fallbackPhase];
-
   const active = options.recycleActive ?? false;
   return {
-    phases: phases.map((phase) => ({
+    phases: workflow.phases.map((phase) => ({
       name: phase.name,
       kind: phase.kind,
       verify: phase.verify,
@@ -82,7 +70,7 @@ export function workflowToPhaseGraphModel(
     })),
     prEnabled: workflow.pr.enabled,
     recycleArrows: [
-      ...phases.flatMap((phase) => {
+      ...workflow.phases.flatMap((phase) => {
         const arrow = phaseRecycleArrow(phase, active);
         return arrow ? [arrow] : [];
       }),
@@ -94,22 +82,18 @@ export function workflowToPhaseGraphModel(
   };
 }
 
-export function fallbackPhaseGraphModel(
+export function phaseGraphModelFromNames(
   phaseNames: string[],
   options: {
-    currentPhase?: string | null;
     prEnabled?: boolean;
     recycleArrows?: RecycleArrow[];
   } = {},
 ): WorkflowGraphModel {
-  const names = phaseNames.length > 0
-    ? phaseNames
-    : [options.currentPhase ?? "phase"];
   return {
-    phases: names.map((name, index) => ({
+    phases: phaseNames.map((name, index) => ({
       name,
       kind: "phase",
-      depends_on: index === 0 ? [] : [names[index - 1]],
+      depends_on: index === 0 ? [] : [phaseNames[index - 1]],
     })),
     prEnabled: options.prEnabled ?? true,
     recycleArrows: options.recycleArrows ?? [],

@@ -85,11 +85,7 @@ func syncWorkflow(store ReadStore, ghClient WorkflowSyncClient) http.HandlerFunc
 			writeProblem(w, http.StatusNotFound, fmt.Sprintf("project %q does not exist", project))
 			return
 		}
-		if err := validateWorkflowAllowedForProject(*projectDoc, reg); err != nil {
-			writeProblem(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		if err := validateMandatoryPhases(reg); err != nil {
+		if err := ValidateWorkflowRegister(reg); err != nil {
 			writeProblem(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -225,10 +221,8 @@ func parseWorkflowYAML(data []byte, project, name, defaultPhaseKind string) (Wor
 		return WorkflowRegister{}, fmt.Errorf("unmarshal workflow register: %w", err)
 	}
 	normalizeWorkflowRegisterWithDefaultKind(&reg, defaultPhaseKind)
-	for _, phase := range reg.Phases {
-		if err := validateNativeWorkflowKind(phase.Kind); err != nil {
-			return WorkflowRegister{}, err
-		}
+	if err := ValidateWorkflowRegister(reg); err != nil {
+		return WorkflowRegister{}, err
 	}
 	return reg, nil
 }

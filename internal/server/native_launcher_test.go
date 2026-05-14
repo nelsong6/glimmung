@@ -56,6 +56,9 @@ func TestNativeJobManifestIncludesRunnerCallbackEnv(t *testing.T) {
 	if env["GLIMMUNG_COMPLETED_URL"] != "http://glimmung.glimmung.svc.cluster.local/v1/run-callbacks/callback-token/native/completed" {
 		t.Fatalf("completed url=%q", env["GLIMMUNG_COMPLETED_URL"])
 	}
+	if _, ok := env["GLIMMUNG_FAILED_URL"]; ok {
+		t.Fatal("failed callback URL should not be injected")
+	}
 	if env["GLIMMUNG_GITHUB_TOKEN_URL"] == "" {
 		t.Fatal("expected GitHub token URL")
 	}

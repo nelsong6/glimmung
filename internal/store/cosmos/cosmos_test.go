@@ -35,7 +35,7 @@ func TestProjectFromDocConvertsCamelCaseFields(t *testing.T) {
 	}
 }
 
-func TestWorkflowFromDocConvertsNestedShapeAndInfersSequentialDependsOn(t *testing.T) {
+func TestWorkflowFromDocConvertsNestedShape(t *testing.T) {
 	raw := []byte(`{
 		"id": "issue-agent",
 		"project": "ambience",
@@ -63,12 +63,14 @@ func TestWorkflowFromDocConvertsNestedShapeAndInfersSequentialDependsOn(t *testi
 				"name": "agent",
 				"kind": "k8s_job",
 				"workflowFilename": "k8s_job:agent",
+				"dependsOn": ["plan"],
 				"verify": true,
 				"recyclePolicy": {"maxAttempts": 4, "on": ["verify_fail"], "landsAt": "self"}
 			},
 			{
 				"name": "cleanup",
-				"always": true
+				"always": true,
+				"dependsOn": ["agent"]
 			}
 		],
 		"pr": {"enabled": true},
@@ -97,7 +99,7 @@ func TestWorkflowFromDocConvertsNestedShapeAndInfersSequentialDependsOn(t *testi
 	if workflow.Phases[1].DependsOn[0] != "plan" {
 		t.Fatalf("agent depends_on=%#v", workflow.Phases[1].DependsOn)
 	}
-	if len(workflow.Phases[2].DependsOn) != 2 {
+	if len(workflow.Phases[2].DependsOn) != 1 || workflow.Phases[2].DependsOn[0] != "agent" {
 		t.Fatalf("cleanup depends_on=%#v", workflow.Phases[2].DependsOn)
 	}
 	if workflow.Phases[1].RecyclePolicy.MaxAttempts != 4 {
@@ -108,7 +110,7 @@ func TestWorkflowFromDocConvertsNestedShapeAndInfersSequentialDependsOn(t *testi
 	}
 }
 
-func TestWorkflowFromDocRespectsExplicitDependsOn(t *testing.T) {
+func TestWorkflowFromDocDoesNotInferDependsOn(t *testing.T) {
 	doc := workflowDoc{
 		ID:      "parallel",
 		Project: "ambience",
@@ -123,7 +125,7 @@ func TestWorkflowFromDocRespectsExplicitDependsOn(t *testing.T) {
 	workflow := workflowFromDoc(doc)
 
 	if len(workflow.Phases[1].DependsOn) != 0 {
-		t.Fatalf("explicit graph should not infer b depends_on: %#v", workflow.Phases[1].DependsOn)
+		t.Fatalf("workflowFromDoc should not infer b depends_on: %#v", workflow.Phases[1].DependsOn)
 	}
 	if len(workflow.Phases[2].DependsOn) != 2 {
 		t.Fatalf("verify depends_on=%#v", workflow.Phases[2].DependsOn)
@@ -136,8 +138,8 @@ func TestNormalizeWorkflowRegisterForProjectDefaultsToK8sJob(t *testing.T) {
 		Name:    "agent-run",
 		Phases: []server.PhaseSpec{
 			{Name: "prepare"},
-			{Name: "test", Verify: true},
-			{Name: "cleanup", Always: true},
+			{Name: "test", Verify: true, DependsOn: []string{"prepare"}},
+			{Name: "cleanup", Always: true, DependsOn: []string{"test"}},
 		},
 	}
 	project := projectDoc{
@@ -163,8 +165,8 @@ func TestValidateWorkflowForProjectRejectsNonNativeKind(t *testing.T) {
 		Name:    "agent-run",
 		Phases: []server.PhaseSpec{
 			{Name: "prepare", Kind: "container"},
-			{Name: "test", Kind: "k8s_job", Verify: true},
-			{Name: "cleanup", Kind: "k8s_job", Always: true},
+			{Name: "test", Kind: "k8s_job", Verify: true, DependsOn: []string{"prepare"}},
+			{Name: "cleanup", Kind: "k8s_job", Always: true, DependsOn: []string{"test"}},
 		},
 	}
 	project := projectDoc{
@@ -472,6 +474,25 @@ func TestCancelLeaseCandidateRankPrefersActiveLease(t *testing.T) {
 	}
 	if cancelLeaseCandidateRank(waiting) >= cancelLeaseCandidateRank(released) {
 		t.Fatal("waiting lease should rank ahead of released lease")
+	}
+}
+
+func TestNativeConcurrencyCapsDefaultAndOverride(t *testing.T) {
+	store := &Store{}
+	if got := store.nativeGlobalCap(); got != 5 {
+		t.Fatalf("global cap=%d, want 5", got)
+	}
+	if got := store.nativeProjectCap(); got != 5 {
+		t.Fatalf("project cap=%d, want 5", got)
+	}
+
+	store.nativeGlobalConcurrency = 7
+	store.nativeProjectConcurrency = 2
+	if got := store.nativeGlobalCap(); got != 7 {
+		t.Fatalf("global cap override=%d, want 7", got)
+	}
+	if got := store.nativeProjectCap(); got != 2 {
+		t.Fatalf("project cap override=%d, want 2", got)
 	}
 }
 

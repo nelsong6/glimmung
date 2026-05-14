@@ -746,7 +746,7 @@ function handleMockRequest(url: URL, init?: RequestInit): Response {
 
   if (path.match(/^\/v1\/runs\/[^/]+\/[^/]+\/native\/events$/)) return json(nativeEvents);
   if (path.match(/^\/v1\/projects\/[^/]+\/issues\/\d+\/runs\/[^/]+\/native\/events$/)) return json(nativeEvents);
-  if (path.match(/^\/v1\/runs\/[^/]+\/[^/]+\/abort$/) && method === "POST") return json({ ok: true });
+  if (path.match(/^\/v1\/projects\/[^/]+\/issues\/\d+\/runs\/[^/]+\/abort$/) && method === "POST") return json({ ok: true });
 
   return json({ error: `mock route not implemented: ${method} ${path}` }, { status: 404 });
 }

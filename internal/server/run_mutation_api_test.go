@@ -158,9 +158,9 @@ func TestAbortRunByNumberBadIssueNumber(t *testing.T) {
 	}
 }
 
-// --- run-callbacks/aborted tests ---
+// --- retired run-callbacks/aborted route ---
 
-func TestRunAbortedByCallbackToken(t *testing.T) {
+func TestRunAbortedByCallbackTokenGone(t *testing.T) {
 	store := &fakeRunMutationStore{
 		runID:       "run-xyz",
 		runRef:      "myproject#7/runs/1",
@@ -174,10 +174,10 @@ func TestRunAbortedByCallbackToken(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
+	if rec.Code != http.StatusGone {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), `"state":"aborted"`) {
+	if !strings.Contains(rec.Body.String(), "/native/completed") {
 		t.Fatalf("body=%s", rec.Body.String())
 	}
 }

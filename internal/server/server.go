@@ -327,7 +327,10 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	mux.HandleFunc("GET /v1/projects/{project}/workflows/{name}/upstream", getWorkflowUpstream(store, ghClient))
 	mux.Handle("POST /v1/projects/{project}/workflows/{name}/sync", requireAdmin(adminAuthenticator, http.HandlerFunc(syncWorkflow(store, ghClient))))
 	mux.Handle("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/abort", requireAdmin(adminAuthenticator, http.HandlerFunc(abortRunByNumber(store))))
-	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/aborted", runAbortedByCallbackToken(store))
+	mux.HandleFunc(
+		"POST /v1/run-callbacks/{callback_token}/aborted",
+		legacyGone("run aborted callbacks are retired; post /native/completed with job_id and conclusion='failure'"),
+	)
 	mux.HandleFunc("GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/events", nativeRunEventsByNumber(store))
 	mux.HandleFunc("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/events", nativeRunEventWriteByNumber(store))
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/events", nativeRunEventWriteByCallbackToken(store))
@@ -337,8 +340,14 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 		"GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/pod-logs",
 		legacyGone("native pod log proxying is retired; use /native/events and archived log evidence"),
 	)
-	mux.HandleFunc("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/failed", nativeRunFailedByNumber(store))
-	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/failed", nativeRunFailedByCallbackToken(store))
+	mux.HandleFunc(
+		"POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/failed",
+		legacyGone("native failure callbacks are retired; post /native/completed with job_id and conclusion='failure'"),
+	)
+	mux.HandleFunc(
+		"POST /v1/run-callbacks/{callback_token}/native/failed",
+		legacyGone("native failure callbacks are retired; post /native/completed with job_id and conclusion='failure'"),
+	)
 	mux.HandleFunc("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/github-token", nativeGitHubTokenByNumber(store, nativeTokenMinter))
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/github-token", nativeGitHubTokenByCallbackToken(store, nativeTokenMinter))
 	mux.HandleFunc(

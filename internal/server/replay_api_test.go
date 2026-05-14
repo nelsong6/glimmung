@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/nelsong6/glimmung/internal/auth"
@@ -79,86 +80,52 @@ func minimalRun(phase string) *RunReplayData {
 
 // --- native/failed tests ---
 
-func TestNativeRunFailedByNumber_Success(t *testing.T) {
+func TestNativeRunFailedByNumberGone(t *testing.T) {
 	store := &fakeRunReplayStore{}
 	store.runID = "run-abc"
 	store.abortResult = AbortRunResult{State: "aborted", RunRef: "proj#1/r1"}
 	h := newReplayHandlerNoAuth(store)
 
-	body, _ := json.Marshal(NativeRunFailedRequest{Reason: "oom"})
+	body, _ := json.Marshal(map[string]string{"reason": "oom"})
 	req := httptest.NewRequest("POST", "/v1/projects/proj/issues/1/runs/r1/native/failed", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusGone {
+		t.Fatalf("expected 410, got %d: %s", w.Code, w.Body.String())
 	}
-	var result AbortRunResult
-	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
-		t.Fatal(err)
-	}
-	if result.State != "aborted" {
-		t.Errorf("expected state=aborted, got %s", result.State)
+	if !strings.Contains(w.Body.String(), "/native/completed") {
+		t.Fatalf("body=%s", w.Body.String())
 	}
 }
 
-func TestNativeRunFailedByNumber_NotFound(t *testing.T) {
-	store := &fakeRunReplayStore{}
-	store.notFound = true
-	h := newReplayHandlerNoAuth(store)
-
-	body, _ := json.Marshal(NativeRunFailedRequest{Reason: "crash"})
-	req := httptest.NewRequest("POST", "/v1/projects/proj/issues/1/runs/r1/native/failed", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Errorf("expected 404, got %d", w.Code)
-	}
-}
-
-func TestNativeRunFailedByNumber_BadIssueNumber(t *testing.T) {
+func TestNativeRunFailedByNumberGoneBeforePathValidation(t *testing.T) {
 	store := &fakeRunReplayStore{}
 	h := newReplayHandlerNoAuth(store)
 
-	body, _ := json.Marshal(NativeRunFailedRequest{Reason: "crash"})
+	body, _ := json.Marshal(map[string]string{"reason": "crash"})
 	req := httptest.NewRequest("POST", "/v1/projects/proj/issues/notanumber/runs/r1/native/failed", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d", w.Code)
+	if w.Code != http.StatusGone {
+		t.Errorf("expected 410, got %d", w.Code)
 	}
 }
 
-func TestNativeRunFailedByCallbackToken_Success(t *testing.T) {
+func TestNativeRunFailedByCallbackTokenGone(t *testing.T) {
 	store := &fakeRunReplayStore{}
 	store.runID = "run-abc"
 	store.abortResult = AbortRunResult{State: "aborted", RunRef: "proj#1/r1"}
 	h := newReplayHandlerNoAuth(store)
 
-	body, _ := json.Marshal(NativeRunFailedRequest{Reason: "timeout"})
+	body, _ := json.Marshal(map[string]string{"reason": "timeout"})
 	req := httptest.NewRequest("POST", "/v1/run-callbacks/tok123/native/failed", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestNativeRunFailedByCallbackToken_NotFound(t *testing.T) {
-	store := &fakeRunReplayStore{}
-	store.notFound = true
-	h := newReplayHandlerNoAuth(store)
-
-	body, _ := json.Marshal(NativeRunFailedRequest{Reason: "crash"})
-	req := httptest.NewRequest("POST", "/v1/run-callbacks/tok123/native/failed", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Errorf("expected 404, got %d", w.Code)
+	if w.Code != http.StatusGone {
+		t.Fatalf("expected 410, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -299,8 +266,8 @@ func TestReplayRunDecision_OverrideWorkflow(t *testing.T) {
 	body, _ := json.Marshal(RunReplayRequest{
 		SyntheticCompletion: SyntheticCompletion{Conclusion: "success"},
 		OverrideWorkflow: &WorkflowReplayOverride{
-			Phases:  []PhaseSpec{{Name: "implement", Verify: false}},
-			Budget:  budget.Config{Total: 10},
+			Phases: []PhaseSpec{{Name: "implement", Verify: false}},
+			Budget: budget.Config{Total: 10},
 		},
 	})
 	req := httptest.NewRequest("POST", "/v1/projects/proj/issues/1/runs/r1/replay", bytes.NewReader(body))

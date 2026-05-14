@@ -407,24 +407,20 @@ func TestNativeRunCompletedByCallbackTokenAdvanceDispatchesNextPhase(t *testing.
 	}
 }
 
-func TestAllReadyDispatchTargetsHandlesFanOutFanInAndTeardown(t *testing.T) {
+func TestAllReadyDispatchTargetsHandlesLinearPhasesAndTeardown(t *testing.T) {
 	wf := &Workflow{Phases: []PhaseSpec{
 		{Name: "prepare"},
-		{Name: "work-a", DependsOn: []string{"prepare"}},
-		{Name: "work-b", DependsOn: []string{"prepare"}},
-		{Name: "verify", Verify: true, DependsOn: []string{"work-a", "work-b"}},
-		{Name: "cleanup", Always: true},
+		{Name: "work", DependsOn: []string{"prepare"}},
+		{Name: "verify", Verify: true, DependsOn: []string{"work"}},
+		{Name: "cleanup", Always: true, DependsOn: []string{"verify"}},
 	}}
 	run := RunReplayData{Attempts: []RunAttemptData{{AttemptIndex: 0, Phase: "prepare", Completed: true, Decision: string(decision.Advance)}}}
-	assertPhaseTargets(t, allReadyDispatchTargets(wf, run, decision.Advance), "work-a", "work-b")
+	assertPhaseTargets(t, allReadyDispatchTargets(wf, run, decision.Advance), "work")
 
-	run.Attempts = append(run.Attempts, RunAttemptData{AttemptIndex: 1, Phase: "work-a", Completed: true, Decision: string(decision.Advance)})
-	assertPhaseTargets(t, allReadyDispatchTargets(wf, run, decision.Advance), "work-b")
-
-	run.Attempts = append(run.Attempts, RunAttemptData{AttemptIndex: 2, Phase: "work-b", Completed: true, Decision: string(decision.Advance)})
+	run.Attempts = append(run.Attempts, RunAttemptData{AttemptIndex: 1, Phase: "work", Completed: true, Decision: string(decision.Advance)})
 	assertPhaseTargets(t, allReadyDispatchTargets(wf, run, decision.Advance), "verify")
 
-	run.Attempts = append(run.Attempts, RunAttemptData{AttemptIndex: 3, Phase: "verify", Completed: true, Decision: string(decision.AbortBudgetAttempts)})
+	run.Attempts = append(run.Attempts, RunAttemptData{AttemptIndex: 2, Phase: "verify", Completed: true, Decision: string(decision.AbortBudgetAttempts)})
 	assertPhaseTargets(t, allReadyDispatchTargets(wf, run, decision.AbortBudgetAttempts), "cleanup")
 }
 
@@ -455,13 +451,13 @@ func TestNativeRunCompletedByCallbackTokenRetryRequiresNativeLauncher(t *testing
 	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
 	store.run = runDataForCompletion("impl")
 	store.wf = singlePhaseWorkflowForCompletion("impl", true)
-	store.abortResult = AbortRunResult{State: "aborted", RunRef: "proj#7/runs/1"}
+	store.terminalResult = AbortRunResult{State: "aborted", RunRef: "proj#7/runs/1"}
 	rec := httptest.NewRecorder()
 	newCompletionHandler(store, nil).ServeHTTP(rec, nativeCompletionRequest("tok", completedJob("impl", "failure", map[string]any{"status": "fail"}, nil)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if got := readCallbackResult(t, rec).Decision; got == nil || *got != "abort_budget_attempts" {
+	if got := readCallbackResult(t, rec).Decision; got == nil || *got != "abort_malformed" {
 		t.Fatalf("decision=%v", got)
 	}
 }

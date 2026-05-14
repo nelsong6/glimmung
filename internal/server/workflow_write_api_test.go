@@ -70,7 +70,7 @@ func TestRegisterWorkflowUpsertsWorkflow(t *testing.T) {
 	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{})
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/v1/workflows", strings.NewReader(`{"project":"ambience","name":"agent-run","phases":[{"name":"prep"},{"name":"verify","verify":true},{"name":"cleanup","always":true}]}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/workflows", strings.NewReader(`{"project":"ambience","name":"agent-run","phases":[{"name":"prep"},{"name":"verify","verify":true,"depends_on":["prep"]},{"name":"cleanup","always":true,"depends_on":["verify"]}]}`))
 	req.Header.Set("Authorization", "Bearer token")
 	handler.ServeHTTP(rec, req)
 
@@ -109,7 +109,7 @@ func TestRegisterWorkflowDefaultsBlankKindToK8sJob(t *testing.T) {
 	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{})
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/v1/workflows", strings.NewReader(`{"project":"glimmung","name":"agent-run","phases":[{"name":"prep"},{"name":"verify","verify":true},{"name":"cleanup","always":true}]}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/workflows", strings.NewReader(`{"project":"glimmung","name":"agent-run","phases":[{"name":"prep"},{"name":"verify","verify":true,"depends_on":["prep"]},{"name":"cleanup","always":true,"depends_on":["verify"]}]}`))
 	req.Header.Set("Authorization", "Bearer token")
 	handler.ServeHTTP(rec, req)
 
@@ -130,7 +130,7 @@ func TestRegisterWorkflowRejectsNonNativeKind(t *testing.T) {
 	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{})
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/v1/workflows", strings.NewReader(`{"project":"glimmung","name":"agent-run","phases":[{"name":"prep","kind":"container"},{"name":"verify","kind":"k8s_job","verify":true},{"name":"cleanup","kind":"k8s_job","always":true}]}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/workflows", strings.NewReader(`{"project":"glimmung","name":"agent-run","phases":[{"name":"prep","kind":"container"},{"name":"verify","kind":"k8s_job","verify":true,"depends_on":["prep"]},{"name":"cleanup","kind":"k8s_job","always":true,"depends_on":["verify"]}]}`))
 	req.Header.Set("Authorization", "Bearer token")
 	handler.ServeHTTP(rec, req)
 
@@ -150,6 +150,57 @@ func TestRegisterWorkflowRequiresMandatoryPhases(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d, want 400", rec.Code)
+	}
+}
+
+func TestRegisterWorkflowRejectsMultipleEntryPhases(t *testing.T) {
+	store := &fakeWorkflowWriteStore{fakeReadStore: fakeReadStore{projects: []Project{{ID: "ambience", Name: "ambience"}}}}
+	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/workflows", strings.NewReader(`{"project":"ambience","name":"agent-run","phases":[{"name":"prep"},{"name":"verify","verify":true},{"name":"cleanup","always":true,"depends_on":["verify"]}]}`))
+	req.Header.Set("Authorization", "Bearer token")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "must declare exactly one depends_on") {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
+func TestRegisterWorkflowRejectsEvidenceGateWithoutVerifyProducer(t *testing.T) {
+	store := &fakeWorkflowWriteStore{fakeReadStore: fakeReadStore{projects: []Project{{ID: "ambience", Name: "ambience"}}}}
+	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/workflows", strings.NewReader(`{"project":"ambience","name":"agent-run","phases":[{"name":"prep"},{"name":"gate","evidence_verification_gate":true,"depends_on":["prep"]},{"name":"cleanup","always":true,"depends_on":["gate"]}]}`))
+	req.Header.Set("Authorization", "Bearer token")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "testing") {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
+func TestRegisterWorkflowRejectsBadPhaseInputRef(t *testing.T) {
+	store := &fakeWorkflowWriteStore{fakeReadStore: fakeReadStore{projects: []Project{{ID: "ambience", Name: "ambience"}}}}
+	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/workflows", strings.NewReader(`{"project":"ambience","name":"agent-run","phases":[{"name":"prep","outputs":["validation_url"]},{"name":"verify","verify":true,"depends_on":["prep"],"inputs":{"missing":"${{ phases.prep.outputs.nope }}"}},{"name":"cleanup","always":true,"depends_on":["verify"]}]}`))
+	req.Header.Set("Authorization", "Bearer token")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "doesn't declare that output") {
+		t.Fatalf("body=%s", rec.Body.String())
 	}
 }
 

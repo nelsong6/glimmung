@@ -120,12 +120,30 @@ func minimalDispatchStore() *fakeDispatchStore {
 		Name:    "main",
 		Project: "proj",
 		Budget:  budget.Config{Total: 25},
-		Phases: []PhaseSpec{{
-			Name:             "impl",
-			Kind:             "k8s_job",
-			WorkflowFilename: "k8s_job:impl",
-			Jobs:             []NativeJobSpec{{ID: "impl", Image: "runner:latest"}},
-		}},
+		Phases: []PhaseSpec{
+			{
+				Name:             "prep",
+				Kind:             "k8s_job",
+				WorkflowFilename: "k8s_job:prep",
+				Jobs:             []NativeJobSpec{{ID: "prep", Image: "runner:latest"}},
+			},
+			{
+				Name:             "verify",
+				Kind:             "k8s_job",
+				WorkflowFilename: "k8s_job:verify",
+				DependsOn:        []string{"prep"},
+				Verify:           true,
+				Jobs:             []NativeJobSpec{{ID: "verify", Image: "runner:latest"}},
+			},
+			{
+				Name:             "cleanup",
+				Kind:             "k8s_job",
+				WorkflowFilename: "k8s_job:cleanup",
+				DependsOn:        []string{"verify"},
+				Always:           true,
+				Jobs:             []NativeJobSpec{{ID: "cleanup", Image: "runner:latest"}},
+			},
+		},
 		DefaultRequirements: map[string]any{},
 		Metadata:            map[string]any{},
 	}
@@ -251,7 +269,7 @@ func TestDispatchRunDispatchedNativeK8sJob(t *testing.T) {
 	if !launcher.called {
 		t.Fatal("native launcher was not called")
 	}
-	if launcher.req.Phase.Name != "impl" || launcher.req.Run.ID != "run-1" {
+	if launcher.req.Phase.Name != "prep" || launcher.req.Run.ID != "run-1" {
 		t.Fatalf("launch request=%#v", launcher.req)
 	}
 	if store.runReq == nil || store.runReq.InitialPhaseKind != "k8s_job" {
@@ -303,10 +321,11 @@ func TestDispatchRunCreateRunFailReleasesLock(t *testing.T) {
 
 func TestDispatchRunMultipleWorkflowsRequiresName(t *testing.T) {
 	store := minimalDispatchStore()
+	phases := store.wf.Phases
 	store.wf = nil
 	store.workflows = []Workflow{
-		{Name: "wf-a", Project: "proj", Phases: []PhaseSpec{{Name: "impl", Kind: "k8s_job"}}, Budget: budget.Config{Total: 25}},
-		{Name: "wf-b", Project: "proj", Phases: []PhaseSpec{{Name: "impl", Kind: "k8s_job"}}, Budget: budget.Config{Total: 25}},
+		{Name: "wf-a", Project: "proj", Phases: phases, Budget: budget.Config{Total: 25}},
+		{Name: "wf-b", Project: "proj", Phases: phases, Budget: budget.Config{Total: 25}},
 	}
 	rec := httptest.NewRecorder()
 	newDispatchTestHandler(store, nil).ServeHTTP(rec, dispatchRequest("proj", 1))
@@ -321,7 +340,7 @@ func TestDispatchRunMultipleWorkflowsRequiresName(t *testing.T) {
 func TestDispatchRunWorkflowAlias(t *testing.T) {
 	store := minimalDispatchStore()
 	store.workflows = []Workflow{
-		{Name: "other", Project: "proj", Phases: []PhaseSpec{{Name: "impl", Kind: "k8s_job"}}},
+		{Name: "other", Project: "proj", Phases: store.wf.Phases, Budget: budget.Config{Total: 25}},
 		*store.wf,
 	}
 	rec := httptest.NewRecorder()

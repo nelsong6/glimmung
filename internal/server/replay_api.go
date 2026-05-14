@@ -52,12 +52,6 @@ type RunVerificationData struct {
 	Reasons []string
 }
 
-// NativeRunFailedRequest is the body for POST …/native/failed.
-type NativeRunFailedRequest struct {
-	JobID  *string `json:"job_id"`
-	Reason string  `json:"reason"`
-}
-
 // SyntheticCompletion mirrors the /completed callback body for in-memory replay.
 type SyntheticCompletion struct {
 	Conclusion   string            `json:"conclusion"`
@@ -91,60 +85,6 @@ type ReplayResult struct {
 	CumulativeCostUSDAfter float64 `json:"cumulative_cost_usd_after"`
 	AttemptsInPhaseAfter   int     `json:"attempts_in_phase_after"`
 	WorkflowSource         string  `json:"workflow_source"`
-}
-
-// nativeRunFailedByNumber handles POST …/runs/{run_number}/native/failed.
-func nativeRunFailedByNumber(store ReadStore) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		mutStore, ok := store.(RunMutationStore)
-		if !ok || mutStore == nil {
-			writeProblem(w, http.StatusServiceUnavailable, "run mutation store not configured")
-			return
-		}
-		runID, project, ok := resolveRunByNumber(w, r, mutStore)
-		if !ok {
-			return
-		}
-		postNativeFailed(w, r, mutStore, project, runID)
-	}
-}
-
-// nativeRunFailedByCallbackToken handles POST …/native/failed via callback token.
-func nativeRunFailedByCallbackToken(store ReadStore) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		mutStore, ok := store.(RunMutationStore)
-		if !ok || mutStore == nil {
-			writeProblem(w, http.StatusServiceUnavailable, "run mutation store not configured")
-			return
-		}
-		runID, project, ok := resolveRunByCallbackToken(w, r, mutStore)
-		if !ok {
-			return
-		}
-		postNativeFailed(w, r, mutStore, project, runID)
-	}
-}
-
-func postNativeFailed(w http.ResponseWriter, r *http.Request, store RunMutationStore, project, runID string) {
-	var req NativeRunFailedRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeProblem(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	reason := req.Reason
-	if reason == "" {
-		reason = "native_run_failed"
-	}
-	result, err := store.AbortRunByID(r.Context(), project, runID, reason)
-	if errors.Is(err, ErrNotFound) {
-		writeProblem(w, http.StatusNotFound, "run not found")
-		return
-	}
-	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "abort run failed")
-		return
-	}
-	writeJSON(w, http.StatusOK, result)
 }
 
 // replayRunDecisionByNumber handles POST …/runs/{run_number}/replay (admin-only).

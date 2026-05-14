@@ -86,7 +86,7 @@ phases:
     workflow_filename: cleanup.yaml
     verify: false
     always: true
-    depends_on: []
+    depends_on: [test]
     jobs: []
 `)
 
@@ -104,7 +104,7 @@ phases:
   - name: cleanup
     workflow_filename: cleanup.yaml
     always: true
-    depends_on: []
+    depends_on: [test]
     jobs: []
 `)
 
@@ -210,6 +210,7 @@ phases:
   - name: cleanup
     kind: k8s_job
     always: true
+    depends_on: [test]
 `), statusCode: 200}
 	handler := newHandlerWithSyncClientAdmin(store, client)
 	req := httptest.NewRequest(http.MethodPost, "/v1/projects/myproject/workflows/agent-run/sync", nil)
@@ -228,7 +229,7 @@ func TestSyncWorkflowAlreadyInSync(t *testing.T) {
 	phases := []PhaseSpec{
 		{Name: "entry", Kind: "k8s_job", WorkflowFilename: "run.yaml", WorkflowRef: "main", Inputs: map[string]string{}, Outputs: []string{}, DependsOn: []string{}, Jobs: []NativeJobSpec{}},
 		{Name: "test", Kind: "k8s_job", WorkflowFilename: "verify.yaml", Verify: true, WorkflowRef: "main", Inputs: map[string]string{}, Outputs: []string{}, DependsOn: []string{"entry"}, Jobs: []NativeJobSpec{}},
-		{Name: "cleanup", Kind: "k8s_job", WorkflowFilename: "cleanup.yaml", Always: true, WorkflowRef: "main", Inputs: map[string]string{}, Outputs: []string{}, DependsOn: []string{}, Jobs: []NativeJobSpec{}},
+		{Name: "cleanup", Kind: "k8s_job", WorkflowFilename: "cleanup.yaml", Always: true, WorkflowRef: "main", Inputs: map[string]string{}, Outputs: []string{}, DependsOn: []string{"test"}, Jobs: []NativeJobSpec{}},
 	}
 	existing := Workflow{
 		Project:             "myproject",

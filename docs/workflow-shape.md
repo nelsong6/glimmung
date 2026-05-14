@@ -18,9 +18,10 @@ prepare  →  work        →  testing  →  cleanup
 ```
 
 - **Phases** flow horizontally. Each phase is a stage of the
-  pipeline. Phases run sequentially with respect to their
-  `depends_on` graph (a phase dispatches when all its predecessors
-  have completed-with-ADVANCE).
+  pipeline. The first phase is the only entry phase and declares
+  `depends_on: []`. Every later phase declares exactly one
+  `depends_on` entry, and that entry must be the immediately
+  previous phase.
 - **Jobs** stack vertically inside a phase. Multiple jobs in one
   phase always run in parallel — there is no job-level
   `depends_on` and the system does not support gitlab-style
@@ -28,7 +29,7 @@ prepare  →  work        →  testing  →  cleanup
   happens at the phase boundary.
 - **A phase is one job wide and any number of jobs deep.** "Wide"
   meaning horizontal — phase boundaries are the only place a
-  pipeline can fan out left-to-right. "Deep" meaning vertical
+  pipeline advances as one left-to-right chain. "Deep" meaning vertical
   parallel jobs within a single phase.
 
 This rule keeps pipeline design legible: anyone reading a
@@ -40,7 +41,7 @@ jobs top-to-bottom in each column.
 
 Glimmung-managed workflows must declare:
 
-1. **prepare** — at least one phase with `depends_on=[]` (an entry
+1. **prepare** — exactly one phase with `depends_on=[]` (the entry
    phase). Project owns what goes here; common shape is "build a
    container image and deploy it to a per-run validation
    namespace."
@@ -55,9 +56,12 @@ Glimmung-managed workflows must declare:
 Any number of `work` phases between prepare and testing — that's
 where the actual implementation happens.
 
-The mandatory-phase enforcement is active in the Go workflow writer and sync
-path. Registrations that miss an entry phase, a testing phase, or an always-run
-cleanup phase are rejected before they can become the project runtime contract.
+The mandatory-phase and linear-topology enforcement is active in the Go workflow
+writer, sync path, and Cosmos upsert path. Registrations that miss the entry
+phase, a `verify: true` testing phase, or an always-run cleanup phase are
+rejected before they can become the project runtime contract. Registrations with
+multiple entry phases, fan-in/fan-out phase dependencies, invalid cross-phase
+input refs, duplicate phase names, or duplicate job IDs are rejected too.
 
 Blank phase `kind` values default to `k8s_job`. Registered workflow phases must
 use `k8s_job`; any other executor kind is rejected before dispatch.
@@ -196,7 +200,8 @@ The constraints are deliberate:
 
 - **Strict left-to-right** removes the gitlab-style "wonky
   semantics" where `needs:` DAGs at the job level make pipelines
-  hard to read. Phases are the only fan-out boundary.
+  hard to read. Jobs can fan out inside a phase; phases themselves
+  stay a single chain.
 - **Mandatory testing** means glimmung-managed workflows are
   self-validating; an agent's PR doesn't ship without a verdict
   step, even if the verdict is just `npm build`.

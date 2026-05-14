@@ -170,12 +170,27 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, nativeLaun
 			Detail:   stringPtr("workflow has no phases"),
 		}, nil
 	}
+	if err := ValidateWorkflowRegister(WorkflowRegister{
+		Project:             wf.Project,
+		Name:                wf.Name,
+		Phases:              wf.Phases,
+		PR:                  wf.PR,
+		Budget:              wf.Budget,
+		TriggerLabel:        wf.TriggerLabel,
+		DefaultRequirements: wf.DefaultRequirements,
+		Metadata:            wf.Metadata,
+	}); err != nil {
+		return PublicDispatchResult{}, &dispatchProblem{status: http.StatusUnprocessableEntity, message: err.Error()}
+	}
 
 	if nativeLauncher == nil {
 		return PublicDispatchResult{}, &dispatchProblem{status: http.StatusServiceUnavailable, message: "native launcher not configured"}
 	}
 
-	initPhase := wf.Phases[0]
+	initPhase, ok := workflowEntryPhase(wf.Phases)
+	if !ok {
+		return PublicDispatchResult{}, &dispatchProblem{status: http.StatusUnprocessableEntity, message: "workflow has no entry phase"}
+	}
 	phaseKind := workflowPhaseKind(initPhase.Kind)
 	if err := validateNativeWorkflowKind(phaseKind); err != nil {
 		return PublicDispatchResult{}, &dispatchProblem{status: http.StatusUnprocessableEntity, message: err.Error()}
@@ -332,6 +347,15 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, nativeLaun
 	}
 
 	return result, nil
+}
+
+func workflowEntryPhase(phases []PhaseSpec) (PhaseSpec, bool) {
+	for _, phase := range phases {
+		if len(phase.DependsOn) == 0 {
+			return phase, true
+		}
+	}
+	return PhaseSpec{}, false
 }
 
 func (req DispatchRunRequest) resolvedWorkflowName() string {

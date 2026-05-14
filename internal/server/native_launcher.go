@@ -837,7 +837,6 @@ func nativeJobEnv(settings Settings, req NativeLaunchRequest, jobID, secretName 
 		{"name": "GLIMMUNG_EVENTS_URL", "value": baseURL + nativePath + "/events"},
 		{"name": "GLIMMUNG_STATUS_URL", "value": baseURL + nativePath + "/status"},
 		{"name": "GLIMMUNG_COMPLETED_URL", "value": baseURL + nativePath + "/completed"},
-		{"name": "GLIMMUNG_FAILED_URL", "value": baseURL + nativePath + "/failed"},
 		{"name": "GLIMMUNG_GITHUB_TOKEN_URL", "value": baseURL + nativePath + "/github-token"},
 		{"name": "GLIMMUNG_ATTEMPT_TOKEN", "valueFrom": map[string]any{"secretKeyRef": map[string]any{"name": secretName, "key": "attempt-token"}}},
 	}
