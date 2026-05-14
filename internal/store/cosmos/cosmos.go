@@ -1467,7 +1467,6 @@ func workflowFromDoc(doc workflowDoc) server.Workflow {
 	for _, phase := range doc.Phases {
 		phases = append(phases, phaseFromDoc(phase))
 	}
-	inferSequentialDependsOn(phases)
 
 	return server.Workflow{
 		ID:                  firstNonEmpty(doc.ID, doc.Name),
@@ -1935,40 +1934,7 @@ func workflowFromMap(doc map[string]any) (server.Workflow, error) {
 }
 
 func validateWorkflowForProject(project projectDoc, req server.WorkflowRegister) error {
-	for _, phase := range req.Phases {
-		if strings.TrimSpace(phase.Kind) != "k8s_job" {
-			return server.ValidationError{Message: "workflow phases must use kind='k8s_job'"}
-		}
-	}
-
-	hasEntry := false
-	hasTesting := false
-	hasCleanup := false
-	for _, phase := range req.Phases {
-		if len(phase.DependsOn) == 0 {
-			hasEntry = true
-		}
-		if phase.Verify || phase.EvidenceVerificationGate {
-			hasTesting = true
-		}
-		if phase.Always {
-			hasCleanup = true
-		}
-	}
-	missing := make([]string, 0)
-	if !hasEntry {
-		missing = append(missing, "prepare")
-	}
-	if !hasTesting {
-		missing = append(missing, "testing")
-	}
-	if !hasCleanup {
-		missing = append(missing, "cleanup")
-	}
-	if len(missing) > 0 {
-		return server.ValidationError{Message: "workflow " + req.Name + " is missing required phases: " + strings.Join(missing, ", ")}
-	}
-	return nil
+	return server.ValidateWorkflowRegister(req)
 }
 
 func normalizeWorkflowRegisterForProjectDoc(req *server.WorkflowRegister, project projectDoc) {
@@ -2132,35 +2098,6 @@ func recyclePolicyFromDoc(doc *recyclePolicyDoc) *server.RecyclePolicy {
 		MaxAttempts: maxAttempts,
 		On:          sliceOrEmpty(doc.On),
 		LandsAt:     firstNonEmpty(doc.LandsAt, "self"),
-	}
-}
-
-func inferSequentialDependsOn(phases []server.PhaseSpec) {
-	hasExplicitDepends := false
-	for _, phase := range phases {
-		if len(phase.DependsOn) > 0 {
-			hasExplicitDepends = true
-			break
-		}
-	}
-	if hasExplicitDepends {
-		return
-	}
-	for i := range phases {
-		if i == 0 {
-			continue
-		}
-		if phases[i].Always {
-			deps := make([]string, 0, i)
-			for j := 0; j < i; j++ {
-				if !phases[j].Always {
-					deps = append(deps, phases[j].Name)
-				}
-			}
-			phases[i].DependsOn = deps
-			continue
-		}
-		phases[i].DependsOn = []string{phases[i-1].Name}
 	}
 }
 
@@ -3781,6 +3718,7 @@ func (s *Store) availableNativeSlot(ctx context.Context, project string) (*int, 
 	if len(docs) >= globalCap {
 		return nil, nil
 	}
+	projectCap := s.nativeProjectCap()
 	used := map[int]bool{}
 	projectActive := 0
 	for _, doc := range docs {
@@ -3792,7 +3730,7 @@ func (s *Store) availableNativeSlot(ctx context.Context, project string) (*int, 
 			used[*slot] = true
 		}
 	}
-	if projectActive >= len(readySlots) {
+	if projectActive >= projectCap || projectActive >= len(readySlots) {
 		return nil, nil
 	}
 	for _, slot := range readySlots {
@@ -3834,6 +3772,13 @@ func (s *Store) nativeReadySlots(ctx context.Context, project string) []int {
 func (s *Store) nativeGlobalCap() int {
 	if s.nativeGlobalConcurrency > 0 {
 		return s.nativeGlobalConcurrency
+	}
+	return 5
+}
+
+func (s *Store) nativeProjectCap() int {
+	if s.nativeProjectConcurrency > 0 {
+		return s.nativeProjectConcurrency
 	}
 	return 5
 }
@@ -4959,7 +4904,7 @@ func (s *Store) RecordNativeJobCompletion(ctx context.Context, project, runID st
 			return server.NativeJobCompletionResult{}, server.ErrConflict
 		}
 
-		expectedJobIDs, err := s.expectedNativeJobIDs(ctx, project, doc.Workflow, attempt.Phase, jobID)
+		expectedJobIDs, err := s.expectedNativeJobIDs(ctx, project, doc.Workflow, attempt.Phase)
 		if err != nil {
 			return server.NativeJobCompletionResult{}, err
 		}
@@ -5017,20 +4962,20 @@ func (s *Store) RecordNativeJobCompletion(ctx context.Context, project, runID st
 	return server.NativeJobCompletionResult{}, fmt.Errorf("record native job completion: too many etag conflicts")
 }
 
-func (s *Store) expectedNativeJobIDs(ctx context.Context, project, workflowName, phaseName, fallbackJobID string) ([]string, error) {
+func (s *Store) expectedNativeJobIDs(ctx context.Context, project, workflowName, phaseName string) ([]string, error) {
 	wf, err := s.GetWorkflowByName(ctx, project, workflowName)
 	if err != nil {
 		return nil, err
 	}
 	if wf == nil {
-		return []string{fallbackJobID}, nil
+		return nil, server.ValidationError{Message: fmt.Sprintf("workflow %q is not registered", workflowName)}
 	}
 	for _, phase := range wf.Phases {
 		if phase.Name != phaseName {
 			continue
 		}
 		if len(phase.Jobs) == 0 {
-			return []string{fallbackJobID}, nil
+			return nil, server.ValidationError{Message: fmt.Sprintf("phase %q has no registered jobs", phaseName)}
 		}
 		ids := make([]string, 0, len(phase.Jobs))
 		seen := map[string]bool{}
@@ -5043,7 +4988,7 @@ func (s *Store) expectedNativeJobIDs(ctx context.Context, project, workflowName,
 			ids = append(ids, id)
 		}
 		if len(ids) == 0 {
-			return []string{fallbackJobID}, nil
+			return nil, server.ValidationError{Message: fmt.Sprintf("phase %q has no registered job ids", phaseName)}
 		}
 		return ids, nil
 	}

@@ -5,7 +5,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -44,11 +43,6 @@ type RunCallbackResult struct {
 	FailedJobIDs      []string `json:"failed_job_ids,omitempty"`
 }
 
-// RunAbortedRequest is the request body for /run-callbacks/{token}/aborted.
-type RunAbortedRequest struct {
-	Reason string `json:"reason"`
-}
-
 // abortRunByNumber handles POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/abort
 func abortRunByNumber(store ReadStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -80,47 +74,6 @@ func abortRunByNumber(store ReadStore) http.HandlerFunc {
 		}
 
 		result, err := mutStore.AbortRunByID(r.Context(), project, runID, reason)
-		if errors.Is(err, ErrNotFound) {
-			writeProblem(w, http.StatusNotFound, "run not found")
-			return
-		}
-		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "abort run failed")
-			return
-		}
-		writeJSON(w, http.StatusOK, result)
-	}
-}
-
-// runAbortedByCallbackToken handles POST /v1/run-callbacks/{callback_token}/aborted
-func runAbortedByCallbackToken(store ReadStore) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		mutStore, ok := store.(RunMutationStore)
-		if !ok || mutStore == nil {
-			writeProblem(w, http.StatusServiceUnavailable, "run mutation store not configured")
-			return
-		}
-		token := r.PathValue("callback_token")
-		runID, project, _, err := mutStore.ReadRunIDForCallbackToken(r.Context(), token)
-		if errors.Is(err, ErrNotFound) {
-			writeProblem(w, http.StatusNotFound, "run callback token not found")
-			return
-		}
-		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "read run by callback token failed")
-			return
-		}
-
-		var req RunAbortedRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeProblem(w, http.StatusBadRequest, "invalid request body")
-			return
-		}
-		if req.Reason == "" {
-			req.Reason = "aborted_via_callback"
-		}
-
-		result, err := mutStore.AbortRunByID(r.Context(), project, runID, req.Reason)
 		if errors.Is(err, ErrNotFound) {
 			writeProblem(w, http.StatusNotFound, "run not found")
 			return

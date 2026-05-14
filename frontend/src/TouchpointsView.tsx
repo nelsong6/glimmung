@@ -6,8 +6,7 @@
  * touchpoints and manually mirrored PRs with no run linkage.
  *
  * Row click navigates to the canonical issue Touchpoint tab when the
- * Touchpoint is linked to an Issue. The legacy PR-coordinate route remains a
- * compatibility fallback for unlinked mirrored PRs.
+ * Touchpoint is linked to an Issue.
  */
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -116,11 +115,9 @@ export function TouchpointsView({
                 onClick={() => {
                   if (row.issue_number !== null) {
                     navigate(`/projects/${encodeURIComponent(row.project)}/issues/${row.issue_number}/touchpoint`);
-                  } else {
-                    navigate(`/touchpoints/${row.repo}/${row.pr_number}`);
                   }
                 }}
-                style={{ cursor: "pointer" }}
+                style={{ cursor: row.issue_number !== null ? "pointer" : "default" }}
               >
                 <td>{row.project}</td>
                 <td className="mono">

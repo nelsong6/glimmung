@@ -277,11 +277,8 @@ func processRunCompletion(
 	case decision.Retry:
 		err := dispatchRetry(ctx, store, nativeLauncher, run, wf, lastAttempt.Phase)
 		if err != nil {
-			// Retry dispatch failed — abort the run to prevent it getting stuck.
 			abortReason := fmt.Sprintf("retry_dispatch_failed: %s", err)
-			result, _ := store.AbortRunByID(ctx, project, runID, abortReason)
-			verdictStr = "abort_budget_attempts"
-			_ = result
+			return abortRunWithWorkflowCleanup(ctx, w, store, nativeLauncher, run, wf, runRef, decision.AbortMalformed, abortReason)
 		}
 		return &RunCallbackResult{RunRef: runRef, Decision: &verdictStr}
 
@@ -291,9 +288,7 @@ func processRunCompletion(
 			for _, target := range targets {
 				if err := dispatchForwardPhase(ctx, store, nativeLauncher, run, wf, target); err != nil {
 					abortReason := fmt.Sprintf("forward_dispatch_failed: %s", err)
-					_, _ = store.AbortRunByID(ctx, project, runID, abortReason)
-					verdictStr = "abort_malformed"
-					return &RunCallbackResult{RunRef: runRef, Decision: &verdictStr}
+					return abortRunWithWorkflowCleanup(ctx, w, store, nativeLauncher, run, wf, runRef, decision.AbortMalformed, abortReason)
 				}
 			}
 			verdictStr = "advance_phase"
@@ -326,9 +321,7 @@ func processRunCompletion(
 			for _, target := range targets {
 				if err := dispatchForwardPhase(ctx, store, nativeLauncher, run, wf, target); err != nil {
 					abortReason := fmt.Sprintf("teardown_dispatch_failed: %s", err)
-					_, _ = store.AbortRunByID(ctx, project, runID, abortReason)
-					verdictStr = "abort_malformed"
-					return &RunCallbackResult{RunRef: runRef, Decision: &verdictStr}
+					return markRunAborted(ctx, w, store, nativeLauncher, run, runRef, decision.AbortMalformed, abortReason)
 				}
 			}
 			verdictStr = "advance_phase"
@@ -354,6 +347,62 @@ func processRunCompletion(
 			IssueLockReleased: result.IssueLockReleased,
 			PRLockReleased:    result.PRLockReleased,
 		}
+	}
+}
+
+func abortRunWithWorkflowCleanup(
+	ctx context.Context,
+	w http.ResponseWriter,
+	store RunCompletionStore,
+	nativeLauncher NativeLauncher,
+	run RunReplayData,
+	wf *Workflow,
+	runRef string,
+	verdict decision.RunDecision,
+	abortReason string,
+) *RunCallbackResult {
+	verdictStr := string(verdict)
+	if wf != nil {
+		targets := allReadyDispatchTargets(wf, run, verdict)
+		if len(targets) > 0 {
+			for _, target := range targets {
+				if err := dispatchForwardPhase(ctx, store, nativeLauncher, run, wf, target); err != nil {
+					return markRunAborted(ctx, w, store, nativeLauncher, run, runRef, decision.AbortMalformed, abortReason+"; cleanup_dispatch_failed: "+err.Error())
+				}
+			}
+			decisionStr := "advance_phase"
+			return &RunCallbackResult{RunRef: runRef, Decision: &decisionStr}
+		}
+		if hasInFlightAttempts(run) {
+			return &RunCallbackResult{RunRef: runRef, Decision: &verdictStr}
+		}
+	}
+	return markRunAborted(ctx, w, store, nativeLauncher, run, runRef, verdict, abortReason)
+}
+
+func markRunAborted(
+	ctx context.Context,
+	w http.ResponseWriter,
+	store RunCompletionStore,
+	nativeLauncher NativeLauncher,
+	run RunReplayData,
+	runRef string,
+	verdict decision.RunDecision,
+	abortReason string,
+) *RunCallbackResult {
+	reason := abortReason
+	result, err := store.SetRunTerminalState(ctx, run.Project, run.ID, "aborted", &reason)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "mark run aborted failed")
+		return nil
+	}
+	advancePlaybooksForTerminalRun(ctx, store, nativeLauncher, run.Project, run.ID)
+	verdictStr := string(verdict)
+	return &RunCallbackResult{
+		RunRef:            runRef,
+		Decision:          &verdictStr,
+		IssueLockReleased: result.IssueLockReleased,
+		PRLockReleased:    result.PRLockReleased,
 	}
 }
 

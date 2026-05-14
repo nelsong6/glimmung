@@ -240,11 +240,19 @@ func (s *fakePlayableStore) ReadIssueForDispatch(context.Context, string, int) (
 }
 
 func (s *fakePlayableStore) GetWorkflowByName(context.Context, string, string) (*Workflow, error) {
-	return &Workflow{Name: "agent", Phases: []PhaseSpec{{Name: "impl", Kind: "k8s_job", Jobs: []NativeJobSpec{{ID: "impl"}}}}}, nil
+	return &Workflow{Name: "agent", Project: "glimmung", Phases: playbookTestWorkflowPhases()}, nil
 }
 
 func (s *fakePlayableStore) ListProjectWorkflows(context.Context, string) ([]Workflow, error) {
-	return []Workflow{{Name: "agent", Phases: []PhaseSpec{{Name: "impl", Kind: "k8s_job", Jobs: []NativeJobSpec{{ID: "impl"}}}}}}, nil
+	return []Workflow{{Name: "agent", Project: "glimmung", Phases: playbookTestWorkflowPhases()}}, nil
+}
+
+func playbookTestWorkflowPhases() []PhaseSpec {
+	return []PhaseSpec{
+		{Name: "prep", Kind: "k8s_job", Jobs: []NativeJobSpec{{ID: "prep"}}},
+		{Name: "verify", Kind: "k8s_job", Verify: true, DependsOn: []string{"prep"}, Jobs: []NativeJobSpec{{ID: "verify"}}},
+		{Name: "cleanup", Kind: "k8s_job", Always: true, DependsOn: []string{"verify"}, Jobs: []NativeJobSpec{{ID: "cleanup"}}},
+	}
 }
 
 func (s *fakePlayableStore) ClaimIssueLock(context.Context, string, int, string, int) error {

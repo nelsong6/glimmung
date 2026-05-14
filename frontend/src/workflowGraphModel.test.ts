@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  fallbackPhaseGraphModel,
+  phaseGraphModelFromNames,
   workflowToPhaseGraphModel,
   type WorkflowGraphSource,
 } from "./workflowGraphModel";
@@ -66,7 +66,7 @@ describe("workflowToPhaseGraphModel", () => {
     });
   });
 
-  it("uses a fallback phase when a workflow definition has no phases", () => {
+  it("preserves an empty phase list when a workflow definition has no phases", () => {
     const workflow: WorkflowGraphSource = {
       name: "native-workflow",
       phases: [],
@@ -80,17 +80,8 @@ describe("workflowToPhaseGraphModel", () => {
       },
     };
 
-    expect(workflowToPhaseGraphModel(workflow, { fallbackPhaseName: "dispatch" })).toEqual({
-      phases: [
-        {
-          name: "dispatch",
-          kind: "k8s_job",
-          verify: false,
-          always: undefined,
-          evidence_verification_gate: undefined,
-          depends_on: [],
-        },
-      ],
+    expect(workflowToPhaseGraphModel(workflow)).toEqual({
+      phases: [],
       prEnabled: false,
       recycleArrows: [
         {
@@ -106,9 +97,9 @@ describe("workflowToPhaseGraphModel", () => {
   });
 });
 
-describe("fallbackPhaseGraphModel", () => {
+describe("phaseGraphModelFromNames", () => {
   it("links provided phase names in order", () => {
-    expect(fallbackPhaseGraphModel(["plan", "implement", "verify"], { prEnabled: false })).toEqual({
+    expect(phaseGraphModelFromNames(["plan", "implement", "verify"], { prEnabled: false })).toEqual({
       phases: [
         { name: "plan", kind: "phase", depends_on: [] },
         { name: "implement", kind: "phase", depends_on: ["plan"] },
@@ -119,9 +110,9 @@ describe("fallbackPhaseGraphModel", () => {
     });
   });
 
-  it("falls back to the current phase when no phase list exists", () => {
-    expect(fallbackPhaseGraphModel([], { currentPhase: "verification" })).toEqual({
-      phases: [{ name: "verification", kind: "phase", depends_on: [] }],
+  it("preserves an empty phase list", () => {
+    expect(phaseGraphModelFromNames([])).toEqual({
+      phases: [],
       prEnabled: true,
       recycleArrows: [],
     });

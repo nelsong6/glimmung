@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/nelsong6/glimmung/internal/domain/budget"
+	"github.com/nelsong6/glimmung/internal/domain/phaserefs"
 )
 
 const workflowKindNativeK8sJob = "k8s_job"
@@ -62,11 +64,7 @@ func registerWorkflow(store ReadStore) http.HandlerFunc {
 			return
 		}
 		normalizeWorkflowRegisterForProject(&req, project)
-		if err := validateWorkflowAllowedForProject(project, req); err != nil {
-			writeProblem(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		if err := validateMandatoryPhases(req); err != nil {
+		if err := ValidateWorkflowRegister(req); err != nil {
 			writeProblem(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -189,6 +187,84 @@ func validateWorkflowAllowedForProject(project Project, req WorkflowRegister) er
 	return nil
 }
 
+// ValidateWorkflowRegister enforces the persisted workflow graph contract.
+func ValidateWorkflowRegister(req WorkflowRegister) error {
+	if len(req.Phases) == 0 {
+		return ValidationError{Message: "workflow " + req.Name + " is missing required phases: prepare, testing, cleanup"}
+	}
+	if err := validateWorkflowAllowedForProject(Project{}, req); err != nil {
+		return err
+	}
+	phaseRefs := make([]phaserefs.Phase, 0, len(req.Phases))
+	phaseNames := map[string]int{}
+	hasTesting := false
+	hasCleanup := false
+	for i, phase := range req.Phases {
+		name := strings.TrimSpace(phase.Name)
+		if name == "" {
+			return ValidationError{Message: fmt.Sprintf("workflow %s phase[%d] is missing name", req.Name, i)}
+		}
+		if prev, ok := phaseNames[name]; ok {
+			return ValidationError{Message: fmt.Sprintf("workflow %s phase %q duplicates phase[%d]", req.Name, name, prev)}
+		}
+		phaseNames[name] = i
+		if phase.Verify {
+			hasTesting = true
+		}
+		if phase.Always {
+			hasCleanup = true
+			if len(phase.Inputs) > 0 {
+				return ValidationError{Message: fmt.Sprintf("workflow %s always phase %q cannot declare inputs; cleanup must be abort-safe", req.Name, name)}
+			}
+		}
+		if len(phase.Jobs) > 0 {
+			seenJobs := map[string]int{}
+			for j, job := range phase.Jobs {
+				jobID := strings.TrimSpace(job.ID)
+				if jobID == "" {
+					return ValidationError{Message: fmt.Sprintf("workflow %s phase %q job[%d] is missing id", req.Name, name, j)}
+				}
+				if prev, ok := seenJobs[jobID]; ok {
+					return ValidationError{Message: fmt.Sprintf("workflow %s phase %q job %q duplicates job[%d]", req.Name, name, jobID, prev)}
+				}
+				seenJobs[jobID] = j
+			}
+		}
+		if i == 0 {
+			if len(phase.DependsOn) != 0 {
+				return ValidationError{Message: fmt.Sprintf("workflow %s entry phase %q must not declare depends_on", req.Name, name)}
+			}
+		} else {
+			if len(phase.DependsOn) != 1 {
+				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q must declare exactly one depends_on entry", req.Name, name)}
+			}
+			want := req.Phases[i-1].Name
+			if phase.DependsOn[0] != want {
+				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q depends_on must be [%q]", req.Name, name, want)}
+			}
+		}
+		phaseRefs = append(phaseRefs, phaserefs.Phase{
+			Name:    name,
+			Inputs:  phase.Inputs,
+			Outputs: phase.Outputs,
+		})
+	}
+	if !hasTesting || !hasCleanup {
+		missing := make([]string, 0, 2)
+		if !hasTesting {
+			missing = append(missing, "testing")
+		}
+		if !hasCleanup {
+			missing = append(missing, "cleanup")
+		}
+		return ValidationError{Message: "workflow " + req.Name + " is missing required phases: " + strings.Join(missing, ", ")}
+	}
+	if err := phaserefs.Validate(phaseRefs); err != nil {
+		return ValidationError{Message: err.Error()}
+	}
+	return nil
+}
+
 func workflowPhaseKind(kind string) string {
 	kind = strings.TrimSpace(kind)
 	if kind == "" {
@@ -227,25 +303,4 @@ func isNativeWebappKind(kind string) bool {
 	default:
 		return false
 	}
-}
-
-func validateMandatoryPhases(req WorkflowRegister) error {
-	hasEntry := false
-	hasTesting := false
-	hasCleanup := false
-	for _, phase := range req.Phases {
-		if len(phase.DependsOn) == 0 {
-			hasEntry = true
-		}
-		if phase.Verify || phase.EvidenceVerificationGate {
-			hasTesting = true
-		}
-		if phase.Always {
-			hasCleanup = true
-		}
-	}
-	if hasEntry && hasTesting && hasCleanup {
-		return nil
-	}
-	return ValidationError{Message: "workflow " + req.Name + " is missing required phases"}
 }

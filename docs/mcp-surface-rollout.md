@@ -23,20 +23,18 @@ MCP wrapper at the same time:
 Do not rely on the backend rejecting stale fields as the only protection. A
 stale MCP schema still misleads agents before the request reaches Glimmung.
 
-## Compatibility Window
+## Rename Or Removal
 
-When a server is renamed, prefer a compatibility alias before removing the old
-name. The alias should point at the same live deployment and expose the same
-health behavior as the new name.
+When a server is renamed, remove the old name in the same change that adds the
+new one. Do not keep an alias for already-running sessions. Stale sessions are
+unsupported and should be restarted.
 
 Recommended sequence:
 
-1. Add the new server name and keep the old name as an alias.
+1. Add the new server name and remove the old name.
 2. Deploy the MCP server and session config together.
 3. Start a fresh session and verify only the expected names appear healthy.
-4. Leave the alias in place long enough for ordinary active sessions to age out.
-5. Remove the alias in a separate change after stale sessions are no longer
-   expected to be common.
+4. Record the fresh-session requirement in the PR.
 
 If the upstream service is being removed with no replacement, do not leave a
 dead namespace in discovery. Remove the session config entry in the same
@@ -67,8 +65,6 @@ Removed or renamed MCP surfaces must not look healthy.
 Each MCP server entry should satisfy one of these states:
 
 - `active`: listed in discovery and routes calls to a live backend
-- `alias`: listed in discovery, documented as temporary, and routes calls to a
-  live backend
 - `removed`: absent from discovery for new sessions
 - `stale`: visible only in old sessions, with failures that clearly indicate
   stale session config instead of a healthy-but-broken tool
@@ -84,11 +80,10 @@ When a stale session is suspected:
 
 1. Start a new session and inspect MCP discovery there.
 2. If the new session is correct, restart or replace the stale session.
-3. If the new session is also wrong, roll back the MCP config change or restore
-   a compatibility alias before continuing the migration.
+3. If the new session is also wrong, roll back the MCP config change or finish
+   removing the old surface before continuing the migration.
 4. Record the old name, new name, deployment revision, and observed stale
    behavior in the PR or issue so the next migration has an audit trail.
 
 The desired operator outcome is simple: new sessions get the new config; old
-sessions either keep working through the alias window or fail with an obvious
-stale-session explanation.
+sessions fail with an obvious stale-session explanation.

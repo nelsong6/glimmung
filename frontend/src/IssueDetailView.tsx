@@ -17,17 +17,13 @@
  * #69) — boring but honest, and the layout extends cleanly when
  * multi-phase orchestration lands.
  *
- * Backwards-compat: old slugs (description / in-progress / lineage)
- * still resolve so deep links from before #81 don't 404.
- *
- * Routed canonically via `/projects/<project>/issues/<number>`. Legacy
- * GitHub-shaped and id-shaped URLs still load so old links can redirect.
+ * Routed canonically via `/projects/<project>/issues/<number>`.
  */
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { authedFetch } from "./auth";
 import { PhaseGraph, type PhaseGraphPhase, type RecycleArrow } from "./PhaseGraph";
-import { fallbackPhaseGraphModel, workflowToPhaseGraphModel } from "./workflowGraphModel";
+import { phaseGraphModelFromNames, workflowToPhaseGraphModel } from "./workflowGraphModel";
 import { resolveProjectWorkflow } from "./workflowLookup";
 
 type IssueDetail = {
@@ -355,8 +351,7 @@ export function IssueDetailView() {
   const { signedIn, isAdmin, snap } = useOutletContext<AuthContext>();
 
   const projectRouteIssueNumber = params.issueNumber ? parseInt(params.issueNumber, 10) : null;
-  // Project-shaped issue URLs are canonical for the UI; GitHub-shaped URLs
-  // remain accepted only as compatibility entry points.
+  // Project-shaped issue URLs are canonical for the UI.
   const target: IssueDetailTarget | null = projectRouteIssueNumber !== null
     ? {
         kind: "number",
@@ -388,9 +383,8 @@ export function IssueDetailView() {
       ? `/projects/${encodeURIComponent(target.project)}/issues/${target.issue_number}`
       : "/issues";
 
-  // Tab is URL-driven so each tab is deep-linkable. Bare issue URLs and
-  // legacy slugs are normalized to `/summary` so the breadcrumb leaf
-  // and address bar stay aligned.
+  // Tab is URL-driven so each tab is deep-linkable. Bare issue URLs are
+  // normalized to `/summary` so the breadcrumb leaf and address bar stay aligned.
   const lastSeg = location.pathname.split("/").filter(Boolean).pop() ?? "";
   // params.runId / workflowRunId hold user-facing run numbers (e.g. "3"),
   // not internal IDs. They force their owning tab independent of graph load.
@@ -509,17 +503,17 @@ export function IssueDetailView() {
     }
   };
 
-  const abortRun = async (runId: string) => {
-    if (!detail) return;
+  const abortRun = async (runNumber: number) => {
+    if (!detail || detail.number === null) return;
     setAbortState({ kind: "aborting" });
     try {
       const r = await authedFetch(
-        `/v1/runs/${encodeURIComponent(detail.project)}/${encodeURIComponent(runId)}/abort?reason=aborted_via_ui`,
+        `/v1/projects/${encodeURIComponent(detail.project)}/issues/${detail.number}/runs/${runNumber}/abort?reason=aborted_via_ui`,
         { method: "POST" },
       );
       if (!r.ok) {
         const text = await r.text();
-        throw new Error(`/v1/runs/${detail.project}/${runId}/abort -> ${r.status}: ${text}`);
+        throw new Error(`/v1/projects/${detail.project}/issues/${detail.number}/runs/${runNumber}/abort -> ${r.status}: ${text}`);
       }
       setAbortState({ kind: "idle" });
       setRefreshTick((t) => t + 1);
@@ -627,7 +621,7 @@ export function IssueDetailView() {
   }, [tab, isInFlight]);
 
   if (target?.kind === "gh" && snap && !resolvedProjectFromRepo) {
-    return <div className="empty">GitHub-shaped issue links are compatibility entry points only. Register the project route to open this issue.</div>;
+    return <div className="empty">Register the project route to open this issue.</div>;
   }
   if (!target && projectRouteIssueNumber !== null && snap) {
     return <div className="empty">Project {params.project || "(missing)"} was not found.</div>;
@@ -697,7 +691,7 @@ export function IssueDetailView() {
                 abortState={abortState}
                 onArmAbort={() => setAbortState({ kind: "armed" })}
                 onCancelAbort={() => setAbortState({ kind: "idle" })}
-                onConfirmAbort={(runId) => void abortRun(runId)}
+                onConfirmAbort={(runNumber) => void abortRun(runNumber)}
                 selectedRunId={selectedRunId}
                 onSelectRun={selectRun}
                 onViewRunWorkflow={selectWorkflowRun}
@@ -1241,7 +1235,7 @@ export function RunViewer({
   abortState: AbortState;
   onArmAbort: () => void;
   onCancelAbort: () => void;
-  onConfirmAbort: (runId: string) => void;
+  onConfirmAbort: (runNumber: number) => void;
   selectedRunId: string | null;
   onBackToRuns: () => void;
   onOpenTouchpoint: () => void;
@@ -1287,7 +1281,7 @@ export function RunViewer({
   // Always targets the currently in-flight run, even when a different
   // historical run is selected for viewing in the run tab.
   const activeRun = findActiveRun(graph);
-  const abortableRunId = activeRun ? runIdFromNode(activeRun) : null;
+  const abortableRunNumber = activeRun ? numberOrNull(activeRun.metadata.run_number) : null;
   const aborting = abortState.kind === "aborting";
   const armed = abortState.kind === "armed";
   const dispatchLabel = dispatching
@@ -1324,14 +1318,14 @@ export function RunViewer({
           <span className="dispatch-error-message">{formatDispatchError(dispatchState.message)}</span>
         </span>
       )}
-      {signedIn && abortableRunId && (
+      {signedIn && abortableRunNumber !== null && (
         <span style={{ marginLeft: "1rem" }}>
           {armed || aborting ? (
             <span className="confirm">
               <button
                 type="button"
                 className="link danger-text"
-                onClick={() => onConfirmAbort(abortableRunId)}
+                onClick={() => onConfirmAbort(abortableRunNumber)}
                 disabled={aborting}
               >
                 {aborting ? "aborting…" : "abort?"}
@@ -1437,8 +1431,7 @@ export function RunViewer({
 }
 
 // Cool-toned definition view of the workflow's DAG when no run has
-// landed yet. Falls back to a generic phase -> touchpoint shape only
-// when the snapshot has not produced the workflow definition.
+// landed yet.
 function DefinitionDag({
   workflow,
   project,
@@ -1447,18 +1440,18 @@ function DefinitionDag({
   project: string;
 }) {
   const location = useLocation();
-  const graphModel = workflow
-    ? workflowToPhaseGraphModel(workflow)
-    : fallbackPhaseGraphModel(["phase"]);
+  const graphModel = workflow ? workflowToPhaseGraphModel(workflow) : null;
   return (
     <div className="dag-wrap">
-      <PhaseGraph
-        phases={graphModel.phases}
-        prEnabled={graphModel.prEnabled}
-        dagClassName="dag-definition"
-        ariaLabel="workflow definition"
-        recycleArrows={graphModel.recycleArrows}
-      />
+      {graphModel && (
+        <PhaseGraph
+          phases={graphModel.phases}
+          prEnabled={graphModel.prEnabled}
+          dagClassName="dag-definition"
+          ariaLabel="workflow definition"
+          recycleArrows={graphModel.recycleArrows}
+        />
+      )}
       {!workflow && (
         <div className="dim mono" style={{ marginTop: "0.5rem" }}>
           Workflow definition unavailable in the current snapshot.
@@ -1516,15 +1509,14 @@ function PipelineDag({
   const graphModel = useMemo(() => {
     if (workflow) return workflowToPhaseGraphModel(workflow);
     if (!hasStoredWorkflowGraph) return null;
-    return fallbackPhaseGraphModel(
+    return phaseGraphModelFromNames(
       workflowGraph?.phases ?? [],
       {
-        currentPhase: phaseRollups[0]?.phaseName ?? null,
         prEnabled: workflowGraph?.terminal.enabled ?? true,
         recycleArrows: workflowGraph?.recycle_arrows ?? [],
       },
     );
-  }, [hasStoredWorkflowGraph, workflow, workflowGraph, phaseRollups]);
+  }, [hasStoredWorkflowGraph, workflow, workflowGraph]);
   const unavailableWorkflowName = stringOrNull(meta.workflow);
   if (!graphModel) {
     return (
@@ -1995,7 +1987,7 @@ function RunsPane({
   abortState: AbortState;
   onArmAbort: () => void;
   onCancelAbort: () => void;
-  onConfirmAbort: (runId: string) => void;
+  onConfirmAbort: (runNumber: number) => void;
   selectedRunId: string | null;
   onSelectRun: (runId: string | null) => void;
   onViewRunWorkflow: (runId: string) => void;
@@ -2021,13 +2013,13 @@ function RunsPane({
     : !isAdmin && !dispatching && !detail.issue_lock_held
     ? "Dispatching runs is restricted to admins (your email is not in ALLOWED_EMAILS)."
     : undefined;
-  const activeRunId = (() => {
+  const activeRunNumber = (() => {
     const node = graph ? findActiveRun(graph) : null;
-    return node ? runIdFromNode(node) : null;
+    return node ? numberOrNull(node.metadata.run_number) : null;
   })();
   const aborting = abortState.kind === "aborting";
   const armed = abortState.kind === "armed";
-  const cancelVisible = signedIn && isAdmin && !!activeRunId;
+  const cancelVisible = signedIn && isAdmin && activeRunNumber !== null;
   const newRunButton = (
     <div
       className="run-actions"
@@ -2059,7 +2051,7 @@ function RunsPane({
             <button
               type="button"
               className="link danger-text"
-              onClick={() => onConfirmAbort(activeRunId)}
+              onClick={() => onConfirmAbort(activeRunNumber)}
               disabled={aborting}
             >
               {aborting ? "cancelling…" : "cancel?"}
@@ -2889,8 +2881,14 @@ function NativeJobInspector({
     setLogs(null);
     setError(null);
     setSelectedKey(defaultSelection);
-    const url = `${nativeRunApiBase(project, runId)}` +
-      `/events?attempt_index=${attemptIndex}&limit=200`;
+    const base = nativeRunApiBase(project, runId);
+    if (!base) {
+      setError("events unavailable for malformed run ref");
+      return () => {
+        cancelled = true;
+      };
+    }
+    const url = `${base}/events?attempt_index=${attemptIndex}&limit=200`;
     const load = () => {
       fetch(url)
       .then(async (res) => {
@@ -2994,14 +2992,14 @@ function NativeJobInspector({
   );
 }
 
-function nativeRunApiBase(project: string, runRef: string): string {
+function nativeRunApiBase(project: string, runRef: string): string | null {
   const parsed = runRef.match(/^[^#]+#(\d+)\/runs\/(.+)$/);
   if (parsed) {
     return `/v1/projects/${encodeURIComponent(project)}` +
       `/issues/${encodeURIComponent(parsed[1])}` +
       `/runs/${encodeURIComponent(parsed[2])}/native`;
   }
-  return `/v1/runs/${encodeURIComponent(project)}/${encodeURIComponent(runRef)}/native`;
+  return null;
 }
 
 function nativeStepRefs(jobs: NativeAttemptJob[]): Array<{

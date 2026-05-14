@@ -1,8 +1,8 @@
 # Touchpoints, RunReports, And Playbook Integration
 
 This document fixes the object boundaries for review surfaces and execution
-telemetry. The current code still has compatibility names such as `Report`,
-but new design and API work should use these boundaries.
+telemetry. Older `Report` terminology is migration debt; new design and API
+work should use these boundaries and delete old surfaces when migrating them.
 
 ## RunReport
 
@@ -23,7 +23,7 @@ Playbook views when needed.
 The materialized API is:
 
 ```text
-GET /v1/runs/{project}/{run_id}/report
+GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/report
 ```
 
 It is derived from the Run document and includes attempt summaries,
@@ -114,7 +114,7 @@ inspection tools, but they belong in the Runs tab, RunReport pages, or a
 future debug view. The default Touchpoint experience is the current live
 frontend for user interaction.
 
-## Compatibility Rename
+## Terminology Migration
 
 Conceptual rename:
 
@@ -124,9 +124,10 @@ Current ReportVersion -> TouchpointVersion, if versions remain useful
 New RunReport -> per-Run factual execution report
 ```
 
-Existing API, frontend, storage, and MCP callers still use some `Report` names.
-Keep compatibility aliases during staged migration and avoid changing storage
-names only for terminology cleanup.
+Existing API, frontend, storage, and MCP callers may still use some `Report`
+names. When a surface is migrated, delete the old route, UI control, storage
+read, test, and docs in the same change. Do not keep aliases for terminology
+cleanup.
 
 ## Playbooks And Touchpoints
 
