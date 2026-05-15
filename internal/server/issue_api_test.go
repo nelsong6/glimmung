@@ -116,12 +116,6 @@ func TestListIssuesValidatesFilters(t *testing.T) {
 	handler := NewWithStore(Settings{}, &fakeIssueStore{})
 
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/issues?repo=nelsong6/glimmung", nil))
-	if rec.Code != http.StatusGone {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-	}
-
-	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/issues?limit=0", nil))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())

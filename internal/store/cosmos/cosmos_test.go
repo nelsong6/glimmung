@@ -75,7 +75,6 @@ func TestWorkflowFromDocConvertsNestedShape(t *testing.T) {
 		],
 		"pr": {"enabled": true},
 		"budget": {"total": 40},
-		"triggerLabel": "agent",
 		"defaultRequirements": {"gpu": "none"},
 		"metadata": {"kind": "primary"},
 		"createdAt": "2026-05-11T03:00:00Z"
@@ -89,9 +88,6 @@ func TestWorkflowFromDocConvertsNestedShape(t *testing.T) {
 
 	if workflow.Budget.Total != 40 {
 		t.Fatalf("Budget=%#v", workflow.Budget)
-	}
-	if workflow.TriggerLabel == nil || *workflow.TriggerLabel != "agent" {
-		t.Fatalf("TriggerLabel=%v", workflow.TriggerLabel)
 	}
 	if len(workflow.Phases) != 3 {
 		t.Fatalf("len(phases)=%d", len(workflow.Phases))

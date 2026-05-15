@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/nelsong6/glimmung/internal/auth"
@@ -75,57 +74,6 @@ func minimalRun(phase string) *RunReplayData {
 			{AttemptIndex: 0, Phase: phase, Conclusion: "success"},
 		},
 		CumulativeCostUSD: 0.5,
-	}
-}
-
-// --- native/failed tests ---
-
-func TestNativeRunFailedByNumberGone(t *testing.T) {
-	store := &fakeRunReplayStore{}
-	store.runID = "run-abc"
-	store.abortResult = AbortRunResult{State: "aborted", RunRef: "proj#1/r1"}
-	h := newReplayHandlerNoAuth(store)
-
-	body, _ := json.Marshal(map[string]string{"reason": "oom"})
-	req := httptest.NewRequest("POST", "/v1/projects/proj/issues/1/runs/r1/native/failed", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusGone {
-		t.Fatalf("expected 410, got %d: %s", w.Code, w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), "/native/completed") {
-		t.Fatalf("body=%s", w.Body.String())
-	}
-}
-
-func TestNativeRunFailedByNumberGoneBeforePathValidation(t *testing.T) {
-	store := &fakeRunReplayStore{}
-	h := newReplayHandlerNoAuth(store)
-
-	body, _ := json.Marshal(map[string]string{"reason": "crash"})
-	req := httptest.NewRequest("POST", "/v1/projects/proj/issues/notanumber/runs/r1/native/failed", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusGone {
-		t.Errorf("expected 410, got %d", w.Code)
-	}
-}
-
-func TestNativeRunFailedByCallbackTokenGone(t *testing.T) {
-	store := &fakeRunReplayStore{}
-	store.runID = "run-abc"
-	store.abortResult = AbortRunResult{State: "aborted", RunRef: "proj#1/r1"}
-	h := newReplayHandlerNoAuth(store)
-
-	body, _ := json.Marshal(map[string]string{"reason": "timeout"})
-	req := httptest.NewRequest("POST", "/v1/run-callbacks/tok123/native/failed", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusGone {
-		t.Fatalf("expected 410, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

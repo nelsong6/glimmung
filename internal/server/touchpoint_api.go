@@ -11,7 +11,6 @@ import (
 
 type TouchpointStore interface {
 	ListTouchpoints(ctx context.Context, filter TouchpointListFilter) ([]TouchpointRow, error)
-	GetTouchpointByRepoPR(ctx context.Context, repo string, prNumber int) (TouchpointDetail, error)
 	GetTouchpointForIssue(ctx context.Context, project string, issueNumber int) (TouchpointDetail, error)
 	EnsureTouchpoint(ctx context.Context, req TouchpointCreate) (TouchpointDetail, error)
 }
@@ -24,55 +23,55 @@ type TouchpointListFilter struct {
 }
 
 type TouchpointRow struct {
-	Ref                    string  `json:"ref"`
-	Project                string  `json:"project"`
-	Repo                   string  `json:"repo"`
-	PRNumber               int     `json:"pr_number"`
-	PRBranch               *string `json:"pr_branch"`
-	Title                  string  `json:"title"`
-	State                  string  `json:"state"`
-	Merged                 bool    `json:"merged"`
-	HTMLURL                *string `json:"html_url"`
-	LinkedIssueRef         *string `json:"linked_issue_ref"`
-	LinkedRunRef           *string `json:"linked_run_ref"`
-	IssueNumber            *int    `json:"issue_number"`
-	RunRef                 *string `json:"run_ref"`
-	RunState               *string `json:"run_state"`
-	ValidationURL          *string `json:"validation_url"`
-	SessionLaunchURL       *string `json:"session_launch_url"`
-	RunAttempts            int     `json:"run_attempts"`
-	RunCumulativeCostUSD   float64 `json:"run_cumulative_cost_usd"`
-	PRLockHeld             bool    `json:"pr_lock_held"`
+	Ref                  string  `json:"ref"`
+	Project              string  `json:"project"`
+	Repo                 string  `json:"repo"`
+	PRNumber             int     `json:"pr_number"`
+	PRBranch             *string `json:"pr_branch"`
+	Title                string  `json:"title"`
+	State                string  `json:"state"`
+	Merged               bool    `json:"merged"`
+	HTMLURL              *string `json:"html_url"`
+	LinkedIssueRef       *string `json:"linked_issue_ref"`
+	LinkedRunRef         *string `json:"linked_run_ref"`
+	IssueNumber          *int    `json:"issue_number"`
+	RunRef               *string `json:"run_ref"`
+	RunState             *string `json:"run_state"`
+	ValidationURL        *string `json:"validation_url"`
+	SessionLaunchURL     *string `json:"session_launch_url"`
+	RunAttempts          int     `json:"run_attempts"`
+	RunCumulativeCostUSD float64 `json:"run_cumulative_cost_usd"`
+	PRLockHeld           bool    `json:"pr_lock_held"`
 }
 
 type TouchpointDetail struct {
-	Ref                    string           `json:"ref"`
-	Project                string           `json:"project"`
-	Repo                   string           `json:"repo"`
-	PRNumber               int              `json:"pr_number"`
-	PRBranch               *string          `json:"pr_branch"`
-	Title                  string           `json:"title"`
-	Body                   string           `json:"body"`
-	State                  string           `json:"state"`
-	Merged                 bool             `json:"merged"`
-	BaseRef                string           `json:"base_ref"`
-	HeadSHA                string           `json:"head_sha"`
-	HTMLURL                *string          `json:"html_url"`
-	LinkedIssueRef         *string          `json:"linked_issue_ref"`
-	LinkedRunRef           *string          `json:"linked_run_ref"`
-	IssueNumber            *int             `json:"issue_number"`
-	IssueTitle             *string          `json:"issue_title"`
-	RunRef                 *string          `json:"run_ref"`
-	RunState               *string          `json:"run_state"`
-	ValidationURL          *string          `json:"validation_url"`
-	ScreenshotsMarkdown    *string          `json:"screenshots_markdown"`
-	SessionLaunchURL       *string          `json:"session_launch_url"`
-	RunAttempts            int              `json:"run_attempts"`
-	RunCumulativeCostUSD   float64          `json:"run_cumulative_cost_usd"`
-	RunAttemptHistory      []map[string]any `json:"run_attempt_history"`
-	Comments               []map[string]any `json:"comments"`
-	Reviews                []map[string]any `json:"reviews"`
-	PRLockHeld             bool             `json:"pr_lock_held"`
+	Ref                  string           `json:"ref"`
+	Project              string           `json:"project"`
+	Repo                 string           `json:"repo"`
+	PRNumber             int              `json:"pr_number"`
+	PRBranch             *string          `json:"pr_branch"`
+	Title                string           `json:"title"`
+	Body                 string           `json:"body"`
+	State                string           `json:"state"`
+	Merged               bool             `json:"merged"`
+	BaseRef              string           `json:"base_ref"`
+	HeadSHA              string           `json:"head_sha"`
+	HTMLURL              *string          `json:"html_url"`
+	LinkedIssueRef       *string          `json:"linked_issue_ref"`
+	LinkedRunRef         *string          `json:"linked_run_ref"`
+	IssueNumber          *int             `json:"issue_number"`
+	IssueTitle           *string          `json:"issue_title"`
+	RunRef               *string          `json:"run_ref"`
+	RunState             *string          `json:"run_state"`
+	ValidationURL        *string          `json:"validation_url"`
+	ScreenshotsMarkdown  *string          `json:"screenshots_markdown"`
+	SessionLaunchURL     *string          `json:"session_launch_url"`
+	RunAttempts          int              `json:"run_attempts"`
+	RunCumulativeCostUSD float64          `json:"run_cumulative_cost_usd"`
+	RunAttemptHistory    []map[string]any `json:"run_attempt_history"`
+	Comments             []map[string]any `json:"comments"`
+	Reviews              []map[string]any `json:"reviews"`
+	PRLockHeld           bool             `json:"pr_lock_held"`
 }
 
 type TouchpointCreate struct {
@@ -126,32 +125,6 @@ func listTouchpoints(store ReadStore) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, rows)
-	}
-}
-
-func touchpointDetailByRepoPR(store ReadStore) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		tpStore, ok := store.(TouchpointStore)
-		if !ok || tpStore == nil {
-			writeProblem(w, http.StatusServiceUnavailable, "touchpoint store not configured")
-			return
-		}
-		repo := r.PathValue("repo_owner") + "/" + r.PathValue("repo_name")
-		prNumber, err := strconv.Atoi(r.PathValue("pr_number"))
-		if err != nil || prNumber < 1 {
-			writeProblem(w, http.StatusBadRequest, "pr_number must be a positive integer")
-			return
-		}
-		detail, err := tpStore.GetTouchpointByRepoPR(r.Context(), repo, prNumber)
-		switch {
-		case errors.Is(err, ErrNotFound):
-			writeProblem(w, http.StatusNotFound, "touchpoint not found")
-			return
-		case err != nil:
-			writeProblem(w, http.StatusInternalServerError, "get touchpoint failed")
-			return
-		}
-		writeJSON(w, http.StatusOK, detail)
 	}
 }
 

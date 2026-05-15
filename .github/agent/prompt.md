@@ -37,7 +37,7 @@ auth paths: Entra and K8s service-account token.
 The default app checks are `go test ./...`, `go vet ./...`,
 `npm run test:run` from `frontend/`, and `npm run build` from `frontend/`.
 There is no root app `pyproject.toml`. Do not recreate root Python packaging
-for the app path. The legacy Python app and root Python test suite have been
+for the app path. The retired Python app and root Python test suite have been
 removed; app/runtime work is validated through Go tests and the frontend gate.
 
 ## Workflow

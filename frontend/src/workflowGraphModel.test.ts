@@ -85,12 +85,12 @@ describe("workflowToPhaseGraphModel", () => {
       prEnabled: false,
       recycleArrows: [
         {
-          source: "report",
+          source: "touchpoint",
           target: "implementation",
           trigger: "changes_requested",
           max_attempts: 3,
           active: false,
-          kind: "report_recycle",
+          kind: "touchpoint_recycle",
         },
       ],
     });

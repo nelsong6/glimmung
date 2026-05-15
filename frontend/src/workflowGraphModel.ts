@@ -40,15 +40,15 @@ function phaseRecycleArrow(phase: WorkflowGraphPhase, active: boolean): RecycleA
   };
 }
 
-function reportRecycleArrow(policy: RecyclePolicy | null | undefined, active: boolean): RecycleArrow | null {
+function touchpointRecycleArrow(policy: RecyclePolicy | null | undefined, active: boolean): RecycleArrow | null {
   if (!policy) return null;
   return {
-    source: "report",
+    source: "touchpoint",
     target: policy.lands_at,
     trigger: policy.on.join(" / "),
     max_attempts: policy.max_attempts,
     active,
-    kind: "report_recycle",
+    kind: "touchpoint_recycle",
   };
 }
 
@@ -75,7 +75,7 @@ export function workflowToPhaseGraphModel(
         return arrow ? [arrow] : [];
       }),
       ...(() => {
-        const arrow = reportRecycleArrow(workflow.pr.recycle_policy, active);
+        const arrow = touchpointRecycleArrow(workflow.pr.recycle_policy, active);
         return arrow ? [arrow] : [];
       })(),
     ],

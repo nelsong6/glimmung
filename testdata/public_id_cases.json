@@ -46,15 +46,15 @@
     "want": "ambience/runs/unknown"
   },
   {
-    "name": "report with number",
-    "function": "report_ref",
+    "name": "touchpoint with number",
+    "function": "touchpoint_ref",
     "repo": "nelsong6/ambience",
     "number": 42,
     "want": "nelsong6/ambience#42"
   },
   {
-    "name": "report without number",
-    "function": "report_ref",
+    "name": "touchpoint without number",
+    "function": "touchpoint_ref",
     "repo": "nelsong6/ambience",
     "number": null,
     "want": "nelsong6/ambience"

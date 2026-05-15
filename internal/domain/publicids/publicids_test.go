@@ -40,8 +40,8 @@ func runPublicIDCase(t *testing.T, tc goldenCase) string {
 		return IssueRef(tc.Project, tc.Number)
 	case "run_ref":
 		return RunRef(tc.Project, tc.IssueNumber, tc.RunDisplay)
-	case "report_ref":
-		return ReportRef(tc.Repo, tc.Number)
+	case "touchpoint_ref":
+		return TouchpointRef(tc.Repo, tc.Number)
 	case "lease_ref":
 		return LeaseRef(tc.Project, tc.SlotName, tc.LeaseNumber)
 	default:

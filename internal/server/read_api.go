@@ -31,7 +31,6 @@ type Workflow struct {
 	Phases              []PhaseSpec    `json:"phases"`
 	PR                  PrPrimitive    `json:"pr"`
 	Budget              budget.Config  `json:"budget"`
-	TriggerLabel        *string        `json:"trigger_label"`
 	DefaultRequirements map[string]any `json:"default_requirements"`
 	Metadata            map[string]any `json:"metadata"`
 	CreatedAt           time.Time      `json:"created_at"`
@@ -133,16 +132,12 @@ func listWorkflows(store ReadStore) http.HandlerFunc {
 
 		project := r.URL.Query().Get("project")
 		nameNeedle := strings.ToLower(r.URL.Query().Get("name"))
-		triggerLabel := r.URL.Query().Get("trigger_label")
 		filtered := make([]Workflow, 0, len(rows))
 		for _, row := range rows {
 			if project != "" && row.Project != project {
 				continue
 			}
 			if nameNeedle != "" && !strings.Contains(strings.ToLower(row.Name), nameNeedle) {
-				continue
-			}
-			if triggerLabel != "" && (row.TriggerLabel == nil || *row.TriggerLabel != triggerLabel) {
 				continue
 			}
 			filtered = append(filtered, row)

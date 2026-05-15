@@ -175,75 +175,7 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	mux.HandleFunc("GET /v1/auth/me", authMe(authResolver))
 	mux.HandleFunc("GET /v1/artifacts/{blob_path...}", readArtifact(artifactStore))
 	adminAuthenticator, _ := authResolver.(AdminAuthenticator)
-	mux.HandleFunc(
-		"GET /v1/issues/by-id/{project}/{issue_id}",
-		storageIDGone("Issue storage-ID lookup is disabled; use /v1/issues/by-number/{project}/{issue_number}"),
-	)
 	mux.HandleFunc("GET /v1/issues", listIssues(store))
-	mux.HandleFunc(
-		"PATCH /v1/issues/by-id/{project}/{issue_id}",
-		storageIDGone("Issue storage-ID mutation is disabled; use /v1/issues/by-number/{project}/{issue_number}"),
-	)
-	mux.HandleFunc(
-		"POST /v1/issues/by-id/{project}/{issue_id}/archive",
-		storageIDGone("Issue storage-ID mutation is disabled; use /v1/issues/by-number/{project}/{issue_number}/archive"),
-	)
-	mux.HandleFunc(
-		"POST /v1/issues/by-id/{project}/{issue_id}/discard",
-		storageIDGone("Issue storage-ID mutation is disabled; use /v1/issues/by-number/{project}/{issue_number}/discard"),
-	)
-	mux.HandleFunc(
-		"POST /v1/issues/by-id/{project}/{issue_id}/comments",
-		storageIDGone("Issue storage-ID comments are disabled; use /v1/issues/by-number/{project}/{issue_number}/comments"),
-	)
-	mux.HandleFunc(
-		"PATCH /v1/issues/by-id/{project}/{issue_id}/comments/{comment_id}",
-		storageIDGone("Issue storage-ID comments are disabled; use /v1/issues/by-number/{project}/{issue_number}/comments/{comment_id}"),
-	)
-	mux.HandleFunc(
-		"DELETE /v1/issues/by-id/{project}/{issue_id}/comments/{comment_id}",
-		storageIDGone("Issue storage-ID comments are disabled; use /v1/issues/by-number/{project}/{issue_number}/comments/{comment_id}"),
-	)
-	mux.HandleFunc(
-		"GET /v1/reports/by-id/{project}/{report_id}",
-		storageIDGone("touchpoints are no longer addressable by storage id; use /v1/touchpoints/{owner}/{repo}/{pr_number} or /v1/projects/{project}/issues/{issue_number}/touchpoint"),
-	)
-	mux.HandleFunc(
-		"GET /v1/touchpoints/by-id/{project}/{report_id}",
-		storageIDGone("touchpoints are no longer addressable by storage id; use /v1/touchpoints/{owner}/{repo}/{pr_number} or /v1/projects/{project}/issues/{issue_number}/touchpoint"),
-	)
-	mux.HandleFunc(
-		"GET /v1/reports/by-id/{project}/{report_id}/versions",
-		storageIDGone("touchpoint versions are no longer addressable by storage id"),
-	)
-	mux.HandleFunc(
-		"GET /v1/touchpoints/by-id/{project}/{report_id}/versions",
-		storageIDGone("touchpoint versions are no longer addressable by storage id"),
-	)
-	mux.HandleFunc(
-		"GET /v1/reports/by-id/{project}/{report_id}/versions/{version}",
-		storageIDGone("touchpoint versions are no longer addressable by storage id"),
-	)
-	mux.HandleFunc(
-		"GET /v1/touchpoints/by-id/{project}/{report_id}/versions/{version}",
-		storageIDGone("touchpoint versions are no longer addressable by storage id"),
-	)
-	mux.HandleFunc(
-		"POST /v1/reports/by-id/{project}/{report_id}/versions",
-		storageIDGone("touchpoint versions are no longer addressable by storage id"),
-	)
-	mux.HandleFunc(
-		"POST /v1/touchpoints/by-id/{project}/{report_id}/versions",
-		storageIDGone("touchpoint versions are no longer addressable by storage id"),
-	)
-	mux.HandleFunc(
-		"PATCH /v1/reports/by-id/{project}/{report_id}",
-		storageIDGone("touchpoints are no longer patchable by storage id"),
-	)
-	mux.HandleFunc(
-		"PATCH /v1/touchpoints/by-id/{project}/{report_id}",
-		storageIDGone("touchpoints are no longer patchable by storage id"),
-	)
 	mux.HandleFunc("GET /v1/projects/{project}/runs", listProjectRuns(store))
 	mux.HandleFunc(
 		"GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/report",
@@ -251,28 +183,16 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	)
 	mux.HandleFunc("GET /v1/issues/by-number/{project}/{issue_number}", issueDetailByNumber(store))
 	mux.HandleFunc(
-		"GET /v1/issues/{repo_owner}/{repo_name}/{issue_number}",
-		storageIDGone("GitHub Issue lookup is disabled; use /v1/issues/by-number/{project}/{issue_number}"),
-	)
-	mux.HandleFunc(
 		"GET /v1/issues/by-number/{project}/{issue_number}/graph",
 		issueGraphByNumber(store),
-	)
-	mux.HandleFunc(
-		"GET /v1/issues/{repo_owner}/{repo_name}/{issue_number}/graph",
-		storageIDGone("GitHub Issue graph lookup is disabled; use /v1/issues/by-number/{project}/{issue_number}/graph"),
 	)
 	mux.HandleFunc("GET /v1/graph", systemGraph(store))
 	mux.HandleFunc("GET /v1/playbooks", listPlaybooks(store))
 	mux.Handle("POST /v1/playbooks", requireAdmin(adminAuthenticator, http.HandlerFunc(createPlaybook(store))))
 	mux.HandleFunc("GET /v1/playbooks/{project}/{playbook_ref}", getPlaybook(store))
 	mux.HandleFunc("GET /v1/touchpoints", listTouchpoints(store))
-	mux.HandleFunc("GET /v1/reports", listTouchpoints(store))
-	mux.HandleFunc("GET /v1/touchpoints/{repo_owner}/{repo_name}/{pr_number}", touchpointDetailByRepoPR(store))
-	mux.HandleFunc("GET /v1/reports/{repo_owner}/{repo_name}/{pr_number}", touchpointDetailByRepoPR(store))
 	mux.HandleFunc("GET /v1/projects/{project}/issues/{issue_number}/touchpoint", issueTouchpointDetail(store))
 	mux.Handle("POST /v1/touchpoints", requireAdmin(adminAuthenticator, http.HandlerFunc(createTouchpoint(store))))
-	mux.Handle("POST /v1/reports", requireAdmin(adminAuthenticator, http.HandlerFunc(createTouchpoint(store))))
 	mux.HandleFunc("GET /v1/projects", listProjects(store))
 	mux.Handle("POST /v1/projects", requireAdmin(adminAuthenticator, http.HandlerFunc(registerProject(store))))
 	mux.Handle("POST /v1/issues", requireAdmin(adminAuthenticator, http.HandlerFunc(createIssue(store))))
@@ -327,33 +247,13 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	mux.HandleFunc("GET /v1/projects/{project}/workflows/{name}/upstream", getWorkflowUpstream(store, ghClient))
 	mux.Handle("POST /v1/projects/{project}/workflows/{name}/sync", requireAdmin(adminAuthenticator, http.HandlerFunc(syncWorkflow(store, ghClient))))
 	mux.Handle("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/abort", requireAdmin(adminAuthenticator, http.HandlerFunc(abortRunByNumber(store))))
-	mux.HandleFunc(
-		"POST /v1/run-callbacks/{callback_token}/aborted",
-		legacyGone("run aborted callbacks are retired; post /native/completed with job_id and conclusion='failure'"),
-	)
 	mux.HandleFunc("GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/events", nativeRunEventsByNumber(store))
 	mux.HandleFunc("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/events", nativeRunEventWriteByNumber(store))
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/events", nativeRunEventWriteByCallbackToken(store))
 	mux.HandleFunc("GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/status", nativeRunStatusByNumber(store))
 	mux.HandleFunc("GET /v1/run-callbacks/{callback_token}/native/status", nativeRunStatusByCallbackToken(store))
-	mux.HandleFunc(
-		"GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/pod-logs",
-		legacyGone("native pod log proxying is retired; use /native/events and archived log evidence"),
-	)
-	mux.HandleFunc(
-		"POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/failed",
-		legacyGone("native failure callbacks are retired; post /native/completed with job_id and conclusion='failure'"),
-	)
-	mux.HandleFunc(
-		"POST /v1/run-callbacks/{callback_token}/native/failed",
-		legacyGone("native failure callbacks are retired; post /native/completed with job_id and conclusion='failure'"),
-	)
 	mux.HandleFunc("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/github-token", nativeGitHubTokenByNumber(store, nativeTokenMinter))
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/github-token", nativeGitHubTokenByCallbackToken(store, nativeTokenMinter))
-	mux.HandleFunc(
-		"POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/completed",
-		legacyGone("native completion by run coordinates is retired; use /v1/run-callbacks/{callback_token}/native/completed"),
-	)
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/completed", nativeRunCompletedByCallbackToken(store, nativeLauncher))
 	mux.Handle("POST /v1/test-slots/checkout", requireAdmin(adminAuthenticator, http.HandlerFunc(checkoutTestSlot(store, testSlotPreparer, nativeTokenMinter))))
 	mux.Handle("POST /v1/test-slots/return", requireAdmin(adminAuthenticator, http.HandlerFunc(returnTestSlot(store, testSlotPreparer, nativeTokenMinter))))

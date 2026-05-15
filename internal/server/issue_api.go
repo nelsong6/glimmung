@@ -91,10 +91,6 @@ func listIssues(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusServiceUnavailable, "issue store not configured")
 			return
 		}
-		if r.URL.Query().Get("repo") != "" {
-			writeProblem(w, http.StatusGone, "GitHub Issue repo filters are disabled; filter by project")
-			return
-		}
 		limit, ok := parseOptionalIssueLimit(w, r)
 		if !ok {
 			return

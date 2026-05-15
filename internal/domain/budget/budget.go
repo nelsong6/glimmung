@@ -27,12 +27,7 @@ func ParseBudgetLabel(label string) (Config, bool) {
 	}
 
 	spec := strings.TrimPrefix(label, labelPrefix)
-	raw := spec
-	if _, after, found := strings.Cut(spec, "x"); found {
-		raw = after
-	}
-
-	total, err := strconv.ParseFloat(raw, 64)
+	total, err := strconv.ParseFloat(spec, 64)
 	if err != nil || total <= 0 {
 		return Config{}, false
 	}

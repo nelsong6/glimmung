@@ -69,8 +69,8 @@ externalSecret:
       kvKey: romaine-life-admin-emails
 
 # The wildcard XListenerSet that per-install HTTPRoutes attach to. Production
-# and legacy per-issue releases install in `glimmung`; native test slots install
-# into slot namespaces and attach back to this shared listener.
+# and per-issue releases install in `glimmung`; native test slots install into
+# slot namespaces and attach back to this shared listener.
 attachListenerSet: glimmung-wildcard
 attachListenerSetNamespace: glimmung
 

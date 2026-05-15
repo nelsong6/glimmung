@@ -64,15 +64,13 @@ func TestListProjectsFiltersAndLimits(t *testing.T) {
 }
 
 func TestListWorkflowsFiltersAndLimits(t *testing.T) {
-	trigger := "agent"
 	created := time.Date(2026, 5, 11, 3, 0, 0, 0, time.UTC)
 	store := fakeReadStore{workflows: []Workflow{
 		{
-			ID:           "issue-agent",
-			Project:      "ambience",
-			Name:         "issue-agent",
-			TriggerLabel: &trigger,
-			Budget:       budget.Config{Total: 40},
+			ID:      "issue-agent",
+			Project: "ambience",
+			Name:    "issue-agent",
+			Budget:  budget.Config{Total: 40},
 			Phases: []PhaseSpec{
 				{
 					Name:             "agent",
@@ -88,18 +86,17 @@ func TestListWorkflowsFiltersAndLimits(t *testing.T) {
 			CreatedAt: created,
 		},
 		{
-			ID:           "other",
-			Project:      "glimmung",
-			Name:         "other",
-			Budget:       budget.Config{Total: 25},
-			TriggerLabel: stringPtr("other"),
-			CreatedAt:    created,
+			ID:        "other",
+			Project:   "glimmung",
+			Name:      "other",
+			Budget:    budget.Config{Total: 25},
+			CreatedAt: created,
 		},
 	}}
 	handler := NewWithStore(Settings{}, store)
 
 	var rows []Workflow
-	getJSON(t, handler, "/v1/workflows?project=ambience&name=ISSUE&trigger_label=agent&limit=1", &rows)
+	getJSON(t, handler, "/v1/workflows?project=ambience&name=ISSUE&limit=1", &rows)
 
 	if len(rows) != 1 || rows[0].Name != "issue-agent" {
 		t.Fatalf("rows=%#v, want issue-agent only", rows)

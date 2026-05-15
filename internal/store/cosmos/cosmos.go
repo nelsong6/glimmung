@@ -1240,7 +1240,6 @@ type workflowDoc struct {
 	Phases              []phaseDoc     `json:"phases"`
 	PR                  prDoc          `json:"pr"`
 	Budget              budgetDoc      `json:"budget"`
-	TriggerLabel        *string        `json:"triggerLabel"`
 	DefaultRequirements map[string]any `json:"defaultRequirements"`
 	Metadata            map[string]any `json:"metadata"`
 	CreatedAt           string         `json:"createdAt"`
@@ -1475,7 +1474,6 @@ func workflowFromDoc(doc workflowDoc) server.Workflow {
 		Phases:              phases,
 		PR:                  prFromDoc(doc.PR),
 		Budget:              budget.Config{Total: defaultBudgetTotal(doc.Budget.Total)},
-		TriggerLabel:        doc.TriggerLabel,
 		DefaultRequirements: mapOrEmpty(doc.DefaultRequirements),
 		Metadata:            mapOrEmpty(doc.Metadata),
 		CreatedAt:           parseTimeOrNow(doc.CreatedAt),
@@ -1860,7 +1858,6 @@ func workflowDocFromRegister(req server.WorkflowRegister, createdAt string) work
 		Phases:              phases,
 		PR:                  prDocFromSpec(req.PR),
 		Budget:              budgetDoc{Total: defaultBudgetTotal(req.Budget.Total)},
-		TriggerLabel:        req.TriggerLabel,
 		DefaultRequirements: mapOrEmpty(req.DefaultRequirements),
 		Metadata:            mapOrEmpty(req.Metadata),
 		CreatedAt:           createdAt,
@@ -2176,9 +2173,9 @@ func sliceOrEmpty[T any](values []T) []T {
 	return values
 }
 
-// â”€â”€ Touchpoint / Report store â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Touchpoint store.
 
-type reportDoc struct {
+type touchpointDoc struct {
 	ID            string           `json:"id"`
 	Project       string           `json:"project"`
 	Repo          string           `json:"repo"`
@@ -2201,7 +2198,7 @@ type reportDoc struct {
 }
 
 func (s *Store) ListTouchpoints(ctx context.Context, filter server.TouchpointListFilter) ([]server.TouchpointRow, error) {
-	var reportDocs []reportDoc
+	var touchpointDocs []touchpointDoc
 	query := "SELECT * FROM c"
 	var params []azcosmos.QueryParameter
 	var predicates []string
@@ -2221,7 +2218,7 @@ func (s *Store) ListTouchpoints(ctx context.Context, filter server.TouchpointLis
 		query = "SELECT * FROM c WHERE " + strings.Join(predicates, " AND ")
 	}
 	query += " ORDER BY c.updated_at DESC"
-	if err := queryAllWhere(ctx, s.reports, query, params, &reportDocs); err != nil {
+	if err := queryAllWhere(ctx, s.reports, query, params, &touchpointDocs); err != nil {
 		return nil, err
 	}
 
@@ -2235,8 +2232,8 @@ func (s *Store) ListTouchpoints(ctx context.Context, filter server.TouchpointLis
 	prLockByKey := buildPRLockIndex(lockDocs)
 
 	now := time.Now().UTC()
-	rows := make([]server.TouchpointRow, 0, len(reportDocs))
-	for _, doc := range reportDocs {
+	rows := make([]server.TouchpointRow, 0, len(touchpointDocs))
+	for _, doc := range touchpointDocs {
 		row := touchpointRowFromDoc(doc, issueRefByID, issueNumberByID, runRefByID, runByLinkedIssueID, runByRepoPR, prLockByKey, now)
 		rows = append(rows, row)
 	}
@@ -2246,32 +2243,13 @@ func (s *Store) ListTouchpoints(ctx context.Context, filter server.TouchpointLis
 	return rows, nil
 }
 
-func (s *Store) GetTouchpointByRepoPR(ctx context.Context, repo string, prNumber int) (server.TouchpointDetail, error) {
-	var docs []reportDoc
-	if err := queryAllWhere(ctx, s.reports,
-		"SELECT * FROM c WHERE c.repo = @repo AND c.number = @num",
-		[]azcosmos.QueryParameter{
-			{Name: "@repo", Value: repo},
-			{Name: "@num", Value: prNumber},
-		},
-		&docs,
-	); err != nil {
-		return server.TouchpointDetail{}, err
-	}
-	if len(docs) == 0 {
-		return server.TouchpointDetail{}, server.ErrNotFound
-	}
-	sort.Slice(docs, func(i, j int) bool { return docs[i].CreatedAt < docs[j].CreatedAt })
-	return s.buildTouchpointDetail(ctx, docs[0])
-}
-
 func (s *Store) GetTouchpointForIssue(ctx context.Context, project string, issueNumber int) (server.TouchpointDetail, error) {
 	issueDoc, err := s.readIssueByNumber(ctx, project, issueNumber)
 	if err != nil {
 		return server.TouchpointDetail{}, server.ErrNotFound
 	}
-	// Find report by linked_issue_id.
-	var docs []reportDoc
+	// Find touchpoint by linked_issue_id.
+	var docs []touchpointDoc
 	if err := queryAllWhere(ctx, s.reports,
 		"SELECT * FROM c WHERE c.project = @project AND c.linked_issue_id = @iid ORDER BY c.updated_at DESC",
 		[]azcosmos.QueryParameter{
@@ -2301,7 +2279,7 @@ func (s *Store) EnsureTouchpoint(ctx context.Context, req server.TouchpointCreat
 
 	// If we have a linked issue, check for an existing touchpoint for that issue.
 	if linkedIssueID != nil {
-		var docs []reportDoc
+		var docs []touchpointDoc
 		_ = queryAllWhere(ctx, s.reports,
 			"SELECT * FROM c WHERE c.project = @project AND c.linked_issue_id = @iid ORDER BY c.updated_at DESC",
 			[]azcosmos.QueryParameter{
@@ -2316,14 +2294,14 @@ func (s *Store) EnsureTouchpoint(ctx context.Context, req server.TouchpointCreat
 			if linkedRunID != nil && (doc.LinkedRunID == nil || *doc.LinkedRunID != *linkedRunID) {
 				doc.LinkedRunID = linkedRunID
 				doc.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-				_ = s.replaceReportDoc(ctx, doc)
+				_ = s.replaceTouchpointDoc(ctx, doc)
 			}
 			return s.buildTouchpointDetail(ctx, doc)
 		}
 	}
 
 	// Fall back to (repo, number) idempotency key.
-	var existingDocs []reportDoc
+	var existingDocs []touchpointDoc
 	_ = queryAllWhere(ctx, s.reports,
 		"SELECT * FROM c WHERE c.repo = @repo AND c.number = @num",
 		[]azcosmos.QueryParameter{
@@ -2346,14 +2324,14 @@ func (s *Store) EnsureTouchpoint(ctx context.Context, req server.TouchpointCreat
 		}
 		if updated {
 			doc.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-			_ = s.replaceReportDoc(ctx, doc)
+			_ = s.replaceTouchpointDoc(ctx, doc)
 		}
 		return s.buildTouchpointDetail(ctx, doc)
 	}
 
 	// Create a new touchpoint.
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	doc := reportDoc{
+	doc := touchpointDoc{
 		ID:            uuid.New().String(),
 		Project:       req.Project,
 		Repo:          req.Repo,
@@ -2381,7 +2359,7 @@ func (s *Store) EnsureTouchpoint(ctx context.Context, req server.TouchpointCreat
 	return s.buildTouchpointDetail(ctx, doc)
 }
 
-func (s *Store) buildTouchpointDetail(ctx context.Context, doc reportDoc) (server.TouchpointDetail, error) {
+func (s *Store) buildTouchpointDetail(ctx context.Context, doc touchpointDoc) (server.TouchpointDetail, error) {
 	// Look up linked run.
 	var run *runDoc
 	if doc.LinkedRunID != nil && *doc.LinkedRunID != "" {
@@ -2433,7 +2411,7 @@ func (s *Store) buildTouchpointDetail(ctx context.Context, doc reportDoc) (serve
 	prLockHeld, _ := s.prLockHeld(ctx, doc.Repo, doc.Number)
 
 	detail := server.TouchpointDetail{
-		Ref:            publicids.ReportRef(doc.Repo, &doc.Number),
+		Ref:            publicids.TouchpointRef(doc.Repo, &doc.Number),
 		Project:        doc.Project,
 		Repo:           doc.Repo,
 		PRNumber:       doc.Number,
@@ -2479,7 +2457,7 @@ func (s *Store) buildTouchpointDetail(ctx context.Context, doc reportDoc) (serve
 	return detail, nil
 }
 
-func (s *Store) replaceReportDoc(ctx context.Context, doc reportDoc) error {
+func (s *Store) replaceTouchpointDoc(ctx context.Context, doc touchpointDoc) error {
 	payload, err := json.Marshal(doc)
 	if err != nil {
 		return err
@@ -2561,7 +2539,7 @@ func (s *Store) resolveRunIDByRef(ctx context.Context, project, ref string) *str
 	return nil
 }
 
-func (d reportDoc) PRBranchStr() string {
+func (d touchpointDoc) PRBranchStr() string {
 	return d.Branch
 }
 
@@ -2616,7 +2594,7 @@ func buildPRLockIndex(docs []lockDoc) map[string]bool {
 }
 
 func touchpointRowFromDoc(
-	doc reportDoc,
+	doc touchpointDoc,
 	issueRefByID map[string]string,
 	issueNumByID map[string]int,
 	runRefByID map[string]string,
@@ -2626,7 +2604,7 @@ func touchpointRowFromDoc(
 	now time.Time,
 ) server.TouchpointRow {
 	row := server.TouchpointRow{
-		Ref:      publicids.ReportRef(doc.Repo, &doc.Number),
+		Ref:      publicids.TouchpointRef(doc.Repo, &doc.Number),
 		Project:  doc.Project,
 		Repo:     doc.Repo,
 		PRNumber: doc.Number,

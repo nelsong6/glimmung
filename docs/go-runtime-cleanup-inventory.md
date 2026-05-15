@@ -23,10 +23,10 @@ are Go plus the Vite dashboard.
 | Surface | Final state |
 |---|---|
 | Native runner callback, event, status, failure, replay, resume, completion, retry, forward-dispatch, and Kubernetes launch paths | Go-owned. |
-| Native pod-log proxy | Retired with a `410 Gone` tombstone; use native events and archived evidence. |
+| Native pod-log proxy | Deleted; use native events and archived evidence. |
 | Native HTTP GitHub token routes | Go-owned surface for native runner callbacks. |
 | Test-slot checkout/return routes | Go-owned surface for MCP/test skill callers; project test-environment scaling remains active for capacity management. |
-| Storage-ID and GitHub issue-coordinate retired routes | Kept only as explicit `410 Gone` tombstones with canonical route guidance. |
+| Storage-ID, GitHub issue-coordinate, Report alias, and PR-coordinate Touchpoint routes | Deleted from the live route table; route inventory tests reject reintroduction. |
 | `POST /v1/portfolio/elements/dispatch` | Go-owned; creates a portfolio review Issue and dispatches through the canonical run path. |
 | `POST /v1/playbooks/{project}/{playbook_ref}/run` | Go-owned; advances ready Playbook entries by creating Issues and dispatching Runs. |
 | Signal drain and request-changes triage | Go-owned; queued PR feedback signals drain in the Go service, reopen linked Runs through the PR recycle policy, and hold PR locks until terminal release. |
@@ -40,7 +40,7 @@ The Go store owns these active Cosmos containers:
 | Container | Data notes |
 |---|---|
 | `projects` | Preserve `id`, `name`, `githubRepo`, `metadata`, and `createdAt`; `argocdApp` may still appear on old docs. |
-| `workflows` | Preserve `project`, `name`, `phases`, `pr`, `budget`, `triggerLabel`, `defaultRequirements`, `metadata`, and `createdAt`. |
+| `workflows` | Preserve `project`, `name`, `phases`, `pr`, `budget`, `defaultRequirements`, `metadata`, and `createdAt`. |
 | `leases` | Preserve lease numbers, state values, callback-token metadata, requester metadata, test-slot fields, and TTL timestamps. |
 | `runs` | Preserve issue refs, public run-number fields, attempts, verification, phase outputs, callback tokens, lock-holder fields, PR links, and native attempt fields. |
 | `run_events` | Preserve native event sequence fields for runner status/log replay. |

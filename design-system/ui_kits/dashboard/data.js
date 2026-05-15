@@ -6,10 +6,10 @@ window.GlimmungData = {
     { name: "tank-operator", github_repo: "nelsong6/tank-operator" },
   ],
   workflows: [
-    { project: "spirelens", name: "issue-agent", workflow_filename: "issue-agent.yml", workflow_ref: "main", trigger_label: "agent-run", default_requirements: { runtime: "x11", gpu: true } },
-    { project: "spirelens", name: "agent-retry", workflow_filename: "agent-retry.yml", workflow_ref: "main", trigger_label: "", default_requirements: { runtime: "x11", gpu: true } },
-    { project: "ambience", name: "issue-agent", workflow_filename: "issue-agent.yml", workflow_ref: "main", trigger_label: "agent-run", default_requirements: { runtime: "linux" } },
-    { project: "tank-operator", name: "deploy-agent", workflow_filename: "deploy.yml", workflow_ref: "main", trigger_label: "deploy", default_requirements: { runtime: "linux", privileged: true } },
+    { project: "spirelens", name: "issue-agent", workflow_filename: "issue-agent.yml", workflow_ref: "main", default_requirements: { runtime: "x11", gpu: true } },
+    { project: "spirelens", name: "agent-retry", workflow_filename: "agent-retry.yml", workflow_ref: "main", default_requirements: { runtime: "x11", gpu: true } },
+    { project: "ambience", name: "issue-agent", workflow_filename: "issue-agent.yml", workflow_ref: "main", default_requirements: { runtime: "linux" } },
+    { project: "tank-operator", name: "deploy-agent", workflow_filename: "deploy.yml", workflow_ref: "main", default_requirements: { runtime: "linux", privileged: true } },
   ],
   hosts: [
     { name: "x11-gpu-01", capabilities: { runtime: "x11", gpu: true, ram_gb: 32 }, current_lease_id: null, drained: false, last_heartbeat: "2026-05-01T12:00:00Z", last_used_at: "2026-05-01T11:57:00Z" },
@@ -27,7 +27,7 @@ window.GlimmungData = {
   issues: [
     { id: "i_001", project: "spirelens", repo: "nelsong6/spirelens", number: 42, title: "agent loops on rare card prediction", labels: ["agent-run", "bug"], last_run_state: "in_progress", issue_lock_held: true },
     { id: "i_002", project: "spirelens", repo: "nelsong6/spirelens", number: 41, title: "verifier crashes on empty deck", labels: ["agent-run"], last_run_state: "passed", issue_lock_held: false },
-    { id: "i_003", project: "ambience", repo: "nelsong6/ambience", number: 17, title: "fade transitions skip frame on resize", labels: ["agent-run", "agent-budget:5x50"], last_run_state: "in_progress", issue_lock_held: true },
+    { id: "i_003", project: "ambience", repo: "nelsong6/ambience", number: 17, title: "fade transitions skip frame on resize", labels: ["agent-run", "agent-budget:50"], last_run_state: "in_progress", issue_lock_held: true },
     { id: "i_004", project: "tank-operator", repo: "nelsong6/tank-operator", number: 8, title: "deploy hangs when secret rotation overlaps", labels: [], last_run_state: null, issue_lock_held: false },
     { id: "i_005", project: "spirelens", repo: "nelsong6/spirelens", number: 40, title: "support multi-elite encounters in plan", labels: [], last_run_state: "aborted", issue_lock_held: false },
   ],

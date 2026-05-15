@@ -567,7 +567,7 @@ func graphNodeFromTouchpoint(tp TouchpointRow) GraphNode {
 		State:     stringPointerOrNil(tp.State),
 		Timestamp: nil,
 		Metadata: map[string]any{
-			"report_ref":       tp.Ref,
+			"touchpoint_ref":   tp.Ref,
 			"project":          tp.Project,
 			"repo":             tp.Repo,
 			"number":           tp.PRNumber,
@@ -757,7 +757,7 @@ func workflowGraphMetadata(workflow Workflow) map[string]any {
 			"phases":         []string{},
 			"default_entry":  nil,
 			"recycle_arrows": []map[string]any{},
-			"terminal":       map[string]any{"kind": "report", "enabled": false},
+			"terminal":       map[string]any{"kind": "touchpoint", "enabled": false},
 		}
 	}
 	phaseNames := make([]string, 0, len(workflow.Phases))
@@ -784,12 +784,12 @@ func workflowGraphMetadata(workflow Workflow) map[string]any {
 	}
 	if workflow.PR.RecyclePolicy != nil {
 		arrows = append(arrows, map[string]any{
-			"source":       "report",
+			"source":       "touchpoint",
 			"target":       workflow.PR.RecyclePolicy.LandsAt,
 			"trigger":      strings.Join(workflow.PR.RecyclePolicy.On, " / "),
 			"max_attempts": workflow.PR.RecyclePolicy.MaxAttempts,
 			"active":       false,
-			"kind":         "report_recycle",
+			"kind":         "touchpoint_recycle",
 		})
 	}
 	var defaultEntry any
@@ -800,7 +800,7 @@ func workflowGraphMetadata(workflow Workflow) map[string]any {
 		"phases":         phaseNames,
 		"default_entry":  defaultEntry,
 		"recycle_arrows": arrows,
-		"terminal":       map[string]any{"kind": "report", "enabled": workflow.PR.Enabled},
+		"terminal":       map[string]any{"kind": "touchpoint", "enabled": workflow.PR.Enabled},
 	}
 }
 

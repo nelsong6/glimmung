@@ -14,41 +14,18 @@ var expectedGoRoutes = []string{
 	"GET /v1/config",
 	"GET /v1/auth/me",
 	"GET /v1/artifacts/{blob_path...}",
-	"GET /v1/issues/by-id/{project}/{issue_id}",
 	"GET /v1/issues",
-	"PATCH /v1/issues/by-id/{project}/{issue_id}",
-	"POST /v1/issues/by-id/{project}/{issue_id}/archive",
-	"POST /v1/issues/by-id/{project}/{issue_id}/discard",
-	"POST /v1/issues/by-id/{project}/{issue_id}/comments",
-	"PATCH /v1/issues/by-id/{project}/{issue_id}/comments/{comment_id}",
-	"DELETE /v1/issues/by-id/{project}/{issue_id}/comments/{comment_id}",
-	"GET /v1/reports/by-id/{project}/{report_id}",
-	"GET /v1/touchpoints/by-id/{project}/{report_id}",
-	"GET /v1/reports/by-id/{project}/{report_id}/versions",
-	"GET /v1/touchpoints/by-id/{project}/{report_id}/versions",
-	"GET /v1/reports/by-id/{project}/{report_id}/versions/{version}",
-	"GET /v1/touchpoints/by-id/{project}/{report_id}/versions/{version}",
-	"POST /v1/reports/by-id/{project}/{report_id}/versions",
-	"POST /v1/touchpoints/by-id/{project}/{report_id}/versions",
-	"PATCH /v1/reports/by-id/{project}/{report_id}",
-	"PATCH /v1/touchpoints/by-id/{project}/{report_id}",
 	"GET /v1/projects/{project}/runs",
 	"GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/report",
 	"GET /v1/issues/by-number/{project}/{issue_number}",
-	"GET /v1/issues/{repo_owner}/{repo_name}/{issue_number}",
 	"GET /v1/issues/by-number/{project}/{issue_number}/graph",
-	"GET /v1/issues/{repo_owner}/{repo_name}/{issue_number}/graph",
 	"GET /v1/graph",
 	"GET /v1/playbooks",
 	"POST /v1/playbooks",
 	"GET /v1/playbooks/{project}/{playbook_ref}",
 	"GET /v1/touchpoints",
-	"GET /v1/reports",
-	"GET /v1/touchpoints/{repo_owner}/{repo_name}/{pr_number}",
-	"GET /v1/reports/{repo_owner}/{repo_name}/{pr_number}",
 	"GET /v1/projects/{project}/issues/{issue_number}/touchpoint",
 	"POST /v1/touchpoints",
-	"POST /v1/reports",
 	"GET /v1/projects",
 	"POST /v1/projects",
 	"POST /v1/issues",
@@ -82,18 +59,13 @@ var expectedGoRoutes = []string{
 	"GET /v1/projects/{project}/workflows/{name}/upstream",
 	"POST /v1/projects/{project}/workflows/{name}/sync",
 	"POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/abort",
-	"POST /v1/run-callbacks/{callback_token}/aborted",
 	"GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/events",
 	"POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/events",
 	"POST /v1/run-callbacks/{callback_token}/native/events",
 	"GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/status",
 	"GET /v1/run-callbacks/{callback_token}/native/status",
-	"GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/pod-logs",
-	"POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/failed",
-	"POST /v1/run-callbacks/{callback_token}/native/failed",
 	"POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/github-token",
 	"POST /v1/run-callbacks/{callback_token}/native/github-token",
-	"POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/completed",
 	"POST /v1/run-callbacks/{callback_token}/native/completed",
 	"POST /v1/test-slots/checkout",
 	"POST /v1/test-slots/return",
@@ -114,6 +86,24 @@ func TestGoRouteInventoryMatchesCleanupContract(t *testing.T) {
 	for i := range expectedGoRoutes {
 		if got[i] != expectedGoRoutes[i] {
 			t.Fatalf("route[%d]=%q, want %q\n\ngot:\n%s\n\nwant:\n%s", i, got[i], expectedGoRoutes[i], formatRoutes(got), formatRoutes(expectedGoRoutes))
+		}
+	}
+}
+
+func TestRetiredRouteFamiliesStayDeleted(t *testing.T) {
+	got := formatRoutes(registeredRoutesInServerSource(t))
+	for _, forbidden := range []string{
+		"/by-id/",
+		"/v1/reports",
+		"/native/pod-logs",
+		"/native/failed",
+		"/runs/{run_number}/native/completed",
+		"/aborted",
+		"/v1/issues/{repo_owner}",
+		"/v1/touchpoints/{repo_owner}",
+	} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("retired route family %q is registered:\n%s", forbidden, got)
 		}
 	}
 }

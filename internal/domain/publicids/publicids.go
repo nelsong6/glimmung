@@ -25,8 +25,8 @@ func RunRef(project string, issueNumber *int, runDisplay string) string {
 	return project + "#" + strconv.Itoa(*issueNumber) + "/runs/" + runPart
 }
 
-// ReportRef returns the operator-facing report or pull request reference.
-func ReportRef(repo string, number *int) string {
+// TouchpointRef returns the operator-facing touchpoint or pull request reference.
+func TouchpointRef(repo string, number *int) string {
 	if number == nil {
 		return repo
 	}

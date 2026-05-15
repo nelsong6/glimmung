@@ -167,8 +167,7 @@ come from the project/runtime contract, not from Glimmung internals.
 Glimmung-owned helper resources may use Glimmung names only when they are
 control-plane artifacts, such as short-lived installer Jobs in the native runner
 namespace. Slot-owned runtime helpers should use slot-local names. For example,
-the Playwright service for a slot is `slot-playwright` in the slot namespace,
-not a `glim-pw-*` resource in the runner namespace.
+the Playwright service for a slot is `slot-playwright` in the slot namespace.
 
 ## Failure Discovery
 

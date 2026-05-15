@@ -1,6 +1,5 @@
 # Cosmos DB NoSQL Database. Containers: projects, workflows, leases,
-# runs, run_events, locks, signals, issues, playbooks, reports,
-# report_versions, and legacy prs.
+# runs, run_events, locks, signals, issues, playbooks, and reports.
 # Created here at the control plane; the runtime pod uses glimmung-identity
 # with Cosmos data-plane scope limited to this database.
 
@@ -202,41 +201,8 @@ resource "azurerm_cosmosdb_sql_container" "playbooks" {
   }
 }
 
-# Legacy PR container. Kept only until the one-shot migration into
-# `reports`/`report_versions` has run in production; code no longer reads
-# this container.
-resource "azurerm_cosmosdb_sql_container" "prs" {
-  name                = "prs"
-  resource_group_name = local.infra.resource_group_name
-  account_name        = data.azurerm_cosmosdb_account.infra.name
-  database_name       = azurerm_cosmosdb_sql_database.glimmung.name
-  partition_key_paths = ["/project"]
-
-  indexing_policy {
-    indexing_mode = "consistent"
-    included_path {
-      path = "/*"
-    }
-  }
-}
-
 resource "azurerm_cosmosdb_sql_container" "reports" {
   name                = "reports"
-  resource_group_name = local.infra.resource_group_name
-  account_name        = data.azurerm_cosmosdb_account.infra.name
-  database_name       = azurerm_cosmosdb_sql_database.glimmung.name
-  partition_key_paths = ["/project"]
-
-  indexing_policy {
-    indexing_mode = "consistent"
-    included_path {
-      path = "/*"
-    }
-  }
-}
-
-resource "azurerm_cosmosdb_sql_container" "report_versions" {
-  name                = "report_versions"
   resource_group_name = local.infra.resource_group_name
   account_name        = data.azurerm_cosmosdb_account.infra.name
   database_name       = azurerm_cosmosdb_sql_database.glimmung.name

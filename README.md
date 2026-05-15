@@ -1,7 +1,7 @@
 # glimmung
 
 Go service for issue-driven agentic development. Glimmung stores projects,
-workflows, issues, runs, leases, reports, and signals in Cosmos DB; serves the
+workflows, issues, runs, leases, touchpoints, and signals in Cosmos DB; serves the
 Vite + React dashboard; and coordinates native Kubernetes jobs.
 
 > *The Glimmung scanned the assembled list of beings he had summoned. From a thousand worlds they had come, each with a craft to contribute.*
@@ -24,7 +24,7 @@ Full design + intent: [issue #1](https://github.com/nelsong6/glimmung/issues/1).
 ## Mental model
 
 ```
-Project -> Workflow -> Issue -> Run -> Phase/Job -> Report
+Project -> Workflow -> Issue -> Run -> Phase/Job -> RunReport
                          \        \
                           \        -> Lease + callback token
                            -> Touchpoint / PR review surface
@@ -33,11 +33,10 @@ Project -> Workflow -> Issue -> Run -> Phase/Job -> Report
 - **Project** = a repo (e.g. `spirelens`), declares the github_repo only.
 - **Workflow** = a database-backed automation shape under a project. Dispatch
   reads the Workflow row from Cosmos: phases, native jobs, PR policy, budget,
-  and requirements. Trigger labels are import metadata and are not a dispatch
-  primitive. Omitted phase kinds default to `k8s_job`; registered phases must
-  use `k8s_job`.
+  and requirements. Omitted phase kinds default to `k8s_job`; registered
+  phases must use `k8s_job`.
 - **Issue** = the canonical Glimmung issue row. GitHub Issues may still feed
-  temporary backlog/tracker workflows, but the live run loop is issue-row based.
+  external backlog/tracker workflows, but the live run loop is issue-row based.
 - **Run** = durable execution record for one issue/workflow invocation. Runs
   hold attempts, phase state, evidence refs, cost, terminal decision, and
   callback-token metadata.
@@ -56,7 +55,7 @@ The "agent" — Claude Code, Codex, whatever runs inside the workflow — is opa
 For larger feature work, Glimmung separates planning context from execution:
 
 ```
-Epic -> Playbook -> ordered Entries -> Issue -> Run -> Report/evidence -> next Entry
+Epic -> Playbook -> ordered Entries -> Issue -> Run -> RunReport/evidence -> next Entry
 ```
 
 - **Epic** = durable feature context: why, goal, constraints, non-goals, success criteria.
@@ -65,6 +64,8 @@ Epic -> Playbook -> ordered Entries -> Issue -> Run -> Report/evidence -> next E
 The initial relationship is intentionally 1:1: one Epic owns one Playbook.
 See [Epics and Playbooks](docs/epics-and-playbooks.md) for the object
 boundary and follow-up implementation surface.
+See [Quality Timeframes](docs/quality-timeframes.md) for the default
+long-term engineering quality bar used when planning substantial work.
 See
 [Touchpoints, RunReports, And Playbook Integration](docs/touchpoints-runreports-playbooks.md)
 for the review surface, per-run audit report, and integration-strategy
@@ -121,7 +122,7 @@ The Go route registration in
 [`internal/server/server.go`](internal/server/server.go) is the active HTTP
 surface. [`internal/server/route_inventory_test.go`](internal/server/route_inventory_test.go)
 keeps that route list explicit; the tables below summarize the operator-facing
-surface rather than every retired-route tombstone.
+surface.
 
 ### Lease lifecycle
 
@@ -159,9 +160,6 @@ surface rather than every retired-route tombstone.
 | GET    | `/v1/projects/{project}/issues/{issue_number}/runs/{run_number}/report` | Factual RunReport for one Run: attempts, cost, validation URL, screenshot markdown, and terminal status. |
 | GET    | `/v1/touchpoints`                 | Touchpoint index across registered projects (GitHub PR syndication metadata + linked Issue/Run state). |
 | GET    | `/v1/projects/{project}/issues/{n}/touchpoint` | Canonical live Touchpoint summary for one Glimmung Issue. |
-| GET    | `/v1/touchpoints/{owner}/{repo}/{n}` | Compatibility Touchpoint lookup by GitHub PR coordinates. |
-| GET    | `/v1/reports`                     | Compatibility alias for `/v1/touchpoints`. |
-| GET    | `/v1/reports/{owner}/{repo}/{n}`  | Compatibility alias for `/v1/touchpoints/{owner}/{repo}/{n}`. |
 | POST   | `/v1/signals`                     | Enqueue a Signal. PR signals use GitHub coordinates only: `{target_type:"pr", target_repo:"owner/repo", target_ref:"42", source:"glimmung_ui", payload:{kind:"reject", feedback:"..."}}`. |
 | POST   | `/v1/signals/drain`               | Admin drain endpoint for queued signals; production also runs the Go signal drain loop in-process. |
 
@@ -544,9 +542,6 @@ Apply an `agent-budget:USD` label to the issue. Examples:
 
 - `agent-budget:50` -> $50 ceiling
 - `agent-budget:12.5` -> $12.50 ceiling
-
-The parser still accepts the old `agent-budget:NxM` spelling and uses the
-value after `x` as the dollar ceiling; new labels should use the direct total.
 
 The budget is **frozen at run-creation time** — relabeling mid-run does not move the goalposts. Resolution order: issue label → `Workflow.budget` → glimmung global default ($25).
 

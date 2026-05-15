@@ -14,13 +14,6 @@
     "want_total": 12.5
   },
   {
-    "name": "parse legacy total",
-    "function": "parse_budget_label",
-    "label": "agent-budget:5x50",
-    "want_parsed": true,
-    "want_total": 50.0
-  },
-  {
     "name": "ignore unrelated",
     "function": "parse_budget_label",
     "label": "bug",

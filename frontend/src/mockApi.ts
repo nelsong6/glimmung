@@ -126,7 +126,6 @@ export const mockSnapshot = {
       },
       workflow_filename: "issue-agent.yaml",
       workflow_ref: "main",
-      trigger_label: "issue-agent",
       default_requirements: { os: "windows", apps: ["sts2"] },
       metadata: { phases: ["design", "implement", "verify"] },
       created_at: ago(8600),
@@ -151,7 +150,6 @@ export const mockSnapshot = {
       pr: { enabled: false, recycle_policy: null },
       workflow_filename: "design-portfolio.yaml",
       workflow_ref: "main",
-      trigger_label: "design-portfolio",
       default_requirements: { os: "linux", apps: ["node", "playwright"] },
       metadata: { output: "design files" },
       created_at: ago(1800),
@@ -176,7 +174,6 @@ export const mockSnapshot = {
       pr: { enabled: false, recycle_policy: null },
       workflow_filename: "preview.yaml",
       workflow_ref: "main",
-      trigger_label: "preview",
       default_requirements: { os: "linux", apps: ["node"] },
       metadata: { output: "mock site" },
       created_at: ago(4200),
@@ -403,7 +400,7 @@ const issueDetails = mockIssues.map((issue) => ({
   ],
 }));
 
-const mockReports = [
+const mockTouchpoints = [
   {
     ref: "nelsong6/glimmung#216",
     project: "glimmung",
@@ -467,10 +464,10 @@ const issueGraph = {
         cycles_count: 2,
         cumulative_cost_usd: 8.91,
         entrypoint_phase: "design",
-        report_id: "report-glimmung-206",
-        report_state: "open",
-        report_title: "Render native run graph detail view",
-        report_url: "https://github.com/nelsong6/glimmung/pull/218",
+        touchpoint_ref: "touchpoint-glimmung-206",
+        touchpoint_state: "open",
+        touchpoint_title: "Render native run graph detail view",
+        touchpoint_url: "https://github.com/nelsong6/glimmung/pull/218",
         pr_number: 218,
         pr_branch: "codex/native-run-graph",
         workflow_graph: {
@@ -479,7 +476,7 @@ const issueGraph = {
           recycle_arrows: [
             { source: "verify", target: "implement", trigger: "reject", max_attempts: 2, active: true, kind: "phase_recycle" },
           ],
-          terminal: { kind: "report", enabled: true },
+          terminal: { kind: "touchpoint", enabled: true },
         },
       },
     },
@@ -498,7 +495,7 @@ const issueGraph = {
       step("summarize", "Summarize review notes", "pending", null, null),
     ]),
     {
-      id: "pr:report-glimmung-206",
+      id: "pr:touchpoint-glimmung-206",
       kind: "pr",
       label: "PR #218",
       state: "open",
@@ -511,7 +508,7 @@ const issueGraph = {
     { source: "run:run-glimmung-206-live", target: "attempt:run-glimmung-206-live:0", kind: "attempted" },
     { source: "run:run-glimmung-206-live", target: "attempt:run-glimmung-206-live:1", kind: "attempted" },
     { source: "run:run-glimmung-206-live", target: "attempt:run-glimmung-206-live:2", kind: "attempted" },
-    { source: "run:run-glimmung-206-live", target: "pr:report-glimmung-206", kind: "opened" },
+    { source: "run:run-glimmung-206-live", target: "pr:touchpoint-glimmung-206", kind: "opened" },
   ],
   projection: {
     issue_ref: "glimmung#206",
@@ -581,7 +578,7 @@ const systemGraph = {
       metadata: { workflow: "portfolio-agent", cycles_count: 1, cumulative_cost_usd: 3.42, pr_number: 216 },
     },
     {
-      id: "pr:report-glimmung-216",
+      id: "pr:touchpoint-glimmung-216",
       kind: "pr",
       label: "PR #216",
       state: "ready",
@@ -600,8 +597,8 @@ const systemGraph = {
   edges: [
     ...issueGraph.edges,
     { source: "issue:issue-glimmung-217", target: "run:run-glimmung-217-review", kind: "spawned" },
-    { source: "run:run-glimmung-217-review", target: "pr:report-glimmung-216", kind: "opened" },
-    { source: "pr:report-glimmung-216", target: "signal:review-glimmung-217", kind: "feedback" },
+    { source: "run:run-glimmung-217-review", target: "pr:touchpoint-glimmung-216", kind: "opened" },
+    { source: "pr:touchpoint-glimmung-216", target: "signal:review-glimmung-217", kind: "feedback" },
   ],
 };
 
@@ -635,8 +632,8 @@ function handleMockRequest(url: URL, init?: RequestInit): Response {
       && (!workflow || issue.workflow === workflow)
     )));
   }
-  if ((path === "/v1/reports" || path === "/v1/touchpoints") && method === "GET") {
-    return json(mockReports);
+  if (path === "/v1/touchpoints" && method === "GET") {
+    return json(mockTouchpoints);
   }
   if (path === "/v1/portfolio/elements" && method === "GET") {
     const project = url.searchParams.get("project");
@@ -677,41 +674,8 @@ function handleMockRequest(url: URL, init?: RequestInit): Response {
     return json({ id: `mock-${Date.now()}`, ok: true }, { status: 201 });
   }
 
-  const reportMatch = path.match(/^\/v1\/(?:reports|touchpoints)\/([^/]+)\/([^/]+)\/(\d+)$/);
-  if (reportMatch) {
-    const repo = `${decodeURIComponent(reportMatch[1])}/${decodeURIComponent(reportMatch[2])}`;
-    const pr = Number(reportMatch[3]);
-    const row = mockReports.find((r) => r.repo === repo && r.pr_number === pr);
-    if (!row) return json({ error: "not found" }, { status: 404 });
-    return json({
-      ...row,
-      body: "This mock report shows how Glimmung can keep a PR review loop attached to the originating run.",
-      base_ref: "main",
-      head_sha: "c0ffee1234567890",
-      validation_url: "https://design-portfolio-pr-216.glimmung.dev.romaine.life/?mock=1",
-      session_launch_url: null,
-      run_attempt_history: [
-        { attempt_index: 0, phase: "design", workflow_filename: "k8s_job:design", dispatched_at: ago(88), completed_at: ago(75), conclusion: "success", verification_status: "pass", evidence_refs: [], summary_markdown: "Mapped the requested interaction and identified the dashboard route to update.", log_archive_url: null, decision: "continue" },
-        { attempt_index: 1, phase: "implement", workflow_filename: "k8s_job:implement", dispatched_at: ago(70), completed_at: row.pr_lock_held ? null : ago(42), conclusion: row.pr_lock_held ? null : "success", verification_status: row.pr_lock_held ? null : "pass", evidence_refs: [], summary_markdown: row.pr_lock_held ? null : "Implemented the touchpoint change, rebuilt the preview, and captured review evidence.", log_archive_url: null, decision: row.pr_lock_held ? null : "report" },
-      ],
-      comments: [],
-      reviews: [],
-    });
-  }
-
-  const ghIssueGraphMatch = path.match(/^\/v1\/issues\/([^/]+)\/([^/]+)\/(\d+)\/graph$/);
-  if (ghIssueGraphMatch) return json(issueGraph);
-
   const nativeIssueGraphMatch = path.match(/^\/v1\/issues\/by-number\/([^/]+)\/(\d+)\/graph$/);
   if (nativeIssueGraphMatch) return json(issueGraph);
-
-  const ghIssueMatch = path.match(/^\/v1\/issues\/([^/]+)\/([^/]+)\/(\d+)$/);
-  if (ghIssueMatch) {
-    const repo = `${decodeURIComponent(ghIssueMatch[1])}/${decodeURIComponent(ghIssueMatch[2])}`;
-    const number = Number(ghIssueMatch[3]);
-    const detail = issueDetails.find((i) => i.repo === repo && i.number === number);
-    return detail ? json(detail) : json({ error: "not found" }, { status: 404 });
-  }
 
   const nativeIssueNumberMatch = path.match(/^\/v1\/issues\/by-number\/([^/]+)\/(\d+)$/);
   if (nativeIssueNumberMatch) {
@@ -727,19 +691,6 @@ function handleMockRequest(url: URL, init?: RequestInit): Response {
     const ref = decodeURIComponent(playbookDetailMatch[2]);
     const row = mockPlaybooks.find((p) => p.project === project && p.ref === ref);
     return row ? json(row) : json({ error: "not found" }, { status: 404 });
-  }
-
-  const nativeIssueMatch = path.match(/^\/v1\/issues\/by-id\/([^/]+)\/([^/]+)$/);
-  if (nativeIssueMatch) {
-    const project = decodeURIComponent(nativeIssueMatch[1]);
-    const id = decodeURIComponent(nativeIssueMatch[2]);
-    const detail = issueDetails.find((i) => i.project === project && i.id === id);
-    return detail ? json(detail) : json({ error: "not found" }, { status: 404 });
-  }
-
-  const discardIssueMatch = path.match(/^\/v1\/issues\/by-id\/([^/]+)\/([^/]+)\/(?:archive|discard)$/);
-  if (discardIssueMatch && method === "POST") {
-    return json({ id: decodeURIComponent(discardIssueMatch[2]), state: "closed" });
   }
 
   if (path.includes("/comments")) return json({ id: `comment-mock-${Date.now()}`, ok: true });

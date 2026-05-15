@@ -87,10 +87,7 @@ export function GraphView({
     const project = String(issue.metadata.project ?? "");
     if (project && typeof number === "number") {
       navigate(`/projects/${encodeURIComponent(project)}/issues/${number}/summary`);
-      return;
     }
-    const issueId = String(issue.metadata.issue_id ?? "");
-    navigate(`/issues/${encodeURIComponent(project)}/${encodeURIComponent(issueId)}`);
   };
 
   const openNode = (issue: GraphNode, node: GraphNode) => {
@@ -106,12 +103,6 @@ export function GraphView({
     const issueNumber = issue.metadata.number;
     if (issueProject && typeof issueNumber === "number") {
       navigate(`/projects/${encodeURIComponent(issueProject)}/issues/${issueNumber}/touchpoint`);
-      return;
-    }
-    const repo = node.metadata.repo;
-    const number = node.metadata.number;
-    if (typeof repo === "string" && typeof number === "number") {
-      navigate(`/touchpoints/${repo}/${number}`);
     }
   };
 
