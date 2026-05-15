@@ -105,7 +105,6 @@ function CapacityView({ snap, signedIn, selected, selectedWorkflow, selectedProj
             <span className="key">project</span><span className="val mono">{selectedWorkflow.project}</span>
             <span className="key">workflow</span><span className="val mono">{selectedWorkflow.name}</span>
             <span className="key">file</span><span className="val mono">{selectedWorkflow.workflow_filename}@{selectedWorkflow.workflow_ref}</span>
-            <span className="key">trigger label</span><span className="val mono">{selectedWorkflow.trigger_label || "—"}</span>
             <span className="key">requires</span><span className="val mono">{JSON.stringify(selectedWorkflow.default_requirements)}</span>
           </div>
         </>

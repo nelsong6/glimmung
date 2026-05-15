@@ -31,7 +31,7 @@ export type RecycleArrow = {
   trigger: string;
   max_attempts: number;
   active: boolean;
-  kind: "phase_recycle" | "report_recycle";
+  kind: "phase_recycle" | "touchpoint_recycle";
 };
 
 export type PhaseGraphProps = {
@@ -395,16 +395,16 @@ export function PhaseGraph({
       const orderedArrows = arrows
         .slice()
         .sort((a, b) => sourceOrder(a, phaseToColumn, columns.length) - sourceOrder(b, phaseToColumn, columns.length));
-      const reportArrowIndex = orderedArrows.findIndex((arrow) => arrow.kind === "report_recycle" || arrow.source === "report");
+      const touchpointArrowIndex = orderedArrows.findIndex((arrow) => arrow.kind === "touchpoint_recycle" || arrow.source === "touchpoint");
       orderedArrows.forEach((arrow, idx) => {
-          const targetHandleIndex = reportArrowIndex >= 0
-            ? idx === reportArrowIndex
+          const targetHandleIndex = touchpointArrowIndex >= 0
+            ? idx === touchpointArrowIndex
               ? 0
-              : idx < reportArrowIndex
+              : idx < touchpointArrowIndex
                 ? idx + 1
                 : idx
             : idx;
-          const source = arrow.kind === "report_recycle" || arrow.source === "report"
+          const source = arrow.kind === "touchpoint_recycle" || arrow.source === "touchpoint"
             ? "touchpoint"
             : `phase:${phaseToColumn.get(arrow.source) ?? 0}`;
           out.push({
@@ -492,6 +492,6 @@ export function PhaseGraph({
 }
 
 function sourceOrder(arrow: RecycleArrow, phaseToColumn: Map<string, number>, terminalIndex: number): number {
-  if (arrow.kind === "report_recycle" || arrow.source === "report") return terminalIndex;
+  if (arrow.kind === "touchpoint_recycle" || arrow.source === "touchpoint") return terminalIndex;
   return phaseToColumn.get(arrow.source) ?? 0;
 }

@@ -2,7 +2,7 @@
  * Issue detail view (#42, #81) — issue meta + tabbed content.
  *
  * Tabs: summary / runs / touchpoint.
- *   - summary: title link, body, edit form (was "description")
+ *   - summary: title link, body, edit form.
  *   - run: workflow's DAG painted with active run state. Phases
  *     as nodes, PR primitive as the trailing node. Cool-toned
  *     definition view when no run is in flight; nodes color in by
@@ -52,9 +52,7 @@ type IssueComment = {
   updated_at: string;
 };
 
-export type IssueDetailTarget =
-  | { kind: "gh"; repo: string; issue_number: number }
-  | { kind: "number"; project: string; issue_number: number };
+export type IssueDetailTarget = { project: string; issue_number: number };
 
 export type GraphNode = {
   id: string;
@@ -224,7 +222,6 @@ type Workflow = {
   pr: { enabled: boolean; recycle_policy: WorkflowRecyclePolicy | null };
   workflow_filename: string | null;
   workflow_ref: string | null;
-  trigger_label: string;
   default_requirements: Record<string, unknown>;
 };
 
@@ -295,16 +292,9 @@ const TAB_SLUGS: Record<Tab, string> = {
   touchpoint: "touchpoint",
 };
 
-// Backwards-compat: old description / in-progress / lineage slugs still
-// resolve so links and bookmarks from before #81 keep working.
 const SLUG_TO_TAB: Record<string, Tab> = {
   summary: "summary",
-  issue: "summary",
-  description: "summary",
-  "the-run": "runs",
-  "in-progress": "runs",
   runs: "runs",
-  lineage: "runs",
   workflow: "workflow",
   touchpoint: "touchpoint",
 };
@@ -334,11 +324,7 @@ function formatDispatchError(message: string): string {
 }
 
 type IssueDetailRouteParams = {
-  owner?: string;
-  repo?: string;
-  n?: string;
   project?: string;
-  issueId?: string;
   issueNumber?: string;
   runId?: string;
   workflowRunId?: string;
@@ -350,36 +336,16 @@ export function IssueDetailView() {
   const params = useParams<IssueDetailRouteParams>();
   const { signedIn, isAdmin, snap } = useOutletContext<AuthContext>();
 
-  const projectRouteIssueNumber = params.issueNumber ? parseInt(params.issueNumber, 10) : null;
-  // Project-shaped issue URLs are canonical for the UI.
-  const target: IssueDetailTarget | null = projectRouteIssueNumber !== null
+  const issueNumber = params.issueNumber ? Number.parseInt(params.issueNumber, 10) : null;
+  const target: IssueDetailTarget | null = params.project && issueNumber !== null && Number.isFinite(issueNumber)
     ? {
-        kind: "number",
         project: params.project ?? "",
-        issue_number: projectRouteIssueNumber,
-      }
-    : params.n
-    ? {
-        kind: "gh",
-        repo: `${params.owner ?? ""}/${params.repo ?? ""}`,
-        issue_number: parseInt(params.n, 10),
+        issue_number: issueNumber,
       }
     : null;
-  const resolvedProjectFromRepo = target?.kind === "gh"
-    ? snap?.projects.find((candidate) => candidate.github_repo === target.repo) ?? null
-    : null;
-  const canonicalProject = target?.kind === "number"
-    ? target.project
-    : resolvedProjectFromRepo?.name ?? null;
 
   const baseUrl =
-    projectRouteIssueNumber !== null
-      ? `/projects/${encodeURIComponent(params.project ?? "")}/issues/${projectRouteIssueNumber}`
-      : target?.kind === "gh" && resolvedProjectFromRepo
-      ? `/projects/${encodeURIComponent(resolvedProjectFromRepo.name)}/issues/${target.issue_number}`
-      : target?.kind === "gh"
-      ? `/issues/${target.repo}/${target.issue_number}`
-      : target?.kind === "number"
+    target
       ? `/projects/${encodeURIComponent(target.project)}/issues/${target.issue_number}`
       : "/issues";
 
@@ -452,25 +418,15 @@ export function IssueDetailView() {
     [detail, issueWorkflowCandidates, selectedWorkflowRun],
   );
   const detailUrl =
-    target?.kind === "gh" && canonicalProject
-      ? `/v1/issues/by-number/${encodeURIComponent(canonicalProject)}/${target.issue_number}`
-      : target?.kind === "gh"
-      ? null
-      : target?.kind === "number"
+    target
       ? `/v1/issues/by-number/${encodeURIComponent(target.project)}/${target.issue_number}`
       : null;
   const graphUrl =
-    target?.kind === "gh" && canonicalProject
-      ? `/v1/issues/by-number/${encodeURIComponent(canonicalProject)}/${target.issue_number}/graph`
-      : target?.kind === "gh"
-      ? null
-      : target?.kind === "number"
+    target
       ? `/v1/issues/by-number/${encodeURIComponent(target.project)}/${target.issue_number}/graph`
       : null;
   const heading =
-    target?.kind === "gh"
-      ? `#${target.issue_number}`
-      : target?.kind === "number"
+    target
       ? `#${target.issue_number}`
       : "";
   const selectTab = (t: Tab) => {
@@ -535,25 +491,7 @@ export function IssueDetailView() {
       navigate(`${baseUrl}/${canonicalSlug}`, { replace: true });
       return;
     }
-    if (target?.kind !== "gh") return;
-    if (projectRouteIssueNumber !== null) return;
-    if (!resolvedProjectFromRepo) return;
-    navigate(
-      `/projects/${encodeURIComponent(resolvedProjectFromRepo.name)}/issues/${target.issue_number}/${canonicalSlug}`,
-      { replace: true },
-    );
-  }, [baseUrl, lastSeg, navigate, params.runId, params.workflowRunId, projectRouteIssueNumber, resolvedProjectFromRepo, tab, target]);
-
-  useEffect(() => {
-    if (!detail?.number) return;
-    if (projectRouteIssueNumber !== null) return;
-    const canonicalSlug = TAB_SLUGS[tab];
-    const runSuffix = params.runId ? `/${params.runId}` : params.workflowRunId ? `/${params.workflowRunId}` : "";
-    navigate(
-      `/projects/${encodeURIComponent(detail.project)}/issues/${detail.number}/${canonicalSlug}${runSuffix}`,
-      { replace: true },
-    );
-  }, [detail, navigate, params.runId, params.workflowRunId, projectRouteIssueNumber, tab]);
+  }, [baseUrl, lastSeg, navigate, params.runId, params.workflowRunId, tab]);
 
   useEffect(() => {
     let cancelled = false;
@@ -620,14 +558,8 @@ export function IssueDetailView() {
     return () => clearInterval(id);
   }, [tab, isInFlight]);
 
-  if (target?.kind === "gh" && snap && !resolvedProjectFromRepo) {
-    return <div className="empty">Register the project route to open this issue.</div>;
-  }
-  if (!target && projectRouteIssueNumber !== null && snap) {
-    return <div className="empty">Project {params.project || "(missing)"} was not found.</div>;
-  }
   if (!target) {
-    return <div className="empty">Loading issue…</div>;
+    return <div className="empty">Issue route is missing a project issue number.</div>;
   }
 
   return (
@@ -1538,9 +1470,9 @@ function PipelineDag({
     ?? workflowGraph?.default_entry?.target
     ?? phaseRollups[0]?.phaseName
     ?? null;
-  const touchpointId = stringOrNull(meta.report_ref);
-  const touchpointState = stringOrNull(meta.report_state);
-  const touchpointTitle = stringOrNull(meta.report_title);
+  const touchpointId = stringOrNull(meta.touchpoint_ref);
+  const touchpointState = stringOrNull(meta.touchpoint_state);
+  const touchpointTitle = stringOrNull(meta.touchpoint_title);
   const primitiveState = stringOrNull(meta.pr_primitive_state);
   const primitiveError = stringOrNull(meta.pr_primitive_error);
   const prNumber = numberOrNull(meta.pr_number);
@@ -1774,10 +1706,10 @@ function DrillIn({
   if (nodeId === null) return null;
   const meta = run.metadata;
   if (nodeId === "pr") {
-    const touchpointId = stringOrNull(meta.report_ref);
-    const touchpointState = stringOrNull(meta.report_state);
-    const touchpointTitle = stringOrNull(meta.report_title);
-    const touchpointUrl = stringOrNull(meta.report_url);
+    const touchpointId = stringOrNull(meta.touchpoint_ref);
+    const touchpointState = stringOrNull(meta.touchpoint_state);
+    const touchpointTitle = stringOrNull(meta.touchpoint_title);
+    const touchpointUrl = stringOrNull(meta.touchpoint_url);
     const primitiveState = stringOrNull(meta.pr_primitive_state);
     const primitiveError = stringOrNull(meta.pr_primitive_error);
     const prNumber = numberOrNull(meta.pr_number);
@@ -2489,9 +2421,9 @@ function TouchpointTab({
     ?? numberOrNull(latestMeta.pr_number)
     ?? numberOrNull(latestPrMeta.number)
     ?? prNumberFromNode(latestPr);
-  const reportTitle = projectedTouchpoint?.title ?? stringOrNull(latestMeta.report_title) ?? stringOrNull(latestPrMeta.title);
-  const reportState = projectedTouchpoint?.state ?? stringOrNull(latestMeta.report_state) ?? latestPr?.state;
-  const reportUrl = projectedTouchpoint?.html_url ?? stringOrNull(latestMeta.report_url) ?? stringOrNull(latestPrMeta.html_url);
+  const touchpointTitle = projectedTouchpoint?.title ?? stringOrNull(latestMeta.touchpoint_title) ?? stringOrNull(latestPrMeta.title);
+  const touchpointState = projectedTouchpoint?.state ?? stringOrNull(latestMeta.touchpoint_state) ?? latestPr?.state;
+  const touchpointUrl = projectedTouchpoint?.html_url ?? stringOrNull(latestMeta.touchpoint_url) ?? stringOrNull(latestPrMeta.html_url);
   const evidenceRepo = projectedTouchpoint?.repo ?? repo ?? stringOrNull(latestPrMeta.repo);
   const validationUrl = projectedRun?.validation_url ?? projectedTouchpoint?.validation_url ?? stringOrNull(latestMeta.validation_url);
   const screenshotsMarkdown = stringOrNull(latestMeta.screenshots_markdown);
@@ -2531,8 +2463,8 @@ function TouchpointTab({
         <div className="row">
           <span className="key">state</span>
           <span className="val">
-            <span className={`pill ${reportState === "open" || reportState === "ready" ? "busy" : reportState ? "free" : ""}`}>
-              {reportState ?? "pending evidence"}
+            <span className={`pill ${touchpointState === "open" || touchpointState === "ready" ? "busy" : touchpointState ? "free" : ""}`}>
+              {touchpointState ?? "pending evidence"}
             </span>
           </span>
         </div>
@@ -2556,8 +2488,8 @@ function TouchpointTab({
           <span className="key">PR</span>
           <span className="val">
             {prNumber !== null && evidenceRepo ? (
-              <a className="mono" href={reportUrl || `https://github.com/${evidenceRepo}/pull/${prNumber}`} target="_blank" rel="noreferrer">
-                #{prNumber}{reportTitle ? ` — ${reportTitle}` : ""}
+              <a className="mono" href={touchpointUrl || `https://github.com/${evidenceRepo}/pull/${prNumber}`} target="_blank" rel="noreferrer">
+                #{prNumber}{touchpointTitle ? ` — ${touchpointTitle}` : ""}
               </a>
             ) : (
               <span className="dim">No PR evidence yet.</span>
@@ -3264,14 +3196,14 @@ function workflowGraphMeta(x: unknown): WorkflowGraphMeta | null {
     : null;
   const terminal = isRecord(x.terminal)
     ? {
-        kind: String(x.terminal.kind ?? "report"),
+        kind: String(x.terminal.kind ?? "touchpoint"),
         enabled: Boolean(x.terminal.enabled),
       }
-    : { kind: "report", enabled: false };
+    : { kind: "touchpoint", enabled: false };
   const recycle_arrows = Array.isArray(x.recycle_arrows)
     ? x.recycle_arrows.flatMap((raw): RecycleArrow[] => {
         if (!isRecord(raw)) return [];
-        const kind = raw.kind === "report_recycle" ? "report_recycle" : "phase_recycle";
+        const kind = raw.kind === "touchpoint_recycle" ? "touchpoint_recycle" : "phase_recycle";
         return [{
           source: String(raw.source ?? ""),
           target: String(raw.target ?? ""),

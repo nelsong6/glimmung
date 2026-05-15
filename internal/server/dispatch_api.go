@@ -176,7 +176,6 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, nativeLaun
 		Phases:              wf.Phases,
 		PR:                  wf.PR,
 		Budget:              wf.Budget,
-		TriggerLabel:        wf.TriggerLabel,
 		DefaultRequirements: wf.DefaultRequirements,
 		Metadata:            wf.Metadata,
 	}); err != nil {

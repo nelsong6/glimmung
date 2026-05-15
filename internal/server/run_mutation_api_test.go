@@ -158,30 +158,6 @@ func TestAbortRunByNumberBadIssueNumber(t *testing.T) {
 	}
 }
 
-// --- retired run-callbacks/aborted route ---
-
-func TestRunAbortedByCallbackTokenGone(t *testing.T) {
-	store := &fakeRunMutationStore{
-		runID:       "run-xyz",
-		runRef:      "myproject#7/runs/1",
-		abortResult: AbortRunResult{State: "aborted", RunRef: "myproject#7/runs/1"},
-	}
-	handler := newRunMutHandlerNoAuth(store)
-
-	body := `{"reason":"workflow_failed"}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/run-callbacks/token456/aborted", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusGone {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), "/native/completed") {
-		t.Fatalf("body=%s", rec.Body.String())
-	}
-}
-
 // --- webhook tests ---
 
 func TestGitHubWebhookNoSecret(t *testing.T) {

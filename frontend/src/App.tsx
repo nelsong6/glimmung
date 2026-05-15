@@ -5,7 +5,6 @@ import { IssueDetailView, RunViewer, type AbortState, type DispatchState, type I
 import { IssuesView } from "./IssuesView";
 import { PlaybooksView } from "./PlaybooksView";
 import { PortfolioView } from "./PortfolioView";
-import { TouchpointDetailView } from "./TouchpointDetailView";
 import { TouchpointsView } from "./TouchpointsView";
 import { StyleguideView } from "./StyleguideView";
 import { PhaseGraph, type PhaseGraphPhase } from "./PhaseGraph";
@@ -87,7 +86,6 @@ type Workflow = {
   pr: PrPrimitiveSpec;
   workflow_filename: string | null;
   workflow_ref: string | null;
-  trigger_label: string;
   default_requirements: Record<string, unknown>;
   metadata: Record<string, unknown>;
   created_at: string;
@@ -242,57 +240,18 @@ export function App() {
         <Route path="projects/:project/issues/new" element={<IssueOnboardingRoute />} />
         <Route path="projects/:project/issues/:issueNumber" element={<IssueDetailView />}>
           <Route path="summary" element={null} />
-          <Route path="issue" element={null} />
           <Route path="runs" element={null} />
           <Route path="runs/:runId" element={null} />
           <Route path="workflow" element={null} />
           <Route path="workflow/:workflowRunId" element={null} />
           <Route path="touchpoint" element={null} />
-          <Route path="description" element={null} />
-          <Route path="the-run" element={null} />
-          <Route path="in-progress" element={null} />
-          <Route path="lineage" element={null} />
         </Route>
         <Route path="projects/:project/needs-attention" element={<ProjectNeedsAttentionRoute />} />
         <Route path="projects/:project/runs" element={<ProjectRunsRoute />} />
         <Route path="projects/:project/runs/:runId" element={<ProjectRunRedirectRoute />} />
         <Route path="issues" element={<Navigate to="/needs-attention" replace />} />
-        <Route path="issues/:owner/:repo/:n" element={<IssueDetailView />}>
-          {/* Issue workspace tabs. Old slugs are still accepted by
-              IssueDetailView so existing links keep working. */}
-          <Route path="summary" element={null} />
-          <Route path="issue" element={null} />
-          <Route path="the-run" element={null} />
-          <Route path="runs" element={null} />
-          <Route path="runs/:runId" element={null} />
-          <Route path="workflow" element={null} />
-          <Route path="workflow/:workflowRunId" element={null} />
-          <Route path="touchpoint" element={null} />
-          {/* Backwards-compat: pre-#81 tab slugs. SLUG_TO_TAB in
-              IssueDetailView maps these to the new tabs so deep links
-              from before the rename keep working. */}
-          <Route path="description" element={null} />
-          <Route path="in-progress" element={null} />
-          <Route path="lineage" element={null} />
-        </Route>
-        <Route path="issues/:project/:issueId" element={<IssueDetailView />}>
-          <Route path="summary" element={null} />
-          <Route path="issue" element={null} />
-          <Route path="the-run" element={null} />
-          <Route path="runs" element={null} />
-          <Route path="runs/:runId" element={null} />
-          <Route path="workflow" element={null} />
-          <Route path="workflow/:workflowRunId" element={null} />
-          <Route path="touchpoint" element={null} />
-          <Route path="description" element={null} />
-          <Route path="in-progress" element={null} />
-          <Route path="lineage" element={null} />
-        </Route>
         <Route path="touchpoints" element={<TouchpointsRoute />} />
         <Route path="portfolio" element={<PortfolioRoute />} />
-        <Route path="touchpoints/:owner/:repo/:n" element={<LegacyTouchpointRedirectRoute />} />
-        <Route path="reports" element={<Navigate to="/touchpoints" replace />} />
-        <Route path="reports/:owner/:repo/:n" element={<LegacyTouchpointRedirectRoute />} />
       </Route>
     </Routes>
   );
@@ -404,12 +363,12 @@ function Layout() {
           fetch("/v1/touchpoints"),
         ]);
         const issues = iRes.ok ? ((await iRes.json()) as Array<{ issue_lock_held?: boolean }>) : [];
-        const reports = pRes.ok ? ((await pRes.json()) as Array<{ pr_lock_held?: boolean }>) : [];
+        const touchpoints = pRes.ok ? ((await pRes.json()) as Array<{ pr_lock_held?: boolean }>) : [];
         if (cancelled) return;
         setInflight({
           issues:
             (Array.isArray(issues) && issues.some((x) => x.issue_lock_held))
-            || (Array.isArray(reports) && reports.some((x) => x.pr_lock_held)),
+            || (Array.isArray(touchpoints) && touchpoints.some((x) => x.pr_lock_held)),
         });
       } catch {
         // keep last value on transient failures
@@ -433,7 +392,7 @@ function Layout() {
   const dashboardLinkClass = ({ isActive }: { isActive: boolean }) =>
     `dashboard-nav-link ${isActive ? "selected" : ""}`;
   const homeRoute = location.pathname === "/";
-  const breadcrumbs = buildBreadcrumbs(location.pathname, snap?.projects ?? []);
+  const breadcrumbs = buildBreadcrumbs(location.pathname);
   const returnTarget = returnTargetFromState(location.state, location.pathname);
 
   return (
@@ -575,7 +534,7 @@ function returnTargetFromState(state: unknown, currentPath: string): { to: strin
   return { to: candidate.returnTo, label };
 }
 
-function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
+function buildBreadcrumbs(pathname: string): Breadcrumb[] {
   const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
   if (parts.length === 0) return [{ label: "Home" }];
   if (parts[0] === "dashboard") {
@@ -646,37 +605,7 @@ function buildBreadcrumbs(pathname: string, projects: Project[]): Breadcrumb[] {
     }
     return crumbs;
   }
-  if (parts[0] === "issues") {
-    const crumbs: Breadcrumb[] = [{ label: "Home", to: "/" }];
-    if (parts.length >= 4) {
-      const owner = parts[1];
-      const repo = parts[2];
-      const issue = parts[3];
-      const githubRepo = `${owner}/${repo}`;
-      const project = projects.find((p) => p.github_repo === githubRepo);
-      if (project) {
-        crumbs.push({ label: "Projects", to: "/projects" });
-        crumbs.push({ label: project.name, to: `/projects/${encodeURIComponent(project.name)}` });
-        crumbs.push({ label: "Issues", to: `/projects/${encodeURIComponent(project.name)}/issues` });
-      } else {
-        crumbs.push({ label: "Needs attention", to: "/needs-attention" });
-        crumbs.push({ label: githubRepo });
-      }
-      crumbs.push({ label: `#${issue}` });
-      if (parts[4]) crumbs.push({ label: titleCase(parts[4]) });
-      return crumbs;
-    }
-    if (parts.length >= 3) {
-      crumbs.push({ label: "Projects", to: "/projects" });
-      crumbs.push({ label: parts[1], to: `/projects/${encodeURIComponent(parts[1])}` });
-      crumbs.push({ label: "Issues", to: `/projects/${encodeURIComponent(parts[1])}/issues` });
-      crumbs.push({ label: parts[2] });
-      if (parts[3]) crumbs.push({ label: titleCase(parts[3]) });
-      return crumbs;
-    }
-    return [{ label: "Home", to: "/" }, { label: "Needs attention" }];
-  }
-  if (parts[0] === "touchpoints" || parts[0] === "reports") {
+  if (parts[0] === "touchpoints") {
     return [{ label: "Home", to: "/" }, { label: "Touchpoints", to: "/touchpoints" }];
   }
   if (parts[0] === "portfolio") {
@@ -892,50 +821,6 @@ function PortfolioRoute() {
       projectFilter={selected.kind === "all" ? null : selected.project}
     />
   );
-}
-
-function LegacyTouchpointRedirectRoute() {
-  const params = useParams<{ owner?: string; repo?: string; n?: string }>();
-  const [target, setTarget] = useState<string | null>(null);
-  const [fallback, setFallback] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const repo = `${params.owner ?? ""}/${params.repo ?? ""}`;
-  const prNumber = params.n ?? "";
-
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      setError(null);
-      setFallback(false);
-      try {
-        const r = await fetch(`/v1/touchpoints/${repo}/${prNumber}`);
-        if (!r.ok) throw new Error(`/v1/touchpoints/${repo}/${prNumber} -> ${r.status}`);
-        const detail = await r.json() as {
-          project?: string;
-          issue_number?: number | null;
-        };
-        if (cancelled) return;
-        if (detail.project && detail.issue_number !== null && detail.issue_number !== undefined) {
-          setTarget(
-            `/projects/${encodeURIComponent(detail.project)}/issues/${detail.issue_number}/touchpoint`,
-          );
-        } else {
-          setFallback(true);
-        }
-      } catch (e) {
-        if (!cancelled) setError(String(e));
-      }
-    };
-    void load();
-    return () => {
-      cancelled = true;
-    };
-  }, [repo, prNumber]);
-
-  if (target) return <Navigate to={target} replace />;
-  if (fallback) return <TouchpointDetailView />;
-  if (error) return <div className="empty error">{error}</div>;
-  return <div className="empty">Loading touchpoint…</div>;
 }
 
 function HomeView({ snap }: LayoutContext) {
@@ -1230,7 +1115,6 @@ function ProjectWorkflowsView({
             <tr>
               <th>Name</th>
               <th>File</th>
-              <th>Trigger</th>
               <th>Requires</th>
               <th>Work</th>
             </tr>
@@ -1254,7 +1138,6 @@ function ProjectWorkflowsView({
                       </a>
                     ) : sourceLabel}
                   </td>
-                  <td className="mono dim">{w.trigger_label}</td>
                   <td><RequirementPills requirements={w.default_requirements} /></td>
                   <td className="mono dim">{wActive} active</td>
                 </tr>
@@ -1380,10 +1263,6 @@ function ProjectWorkflowView({
           <div className="project-fact">
             <span>active</span>
             <strong>{active.length}</strong>
-          </div>
-          <div className="project-fact">
-            <span>trigger</span>
-            <strong>{workflow.trigger_label}</strong>
           </div>
         </div>
       </section>
@@ -1940,7 +1819,7 @@ function projectRunGraph(run: ProjectRun, workflow: Workflow | undefined, projec
         phases: phaseNames,
         default_entry: { target: phaseNames[0] ?? run.current_phase, active: true, kind: "phase" },
         recycle_arrows: graphModel?.recycleArrows ?? [],
-        terminal: { kind: "report", enabled: graphModel?.prEnabled ?? true },
+        terminal: { kind: "touchpoint", enabled: graphModel?.prEnabled ?? true },
       },
     },
   };
@@ -2051,7 +1930,7 @@ function projectRunReportGraph(report: RunReport, workflow: Workflow | undefined
         phases: uniquePhases,
         default_entry: { target: uniquePhases[0] ?? report.current_phase ?? "phase", active: true, kind: "phase" },
         recycle_arrows: graphModel?.recycleArrows ?? [],
-        terminal: { kind: "pr", enabled: graphModel?.prEnabled ?? false },
+        terminal: { kind: "touchpoint", enabled: graphModel?.prEnabled ?? false },
       },
     },
   };

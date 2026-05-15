@@ -190,7 +190,7 @@ func (l *KubernetesNativeLauncher) DeprovisionTestSlot(ctx context.Context, leas
 }
 
 func (l *KubernetesNativeLauncher) deletePlaywrightResources(ctx context.Context, lease Lease, slotName string) error {
-	for _, target := range playwrightResourceTargets(lease, slotName, l.Settings.NativeRunnerNamespace) {
+	for _, target := range playwrightResourceTargets(lease, slotName) {
 		for _, path := range []string{
 			"/apis/apps/v1/namespaces/" + target.namespace + "/deployments/" + target.name,
 			"/api/v1/namespaces/" + target.namespace + "/services/" + target.name,
@@ -1243,14 +1243,10 @@ type playwrightResourceTarget struct {
 	name      string
 }
 
-func playwrightResourceTargets(lease Lease, slotName, runnerNamespace string) []playwrightResourceTarget {
+func playwrightResourceTargets(lease Lease, slotName string) []playwrightResourceTarget {
 	var targets []playwrightResourceTarget
 	if name := playwrightResourceName(lease.Project, slotName); name != "" {
 		targets = append(targets, playwrightResourceTarget{namespace: slotName, name: name})
-	}
-	legacyName := compactResourceName("glim-pw", lease.Project+"-"+slotName, 0)
-	if legacyName != "" && runnerNamespace != "" {
-		targets = append(targets, playwrightResourceTarget{namespace: runnerNamespace, name: legacyName})
 	}
 	return targets
 }

@@ -28,7 +28,6 @@ type WorkflowRegister struct {
 	Phases              []PhaseSpec    `json:"phases"`
 	PR                  PrPrimitive    `json:"pr"`
 	Budget              budget.Config  `json:"budget"`
-	TriggerLabel        *string        `json:"trigger_label"`
 	DefaultRequirements map[string]any `json:"default_requirements"`
 	Metadata            map[string]any `json:"metadata"`
 }

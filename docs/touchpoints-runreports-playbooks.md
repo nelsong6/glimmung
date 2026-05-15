@@ -124,10 +124,10 @@ Current ReportVersion -> TouchpointVersion, if versions remain useful
 New RunReport -> per-Run factual execution report
 ```
 
-Existing API, frontend, storage, and MCP callers may still use some `Report`
-names. When a surface is migrated, delete the old route, UI control, storage
-read, test, and docs in the same change. Do not keep aliases for terminology
-cleanup.
+Live API and frontend surfaces use Touchpoint and RunReport terminology. The
+Cosmos `reports` container remains the physical Touchpoint storage container;
+do not add Report-named routes, UI controls, runtime reads, aliases, or tests
+for terminology cleanup.
 
 ## Playbooks And Touchpoints
 

@@ -41,10 +41,11 @@ The detailed cleanup inventory lives in
   those endpoints directly.
 - Keep `/healthz`, `/v1/config`, `/v1/auth/me`, `/v1/state`, and `/v1/events`
   stable for operations, dashboard bootstrap, and automation clients.
-- Storage-ID routes that remain registered as `410 Gone` are intentional
-  tombstones, not unfinished handlers.
+- Retired route families must stay unregistered. `route_inventory_test.go`
+  rejects storage-ID, GitHub Issue-coordinate, Report alias, PR-coordinate
+  Touchpoint, and retired native callback/proxy routes.
 - Canonical graph routes are Go-owned: `/v1/issues/by-number/{project}/{issue_number}/graph`
-  and `/v1/graph`. GitHub Issue-coordinate graph routes remain `410 Gone`.
+  and `/v1/graph`.
 
 ## Data contract
 

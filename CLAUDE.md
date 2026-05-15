@@ -26,6 +26,15 @@ is binding. Compatibility is prohibited. Existing language such as `legacy`,
 `compatibility`, `fallback`, `temporary`, or `exception` is evidence of old
 system surface to delete, not permission to preserve it.
 
+## Quality timeframe
+
+Read [`docs/quality-timeframes.md`](docs/quality-timeframes.md) before
+planning substantial work. Glimmung follows the long-term, heavy-solution
+operating mode described there. Do not ship a light or medium version when the
+complete architecture, hardening, observability, and migration cleanup are
+already understood. If the complete solution must be split across PRs, write
+the full plan first and keep every stage coherent by itself.
+
 ## The four levers
 
 Every feature glimmung adds is one or more of:

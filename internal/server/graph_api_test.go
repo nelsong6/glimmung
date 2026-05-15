@@ -3,8 +3,6 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -75,10 +73,6 @@ func (s fakeGraphStore) ListTouchpoints(_ context.Context, filter TouchpointList
 		}
 	}
 	return out, nil
-}
-
-func (s fakeGraphStore) GetTouchpointByRepoPR(context.Context, string, int) (TouchpointDetail, error) {
-	return TouchpointDetail{}, ErrUnsupported
 }
 
 func (s fakeGraphStore) GetTouchpointForIssue(context.Context, string, int) (TouchpointDetail, error) {
@@ -273,15 +267,6 @@ func TestSystemGraphUsesProjectFilter(t *testing.T) {
 	assertGraphNode(t, graph, "issue:glimmung#17", "issue")
 	assertGraphNode(t, graph, "run:glimmung#17/runs/1", "run")
 	assertGraphEdge(t, graph, "issue:glimmung#17", "run:glimmung#17/runs/1", "spawned")
-}
-
-func TestLegacyGitHubIssueGraphRouteRemainsGone(t *testing.T) {
-	handler := NewWithStore(Settings{}, fakeReadStore{})
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/issues/nelsong6/glimmung/446/graph", nil))
-	if rec.Code != http.StatusGone {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-	}
 }
 
 func assertGraphNode(t *testing.T, graph IssueGraph, id, kind string) GraphNode {

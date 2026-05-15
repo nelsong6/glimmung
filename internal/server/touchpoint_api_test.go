@@ -24,13 +24,6 @@ func (s *fakeTouchpointStore) ListTouchpoints(_ context.Context, _ TouchpointLis
 	return s.rows, nil
 }
 
-func (s *fakeTouchpointStore) GetTouchpointByRepoPR(_ context.Context, _ string, _ int) (TouchpointDetail, error) {
-	if s.err != nil {
-		return TouchpointDetail{}, s.err
-	}
-	return s.detail, nil
-}
-
 func (s *fakeTouchpointStore) GetTouchpointForIssue(_ context.Context, _ string, _ int) (TouchpointDetail, error) {
 	if s.err != nil {
 		return TouchpointDetail{}, s.err
@@ -75,43 +68,6 @@ func TestListTouchpoints(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"ref":"nelsong6/glimmung#42"`) {
 		t.Fatalf("body=%s", rec.Body.String())
-	}
-}
-
-func TestListTouchpointsAlias(t *testing.T) {
-	store := &fakeTouchpointStore{rows: []TouchpointRow{{Ref: "nelsong6/glimmung#1", Project: "glimmung", Repo: "nelsong6/glimmung", PRNumber: 1, State: "ready"}}}
-	handler := NewWithStore(Settings{}, store)
-
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/reports", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestTouchpointDetailByRepoPR(t *testing.T) {
-	store := &fakeTouchpointStore{detail: TouchpointDetail{
-		Ref: "nelsong6/glimmung#42", Project: "glimmung", Repo: "nelsong6/glimmung", PRNumber: 42, Title: "Fix dashboard", State: "ready",
-	}}
-	handler := NewWithStore(Settings{}, store)
-
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/touchpoints/nelsong6/glimmung/42", nil))
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), `"pr_number":42`) {
-		t.Fatalf("body=%s", rec.Body.String())
-	}
-}
-
-func TestTouchpointDetailByRepoPRNotFound(t *testing.T) {
-	handler := NewWithStore(Settings{}, &fakeTouchpointStore{err: ErrNotFound})
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/touchpoints/nelsong6/glimmung/42", nil))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -173,7 +129,7 @@ func TestCreateTouchpointValidates(t *testing.T) {
 
 func TestTouchpointRequiresStore(t *testing.T) {
 	handler := NewWithStore(Settings{}, fakeReadStore{})
-	for _, path := range []string{"/v1/touchpoints", "/v1/touchpoints/nelsong6/glimmung/1", "/v1/projects/glimmung/issues/1/touchpoint"} {
+	for _, path := range []string{"/v1/touchpoints", "/v1/projects/glimmung/issues/1/touchpoint"} {
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 		if rec.Code != http.StatusServiceUnavailable {
