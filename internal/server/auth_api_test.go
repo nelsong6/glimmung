@@ -16,7 +16,7 @@ type fakeAuthResolver struct {
 	ok      bool
 }
 
-func (r fakeAuthResolver) ResolveCaller(context.Context, string) (auth.User, bool, bool) {
+func (r fakeAuthResolver) ResolveCaller(context.Context, *http.Request) (auth.User, bool, bool) {
 	return r.user, r.isAdmin, r.ok
 }
 

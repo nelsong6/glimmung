@@ -10,7 +10,7 @@ import (
 type adminUserContextKey struct{}
 
 type AdminAuthenticator interface {
-	RequireAdmin(ctx context.Context, authorization string) (auth.User, error)
+	RequireAdmin(ctx context.Context, r *http.Request) (auth.User, error)
 }
 
 func requireAdmin(authenticator AdminAuthenticator, next http.Handler) http.Handler {
@@ -19,7 +19,7 @@ func requireAdmin(authenticator AdminAuthenticator, next http.Handler) http.Hand
 			writeProblem(w, http.StatusServiceUnavailable, "admin auth not configured")
 			return
 		}
-		user, err := authenticator.RequireAdmin(r.Context(), r.Header.Get("Authorization"))
+		user, err := authenticator.RequireAdmin(r.Context(), r)
 		if err != nil {
 			if authErr, ok := err.(auth.AuthError); ok {
 				writeProblem(w, authErr.Status, authErr.Message)

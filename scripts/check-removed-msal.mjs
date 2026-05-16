@@ -58,6 +58,12 @@ const blocked = [
   { name: "glimmung-oauth Entra app reg name", pattern: /\bglimmung-oauth(?:-test)?-client-id\b/ },
   { name: "glimmung-admin-emails KV secret", pattern: /\bglimmung-admin-emails\b/ },
   { name: "Application.ReadWrite.All MS Graph permission", pattern: /Application\.ReadWrite\.(?:All|OwnedBy)/ },
+  { name: "RomaineLifeAuthenticator (replaced by CookieDelegate)", pattern: /\bRomaineLifeAuthenticator\b/ },
+  { name: "NewRomaineLifeAuthenticator", pattern: /\bNewRomaineLifeAuthenticator\b/ },
+  { name: "JWKS endpoint URL (cookie-only — no local JWT verify)", pattern: /auth\.romaine\.life\/api\/auth\/jwks/ },
+  { name: "auth.romaine.life /api/auth/token (cookie-only — no token fetch)", pattern: /auth\.romaine\.life\/api\/auth\/token/ },
+  { name: "createRemoteJWKSet (no JWT verify in app)", pattern: /\bcreateRemoteJWKSet\b/ },
+  { name: "localStorage token storage", pattern: /localStorage\.(get|set|remove)Item\(['"`]?token/i },
 ];
 
 const failures = [];
