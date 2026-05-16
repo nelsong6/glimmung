@@ -177,9 +177,26 @@ on a project-owned Entra app. Sign-in for any slot URL flows through
 auth.romaine.life: the project's frontend redirects to
 `auth.romaine.life/sign-in/microsoft?callbackURL=https://slot-1.foo/`, the
 auth service completes the Microsoft handshake under a single org-wide app
-reg, and 302s back to the slot. auth.romaine.life's `trustedOrigins`
-allowlist covers slots via the wildcard `https://*.glimmung.dev.romaine.life`
-(see nelsong6/auth#20).
+reg, and 302s back to the slot.
+
+The trustedOrigins allowlist for slot hostnames is **owned by glimmung**,
+not statically listed in `nelsong6/auth` source. Each project that opts in
+sets `managed_auth_origins.enabled=true` in its project metadata;
+glimmung's reconciler (`internal/server/managed_origins.go`) derives the
+wildcard mechanically from `native_standby_dns.record_base`
+(`https://*.<record_base>`) and PUTs it to
+`auth.romaine.life/api/admin/origins/{project}` via the projected SA
+token mounted with `audience: https://auth.romaine.life`. The wildcard
+unions into Better Auth's `trustedOrigins` and Hono's CORS allowlist on
+`/api/auth/*` at request time (60s in-process cache). See nelsong6/glimmung#142
+for the full architecture; auth's CI guard
+(`nelsong6/auth/scripts/check-static-slot-origins.mjs`) prevents any
+project-specific slot wildcard from being re-added to auth source.
+
+Reconciliation triggers on `scaleProjectTestEnvironments`,
+`registerProject`, and (future) project deregister. Failures surface on
+the project's `managed_auth_origins_status` row; re-issuing any trigger
+is the idempotent self-heal.
 
 Glimmung no longer reconciles redirect URIs against Microsoft Graph on slot
 scale changes — that whole code path was deleted alongside the per-project
