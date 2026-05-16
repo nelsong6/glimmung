@@ -210,37 +210,6 @@ func (s *Store) SetProjectTestEnvironmentCount(ctx context.Context, project stri
 	return projectFromMap(doc)
 }
 
-func (s *Store) SetProjectNativeAuthRedirectStatus(ctx context.Context, project string, status server.NativeAuthRedirectStatus) (server.Project, error) {
-	partitionKey := azcosmos.NewPartitionKeyString(project)
-	read, err := s.projects.ReadItem(ctx, partitionKey, project, nil)
-	if err != nil {
-		if isCosmosStatus(err, http.StatusNotFound) {
-			return server.Project{}, server.ErrNotFound
-		}
-		return server.Project{}, err
-	}
-
-	var doc map[string]any
-	if err := json.Unmarshal(read.Value, &doc); err != nil {
-		return server.Project{}, err
-	}
-	metadata, _ := doc["metadata"].(map[string]any)
-	if metadata == nil {
-		metadata = map[string]any{}
-	}
-	metadata["native_auth_redirects_status"] = status
-	doc["metadata"] = metadata
-
-	payload, err := json.Marshal(doc)
-	if err != nil {
-		return server.Project{}, err
-	}
-	if _, err := s.projects.ReplaceItem(ctx, partitionKey, project, payload, nil); err != nil {
-		return server.Project{}, err
-	}
-	return projectFromMap(doc)
-}
-
 func (s *Store) SetProjectNativeWorkloadIdentityStatus(ctx context.Context, project string, status server.NativeWorkloadIdentityStatus) (server.Project, error) {
 	partitionKey := azcosmos.NewPartitionKeyString(project)
 	read, err := s.projects.ReadItem(ctx, partitionKey, project, nil)

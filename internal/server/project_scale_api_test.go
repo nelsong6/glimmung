@@ -20,7 +20,6 @@ type fakeProjectScalerStore struct {
 	name         string
 	count        int
 	slotStatuses []TestEnvironmentSlotStatus
-	status       *NativeAuthRedirectStatus
 	wiStatus     *NativeWorkloadIdentityStatus
 	statusErr    error
 	leaseErr     error
@@ -160,15 +159,6 @@ func pruneFakeTestSlots(raw any, count int) []any {
 	return pruned
 }
 
-func (s *fakeProjectScalerStore) SetProjectNativeAuthRedirectStatus(_ context.Context, project string, status NativeAuthRedirectStatus) (Project, error) {
-	if s.statusErr != nil {
-		return Project{}, s.statusErr
-	}
-	s.status = &status
-	s.project.Metadata["native_auth_redirects_status"] = status
-	return s.project, nil
-}
-
 func (s *fakeProjectScalerStore) SetProjectNativeWorkloadIdentityStatus(_ context.Context, project string, status NativeWorkloadIdentityStatus) (Project, error) {
 	if s.statusErr != nil {
 		return Project{}, s.statusErr
@@ -176,15 +166,6 @@ func (s *fakeProjectScalerStore) SetProjectNativeWorkloadIdentityStatus(_ contex
 	s.wiStatus = &status
 	s.project.Metadata["native_standby_workload_identity_status"] = status
 	return s.project, nil
-}
-
-type fakeNativeAuthRedirectReconciler struct {
-	status NativeAuthRedirectStatus
-	err    error
-}
-
-func (r fakeNativeAuthRedirectReconciler) ReconcileNativeAuthRedirects(context.Context, Project) (NativeAuthRedirectStatus, error) {
-	return r.status, r.err
 }
 
 type fakeNativeWorkloadIdentityReconciler struct {
@@ -234,39 +215,6 @@ func TestScaleProjectTestEnvironmentsUpdatesCount(t *testing.T) {
 	}
 }
 
-func TestScaleProjectTestEnvironmentsPersistsAuthRedirectStatus(t *testing.T) {
-	store := &fakeProjectScalerStore{project: Project{
-		ID:         "tank",
-		Name:       "tank",
-		GitHubRepo: "nelsong6/tank-operator",
-		Metadata: map[string]any{
-			"native_standby_dns": map[string]any{"count": float64(4)},
-		},
-	}}
-	handler := newHandler(
-		Settings{},
-		store,
-		fakeAdminAuthenticator{user: auth.User{Sub: "admin"}},
-		nil,
-		fakeNativeAuthRedirectReconciler{status: NativeAuthRedirectStatus{
-			State:               NativeAuthRedirectStatusOK,
-			DesiredCount:        4,
-			ManagedRedirectURIs: []string{"https://tank-slot-1.tank.dev.romaine.life/"},
-		}},
-		nil,
-	)
-
-	var project Project
-	patchJSON(t, handler, "/v1/projects/tank/test-environments/count", `{"count":4}`, &project)
-
-	if store.status == nil || store.status.State != NativeAuthRedirectStatusOK {
-		t.Fatalf("status=%#v", store.status)
-	}
-	if project.Metadata["native_auth_redirects_status"] == nil {
-		t.Fatalf("metadata=%#v", project.Metadata)
-	}
-}
-
 func TestScaleProjectTestEnvironmentsPersistsWorkloadIdentityStatus(t *testing.T) {
 	store := &fakeProjectScalerStore{project: Project{
 		ID:         "tank",
@@ -284,7 +232,6 @@ func TestScaleProjectTestEnvironmentsPersistsWorkloadIdentityStatus(t *testing.T
 		Settings{},
 		store,
 		fakeAdminAuthenticator{user: auth.User{Sub: "admin"}},
-		nil,
 		nil,
 		fakeNativeWorkloadIdentityReconciler{status: NativeWorkloadIdentityStatus{
 			State:        NativeWorkloadIdentityStatusOK,
@@ -330,7 +277,6 @@ func TestScaleProjectTestEnvironmentsPreparesSlotsBeforeReady(t *testing.T) {
 		Settings{},
 		store,
 		fakeAdminAuthenticator{user: auth.User{Sub: "admin"}},
-		nil,
 		nil,
 		preparer,
 	)
@@ -389,7 +335,6 @@ func TestScaleProjectTestEnvironmentsDeprovisionsRemovedSlots(t *testing.T) {
 		Settings{},
 		store,
 		fakeAdminAuthenticator{user: auth.User{Sub: "admin"}},
-		nil,
 		nil,
 		preparer,
 	)
@@ -452,7 +397,6 @@ func TestScaleProjectTestEnvironmentsRejectsRemovingActiveSlot(t *testing.T) {
 		store,
 		fakeAdminAuthenticator{user: auth.User{Sub: "admin"}},
 		nil,
-		nil,
 		preparer,
 	)
 
@@ -496,7 +440,6 @@ func TestScaleProjectTestEnvironmentsRequiresLeaseVisibilityWhenRemovingSlots(t 
 		Settings{},
 		store,
 		fakeAdminAuthenticator{user: auth.User{Sub: "admin"}},
-		nil,
 		nil,
 		&fakeTestSlotPreparer{},
 	)

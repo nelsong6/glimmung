@@ -10,9 +10,8 @@ import { StyleguideView } from "./StyleguideView";
 import { PhaseGraph, type PhaseGraphPhase } from "./PhaseGraph";
 import { workflowToPhaseGraphModel } from "./workflowGraphModel";
 import { resolveProjectWorkflow } from "./workflowLookup";
-import { authedFetch, currentAccount, initAuth, signIn, signOut } from "./auth";
+import { authedFetch, currentAccount, initAuth, signIn, signOut, type Account } from "./auth";
 import { isMockMode, mockRuns, mockSnapshot } from "./mockApi";
-import type { AccountInfo } from "@azure/msal-browser";
 
 type Lease = {
   ref: string;
@@ -267,7 +266,7 @@ function Layout() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [conn, setConn] = useState<Connection>("dead");
   const selected = ALL;
-  const [account, setAccount] = useState<AccountInfo | null>(null);
+  const [account, setAccount] = useState<Account | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [showAdmin, setShowAdmin] = useState(false);

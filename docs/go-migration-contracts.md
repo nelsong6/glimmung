@@ -74,11 +74,13 @@ Run the Go service locally with:
 
 ```sh
 PORT=8001 \
-ENTRA_CLIENT_ID=local-client \
 TANK_OPERATOR_BASE_URL=https://tank.romaine.life \
 GLIMMUNG_STATIC_DIR=frontend/dist \
 go run ./cmd/glimmung-go
 ```
+
+The backend verifies bearer tokens against `auth.romaine.life/api/auth/jwks`
+on every admin request, so no per-deploy OAuth configuration is needed.
 
 Static frontend assets and SPA fallback are served when `GLIMMUNG_STATIC_DIR`
 points at a built frontend directory.

@@ -139,7 +139,7 @@ func TestCheckoutTestSlotStartsAsyncActivation(t *testing.T) {
 		activateRelease: make(chan struct{}),
 		activateDone:    make(chan struct{}, 1),
 	}
-	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil, preparer)
+	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, preparer)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/test-slots/checkout", strings.NewReader(`{"project":"tank-operator","tank_session_id":"98"}`))
 	req.Header.Set("Authorization", "Bearer admin")
@@ -493,7 +493,7 @@ func TestAsyncCheckoutFailureMarksErrorAndReleasesLease(t *testing.T) {
 		activateDone: make(chan struct{}, 1),
 		returnDone:   make(chan struct{}, 1),
 	}
-	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil, preparer)
+	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, preparer)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/test-slots/checkout", strings.NewReader(`{"project":"tank-operator"}`))
 	req.Header.Set("Authorization", "Bearer admin")
@@ -570,7 +570,7 @@ func TestCheckoutTestSlotRejectsModeField(t *testing.T) {
 	store := &fakeLeaseStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{ID: "tank-operator", Name: "tank-operator"}}},
 	}
-	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil, nil)
+	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/test-slots/checkout", strings.NewReader(`{"project":"tank-operator","mode":"delete"}`))
 	req.Header.Set("Authorization", "Bearer admin")
@@ -590,7 +590,7 @@ func TestCheckoutTestSlotRejectsSlotIndexField(t *testing.T) {
 		fakeReadStore: fakeReadStore{projects: []Project{{ID: "tank-operator", Name: "tank-operator"}}},
 	}
 	preparer := &fakeTestSlotPreparer{}
-	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil, preparer)
+	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, preparer)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/test-slots/checkout", strings.NewReader(`{"project":"tank-operator","slot_index":1}`))
 	req.Header.Set("Authorization", "Bearer admin")
@@ -612,7 +612,7 @@ func TestCheckoutTestSlotRejectsPhaseInputsField(t *testing.T) {
 	store := &fakeLeaseStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{ID: "tank-operator", Name: "tank-operator"}}},
 	}
-	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil, nil)
+	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/test-slots/checkout", strings.NewReader(`{"project":"tank-operator","phase_inputs":{"validation_slot_index":"1"}}`))
 	req.Header.Set("Authorization", "Bearer admin")
@@ -632,7 +632,7 @@ func TestCheckoutTestSlotMapsUnavailable(t *testing.T) {
 		fakeReadStore: fakeReadStore{projects: []Project{{ID: "tank-operator", Name: "tank-operator"}}},
 		err:           ErrUnavailable,
 	}
-	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil, nil)
+	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/test-slots/checkout", strings.NewReader(`{"project":"tank-operator"}`))
 	req.Header.Set("Authorization", "Bearer admin")
@@ -669,7 +669,7 @@ func TestReturnTestSlotReleasesLease(t *testing.T) {
 		returnRelease: make(chan struct{}),
 		returnDone:    make(chan struct{}, 1),
 	}
-	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil, preparer)
+	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, preparer)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/test-slots/return", strings.NewReader(`{"project":"tank-operator","slot_name":"tank-slot-1","caller_pod_ip":"10.244.1.166","caller_session_id":"14","source":"mcp-glimmung.return_test_slot","reason":"done"}`))
 	req.Header.Set("Authorization", "Bearer admin")
@@ -751,7 +751,7 @@ func TestRepairTestEnvironmentSlotStartsCleanupWithoutLease(t *testing.T) {
 		returnRelease: make(chan struct{}),
 		returnDone:    make(chan struct{}, 1),
 	}
-	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil, preparer)
+	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, preparer)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/projects/tank/test-environments/tank-slot-1/repair", nil)
 	req.Header.Set("Authorization", "Bearer admin")
@@ -810,7 +810,7 @@ func TestRepairTestEnvironmentSlotRejectsActiveLease(t *testing.T) {
 		}},
 	}
 	preparer := &fakeTestSlotPreparer{}
-	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil, preparer)
+	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, preparer)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/projects/tank/test-environments/tank-slot-1/repair", nil)
 	req.Header.Set("Authorization", "Bearer admin")
@@ -839,7 +839,7 @@ func TestAppendTestSlotHotSwapHistoryResolvesSlotLease(t *testing.T) {
 			},
 		}},
 	}
-	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil, nil)
+	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/test-slots/hot-swap-history", strings.NewReader(`{"project":"tank-operator","slot_name":"tank-slot-1","entry":{"operation":"backend","status":"ok"}}`))
 	req.Header.Set("Authorization", "Bearer admin")

@@ -275,7 +275,7 @@ func (s *fakePlayableStore) AbortRunByID(context.Context, string, string, string
 
 func TestRunPlaybookDispatchesReadyEntries(t *testing.T) {
 	store := &fakePlayableStore{}
-	handler := NewWithRuntimeClients(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil, &fakeNativeLauncher{})
+	handler := NewWithRuntimeClients(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, &fakeNativeLauncher{})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/playbooks/glimmung/pb-ref/run", nil)

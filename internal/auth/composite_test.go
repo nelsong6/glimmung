@@ -16,22 +16,42 @@ func TestCompositeResolverSoftensInvalidTokens(t *testing.T) {
 	}
 }
 
-func TestCompositeResolverResolvesEntraAdminState(t *testing.T) {
+func TestCompositeResolverResolvesRomaineLifeUser(t *testing.T) {
 	key := mustRSAKey(t)
-	jwks := newJWKSServer(t, key)
+	jwks := newRomaineJWKSServer(t, key)
 	defer jwks.Close()
-	entra := newTestEntraAuthenticator(t, jwks.URL, "client-id", "admin@example.com")
-	resolver := CompositeAuthenticator{Entra: entra}
+	romaineLife := newTestRomaineLifeAuthenticator(jwks.URL)
+	resolver := CompositeAuthenticator{RomaineLife: romaineLife}
 
-	token := signEntraToken(t, key, map[string]any{
-		"aud":   "client-id",
-		"iss":   "https://login.microsoftonline.com/tenant/v2.0",
+	token := signRomaineToken(t, key, map[string]any{
+		"iss":   authRomaineLifeIssuer,
 		"sub":   "subject",
-		"email": "other@example.com",
+		"email": "user@example.com",
+		"role":  "user",
 		"exp":   time.Now().Add(time.Hour).Unix(),
 	})
 	user, isAdmin, ok := resolver.ResolveCaller(context.Background(), "Bearer "+token)
-	if !ok || isAdmin || user.Email != "other@example.com" {
+	if !ok || isAdmin || user.Email != "user@example.com" {
+		t.Fatalf("user=%#v isAdmin=%v ok=%v", user, isAdmin, ok)
+	}
+}
+
+func TestCompositeResolverResolvesRomaineLifeAdmin(t *testing.T) {
+	key := mustRSAKey(t)
+	jwks := newRomaineJWKSServer(t, key)
+	defer jwks.Close()
+	romaineLife := newTestRomaineLifeAuthenticator(jwks.URL)
+	resolver := CompositeAuthenticator{RomaineLife: romaineLife}
+
+	token := signRomaineToken(t, key, map[string]any{
+		"iss":   authRomaineLifeIssuer,
+		"sub":   "subject",
+		"email": "admin@example.com",
+		"role":  "admin",
+		"exp":   time.Now().Add(time.Hour).Unix(),
+	})
+	user, isAdmin, ok := resolver.ResolveCaller(context.Background(), "Bearer "+token)
+	if !ok || !isAdmin || user.Email != "admin@example.com" {
 		t.Fatalf("user=%#v isAdmin=%v ok=%v", user, isAdmin, ok)
 	}
 }
@@ -80,7 +100,7 @@ func TestCompositeRequireAdminRoutesMissingAndUnconfigured(t *testing.T) {
 	assertAuthStatus(t, err, http.StatusUnauthorized, "missing bearer")
 
 	_, err = resolver.RequireAdmin(context.Background(), "Bearer plain-token")
-	assertAuthStatus(t, err, http.StatusServiceUnavailable, "entra auth not configured")
+	assertAuthStatus(t, err, http.StatusServiceUnavailable, "auth.romaine.life auth not configured")
 
 	_, err = resolver.RequireAdmin(context.Background(), "Bearer "+jwtWithClaims(t, map[string]any{
 		"kubernetes.io": map[string]any{"namespace": "ns"},
@@ -88,16 +108,16 @@ func TestCompositeRequireAdminRoutesMissingAndUnconfigured(t *testing.T) {
 	assertAuthStatus(t, err, http.StatusServiceUnavailable, "k8s auth not configured")
 }
 
-func TestCompositeRequireAdminRoutesEntraAndK8s(t *testing.T) {
+func TestCompositeRequireAdminRoutesRomaineLifeAndK8s(t *testing.T) {
 	key := mustRSAKey(t)
-	jwks := newJWKSServer(t, key)
+	jwks := newRomaineJWKSServer(t, key)
 	defer jwks.Close()
-	entra := newTestEntraAuthenticator(t, jwks.URL, "client-id", "admin@example.com")
-	entraToken := signEntraToken(t, key, map[string]any{
-		"aud":   "client-id",
-		"iss":   "https://login.microsoftonline.com/tenant/v2.0",
+	romaineLife := newTestRomaineLifeAuthenticator(jwks.URL)
+	romaineToken := signRomaineToken(t, key, map[string]any{
+		"iss":   authRomaineLifeIssuer,
 		"sub":   "subject",
 		"email": "admin@example.com",
+		"role":  "admin",
 		"exp":   time.Now().Add(time.Hour).Unix(),
 	})
 
@@ -110,10 +130,10 @@ func TestCompositeRequireAdminRoutesEntraAndK8s(t *testing.T) {
 	defer tokenReview.Close()
 	k8s := newTestAuthenticator(t, tokenReview.URL, "ns/sa")
 
-	resolver := CompositeAuthenticator{Entra: entra, K8s: k8s}
-	user, err := resolver.RequireAdmin(context.Background(), "Bearer "+entraToken)
+	resolver := CompositeAuthenticator{RomaineLife: romaineLife, K8s: k8s}
+	user, err := resolver.RequireAdmin(context.Background(), "Bearer "+romaineToken)
 	if err != nil || user.Email != "admin@example.com" {
-		t.Fatalf("entra user=%#v err=%v", user, err)
+		t.Fatalf("romaine.life user=%#v err=%v", user, err)
 	}
 
 	user, err = resolver.RequireAdmin(context.Background(), "Bearer "+jwtWithClaims(t, map[string]any{

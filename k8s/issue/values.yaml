@@ -61,12 +61,6 @@ externalSecret:
       kvKey: glimmung-github-app-private-key
     - envVar: GITHUB_WEBHOOK_SECRET
       kvKey: glimmung-github-webhook-secret
-    - envVar: ENTRA_CLIENT_ID
-      kvKey: glimmung-oauth-client-id
-    - envVar: ENTRA_TEST_CLIENT_ID
-      kvKey: glimmung-oauth-test-client-id
-    - envVar: ALLOWED_EMAILS
-      kvKey: glimmung-admin-emails
 
 # The wildcard XListenerSet that per-install HTTPRoutes attach to. Production
 # and per-issue releases install in `glimmung`; native test slots install into

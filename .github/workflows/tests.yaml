@@ -26,6 +26,17 @@ jobs:
       - name: Run Go vet
         run: go vet ./...
 
+  check-removed-msal:
+    name: Removed MSAL / Entra surface
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Guard against MSAL/Entra/allowlist reintroduction
+        run: node scripts/check-removed-msal.mjs
+
   frontend:
     runs-on: ubuntu-latest
     steps:

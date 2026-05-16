@@ -312,7 +312,7 @@ func TestReleaseLeaseByCallbackTokenStartsTestSlotCleanup(t *testing.T) {
 		returnRelease: make(chan struct{}),
 		returnDone:    make(chan struct{}, 1),
 	}
-	handler := newHandler(Settings{}, store, nil, nil, nil, preparer)
+	handler := newHandler(Settings{}, store, nil, nil, preparer)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/lease-callbacks/callback-token/release", nil))

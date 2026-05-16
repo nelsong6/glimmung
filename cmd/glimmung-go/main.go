@@ -10,7 +10,6 @@ import (
 
 	"github.com/nelsong6/glimmung/internal/auth"
 	azureclient "github.com/nelsong6/glimmung/internal/azure"
-	entraredirects "github.com/nelsong6/glimmung/internal/entra"
 	githubclient "github.com/nelsong6/glimmung/internal/github"
 	"github.com/nelsong6/glimmung/internal/server"
 	artifactstore "github.com/nelsong6/glimmung/internal/store/artifacts"
@@ -29,11 +28,6 @@ func main() {
 	}
 	authenticator := buildAuthenticator(settings)
 	ghClient := buildGitHubClient(settings)
-	authRedirectClient, err := entraredirects.NewRedirectClient()
-	if err != nil {
-		log.Printf("native auth redirect reconciler disabled: %v", err)
-	}
-	authRedirects := server.NativeAuthRedirectService{Client: authRedirectClient}
 	workloadIdentityClient, err := azureclient.NewWorkloadIdentityClient()
 	if err != nil {
 		log.Printf("native workload identity reconciler disabled: %v", err)
@@ -56,7 +50,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           server.NewWithRuntimeReconcilers(settings, store, authenticator, ghClient, authRedirects, workloadIdentities, nativeLauncher, artifacts),
+		Handler:           server.NewWithRuntimeReconcilers(settings, store, authenticator, ghClient, workloadIdentities, nativeLauncher, artifacts),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -100,18 +94,10 @@ func buildGitHubClient(settings server.Settings) server.WorkflowSyncClient {
 }
 
 func buildAuthenticator(settings server.Settings) auth.CompositeAuthenticator {
-	var entra *auth.EntraAuthenticator
-	if settings.EntraClientID != "" || settings.EntraTestClientID != "" {
-		authenticator, err := auth.NewEntraAuthenticator(auth.EntraConfig{
-			Audiences:     []string{settings.EntraClientID, settings.EntraTestClientID},
-			AllowedEmails: settings.AllowedEmails,
-		})
-		if err != nil {
-			log.Printf("entra auth disabled: %v", err)
-		} else {
-			entra = authenticator
-		}
-	}
+	// Microsoft sign-in is delegated to auth.romaine.life. The RomaineLife
+	// authenticator verifies RS256 JWTs against that service's JWKS and
+	// gates on the role claim (admin / user); no per-app config needed.
+	romaineLife := auth.NewRomaineLifeAuthenticator()
 
 	var k8s *auth.K8sAuthenticator
 	if settings.K8sSAAllowlist != "" {
@@ -128,5 +114,5 @@ func buildAuthenticator(settings server.Settings) auth.CompositeAuthenticator {
 		}
 	}
 
-	return auth.CompositeAuthenticator{Entra: entra, K8s: k8s}
+	return auth.CompositeAuthenticator{RomaineLife: romaineLife, K8s: k8s}
 }
