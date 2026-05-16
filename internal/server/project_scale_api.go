@@ -60,7 +60,7 @@ type TestSlotReturnHistoryEntry struct {
 	CleanupStarted  bool      `json:"cleanup_started"`
 }
 
-func scaleProjectTestEnvironments(store ReadStore, authRedirects NativeAuthRedirectReconciler, workloadIdentities NativeWorkloadIdentityReconciler, preparer TestSlotPreparer, _ NativeGitHubTokenMinter) http.HandlerFunc {
+func scaleProjectTestEnvironments(store ReadStore, workloadIdentities NativeWorkloadIdentityReconciler, preparer TestSlotPreparer, _ NativeGitHubTokenMinter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		scaler, ok := store.(ProjectTestEnvironmentScaler)
 		if !ok || scaler == nil {
@@ -122,26 +122,6 @@ func scaleProjectTestEnvironments(store ReadStore, authRedirects NativeAuthRedir
 			}
 			writeProblem(w, http.StatusInternalServerError, "scale project test environments failed")
 			return
-		}
-		if authRedirects != nil {
-			status, err := authRedirects.ReconcileNativeAuthRedirects(r.Context(), updated)
-			if status.State != "" && status.State != NativeAuthRedirectStatusSkipped {
-				statusWriter, ok := store.(ProjectNativeAuthRedirectStatusWriter)
-				if !ok || statusWriter == nil {
-					writeProblem(w, http.StatusServiceUnavailable, "project auth redirect status store not configured")
-					return
-				}
-				persisted, persistErr := statusWriter.SetProjectNativeAuthRedirectStatus(r.Context(), project, status)
-				if persistErr != nil {
-					writeProblem(w, http.StatusInternalServerError, "record auth redirect status failed")
-					return
-				}
-				updated = persisted
-			}
-			if err != nil {
-				writeProblem(w, http.StatusBadGateway, "auth redirect reconciliation failed")
-				return
-			}
 		}
 		if workloadIdentities != nil {
 			status, err := workloadIdentities.ReconcileNativeWorkloadIdentities(r.Context(), updated)

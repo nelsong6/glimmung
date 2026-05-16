@@ -165,52 +165,25 @@ surface.
 
 Admin endpoints accept **either** auth path:
 
-- **Entra ID** — humans + CLI. `az account get-access-token --resource <client-id>` mints a token; backend validates it via JWKS and checks the email claim against `ALLOWED_EMAILS`. The dashboard uses MSAL.js to do the same thing.
+- **auth.romaine.life delegation** — humans + browser-facing CLI. The frontend redirects users to `auth.romaine.life/sign-in/microsoft`; the resulting RS256 JWT (with `{sub, email, name, role}` claims) is presented to the backend as `Authorization: Bearer <token>`. The backend verifies against `auth.romaine.life/api/auth/jwks`, pins the issuer to `https://auth.romaine.life`, and gates on `role ∈ {admin, user}` — `pending` users return 403. Admin promotion happens at [auth.romaine.life/admin](https://auth.romaine.life/admin).
 - **K8s service-account token** — in-cluster callers (tank-operator, future agents). The pod presents its projected SA token as `Authorization: Bearer <token>`; backend validates it via `TokenReview` against the cluster API server and checks the resolved `system:serviceaccount:<ns>:<name>` against `K8S_SA_ALLOWLIST` (Helm default `tank-operator/tank-operator`). Glimmung's pod SA is bound to `system:auth-delegator` ([k8s/templates/auth-delegator.yaml](k8s/templates/auth-delegator.yaml)) so the review call is permitted. Same RBAC primitive the mcp-* deployments use; the validation runs in-app instead of via a kube-rbac-proxy sidecar because glimmung's listener is publicly exposed.
 
-The two paths are routed by the unverified `iss` claim — Microsoft issuer vs. cluster issuer — and each goes through its own validator. To allowlist additional SAs, set `K8S_SA_ALLOWLIST="ns1/sa1,ns2/sa2"`.
+K8s SA tokens are routed by their distinct JWT shape (cluster issuer, `kubernetes.io` claim); everything else goes to the auth.romaine.life verifier. To allowlist additional SAs, set `K8S_SA_ALLOWLIST="ns1/sa1,ns2/sa2"`.
 
-### Native webapp auth redirects
+### Test-slot sign-in
 
-Native webapps that use MSAL with `redirectUri = window.location.origin + "/"`
-need each validation slot hostname registered on their dedicated Entra app
-registration. Glimmung reconciles those SPA redirect URIs when
-`PATCH /v1/projects/{project}/test-environments/count` changes
-`metadata.native_standby_dns.count`.
+Per-project test slots no longer need their own SPA redirect URI registered
+on a project-owned Entra app. Sign-in for any slot URL flows through
+auth.romaine.life: the project's frontend redirects to
+`auth.romaine.life/sign-in/microsoft?callbackURL=https://slot-1.foo/`, the
+auth service completes the Microsoft handshake under a single org-wide app
+reg, and 302s back to the slot. auth.romaine.life's `trustedOrigins`
+allowlist covers slots via the wildcard `https://*.glimmung.dev.romaine.life`
+(see nelsong6/auth#20).
 
-Project metadata contract:
-
-```json
-{
-  "native_webapp": true,
-  "native_standby_dns": {
-    "enabled": true,
-    "record_base": "tank.dev.romaine.life",
-    "slot_prefix": "tank-slot",
-    "count": 3
-  },
-  "native_auth_redirects": {
-    "enabled": true,
-    "provider": "entra",
-    "redirect_uri_mode": "spa",
-    "application_object_id": "<entra application object id>",
-    "production_redirect_uris": ["https://tank.romaine.life/"],
-    "extra_redirect_uris": []
-  }
-}
-```
-
-`application_client_id` is also accepted when the object id is not known; the
-reconciler resolves it through Microsoft Graph. Desired managed slot URIs are
-derived as `https://{slot_prefix}-{i}.{record_base}/` for `i in 1..count`.
-The reconciler adds missing managed URIs and removes stale managed slot URIs
-above the current count. It preserves production, extra, and unrelated manual
-portal entries. Reconciliation diagnostics are written to
-`metadata.native_auth_redirects_status` so `/v1/projects` and `/v1/state`
-show whether auth redirect sync is `ok` or `failed`.
-
-`native_standby_entra_redirects` is not accepted. Use `native_auth_redirects`
-for all native webapp auth redirect reconciliation.
+Glimmung no longer reconciles redirect URIs against Microsoft Graph on slot
+scale changes — that whole code path was deleted alongside the per-project
+metadata field that used to drive it.
 
 ### Native test-slot provisioning
 
@@ -396,10 +369,8 @@ KV keys consumed by glimmung:
 | `glimmung-github-app-installation-id` | same                                                                      |
 | `glimmung-github-app-private-key`  | same                                                                         |
 | `glimmung-github-webhook-secret`   | same                                                                         |
-| `glimmung-oauth-client-id`         | created by `glimmung/tofu/oauth.tf` (Entra app reg)                          |
-| `glimmung-oauth-allowed-emails`    | same                                                                         |
 
-The Entra side is fully tofu-managed. The GitHub App is created via the GitHub UI — one webhook URL per App means glimmung needs its own (the shared `github-app-*` keys still serve mcp-github / diagrams). Configure the App with:
+The GitHub App is created via the GitHub UI — one webhook URL per App means glimmung needs its own (the shared `github-app-*` keys still serve mcp-github / diagrams). Configure the App with:
 
 - Webhook URL: `https://glimmung.romaine.life/v1/webhook/github`
 - Subscribe to events: **Issues**, **Workflow runs**

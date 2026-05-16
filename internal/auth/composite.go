@@ -6,9 +6,13 @@ import (
 	"strings"
 )
 
+// CompositeAuthenticator routes incoming bearer tokens to the right verifier
+// based on token shape. K8s ServiceAccount tokens (recognized by their JWT
+// structure) go to the K8s authenticator; everything else is treated as an
+// auth.romaine.life RS256 JWT.
 type CompositeAuthenticator struct {
-	Entra *EntraAuthenticator
-	K8s   *K8sAuthenticator
+	RomaineLife *RomaineLifeAuthenticator
+	K8s         *K8sAuthenticator
 }
 
 func (a CompositeAuthenticator) ResolveCaller(ctx context.Context, authorization string) (User, bool, bool) {
@@ -31,10 +35,10 @@ func (a CompositeAuthenticator) ResolveCaller(ctx context.Context, authorization
 		return user, isAdmin, true
 	}
 
-	if a.Entra == nil {
+	if a.RomaineLife == nil {
 		return User{}, false, false
 	}
-	user, isAdmin, err := a.Entra.Resolve(ctx, token)
+	user, isAdmin, err := a.RomaineLife.Resolve(ctx, token)
 	if err != nil {
 		return User{}, false, false
 	}
@@ -57,8 +61,8 @@ func (a CompositeAuthenticator) RequireAdmin(ctx context.Context, authorization 
 		return a.K8s.RequireAdmin(ctx, token)
 	}
 
-	if a.Entra == nil {
-		return User{}, AuthError{Status: http.StatusServiceUnavailable, Message: "entra auth not configured"}
+	if a.RomaineLife == nil {
+		return User{}, AuthError{Status: http.StatusServiceUnavailable, Message: "auth.romaine.life auth not configured"}
 	}
-	return a.Entra.RequireAdmin(ctx, token)
+	return a.RomaineLife.RequireAdmin(ctx, token)
 }

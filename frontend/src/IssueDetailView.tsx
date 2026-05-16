@@ -1228,7 +1228,7 @@ export function RunViewer({
   const dispatchTitle = !signedIn
     ? undefined
     : !isAdmin && !dispatching && !inFlight
-    ? "Re-dispatching is restricted to admins (your email is not in ALLOWED_EMAILS)."
+    ? "Re-dispatching is restricted to admins. Ask an admin to promote your account at auth.romaine.life/admin."
     : undefined;
   const actions = actionsVisible ? (
     <div
@@ -1943,7 +1943,7 @@ function RunsPane({
   const buttonTitle = !signedIn
     ? undefined
     : !isAdmin && !dispatching && !detail.issue_lock_held
-    ? "Dispatching runs is restricted to admins (your email is not in ALLOWED_EMAILS)."
+    ? "Dispatching runs is restricted to admins. Ask an admin to promote your account at auth.romaine.life/admin."
     : undefined;
   const activeRunNumber = (() => {
     const node = graph ? findActiveRun(graph) : null;

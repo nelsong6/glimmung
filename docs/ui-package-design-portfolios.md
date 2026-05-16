@@ -23,34 +23,23 @@ review queue and explicit dispatch path.
 
 ## Disposable Preview Hosts
 
-Production continues to use `glimmung-oauth`, whose client ID is exposed as
-`ENTRA_CLIENT_ID`.
+Sign-in for both production and disposable review hosts is delegated to
+auth.romaine.life. Glimmung holds no per-host Entra app registration of its
+own; the auth service owns the single org-wide app reg, and slot hosts work
+by passing their own URL as `callbackURL` when redirecting to
+`auth.romaine.life/sign-in/microsoft`.
 
-Disposable frontend review hosts use `glimmung-oauth-test`, exposed to the pod
-as `ENTRA_TEST_CLIENT_ID`. `/v1/config` returns the test client ID when the
-request host is `glimmung.dev.romaine.life` or any subdomain of
-`glimmung.dev.romaine.life`. For production hosts it returns the production
-client ID.
-
-The backend accepts ID tokens for either audience and still enforces the same
-`ALLOWED_EMAILS` allowlist. The test app changes only the SPA redirect URI set;
-it does not relax user authorization.
+`/v1/config` returns `{auth_url, tank_operator_base_url}` — no host-specific
+branching. Admin gating still happens at the backend, but it's now driven by
+the upstream `role` claim (`admin`/`user`/`pending`) rather than a per-app
+email allowlist.
 
 ## Hostnames
 
-Microsoft Entra SPA redirect URIs do not support wildcards. Glimmung owns a
-small stable pool of UI review hostnames and registers each one on
-`glimmung-oauth-test`. The stable hosts can be shared across repos as long as
-the route points at the repo-specific validation environment.
-
-Add more entries through `tofu/variables.tf` `test_redirect_uris`; do not use a
-runtime-generated hostname with `glimmung-oauth-test` unless it has been
-pre-registered in Entra.
-
-Native webapp validation slots are different: a project can opt into
-`metadata.native_auth_redirects`, and Glimmung will reconcile that app's
-dedicated Entra SPA redirect URIs whenever its native standby slot count
-changes.
+auth.romaine.life's `trustedOrigins` covers glimmung's slot pool via the
+wildcard `https://*.glimmung.dev.romaine.life` (see nelsong6/auth#20), so new
+slots don't need any Entra-side registration — just route the hostname at the
+repo-specific validation environment.
 
 ## Wiring Checklist
 
@@ -58,8 +47,8 @@ changes.
 2. Expose `/_design-portfolio` or `/_styleguide` in the real app bundle.
 3. Use one of the Glimmung-managed `glimmung-slot-N.glimmung.dev.romaine.life`
    preview hostnames.
-4. Confirm `/v1/config` on that hostname returns `ENTRA_TEST_CLIENT_ID`.
-5. Confirm Microsoft login completes without a redirect URI error.
+4. Confirm `/v1/config` on that hostname returns `auth_url` pointing at auth.romaine.life.
+5. Confirm Microsoft sign-in completes via auth.romaine.life and lands back on the slot URL.
 6. Add screenshot capture for the portfolio route.
 7. Register rows with Glimmung and dispatch follow-up only from the operator
    portfolio surface.

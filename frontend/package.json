@@ -11,7 +11,6 @@
     "test:run": "vitest run"
   },
   "dependencies": {
-    "@azure/msal-browser": "^3.27.0",
     "@xyflow/react": "^12.10.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

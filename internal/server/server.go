@@ -2,7 +2,6 @@ package server
 
 import (
 	"encoding/json"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,7 +11,7 @@ import (
 
 const (
 	defaultPort                = "8000"
-	defaultAuthority           = "https://login.microsoftonline.com/common"
+	defaultAuthURL             = "https://auth.romaine.life"
 	defaultTankOperatorBaseURL = "https://tank.romaine.life"
 )
 
@@ -20,9 +19,6 @@ type Settings struct {
 	Port                           string
 	CosmosEndpoint                 string
 	CosmosDatabase                 string
-	EntraClientID                  string
-	EntraTestClientID              string
-	AllowedEmails                  string
 	K8sSAAllowlist                 string
 	K8sAPIHost                     string
 	K8sSATokenPath                 string
@@ -56,9 +52,6 @@ func SettingsFromEnv() Settings {
 		Port:                envOrDefault("PORT", defaultPort),
 		CosmosEndpoint:      os.Getenv("COSMOS_ENDPOINT"),
 		CosmosDatabase:      os.Getenv("COSMOS_DATABASE"),
-		EntraClientID:       os.Getenv("ENTRA_CLIENT_ID"),
-		EntraTestClientID:   os.Getenv("ENTRA_TEST_CLIENT_ID"),
-		AllowedEmails:       os.Getenv("ALLOWED_EMAILS"),
 		K8sSAAllowlist:      os.Getenv("K8S_SA_ALLOWLIST"),
 		K8sAPIHost:          envOrDefault("K8S_API_HOST", "https://kubernetes.default.svc"),
 		K8sSATokenPath:      envOrDefault("K8S_SA_TOKEN_PATH", "/var/run/secrets/kubernetes.io/serviceaccount/token"),
@@ -137,26 +130,26 @@ func NewWithStore(settings Settings, store ReadStore) http.Handler {
 
 // NewWithSyncClient extends NewWithDependencies with an optional GitHub client for workflow sync.
 func NewWithSyncClient(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, artifactStores ...ArtifactStore) http.Handler {
-	return newHandler(settings, store, authResolver, ghClient, nil, nil, artifactStores...)
+	return newHandler(settings, store, authResolver, ghClient, nil, artifactStores...)
 }
 
-func NewWithRuntimeClients(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, authRedirects NativeAuthRedirectReconciler, nativeLauncher NativeLauncher, artifactStores ...ArtifactStore) http.Handler {
-	return newHandlerWithReconcilers(settings, store, authResolver, ghClient, authRedirects, nil, nativeLauncher, artifactStores...)
+func NewWithRuntimeClients(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, nativeLauncher NativeLauncher, artifactStores ...ArtifactStore) http.Handler {
+	return newHandlerWithReconcilers(settings, store, authResolver, ghClient, nil, nativeLauncher, artifactStores...)
 }
 
-func NewWithRuntimeReconcilers(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, authRedirects NativeAuthRedirectReconciler, workloadIdentities NativeWorkloadIdentityReconciler, nativeLauncher NativeLauncher, artifactStores ...ArtifactStore) http.Handler {
-	return newHandlerWithReconcilers(settings, store, authResolver, ghClient, authRedirects, workloadIdentities, nativeLauncher, artifactStores...)
+func NewWithRuntimeReconcilers(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, workloadIdentities NativeWorkloadIdentityReconciler, nativeLauncher NativeLauncher, artifactStores ...ArtifactStore) http.Handler {
+	return newHandlerWithReconcilers(settings, store, authResolver, ghClient, workloadIdentities, nativeLauncher, artifactStores...)
 }
 
 func NewWithDependencies(settings Settings, store ReadStore, authResolver AuthResolver, artifactStores ...ArtifactStore) http.Handler {
-	return newHandler(settings, store, authResolver, nil, nil, nil, artifactStores...)
+	return newHandler(settings, store, authResolver, nil, nil, artifactStores...)
 }
 
-func newHandler(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, authRedirects NativeAuthRedirectReconciler, nativeLauncher NativeLauncher, artifactStores ...ArtifactStore) http.Handler {
-	return newHandlerWithReconcilers(settings, store, authResolver, ghClient, authRedirects, nil, nativeLauncher, artifactStores...)
+func newHandler(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, nativeLauncher NativeLauncher, artifactStores ...ArtifactStore) http.Handler {
+	return newHandlerWithReconcilers(settings, store, authResolver, ghClient, nil, nativeLauncher, artifactStores...)
 }
 
-func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, authRedirects NativeAuthRedirectReconciler, workloadIdentities NativeWorkloadIdentityReconciler, nativeLauncher NativeLauncher, artifactStores ...ArtifactStore) http.Handler {
+func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, workloadIdentities NativeWorkloadIdentityReconciler, nativeLauncher NativeLauncher, artifactStores ...ArtifactStore) http.Handler {
 	var artifactStore ArtifactStore
 	if len(artifactStores) > 0 {
 		artifactStore = artifactStores[0]
@@ -222,7 +215,7 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	)
 	mux.Handle(
 		"PATCH /v1/projects/{project}/test-environments/count",
-		requireAdmin(adminAuthenticator, http.HandlerFunc(scaleProjectTestEnvironments(store, authRedirects, workloadIdentities, testSlotPreparer, nativeTokenMinter))),
+		requireAdmin(adminAuthenticator, http.HandlerFunc(scaleProjectTestEnvironments(store, workloadIdentities, testSlotPreparer, nativeTokenMinter))),
 	)
 	mux.HandleFunc("GET /v1/workflows", listWorkflows(store))
 	mux.Handle("POST /v1/workflows", requireAdmin(adminAuthenticator, http.HandlerFunc(registerWorkflow(store))))
@@ -273,52 +266,17 @@ func healthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// publicConfig serves /v1/config — read by the frontend on boot to discover
+// where the auth service lives (auth.romaine.life) and where to link out for
+// tank-operator. No per-host branching: slots delegate to auth.romaine.life
+// just like prod and pass their own URL via `callbackURL`.
 func publicConfig(settings Settings) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		clientID := frontendEntraClientID(settings, requestHost(r))
+	return func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{
-			"entra_client_id":        clientID,
-			"authority":              defaultAuthority,
+			"auth_url":               defaultAuthURL,
 			"tank_operator_base_url": strings.TrimRight(settings.TankOperatorBaseURL, "/"),
 		})
 	}
-}
-
-func requestHost(r *http.Request) string {
-	forwarded := r.Header.Get("x-forwarded-host")
-	host := forwarded
-	if comma := strings.Index(host, ","); comma >= 0 {
-		host = host[:comma]
-	}
-	host = strings.TrimSpace(host)
-	if host == "" {
-		host = strings.TrimSpace(r.Host)
-	}
-	if strings.HasPrefix(host, "[") {
-		end := strings.Index(host, "]")
-		if end >= 0 {
-			return strings.ToLower(strings.TrimPrefix(host[:end], "["))
-		}
-	}
-	if withoutPort, _, err := net.SplitHostPort(host); err == nil {
-		return strings.ToLower(withoutPort)
-	}
-	if colon := strings.Index(host, ":"); colon >= 0 {
-		host = host[:colon]
-	}
-	return strings.ToLower(host)
-}
-
-func frontendEntraClientID(settings Settings, host string) string {
-	if settings.EntraTestClientID != "" && isDisposableFrontendHost(host) {
-		return settings.EntraTestClientID
-	}
-	return settings.EntraClientID
-}
-
-func isDisposableFrontendHost(host string) bool {
-	host = strings.TrimRight(strings.ToLower(strings.TrimSpace(host)), ".")
-	return host == "glimmung.dev.romaine.life" || strings.HasSuffix(host, ".glimmung.dev.romaine.life")
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

@@ -28,56 +28,16 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
-func TestPublicConfigUsesProductionClientForProductionHost(t *testing.T) {
-	body := requestConfig(t, "glimmung.romaine.life", "", Settings{
-		EntraClientID:       "prod-client",
-		EntraTestClientID:   "test-client",
+func TestPublicConfigPointsAtAuthRomaineLife(t *testing.T) {
+	body := requestConfig(t, Settings{
 		TankOperatorBaseURL: "https://tank.romaine.life/",
 	})
 
-	if body["entra_client_id"] != "prod-client" {
-		t.Fatalf("entra_client_id=%q, want prod-client", body["entra_client_id"])
-	}
-	if body["authority"] != defaultAuthority {
-		t.Fatalf("authority=%q, want %q", body["authority"], defaultAuthority)
+	if body["auth_url"] != defaultAuthURL {
+		t.Fatalf("auth_url=%q, want %q", body["auth_url"], defaultAuthURL)
 	}
 	if body["tank_operator_base_url"] != "https://tank.romaine.life" {
 		t.Fatalf("tank_operator_base_url=%q", body["tank_operator_base_url"])
-	}
-}
-
-func TestPublicConfigUsesTestClientForDisposableHost(t *testing.T) {
-	body := requestConfig(t, "preview.glimmung.dev.romaine.life", "", Settings{
-		EntraClientID:       "prod-client",
-		EntraTestClientID:   "test-client",
-		TankOperatorBaseURL: "https://tank.romaine.life",
-	})
-
-	if body["entra_client_id"] != "test-client" {
-		t.Fatalf("entra_client_id=%q, want test-client", body["entra_client_id"])
-	}
-}
-
-func TestPublicConfigUsesForwardedHost(t *testing.T) {
-	body := requestConfig(t, "glimmung.romaine.life", "preview.glimmung.dev.romaine.life, proxy", Settings{
-		EntraClientID:       "prod-client",
-		EntraTestClientID:   "test-client",
-		TankOperatorBaseURL: "https://tank.romaine.life",
-	})
-
-	if body["entra_client_id"] != "test-client" {
-		t.Fatalf("entra_client_id=%q, want test-client", body["entra_client_id"])
-	}
-}
-
-func TestFrontendClientSelectionFallsBackWithoutTestClient(t *testing.T) {
-	body := requestConfig(t, "preview.glimmung.dev.romaine.life", "", Settings{
-		EntraClientID:       "prod-client",
-		TankOperatorBaseURL: "https://tank.romaine.life",
-	})
-
-	if body["entra_client_id"] != "prod-client" {
-		t.Fatalf("entra_client_id=%q, want prod-client", body["entra_client_id"])
 	}
 }
 
@@ -147,15 +107,11 @@ func TestStaticAssetRejectsMissingAndTraversal(t *testing.T) {
 	}
 }
 
-func requestConfig(t *testing.T, host string, forwardedHost string, settings Settings) map[string]string {
+func requestConfig(t *testing.T, settings Settings) map[string]string {
 	t.Helper()
 
 	handler := New(settings)
 	req := httptest.NewRequest(http.MethodGet, "/v1/config", nil)
-	req.Host = host
-	if forwardedHost != "" {
-		req.Header.Set("x-forwarded-host", forwardedHost)
-	}
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)

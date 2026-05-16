@@ -100,7 +100,7 @@ func TestUpsertPortfolioElement(t *testing.T) {
 		ElementID: "hero",
 		Status:    "needs_review",
 	}}
-	handler := NewWithRuntimeClients(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil, &fakeNativeLauncher{})
+	handler := NewWithRuntimeClients(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, &fakeNativeLauncher{})
 	body := `{"project":"myproject","route":"/about","element_id":"hero","title":"Hero","status":"needs_review"}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/portfolio/elements", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer admin")
@@ -140,7 +140,7 @@ func TestPatchPortfolioElement(t *testing.T) {
 		Ref:    "about--hero",
 		Status: "approved",
 	}}
-	handler := NewWithRuntimeClients(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil, &fakeNativeLauncher{})
+	handler := NewWithRuntimeClients(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, &fakeNativeLauncher{})
 	body := `{"status":"approved"}`
 	req := httptest.NewRequest(http.MethodPatch, "/v1/portfolio/elements/myproject/about--hero", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer admin")
@@ -180,7 +180,7 @@ func TestDispatchPortfolioElementsCreatesIssueAndDispatches(t *testing.T) {
 			PreviewURL: &preview,
 		}},
 	}
-	handler := NewWithRuntimeClients(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil, &fakeNativeLauncher{})
+	handler := NewWithRuntimeClients(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, &fakeNativeLauncher{})
 	body := `{"project":"myproject","status":"needs_review","workflow":"main"}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/portfolio/elements/dispatch", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer admin")
