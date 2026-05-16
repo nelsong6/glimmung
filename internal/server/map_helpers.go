@@ -76,4 +76,3 @@ func nonNegativeIntMapValue(values map[string]any, key string) int {
 	}
 	return 0
 }
-

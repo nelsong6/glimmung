@@ -37,6 +37,13 @@ func main() {
 		Issuer:                  settings.NativeWorkloadIdentityIssuer,
 		ServiceAccountTokenPath: settings.K8sSATokenPath,
 	}
+	// Glimmung-owned auth.romaine.life slot origin reconciler. Uses a
+	// projected SA token mounted with audience = auth.romaine.life so it
+	// cannot be replayed against other JWT validators. See glimmung#142.
+	managedOrigins := server.ManagedOriginService{
+		AuthBaseURL:             settings.AuthRomaineLifeBaseURL,
+		ServiceAccountTokenPath: settings.AuthRomaineLifeTokenPath,
+	}
 	nativeLauncher := server.NewKubernetesNativeLauncher(settings)
 	if store != nil {
 		go server.StartSignalDrainLoop(context.Background(), store, nativeLauncher, 15*time.Second, log.Printf)
@@ -50,7 +57,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           server.NewWithRuntimeReconcilers(settings, store, authenticator, ghClient, workloadIdentities, nativeLauncher, artifacts),
+		Handler:           server.NewWithReconcilers(settings, store, authenticator, ghClient, workloadIdentities, managedOrigins, nativeLauncher, artifacts),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

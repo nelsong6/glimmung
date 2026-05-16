@@ -26,7 +26,7 @@ type projectRegisterRequest struct {
 	Metadata   map[string]any `json:"metadata"`
 }
 
-func registerProject(store ReadStore) http.HandlerFunc {
+func registerProject(store ReadStore, managedOrigins ManagedOriginReconciler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		writer, ok := store.(ProjectWriter)
 		if !ok || writer == nil {
@@ -62,6 +62,39 @@ func registerProject(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusInternalServerError, "register project failed")
 			return
 		}
+		// Reconcile glimmung-owned auth.romaine.life slot origins for this
+		// project. Skipped when the project doesn't opt in via
+		// managed_auth_origins.enabled; failed status persists on the
+		// project row so dashboards surface the broken state. See
+		// nelsong6/glimmung#142 stage 2.
+		if updated, ok := reconcileManagedAuthOrigins(r.Context(), store, managedOrigins, project); ok {
+			project = updated
+		}
 		writeJSON(w, http.StatusOK, project)
 	}
+}
+
+// reconcileManagedAuthOrigins runs the managed-origin reconciler and
+// persists its status on the project row. Returns the refreshed project
+// when status was written, or the original when the reconciler was
+// absent or the status writer is unsupported. Errors are intentionally
+// swallowed at this layer (status carries the failure) so the
+// outer handler can still return the upserted project.
+func reconcileManagedAuthOrigins(ctx context.Context, store ReadStore, reconciler ManagedOriginReconciler, project Project) (Project, bool) {
+	if reconciler == nil {
+		return project, false
+	}
+	status, _ := reconciler.ReconcileManagedOrigins(ctx, project)
+	if status.State == "" {
+		return project, false
+	}
+	writer, ok := store.(ProjectManagedAuthOriginStatusWriter)
+	if !ok || writer == nil {
+		return project, false
+	}
+	updated, err := writer.SetProjectManagedAuthOriginStatus(ctx, firstNonEmpty(project.Name, project.ID), status)
+	if err != nil {
+		return project, false
+	}
+	return updated, true
 }

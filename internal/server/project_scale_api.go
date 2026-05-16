@@ -60,7 +60,7 @@ type TestSlotReturnHistoryEntry struct {
 	CleanupStarted  bool      `json:"cleanup_started"`
 }
 
-func scaleProjectTestEnvironments(store ReadStore, workloadIdentities NativeWorkloadIdentityReconciler, preparer TestSlotPreparer, _ NativeGitHubTokenMinter) http.HandlerFunc {
+func scaleProjectTestEnvironments(store ReadStore, workloadIdentities NativeWorkloadIdentityReconciler, managedOrigins ManagedOriginReconciler, preparer TestSlotPreparer, _ NativeGitHubTokenMinter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		scaler, ok := store.(ProjectTestEnvironmentScaler)
 		if !ok || scaler == nil {
@@ -140,6 +140,36 @@ func scaleProjectTestEnvironments(store ReadStore, workloadIdentities NativeWork
 			}
 			if err != nil {
 				writeProblem(w, http.StatusBadGateway, "workload identity reconciliation failed")
+				return
+			}
+		}
+		// Reconcile glimmung-owned auth.romaine.life slot origins. The
+		// wildcard is invariant under scale (it's derived from
+		// native_standby_dns.record_base, not from count), but running
+		// reconciliation here gives operators an idempotent self-heal:
+		// re-issuing the same scale call retries a failed origin upsert.
+		// Failure surfaces on the project's managed_auth_origins_status
+		// row but does not abort the scale operation — slots are already
+		// reconciled at this point; broken sign-in is a softer failure
+		// than a half-scaled project.
+		// See nelsong6/glimmung#142 stage 2.
+		if managedOrigins != nil {
+			originStatus, originErr := managedOrigins.ReconcileManagedOrigins(r.Context(), updated)
+			if originStatus.State != "" && originStatus.State != ManagedAuthOriginStatusSkipped {
+				originWriter, ok := store.(ProjectManagedAuthOriginStatusWriter)
+				if !ok || originWriter == nil {
+					writeProblem(w, http.StatusServiceUnavailable, "project managed auth origin status store not configured")
+					return
+				}
+				persistedOrigins, persistErr := originWriter.SetProjectManagedAuthOriginStatus(r.Context(), project, originStatus)
+				if persistErr != nil {
+					writeProblem(w, http.StatusInternalServerError, "record managed auth origin status failed")
+					return
+				}
+				updated = persistedOrigins
+			}
+			if originErr != nil {
+				writeProblem(w, http.StatusBadGateway, "managed auth origin reconciliation failed")
 				return
 			}
 		}
