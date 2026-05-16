@@ -17,6 +17,14 @@ const (
 	testSlotStateActive     = "active"
 	testSlotStateCleaning   = "cleaning"
 	testSlotStateReady      = "ready"
+
+	// testSlotDefaultTTLSeconds is the TTL applied to a test-slot lease when
+	// the caller does not pass `ttl_seconds`. Interactive review of a test
+	// slot routinely takes longer than the generic 15-minute lease default —
+	// signing in, hot-swapping, working through a session — so the default
+	// here is one hour. Callers (smoke workflows, automation) that want a
+	// tighter bound still pass `ttl_seconds` explicitly and override this.
+	testSlotDefaultTTLSeconds = 3600
 )
 
 type TestSlotCheckoutRequest struct {
@@ -106,12 +114,17 @@ func checkoutTestSlot(store ReadStore, preparer TestSlotPreparer, minter NativeG
 		if strings.TrimSpace(requester.Ref) == "" {
 			requester.Ref = testSlotRequesterRef(req)
 		}
+		ttlSeconds := req.TTLSeconds
+		if ttlSeconds == nil {
+			defaultTTL := testSlotDefaultTTLSeconds
+			ttlSeconds = &defaultTTL
+		}
 		lease, err := leaseStore.AcquireLease(r.Context(), LeaseAcquireRequest{
 			Project:    req.Project,
 			Workflow:   &workflow,
 			Metadata:   metadata,
 			Requester:  requester,
-			TTLSeconds: req.TTLSeconds,
+			TTLSeconds: ttlSeconds,
 		})
 		if err != nil {
 			var validationErr ValidationError

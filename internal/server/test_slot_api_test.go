@@ -167,6 +167,9 @@ func TestCheckoutTestSlotStartsAsyncActivation(t *testing.T) {
 	if len(store.leaseReq.Metadata) != 1 || !boolFromMap(store.leaseReq.Metadata, "test_slot_checkout") {
 		t.Fatalf("checkout metadata should not include mode: %#v", store.leaseReq.Metadata)
 	}
+	if store.leaseReq.TTLSeconds == nil || *store.leaseReq.TTLSeconds != testSlotDefaultTTLSeconds {
+		t.Fatalf("default TTL not applied: ttl=%v, want %d", store.leaseReq.TTLSeconds, testSlotDefaultTTLSeconds)
+	}
 	for _, want := range []string{`"state":"activating"`, `"usable":false`, `"slot_name":"tank-slot-1"`, `"url":"https://tank-slot-1.tank.dev.romaine.life/"`, `"host":"native-k8s"`, `"status_url":"/v1/projects/tank-operator/test-environments/tank-slot-1"`} {
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Fatalf("response missing %s: %s", want, rec.Body.String())
@@ -191,6 +194,67 @@ func TestCheckoutTestSlotStartsAsyncActivation(t *testing.T) {
 	}
 	if finalStatus.ActivationCompletedAt == nil {
 		t.Fatalf("activation completion missing: %#v", finalStatus)
+	}
+}
+
+func TestCheckoutTestSlotHonorsExplicitTTL(t *testing.T) {
+	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "tank-operator",
+			Name: "tank-operator",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"slot_prefix": "tank-slot",
+				"record_base": "tank.dev.romaine.life",
+				"count":       float64(1),
+				"slots": []any{
+					map[string]any{"slot_index": float64(1), "slot_name": "tank-slot-1", "state": "ready"},
+				},
+			}},
+		}}},
+		lease: Lease{
+			Project:     "tank-operator",
+			LeaseNumber: intPtr(3),
+			Host:        stringPtr("native-k8s"),
+			State:       "claimed",
+			Metadata: map[string]any{
+				"test_slot_checkout": true,
+				"native_k8s":         true,
+				"native_slot_index":  "1",
+				"native_slot_name":   "tank-slot-1",
+			},
+			RequestedAt: now,
+		},
+	}
+	preparer := &fakeTestSlotPreparer{
+		activateStarted: make(chan struct{}, 1),
+		activateRelease: make(chan struct{}),
+		activateDone:    make(chan struct{}, 1),
+	}
+	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, preparer)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/test-slots/checkout", strings.NewReader(`{"project":"tank-operator","tank_session_id":"99","ttl_seconds":120}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.leaseReq.TTLSeconds == nil || *store.leaseReq.TTLSeconds != 120 {
+		t.Fatalf("explicit ttl ignored: ttl=%v, want 120", store.leaseReq.TTLSeconds)
+	}
+	// Let the spawned activation drain so the goroutine doesn't leak across tests.
+	select {
+	case <-preparer.activateStarted:
+	case <-time.After(time.Second):
+		t.Fatal("background activation did not start")
+	}
+	close(preparer.activateRelease)
+	select {
+	case <-preparer.activateDone:
+	case <-time.After(time.Second):
+		t.Fatal("background activation did not finish")
 	}
 }
 
