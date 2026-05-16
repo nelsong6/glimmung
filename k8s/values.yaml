@@ -125,4 +125,4 @@ externalSecret:
     - envVar: ENTRA_TEST_CLIENT_ID
       kvKey: glimmung-oauth-test-client-id
     - envVar: ALLOWED_EMAILS
-      kvKey: romaine-life-admin-emails
+      kvKey: glimmung-admin-emails

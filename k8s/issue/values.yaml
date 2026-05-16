@@ -66,7 +66,7 @@ externalSecret:
     - envVar: ENTRA_TEST_CLIENT_ID
       kvKey: glimmung-oauth-test-client-id
     - envVar: ALLOWED_EMAILS
-      kvKey: romaine-life-admin-emails
+      kvKey: glimmung-admin-emails
 
 # The wildcard XListenerSet that per-install HTTPRoutes attach to. Production
 # and per-issue releases install in `glimmung`; native test slots install into
