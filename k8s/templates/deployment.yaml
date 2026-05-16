@@ -79,6 +79,15 @@ spec:
             - name: K8S_SA_ALLOWLIST
               value: {{ .Values.k8sSaAuth.allowlist | quote }}
 {{ end }}
+            # Glimmung-owned auth.romaine.life slot origin reconciler. The
+            # service uses the projected SA token below — its audience is
+            # scoped to auth.romaine.life so a stolen token cannot be
+            # replayed against any other in-cluster JWT validator. See
+            # nelsong6/glimmung#142 stage 2.
+            - name: AUTH_ROMAINE_LIFE_BASE_URL
+              value: {{ .Values.authRomaineLife.baseUrl | quote }}
+            - name: AUTH_ROMAINE_LIFE_TOKEN_PATH
+              value: {{ printf "%s/token" .Values.authRomaineLife.tokenMountPath | quote }}
           envFrom:
             - configMapRef:
                 name: {{ .Values.config.name }}
@@ -103,3 +112,18 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
+          volumeMounts:
+            - name: auth-romaine-life-token
+              mountPath: {{ .Values.authRomaineLife.tokenMountPath | quote }}
+              readOnly: true
+      volumes:
+        # Per-audience projected SA token for the managed-origin reconciler.
+        # auth.romaine.life validates the audience claim explicitly so this
+        # token cannot be replayed against any other JWT validator.
+        - name: auth-romaine-life-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: {{ .Values.authRomaineLife.baseUrl | quote }}
+                  expirationSeconds: 3600
+                  path: token

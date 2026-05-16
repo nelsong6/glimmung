@@ -41,10 +41,18 @@ type Settings struct {
 	NativeRunnerProjectConcurrency int
 	NativeRunnerGlobalConcurrency  int
 	NativeWorkloadIdentityIssuer   string
-	GitHubAppID                    string
-	GitHubAppInstallationID        string
-	GitHubAppPrivateKey            string
-	GitHubWebhookSecret            string
+	// AuthRomaineLifeBaseURL is the base URL of the auth.romaine.life
+	// admin API used by ManagedOriginService. Empty disables the
+	// reconciler; only useful for local dev / smoke runs.
+	AuthRomaineLifeBaseURL string
+	// AuthRomaineLifeTokenPath is the path to a projected k8s
+	// ServiceAccount token with audience = AuthRomaineLifeBaseURL. The
+	// chart mounts this at /var/run/secrets/auth.romaine.life/token.
+	AuthRomaineLifeTokenPath string
+	GitHubAppID              string
+	GitHubAppInstallationID  string
+	GitHubAppPrivateKey      string
+	GitHubWebhookSecret      string
 }
 
 func SettingsFromEnv() Settings {
@@ -113,10 +121,18 @@ func SettingsFromEnv() Settings {
 			5,
 		),
 		NativeWorkloadIdentityIssuer: os.Getenv("NATIVE_WORKLOAD_IDENTITY_ISSUER"),
-		GitHubAppID:                  os.Getenv("GITHUB_APP_ID"),
-		GitHubAppInstallationID:      os.Getenv("GITHUB_APP_INSTALLATION_ID"),
-		GitHubAppPrivateKey:          os.Getenv("GITHUB_APP_PRIVATE_KEY"),
-		GitHubWebhookSecret:          os.Getenv("GITHUB_WEBHOOK_SECRET"),
+		AuthRomaineLifeBaseURL: envOrDefault(
+			"AUTH_ROMAINE_LIFE_BASE_URL",
+			defaultAuthURL,
+		),
+		AuthRomaineLifeTokenPath: envOrDefault(
+			"AUTH_ROMAINE_LIFE_TOKEN_PATH",
+			"/var/run/secrets/auth.romaine.life/token",
+		),
+		GitHubAppID:             os.Getenv("GITHUB_APP_ID"),
+		GitHubAppInstallationID: os.Getenv("GITHUB_APP_INSTALLATION_ID"),
+		GitHubAppPrivateKey:     os.Getenv("GITHUB_APP_PRIVATE_KEY"),
+		GitHubWebhookSecret:     os.Getenv("GITHUB_WEBHOOK_SECRET"),
 	}
 }
 
@@ -134,11 +150,19 @@ func NewWithSyncClient(settings Settings, store ReadStore, authResolver AuthReso
 }
 
 func NewWithRuntimeClients(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, nativeLauncher NativeLauncher, artifactStores ...ArtifactStore) http.Handler {
-	return newHandlerWithReconcilers(settings, store, authResolver, ghClient, nil, nativeLauncher, artifactStores...)
+	return newHandlerWithReconcilers(settings, store, authResolver, ghClient, nil, nil, nativeLauncher, artifactStores...)
 }
 
 func NewWithRuntimeReconcilers(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, workloadIdentities NativeWorkloadIdentityReconciler, nativeLauncher NativeLauncher, artifactStores ...ArtifactStore) http.Handler {
-	return newHandlerWithReconcilers(settings, store, authResolver, ghClient, workloadIdentities, nativeLauncher, artifactStores...)
+	return newHandlerWithReconcilers(settings, store, authResolver, ghClient, workloadIdentities, nil, nativeLauncher, artifactStores...)
+}
+
+// NewWithReconcilers extends NewWithRuntimeReconcilers with the
+// managed-auth-origins reconciler (glimmung#142 stage 2). Existing callers
+// keep working through NewWithRuntimeReconcilers (which passes nil for the
+// origins reconciler); new wiring in cmd/glimmung-go uses this.
+func NewWithReconcilers(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, workloadIdentities NativeWorkloadIdentityReconciler, managedOrigins ManagedOriginReconciler, nativeLauncher NativeLauncher, artifactStores ...ArtifactStore) http.Handler {
+	return newHandlerWithReconcilers(settings, store, authResolver, ghClient, workloadIdentities, managedOrigins, nativeLauncher, artifactStores...)
 }
 
 func NewWithDependencies(settings Settings, store ReadStore, authResolver AuthResolver, artifactStores ...ArtifactStore) http.Handler {
@@ -146,10 +170,10 @@ func NewWithDependencies(settings Settings, store ReadStore, authResolver AuthRe
 }
 
 func newHandler(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, nativeLauncher NativeLauncher, artifactStores ...ArtifactStore) http.Handler {
-	return newHandlerWithReconcilers(settings, store, authResolver, ghClient, nil, nativeLauncher, artifactStores...)
+	return newHandlerWithReconcilers(settings, store, authResolver, ghClient, nil, nil, nativeLauncher, artifactStores...)
 }
 
-func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, workloadIdentities NativeWorkloadIdentityReconciler, nativeLauncher NativeLauncher, artifactStores ...ArtifactStore) http.Handler {
+func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver AuthResolver, ghClient WorkflowSyncClient, workloadIdentities NativeWorkloadIdentityReconciler, managedOrigins ManagedOriginReconciler, nativeLauncher NativeLauncher, artifactStores ...ArtifactStore) http.Handler {
 	var artifactStore ArtifactStore
 	if len(artifactStores) > 0 {
 		artifactStore = artifactStores[0]
@@ -187,7 +211,7 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	mux.HandleFunc("GET /v1/projects/{project}/issues/{issue_number}/touchpoint", issueTouchpointDetail(store))
 	mux.Handle("POST /v1/touchpoints", requireAdmin(adminAuthenticator, http.HandlerFunc(createTouchpoint(store))))
 	mux.HandleFunc("GET /v1/projects", listProjects(store))
-	mux.Handle("POST /v1/projects", requireAdmin(adminAuthenticator, http.HandlerFunc(registerProject(store))))
+	mux.Handle("POST /v1/projects", requireAdmin(adminAuthenticator, http.HandlerFunc(registerProject(store, managedOrigins))))
 	mux.Handle("POST /v1/issues", requireAdmin(adminAuthenticator, http.HandlerFunc(createIssue(store))))
 	mux.Handle(
 		"PATCH /v1/issues/by-number/{project}/{issue_number}",
@@ -215,7 +239,7 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	)
 	mux.Handle(
 		"PATCH /v1/projects/{project}/test-environments/count",
-		requireAdmin(adminAuthenticator, http.HandlerFunc(scaleProjectTestEnvironments(store, workloadIdentities, testSlotPreparer, nativeTokenMinter))),
+		requireAdmin(adminAuthenticator, http.HandlerFunc(scaleProjectTestEnvironments(store, workloadIdentities, managedOrigins, testSlotPreparer, nativeTokenMinter))),
 	)
 	mux.HandleFunc("GET /v1/workflows", listWorkflows(store))
 	mux.Handle("POST /v1/workflows", requireAdmin(adminAuthenticator, http.HandlerFunc(registerWorkflow(store))))

@@ -67,6 +67,20 @@ k8sSaAuth:
   enabled: true
   allowlist: tank-operator/tank-operator,mcp-glimmung/mcp-glimmung
 
+# Glimmung-owned auth.romaine.life slot origin reconciler. Glimmung calls
+# the admin surface on the auth service to set / clear per-project slot
+# wildcards (https://*.<record_base>) in the managed_origin store. Inbound
+# auth on the admin surface is a projected SA token with audience scoped
+# to auth.romaine.life; the deployment mounts that token below. See
+# nelsong6/glimmung#142 stage 2.
+authRomaineLife:
+  baseUrl: https://auth.romaine.life
+  # In-pod mount path for the projected SA token. The token file lands
+  # at {tokenMountPath}/token, and AUTH_ROMAINE_LIFE_TOKEN_PATH points
+  # there explicitly. The mount path is also reused as the projected
+  # token's audience in deployment.yaml.
+  tokenMountPath: /var/run/secrets/auth.romaine.life
+
 # Cosmos DB — endpoint of the shared serverless account, database is glimmung's own.
 cosmos:
   endpoint: https://infra-cosmos-serverless.documents.azure.com:443/

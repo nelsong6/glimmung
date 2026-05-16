@@ -242,6 +242,7 @@ func TestScaleProjectTestEnvironmentsPersistsWorkloadIdentityStatus(t *testing.T
 				Subject:        "system:serviceaccount:tank-slot-1-sessions:tank-slot-1-session",
 			}},
 		}},
+		nil, // managed-origins reconciler not under test here
 		nil,
 	)
 
