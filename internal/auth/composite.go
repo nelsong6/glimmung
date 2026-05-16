@@ -6,63 +6,76 @@ import (
 	"strings"
 )
 
-// CompositeAuthenticator routes incoming bearer tokens to the right verifier
-// based on token shape. K8s ServiceAccount tokens (recognized by their JWT
-// structure) go to the K8s authenticator; everything else is treated as an
-// auth.romaine.life RS256 JWT.
+// CompositeAuthenticator routes incoming requests to the right verifier:
+//   - Authorization: Bearer <K8s SA token>  →  K8sAuthenticator (in-cluster
+//     callers like tank-operator's MCP attestation)
+//   - .romaine.life session cookie           →  CookieDelegate (browser
+//     callers — forwards cookie to auth.romaine.life/api/auth/get-session
+//     and gates on the role claim)
+//
+// Browser callers don't (and shouldn't) hold a Bearer token: the auth
+// service owns the session via a cookie scoped to the parent domain, and
+// glimmung consults it per-request (cached 60s).
 type CompositeAuthenticator struct {
-	RomaineLife *RomaineLifeAuthenticator
-	K8s         *K8sAuthenticator
+	Cookie *CookieDelegate
+	K8s    *K8sAuthenticator
 }
 
-func (a CompositeAuthenticator) ResolveCaller(ctx context.Context, authorization string) (User, bool, bool) {
-	if !strings.HasPrefix(strings.ToLower(authorization), "bearer ") {
-		return User{}, false, false
-	}
-	token := strings.TrimSpace(authorization[7:])
-	if token == "" {
+// ResolveCaller returns (user, isAdmin, ok). ok=false means no
+// recognizable credential was attached; isAdmin=true means the resolved
+// user has the admin role.
+func (a CompositeAuthenticator) ResolveCaller(ctx context.Context, r *http.Request) (User, bool, bool) {
+	if r == nil {
 		return User{}, false, false
 	}
 
-	if LooksLikeK8sSAToken(token) {
-		if a.K8s == nil {
-			return User{}, false, false
+	authz := r.Header.Get("Authorization")
+	if strings.HasPrefix(strings.ToLower(authz), "bearer ") {
+		token := strings.TrimSpace(authz[7:])
+		if token != "" && LooksLikeK8sSAToken(token) {
+			if a.K8s == nil {
+				return User{}, false, false
+			}
+			user, isAdmin, err := a.K8s.Resolve(ctx, token)
+			if err != nil {
+				return User{}, false, false
+			}
+			return user, isAdmin, true
 		}
-		user, isAdmin, err := a.K8s.Resolve(ctx, token)
-		if err != nil {
-			return User{}, false, false
-		}
-		return user, isAdmin, true
 	}
 
-	if a.RomaineLife == nil {
+	if a.Cookie == nil {
 		return User{}, false, false
 	}
-	user, isAdmin, err := a.RomaineLife.Resolve(ctx, token)
+	user, isAdmin, err := a.Cookie.Resolve(ctx, r.Header.Get("Cookie"))
 	if err != nil {
 		return User{}, false, false
 	}
 	return user, isAdmin, true
 }
 
-func (a CompositeAuthenticator) RequireAdmin(ctx context.Context, authorization string) (User, error) {
-	if !strings.HasPrefix(strings.ToLower(authorization), "bearer ") {
-		return User{}, AuthError{Status: http.StatusUnauthorized, Message: "missing bearer token"}
-	}
-	token := strings.TrimSpace(authorization[7:])
-	if token == "" {
-		return User{}, AuthError{Status: http.StatusUnauthorized, Message: "missing bearer token"}
+// RequireAdmin is the strict variant for admin-only routes. Bearer K8s SA
+// tokens still go through K8s.RequireAdmin (which has its own allowlist);
+// browser cookies go through CookieDelegate.RequireAdmin (which 403s
+// anything other than role=admin).
+func (a CompositeAuthenticator) RequireAdmin(ctx context.Context, r *http.Request) (User, error) {
+	if r == nil {
+		return User{}, AuthError{Status: http.StatusUnauthorized, Message: "no request"}
 	}
 
-	if LooksLikeK8sSAToken(token) {
-		if a.K8s == nil {
-			return User{}, AuthError{Status: http.StatusServiceUnavailable, Message: "k8s auth not configured"}
+	authz := r.Header.Get("Authorization")
+	if strings.HasPrefix(strings.ToLower(authz), "bearer ") {
+		token := strings.TrimSpace(authz[7:])
+		if token != "" && LooksLikeK8sSAToken(token) {
+			if a.K8s == nil {
+				return User{}, AuthError{Status: http.StatusServiceUnavailable, Message: "k8s auth not configured"}
+			}
+			return a.K8s.RequireAdmin(ctx, token)
 		}
-		return a.K8s.RequireAdmin(ctx, token)
 	}
 
-	if a.RomaineLife == nil {
-		return User{}, AuthError{Status: http.StatusServiceUnavailable, Message: "auth.romaine.life auth not configured"}
+	if a.Cookie == nil {
+		return User{}, AuthError{Status: http.StatusServiceUnavailable, Message: "auth.romaine.life delegate not configured"}
 	}
-	return a.RomaineLife.RequireAdmin(ctx, token)
+	return a.Cookie.RequireAdmin(ctx, r.Header.Get("Cookie"))
 }

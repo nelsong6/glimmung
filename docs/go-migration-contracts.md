@@ -79,8 +79,9 @@ GLIMMUNG_STATIC_DIR=frontend/dist \
 go run ./cmd/glimmung-go
 ```
 
-The backend verifies bearer tokens against `auth.romaine.life/api/auth/jwks`
-on every admin request, so no per-deploy OAuth configuration is needed.
+The backend delegates session validation to auth.romaine.life on every
+admin request (cookie-forward to `get-session`, cached briefly), so no
+per-deploy OAuth configuration is needed.
 
 Static frontend assets and SPA fallback are served when `GLIMMUNG_STATIC_DIR`
 points at a built frontend directory.

@@ -5,54 +5,60 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 )
 
 func TestCompositeResolverSoftensInvalidTokens(t *testing.T) {
 	resolver := CompositeAuthenticator{}
-	_, _, ok := resolver.ResolveCaller(context.Background(), "Bearer invalid")
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer invalid")
+	_, _, ok := resolver.ResolveCaller(context.Background(), req)
 	if ok {
 		t.Fatal("invalid token should not resolve")
 	}
 }
 
-func TestCompositeResolverResolvesRomaineLifeUser(t *testing.T) {
-	key := mustRSAKey(t)
-	jwks := newRomaineJWKSServer(t, key)
-	defer jwks.Close()
-	romaineLife := newTestRomaineLifeAuthenticator(jwks.URL)
-	resolver := CompositeAuthenticator{RomaineLife: romaineLife}
-
-	token := signRomaineToken(t, key, map[string]any{
-		"iss":   authRomaineLifeIssuer,
-		"sub":   "subject",
-		"email": "user@example.com",
-		"role":  "user",
-		"exp":   time.Now().Add(time.Hour).Unix(),
+func TestCompositeResolverResolvesCookieUser(t *testing.T) {
+	srv := newFakeAuthServer(t, map[string]string{
+		"good-cookie": `{"user":{"id":"sub-user","email":"user@example.com","name":"User","role":"user"}}`,
 	})
-	user, isAdmin, ok := resolver.ResolveCaller(context.Background(), "Bearer "+token)
+	defer srv.Close()
+	resolver := CompositeAuthenticator{Cookie: newTestCookieDelegate(srv.URL)}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Cookie", "good-cookie")
+	user, isAdmin, ok := resolver.ResolveCaller(context.Background(), req)
 	if !ok || isAdmin || user.Email != "user@example.com" {
 		t.Fatalf("user=%#v isAdmin=%v ok=%v", user, isAdmin, ok)
 	}
 }
 
-func TestCompositeResolverResolvesRomaineLifeAdmin(t *testing.T) {
-	key := mustRSAKey(t)
-	jwks := newRomaineJWKSServer(t, key)
-	defer jwks.Close()
-	romaineLife := newTestRomaineLifeAuthenticator(jwks.URL)
-	resolver := CompositeAuthenticator{RomaineLife: romaineLife}
-
-	token := signRomaineToken(t, key, map[string]any{
-		"iss":   authRomaineLifeIssuer,
-		"sub":   "subject",
-		"email": "admin@example.com",
-		"role":  "admin",
-		"exp":   time.Now().Add(time.Hour).Unix(),
+func TestCompositeResolverResolvesCookieAdmin(t *testing.T) {
+	srv := newFakeAuthServer(t, map[string]string{
+		"admin-cookie": `{"user":{"id":"sub-admin","email":"admin@example.com","name":"Admin","role":"admin"}}`,
 	})
-	user, isAdmin, ok := resolver.ResolveCaller(context.Background(), "Bearer "+token)
+	defer srv.Close()
+	resolver := CompositeAuthenticator{Cookie: newTestCookieDelegate(srv.URL)}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Cookie", "admin-cookie")
+	user, isAdmin, ok := resolver.ResolveCaller(context.Background(), req)
 	if !ok || !isAdmin || user.Email != "admin@example.com" {
 		t.Fatalf("user=%#v isAdmin=%v ok=%v", user, isAdmin, ok)
+	}
+}
+
+func TestCompositeResolverRejectsPendingCookie(t *testing.T) {
+	srv := newFakeAuthServer(t, map[string]string{
+		"pending-cookie": `{"user":{"id":"sub-pending","email":"pending@example.com","role":"pending"}}`,
+	})
+	defer srv.Close()
+	resolver := CompositeAuthenticator{Cookie: newTestCookieDelegate(srv.URL)}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Cookie", "pending-cookie")
+	_, _, ok := resolver.ResolveCaller(context.Background(), req)
+	if ok {
+		t.Fatal("pending role should not resolve")
 	}
 }
 
@@ -67,9 +73,11 @@ func TestCompositeResolverResolvesK8sAdminState(t *testing.T) {
 	k8s := newTestAuthenticator(t, tokenReview.URL, "ns/sa")
 	resolver := CompositeAuthenticator{K8s: k8s}
 
-	user, isAdmin, ok := resolver.ResolveCaller(context.Background(), "Bearer "+jwtWithClaims(t, map[string]any{
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+jwtWithClaims(t, map[string]any{
 		"kubernetes.io": map[string]any{"namespace": "ns"},
 	}))
+	user, isAdmin, ok := resolver.ResolveCaller(context.Background(), req)
 	if !ok || !isAdmin || user.Email != "system:serviceaccount:ns:sa" {
 		t.Fatalf("user=%#v isAdmin=%v ok=%v", user, isAdmin, ok)
 	}
@@ -85,9 +93,11 @@ func TestCompositeResolverTreatsRejectedK8sTokenAsUnsigned(t *testing.T) {
 	k8s := newTestAuthenticator(t, tokenReview.URL, "ns/sa")
 	resolver := CompositeAuthenticator{K8s: k8s}
 
-	_, _, ok := resolver.ResolveCaller(context.Background(), "Bearer "+jwtWithClaims(t, map[string]any{
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+jwtWithClaims(t, map[string]any{
 		"kubernetes.io": map[string]any{"namespace": "ns"},
 	}))
+	_, _, ok := resolver.ResolveCaller(context.Background(), req)
 	if ok {
 		t.Fatal("rejected token should not resolve")
 	}
@@ -96,30 +106,24 @@ func TestCompositeResolverTreatsRejectedK8sTokenAsUnsigned(t *testing.T) {
 func TestCompositeRequireAdminRoutesMissingAndUnconfigured(t *testing.T) {
 	resolver := CompositeAuthenticator{}
 
-	_, err := resolver.RequireAdmin(context.Background(), "")
-	assertAuthStatus(t, err, http.StatusUnauthorized, "missing bearer")
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	_, err := resolver.RequireAdmin(context.Background(), req)
+	assertAuthStatus(t, err, http.StatusServiceUnavailable, "auth.romaine.life delegate not configured")
 
-	_, err = resolver.RequireAdmin(context.Background(), "Bearer plain-token")
-	assertAuthStatus(t, err, http.StatusServiceUnavailable, "auth.romaine.life auth not configured")
-
-	_, err = resolver.RequireAdmin(context.Background(), "Bearer "+jwtWithClaims(t, map[string]any{
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+jwtWithClaims(t, map[string]any{
 		"kubernetes.io": map[string]any{"namespace": "ns"},
 	}))
+	_, err = resolver.RequireAdmin(context.Background(), req)
 	assertAuthStatus(t, err, http.StatusServiceUnavailable, "k8s auth not configured")
 }
 
-func TestCompositeRequireAdminRoutesRomaineLifeAndK8s(t *testing.T) {
-	key := mustRSAKey(t)
-	jwks := newRomaineJWKSServer(t, key)
-	defer jwks.Close()
-	romaineLife := newTestRomaineLifeAuthenticator(jwks.URL)
-	romaineToken := signRomaineToken(t, key, map[string]any{
-		"iss":   authRomaineLifeIssuer,
-		"sub":   "subject",
-		"email": "admin@example.com",
-		"role":  "admin",
-		"exp":   time.Now().Add(time.Hour).Unix(),
+func TestCompositeRequireAdminRoutesCookieAndK8s(t *testing.T) {
+	authSrv := newFakeAuthServer(t, map[string]string{
+		"admin-cookie": `{"user":{"id":"sub-admin","email":"admin@example.com","name":"Admin","role":"admin"}}`,
 	})
+	defer authSrv.Close()
+	delegate := newTestCookieDelegate(authSrv.URL)
 
 	tokenReview := newTokenReviewServer(t, http.StatusOK, tokenReviewResponse{
 		Status: tokenReviewStatus{
@@ -130,16 +134,42 @@ func TestCompositeRequireAdminRoutesRomaineLifeAndK8s(t *testing.T) {
 	defer tokenReview.Close()
 	k8s := newTestAuthenticator(t, tokenReview.URL, "ns/sa")
 
-	resolver := CompositeAuthenticator{RomaineLife: romaineLife, K8s: k8s}
-	user, err := resolver.RequireAdmin(context.Background(), "Bearer "+romaineToken)
+	resolver := CompositeAuthenticator{Cookie: delegate, K8s: k8s}
+
+	cookieReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	cookieReq.Header.Set("Cookie", "admin-cookie")
+	user, err := resolver.RequireAdmin(context.Background(), cookieReq)
 	if err != nil || user.Email != "admin@example.com" {
-		t.Fatalf("romaine.life user=%#v err=%v", user, err)
+		t.Fatalf("cookie user=%#v err=%v", user, err)
 	}
 
-	user, err = resolver.RequireAdmin(context.Background(), "Bearer "+jwtWithClaims(t, map[string]any{
+	k8sReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	k8sReq.Header.Set("Authorization", "Bearer "+jwtWithClaims(t, map[string]any{
 		"kubernetes.io": map[string]any{"namespace": "ns"},
 	}))
+	user, err = resolver.RequireAdmin(context.Background(), k8sReq)
 	if err != nil || user.Email != "system:serviceaccount:ns:sa" {
 		t.Fatalf("k8s user=%#v err=%v", user, err)
 	}
+}
+
+// newFakeAuthServer returns the canned body keyed by Cookie header for
+// known cookies, or `null` for unknown ones (matching Better Auth's
+// actual behavior on missing/invalid sessions).
+func newFakeAuthServer(t *testing.T, responses map[string]string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if body, ok := responses[r.Header.Get("Cookie")]; ok {
+			_, _ = w.Write([]byte(body))
+			return
+		}
+		_, _ = w.Write([]byte("null"))
+	}))
+}
+
+func newTestCookieDelegate(endpoint string) *CookieDelegate {
+	d := NewCookieDelegate()
+	d.endpoint = endpoint
+	return d
 }

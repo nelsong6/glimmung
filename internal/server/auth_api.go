@@ -8,7 +8,7 @@ import (
 )
 
 type AuthResolver interface {
-	ResolveCaller(ctx context.Context, authorization string) (auth.User, bool, bool)
+	ResolveCaller(ctx context.Context, r *http.Request) (auth.User, bool, bool)
 }
 
 type AuthMeResponse struct {
@@ -25,7 +25,7 @@ func authMe(authResolver AuthResolver) http.HandlerFunc {
 			writeJSON(w, http.StatusOK, AuthMeResponse{SignedIn: false, IsAdmin: false})
 			return
 		}
-		user, isAdmin, ok := authResolver.ResolveCaller(r.Context(), r.Header.Get("Authorization"))
+		user, isAdmin, ok := authResolver.ResolveCaller(r.Context(), r)
 		if !ok {
 			writeJSON(w, http.StatusOK, AuthMeResponse{SignedIn: false, IsAdmin: false})
 			return

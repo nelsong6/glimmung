@@ -14,11 +14,11 @@ type fakeAdminAuthenticator struct {
 	err  error
 }
 
-func (a fakeAdminAuthenticator) RequireAdmin(context.Context, string) (auth.User, error) {
+func (a fakeAdminAuthenticator) RequireAdmin(context.Context, *http.Request) (auth.User, error) {
 	return a.user, a.err
 }
 
-func (a fakeAdminAuthenticator) ResolveCaller(context.Context, string) (auth.User, bool, bool) {
+func (a fakeAdminAuthenticator) ResolveCaller(context.Context, *http.Request) (auth.User, bool, bool) {
 	if a.err != nil {
 		return auth.User{}, false, false
 	}
