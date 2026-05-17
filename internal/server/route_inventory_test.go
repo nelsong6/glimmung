@@ -70,6 +70,7 @@ var expectedGoRoutes = []string{
 	"POST /v1/test-slots/checkout",
 	"POST /v1/test-slots/return",
 	"POST /v1/test-slots/hot-swap-history",
+	"POST /v1/test-slots/apply-hot-swap",
 	"POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/replay",
 	"POST /v1/runs/dispatch",
 	"POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/resume",

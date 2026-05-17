@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/nelsong6/glimmung/internal/ops/agentops"
 )
 
 const (
@@ -275,6 +277,12 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	mux.Handle("POST /v1/test-slots/checkout", requireAdmin(adminAuthenticator, http.HandlerFunc(checkoutTestSlot(store, testSlotPreparer, nativeTokenMinter))))
 	mux.Handle("POST /v1/test-slots/return", requireAdmin(adminAuthenticator, http.HandlerFunc(returnTestSlot(store, testSlotPreparer, nativeTokenMinter))))
 	mux.Handle("POST /v1/test-slots/hot-swap-history", requireAdmin(adminAuthenticator, http.HandlerFunc(appendTestSlotHotSwapHistory(store))))
+	// /v1/test-slots/apply-hot-swap — developer-driven build-and-swap.
+	// Sync UX per docs/test-slot-hot-swap.md. The performer is wired to
+	// the production ops.ApplyHotSwap; the agentops.Ops uses ExecRunner
+	// by default (calls real kubectl in-cluster).
+	applyHotSwapOps := agentops.New(nil)
+	mux.Handle("POST /v1/test-slots/apply-hot-swap", requireAdmin(adminAuthenticator, http.HandlerFunc(applyTestSlotHotSwap(store, applyHotSwapOps.ApplyHotSwap))))
 	mux.Handle("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/replay", requireAdmin(adminAuthenticator, http.HandlerFunc(replayRunDecisionByNumber(store))))
 	mux.Handle("POST /v1/runs/dispatch", requireAdmin(adminAuthenticator, http.HandlerFunc(dispatchRunHandler(store, nativeLauncher))))
 	mux.Handle("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/resume", requireAdmin(adminAuthenticator, http.HandlerFunc(resumeRunHandler(store, nativeLauncher))))
