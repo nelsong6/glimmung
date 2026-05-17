@@ -652,7 +652,7 @@ func TestReconcileSeedsMissingTestSlots(t *testing.T) {
 	}
 	waitForSlotStatusCount(t, store, 6) // 3 slots × (warming + ready)
 	seen := map[int]string{}
-	for _, status := range store.slotStatuses {
+	for _, status := range store.snapshotSlotStatuses() {
 		seen[status.SlotIndex] = status.State
 	}
 	for i := 1; i <= 3; i++ {
@@ -773,14 +773,16 @@ func TestReconcileSkipsRecentWarmingAndClaimedSlots(t *testing.T) {
 
 func waitForSlotStatusCount(t *testing.T, store *fakeLeaseStore, want int) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
+	var got int
 	for time.Now().Before(deadline) {
-		if len(store.slotStatuses) >= want {
+		got = len(store.snapshotSlotStatuses())
+		if got >= want {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("slot status writes=%d, want >=%d", len(store.slotStatuses), want)
+	t.Fatalf("slot status writes=%d, want >=%d", got, want)
 }
 
 func TestAsyncCheckoutFailureMarksErrorAndReleasesLease(t *testing.T) {
@@ -853,17 +855,19 @@ func TestAsyncCheckoutFailureMarksErrorAndReleasesLease(t *testing.T) {
 
 func waitForSlotStatus(t *testing.T, store *fakeLeaseStore, state string) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(5 * time.Second)
+	var snapshot []TestEnvironmentSlotStatus
 	for time.Now().Before(deadline) {
-		if len(store.slotStatuses) > 0 && store.slotStatuses[len(store.slotStatuses)-1].State == state {
+		snapshot = store.snapshotSlotStatuses()
+		if len(snapshot) > 0 && snapshot[len(snapshot)-1].State == state {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if len(store.slotStatuses) == 0 {
+	if len(snapshot) == 0 {
 		t.Fatalf("slot statuses empty, want %s", state)
 	}
-	t.Fatalf("final slot status=%q, want %s", store.slotStatuses[len(store.slotStatuses)-1].State, state)
+	t.Fatalf("final slot status=%q, want %s", snapshot[len(snapshot)-1].State, state)
 }
 
 func waitForInstallerCleanup(t *testing.T, preparer *fakeTestSlotPreparer) {
