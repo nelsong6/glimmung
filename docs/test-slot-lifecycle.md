@@ -134,30 +134,37 @@ path as `POST /v1/test-slots/return`. Callback release must not mark the lease
 released until hot runtime teardown and preliminary revalidation have
 completed.
 
-### Reconciliation
+### Lifecycle Triggers
 
-Glimmung runs a single test-slot reconciler that owns durable lifecycle work.
-On every tick it:
+Test-slot state is event-driven. There is no polling reconciler loop. Every
+lifecycle transition responds to an explicit event:
 
-- seeds missing `slots[*]` records (count is set but the index is not in the
-  array) and runs preliminary reconciliation to bring them from `warming` to
-  `ready`;
-- resumes stale `warming` entries whose preliminary reconciliation crashed,
-  was rolled back, or never finished;
-- restarts stale `activating` work;
-- restarts stale `cleaning` work;
-- cleans up short-lived installer Jobs and clone Secrets for active slots;
-- starts cleanup for expired claimed test-slot leases.
+| Event | Trigger | Effect |
+|---|---|---|
+| count changed | `PATCH /v1/projects/{project}/test-environments/count` | handler writes the new count, fires per-slot warm goroutines for any missing or in-flight-`warming` slot, returns immediately |
+| checkout | `POST /v1/test-slots/checkout` | acquires lease, arms a `time.AfterFunc` for `assigned_at + ttl_seconds`, starts activation goroutine |
+| return / callback release / admin cancel | `POST /v1/test-slots/return`, `POST /v1/lease-callbacks/.../release`, `POST /v1/leases/cancel` | stops the lease's TTL timer, starts cleanup goroutine |
+| TTL deadline | per-lease `time.AfterFunc` fires | starts cleanup goroutine with source `lease.ttl_expiry` |
+| activation finished | inline at end of activation goroutine | one-shot installer cleanup, write `active` status |
+| cleanup finished | inline at end of cleanup goroutine | release lease, write `ready` status |
+| process start | `RecoverInFlightTestSlots` (one-shot, called once from `cmd/glimmung-go/main.go`) | re-arm TTL timers for surviving `claimed` leases, resume in-flight `warming`/`activating`/`cleaning` goroutines, warm missing `slots[*]` entries |
 
-There is no separate admin "repair" endpoint. Any slot in `error`, stale
-`warming`, or stale `cleaning` is recovered on the next reconciler tick — an
-operator-driven escape hatch is an exception path the migration policy
-forbids. A genuinely stuck slot is a reconciler bug to fix, not a
-button-to-press; once the reconciler change is shipped, the only way to remove
-slot capacity is decreasing queue size.
+The TTL timer is the design choice that lets the lifecycle stay event-driven
+without losing auto-expiry. Polling the lease list every N seconds to ask
+"are any leases expired yet?" would burn Cosmos reads forever and is the
+lazy version of what a deadline-bound timer expresses directly. A timer
+firing at `assigned_at + ttl_seconds` is the same shape as an HTTP request
+arriving: it's the event we wanted, delivered when we wanted it.
 
-The reconciler must not re-warm a slot that has a current `claimed` lease;
-those slots are driven by the activation/cleaning paths attached to the lease.
+Timer state is in-process and not durable. Recovery is the responsibility of
+`RecoverInFlightTestSlots`: on every process boot it walks Cosmos once and
+re-arms an `AfterFunc` for every still-`claimed` test-slot lease, computing
+remaining duration from the durable `assigned_at + ttl_seconds`. A deadline
+that has already passed fires cleanup immediately. After this one-shot pass
+returns, the lifecycle is purely event-driven until the next restart.
+
+There is no admin "repair" endpoint, no periodic reconciler, no scheduled
+sweep. A genuinely stuck slot is a code bug to fix, not a button to press.
 
 ## Resource Classification
 
@@ -231,16 +238,18 @@ The slot system is not complete until all of these are true:
   keeps the lease claimed until the slot is safe to allocate again.
 - Lease callback release follows the same cleanup path as public test-slot
   return for test-slot leases.
-- Expired or abandoned claimed test-slot leases are cleaned by reconciliation
-  without requiring manual intervention.
-- Slots in `error`, stale `warming`, or stale `cleaning` are recovered by the
-  test-slot reconciler on its next tick. There is no admin repair endpoint;
-  the only way to remove capacity is decreasing queue size.
-- Missing `slots[*]` entries are seeded by the reconciler. Setting
-  `native_standby_dns.count` is sufficient — the queue-size handler does not
-  warm synchronously.
-- Short-lived installer Jobs and clone Secrets are cleaned after success and
-  reconciled after process restarts.
+- Expired claimed test-slot leases are cleaned by a per-lease
+  `time.AfterFunc` armed at checkout. No polling loop scans for expirations.
+- Slots in `error`, stale `warming`, or stale `cleaning` are recovered by
+  `RecoverInFlightTestSlots` at process startup, not by a periodic tick.
+  There is no admin repair endpoint; the only way to remove capacity is
+  decreasing queue size.
+- Missing `slots[*]` entries are seeded by the PATCH-count handler when the
+  count changes and by the startup recovery sweep. There is no background
+  job that re-checks count vs `slots[*]` between those two triggers.
+- Short-lived installer Jobs and clone Secrets are cleaned once at the end
+  of the activation that produced them, and once defensively during the
+  startup recovery sweep for any slot found in `active`.
 - Dashboard slot rows expose enough activation and cleanup metadata to debug
   stuck work without querying Cosmos directly. State for an unseeded slot is
   empty in the API and labeled "unseeded" in the UI — neither layer

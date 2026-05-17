@@ -152,6 +152,11 @@ func checkoutTestSlot(settings Settings, store ReadStore, preparer TestSlotPrepa
 				writeProblem(w, http.StatusInternalServerError, "record test-slot activation state failed")
 				return
 			}
+			// Arm TTL expiry as soon as the lease is claimed. Cleanup
+			// pathways (return / callback release / admin cancel) call
+			// cancelLeaseExpiryTimer on the way out, so the timer only
+			// fires if nobody returned the lease in time.
+			armLeaseExpiryTimer(store, preparer, project, lease, nil)
 			beginTestSlotActivation(store, preparer, minter, project, lease, nil)
 			writeJSON(w, http.StatusAccepted, testSlotCheckoutResponse(settings, project, workflow, lease, testSlotStateActivating))
 			return
@@ -593,6 +598,9 @@ func activateTestSlotRuntime(parent context.Context, store ReadStore, preparer T
 	cleanupCancel()
 
 	if leaseStore, ok := store.(LeaseCanceller); ok && leaseStore != nil {
+		// Activation failed; the timer we armed at checkout is no longer
+		// meaningful (the lease is going away). Stop it.
+		cancelLeaseExpiryTimer(LeasePublicRefFromLease(lease))
 		cancelCtx, cancelRelease := context.WithTimeout(context.Background(), 30*time.Second)
 		if _, cancelErr := leaseStore.CancelLeaseByRef(cancelCtx, lease.Project, LeasePublicRefFromLease(lease)); cancelErr != nil && logf != nil {
 			logf("test-slot activation lease release failed project=%s lease=%s: %v", lease.Project, LeasePublicRefFromLease(lease), cancelErr)
@@ -624,6 +632,10 @@ func beginTestSlotCleanup(store ReadStore, preparer TestSlotPreparer, project Pr
 	if _, loaded := testSlotCleanups.LoadOrStore(key, struct{}{}); loaded {
 		return false
 	}
+	// Whatever triggered cleanup (explicit return, callback release, admin
+	// cancel, or TTL expiry firing this very path), we don't want the TTL
+	// timer to fire a second time. Stop is idempotent.
+	cancelLeaseExpiryTimer(LeasePublicRefFromLease(lease))
 	go func() {
 		defer testSlotCleanups.Delete(key)
 		cleanupTestSlotRuntime(context.Background(), store, preparer, project, lease, releaseLease, logf)
@@ -736,47 +748,43 @@ func testSlotLeaseStillState(ctx context.Context, store ReadStore, project Proje
 	return false
 }
 
-func StartTestSlotReconcilerLoop(ctx context.Context, store ReadStore, preparer TestSlotPreparer, minter NativeGitHubTokenMinter, interval time.Duration, logf func(string, ...any)) {
+// RecoverInFlightTestSlots is the one-shot startup pass that replaces the old
+// polling reconciler. It walks Cosmos once after the process boots and:
+//
+//   - Re-arms TTL expiry timers for every still-claimed test-slot lease,
+//     computing remaining duration from `assigned_at + ttl_seconds`. A lease
+//     whose deadline has already passed fires cleanup immediately.
+//   - Resumes any in-flight `activating` / `cleaning` / `warming` work whose
+//     driving goroutine died with the previous process. The goroutines are
+//     fresh; the durable Cosmos state is what makes the resume meaningful.
+//   - Fires warmup for slots within `count` that have no `slots[*]` entry
+//     (this is also covered by the PATCH-count handler, but startup is the
+//     other valid moment for the same trigger).
+//
+// After this returns, lifecycle changes are driven exclusively by HTTP
+// handlers (PATCH count, checkout, return, callback release) and per-lease
+// AfterFunc timers. No periodic polling.
+func RecoverInFlightTestSlots(ctx context.Context, store ReadStore, preparer TestSlotPreparer, minter NativeGitHubTokenMinter, logf func(string, ...any)) {
 	if store == nil || preparer == nil {
 		return
 	}
-	if interval <= 0 {
-		interval = 30 * time.Second
-	}
-	reconcileTestSlots(ctx, store, preparer, minter, 30*time.Second, logf)
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			reconcileTestSlots(ctx, store, preparer, minter, 30*time.Second, logf)
-		}
-	}
-}
-
-func reconcileTestSlots(ctx context.Context, store ReadStore, preparer TestSlotPreparer, minter NativeGitHubTokenMinter, minAge time.Duration, logf func(string, ...any)) int {
-	if store == nil || preparer == nil {
-		return 0
-	}
 	stateStore, ok := store.(StateStore)
 	if !ok || stateStore == nil {
-		return 0
+		return
 	}
 	projects, err := store.ListProjects(ctx)
 	if err != nil {
 		if logf != nil {
-			logf("test-slot reconciliation list projects failed: %v", err)
+			logf("test-slot recovery list projects failed: %v", err)
 		}
-		return 0
+		return
 	}
 	leases, err := stateStore.ListLeases(ctx)
 	if err != nil {
 		if logf != nil {
-			logf("test-slot reconciliation list leases failed: %v", err)
+			logf("test-slot recovery list leases failed: %v", err)
 		}
-		return 0
+		return
 	}
 	projectsByKey := map[string]Project{}
 	for _, project := range projects {
@@ -787,9 +795,8 @@ func reconcileTestSlots(ctx context.Context, store ReadStore, preparer TestSlotP
 			projectsByKey[project.ID] = project
 		}
 	}
-	started := 0
-	now := time.Now()
 	claimedSlots := map[string]map[int]bool{}
+	claimedLeases := map[string]map[int]Lease{}
 	for _, lease := range leases {
 		if lease.State != "claimed" || !boolFromMap(lease.Metadata, "test_slot_checkout") {
 			continue
@@ -805,52 +812,46 @@ func reconcileTestSlots(ctx context.Context, store ReadStore, preparer TestSlotP
 		projectKey := firstNonEmpty(project.Name, project.ID, lease.Project)
 		if claimedSlots[projectKey] == nil {
 			claimedSlots[projectKey] = map[int]bool{}
+			claimedLeases[projectKey] = map[int]Lease{}
 		}
 		claimedSlots[projectKey][*slotIndex] = true
-		if testSlotLeaseExpired(now, lease) {
-			if _, err := setLeaseSlotCleanupStarting(ctx, store, project, lease, testSlotReturnHistoryEntry(lease, testSlotReturnAudit{
-				Source:         "reconciler.test_slot_ttl",
-				CleanupStarted: true,
-			})); err != nil {
-				if logf != nil {
-					logf("record expired test-slot cleanup failed project=%s lease=%s: %v", lease.Project, LeasePublicRefFromLease(lease), err)
-				}
-				continue
-			}
-			if beginTestSlotCleanup(store, preparer, project, lease, true, logf) {
-				started++
-			}
-			continue
-		}
-		status, ok := testEnvironmentSlotStatus(project, *slotIndex)
-		if !ok {
+		claimedLeases[projectKey][*slotIndex] = lease
+
+		// Re-arm the TTL expiry timer. The lease was claimed by a previous
+		// glimmung process whose in-memory timer died with it; the durable
+		// `assigned_at + ttl_seconds` lets us reconstruct the deadline.
+		armLeaseExpiryTimer(store, preparer, project, lease, logf)
+
+		// Resume in-flight per-slot work that the previous process started
+		// but did not finish. testSlotActivations / testSlotCleanups dedup
+		// per-lease so a fresh handler request that races with this is safe.
+		status, hasStatus := testEnvironmentSlotStatus(project, *slotIndex)
+		if !hasStatus {
 			continue
 		}
 		switch status.State {
 		case testSlotStateActivating:
-			if !status.UpdatedAt.IsZero() && now.Sub(status.UpdatedAt) < minAge {
-				continue
-			}
-			if beginTestSlotActivation(store, preparer, minter, project, lease, logf) {
-				started++
-			}
+			beginTestSlotActivation(store, preparer, minter, project, lease, logf)
 		case testSlotStateCleaning:
-			if !status.UpdatedAt.IsZero() && now.Sub(status.UpdatedAt) < minAge {
-				continue
-			}
-			if beginTestSlotCleanup(store, preparer, project, lease, true, logf) {
-				started++
-			}
+			beginTestSlotCleanup(store, preparer, project, lease, true, logf)
 		case testSlotStateActive:
+			// Installer cleanup is a one-shot at end of activation; on
+			// startup, drive it once defensively for slots that reached
+			// active before the previous process exited.
 			cleanupTestSlotInstaller(ctx, preparer, lease, project, logf)
 		}
 	}
+
 	for _, project := range projects {
 		projectName := firstNonEmpty(project.Name, project.ID)
 		if projectName == "" {
 			continue
 		}
 		statuses := testEnvironmentSlotStatuses(project)
+
+		// Resume `cleaning` for slots whose lease is already gone — that's
+		// the "cleanup started, lease released, but cleanup goroutine died"
+		// recovery case.
 		for slotIndex, status := range statuses {
 			if status.State != testSlotStateCleaning {
 				continue
@@ -858,49 +859,53 @@ func reconcileTestSlots(ctx context.Context, store ReadStore, preparer TestSlotP
 			if claimedSlots[projectName][slotIndex] {
 				continue
 			}
-			if !status.UpdatedAt.IsZero() && now.Sub(status.UpdatedAt) < minAge {
-				continue
-			}
 			slotName := status.SlotName
 			if strings.TrimSpace(slotName) == "" {
 				slotName = testEnvironmentName(projectName, slotIndex, project, Lease{})
 			}
 			lease := testEnvironmentWarmupLease(project, slotIndex, slotName)
-			if beginTestSlotCleanup(store, preparer, project, lease, false, logf) {
-				started++
-			}
+			beginTestSlotCleanup(store, preparer, project, lease, false, logf)
 		}
 
-		// Seed missing slot records (count is set but the slot is absent from
-		// `slots[*]`) and resume stale `warming` entries. Warming is durable
-		// reconciler work, not a one-shot side effect of PATCH count: a slot
-		// whose preliminary reconciliation crashed, was rolled back, or never
-		// ran will be picked up here on the next tick.
-		slotCount := projectTestSlotCount(Settings{}, project)
-		for slotIndex := 1; slotIndex <= slotCount; slotIndex++ {
-			if claimedSlots[projectName][slotIndex] {
-				// A claimed lease drives its own lifecycle (activation /
-				// cleaning / active). Don't re-warm under it.
-				continue
-			}
-			status, hasStatus := statuses[slotIndex]
-			switch {
-			case !hasStatus:
-				// missing entirely → seed and warm
-			case status.State == testSlotStateWarming:
-				if !status.UpdatedAt.IsZero() && now.Sub(status.UpdatedAt) < minAge {
-					continue
-				}
-				// stale warming → resume
-			default:
-				continue
-			}
-			if beginTestSlotWarmup(store, preparer, project, slotIndex, logf) {
-				started++
-			}
-		}
+		// Warm missing or stale-`warming` slots. Same per-slot dedup as the
+		// PATCH-count handler uses, so racing startup-vs-PATCH is safe.
+		EnsureProjectTestSlotsWarmed(ctx, store, preparer, project, claimedSlots[projectName], logf)
 	}
-	return started
+}
+
+// EnsureProjectTestSlotsWarmed walks `1..count` for the project and fires a
+// warm goroutine for every slot index whose `slots[*]` entry is missing or
+// stale `warming`. Called from two triggers: PATCH /test-environments/count
+// (immediately after the count is written) and the startup recovery sweep.
+// Both paths dedup via `testSlotWarmups`, so the same trigger firing twice or
+// the two triggers racing each other are both safe.
+func EnsureProjectTestSlotsWarmed(_ context.Context, store ReadStore, preparer TestSlotPreparer, project Project, claimed map[int]bool, logf func(string, ...any)) {
+	if preparer == nil {
+		return
+	}
+	slotCount := projectTestSlotCount(Settings{}, project)
+	if slotCount <= 0 {
+		return
+	}
+	statuses := testEnvironmentSlotStatuses(project)
+	for slotIndex := 1; slotIndex <= slotCount; slotIndex++ {
+		if claimed[slotIndex] {
+			// A claimed lease drives its own lifecycle (activation /
+			// cleaning / active). Don't re-warm under it.
+			continue
+		}
+		status, hasStatus := statuses[slotIndex]
+		switch {
+		case !hasStatus:
+			// missing entirely → seed and warm
+		case status.State == testSlotStateWarming:
+			// in-flight warming whose goroutine may have died; the
+			// per-slot dedup map decides whether to actually re-fire
+		default:
+			continue
+		}
+		beginTestSlotWarmup(store, preparer, project, slotIndex, logf)
+	}
 }
 
 // testSlotWarmups serializes warmup work per slot so concurrent reconciler
@@ -981,24 +986,6 @@ func warmTestSlot(ctx context.Context, store ReadStore, preparer TestSlotPrepare
 	}); err != nil && logf != nil {
 		logf("test-slot warmup record ready failed project=%s slot=%s: %v", projectKey, slotName, err)
 	}
-}
-
-func testSlotLeaseExpired(now time.Time, lease Lease) bool {
-	if lease.State != "claimed" || !boolFromMap(lease.Metadata, "test_slot_checkout") {
-		return false
-	}
-	ttl := defaultTTLSeconds(lease.TTLSeconds)
-	if ttl <= 0 {
-		return false
-	}
-	started := lease.RequestedAt
-	if lease.AssignedAt != nil {
-		started = *lease.AssignedAt
-	}
-	if started.IsZero() {
-		return false
-	}
-	return !now.Before(started.Add(time.Duration(ttl) * time.Second))
 }
 
 func resolveTestSlotLease(r *http.Request, store StateStore, req TestSlotReturnRequest) (Lease, error) {

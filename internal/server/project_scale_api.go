@@ -179,12 +179,14 @@ func scaleProjectTestEnvironments(store ReadStore, workloadIdentities NativeWork
 				return
 			}
 		}
-		// Warming is durable reconciler work, not a synchronous side effect of
-		// this handler. The test-slot reconciler (StartTestSlotReconcilerLoop)
-		// seeds missing slot status records and resumes stale `warming`
-		// entries on its next tick. A handler that blocked here would mean a
-		// crash, restart, or rollout during warmup left the project doc
-		// permanently inconsistent — see the slot lifecycle doc.
+		// Fire warmup for any newly added slots. The handler returns as soon
+		// as the goroutines are queued; clients poll /v1/state for readiness.
+		// Process restart between this PATCH and warmup completion is covered
+		// by RecoverInFlightTestSlots, which re-fires for any slot still in
+		// `warming` or missing entirely. No polling loop sits in between.
+		if preparer != nil && *req.Count > 0 {
+			EnsureProjectTestSlotsWarmed(r.Context(), store, preparer, updated, nil, nil)
+		}
 		writeJSON(w, http.StatusOK, updated)
 	}
 }

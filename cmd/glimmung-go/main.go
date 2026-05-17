@@ -50,7 +50,13 @@ func main() {
 	}
 	if store != nil {
 		if nativeMinter, ok := ghClient.(server.NativeGitHubTokenMinter); ok {
-			go server.StartTestSlotReconcilerLoop(context.Background(), store, nativeLauncher, nativeMinter, 15*time.Second, log.Printf)
+			// One-shot recovery sweep at startup: re-arm per-lease TTL
+			// timers, resume in-flight warming/activating/cleaning work, and
+			// warm any slots that should exist by count but have no record
+			// yet. After this returns, the test-slot lifecycle is purely
+			// event-driven — HTTP handlers and per-lease AfterFunc timers,
+			// no polling loop.
+			go server.RecoverInFlightTestSlots(context.Background(), store, nativeLauncher, nativeMinter, log.Printf)
 		}
 	}
 	addr := ":" + settings.Port
