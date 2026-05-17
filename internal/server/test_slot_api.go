@@ -267,8 +267,29 @@ func returnTestSlot(store ReadStore, preparer TestSlotPreparer, _ NativeGitHubTo
 	}
 }
 
-func markLeaseSlotStatus(ctx context.Context, store ReadStore, project Project, lease Lease, state string, cause error) {
-	_, _ = setLeaseSlotStatus(ctx, store, project, lease, state, cause)
+// markLeaseSlotStatus is a fire-and-forget wrapper for the small number
+// of call sites that just want to flip the slot's state without caring
+// about errors (e.g., recording an `error` state when a goroutine bails
+// mid-flight and the caller is already returning the user-facing error).
+// Routes to the appropriate Mark* helper based on the requested state.
+func markLeaseSlotStatus(ctx context.Context, store ReadStore, _ Project, lease Lease, state string, cause error) {
+	now := time.Now().UTC()
+	switch state {
+	case testSlotStateActivating:
+		_, _ = markLeaseSlotActivating(ctx, store, lease, testSlotInstallerJobName(lease), now)
+	case testSlotStateActive:
+		_, _ = markLeaseSlotRunning(ctx, store, lease, now)
+	case testSlotStateCleaning:
+		_, _ = markLeaseSlotCleaning(ctx, store, lease, now)
+	case testSlotStateReady:
+		_, _ = markLeaseSlotCleaned(ctx, store, lease, now)
+	case "error":
+		c := cause
+		if c == nil {
+			c = errors.New("test-slot transition to error without cause")
+		}
+		_, _ = markLeaseSlotError(ctx, store, lease, now, c)
+	}
 }
 
 type testSlotStatusMutation func(*TestEnvironmentSlotStatus, time.Time)
@@ -281,40 +302,33 @@ type testSlotReturnAudit struct {
 	CleanupStarted  bool
 }
 
-func setLeaseSlotActivationStarting(ctx context.Context, store ReadStore, project Project, lease Lease) (Project, error) {
-	return setLeaseSlotStatus(ctx, store, project, lease, testSlotStateActivating, nil, func(status *TestEnvironmentSlotStatus, now time.Time) {
-		if attempt := testSlotActivationAttempt(lease); attempt != nil {
-			status.ActivationAttempt = attempt
-		}
-		state := testSlotStateActivating
-		jobName := testSlotInstallerJobName(lease)
-		status.ActivationState = &state
-		status.ActivationStartedAt = &now
-		status.ActivationCompletedAt = nil
-		status.ActivationJobName = &jobName
-		status.ActivationError = nil
-	})
+func setLeaseSlotActivationStarting(ctx context.Context, store ReadStore, _ Project, lease Lease) (Project, error) {
+	jobName := testSlotInstallerJobName(lease)
+	if _, err := markLeaseSlotActivating(ctx, store, lease, jobName, time.Now().UTC()); err != nil {
+		return Project{}, err
+	}
+	return Project{}, nil
 }
 
-func setLeaseSlotActivationFinished(ctx context.Context, store ReadStore, project Project, lease Lease, state string, cause error) (Project, error) {
-	return setLeaseSlotStatus(ctx, store, project, lease, state, cause, func(status *TestEnvironmentSlotStatus, now time.Time) {
-		if attempt := testSlotActivationAttempt(lease); attempt != nil {
-			status.ActivationAttempt = attempt
+func setLeaseSlotActivationFinished(ctx context.Context, store ReadStore, _ Project, lease Lease, state string, cause error) (Project, error) {
+	now := time.Now().UTC()
+	switch state {
+	case testSlotStateActive:
+		if _, err := markLeaseSlotRunning(ctx, store, lease, now); err != nil {
+			return Project{}, err
 		}
-		if status.ActivationStartedAt == nil {
-			status.ActivationStartedAt = &now
+	case "error":
+		errMsg := cause
+		if errMsg == nil {
+			errMsg = errors.New("activation failed without cause")
 		}
-		jobName := testSlotInstallerJobName(lease)
-		status.ActivationState = &state
-		status.ActivationCompletedAt = &now
-		status.ActivationJobName = &jobName
-		if cause != nil {
-			text := cause.Error()
-			status.ActivationError = &text
-		} else {
-			status.ActivationError = nil
+		if _, err := markLeaseSlotError(ctx, store, lease, now, errMsg); err != nil {
+			return Project{}, err
 		}
-	})
+	default:
+		return Project{}, fmt.Errorf("setLeaseSlotActivationFinished: unsupported state %q", state)
+	}
+	return Project{}, nil
 }
 
 func testSlotReturnHistoryEntry(lease Lease, audit testSlotReturnAudit) TestSlotReturnHistoryEntry {
@@ -376,124 +390,90 @@ func stringPointerOrDefault(value *string, fallback string) string {
 	return fallback
 }
 
-func setLeaseSlotCleanupStarting(ctx context.Context, store ReadStore, project Project, lease Lease, historyEntries ...TestSlotReturnHistoryEntry) (Project, error) {
-	return setLeaseSlotStatus(ctx, store, project, lease, testSlotStateCleaning, nil, func(status *TestEnvironmentSlotStatus, now time.Time) {
-		state := testSlotStateCleaning
-		status.CleanupState = &state
-		status.CleanupStartedAt = &now
-		status.CleanupCompletedAt = nil
-		status.CleanupError = nil
-		status.ReturnHistory = appendBoundedTestSlotReturnHistory(status.ReturnHistory, historyEntries...)
-	})
+func setLeaseSlotCleanupStarting(ctx context.Context, store ReadStore, _ Project, lease Lease, historyEntries ...TestSlotReturnHistoryEntry) (Project, error) {
+	now := time.Now().UTC()
+	if _, err := markLeaseSlotCleaning(ctx, store, lease, now); err != nil {
+		return Project{}, err
+	}
+	for _, entry := range historyEntries {
+		if entry.Event == "" {
+			continue
+		}
+		if err := appendLeaseSlotHistory(ctx, store, slotHistoryEntryFromLegacy(entry)); err != nil {
+			return Project{}, err
+		}
+	}
+	return Project{}, nil
 }
 
-func appendLeaseSlotReturnHistory(ctx context.Context, store ReadStore, project Project, lease Lease, historyEntry TestSlotReturnHistoryEntry) (Project, error) {
+// slotHistoryEntryFromLegacy translates a legacy TestSlotReturnHistoryEntry
+// into the new SlotHistoryEntry shape. The two structs are field-equivalent
+// modulo the ID column; the ID is left blank so AppendSlotHistory assigns
+// a uuid.
+func slotHistoryEntryFromLegacy(entry TestSlotReturnHistoryEntry) SlotHistoryEntry {
+	return SlotHistoryEntry{
+		Event:           entry.Event,
+		CreatedAt:       entry.CreatedAt,
+		Project:         entry.Project,
+		SlotIndex:       entry.SlotIndex,
+		SlotName:        entry.SlotName,
+		LeaseRef:        entry.LeaseRef,
+		LeaseNumber:     entry.LeaseNumber,
+		LeaseRequester:  entry.LeaseRequester,
+		CallerPodIP:     entry.CallerPodIP,
+		CallerSessionID: entry.CallerSessionID,
+		Source:          entry.Source,
+		Reason:          entry.Reason,
+		CleanupStarted:  entry.CleanupStarted,
+	}
+}
+
+func appendLeaseSlotReturnHistory(ctx context.Context, store ReadStore, _ Project, lease Lease, historyEntry TestSlotReturnHistoryEntry) (Project, error) {
 	if historyEntry.Event == "" {
 		return Project{}, nil
 	}
-	writer, ok := store.(ProjectTestEnvironmentSlotStatusWriter)
-	if !ok || writer == nil {
-		return Project{}, errors.New("test-slot status store not configured")
+	if err := appendLeaseSlotHistory(ctx, store, slotHistoryEntryFromLegacy(historyEntry)); err != nil {
+		return Project{}, err
 	}
-	slotIndex := nativeSlotIndexFromMetadata(lease.Metadata)
-	slotName := nativeSlotNameFromMetadata(lease.Metadata)
-	if slotIndex == nil || slotName == nil {
-		return Project{}, errors.New("test-slot lease is missing slot metadata")
-	}
-	status := TestEnvironmentSlotStatus{
-		SlotIndex: *slotIndex,
-		SlotName:  *slotName,
-		State:     testSlotStateReady,
-		UpdatedAt: time.Now().UTC(),
-	}
-	if current, ok := currentLeaseSlotStatus(ctx, store, project, lease, *slotIndex); ok {
-		status = current
-		if status.SlotName == "" {
-			status.SlotName = *slotName
-		}
-		if status.State == "" {
-			status.State = testSlotStateReady
-		}
-		status.UpdatedAt = time.Now().UTC()
-	}
-	status.ReturnHistory = appendBoundedTestSlotReturnHistory(status.ReturnHistory, historyEntry)
-	return writer.SetProjectTestEnvironmentSlotStatus(ctx, firstNonEmpty(lease.Project, project.ID, project.Name), status)
+	return Project{}, nil
 }
 
-func setLeaseSlotCleanupFinished(ctx context.Context, store ReadStore, project Project, lease Lease, state string, cause error) (Project, error) {
-	return setLeaseSlotStatus(ctx, store, project, lease, state, cause, func(status *TestEnvironmentSlotStatus, now time.Time) {
-		status.CleanupState = &state
-		if status.CleanupStartedAt == nil {
-			status.CleanupStartedAt = &now
-		}
-		status.CleanupCompletedAt = &now
-		if cause != nil {
-			text := cause.Error()
-			status.CleanupError = &text
-		} else {
-			status.CleanupError = nil
-		}
-		// Slot status fields describe current state, not history. Once a
-		// clean cleanup returns the slot to the pool, the previous lease's
-		// activation_* fields are stale — leaving them populated forces the
-		// dashboard (and every other consumer) to encode "is this field
-		// still meaningful?" judgment in the rendering layer instead of
-		// trusting the data. ReturnHistory below preserves the audit trail
-		// of who used the slot and why it was returned.
-		//
-		// On the error path we keep the activation_* fields visible — they
-		// are diagnostic context for the operator who has to repair the
-		// slot.
-		if cause == nil && state == testSlotStateReady {
-			status.ActivationAttempt = nil
-			status.ActivationState = nil
-			status.ActivationStartedAt = nil
-			status.ActivationCompletedAt = nil
-			status.ActivationJobName = nil
-			status.ActivationError = nil
-		}
-	})
-}
-
-func setLeaseSlotStatus(ctx context.Context, store ReadStore, project Project, lease Lease, state string, cause error, mutations ...testSlotStatusMutation) (Project, error) {
-	writer, ok := store.(ProjectTestEnvironmentSlotStatusWriter)
-	if !ok || writer == nil {
-		return Project{}, errors.New("test-slot status store not configured")
-	}
-	slotIndex := nativeSlotIndexFromMetadata(lease.Metadata)
-	slotName := nativeSlotNameFromMetadata(lease.Metadata)
-	if slotIndex == nil || slotName == nil {
-		return Project{}, errors.New("test-slot lease is missing slot metadata")
-	}
+func setLeaseSlotCleanupFinished(ctx context.Context, store ReadStore, _ Project, lease Lease, state string, cause error) (Project, error) {
 	now := time.Now().UTC()
-	var detail *string
-	if cause != nil {
-		text := cause.Error()
-		detail = &text
-	}
-	status := TestEnvironmentSlotStatus{
-		SlotIndex: *slotIndex,
-		SlotName:  *slotName,
-	}
-	if current, ok := currentLeaseSlotStatus(ctx, store, project, lease, *slotIndex); ok {
-		status = current
-		if status.SlotName == "" {
-			status.SlotName = *slotName
+	switch state {
+	case testSlotStateReady:
+		if _, err := markLeaseSlotCleaned(ctx, store, lease, now); err != nil {
+			return Project{}, err
 		}
-	}
-	status.State = state
-	status.UpdatedAt = now
-	status.Detail = detail
-	if state == testSlotStateReady {
-		status.ReadyAt = &now
-	}
-	for _, mutate := range mutations {
-		if mutate != nil {
-			mutate(&status, now)
+	case "error":
+		errMsg := cause
+		if errMsg == nil {
+			errMsg = errors.New("cleanup failed without cause")
 		}
+		// Ensure the slot is in `cleaning` before transitioning to
+		// error. The cleanup-pathway contract is that cleanup-finished
+		// reports the outcome of a cleanup; the error therefore
+		// belongs to the cleanup phase (CleanupError), not the
+		// activation phase. Walking through cleaning makes MarkError
+		// populate the correct phase-specific error field.
+		if _, err := markLeaseSlotCleaning(ctx, store, lease, now); err != nil && !errors.Is(err, ErrInvalidSlotTransition) {
+			return Project{}, err
+		}
+		if _, err := markLeaseSlotError(ctx, store, lease, now, errMsg); err != nil {
+			return Project{}, err
+		}
+	default:
+		return Project{}, fmt.Errorf("setLeaseSlotCleanupFinished: unsupported state %q", state)
 	}
-	return writer.SetProjectTestEnvironmentSlotStatus(ctx, firstNonEmpty(lease.Project, project.ID, project.Name), status)
+	return Project{}, nil
 }
+
+// setLeaseSlotStatus and currentLeaseSlotStatus were the central writer/
+// reader against the legacy `project.metadata.native_standby_dns.slots[]`
+// array. Stage 2 of the slot-storage rework replaced them with the
+// markLeaseSlot*/SlotStore.UpdateIfMatch path. The functions stay deleted;
+// any new code path that thinks it needs them should use the Mark* helpers
+// directly so the slot row stays the single source of truth.
 
 func currentLeaseSlotStatus(ctx context.Context, store ReadStore, project Project, lease Lease, slotIndex int) (TestEnvironmentSlotStatus, bool) {
 	projects, err := store.ListProjects(ctx)
@@ -801,26 +781,26 @@ func sameTestSlotLease(left Lease, right Lease) bool {
 }
 
 func testSlotLeaseStillActivating(ctx context.Context, store ReadStore, project Project, lease Lease) bool {
-	return testSlotLeaseStillState(ctx, store, project, lease, testSlotStateActivating)
+	return testSlotLeaseStillState(ctx, store, project, lease, SlotStateActivating)
 }
 
-func testSlotLeaseStillState(ctx context.Context, store ReadStore, project Project, lease Lease, state string) bool {
+func testSlotLeaseStillState(ctx context.Context, store ReadStore, _ Project, lease Lease, state string) bool {
 	slotIndex := nativeSlotIndexFromMetadata(lease.Metadata)
 	if slotIndex == nil {
 		return false
 	}
-	projects, err := store.ListProjects(ctx)
-	if err != nil {
+	slotStore := slotStoreFromReadStore(store)
+	if slotStore == nil {
 		return true
 	}
-	for _, current := range projects {
-		if current.Name != lease.Project && current.ID != lease.Project && current.Name != project.Name && current.ID != project.ID {
-			continue
-		}
-		status, ok := testEnvironmentSlotStatus(current, *slotIndex)
-		return ok && status.State == state
+	slot, err := slotStore.GetSlot(ctx, lease.Project, *slotIndex)
+	if err != nil {
+		// Slot doc missing or other store error: be defensive and let the
+		// caller proceed (the only consequence is a redundant transition
+		// attempt that the state machine will catch).
+		return true
 	}
-	return false
+	return slot.State == state
 }
 
 // recoveryMinAge is the lower bound on `updated_at` for an in-flight status
@@ -856,6 +836,17 @@ func RecoverInFlightTestSlots(ctx context.Context, store ReadStore, preparer Tes
 	stateStore, ok := store.(StateStore)
 	if !ok || stateStore == nil {
 		return
+	}
+	// Idempotent slot-storage migration: copies any project's legacy
+	// `metadata.native_standby_dns.slots[]` array into the `slots`
+	// collection. Production startup runs this before recovery via
+	// cmd/glimmung-go/main.go; calling it again here is a no-op when the
+	// legacy arrays are already stripped, but it keeps tests and any
+	// uncommon boot order working without extra setup.
+	if _, err := MigrateProjectSlotsIntoCollection(ctx, store); err != nil {
+		if logf != nil {
+			logf("test-slot recovery slot-storage migration failed: %v", err)
+		}
 	}
 	projects, err := store.ListProjects(ctx)
 	if err != nil {
@@ -1047,45 +1038,50 @@ func beginTestSlotWarmup(store ReadStore, preparer TestSlotPreparer, project Pro
 }
 
 func warmTestSlot(ctx context.Context, store ReadStore, preparer TestSlotPreparer, project Project, slotIndex int, slotName string, logf func(string, ...any)) {
-	writer, ok := store.(ProjectTestEnvironmentSlotStatusWriter)
-	if !ok || writer == nil {
-		if logf != nil {
-			logf("test-slot warmup skipped: status writer not configured project=%s slot=%s", firstNonEmpty(project.Name, project.ID), slotName)
-		}
+	projectKey := firstNonEmpty(project.Name, project.ID)
+	if projectKey == "" {
 		return
 	}
-	projectKey := firstNonEmpty(project.Name, project.ID)
 	now := time.Now().UTC()
 
-	// Cross-replica dedup: write the initial `warming` status with an
-	// etag-conditional ReplaceItem so two racing pods don't both kick off
-	// concurrent Helm installs against the same release. The first writer
-	// wins; the loser gets ErrPreconditionFailed and returns. Falls back to
-	// an unconditional write for stores that don't implement the CAS
-	// interface (test fakes).
-	updated, err := claimTestSlotWarmup(ctx, store, writer, projectKey, slotIndex, slotName, now)
-	if err != nil {
-		if errors.Is(err, ErrPreconditionFailed) {
-			// Another replica is starting warmup for this slot. Their
-			// goroutine owns the Helm install; ours is a no-op.
-			return
-		}
+	// Ensure the slot doc exists in the `slots` collection. PATCH-count
+	// and boot recovery normally seed it; this call is a defensive
+	// idempotent guarantee for any path that fires warmup without going
+	// through those seeders (in particular: tests).
+	if _, err := ensureSlotExists(ctx, store, projectKey, slotIndex, slotName, now); err != nil {
 		if logf != nil {
-			logf("test-slot warmup record start failed project=%s slot=%s: %v", projectKey, slotName, err)
+			logf("test-slot warmup ensure-slot-exists failed project=%s slot=%s: %v", projectKey, slotName, err)
 		}
 		return
 	}
-	current := updated
-	lease := testEnvironmentWarmupLease(current, slotIndex, slotName)
-	if err := preparer.EnsureTestSlotPreliminaries(ctx, lease, current); err != nil {
-		detail := err.Error()
-		if _, writeErr := writer.SetProjectTestEnvironmentSlotStatus(ctx, projectKey, TestEnvironmentSlotStatus{
-			SlotIndex: slotIndex,
-			SlotName:  slotName,
-			State:     "error",
-			UpdatedAt: time.Now().UTC(),
-			Detail:    &detail,
-		}); writeErr != nil && logf != nil {
+
+	// Transition unseeded -> provisioning via per-slot CAS. Two racing
+	// goroutines (recovery sweep + PATCH-count handler, two replicas
+	// during a rollout) take this transition together; exactly one's
+	// write commits, the other gets ErrPreconditionFailed and exits.
+	// No cross-slot contention exists — each slot is its own doc.
+	if _, err := markSlotProvisioning(ctx, store, projectKey, slotIndex, now); err != nil {
+		switch {
+		case errors.Is(err, ErrPreconditionFailed):
+			// Another goroutine won the claim; ours is a no-op.
+			return
+		case errors.Is(err, ErrInvalidSlotTransition):
+			// Slot is already past the unseeded->provisioning gate
+			// (provisioned, activating, running, cleaning, or error).
+			// The recovery sweep should already be skipping these,
+			// but tolerate the race silently.
+			return
+		default:
+			if logf != nil {
+				logf("test-slot warmup mark-provisioning failed project=%s slot=%s: %v", projectKey, slotName, err)
+			}
+			return
+		}
+	}
+
+	lease := testEnvironmentWarmupLease(project, slotIndex, slotName)
+	if err := preparer.EnsureTestSlotPreliminaries(ctx, lease, project); err != nil {
+		if _, writeErr := markSlotError(ctx, store, projectKey, slotIndex, time.Now().UTC(), err); writeErr != nil && logf != nil {
 			logf("test-slot warmup record error failed project=%s slot=%s: %v", projectKey, slotName, writeErr)
 		}
 		if logf != nil {
@@ -1093,16 +1089,9 @@ func warmTestSlot(ctx context.Context, store ReadStore, preparer TestSlotPrepare
 		}
 		return
 	}
-	cleanupTestSlotInstaller(ctx, preparer, lease, current, logf)
-	readyAt := time.Now().UTC()
-	if _, err := writer.SetProjectTestEnvironmentSlotStatus(ctx, projectKey, TestEnvironmentSlotStatus{
-		SlotIndex: slotIndex,
-		SlotName:  slotName,
-		State:     testSlotStateReady,
-		UpdatedAt: readyAt,
-		ReadyAt:   &readyAt,
-	}); err != nil && logf != nil {
-		logf("test-slot warmup record ready failed project=%s slot=%s: %v", projectKey, slotName, err)
+	cleanupTestSlotInstaller(ctx, preparer, lease, project, logf)
+	if _, err := markSlotProvisioned(ctx, store, projectKey, slotIndex, time.Now().UTC()); err != nil && logf != nil {
+		logf("test-slot warmup mark-provisioned failed project=%s slot=%s: %v", projectKey, slotName, err)
 	}
 }
 

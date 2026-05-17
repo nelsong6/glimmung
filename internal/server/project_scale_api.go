@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -16,25 +17,18 @@ type ProjectTestEnvironmentScaler interface {
 	SetProjectTestEnvironmentCount(ctx context.Context, project string, count int) (Project, error)
 }
 
-type ProjectTestEnvironmentSlotStatusWriter interface {
-	SetProjectTestEnvironmentSlotStatus(ctx context.Context, project string, status TestEnvironmentSlotStatus) (Project, error)
-}
+// ProjectTestEnvironmentSlotStatusWriter and
+// ProjectTestEnvironmentSlotStatusClaimer were retired with the slot-
+// storage rework. Slot status now lives in its own collection; writes
+// go through SlotStore.UpdateIfMatch which carries its own per-row
+// etag CAS. See docs/test-slot-lifecycle.md.
 
 // ProjectReader exposes a single-doc read that captures the Cosmos etag on
-// the returned Project (Project.ETag()). Required by callers doing
-// optimistic-concurrency writes (e.g., the test-slot cleanup claim).
+// the returned Project (Project.ETag()). Still used by callers doing
+// optimistic-concurrency writes against the project doc itself (e.g.,
+// scale handlers updating count).
 type ProjectReader interface {
 	ReadProject(ctx context.Context, project string) (Project, error)
-}
-
-// ProjectTestEnvironmentSlotStatusClaimer is the etag-conditional companion
-// of ProjectTestEnvironmentSlotStatusWriter. If `ifMatchEtag` is non-empty
-// and the project doc's etag has changed since it was read, the call
-// returns ErrPreconditionFailed without mutating anything. Callers racing
-// on a claim (timer-fire cleanup across multiple replicas) handle that as
-// "another replica won the claim, no-op."
-type ProjectTestEnvironmentSlotStatusClaimer interface {
-	SetProjectTestEnvironmentSlotStatusIfMatch(ctx context.Context, project string, status TestEnvironmentSlotStatus, ifMatchEtag string) (Project, error)
 }
 
 type TestEnvironmentScaleRequest struct {
@@ -107,7 +101,10 @@ func scaleProjectTestEnvironments(store ReadStore, workloadIdentities NativeWork
 		}
 		var removedSlots []TestEnvironmentSlotStatus
 		if hasBefore {
-			removedSlots = testEnvironmentSlotsAboveCount(before, *req.Count)
+			removedSlots = mergeRemovedSlots(
+				testEnvironmentSlotsAboveCount(before, *req.Count),
+				slotsAboveCountFromStore(r.Context(), store, project, *req.Count),
+			)
 		}
 		if hasBefore && len(removedSlots) > 0 {
 			activeRemoved, err := activeTestSlotLeasesAboveCount(r.Context(), store, before, project, *req.Count)
@@ -196,11 +193,31 @@ func scaleProjectTestEnvironments(store ReadStore, workloadIdentities NativeWork
 				return
 			}
 		}
+		// Delete slot docs above the new count. Idempotent.
+		if slotStore := slotStoreFromReadStore(store); slotStore != nil {
+			for _, removed := range removedSlots {
+				if err := slotStore.DeleteSlot(r.Context(), project, removed.SlotIndex); err != nil {
+					log.Printf("scale down: delete slot doc project=%s slot=%d failed: %v", project, removed.SlotIndex, err)
+				}
+			}
+		}
+		// Pre-create slot docs in `unseeded` state for indices that
+		// should now exist. Idempotent; existing slots are left alone.
+		// Warmup fires below for any that this just seeded.
+		if slotStore := slotStoreFromReadStore(store); slotStore != nil {
+			now := time.Now().UTC()
+			for slotIndex := 1; slotIndex <= *req.Count; slotIndex++ {
+				slotName := testEnvironmentName(project, slotIndex, updated, Lease{})
+				if _, err := slotStore.CreateSlot(r.Context(), NewUnseededSlot(project, slotIndex, slotName, now)); err != nil {
+					log.Printf("scale up: ensure slot doc project=%s slot=%d failed: %v", project, slotIndex, err)
+				}
+			}
+		}
 		// Fire warmup for any newly added slots. The handler returns as soon
 		// as the goroutines are queued; clients poll /v1/state for readiness.
 		// Process restart between this PATCH and warmup completion is covered
 		// by RecoverInFlightTestSlots, which re-fires for any slot still in
-		// `warming` or missing entirely. No polling loop sits in between.
+		// `provisioning` or `unseeded`. No polling loop sits in between.
 		if preparer != nil && *req.Count > 0 {
 			EnsureProjectTestSlotsWarmed(r.Context(), store, preparer, updated, nil, nil)
 		}
@@ -319,6 +336,59 @@ func testEnvironmentSlotsAboveCount(project Project, count int) []TestEnvironmen
 		return removed[i].SlotIndex < removed[j].SlotIndex
 	})
 	return removed
+}
+
+// slotsAboveCountFromStore reads the new `slots` collection for the given
+// project and returns slot rows whose index exceeds the new count. After
+// the slot-storage migration runs, this is the canonical source of "which
+// slots need to be deprovisioned for a scale-down."
+func slotsAboveCountFromStore(ctx context.Context, store ReadStore, project string, count int) []TestEnvironmentSlotStatus {
+	slotStore := slotStoreFromReadStore(store)
+	if slotStore == nil {
+		return nil
+	}
+	slots, err := slotStore.ListSlotsByProject(ctx, project)
+	if err != nil {
+		return nil
+	}
+	out := make([]TestEnvironmentSlotStatus, 0)
+	for _, s := range slots {
+		if s.SlotIndex <= count {
+			continue
+		}
+		out = append(out, TestEnvironmentSlotStatus{
+			SlotIndex: s.SlotIndex,
+			SlotName:  s.SlotName,
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].SlotIndex < out[j].SlotIndex })
+	return out
+}
+
+// mergeRemovedSlots dedups by slot index, preferring entries with a
+// non-empty slot_name. Used by the PATCH-count handler so the slot-removal
+// set is the union of legacy-array view and new-collection view during the
+// migration window.
+func mergeRemovedSlots(a, b []TestEnvironmentSlotStatus) []TestEnvironmentSlotStatus {
+	byIndex := map[int]TestEnvironmentSlotStatus{}
+	for _, s := range a {
+		byIndex[s.SlotIndex] = s
+	}
+	for _, s := range b {
+		if existing, ok := byIndex[s.SlotIndex]; ok {
+			if strings.TrimSpace(existing.SlotName) == "" && strings.TrimSpace(s.SlotName) != "" {
+				byIndex[s.SlotIndex] = s
+			}
+			continue
+		}
+		byIndex[s.SlotIndex] = s
+	}
+	out := make([]TestEnvironmentSlotStatus, 0, len(byIndex))
+	for _, s := range byIndex {
+		out = append(out, s)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].SlotIndex < out[j].SlotIndex })
+	return out
 }
 
 func testEnvironmentSlotState(project Project, slotIndex int) string {

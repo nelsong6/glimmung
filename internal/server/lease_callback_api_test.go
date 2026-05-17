@@ -22,6 +22,7 @@ type fakeLeaseCallbackStore struct {
 	token        string
 	heartbeats   []string
 	releases     []string
+	slots        *fakeLeaseStore
 }
 
 func (s fakeLeaseCallbackStore) ReadLeaseByCallbackToken(_ context.Context, token string) (Lease, error) {
@@ -120,6 +121,46 @@ func (s *fakeLeaseCallbackStore) SetProjectTestEnvironmentSlotStatus(_ context.C
 		return s.projects[i], nil
 	}
 	return Project{}, ErrNotFound
+}
+
+// SlotStore + SlotHistoryStore methods backed by a sibling fakeLeaseStore.
+// Lifecycle helpers use SlotStore via type assertion on the read store
+// they're handed; the callback API tests pass a *fakeLeaseCallbackStore,
+// so this fake must satisfy both interfaces.
+func (s *fakeLeaseCallbackStore) slotStore() *fakeLeaseStore {
+	if s.slots == nil {
+		s.slots = &fakeLeaseStore{}
+		s.slots.slotStatuses = s.slotStatuses
+	}
+	return s.slots
+}
+
+func (s *fakeLeaseCallbackStore) CreateSlot(ctx context.Context, slot Slot) (Slot, error) {
+	res, err := s.slotStore().CreateSlot(ctx, slot)
+	s.slotStatuses = s.slots.slotStatuses
+	return res, err
+}
+func (s *fakeLeaseCallbackStore) GetSlot(ctx context.Context, project string, slotIndex int) (Slot, error) {
+	return s.slotStore().GetSlot(ctx, project, slotIndex)
+}
+func (s *fakeLeaseCallbackStore) ListSlotsByProject(ctx context.Context, project string) ([]Slot, error) {
+	return s.slotStore().ListSlotsByProject(ctx, project)
+}
+func (s *fakeLeaseCallbackStore) UpdateIfMatch(ctx context.Context, project string, slotIndex int, mutate func(Slot) (Slot, error)) (Slot, error) {
+	res, err := s.slotStore().UpdateIfMatch(ctx, project, slotIndex, mutate)
+	s.slotStatuses = s.slots.slotStatuses
+	return res, err
+}
+func (s *fakeLeaseCallbackStore) DeleteSlot(ctx context.Context, project string, slotIndex int) error {
+	return s.slotStore().DeleteSlot(ctx, project, slotIndex)
+}
+func (s *fakeLeaseCallbackStore) AppendSlotHistory(ctx context.Context, entry SlotHistoryEntry) (SlotHistoryEntry, error) {
+	res, err := s.slotStore().AppendSlotHistory(ctx, entry)
+	s.slotStatuses = s.slots.slotStatuses
+	return res, err
+}
+func (s *fakeLeaseCallbackStore) ListSlotHistory(ctx context.Context, project string, slotIndex *int) ([]SlotHistoryEntry, error) {
+	return s.slotStore().ListSlotHistory(ctx, project, slotIndex)
 }
 
 func TestReadLeaseByCallbackTokenReturnsPublicLease(t *testing.T) {

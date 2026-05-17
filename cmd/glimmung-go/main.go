@@ -48,6 +48,22 @@ func main() {
 	}
 	nativeLauncher := server.NewKubernetesNativeLauncher(settings)
 	if store != nil {
+		// One-shot slot-storage migration: copy any project's legacy
+		// `metadata.native_standby_dns.slots[]` array into the new
+		// `slots` collection, then strip the legacy array. Idempotent —
+		// re-running on every boot is safe. Blocks HTTP server start
+		// so readiness doesn't go live while readers might see a
+		// partially-migrated store.
+		migrationCtx, cancelMigration := context.WithTimeout(context.Background(), 60*time.Second)
+		summary, err := server.MigrateProjectSlotsIntoCollection(migrationCtx, store)
+		cancelMigration()
+		if err != nil {
+			log.Printf("slot-storage migration failed: %v (summary: %s)", err, summary)
+			os.Exit(1)
+		}
+		log.Printf("slot-storage migration ok: %s", summary)
+	}
+	if store != nil {
 		go server.StartSignalDrainLoop(context.Background(), store, nativeLauncher, 15*time.Second, log.Printf)
 	}
 	if store != nil {
