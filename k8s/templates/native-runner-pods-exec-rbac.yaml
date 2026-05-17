@@ -1,0 +1,39 @@
+# Cluster-wide pods/get+list+exec for the native-runner SA.
+#
+# Granted so the apply-hot-swap Job (dispatched by the apply endpoint
+# in internal/server/test_slot_apply_hot_swap_api.go) can `kubectl get
+# pods` and `kubectl exec` into a different namespace — the target
+# slot's session namespace, e.g. tank-operator-slot-2-sessions.
+#
+# The existing native-runner-scaffold-rbac.yaml gives the runner
+# `rolebindings/create` and `clusterroles/bind` for namespaceRole, but
+# scaffolding a rolebinding per slot namespace at apply-time is more
+# moving parts than we need: the apply-hot-swap surface is a single
+# narrow operation (build artifact, tar-stream into target, signal
+# PID 1). A static cluster-scoped pods/exec grant is the minimum
+# addition that makes it work, and it's narrower than the cluster-
+# admin bind capability the runner already has via the scaffold role.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: glimmung-native-runner-pods-exec
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: glimmung-native-runner-pods-exec
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: glimmung-native-runner-pods-exec
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.nativeRunner.serviceAccount }}
+    namespace: {{ .Values.nativeRunner.namespace }}
