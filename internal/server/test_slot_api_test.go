@@ -1292,6 +1292,145 @@ func TestReturnTestSlotReleasesLease(t *testing.T) {
 	}
 }
 
+func TestSetLeaseSlotCleanupFinishedClearsActivationFieldsOnSuccess(t *testing.T) {
+	// Successful cleanup returns the slot to the pool. The previous lease's
+	// activation_* fields are now historical and must not linger — leaving
+	// them populated forces every consumer (dashboard, mcp-glimmung,
+	// operators reading the doc) to encode "is this still meaningful?"
+	// judgment in the rendering layer. The audit trail lives in
+	// ReturnHistory; the activation_* fields describe current state only.
+	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
+	attempt := 77
+	state := testSlotStateActive
+	jobName := "glim-slot-apply-tank-slot-1-77"
+	startedAt := now.Add(-time.Hour)
+	completedAt := now.Add(-time.Hour + 19*time.Second)
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "tank",
+			Name: "tank",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"slot_prefix": "tank-slot",
+				"count":       float64(1),
+				"slots": []any{
+					map[string]any{
+						"slot_index":             float64(1),
+						"slot_name":              "tank-slot-1",
+						"state":                  testSlotStateActive,
+						"updated_at":             now.Format(time.RFC3339Nano),
+						"activation_attempt":     float64(attempt),
+						"activation_state":       state,
+						"activation_started_at":  startedAt.Format(time.RFC3339Nano),
+						"activation_completed_at": completedAt.Format(time.RFC3339Nano),
+						"activation_job_name":    jobName,
+					},
+				},
+			}},
+		}}},
+	}
+	lease := Lease{
+		Project:     "tank",
+		LeaseNumber: intPtr(77),
+		State:       "claimed",
+		Metadata: map[string]any{
+			"test_slot_checkout": true,
+			"native_slot_index":  "1",
+			"native_slot_name":   "tank-slot-1",
+		},
+		RequestedAt: now,
+	}
+
+	if _, err := setLeaseSlotCleanupFinished(context.Background(), store, store.projects[0], lease, testSlotStateReady, nil); err != nil {
+		t.Fatalf("cleanup finished: %v", err)
+	}
+	snap := store.snapshotSlotStatuses()
+	if len(snap) == 0 {
+		t.Fatal("no slot status written")
+	}
+	final := snap[len(snap)-1]
+	if final.State != testSlotStateReady {
+		t.Fatalf("state=%q, want ready", final.State)
+	}
+	if final.ActivationAttempt != nil {
+		t.Errorf("ActivationAttempt=%v, want nil after clean return", *final.ActivationAttempt)
+	}
+	if final.ActivationState != nil {
+		t.Errorf("ActivationState=%q, want nil after clean return", *final.ActivationState)
+	}
+	if final.ActivationStartedAt != nil {
+		t.Errorf("ActivationStartedAt=%v, want nil after clean return", final.ActivationStartedAt)
+	}
+	if final.ActivationCompletedAt != nil {
+		t.Errorf("ActivationCompletedAt=%v, want nil after clean return", final.ActivationCompletedAt)
+	}
+	if final.ActivationJobName != nil {
+		t.Errorf("ActivationJobName=%q, want nil after clean return", *final.ActivationJobName)
+	}
+	if final.ActivationError != nil {
+		t.Errorf("ActivationError=%q, want nil after clean return", *final.ActivationError)
+	}
+	if final.CleanupState == nil || *final.CleanupState != testSlotStateReady {
+		t.Errorf("CleanupState=%v, want ready", final.CleanupState)
+	}
+}
+
+func TestSetLeaseSlotCleanupFinishedPreservesActivationFieldsOnError(t *testing.T) {
+	// Cleanup failed; slot ends in `error`. The activation_* fields stay
+	// visible as diagnostic context for the operator who has to repair —
+	// they're the "what was this slot doing when it broke" trail.
+	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "tank",
+			Name: "tank",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"slot_prefix": "tank-slot",
+				"count":       float64(1),
+				"slots": []any{
+					map[string]any{
+						"slot_index":          float64(1),
+						"slot_name":           "tank-slot-1",
+						"state":               testSlotStateActive,
+						"updated_at":          now.Format(time.RFC3339Nano),
+						"activation_attempt":  float64(77),
+						"activation_state":    testSlotStateActive,
+						"activation_job_name": "glim-slot-apply-tank-slot-1-77",
+					},
+				},
+			}},
+		}}},
+	}
+	lease := Lease{
+		Project:     "tank",
+		LeaseNumber: intPtr(77),
+		State:       "claimed",
+		Metadata: map[string]any{
+			"test_slot_checkout": true,
+			"native_slot_index":  "1",
+			"native_slot_name":   "tank-slot-1",
+		},
+		RequestedAt: now,
+	}
+
+	if _, err := setLeaseSlotCleanupFinished(context.Background(), store, store.projects[0], lease, "error", errors.New("helm uninstall failed: timeout")); err != nil {
+		t.Fatalf("cleanup finished: %v", err)
+	}
+	snap := store.snapshotSlotStatuses()
+	final := snap[len(snap)-1]
+	if final.State != "error" {
+		t.Fatalf("state=%q, want error", final.State)
+	}
+	if final.ActivationAttempt == nil || *final.ActivationAttempt != 77 {
+		t.Errorf("ActivationAttempt=%v, want preserved as 77 on error path", final.ActivationAttempt)
+	}
+	if final.ActivationState == nil || *final.ActivationState != testSlotStateActive {
+		t.Errorf("ActivationState=%v, want preserved on error path", final.ActivationState)
+	}
+	if final.ActivationJobName == nil {
+		t.Error("ActivationJobName=nil, want preserved on error path")
+	}
+}
+
 func TestAppendTestSlotHotSwapHistoryResolvesSlotLease(t *testing.T) {
 	store := &fakeLeaseStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{ID: "tank-operator", Name: "tank-operator"}}},

@@ -2692,12 +2692,19 @@ function testEnvironmentStateLabel(state: TestEnvironment["state"]): string {
 }
 
 function testEnvironmentWorkLabel(env: TestEnvironment): string {
+  // The Work column shows what is happening on the slot *right now*. Errors
+  // surface unconditionally because an erroring slot needs an operator's
+  // attention regardless of its current lifecycle state. Otherwise, only
+  // states that represent in-flight work get a label; settled slots (active,
+  // available, claimed-and-idle) show `-`. Past-tense fields like
+  // activation_attempt or cleanup_state="ready" describe history, not
+  // current work — per the slot status field contract in
+  // docs/test-slot-lifecycle.md they live in the doc but must not be
+  // promoted to a "currently doing" label by the UI.
   if (env.cleanup_error) return "cleanup error";
   if (env.activation_error) return "activation error";
   if (env.state === "cleaning") return compactWorkLabel("cleanup", env.cleanup_state, env.cleanup_started_at);
   if (env.state === "activating") return compactWorkLabel("activation", env.activation_state, env.activation_started_at, env.activation_attempt);
-  if (env.activation_attempt) return `activation #${env.activation_attempt}`;
-  if (env.cleanup_state) return `cleanup ${env.cleanup_state}`;
   return "-";
 }
 

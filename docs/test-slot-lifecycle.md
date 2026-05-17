@@ -240,6 +240,37 @@ Any code path that makes an available unleased slot keep app, proxy, session,
 Playwright, or other steady runtime pods alive violates this contract. Such
 resources must move behind lease activation and be deleted on return.
 
+## Slot Status Field Contract
+
+Every field on a slot's status doc describes the slot's **current** state, not
+its history. When a field is present, consumers may trust that it describes
+something happening or true *right now*.
+
+Concretely:
+
+- `state`, `usable`, `detail`, `updated_at` always reflect the current slot
+  state.
+- `activation_attempt`, `activation_state`, `activation_started_at`,
+  `activation_completed_at`, `activation_job_name`, `activation_error`
+  describe the **current** activation. They are populated while a slot is
+  `activating` or `active` and cleared by the cleanup pathway when the slot
+  returns to the pool (`ready` / `available`). They are deliberately kept on
+  the `error` state so an operator repairing the slot has the diagnostic
+  context for what failed.
+- `cleanup_state`, `cleanup_started_at`, `cleanup_completed_at`,
+  `cleanup_error` describe the current or most recent cleanup of the slot.
+  These are not cleared because they describe the slot itself (last time it
+  was cleaned), not a transient lease's footprint.
+- `test_slot_return_history` is the canonical audit trail of who used the
+  slot, by which lease number, when, and why each return happened. This is
+  the place to look for historical "what lease last used this slot" data;
+  the activation_* fields are not.
+
+Consumers (dashboard, mcp-glimmung tooling, operators) must not encode
+"this field is only meaningful when the slot is in state X" logic in their
+rendering layer. If a field is present, it's current. If it has been
+superseded, the producer clears it.
+
 ## Completion Checklist
 
 The slot system is not complete until all of these are true:
