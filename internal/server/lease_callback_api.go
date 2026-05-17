@@ -145,5 +145,5 @@ func releaseTestSlotLeaseByCallback(w http.ResponseWriter, r *http.Request, stor
 		return
 	}
 	beginTestSlotCleanup(store, preparer, project, lease, true, nil)
-	writeJSON(w, http.StatusAccepted, testSlotReturnResponse(project, lease.Project, lease, testSlotStateCleaning, true))
+	writeJSON(w, http.StatusAccepted, testSlotReturnResponse(project, lease.Project, lease, SlotStateCleaning, true))
 }

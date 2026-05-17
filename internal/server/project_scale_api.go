@@ -99,12 +99,13 @@ func scaleProjectTestEnvironments(store ReadStore, workloadIdentities NativeWork
 			writeInternalError(w, r, err, "list projects failed")
 			return
 		}
+		// removedSlots comes from the slots collection only — the retired
+		// `project.metadata.native_standby_dns.slots[]` embedded array is
+		// no longer a live read path (docs/migration-policy.md
+		// "no parallel path that works for now").
 		var removedSlots []TestEnvironmentSlotStatus
 		if hasBefore {
-			removedSlots = mergeRemovedSlots(
-				testEnvironmentSlotsAboveCount(before, *req.Count),
-				slotsAboveCountFromStore(r.Context(), store, project, *req.Count),
-			)
+			removedSlots = slotsAboveCountFromStore(r.Context(), store, project, *req.Count)
 		}
 		if hasBefore && len(removedSlots) > 0 {
 			activeRemoved, err := activeTestSlotLeasesAboveCount(r.Context(), store, before, project, *req.Count)
@@ -307,41 +308,13 @@ func testEnvironmentWarmupLease(project Project, slotIndex int, slotName string)
 	}
 }
 
-func testEnvironmentSlotsAboveCount(project Project, count int) []TestEnvironmentSlotStatus {
-	removed := make([]TestEnvironmentSlotStatus, 0)
-	projectName := firstNonEmpty(project.Name, project.ID)
-	if standbyDNS, ok := mapFromMap(project.Metadata, "native_standby_dns"); ok {
-		for _, slot := range mapSliceFromAnySlice(anySlice(standbyDNS["slots"])) {
-			index, ok := positiveIntFromMap(slot, "slot_index")
-			if !ok {
-				index, ok = positiveIntFromMap(slot, "slotIndex")
-			}
-			if !ok || index <= count {
-				continue
-			}
-			slotName, _ := stringFromMap(slot, "slot_name")
-			if strings.TrimSpace(slotName) == "" {
-				slotName, _ = stringFromMap(slot, "slotName")
-			}
-			if strings.TrimSpace(slotName) == "" {
-				slotName = testEnvironmentName(projectName, index, project, Lease{})
-			}
-			removed = append(removed, TestEnvironmentSlotStatus{
-				SlotIndex: index,
-				SlotName:  strings.TrimSpace(slotName),
-			})
-		}
-	}
-	sort.SliceStable(removed, func(i, j int) bool {
-		return removed[i].SlotIndex < removed[j].SlotIndex
-	})
-	return removed
-}
-
-// slotsAboveCountFromStore reads the new `slots` collection for the given
-// project and returns slot rows whose index exceeds the new count. After
-// the slot-storage migration runs, this is the canonical source of "which
-// slots need to be deprovisioned for a scale-down."
+// slotsAboveCountFromStore reads the `slots` collection for the given
+// project and returns slot rows whose index exceeds the new count. This is
+// the single source of "which slots need to be deprovisioned for a
+// scale-down" after the slot-storage rework (PR #518) — the retired
+// `project.metadata.native_standby_dns.slots[]` embedded array is not a
+// live read path (docs/migration-policy.md "no parallel path that works
+// for now").
 func slotsAboveCountFromStore(ctx context.Context, store ReadStore, project string, count int) []TestEnvironmentSlotStatus {
 	slotStore := slotStoreFromReadStore(store)
 	if slotStore == nil {
@@ -363,48 +336,4 @@ func slotsAboveCountFromStore(ctx context.Context, store ReadStore, project stri
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].SlotIndex < out[j].SlotIndex })
 	return out
-}
-
-// mergeRemovedSlots dedups by slot index, preferring entries with a
-// non-empty slot_name. Used by the PATCH-count handler so the slot-removal
-// set is the union of legacy-array view and new-collection view during the
-// migration window.
-func mergeRemovedSlots(a, b []TestEnvironmentSlotStatus) []TestEnvironmentSlotStatus {
-	byIndex := map[int]TestEnvironmentSlotStatus{}
-	for _, s := range a {
-		byIndex[s.SlotIndex] = s
-	}
-	for _, s := range b {
-		if existing, ok := byIndex[s.SlotIndex]; ok {
-			if strings.TrimSpace(existing.SlotName) == "" && strings.TrimSpace(s.SlotName) != "" {
-				byIndex[s.SlotIndex] = s
-			}
-			continue
-		}
-		byIndex[s.SlotIndex] = s
-	}
-	out := make([]TestEnvironmentSlotStatus, 0, len(byIndex))
-	for _, s := range byIndex {
-		out = append(out, s)
-	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].SlotIndex < out[j].SlotIndex })
-	return out
-}
-
-func testEnvironmentSlotState(project Project, slotIndex int) string {
-	if standbyDNS, ok := mapFromMap(project.Metadata, "native_standby_dns"); ok {
-		for _, slot := range mapSliceFromAnySlice(anySlice(standbyDNS["slots"])) {
-			n, ok := positiveIntFromMap(slot, "slot_index")
-			if !ok {
-				n, ok = positiveIntFromMap(slot, "slotIndex")
-			}
-			if !ok || n != slotIndex {
-				continue
-			}
-			if value, ok := stringFromMap(slot, "state"); ok && strings.TrimSpace(value) != "" {
-				return strings.TrimSpace(value)
-			}
-		}
-	}
-	return ""
 }

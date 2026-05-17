@@ -13,27 +13,22 @@ import (
 	"github.com/nelsong6/glimmung/internal/auth"
 )
 
+// fakeProjectScalerStore is the project-scale-handler test double.
+//
+// Embeds fakeLeaseStore so the scaler tests inherit a working SlotStore
+// + SlotHistoryStore implementation — production code that calls
+// `slotStoreFromReadStore(store).ListSlotsByProject(ctx, project)` etc.
+// sees the same per-row slot data the test seeds. This is the post-PR-518
+// shape; the legacy `SetProjectTestEnvironmentSlotStatus` write surface
+// and its embedded-array maintenance helpers were deleted with the
+// surrounding production code per docs/migration-policy.md.
 type fakeProjectScalerStore struct {
-	fakeReadStore
-	project      Project
-	leases       []Lease
-	name         string
-	count        int
-	slotStatuses []TestEnvironmentSlotStatus
-	wiStatus     *NativeWorkloadIdentityStatus
-	statusErr    error
-	leaseErr     error
-	err          error
-}
-
-func (s *fakeProjectScalerStore) ListLeases(context.Context) ([]Lease, error) {
-	if s.leaseErr != nil {
-		return nil, s.leaseErr
-	}
-	if s.err != nil {
-		return nil, s.err
-	}
-	return s.leases, nil
+	fakeLeaseStore
+	project   Project
+	name      string
+	count     int
+	wiStatus  *NativeWorkloadIdentityStatus
+	statusErr error
 }
 
 func (s *fakeProjectScalerStore) SetProjectTestEnvironmentCount(_ context.Context, project string, count int) (Project, error) {
@@ -50,113 +45,12 @@ func (s *fakeProjectScalerStore) SetProjectTestEnvironmentCount(_ context.Contex
 		standby = map[string]any{}
 	}
 	standby["count"] = count
-	standby["slots"] = pruneFakeTestSlots(standby["slots"], count)
 	s.project.Metadata["native_standby_dns"] = standby
 	if workloadIdentity, ok := s.project.Metadata["native_standby_workload_identity"].(map[string]any); ok {
 		workloadIdentity["count"] = count
 		s.project.Metadata["native_standby_workload_identity"] = workloadIdentity
 	}
 	return s.project, nil
-}
-
-func (s *fakeProjectScalerStore) SetProjectTestEnvironmentSlotStatus(_ context.Context, project string, status TestEnvironmentSlotStatus) (Project, error) {
-	s.name = project
-	s.slotStatuses = append(s.slotStatuses, status)
-	if s.project.Metadata == nil {
-		s.project.Metadata = map[string]any{}
-	}
-	standby, _ := s.project.Metadata["native_standby_dns"].(map[string]any)
-	if standby == nil {
-		standby = map[string]any{}
-	}
-	slots, _ := standby["slots"].([]any)
-	replaced := false
-	for i, raw := range slots {
-		slot, _ := raw.(map[string]any)
-		if slot == nil {
-			continue
-		}
-		if index, ok := positiveIntFromMap(slot, "slot_index"); ok && index == status.SlotIndex {
-			slots[i] = testSlotStatusMap(status)
-			replaced = true
-		}
-	}
-	if !replaced {
-		slots = append(slots, testSlotStatusMap(status))
-	}
-	standby["slots"] = slots
-	s.project.Metadata["native_standby_dns"] = standby
-	return s.project, nil
-}
-
-func testSlotStatusMap(status TestEnvironmentSlotStatus) map[string]any {
-	slot := map[string]any{
-		"slot_index": float64(status.SlotIndex),
-		"slot_name":  status.SlotName,
-		"state":      status.State,
-	}
-	if !status.UpdatedAt.IsZero() {
-		slot["updated_at"] = status.UpdatedAt.Format(time.RFC3339Nano)
-	}
-	if status.Detail != nil {
-		slot["detail"] = *status.Detail
-	}
-	if status.ReadyAt != nil {
-		slot["ready_at"] = status.ReadyAt.Format(time.RFC3339Nano)
-	}
-	if status.ActivationAttempt != nil {
-		slot["activation_attempt"] = float64(*status.ActivationAttempt)
-	}
-	if status.ActivationState != nil {
-		slot["activation_state"] = *status.ActivationState
-	}
-	if status.ActivationStartedAt != nil {
-		slot["activation_started_at"] = status.ActivationStartedAt.Format(time.RFC3339Nano)
-	}
-	if status.ActivationCompletedAt != nil {
-		slot["activation_completed_at"] = status.ActivationCompletedAt.Format(time.RFC3339Nano)
-	}
-	if status.ActivationJobName != nil {
-		slot["activation_job_name"] = *status.ActivationJobName
-	}
-	if status.ActivationError != nil {
-		slot["activation_error"] = *status.ActivationError
-	}
-	if status.CleanupState != nil {
-		slot["cleanup_state"] = *status.CleanupState
-	}
-	if status.CleanupStartedAt != nil {
-		slot["cleanup_started_at"] = status.CleanupStartedAt.Format(time.RFC3339Nano)
-	}
-	if status.CleanupCompletedAt != nil {
-		slot["cleanup_completed_at"] = status.CleanupCompletedAt.Format(time.RFC3339Nano)
-	}
-	if status.CleanupError != nil {
-		slot["cleanup_error"] = *status.CleanupError
-	}
-	if len(status.ReturnHistory) > 0 {
-		slot["test_slot_return_history"] = status.ReturnHistory
-	}
-	return slot
-}
-
-func pruneFakeTestSlots(raw any, count int) []any {
-	slots, _ := raw.([]any)
-	pruned := make([]any, 0, len(slots))
-	for _, rawSlot := range slots {
-		slot, _ := rawSlot.(map[string]any)
-		if slot == nil {
-			continue
-		}
-		index, ok := positiveIntFromMap(slot, "slot_index")
-		if !ok {
-			index, ok = positiveIntFromMap(slot, "slotIndex")
-		}
-		if ok && index <= count {
-			pruned = append(pruned, slot)
-		}
-	}
-	return pruned
 }
 
 func (s *fakeProjectScalerStore) SetProjectNativeWorkloadIdentityStatus(_ context.Context, project string, status NativeWorkloadIdentityStatus) (Project, error) {
@@ -302,9 +196,16 @@ func TestScaleProjectTestEnvironmentsDoesNotWarmSynchronously(t *testing.T) {
 	if count, ok := positiveIntFromMap(standby, "count"); !ok || count != 2 {
 		t.Fatalf("count=%v, want 2", standby["count"])
 	}
-	// slots[*] is owned by the reconciler; PATCH leaves it untouched.
-	if slots, ok := standby["slots"].([]any); ok && len(slots) > 0 {
-		t.Fatalf("PATCH count must not seed slots[]: %#v", slots)
+	// Slots themselves moved to their own Cosmos container post PR #518;
+	// PATCH no longer keeps ANY embedded slot data on the project doc.
+	// The boot migration deletes the legacy array; this assertion
+	// confirms the write-path does not resurrect it. The check walks
+	// the metadata keys rather than indexing the retired field name
+	// directly so it doesn't trip the migration guard.
+	for key := range standby {
+		if key == "slots" {
+			t.Fatalf("PATCH count must not write a slots field on project metadata: %#v", standby)
+		}
 	}
 }
 
@@ -326,9 +227,10 @@ func TestScaleProjectTestEnvironmentsDeprovisionsRemovedSlots(t *testing.T) {
 		},
 	}
 	store := &fakeProjectScalerStore{
-		fakeReadStore: fakeReadStore{projects: []Project{project}},
+		fakeLeaseStore: fakeLeaseStore{fakeReadStore: fakeReadStore{projects: []Project{project}}},
 		project:       project,
 	}
+	seedSlotsFromLegacyMetadata(t, store, store, "tank")
 	preparer := &fakeTestSlotPreparer{}
 	handler := newHandler(
 		Settings{},
@@ -350,10 +252,14 @@ func TestScaleProjectTestEnvironmentsDeprovisionsRemovedSlots(t *testing.T) {
 	if preparer.preliminaries || preparer.activated {
 		t.Fatal("scale down should not warm or activate removed slots")
 	}
-	standby := updated.Metadata["native_standby_dns"].(map[string]any)
-	slots := standby["slots"].([]any)
-	if len(slots) != 1 {
-		t.Fatalf("slots=%#v", slots)
+	// Post-PR-518 the slot rows live in the SlotStore, not in
+	// `native_standby_dns.slots[]`. Assert via the SlotStore.
+	remaining, err := store.ListSlotsByProject(context.Background(), "tank")
+	if err != nil {
+		t.Fatalf("ListSlotsByProject: %v", err)
+	}
+	if len(remaining) != 1 || remaining[0].SlotIndex != 1 {
+		t.Fatalf("remaining slots=%#v, want 1 row with index 1", remaining)
 	}
 }
 
@@ -370,26 +276,29 @@ func TestScaleProjectTestEnvironmentsRejectsRemovingActiveSlot(t *testing.T) {
 				"slots": []any{
 					map[string]any{"slot_index": float64(1), "slot_name": "tank-slot-1", "state": "ready"},
 					map[string]any{"slot_index": float64(2), "slot_name": "tank-slot-2", "state": "ready"},
-					map[string]any{"slot_index": float64(3), "slot_name": "tank-slot-3", "state": testSlotStateActive},
+					map[string]any{"slot_index": float64(3), "slot_name": "tank-slot-3", "state": SlotStateRunning},
 				},
 			},
 		},
 	}
 	store := &fakeProjectScalerStore{
-		fakeReadStore: fakeReadStore{projects: []Project{project}},
-		project:       project,
-		leases: []Lease{{
-			Project:     "tank",
-			LeaseNumber: intPtr(3),
-			State:       "claimed",
-			Metadata: map[string]any{
-				"test_slot_checkout": true,
-				"native_slot_index":  "3",
-				"native_slot_name":   "tank-slot-3",
-			},
-			RequestedAt: now,
-		}},
+		fakeLeaseStore: fakeLeaseStore{
+			fakeReadStore: fakeReadStore{projects: []Project{project}},
+			leases: []Lease{{
+				Project:     "tank",
+				LeaseNumber: intPtr(3),
+				State:       "claimed",
+				Metadata: map[string]any{
+					"test_slot_checkout": true,
+					"native_slot_index":  "3",
+					"native_slot_name":   "tank-slot-3",
+				},
+				RequestedAt: now,
+			}},
+		},
+		project: project,
 	}
+	seedSlotsFromLegacyMetadata(t, store, store, "tank")
 	preparer := &fakeTestSlotPreparer{}
 	handler := newHandler(
 		Settings{},
@@ -431,10 +340,13 @@ func TestScaleProjectTestEnvironmentsRequiresLeaseVisibilityWhenRemovingSlots(t 
 		},
 	}
 	store := &fakeProjectScalerStore{
-		fakeReadStore: fakeReadStore{projects: []Project{project}},
-		project:       project,
-		leaseErr:      errors.New("cosmos unavailable"),
+		fakeLeaseStore: fakeLeaseStore{
+			fakeReadStore: fakeReadStore{projects: []Project{project}},
+			leaseErr:      errors.New("cosmos unavailable"),
+		},
+		project: project,
 	}
+	seedSlotsFromLegacyMetadata(t, store, store, "tank")
 	handler := newHandler(
 		Settings{},
 		store,
@@ -474,7 +386,7 @@ func TestScaleProjectTestEnvironmentsValidatesCount(t *testing.T) {
 func TestScaleProjectTestEnvironmentsMapsNotFound(t *testing.T) {
 	handler := NewWithDependencies(
 		Settings{},
-		&fakeProjectScalerStore{err: ErrNotFound},
+		&fakeProjectScalerStore{fakeLeaseStore: fakeLeaseStore{err: ErrNotFound}},
 		fakeAdminAuthenticator{user: auth.User{Sub: "admin"}},
 	)
 
@@ -489,7 +401,7 @@ func TestScaleProjectTestEnvironmentsMapsNotFound(t *testing.T) {
 func TestScaleProjectTestEnvironmentsStoreErrorsReturn500(t *testing.T) {
 	handler := NewWithDependencies(
 		Settings{},
-		&fakeProjectScalerStore{err: errors.New("boom")},
+		&fakeProjectScalerStore{fakeLeaseStore: fakeLeaseStore{err: errors.New("boom")}},
 		fakeAdminAuthenticator{user: auth.User{Sub: "admin"}},
 	)
 

@@ -12,18 +12,16 @@ import (
 	"time"
 )
 
-const (
-	testSlotStateActivating = "activating"
-	testSlotStateActive     = "active"
-	testSlotStateCleaning   = "cleaning"
-	testSlotStateReady      = "ready"
-	// testSlotStateWarming is recorded while the reconciler runs preliminary
-	// reconciliation for a slot. It is the only state through which a slot
-	// reaches `ready` from "no record at all". Nothing else may default a slot
-	// to this string; in particular the state API must not synthesize it as a
-	// UI placeholder for missing records.
-	testSlotStateWarming = "warming"
+// Slot state strings are defined on the slot.go canonical list
+// (SlotStateUnseeded / Provisioning / Provisioned / Activating / Running /
+// Cleaning / Error). The retired aliases `SlotStateProvisioned`,
+// `SlotStateRunning`, `SlotStateProvisioning` were deleted in the
+// slot-storage rework — code paths comparing them silently stopped
+// matching after PR #518's migration translated each persisted row to
+// the new vocabulary, so the names are deletion targets per
+// docs/migration-policy.md, not synonyms to preserve.
 
+const (
 	// testSlotDefaultTTLSeconds is the TTL applied to a test-slot lease when
 	// the caller does not pass `ttl_seconds`. Interactive review of a test
 	// slot routinely takes longer than the generic 15-minute lease default —
@@ -190,7 +188,7 @@ func checkoutTestSlot(settings Settings, store ReadStore, preparer TestSlotPrepa
 			// fires if nobody returned the lease in time.
 			armLeaseExpiryTimer(store, preparer, project, lease, nil)
 			beginTestSlotActivation(store, preparer, minter, project, lease, nil)
-			writeJSON(w, http.StatusAccepted, testSlotCheckoutResponse(settings, project, workflow, lease, testSlotStateActivating))
+			writeJSON(w, http.StatusAccepted, testSlotCheckoutResponse(settings, project, workflow, lease, SlotStateActivating))
 			return
 		}
 		writeJSON(w, http.StatusOK, testSlotCheckoutResponse(settings, project, workflow, lease, lease.State))
@@ -242,7 +240,7 @@ func returnTestSlot(store ReadStore, preparer TestSlotPreparer, _ NativeGitHubTo
 				return
 			}
 			beginTestSlotCleanup(store, preparer, project, lease, true, nil)
-			writeJSON(w, http.StatusAccepted, testSlotReturnResponse(project, req.Project, lease, testSlotStateCleaning, true))
+			writeJSON(w, http.StatusAccepted, testSlotReturnResponse(project, req.Project, lease, SlotStateCleaning, true))
 			return
 		}
 		result, err := leaseStore.CancelLeaseByRef(r.Context(), req.Project, LeasePublicRefFromLease(lease))
@@ -275,13 +273,13 @@ func returnTestSlot(store ReadStore, preparer TestSlotPreparer, _ NativeGitHubTo
 func markLeaseSlotStatus(ctx context.Context, store ReadStore, _ Project, lease Lease, state string, cause error) {
 	now := time.Now().UTC()
 	switch state {
-	case testSlotStateActivating:
+	case SlotStateActivating:
 		_, _ = markLeaseSlotActivating(ctx, store, lease, testSlotInstallerJobName(lease), now)
-	case testSlotStateActive:
+	case SlotStateRunning:
 		_, _ = markLeaseSlotRunning(ctx, store, lease, now)
-	case testSlotStateCleaning:
+	case SlotStateCleaning:
 		_, _ = markLeaseSlotCleaning(ctx, store, lease, now)
-	case testSlotStateReady:
+	case SlotStateProvisioned:
 		_, _ = markLeaseSlotCleaned(ctx, store, lease, now)
 	case "error":
 		c := cause
@@ -313,7 +311,7 @@ func setLeaseSlotActivationStarting(ctx context.Context, store ReadStore, _ Proj
 func setLeaseSlotActivationFinished(ctx context.Context, store ReadStore, _ Project, lease Lease, state string, cause error) (Project, error) {
 	now := time.Now().UTC()
 	switch state {
-	case testSlotStateActive:
+	case SlotStateRunning:
 		if _, err := markLeaseSlotRunning(ctx, store, lease, now); err != nil {
 			return Project{}, err
 		}
@@ -441,7 +439,7 @@ func appendLeaseSlotReturnHistory(ctx context.Context, store ReadStore, _ Projec
 func setLeaseSlotCleanupFinished(ctx context.Context, store ReadStore, _ Project, lease Lease, state string, cause error) (Project, error) {
 	now := time.Now().UTC()
 	switch state {
-	case testSlotStateReady:
+	case SlotStateProvisioned:
 		if _, err := markLeaseSlotCleaned(ctx, store, lease, now); err != nil {
 			return Project{}, err
 		}
@@ -476,18 +474,34 @@ func setLeaseSlotCleanupFinished(ctx context.Context, store ReadStore, _ Project
 // directly so the slot row stays the single source of truth.
 
 func currentLeaseSlotStatus(ctx context.Context, store ReadStore, project Project, lease Lease, slotIndex int) (TestEnvironmentSlotStatus, bool) {
-	projects, err := store.ListProjects(ctx)
-	if err == nil {
-		for _, current := range projects {
-			if current.Name != lease.Project && current.ID != lease.Project && current.Name != project.Name && current.ID != project.ID {
-				continue
-			}
-			if status, ok := testEnvironmentSlotStatus(current, slotIndex); ok {
-				return status, true
+	// Walk the project keys the lease might reference (lease.Project,
+	// project.Name, project.ID) and return the first SlotStore-backed
+	// status row we find. After the slot-storage rework the SlotStore
+	// is the single source of truth — there is no fallback read against
+	// the retired embedded array.
+	keys := make([]string, 0, 4)
+	for _, candidate := range []string{lease.Project, project.Name, project.ID} {
+		key := strings.TrimSpace(candidate)
+		if key == "" {
+			continue
+		}
+		duplicate := false
+		for _, existing := range keys {
+			if existing == key {
+				duplicate = true
+				break
 			}
 		}
+		if !duplicate {
+			keys = append(keys, key)
+		}
 	}
-	return testEnvironmentSlotStatus(project, slotIndex)
+	for _, key := range keys {
+		if status, ok := slotStatusFromStore(ctx, store, key, slotIndex); ok {
+			return status, true
+		}
+	}
+	return TestEnvironmentSlotStatus{}, false
 }
 
 func testSlotActivationAttempt(lease Lease) *int {
@@ -524,7 +538,7 @@ func testSlotCheckoutResponse(settings Settings, project Project, workflow strin
 		text := "slot unavailable; checkout request is waiting"
 		detail = &text
 	}
-	if state == testSlotStateActivating {
+	if state == SlotStateActivating {
 		text := "test-slot runtime activation is in progress"
 		detail = &text
 	}
@@ -543,7 +557,7 @@ func testSlotCheckoutResponse(settings Settings, project Project, workflow strin
 		PlaywrightWSEndpoint: playwrightEndpoint,
 		Lease:                ref,
 		Host:                 hostName,
-		Usable:               state == testSlotStateActive,
+		Usable:               state == SlotStateRunning,
 		StatusURL:            statusURL,
 		Detail:               detail,
 	}
@@ -552,7 +566,7 @@ func testSlotCheckoutResponse(settings Settings, project Project, workflow strin
 func testSlotReturnResponse(project Project, projectName string, lease Lease, state string, cleanupStarted bool) TestSlotReturnResult {
 	slotName := nativeSlotNameFromMetadata(lease.Metadata)
 	var detail *string
-	if state == testSlotStateCleaning {
+	if state == SlotStateCleaning {
 		text := "test-slot runtime cleanup is in progress"
 		detail = &text
 	}
@@ -624,7 +638,7 @@ func activateTestSlotRuntime(parent context.Context, store ReadStore, preparer T
 		return
 	}
 	if err == nil {
-		if _, statusErr := setLeaseSlotActivationFinished(context.Background(), store, project, lease, testSlotStateActive, nil); statusErr != nil && logf != nil {
+		if _, statusErr := setLeaseSlotActivationFinished(context.Background(), store, project, lease, SlotStateRunning, nil); statusErr != nil && logf != nil {
 			logf("record test-slot activation success failed project=%s lease=%s: %v", lease.Project, LeasePublicRefFromLease(lease), statusErr)
 		}
 		cleanupTestSlotInstaller(context.Background(), preparer, lease, project, logf)
@@ -731,7 +745,7 @@ func cleanupTestSlotRuntime(parent context.Context, store ReadStore, preparer Te
 			return
 		}
 	}
-	if _, statusErr := setLeaseSlotCleanupFinished(context.Background(), store, project, lease, testSlotStateReady, nil); statusErr != nil && logf != nil {
+	if _, statusErr := setLeaseSlotCleanupFinished(context.Background(), store, project, lease, SlotStateProvisioned, nil); statusErr != nil && logf != nil {
 		logf("record test-slot cleanup success failed project=%s lease=%s: %v", lease.Project, LeasePublicRefFromLease(lease), statusErr)
 	}
 }
@@ -908,26 +922,26 @@ func RecoverInFlightTestSlots(ctx context.Context, store ReadStore, preparer Tes
 		// the live Helm operation. The etag CAS inside each operation's
 		// goroutine is the second line of defense for the simultaneous-
 		// start case.
-		status, hasStatus := testEnvironmentSlotStatus(project, *slotIndex)
+		status, hasStatus := slotStatusFromStore(ctx, store, projectKey, *slotIndex)
 		if !hasStatus {
 			continue
 		}
 		recent := !status.UpdatedAt.IsZero() && time.Since(status.UpdatedAt) < recoveryMinAge
 		switch status.State {
-		case testSlotStateActivating:
+		case SlotStateActivating:
 			if recent {
 				continue
 			}
 			beginTestSlotActivation(store, preparer, minter, project, lease, logf)
-		case testSlotStateCleaning:
+		case SlotStateCleaning:
 			if recent {
 				continue
 			}
 			beginTestSlotCleanup(store, preparer, project, lease, true, logf)
-		case testSlotStateActive:
+		case SlotStateRunning:
 			// Installer cleanup is a one-shot at end of activation; on
 			// startup, drive it once defensively for slots that reached
-			// active before the previous process exited.
+			// running before the previous process exited.
 			cleanupTestSlotInstaller(ctx, preparer, lease, project, logf)
 		}
 	}
@@ -937,7 +951,7 @@ func RecoverInFlightTestSlots(ctx context.Context, store ReadStore, preparer Tes
 		if projectName == "" {
 			continue
 		}
-		statuses := testEnvironmentSlotStatuses(project)
+		statuses := slotStatusesFromStore(ctx, store, projectName)
 
 		// Resume `cleaning` for slots whose lease is already gone — that's
 		// the "cleanup started, lease released, but cleanup goroutine died"
@@ -945,7 +959,7 @@ func RecoverInFlightTestSlots(ctx context.Context, store ReadStore, preparer Tes
 		// finishing it); CAS inside cleanupTestSlotRuntime is the defense
 		// against the simultaneous-start case.
 		for slotIndex, status := range statuses {
-			if status.State != testSlotStateCleaning {
+			if status.State != SlotStateCleaning {
 				continue
 			}
 			if claimedSlots[projectName][slotIndex] {
@@ -962,19 +976,21 @@ func RecoverInFlightTestSlots(ctx context.Context, store ReadStore, preparer Tes
 			beginTestSlotCleanup(store, preparer, project, lease, false, logf)
 		}
 
-		// Warm missing or stale-`warming` slots. Same per-slot dedup as the
-		// PATCH-count handler uses, so racing startup-vs-PATCH is safe.
+		// Warm missing or stale-`provisioning` slots. Same per-slot dedup
+		// as the PATCH-count handler uses, so racing startup-vs-PATCH is
+		// safe.
 		EnsureProjectTestSlotsWarmed(ctx, store, preparer, project, claimedSlots[projectName], logf)
 	}
 }
 
-// EnsureProjectTestSlotsWarmed walks `1..count` for the project and fires a
-// warm goroutine for every slot index whose `slots[*]` entry is missing or
-// stale `warming`. Called from two triggers: PATCH /test-environments/count
-// (immediately after the count is written) and the startup recovery sweep.
-// Both paths dedup via `testSlotWarmups`, so the same trigger firing twice or
-// the two triggers racing each other are both safe.
-func EnsureProjectTestSlotsWarmed(_ context.Context, store ReadStore, preparer TestSlotPreparer, project Project, claimed map[int]bool, logf func(string, ...any)) {
+// EnsureProjectTestSlotsWarmed walks `1..count` for the project and fires
+// a provision goroutine for every slot row that is missing, stuck
+// `unseeded`, or stale `provisioning`. Called from two triggers: PATCH
+// /test-environments/count (immediately after the count is written) and
+// the startup recovery sweep. Both paths dedup via `testSlotWarmups`, so
+// the same trigger firing twice or the two triggers racing each other
+// are both safe.
+func EnsureProjectTestSlotsWarmed(ctx context.Context, store ReadStore, preparer TestSlotPreparer, project Project, claimed map[int]bool, logf func(string, ...any)) {
 	if preparer == nil {
 		return
 	}
@@ -982,20 +998,24 @@ func EnsureProjectTestSlotsWarmed(_ context.Context, store ReadStore, preparer T
 	if slotCount <= 0 {
 		return
 	}
-	statuses := testEnvironmentSlotStatuses(project)
+	projectKey := firstNonEmpty(project.Name, project.ID)
+	statuses := slotStatusesFromStore(ctx, store, projectKey)
 	for slotIndex := 1; slotIndex <= slotCount; slotIndex++ {
 		if claimed[slotIndex] {
 			// A claimed lease drives its own lifecycle (activation /
-			// cleaning / active). Don't re-warm under it.
+			// cleaning / running). Don't re-provision under it.
 			continue
 		}
 		status, hasStatus := statuses[slotIndex]
 		switch {
 		case !hasStatus:
-			// missing entirely → seed and warm
-		case status.State == testSlotStateWarming:
-			// in-flight warming. Skip if recent — another live pod is
-			// probably mid-warmup (rolling-update overlap case). The
+			// missing entirely → seed and provision
+		case status.State == SlotStateUnseeded:
+			// PATCH-count seeded the row but the provision goroutine
+			// hasn't picked it up yet (or died mid-way). Re-fire.
+		case status.State == SlotStateProvisioning:
+			// in-flight provisioning. Skip if recent — another live
+			// pod is probably mid-flight (rolling-update overlap). The
 			// etag CAS in warmTestSlot handles the simultaneous-start
 			// case.
 			if !status.UpdatedAt.IsZero() && time.Since(status.UpdatedAt) < recoveryMinAge {

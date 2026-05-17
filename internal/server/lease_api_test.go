@@ -8,20 +8,30 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/nelsong6/glimmung/internal/auth"
 )
 
 type fakeLeaseStore struct {
 	fakeReadStore
-	lease        Lease
-	leases       []Lease
-	result       CancelLeaseResult
-	leaseReq     LeaseAcquireRequest
+	lease    Lease
+	leases   []Lease
+	result   CancelLeaseResult
+	leaseReq LeaseAcquireRequest
+	// slotStatuses is an append-only log of every Slot write the fake
+	// observed (via CreateSlot / UpdateIfMatch). Recorded in canonical
+	// state-name vocabulary post-PR-518. Tests inspect it when they
+	// care about the *sequence* of writes rather than the slot's
+	// current state.
 	slotStatuses []TestEnvironmentSlotStatus
 	cancelledRef string
 	err          error
+	// leaseErr, when non-nil, fails ListLeases / AcquireLease only —
+	// distinct from `err` which fails reads across the embedded
+	// fakeReadStore (ListProjects etc.). Lets tests assert
+	// downstream-Cosmos-outage behavior without breaking unrelated
+	// reads needed to set up the test.
+	leaseErr error
 	// mu guards slotStatuses and the project mutations performed by
 	// SetProjectTestEnvironmentSlotStatus. The reconciler now warms multiple
 	// slots concurrently, so several goroutines may write through this fake at
@@ -45,6 +55,27 @@ type fakeLeaseStore struct {
 	// slotHistoryNextID is the counter used to assign synthetic ids to
 	// SlotHistoryEntry rows that arrive with an empty ID.
 	slotHistoryNextID int
+	// seedMode skips appending to slotStatuses during CreateSlot /
+	// UpdateIfMatch. Test helpers (seedSlot, seedSlotsFromLegacyMetadata)
+	// flip this on while priming initial state so the slotStatuses
+	// write-log only carries writes from production code paths under
+	// test, not from fixture setup.
+	seedMode bool
+}
+
+// beginSeed and endSeed wrap a block of test-fixture writes that should
+// not show up in the slotStatuses write-log. The helpers in
+// slot_test_helpers_test.go invoke these around their CreateSlot calls.
+func (s *fakeLeaseStore) beginSeed() {
+	s.mu.Lock()
+	s.seedMode = true
+	s.mu.Unlock()
+}
+
+func (s *fakeLeaseStore) endSeed() {
+	s.mu.Lock()
+	s.seedMode = false
+	s.mu.Unlock()
 }
 
 func (s *fakeLeaseStore) ensureSlotsInitLocked() {
@@ -85,59 +116,12 @@ func (s *fakeLeaseStore) GetSlot(_ context.Context, project string, slotIndex in
 	if stored, ok := s.slots[key]; ok {
 		return stored.WithETag(s.slotEtagLocked(key)), nil
 	}
-	// Bridge for tests pre-populated with legacy slot data: if the
-	// project's metadata still carries a slots[] entry for this index,
-	// synthesize a Slot from it. Mirrors what
-	// MigrateProjectSlotsIntoCollection does once per project at boot
-	// in production. Without this bridge tests would have to call the
-	// migration manually before every lifecycle test.
-	for _, p := range s.projects {
-		if p.Name != project && p.ID != project {
-			continue
-		}
-		for _, entry := range readLegacyProjectSlots(p) {
-			if entry.slotIndex != slotIndex {
-				continue
-			}
-			slot := slotFromLegacyEntry(project, entry, time.Now().UTC())
-			// Preserve the legacy entry's activation/cleanup fields
-			// so tests that pre-populate those for diagnostics still
-			// see them.
-			if v, ok := positiveIntFromMap(entry.raw, "activation_attempt"); ok {
-				attempt := v
-				slot.ActivationAttempt = &attempt
-			}
-			if v, ok := stringFromMap(entry.raw, "activation_job_name"); ok && strings.TrimSpace(v) != "" {
-				job := strings.TrimSpace(v)
-				slot.ActivationJobName = &job
-			}
-			if v, ok := stringFromMap(entry.raw, "activation_started_at"); ok {
-				if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
-					slot.ActivationStartedAt = &t
-				}
-			}
-			if v, ok := stringFromMap(entry.raw, "activation_completed_at"); ok {
-				if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
-					slot.ActivationCompletedAt = &t
-				}
-			}
-			// If the legacy entry didn't carry per-phase timestamps
-			// but the legacy state implies activation reached `active`,
-			// infer ActivationCompletedAt from the updated_at timestamp
-			// so the derived ActivationState in recordLegacySlotStatusLocked
-			// reports "active" instead of falling through.
-			if slot.ActivationCompletedAt == nil && slot.State == SlotStateRunning {
-				t := slot.UpdatedAt
-				slot.ActivationCompletedAt = &t
-				if slot.ActivationStartedAt == nil {
-					slot.ActivationStartedAt = &t
-				}
-			}
-			s.slotEtags[key]++
-			s.slots[key] = slot
-			return slot.WithETag(s.slotEtagLocked(key)), nil
-		}
-	}
+	// Earlier the fake auto-synthesized Slot rows from the project's
+	// legacy embedded `native_standby_dns.slots[]` array. That was the
+	// PR #518 "legacy-compat bridge" the migration policy forbids:
+	// tests had no way to distinguish "I forgot to seed a slot" from
+	// "I'm depending on legacy data shape to round-trip." The bridge
+	// is gone; tests seed via seedSlot / seedSlotsFromLegacyMetadata.
 	return Slot{}, ErrNotFound
 }
 
@@ -242,27 +226,34 @@ func (s *fakeLeaseStore) ListSlotHistory(_ context.Context, project string, slot
 	return out, nil
 }
 
-// recordLegacySlotStatusLocked mirrors a Slot write into the legacy
-// slotStatuses slice that existing tests still inspect. The state name
-// is translated back to the legacy vocabulary (provisioning→warming,
-// provisioned→ready, running→active) so test assertions written before
-// the rename keep passing during the cutover. After Stage 2 is fully
-// landed and tests have been updated to use the new state names, the
-// slotStatuses slice and this translator can be deleted.
+// recordSlotStatusLocked mirrors a Slot write into the slotStatuses slice
+// so existing tests can inspect the sequence of writes via the fake.
+//
+// After PR #518's storage rework the canonical state lives in the new
+// `slots` collection (s.slots). slotStatuses is purely a write-log for
+// test convenience; the state names recorded here are the **new**
+// canonical names (`provisioning`, `provisioned`, `running`, etc.) — no
+// retired-vocabulary translation. The earlier `legacyStateFromSlot`
+// translator was deleted per docs/migration-policy.md: tests must assert
+// against the canonical state vocabulary, not a parallel one.
 func (s *fakeLeaseStore) recordLegacySlotStatusLocked(slot Slot) {
 	// Skip the synthetic "unseeded" creates that show up via
-	// ensureSlotExists — old tests expect the legacy slotStatuses slice
-	// to contain only the writes that came from the actual lifecycle
-	// helpers (warming/activating/cleaning/etc.). The new SlotStore
-	// model creates the slot doc lazily, but that's an implementation
-	// detail that doesn't belong in the legacy view.
+	// ensureSlotExists — the slotStatuses log is intended to contain
+	// writes that came from the lifecycle helpers, not the seeding
+	// path.
 	if slot.State == SlotStateUnseeded {
+		return
+	}
+	// Skip writes that happen inside a seed block. Test helpers wrap
+	// their fixture writes in beginSeed/endSeed so the slotStatuses
+	// log only carries writes from production code paths under test.
+	if s.seedMode {
 		return
 	}
 	status := TestEnvironmentSlotStatus{
 		SlotIndex: slot.SlotIndex,
 		SlotName:  slot.SlotName,
-		State:     legacyStateFromSlot(slot.State),
+		State:     slot.State,
 		UpdatedAt: slot.UpdatedAt,
 		Detail:    slot.Detail,
 	}
@@ -272,21 +263,13 @@ func (s *fakeLeaseStore) recordLegacySlotStatusLocked(slot Slot) {
 	if slot.ActivationAttempt != nil {
 		status.ActivationAttempt = slot.ActivationAttempt
 	}
-	// ActivationState mirrors the slot's activation-phase lifecycle in
-	// the legacy shape. It persists across the broader slot State so
-	// that operators inspecting an error'd slot can still see what its
-	// most recent activation outcome was. Derive it from the
-	// activation_* fields rather than the slot.State directly.
-	switch {
-	case slot.ActivationError != nil:
-		state := "error"
-		status.ActivationState = &state
-	case slot.ActivationCompletedAt != nil:
-		state := "active"
-		status.ActivationState = &state
-	case slot.ActivationStartedAt != nil:
-		state := "activating"
-		status.ActivationState = &state
+	// ActivationState mirrors the slot's activation-phase lifecycle.
+	// Derived from the activation_* fields rather than slot.State so it
+	// persists across the broader state transitions (a slot that
+	// reached `running` and is now `cleaning` still records its
+	// activation outcome).
+	if derived := derivedActivationState(slot); derived != nil {
+		status.ActivationState = derived
 	}
 	if slot.ActivationStartedAt != nil {
 		status.ActivationStartedAt = slot.ActivationStartedAt
@@ -302,37 +285,17 @@ func (s *fakeLeaseStore) recordLegacySlotStatusLocked(slot Slot) {
 	}
 	if slot.CleanupStartedAt != nil {
 		status.CleanupStartedAt = slot.CleanupStartedAt
-		cleaningState := "cleaning"
-		status.CleanupState = &cleaningState
 	}
 	if slot.CleanupCompletedAt != nil {
 		status.CleanupCompletedAt = slot.CleanupCompletedAt
-		switch slot.State {
-		case SlotStateProvisioned:
-			done := "ready"
-			status.CleanupState = &done
-		case SlotStateError:
-			errored := "error"
-			status.CleanupState = &errored
-		}
+	}
+	if derived := derivedCleanupState(slot); derived != nil {
+		status.CleanupState = derived
 	}
 	if slot.CleanupError != nil {
 		status.CleanupError = slot.CleanupError
 	}
 	s.slotStatuses = append(s.slotStatuses, status)
-}
-
-func legacyStateFromSlot(state string) string {
-	switch state {
-	case SlotStateProvisioning:
-		return "warming"
-	case SlotStateProvisioned:
-		return "ready"
-	case SlotStateRunning:
-		return "active"
-	default:
-		return state
-	}
 }
 
 func (s *fakeLeaseStore) AcquireLease(_ context.Context, req LeaseAcquireRequest) (Lease, error) {
@@ -352,6 +315,9 @@ func (s *fakeLeaseStore) CancelLeaseByRef(_ context.Context, _, ref string) (Can
 }
 
 func (s *fakeLeaseStore) ListLeases(context.Context) ([]Lease, error) {
+	if s.leaseErr != nil {
+		return nil, s.leaseErr
+	}
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -361,61 +327,11 @@ func (s *fakeLeaseStore) ListLeases(context.Context) ([]Lease, error) {
 	return []Lease{s.lease}, nil
 }
 
-func (s *fakeLeaseStore) SetProjectTestEnvironmentSlotStatus(_ context.Context, project string, status TestEnvironmentSlotStatus) (Project, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.writeSlotStatusLocked(project, status, "")
-}
-
-// SetProjectTestEnvironmentSlotStatusIfMatch implements
-// ProjectTestEnvironmentSlotStatusClaimer for the fake. When `ifMatchEtag`
-// is non-empty and disagrees with the store's current etag, returns
-// ErrPreconditionFailed without mutating state — simulating the Cosmos
-// 412 path that makes the multi-replica cleanup-claim race safe.
-func (s *fakeLeaseStore) SetProjectTestEnvironmentSlotStatusIfMatch(_ context.Context, project string, status TestEnvironmentSlotStatus, ifMatchEtag string) (Project, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.writeSlotStatusLocked(project, status, ifMatchEtag)
-}
-
-func (s *fakeLeaseStore) writeSlotStatusLocked(project string, status TestEnvironmentSlotStatus, ifMatchEtag string) (Project, error) {
-	if ifMatchEtag != "" && ifMatchEtag != s.currentEtagLocked() {
-		return Project{}, ErrPreconditionFailed
-	}
-	s.slotStatuses = append(s.slotStatuses, status)
-	for i := range s.projects {
-		if s.projects[i].Name != project && s.projects[i].ID != project {
-			continue
-		}
-		if s.projects[i].Metadata == nil {
-			s.projects[i].Metadata = map[string]any{}
-		}
-		standby, _ := s.projects[i].Metadata["native_standby_dns"].(map[string]any)
-		if standby == nil {
-			standby = map[string]any{}
-		}
-		slots, _ := standby["slots"].([]any)
-		replaced := false
-		for j, raw := range slots {
-			slot, _ := raw.(map[string]any)
-			if slot == nil {
-				continue
-			}
-			if index, ok := positiveIntFromMap(slot, "slot_index"); ok && index == status.SlotIndex {
-				slots[j] = testSlotStatusMap(status)
-				replaced = true
-			}
-		}
-		if !replaced {
-			slots = append(slots, testSlotStatusMap(status))
-		}
-		standby["slots"] = slots
-		s.projects[i].Metadata["native_standby_dns"] = standby
-		s.etag++
-		return s.projects[i].WithETag(s.currentEtagLocked()), nil
-	}
-	return Project{}, ErrNotFound
-}
+// SetProjectTestEnvironmentSlotStatus and its IfMatch sibling were the
+// pre-PR-518 slot-status write path. They were deleted with the
+// surrounding production code; no fake-side implementation is needed.
+// Slot writes now go through SlotStore.UpdateIfMatch on the embedded
+// `slots` map — see CreateSlot, GetSlot, UpdateIfMatch above.
 
 // ReadProject implements ProjectReader for the fake. Returns the project
 // with the current etag attached so callers can attempt etag-conditional

@@ -11,13 +11,64 @@ import (
 	"time"
 )
 
+// fakeStateStore is the /v1/state test double. Wraps a *fakeLeaseStore
+// so it gets a working SlotStore + SlotHistoryStore implementation —
+// production /v1/state reads slot rows via SlotStore.ListSlotsByProject
+// after PR #518, so the fake must satisfy that interface for the
+// rendered snapshot to contain any slot data.
+//
+// Pointer field (not embedded value) because fakeLeaseStore carries a
+// mutex; value-copying the struct around (state_api tests previously
+// passed `store` by value) would unsafely duplicate the mutex.
 type fakeStateStore struct {
 	fakeReadStore
 	leases []Lease
 	err    error
+	// slotStore is lazily allocated by ensureSlotStore; tests that
+	// don't exercise slot rows can leave it nil and a single-shared
+	// fakeLeaseStore is created on first seed call.
+	slotStore *fakeLeaseStore
 }
 
-func (s fakeStateStore) ListLeases(context.Context) ([]Lease, error) {
+func (s *fakeStateStore) ensureSlotStore() *fakeLeaseStore {
+	if s.slotStore == nil {
+		s.slotStore = &fakeLeaseStore{fakeReadStore: s.fakeReadStore}
+	}
+	return s.slotStore
+}
+
+func (s *fakeStateStore) CreateSlot(ctx context.Context, slot Slot) (Slot, error) {
+	return s.ensureSlotStore().CreateSlot(ctx, slot)
+}
+
+func (s *fakeStateStore) GetSlot(ctx context.Context, project string, slotIndex int) (Slot, error) {
+	return s.ensureSlotStore().GetSlot(ctx, project, slotIndex)
+}
+
+func (s *fakeStateStore) ListSlotsByProject(ctx context.Context, project string) ([]Slot, error) {
+	return s.ensureSlotStore().ListSlotsByProject(ctx, project)
+}
+
+func (s *fakeStateStore) UpdateIfMatch(ctx context.Context, project string, slotIndex int, mutate func(Slot) (Slot, error)) (Slot, error) {
+	return s.ensureSlotStore().UpdateIfMatch(ctx, project, slotIndex, mutate)
+}
+
+func (s *fakeStateStore) DeleteSlot(ctx context.Context, project string, slotIndex int) error {
+	return s.ensureSlotStore().DeleteSlot(ctx, project, slotIndex)
+}
+
+func (s *fakeStateStore) AppendSlotHistory(ctx context.Context, entry SlotHistoryEntry) (SlotHistoryEntry, error) {
+	return s.ensureSlotStore().AppendSlotHistory(ctx, entry)
+}
+
+func (s *fakeStateStore) ListSlotHistory(ctx context.Context, project string, slotIndex *int) ([]SlotHistoryEntry, error) {
+	return s.ensureSlotStore().ListSlotHistory(ctx, project, slotIndex)
+}
+
+func (s *fakeStateStore) beginSeed() { s.ensureSlotStore().beginSeed() }
+func (s *fakeStateStore) endSeed()   { s.ensureSlotStore().endSeed() }
+
+func (s *fakeStateStore) ListLeases(context.Context) ([]Lease, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -27,7 +78,7 @@ func (s fakeStateStore) ListLeases(context.Context) ([]Lease, error) {
 func TestStateSnapshotUsesPublicLeaseRefs(t *testing.T) {
 	now := time.Date(2026, 5, 11, 3, 0, 0, 0, time.UTC)
 	leaseID := "01JLEASEBACKING"
-	store := fakeStateStore{
+	store := &fakeStateStore{
 		leases: []Lease{{
 			ID:           leaseID,
 			LeaseNumber:  intPtr(17),
@@ -61,7 +112,7 @@ func TestStateSnapshotUsesPublicLeaseRefs(t *testing.T) {
 
 func TestStateSnapshotIncludesTestEnvironmentsAndWaitingRequests(t *testing.T) {
 	now := time.Date(2026, 5, 11, 3, 0, 0, 0, time.UTC)
-	store := fakeStateStore{
+	store := &fakeStateStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{
 			ID:   "glimmung",
 			Name: "glimmung",
@@ -98,6 +149,7 @@ func TestStateSnapshotIncludesTestEnvironmentsAndWaitingRequests(t *testing.T) {
 			},
 		},
 	}
+	seedSlotsFromLegacyMetadata(t, store, store, "glimmung")
 	handler := NewWithStore(Settings{NativeRunnerProjectConcurrency: 5}, store)
 
 	var snapshot StateSnapshot
@@ -120,7 +172,7 @@ func TestStateSnapshotIncludesTestEnvironmentsAndWaitingRequests(t *testing.T) {
 func TestTestEnvironmentStatusShowsActivatingSlot(t *testing.T) {
 	now := time.Date(2026, 5, 11, 3, 0, 0, 0, time.UTC)
 	detail := "test-slot runtime activation is in progress"
-	store := fakeStateStore{
+	store := &fakeStateStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{
 			ID:   "tank",
 			Name: "tank",
@@ -150,6 +202,7 @@ func TestTestEnvironmentStatusShowsActivatingSlot(t *testing.T) {
 			RequestedAt: now,
 		}},
 	}
+	seedSlotsFromLegacyMetadata(t, store, store, "tank")
 	handler := NewWithStore(Settings{}, store)
 
 	var env TestEnvironmentPublic
@@ -172,7 +225,7 @@ func TestStateSnapshotEmitsEmptyStateForUnseededSlots(t *testing.T) {
 	// "warming". The dashboard owns the labeling for unseeded slots; the API
 	// must mirror durable storage honestly.
 	now := time.Date(2026, 5, 11, 3, 0, 0, 0, time.UTC)
-	store := fakeStateStore{
+	store := &fakeStateStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{
 			ID:   "fresh",
 			Name: "fresh",
@@ -209,7 +262,7 @@ func TestStateSnapshotEmitsEmptyStateForUnseededSlots(t *testing.T) {
 
 func TestStateSnapshotDoesNotInferNativeSlotsFromAppType(t *testing.T) {
 	now := time.Date(2026, 5, 11, 3, 0, 0, 0, time.UTC)
-	store := fakeStateStore{
+	store := &fakeStateStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{
 			ID:        "glimmung",
 			Name:      "glimmung",
@@ -229,7 +282,7 @@ func TestStateSnapshotDoesNotInferNativeSlotsFromAppType(t *testing.T) {
 
 func TestStateSnapshotIgnoresOutOfRangeNativeSlots(t *testing.T) {
 	now := time.Date(2026, 5, 11, 3, 0, 0, 0, time.UTC)
-	store := fakeStateStore{
+	store := &fakeStateStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{
 			ID:   "tank-operator",
 			Name: "tank-operator",
@@ -275,7 +328,7 @@ func TestStateSnapshotRequiresStateStore(t *testing.T) {
 }
 
 func TestStateSnapshotStoreErrorsReturn500(t *testing.T) {
-	handler := NewWithStore(Settings{}, fakeStateStore{
+	handler := NewWithStore(Settings{}, &fakeStateStore{
 		fakeReadStore: fakeReadStore{},
 		err:           errors.New("boom"),
 	})
@@ -297,7 +350,7 @@ func TestStateEventsRequiresStateStore(t *testing.T) {
 
 func TestStateEventsStreamsInitialStateEvent(t *testing.T) {
 	now := time.Date(2026, 5, 11, 3, 0, 0, 0, time.UTC)
-	store := fakeStateStore{
+	store := &fakeStateStore{
 		leases: []Lease{{
 			ID:          "lease-1",
 			Project:     "ambience",

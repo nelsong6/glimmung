@@ -88,40 +88,9 @@ func (s *fakeLeaseCallbackStore) CancelLeaseByRef(_ context.Context, _, ref stri
 	return CancelLeaseResult{State: "no_active_run", LeaseRef: ref}, nil
 }
 
-func (s *fakeLeaseCallbackStore) SetProjectTestEnvironmentSlotStatus(_ context.Context, project string, status TestEnvironmentSlotStatus) (Project, error) {
-	s.slotStatuses = append(s.slotStatuses, status)
-	for i := range s.projects {
-		if s.projects[i].Name != project && s.projects[i].ID != project {
-			continue
-		}
-		if s.projects[i].Metadata == nil {
-			s.projects[i].Metadata = map[string]any{}
-		}
-		standby, _ := s.projects[i].Metadata["native_standby_dns"].(map[string]any)
-		if standby == nil {
-			standby = map[string]any{}
-		}
-		slots, _ := standby["slots"].([]any)
-		replaced := false
-		for j, raw := range slots {
-			slot, _ := raw.(map[string]any)
-			if slot == nil {
-				continue
-			}
-			if index, ok := positiveIntFromMap(slot, "slot_index"); ok && index == status.SlotIndex {
-				slots[j] = testSlotStatusMap(status)
-				replaced = true
-			}
-		}
-		if !replaced {
-			slots = append(slots, testSlotStatusMap(status))
-		}
-		standby["slots"] = slots
-		s.projects[i].Metadata["native_standby_dns"] = standby
-		return s.projects[i], nil
-	}
-	return Project{}, ErrNotFound
-}
+// SetProjectTestEnvironmentSlotStatus was the pre-PR-518 slot-status
+// write path. Deleted with the production code; slot writes now go
+// through SlotStore.UpdateIfMatch on the embedded slot map.
 
 // SlotStore + SlotHistoryStore methods backed by a sibling fakeLeaseStore.
 // Lifecycle helpers use SlotStore via type assertion on the read store
@@ -323,7 +292,7 @@ func TestReleaseLeaseByCallbackTokenStartsTestSlotCleanup(t *testing.T) {
 				"slot_prefix": "tank-slot",
 				"count":       float64(1),
 				"slots": []any{
-					map[string]any{"slot_index": float64(1), "slot_name": "tank-slot-1", "state": testSlotStateActive},
+					map[string]any{"slot_index": float64(1), "slot_name": "tank-slot-1", "state": SlotStateRunning},
 				},
 			}},
 		}}},
@@ -361,7 +330,7 @@ func TestReleaseLeaseByCallbackTokenStartsTestSlotCleanup(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if len(store.slotStatuses) != 1 || store.slotStatuses[0].State != testSlotStateCleaning {
+	if len(store.slotStatuses) != 1 || store.slotStatuses[0].State != SlotStateCleaning {
 		t.Fatalf("slot statuses=%#v, want cleaning", store.slotStatuses)
 	}
 	if len(store.slotStatuses[0].ReturnHistory) != 1 || store.slotStatuses[0].ReturnHistory[0].Source != "lease_callback.release" {

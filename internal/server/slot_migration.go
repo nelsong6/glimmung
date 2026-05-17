@@ -186,6 +186,14 @@ func slotFromLegacyEntry(project string, entry legacySlotEntry, now time.Time) S
 		t := entry.readyAt.UTC()
 		slot.ProvisionedAt = &t
 	}
+	// Preserve the operator-visible `detail` field across migration —
+	// it's the human-readable explanation that pairs with non-terminal
+	// states and errors. Dropping it on migration loses diagnostic
+	// context that the dashboard surfaces.
+	if v, ok := stringFromMap(entry.raw, "detail"); ok && v != "" {
+		detail := v
+		slot.Detail = &detail
+	}
 	return slot
 }
 

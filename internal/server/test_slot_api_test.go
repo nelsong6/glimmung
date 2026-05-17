@@ -135,6 +135,7 @@ func TestCheckoutTestSlotStartsAsyncActivation(t *testing.T) {
 			RequestedAt: now,
 		},
 	}
+	seedSlotsFromLegacyMetadata(t, store, store, "tank-operator")
 	preparer := &fakeTestSlotPreparer{
 		activateStarted: make(chan struct{}, 1),
 		activateRelease: make(chan struct{}),
@@ -153,13 +154,13 @@ func TestCheckoutTestSlotStartsAsyncActivation(t *testing.T) {
 	if preparer.preliminaries {
 		t.Fatal("checkout activation should not call the warmup path through the API handler")
 	}
-	if len(store.slotStatuses) != 1 || store.slotStatuses[0].State != testSlotStateActivating {
+	if len(store.slotStatuses) != 1 || store.slotStatuses[0].State != SlotStateActivating {
 		t.Fatalf("slot statuses=%#v, want activating", store.slotStatuses)
 	}
 	if store.slotStatuses[0].ActivationAttempt == nil || *store.slotStatuses[0].ActivationAttempt != 2 {
 		t.Fatalf("activation attempt=%v, want 2", store.slotStatuses[0].ActivationAttempt)
 	}
-	if store.slotStatuses[0].ActivationState == nil || *store.slotStatuses[0].ActivationState != testSlotStateActivating {
+	if store.slotStatuses[0].ActivationState == nil || *store.slotStatuses[0].ActivationState != SlotStateActivating {
 		t.Fatalf("activation state=%v, want activating", store.slotStatuses[0].ActivationState)
 	}
 	if store.slotStatuses[0].ActivationStartedAt == nil || store.slotStatuses[0].ActivationJobName == nil {
@@ -187,10 +188,15 @@ func TestCheckoutTestSlotStartsAsyncActivation(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("background activation did not finish")
 	}
-	waitForSlotStatus(t, store, testSlotStateActive)
+	waitForSlotStatus(t, store, SlotStateRunning)
 	waitForInstallerCleanup(t, preparer)
 	finalStatus := store.slotStatuses[len(store.slotStatuses)-1]
-	if finalStatus.ActivationState == nil || *finalStatus.ActivationState != testSlotStateActive {
+	// derivedActivationState returns the legacy wire vocabulary
+	// ("active" once ActivationCompletedAt is set) for dashboard/mcp
+	// wire-compat. The state name migration to the new vocab on the
+	// wire is a separate follow-up; until then this assertion uses
+	// the wire string directly.
+	if finalStatus.ActivationState == nil || *finalStatus.ActivationState != "active" {
 		t.Fatalf("final activation state=%v, want active", finalStatus.ActivationState)
 	}
 	if finalStatus.ActivationCompletedAt == nil {
@@ -333,6 +339,7 @@ func TestCheckoutTestSlotHonorsExplicitTTL(t *testing.T) {
 			RequestedAt: now,
 		},
 	}
+	seedSlotsFromLegacyMetadata(t, store, store, "tank-operator")
 	preparer := &fakeTestSlotPreparer{
 		activateStarted: make(chan struct{}, 1),
 		activateRelease: make(chan struct{}),
@@ -389,7 +396,7 @@ func TestRecoverInFlightTestSlotsResumesActivation(t *testing.T) {
 					map[string]any{
 						"slot_index": float64(1),
 						"slot_name":  "recover-slot-1",
-						"state":      testSlotStateActivating,
+						"state":      SlotStateActivating,
 						"updated_at": stale.Format(time.RFC3339Nano),
 					},
 				},
@@ -427,7 +434,7 @@ func TestRecoverInFlightTestSlotsResumesActivation(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("recovered activation did not finish")
 	}
-	waitForSlotStatus(t, store, testSlotStateActive)
+	waitForSlotStatus(t, store, SlotStateRunning)
 }
 
 func TestRecoverInFlightTestSlotsResumesCleanup(t *testing.T) {
@@ -447,7 +454,7 @@ func TestRecoverInFlightTestSlotsResumesCleanup(t *testing.T) {
 					map[string]any{
 						"slot_index": float64(1),
 						"slot_name":  "recover-slot-1",
-						"state":      testSlotStateCleaning,
+						"state":      SlotStateCleaning,
 						"updated_at": stale.Format(time.RFC3339Nano),
 					},
 				},
@@ -485,7 +492,7 @@ func TestRecoverInFlightTestSlotsResumesCleanup(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("recovered cleanup did not finish")
 	}
-	waitForSlotStatus(t, store, testSlotStateReady)
+	waitForSlotStatus(t, store, SlotStateProvisioned)
 	if store.cancelledRef != "recover-slot-1" {
 		t.Fatalf("cancelledRef=%q, want recover-slot-1", store.cancelledRef)
 	}
@@ -511,7 +518,7 @@ func TestRecoverInFlightTestSlotsCleansSlotWithoutLease(t *testing.T) {
 					map[string]any{
 						"slot_index": float64(1),
 						"slot_name":  "recover-slot-1",
-						"state":      testSlotStateCleaning,
+						"state":      SlotStateCleaning,
 						"updated_at": stale.Format(time.RFC3339Nano),
 					},
 				},
@@ -522,7 +529,7 @@ func TestRecoverInFlightTestSlotsCleansSlotWithoutLease(t *testing.T) {
 	preparer := &fakeTestSlotPreparer{}
 
 	RecoverInFlightTestSlots(context.Background(), store, preparer, nil, nil)
-	waitForSlotStatus(t, store, testSlotStateReady)
+	waitForSlotStatus(t, store, SlotStateProvisioned)
 	if store.cancelledRef != "" {
 		t.Fatalf("cancelledRef=%q, want empty", store.cancelledRef)
 	}
@@ -546,7 +553,7 @@ func TestLeaseExpiryTimerFiresCleanup(t *testing.T) {
 					map[string]any{
 						"slot_index": float64(1),
 						"slot_name":  "expire-slot-1",
-						"state":      testSlotStateActive,
+						"state":      SlotStateRunning,
 						"updated_at": now.Format(time.RFC3339Nano),
 					},
 				},
@@ -587,7 +594,7 @@ func TestLeaseExpiryTimerFiresCleanup(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("cleanup did not finish")
 	}
-	waitForSlotStatus(t, store, testSlotStateReady)
+	waitForSlotStatus(t, store, SlotStateProvisioned)
 	if store.cancelledRef != "expire-slot-1" {
 		t.Fatalf("cancelledRef=%q, want expire-slot-1", store.cancelledRef)
 	}
@@ -665,7 +672,7 @@ func TestClaimTestSlotCleanupDedupsOnEtagConflict(t *testing.T) {
 					map[string]any{
 						"slot_index": float64(1),
 						"slot_name":  "race-slot-1",
-						"state":      testSlotStateActive,
+						"state":      SlotStateRunning,
 						"updated_at": now.Format(time.RFC3339Nano),
 					},
 				},
@@ -728,7 +735,7 @@ func TestClaimTestSlotCleanupDedupsOnEtagConflict(t *testing.T) {
 	// returned before writing.
 	cleaningWrites := 0
 	for _, status := range store.snapshotSlotStatuses() {
-		if status.State == testSlotStateCleaning {
+		if status.State == SlotStateCleaning {
 			cleaningWrites++
 		}
 	}
@@ -781,7 +788,7 @@ func TestClaimTestSlotWarmupRetriesAcrossCrossSlotWrites(t *testing.T) {
 		seen[status.SlotIndex] = status.State
 	}
 	for i := 1; i <= count; i++ {
-		if seen[i] != testSlotStateReady {
+		if seen[i] != SlotStateProvisioned {
 			t.Fatalf("slot %d final state=%q, want ready (cross-slot CAS contention must not strand a slot under retry exhaustion)", i, seen[i])
 		}
 	}
@@ -803,7 +810,7 @@ func TestFireLeaseExpiryNoOpsWhenAnotherReplicaAlreadyClaimed(t *testing.T) {
 					map[string]any{
 						"slot_index": float64(1),
 						"slot_name":  "race-slot-1",
-						"state":      testSlotStateActive,
+						"state":      SlotStateRunning,
 						"updated_at": now.Format(time.RFC3339Nano),
 					},
 				},
@@ -847,7 +854,7 @@ func TestFireLeaseExpiryNoOpsWhenAnotherReplicaAlreadyClaimed(t *testing.T) {
 	// fireLeaseExpiry's lost race.
 	cleaningWrites := 0
 	for _, status := range store.snapshotSlotStatuses() {
-		if status.State == testSlotStateCleaning {
+		if status.State == SlotStateCleaning {
 			cleaningWrites++
 		}
 	}
@@ -872,7 +879,7 @@ func TestRecoverInFlightTestSlotsArmsTimerForClaimedLease(t *testing.T) {
 					map[string]any{
 						"slot_index": float64(1),
 						"slot_name":  "expire-slot-1",
-						"state":      testSlotStateActive,
+						"state":      SlotStateRunning,
 						"updated_at": now.Format(time.RFC3339Nano),
 					},
 				},
@@ -925,7 +932,7 @@ func TestRecoverInFlightTestSlotsCleansInstallerForActiveSlot(t *testing.T) {
 					map[string]any{
 						"slot_index": float64(1),
 						"slot_name":  "active-slot-1",
-						"state":      testSlotStateActive,
+						"state":      SlotStateRunning,
 						"updated_at": now.Format(time.RFC3339Nano),
 					},
 				},
@@ -984,7 +991,7 @@ func TestRecoverInFlightTestSlotsWarmsMissingSlots(t *testing.T) {
 		seen[status.SlotIndex] = status.State
 	}
 	for i := 1; i <= 3; i++ {
-		if seen[i] != testSlotStateReady {
+		if seen[i] != SlotStateProvisioned {
 			t.Fatalf("slot %d final state=%q, want ready", i, seen[i])
 		}
 	}
@@ -1005,7 +1012,7 @@ func TestRecoverInFlightTestSlotsResumesStaleWarming(t *testing.T) {
 					map[string]any{
 						"slot_index": float64(1),
 						"slot_name":  "stale-slot-1",
-						"state":      testSlotStateWarming,
+						"state":      SlotStateProvisioning,
 						"updated_at": time.Now().UTC().Add(-2 * recoveryMinAge).Format(time.RFC3339Nano),
 					},
 				},
@@ -1016,7 +1023,7 @@ func TestRecoverInFlightTestSlotsResumesStaleWarming(t *testing.T) {
 	preparer := &fakeTestSlotPreparer{}
 
 	RecoverInFlightTestSlots(context.Background(), store, preparer, nil, nil)
-	waitForSlotStatus(t, store, testSlotStateReady)
+	waitForSlotStatus(t, store, SlotStateProvisioned)
 	if !preparer.preliminaries {
 		t.Fatal("expected EnsureTestSlotPreliminaries to run for stale warming slot")
 	}
@@ -1038,7 +1045,7 @@ func TestRecoverInFlightTestSlotsSkipsClaimedSlot(t *testing.T) {
 					map[string]any{
 						"slot_index": float64(1),
 						"slot_name":  "claim-slot-1",
-						"state":      testSlotStateActive,
+						"state":      SlotStateRunning,
 						"updated_at": now.Format(time.RFC3339Nano),
 					},
 				},
@@ -1309,7 +1316,7 @@ func TestReturnTestSlotReleasesLease(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"state":"cleaning"`) || !strings.Contains(rec.Body.String(), `"cleanup_started":true`) {
 		t.Fatalf("response=%s", rec.Body.String())
 	}
-	if len(store.slotStatuses) != 1 || store.slotStatuses[0].State != testSlotStateCleaning {
+	if len(store.slotStatuses) != 1 || store.slotStatuses[0].State != SlotStateCleaning {
 		t.Fatalf("slot statuses=%#v, want cleaning", store.slotStatuses)
 	}
 	if len(store.slotStatuses[0].ReturnHistory) != 1 {
@@ -1325,7 +1332,7 @@ func TestReturnTestSlotReleasesLease(t *testing.T) {
 	if history.LeaseNumber == nil || *history.LeaseNumber != 2 || history.LeaseRequester != nil {
 		t.Fatalf("return lease history=%#v", history)
 	}
-	if store.slotStatuses[0].CleanupState == nil || *store.slotStatuses[0].CleanupState != testSlotStateCleaning {
+	if store.slotStatuses[0].CleanupState == nil || *store.slotStatuses[0].CleanupState != SlotStateCleaning {
 		t.Fatalf("cleanup state=%v, want cleaning", store.slotStatuses[0].CleanupState)
 	}
 	select {
@@ -1339,12 +1346,16 @@ func TestReturnTestSlotReleasesLease(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("background cleanup did not finish")
 	}
-	waitForSlotStatus(t, store, testSlotStateReady)
+	waitForSlotStatus(t, store, SlotStateProvisioned)
 	if store.cancelledRef != "tank-slot-1" {
 		t.Fatalf("cancelledRef=%q, want tank-slot-1", store.cancelledRef)
 	}
 	finalStatus := store.slotStatuses[len(store.slotStatuses)-1]
-	if finalStatus.CleanupState == nil || *finalStatus.CleanupState != testSlotStateReady {
+	// derivedCleanupState returns the legacy wire string "ready" when
+	// CleanupCompletedAt is set on a provisioned slot — wire-compat
+	// for dashboards; the wire-vocab migration is a separate
+	// follow-up.
+	if finalStatus.CleanupState == nil || *finalStatus.CleanupState != "ready" {
 		t.Fatalf("cleanup state=%v, want ready", finalStatus.CleanupState)
 	}
 	if finalStatus.CleanupCompletedAt == nil {
@@ -1361,7 +1372,7 @@ func TestSetLeaseSlotCleanupFinishedClearsActivationFieldsOnSuccess(t *testing.T
 	// ReturnHistory; the activation_* fields describe current state only.
 	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
 	attempt := 77
-	state := testSlotStateActive
+	state := SlotStateRunning
 	jobName := "glim-slot-apply-tank-slot-1-77"
 	startedAt := now.Add(-time.Hour)
 	completedAt := now.Add(-time.Hour + 19*time.Second)
@@ -1376,7 +1387,7 @@ func TestSetLeaseSlotCleanupFinishedClearsActivationFieldsOnSuccess(t *testing.T
 					map[string]any{
 						"slot_index":              float64(1),
 						"slot_name":               "tank-slot-1",
-						"state":                   testSlotStateActive,
+						"state":                   SlotStateRunning,
 						"updated_at":              now.Format(time.RFC3339Nano),
 						"activation_attempt":      float64(attempt),
 						"activation_state":        state,
@@ -1388,6 +1399,7 @@ func TestSetLeaseSlotCleanupFinishedClearsActivationFieldsOnSuccess(t *testing.T
 			}},
 		}}},
 	}
+	seedSlotsFromLegacyMetadata(t, store, store, "tank")
 	lease := Lease{
 		Project:     "tank",
 		LeaseNumber: intPtr(77),
@@ -1400,7 +1412,7 @@ func TestSetLeaseSlotCleanupFinishedClearsActivationFieldsOnSuccess(t *testing.T
 		RequestedAt: now,
 	}
 
-	if _, err := setLeaseSlotCleanupFinished(context.Background(), store, store.projects[0], lease, testSlotStateReady, nil); err != nil {
+	if _, err := setLeaseSlotCleanupFinished(context.Background(), store, store.projects[0], lease, SlotStateProvisioned, nil); err != nil {
 		t.Fatalf("cleanup finished: %v", err)
 	}
 	snap := store.snapshotSlotStatuses()
@@ -1408,7 +1420,7 @@ func TestSetLeaseSlotCleanupFinishedClearsActivationFieldsOnSuccess(t *testing.T
 		t.Fatal("no slot status written")
 	}
 	final := snap[len(snap)-1]
-	if final.State != testSlotStateReady {
+	if final.State != SlotStateProvisioned {
 		t.Fatalf("state=%q, want ready", final.State)
 	}
 	if final.ActivationAttempt != nil {
@@ -1429,7 +1441,9 @@ func TestSetLeaseSlotCleanupFinishedClearsActivationFieldsOnSuccess(t *testing.T
 	if final.ActivationError != nil {
 		t.Errorf("ActivationError=%q, want nil after clean return", *final.ActivationError)
 	}
-	if final.CleanupState == nil || *final.CleanupState != testSlotStateReady {
+	// CleanupState is the legacy wire vocabulary ("ready" once cleanup
+	// completes on a provisioned slot). See note on "active" above.
+	if final.CleanupState == nil || *final.CleanupState != "ready" {
 		t.Errorf("CleanupState=%v, want ready", final.CleanupState)
 	}
 }
@@ -1450,16 +1464,17 @@ func TestSetLeaseSlotCleanupFinishedPreservesActivationFieldsOnError(t *testing.
 					map[string]any{
 						"slot_index":          float64(1),
 						"slot_name":           "tank-slot-1",
-						"state":               testSlotStateActive,
+						"state":               SlotStateRunning,
 						"updated_at":          now.Format(time.RFC3339Nano),
 						"activation_attempt":  float64(77),
-						"activation_state":    testSlotStateActive,
+						"activation_state":    SlotStateRunning,
 						"activation_job_name": "glim-slot-apply-tank-slot-1-77",
 					},
 				},
 			}},
 		}}},
 	}
+	seedSlotsFromLegacyMetadata(t, store, store, "tank")
 	lease := Lease{
 		Project:     "tank",
 		LeaseNumber: intPtr(77),
@@ -1483,7 +1498,9 @@ func TestSetLeaseSlotCleanupFinishedPreservesActivationFieldsOnError(t *testing.
 	if final.ActivationAttempt == nil || *final.ActivationAttempt != 77 {
 		t.Errorf("ActivationAttempt=%v, want preserved as 77 on error path", final.ActivationAttempt)
 	}
-	if final.ActivationState == nil || *final.ActivationState != testSlotStateActive {
+	// ActivationState here is the legacy wire-derived string ("active"
+	// when ActivationCompletedAt is set); see notes on "active" above.
+	if final.ActivationState == nil || *final.ActivationState != "active" {
 		t.Errorf("ActivationState=%v, want preserved on error path", final.ActivationState)
 	}
 	if final.ActivationJobName == nil {

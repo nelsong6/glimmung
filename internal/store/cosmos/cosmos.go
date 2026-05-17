@@ -204,7 +204,15 @@ func (s *Store) SetProjectTestEnvironmentCount(ctx context.Context, project stri
 		standbyDNS = map[string]any{}
 	}
 	standbyDNS["count"] = count
-	standbyDNS["slots"] = pruneProjectTestEnvironmentSlots(standbyDNS["slots"], count)
+	// The slots themselves live in the `slots` Cosmos container post
+	// PR #518; the project doc only owns the configured count and the
+	// slot-prefix. Defensively delete any stale embedded array so
+	// dual-source state is impossible (docs/migration-policy.md:
+	// "no fallback defaults, no runtime reads whose purpose is to keep
+	// old behavior working"). The migration boot sweep also strips this,
+	// but a write of the project doc that re-attached the array would
+	// resurrect old behavior — so we belt-and-suspender it here.
+	delete(standbyDNS, "slots")
 	metadata["native_standby_dns"] = standbyDNS
 	if workloadIdentity, ok := metadata["native_standby_workload_identity"].(map[string]any); ok {
 		workloadIdentity["count"] = count
@@ -289,51 +297,6 @@ func (s *Store) SetProjectManagedAuthOriginStatus(ctx context.Context, project s
 	return projectFromMap(doc)
 }
 
-// StripProjectTestEnvironmentSlotsArray removes the legacy
-// `metadata.native_standby_dns.slots[]` array from a project doc.
-// Called by the one-shot slot-storage-rework migration after slot data
-// has been copied to the new `slots` collection.
-//
-// Idempotent: if the array is already absent, the call is a no-op
-// (still does the read-modify-write so the project doc's updated_at
-// advances, which is harmless).
-func (s *Store) StripProjectTestEnvironmentSlotsArray(ctx context.Context, project string) error {
-	partitionKey := azcosmos.NewPartitionKeyString(project)
-	read, err := s.projects.ReadItem(ctx, partitionKey, project, nil)
-	if err != nil {
-		if isCosmosStatus(err, http.StatusNotFound) {
-			return server.ErrNotFound
-		}
-		return err
-	}
-	var doc map[string]any
-	if err := json.Unmarshal(read.Value, &doc); err != nil {
-		return err
-	}
-	metadata, _ := doc["metadata"].(map[string]any)
-	if metadata == nil {
-		return nil
-	}
-	standbyDNS, _ := metadata["native_standby_dns"].(map[string]any)
-	if standbyDNS == nil {
-		return nil
-	}
-	if _, present := standbyDNS["slots"]; !present {
-		return nil
-	}
-	delete(standbyDNS, "slots")
-	metadata["native_standby_dns"] = standbyDNS
-	doc["metadata"] = metadata
-	payload, err := json.Marshal(doc)
-	if err != nil {
-		return err
-	}
-	if _, err := s.projects.ReplaceItem(ctx, partitionKey, project, payload, nil); err != nil {
-		return err
-	}
-	return nil
-}
-
 // SetProjectTestEnvironmentSlotStatus and its IfMatch sibling were
 // retired with the slot-storage rework. Slot status now lives in the
 // `slots` collection; writes go through Store.UpdateIfMatch.
@@ -360,90 +323,6 @@ func (s *Store) ReadProject(ctx context.Context, project string) (server.Project
 		return server.Project{}, err
 	}
 	return p.WithETag(string(read.ETag)), nil
-}
-
-func pruneProjectTestEnvironmentSlots(raw any, count int) []map[string]any {
-	slots := make([]map[string]any, 0)
-	for _, slot := range mapSliceValue(raw) {
-		index, ok := positiveIntValue(firstAny(slot["slot_index"], slot["slotIndex"]))
-		if !ok || index > count {
-			continue
-		}
-		slots = append(slots, slot)
-	}
-	return slots
-}
-
-func setProjectTestEnvironmentSlotStatus(raw any, status server.TestEnvironmentSlotStatus) []map[string]any {
-	slots := make([]map[string]any, 0)
-	replaced := false
-	for _, slot := range mapSliceValue(raw) {
-		index, ok := positiveIntValue(firstAny(slot["slot_index"], slot["slotIndex"]))
-		if ok && index == status.SlotIndex {
-			slots = append(slots, projectTestEnvironmentSlotStatusMap(status))
-			replaced = true
-			continue
-		}
-		slots = append(slots, slot)
-	}
-	if !replaced {
-		slots = append(slots, projectTestEnvironmentSlotStatusMap(status))
-	}
-	sort.SliceStable(slots, func(i, j int) bool {
-		left, _ := positiveIntValue(firstAny(slots[i]["slot_index"], slots[i]["slotIndex"]))
-		right, _ := positiveIntValue(firstAny(slots[j]["slot_index"], slots[j]["slotIndex"]))
-		return left < right
-	})
-	return slots
-}
-
-func projectTestEnvironmentSlotStatusMap(status server.TestEnvironmentSlotStatus) map[string]any {
-	slot := map[string]any{
-		"slot_index": status.SlotIndex,
-		"slot_name":  status.SlotName,
-		"state":      status.State,
-		"updated_at": status.UpdatedAt.Format(time.RFC3339Nano),
-	}
-	if status.Detail != nil && strings.TrimSpace(*status.Detail) != "" {
-		slot["detail"] = strings.TrimSpace(*status.Detail)
-	}
-	if status.ReadyAt != nil {
-		slot["ready_at"] = status.ReadyAt.Format(time.RFC3339Nano)
-	}
-	if status.ActivationAttempt != nil {
-		slot["activation_attempt"] = *status.ActivationAttempt
-	}
-	if status.ActivationState != nil && strings.TrimSpace(*status.ActivationState) != "" {
-		slot["activation_state"] = strings.TrimSpace(*status.ActivationState)
-	}
-	if status.ActivationStartedAt != nil {
-		slot["activation_started_at"] = status.ActivationStartedAt.Format(time.RFC3339Nano)
-	}
-	if status.ActivationCompletedAt != nil {
-		slot["activation_completed_at"] = status.ActivationCompletedAt.Format(time.RFC3339Nano)
-	}
-	if status.ActivationJobName != nil && strings.TrimSpace(*status.ActivationJobName) != "" {
-		slot["activation_job_name"] = strings.TrimSpace(*status.ActivationJobName)
-	}
-	if status.ActivationError != nil && strings.TrimSpace(*status.ActivationError) != "" {
-		slot["activation_error"] = strings.TrimSpace(*status.ActivationError)
-	}
-	if status.CleanupState != nil && strings.TrimSpace(*status.CleanupState) != "" {
-		slot["cleanup_state"] = strings.TrimSpace(*status.CleanupState)
-	}
-	if status.CleanupStartedAt != nil {
-		slot["cleanup_started_at"] = status.CleanupStartedAt.Format(time.RFC3339Nano)
-	}
-	if status.CleanupCompletedAt != nil {
-		slot["cleanup_completed_at"] = status.CleanupCompletedAt.Format(time.RFC3339Nano)
-	}
-	if status.CleanupError != nil && strings.TrimSpace(*status.CleanupError) != "" {
-		slot["cleanup_error"] = strings.TrimSpace(*status.CleanupError)
-	}
-	if len(status.ReturnHistory) > 0 {
-		slot["test_slot_return_history"] = status.ReturnHistory
-	}
-	return slot
 }
 
 func (s *Store) readProjectDoc(ctx context.Context, project string) (projectDoc, error) {
@@ -3773,32 +3652,58 @@ func (s *Store) availableNativeSlot(ctx context.Context, project string) (*int, 
 	return nil, nil
 }
 
+// nativeReadySlots returns the slot indices that are leasable right now —
+// state == `provisioned` and not already bound to an active lease. After
+// the slot-storage rework (PR #518) the canonical source is the `slots`
+// Cosmos container; this reader goes through the SlotStore interface so
+// the cosmos store and any test fakes share one truth and there is no
+// runtime read against the retired
+// `project.metadata.native_standby_dns.slots[]` array (per
+// docs/migration-policy.md "no parallel path that works for now").
+//
+// `count` from project metadata still bounds the result: slot docs whose
+// index exceeds the configured count are stale rows that the scale-down
+// path hasn't reaped yet, and the checkout must not lease against them.
 func (s *Store) nativeReadySlots(ctx context.Context, project string) []int {
-	doc, err := s.readProjectDoc(ctx, project)
+	count, ok := s.nativeStandbyCount(ctx, project)
+	if !ok {
+		return nil
+	}
+	rows, err := s.ListSlotsByProject(ctx, project)
 	if err != nil {
 		return nil
 	}
-	standby, ok := doc.Metadata["native_standby_dns"].(map[string]any)
-	if !ok {
-		return nil
-	}
-	count, ok := positiveIntValue(standby["count"])
-	if !ok {
-		return nil
-	}
-	slots := make([]int, 0)
-	for _, slot := range mapSliceValue(standby["slots"]) {
-		index, ok := positiveIntValue(firstAny(slot["slot_index"], slot["slotIndex"]))
-		if !ok || index < 1 || index > count {
+	out := make([]int, 0, len(rows))
+	for _, row := range rows {
+		if row.SlotIndex < 1 || row.SlotIndex > count {
 			continue
 		}
-		state, _ := slot["state"].(string)
-		if strings.EqualFold(strings.TrimSpace(state), "ready") {
-			slots = append(slots, index)
+		if row.State != server.SlotStateProvisioned {
+			continue
 		}
+		if row.ActiveLeaseRef != nil {
+			continue
+		}
+		out = append(out, row.SlotIndex)
 	}
-	sort.Ints(slots)
-	return slots
+	sort.Ints(out)
+	return out
+}
+
+// nativeStandbyCount returns the configured slot count for a project from
+// the project doc. The count itself stays on the project doc because it is
+// a knob the human edits (PATCH /v1/projects/{p}); only the per-slot status
+// moved to the `slots` collection.
+func (s *Store) nativeStandbyCount(ctx context.Context, project string) (int, bool) {
+	doc, err := s.readProjectDoc(ctx, project)
+	if err != nil {
+		return 0, false
+	}
+	standby, ok := doc.Metadata["native_standby_dns"].(map[string]any)
+	if !ok {
+		return 0, false
+	}
+	return positiveIntValue(standby["count"])
 }
 
 func (s *Store) nativeGlobalCap() int {
