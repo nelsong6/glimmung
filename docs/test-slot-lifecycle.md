@@ -78,6 +78,16 @@ When native Playwright support is enabled, activation must create the
 slot-local `slot-playwright` Deployment and Service and wait for the Deployment
 to report ready and available replicas before recording the slot as active.
 
+The `slot-playwright` Service is the canonical browser surface for the lease.
+Session-side tooling (mcp-glimmung's `inspect_browser_url`, agent-driven
+browser scripts) drives this Playwright over its WebSocket protocol instead of
+launching a browser elsewhere. Checkout and `/v1/state` responses expose the
+endpoint as `playwright_ws_endpoint` on the slot and on the active lease,
+shaped `ws://slot-playwright.<slot-name>.svc.cluster.local:<port>`. The field
+is omitted on clusters where Playwright support is disabled; tools that need
+it must treat absence as "this cluster does not run lease-scoped browsers"
+rather than fall back to a shared host.
+
 ### MCP Checkout Surface
 
 `nelsong6/mcp-glimmung` exposes `checkout_test_slot` as the session-facing MCP

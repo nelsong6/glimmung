@@ -46,19 +46,20 @@ type Lease struct {
 }
 
 type LeasePublic struct {
-	Ref          string          `json:"ref"`
-	LeaseNumber  *int            `json:"lease_number"`
-	Project      string          `json:"project"`
-	Workflow     *string         `json:"workflow"`
-	Host         *string         `json:"host"`
-	State        string          `json:"state"`
-	Requirements map[string]any  `json:"requirements"`
-	Metadata     map[string]any  `json:"metadata"`
-	Requester    *LeaseRequester `json:"requester"`
-	RequestedAt  time.Time       `json:"requested_at"`
-	AssignedAt   *time.Time      `json:"assigned_at"`
-	ReleasedAt   *time.Time      `json:"released_at"`
-	TTLSeconds   int             `json:"ttl_seconds"`
+	Ref                  string          `json:"ref"`
+	LeaseNumber          *int            `json:"lease_number"`
+	Project              string          `json:"project"`
+	Workflow             *string         `json:"workflow"`
+	Host                 *string         `json:"host"`
+	State                string          `json:"state"`
+	Requirements         map[string]any  `json:"requirements"`
+	Metadata             map[string]any  `json:"metadata"`
+	Requester            *LeaseRequester `json:"requester"`
+	RequestedAt          time.Time       `json:"requested_at"`
+	AssignedAt           *time.Time      `json:"assigned_at"`
+	ReleasedAt           *time.Time      `json:"released_at"`
+	TTLSeconds           int             `json:"ttl_seconds"`
+	PlaywrightWSEndpoint *string         `json:"playwright_ws_endpoint,omitempty"`
 }
 
 type LeaseRequester struct {
@@ -106,6 +107,7 @@ type TestEnvironmentPublic struct {
 	ReturnHistory         []TestSlotReturnHistoryEntry `json:"test_slot_return_history,omitempty"`
 	Lease                 *LeasePublic                 `json:"lease"`
 	WaitingRequests       []TestSlotRequestPublic      `json:"waiting_requests"`
+	PlaywrightWSEndpoint  *string                      `json:"playwright_ws_endpoint,omitempty"`
 }
 
 func stateSnapshot(settings Settings, store ReadStore) http.HandlerFunc {
@@ -246,7 +248,7 @@ func computeStateSnapshot(
 
 	activePublic := make([]LeasePublic, 0, len(active))
 	for _, lease := range active {
-		activePublic = append(activePublic, leaseToPublic(lease))
+		activePublic = append(activePublic, leaseToPublicForState(settings, lease))
 	}
 
 	return StateSnapshot{
@@ -274,6 +276,19 @@ func leaseToPublic(lease Lease) LeasePublic {
 		ReleasedAt:   lease.ReleasedAt,
 		TTLSeconds:   defaultTTLSeconds(lease.TTLSeconds),
 	}
+}
+
+// leaseToPublicForState wraps leaseToPublic for the state snapshot, attaching
+// the slot-playwright WebSocket endpoint when the lease holds a slot and the
+// cluster is running playwright-enabled slots. mcp-glimmung's
+// `inspect_browser_url` reads this field to route browser inspection through
+// the leased slot's Playwright pod.
+func leaseToPublicForState(settings Settings, lease Lease) LeasePublic {
+	public := leaseToPublic(lease)
+	if slotName, ok := stringFromMap(lease.Metadata, "native_slot_name"); ok {
+		public.PlaywrightWSEndpoint = PlaywrightWSEndpointFor(settings, slotName)
+	}
+	return public
 }
 
 // LeasePublicRefFromLease is the exported wrapper used by the cosmos store.
@@ -384,7 +399,7 @@ func testEnvironmentsFromSnapshot(
 					state = "claimed"
 				}
 				usable = state == testSlotStateActive
-				value := leaseToPublic(lease)
+				value := leaseToPublicForState(settings, lease)
 				publicLease = &value
 			}
 			var updatedAt *time.Time
@@ -392,10 +407,11 @@ func testEnvironmentsFromSnapshot(
 				value := slotStatus.UpdatedAt
 				updatedAt = &value
 			}
+			slotName := testEnvironmentName(projectName, slotIndex, project, lease)
 			envs = append(envs, TestEnvironmentPublic{
 				Project:               projectName,
 				SlotIndex:             slotIndex,
-				SlotName:              testEnvironmentName(projectName, slotIndex, project, lease),
+				SlotName:              slotName,
 				State:                 state,
 				Usable:                usable,
 				Detail:                slotStatus.Detail,
@@ -414,6 +430,7 @@ func testEnvironmentsFromSnapshot(
 				ReturnHistory:         slotStatus.ReturnHistory,
 				Lease:                 publicLease,
 				WaitingRequests:       sliceOrEmpty(waitingByProject[projectName][slotIndex]),
+				PlaywrightWSEndpoint:  PlaywrightWSEndpointFor(settings, slotName),
 			})
 		}
 	}
