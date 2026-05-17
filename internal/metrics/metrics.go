@@ -270,6 +270,102 @@ func RecordHotSwap(outcome string, duration time.Duration) {
 	hotSwapDurationSeconds.WithLabelValues(out).Observe(duration.Seconds())
 }
 
+// --- Cosmos query layer ------------------------------------------------------
+//
+// Per-query observability for the three primitives in
+// internal/store/cosmos/query.go (singlePartitionQuery, crossPartitionQuery,
+// fanOutByProject). The contract migration that introduced those primitives
+// also retired a class of latent bug — implicit cross-partition ORDER BY
+// queries that the Go SDK can't fan out — and these metrics exist so a
+// regression surfaces on a dashboard, not as a 5xx-per-minute log only the
+// next operator to grep finds. See docs/cosmos-partition-strategy.md.
+
+var (
+	cosmosQueriesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "glimmung_cosmos_queries_total",
+			Help: "Cosmos queries dispatched, labelled by container, partition mode (single, cross, fanout), and outcome (success, error).",
+		},
+		[]string{"container", "mode", "outcome"},
+	)
+	cosmosQueryDurationSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "glimmung_cosmos_query_duration_seconds",
+			Help:    "Cosmos query wall-clock duration, labelled by container and partition mode. Fanout duration is the total across all per-partition iterations.",
+			Buckets: prometheus.ExponentialBuckets(0.005, 2, 12), // 5ms .. ~20s
+		},
+		[]string{"container", "mode"},
+	)
+	cosmosQueryRuChargeTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "glimmung_cosmos_query_ru_charge_total",
+			Help: "Cumulative Cosmos RU charge consumed by queries, labelled by container and partition mode.",
+		},
+		[]string{"container", "mode"},
+	)
+	cosmosFanoutPartitionsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "glimmung_cosmos_fanout_partitions_total",
+			Help: "Total per-partition iterations executed by fanOutByProject, labelled by container. Divide by the queries_total fanout count for partition fan-out factor.",
+		},
+		[]string{"container"},
+	)
+	cosmosQueryPlanErrorTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "glimmung_cosmos_query_plan_error_total",
+			Help: "Cosmos 400 BadRequest responses that match the query-plan failure shape (cross-partition ORDER BY/DISTINCT/GROUP BY/OFFSET/TOP via the Go SDK). The dedicated counter exists because the production /v1/touchpoints 5xx-per-minute bug surfaced as a generic 5xx for hours before anyone noticed; this counter would have alerted on it directly.",
+		},
+		[]string{"container"},
+	)
+)
+
+// CosmosQueryMode is the closed enum of partition-strategy modes recorded by
+// RecordCosmosQuery. Mirrors the three primitives in
+// internal/store/cosmos/query.go so a metrics label cannot drift away from
+// the primitive a callsite actually used.
+const (
+	CosmosQueryModeSingle = "single"
+	CosmosQueryModeCross  = "cross"
+	CosmosQueryModeFanout = "fanout"
+)
+
+// CosmosQueryOutcome is the closed enum of query outcomes. error is the
+// terminal SDK error; success is everything that completed without one,
+// including empty result sets.
+const (
+	CosmosQueryOutcomeSuccess = "success"
+	CosmosQueryOutcomeError   = "error"
+)
+
+// RecordCosmosQuery records one Cosmos query execution. container is the
+// short container name (e.g. "reports"); mode is one of the
+// CosmosQueryMode* constants; duration is wall-clock; ruCharge is the
+// summed RU charge across every page returned by the pager; queryPlanErr
+// is true when the SDK error matches the query-plan failure shape
+// (rejected cross-partition ORDER BY etc.), which increments the
+// dedicated counter alongside the generic error outcome.
+func RecordCosmosQuery(container, mode string, duration time.Duration, ruCharge float64, outcome string, queryPlanErr bool) {
+	c := safeLabel(container)
+	m := safeLabel(mode)
+	o := safeLabel(outcome)
+	cosmosQueriesTotal.WithLabelValues(c, m, o).Inc()
+	cosmosQueryDurationSeconds.WithLabelValues(c, m).Observe(duration.Seconds())
+	if ruCharge > 0 {
+		cosmosQueryRuChargeTotal.WithLabelValues(c, m).Add(ruCharge)
+	}
+	if queryPlanErr {
+		cosmosQueryPlanErrorTotal.WithLabelValues(c).Inc()
+	}
+}
+
+// RecordCosmosFanoutPartition increments the partition-iteration counter
+// for one fanOutByProject step. Called once per project the helper
+// visits; the count divided by the fanout-mode queries_total count gives
+// the observed average fan-out factor.
+func RecordCosmosFanoutPartition(container string) {
+	cosmosFanoutPartitionsTotal.WithLabelValues(safeLabel(container)).Inc()
+}
+
 // --- Auth (auth.romaine.life JWT verifier) -----------------------------------
 
 var authRomaineLifeRequestsTotal = prometheus.NewCounterVec(
@@ -327,6 +423,11 @@ func init() {
 		leaseAcquireWaitSeconds,
 		hotSwapOutcomesTotal,
 		hotSwapDurationSeconds,
+		cosmosQueriesTotal,
+		cosmosQueryDurationSeconds,
+		cosmosQueryRuChargeTotal,
+		cosmosFanoutPartitionsTotal,
+		cosmosQueryPlanErrorTotal,
 		authRomaineLifeRequestsTotal,
 	)
 }

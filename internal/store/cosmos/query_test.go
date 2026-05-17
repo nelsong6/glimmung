@@ -1,6 +1,7 @@
 package cosmos
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -154,6 +155,78 @@ func TestFanOutByProjectGuardsParameterBinding(t *testing.T) {
 		}
 		if len(dst) != 0 {
 			t.Fatalf("expected empty destination, got %d rows", len(dst))
+		}
+	})
+}
+
+// isQueryPlanError is the heuristic that drives the dedicated
+// glimmung_cosmos_query_plan_error_total counter. The match phrase is
+// the Cosmos gateway's long-standing 400 body for the cross-partition
+// ORDER BY / DISTINCT / GROUP BY / OFFSET / TOP shapes. If the SDK
+// changes the wording, this counter goes dark — covering the phrase in a
+// test makes the breakage visible at build time, not at the next
+// production regression.
+func TestIsQueryPlanError(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error is not a query-plan error", nil, false},
+		{
+			name: "canonical Cosmos 400 query-plan body",
+			err: errors.New(
+				"RESPONSE 400: Bad Request: The provided cross partition query " +
+					"can not be directly served by the gateway.",
+			),
+			want: true,
+		},
+		{"unrelated SDK error is not a query-plan error", errors.New("RESPONSE 429: Too Many Requests"), false},
+		{"unrelated string is not a query-plan error", errors.New("connection refused"), false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := isQueryPlanError(tc.err)
+			if got != tc.want {
+				t.Fatalf("isQueryPlanError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// redactedQueryShape exists so the per-query slog line can include the
+// SQL shape without unbounded length and without leaking partition-key
+// values. The contract: whitespace collapses to single spaces, and the
+// rendering caps at 240 characters with an ellipsis sentinel.
+func TestRedactedQueryShape(t *testing.T) {
+	t.Parallel()
+	t.Run("collapses whitespace", func(t *testing.T) {
+		t.Parallel()
+		got := redactedQueryShape("SELECT *\n  FROM c\n  WHERE c.project = @project")
+		want := "SELECT * FROM c WHERE c.project = @project"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+	t.Run("truncates over 240 chars with ellipsis", func(t *testing.T) {
+		t.Parallel()
+		long := strings.Repeat("a", 300)
+		got := redactedQueryShape(long)
+		if len(got) != 240 {
+			t.Fatalf("len(got) = %d, want 240", len(got))
+		}
+		if !strings.HasSuffix(got, "...") {
+			t.Fatalf("expected ellipsis suffix, got %q", got)
+		}
+	})
+	t.Run("short queries pass through", func(t *testing.T) {
+		t.Parallel()
+		got := redactedQueryShape("SELECT * FROM c")
+		if got != "SELECT * FROM c" {
+			t.Fatalf("got %q", got)
 		}
 	})
 }
