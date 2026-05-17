@@ -134,15 +134,15 @@ const CHECKS = [
   {
     id: "ops-dispatcher-fn",
     from: "Guarantee 1: end-to-end apply",
-    file: "internal/ops/agentops/apply_hot_swap.go",
-    description: "New ops function dispatches a build-and-swap Job and watches it to completion",
+    file: "internal/server/test_slot_apply_hot_swap_ops.go",
+    description: "Dispatcher function ApplyHotSwap takes a k8sJobClient (no kubectl shell-out — glimmung pod has no kubectl; matches the native_launcher request() pattern)",
     kind: "grep-present",
-    pattern: /func\s+\(o\s*\*Ops\)\s+(?:Dispatch)?ApplyHotSwap\(/,
+    pattern: /func\s+ApplyHotSwap\([\s\S]{0,200}?k8sJobClient/,
   },
   {
     id: "ops-dispatcher-job-spec",
     from: "Guarantee 1: end-to-end apply",
-    file: "internal/ops/agentops/apply_hot_swap.go",
+    file: "internal/server/test_slot_apply_hot_swap_ops.go",
     description: "Job spec uses init container for build, main container for swap (sequential via initContainers)",
     kind: "grep-present",
     pattern: /initContainers|InitContainers/,
@@ -150,10 +150,10 @@ const CHECKS = [
   {
     id: "ops-dispatcher-watches-job",
     from: "Guarantee 1: end-to-end apply",
-    file: "internal/ops/agentops/apply_hot_swap.go",
-    description: "Job dispatcher watches for completion using the kubectl wait pattern (bounded timeout)",
+    file: "internal/server/test_slot_apply_hot_swap_ops.go",
+    description: "Dispatcher polls Job's status.conditions via the k8s HTTP API (Complete/Failed types), not by kubectl-wait. Bounded by Timeout.",
     kind: "grep-present",
-    pattern: /kubectl[\s\S]{0,200}?\bwait\b|--for=condition=complete/,
+    pattern: /WaitForJob[\s\S]{0,2000}?conditions|Complete[\s\S]{0,200}?Failed/,
   },
 
   // ─────────────────────── Guarantee 2: each app declares its own builder ───────────────────────
@@ -272,7 +272,7 @@ const CHECKS = [
   {
     id: "observability-outcome-tracked-in-result",
     from: "Guarantee 3: sync UX + durable state",
-    file: "internal/ops/agentops/apply_hot_swap.go",
+    file: "internal/server/test_slot_apply_hot_swap_ops.go",
     description: "Result struct carries a bounded Outcome field with the named failure modes (persisted | build_failed | swap_failed | timeout); these flow into the durable hot-swap history record. Prometheus counter deferred to a separate PR when glimmung gets a /metrics endpoint.",
     kind: "grep-present",
     pattern: /Outcome[\s\S]{0,400}?persisted[\s\S]{0,200}?build_failed[\s\S]{0,200}?swap_failed[\s\S]{0,200}?timeout/,
@@ -347,7 +347,7 @@ const CHECKS = [
   {
     id: "test-ops-apply-hot-swap-job-spec",
     from: "Tests",
-    file: "internal/ops/agentops/apply_hot_swap_test.go",
+    file: "internal/server/test_slot_apply_hot_swap_ops_test.go",
     description: "Test asserts ApplyHotSwap renders the correct Job spec for each artifact_kind (builder_image, init container, main container, volumes)",
     kind: "grep-present",
     pattern: /TestApplyHotSwap|TestDispatchApplyHotSwap/,
