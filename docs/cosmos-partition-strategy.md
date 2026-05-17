@@ -147,25 +147,50 @@ The Go SDK is one of those "older SDK clients" by capability. Until it
 implements query-plan handling (no public timeline at the time of
 writing), the only options are the three primitives above.
 
+## Observability
+
+Every query through the three primitives is instrumented (Stage 2 of
+the contract rollout). Five Prometheus families plus a structured
+`slog.Error` on failure cover the surface:
+
+| Metric | Labels | What it tells you |
+|---|---|---|
+| `glimmung_cosmos_queries_total` | `container`, `mode`, `outcome` | Rate of Cosmos queries by container, partition strategy (`single` / `cross` / `fanout`), and outcome (`success` / `error`). |
+| `glimmung_cosmos_query_duration_seconds` | `container`, `mode` | Wall-clock duration histogram. Fan-out duration is the total across all per-partition iterations. |
+| `glimmung_cosmos_query_ru_charge_total` | `container`, `mode` | Cumulative RU charge, summed across pages. Divide by `queries_total` for average RU per query. |
+| `glimmung_cosmos_fanout_partitions_total` | `container` | Per-partition iterations executed by `fanOutByProject`. Divide by the fanout-mode `queries_total` for observed fan-out factor. |
+| `glimmung_cosmos_query_plan_error_total` | `container` | The 400 BadRequest shape this contract migration retired. Direct alerting target: any nonzero rate is a regression of the original bug. |
+
+`slog.Error` lines emitted at query failure include `container`,
+`mode`, `duration_ms`, `ru_charge`, `query_plan_error` (bool),
+`query` (whitespace-collapsed, 240-char-capped shape), and `err`.
+The slog line uses the same field names as the metric labels so a
+dashboard pivot and a log search land on the same dimensions.
+
 ## Migration backlog
 
-This document is the source of truth for follow-on work that the Stage 1
-PR did not absorb. As of the contract migration:
+This document is the source of truth for follow-on work that the
+contract migration did not absorb. As of Stage 2:
 
 - All read paths in `cosmos.go` go through the three primitives.
 - The guard in `scripts/check-cosmos-queries.mjs` enforces the contract.
-- `slot.go` and `slot_history.go` use `NewQueryItemsPager` directly with
-  explicit partition keys; they predate this guard and the script allows
-  them by name. Next time they're touched, fold them into
-  `singlePartitionQuery` so the allowlist can shrink.
-- Cosmos observability (per-query slog fields, Prometheus counters, RU
-  charge, partition mode) is **not yet shipped** — that's Stage 2 of the
-  Cosmos query contract rollout. Until it lands, partition-strategy
-  regressions will still produce 5xx logs through `writeInternalError`
-  but will not surface as a dedicated metric.
+- Per-query observability ships via the metrics above (Stage 2 — this
+  PR). Operators should add a Grafana row for the five families and an
+  alert on `rate(glimmung_cosmos_query_plan_error_total[5m]) > 0`.
+- `slot.go` and `slot_history.go` use `NewQueryItemsPager` directly
+  with explicit partition keys; they predate the contract and the
+  script allows them by name. They are **not** instrumented by the
+  observability layer because they bypass the helpers. Next time
+  they're touched, fold them into `singlePartitionQuery` so both the
+  allowlist and the metrics gap shrink.
 - The SPA poll at `frontend/src/App.tsx:359-385` calls `/v1/touchpoints`
   with no project filter, which forces a fan-out on every 20-second
   tick. Stage 3 of this rollout scopes or replaces the poll. Until
   then, the fan-out cost is bounded by the number of registered
   projects (small) and the once-a-minute external probe pointing at
-  `/v1/touchpoints` (also retargeted in Stage 3).
+  `/v1/touchpoints` (also retargeted in Stage 3). The fan-out is now
+  fully observable: a sustained `glimmung_cosmos_fanout_partitions_total`
+  rate against the `reports` container quantifies the cost.
+- Stage 4 — `writeUnavailable` helper for deliberate 503 responses
+  (test-slot saturation, etc.) so they leave a structured log line and
+  a counter rather than being silent.

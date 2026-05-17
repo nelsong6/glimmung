@@ -19,6 +19,13 @@
 //
 // See docs/cosmos-partition-strategy.md for the partition key inventory
 // and the rules for choosing between these helpers.
+//
+// Per-query observability — Prometheus counters/histograms and structured
+// slog on error — lives in instrumentPager below and the metrics package
+// (RecordCosmosQuery / RecordCosmosFanoutPartition). The dedicated
+// glimmung_cosmos_query_plan_error_total counter fires when a Cosmos 400
+// matches the query-plan failure shape so a regression of the original
+// bug surfaces on a dashboard, not as opaque 5xx logs.
 package cosmos
 
 import (
@@ -26,9 +33,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/data/azcosmos"
+
+	"github.com/nelsong6/glimmung/internal/metrics"
 )
 
 // singlePartitionQuery executes a SQL query against one partition of
@@ -51,20 +62,7 @@ func singlePartitionQuery[T any](
 	pager := container.NewQueryItemsPager(query, pk, &azcosmos.QueryOptions{
 		QueryParameters: parameters,
 	})
-	for pager.More() {
-		page, err := pager.NextPage(ctx)
-		if err != nil {
-			return err
-		}
-		for _, item := range page.Items {
-			var row T
-			if err := json.Unmarshal(item, &row); err != nil {
-				return err
-			}
-			*target = append(*target, row)
-		}
-	}
-	return nil
+	return instrumentPager(ctx, container, metrics.CosmosQueryModeSingle, query, pager, target)
 }
 
 // crossPartitionQuery executes a SQL query across every physical partition
@@ -95,20 +93,7 @@ func crossPartitionQuery[T any](
 	pager := container.NewQueryItemsPager(query, azcosmos.NewPartitionKey(), &azcosmos.QueryOptions{
 		QueryParameters: parameters,
 	})
-	for pager.More() {
-		page, err := pager.NextPage(ctx)
-		if err != nil {
-			return err
-		}
-		for _, item := range page.Items {
-			var row T
-			if err := json.Unmarshal(item, &row); err != nil {
-				return err
-			}
-			*target = append(*target, row)
-		}
-	}
-	return nil
+	return instrumentPager(ctx, container, metrics.CosmosQueryModeCross, query, pager, target)
 }
 
 // fanOutByProject runs query once per project partition and appends the
@@ -143,22 +128,141 @@ func fanOutByProject[T any](
 			return errors.New("fanOutByProject: @project must not be pre-bound in parameters")
 		}
 	}
+	// Aggregate observability across every per-partition iteration so the
+	// metric reflects the whole fan-out call as one operation. Per-
+	// partition iterations are also counted on the fan-out counter, which
+	// gives the dashboard an observed fan-out factor when divided by the
+	// fanout-mode queries_total.
+	start := time.Now()
+	var totalRU float64
+	containerName := containerName(container)
 	for _, project := range projects {
+		metrics.RecordCosmosFanoutPartition(containerName)
 		params := make([]azcosmos.QueryParameter, 0, len(parameters)+1)
 		params = append(params, parameters...)
 		params = append(params, azcosmos.QueryParameter{Name: "@project", Value: project})
-		if err := singlePartitionQuery(
-			ctx,
-			container,
-			azcosmos.NewPartitionKeyString(project),
+		pager := container.NewQueryItemsPager(
 			query,
-			params,
-			target,
-		); err != nil {
+			azcosmos.NewPartitionKeyString(project),
+			&azcosmos.QueryOptions{QueryParameters: params},
+		)
+		ru, err := drainPagerInto(ctx, pager, target)
+		totalRU += ru
+		if err != nil {
+			outcome := metrics.CosmosQueryOutcomeError
+			metrics.RecordCosmosQuery(containerName, metrics.CosmosQueryModeFanout, time.Since(start), totalRU, outcome, isQueryPlanError(err))
+			slog.Error("cosmos query failed",
+				"container", containerName,
+				"mode", metrics.CosmosQueryModeFanout,
+				"partitions_scanned", project, // last partition touched
+				"duration_ms", time.Since(start).Milliseconds(),
+				"ru_charge", totalRU,
+				"query_plan_error", isQueryPlanError(err),
+				"err", err,
+			)
 			return err
 		}
 	}
+	metrics.RecordCosmosQuery(containerName, metrics.CosmosQueryModeFanout, time.Since(start), totalRU, metrics.CosmosQueryOutcomeSuccess, false)
 	return nil
+}
+
+// instrumentPager wraps a single-pager loop (single- or cross-partition)
+// with duration + RU + outcome recording and structured error logging.
+// fanOutByProject does its own bookkeeping because it aggregates across
+// multiple pagers; both paths agree on the metric and slog field shapes.
+func instrumentPager[T any](
+	ctx context.Context,
+	container *azcosmos.ContainerClient,
+	mode string,
+	query string,
+	pager pager,
+	target *[]T,
+) error {
+	start := time.Now()
+	containerName := containerName(container)
+	ru, err := drainPagerInto(ctx, pager, target)
+	outcome := metrics.CosmosQueryOutcomeSuccess
+	if err != nil {
+		outcome = metrics.CosmosQueryOutcomeError
+		slog.Error("cosmos query failed",
+			"container", containerName,
+			"mode", mode,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"ru_charge", ru,
+			"query_plan_error", isQueryPlanError(err),
+			"query", redactedQueryShape(query),
+			"err", err,
+		)
+	}
+	metrics.RecordCosmosQuery(containerName, mode, time.Since(start), ru, outcome, err != nil && isQueryPlanError(err))
+	return err
+}
+
+// pager is the slice of azcosmos.NewQueryItemsPager / NewPartitionedQueryItemsPager
+// that instrumentPager and drainPagerInto care about. Declaring it locally
+// avoids leaking the runtime generic type back through public signatures.
+type pager interface {
+	More() bool
+	NextPage(ctx context.Context) (azcosmos.QueryItemsResponse, error)
+}
+
+// drainPagerInto runs pager.More / NextPage to completion, decodes each
+// item into T, appends to target, and returns the summed RU charge.
+func drainPagerInto[T any](ctx context.Context, p pager, target *[]T) (float64, error) {
+	var ru float64
+	for p.More() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			return ru, err
+		}
+		ru += float64(page.RequestCharge)
+		for _, item := range page.Items {
+			var row T
+			if err := json.Unmarshal(item, &row); err != nil {
+				return ru, err
+			}
+			*target = append(*target, row)
+		}
+	}
+	return ru, nil
+}
+
+// containerName extracts the short container id (e.g. "reports") from an
+// azcosmos.ContainerClient so the metric label and slog field reflect
+// which collection a query touched without threading the name through
+// every helper signature.
+func containerName(c *azcosmos.ContainerClient) string {
+	if c == nil {
+		return ""
+	}
+	return c.ID()
+}
+
+// isQueryPlanError detects the Cosmos gateway's 400 BadRequest response
+// for cross-partition queries that require a client-side query plan the
+// Go SDK does not implement. The error body is a fixed phrase Microsoft
+// has shipped for years; matching on it is the cheapest reliable signal
+// short of parsing the SDK error type, which is internal.
+func isQueryPlanError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "cross partition query can not be directly served")
+}
+
+// redactedQueryShape returns a compact rendering of the SQL query
+// suitable for log inspection but free of bound values and identifiers
+// that might leak partition-key contents. The full SQL text is kept
+// because parameters are bound separately by the SDK; identifiers like
+// container fields are not sensitive on their own.
+func redactedQueryShape(query string) string {
+	q := strings.Join(strings.Fields(query), " ")
+	if len(q) > 240 {
+		q = q[:237] + "..."
+	}
+	return q
 }
 
 // rejectOrderingClauses returns an error if query uses a clause that the
