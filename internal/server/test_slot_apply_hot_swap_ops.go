@@ -67,7 +67,7 @@ type k8sJobClient interface {
 //
 //  1. Init container (contract.<kind>.builder_image): git clone +
 //     contract.<kind>.build_command. Leaves source at /work/source.
-//  2. Main container (bitnami/kubectl): resolves target pods via
+//  2. Main container (alpine/k8s): resolves target pods via
 //     kubectl-get against contract.<kind>.pod_selector, then for each
 //     pod tar-streams /work/source into contract.<kind>.target and
 //     sends the configured restart signal.
@@ -124,14 +124,24 @@ func ApplyHotSwap(ctx context.Context, k8s k8sJobClient, opts ApplyHotSwapOption
 		opts.ServiceAccount = "glimmung-native-runner"
 	}
 	if opts.SwapContainerImage == "" {
-		// `bitnami/kubectl:1.31` (and other version-pinned tags) were
-		// removed from Docker Hub in late 2025 when Bitnami changed
-		// their tagging policy — only `:latest` + SHA digest tags are
-		// published now. Use `:latest`; the swap container is short-
-		// lived and only needs sh + kubectl, so version drift is low-
-		// risk here. A caller can override SwapContainerImage to pin
-		// to a specific digest if reproducibility matters.
-		opts.SwapContainerImage = "bitnami/kubectl:latest"
+		// Bitnami deprecated their free public Docker Hub catalog —
+		// version-pinned tags like `bitnami/kubectl:1.31` started
+		// disappearing in late 2025, and the `bitnamilegacy/*`
+		// migration repo is itself EOL on 2026-08-28 with no security
+		// updates after that. `bitnami/kubectl:latest` still resolves
+		// today but sits on the same dying catalog.
+		//
+		// alpine/k8s is an independently-maintained image (Docker Hub
+		// `alpine` org) that ships sh + kubectl + tar (plus helm, jq,
+		// yq, curl, bash). The sibling `glim-slot-apply-*` Job on this
+		// cluster already uses alpine/k8s:1.30.0 so node-cache hits
+		// are common. The swap container's contract is sh + kubectl +
+		// tar, so alpine/k8s is the closest drop-in that doesn't
+		// depend on Bitnami's commercial decisions.
+		//
+		// A caller can override SwapContainerImage to pin to a digest
+		// if reproducibility matters or to point at an ACR mirror.
+		opts.SwapContainerImage = "alpine/k8s:1.31.13"
 	}
 
 	jobName := "apply-hot-swap-" + randHex(8)

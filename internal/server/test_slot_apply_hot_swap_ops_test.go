@@ -47,8 +47,8 @@ func (f *fakeK8sJobClient) DeleteJob(_ context.Context, _ string, name string) e
 // TestApplyHotSwapHappyPathDispatchesJob asserts the Job spec carries
 // the contract's builder_image, build_command, target, container, and
 // pod selector — and that the swap script does pod resolution + tar-
-// stream + SIGHUP via kubectl inside the bitnami container (not from
-// the glimmung pod, which has no kubectl).
+// stream + SIGHUP via kubectl inside the alpine/k8s container (not
+// from the glimmung pod, which has no kubectl).
 func TestApplyHotSwapHappyPathDispatchesJob(t *testing.T) {
 	k8s := &fakeK8sJobClient{
 		waitResult: "complete",
@@ -93,7 +93,7 @@ func TestApplyHotSwapHappyPathDispatchesJob(t *testing.T) {
 	checks := []string{
 		`"image":"node:20-alpine"`,                          // builder_image
 		"npm run build",                                     // build command
-		`"image":"bitnami/kubectl:latest"`,                  // default swap container
+		`"image":"alpine/k8s:1.31.13"`,                      // default swap container
 		"kubectl -n 'tank-operator-slot-1-sessions'",        // namespace into kubectl
 		"tank-operator/session-id",                          // pod selector
 		"tar c -C /work/source",                             // tar-stream
