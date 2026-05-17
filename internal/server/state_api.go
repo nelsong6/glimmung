@@ -219,7 +219,7 @@ func loadStateSnapshot(ctx context.Context, settings Settings, store ReadStore) 
 		return StateSnapshot{}, stateSnapshotError{status: http.StatusInternalServerError, message: "list leases failed"}
 	}
 
-	return computeStateSnapshot(settings, projects, workflows, leases), nil
+	return computeStateSnapshot(ctx, settings, store, projects, workflows, leases), nil
 }
 
 func writeStateSnapshotError(w http.ResponseWriter, r *http.Request, err error) {
@@ -231,7 +231,9 @@ func writeStateSnapshotError(w http.ResponseWriter, r *http.Request, err error) 
 }
 
 func computeStateSnapshot(
+	ctx context.Context,
 	settings Settings,
+	store ReadStore,
 	projects []Project,
 	workflows []Workflow,
 	leases []Lease,
@@ -254,7 +256,7 @@ func computeStateSnapshot(
 
 	return StateSnapshot{
 		ActiveLeases:            activePublic,
-		TestEnvironments:        testEnvironmentsFromSnapshot(settings, projects, active, waiting),
+		TestEnvironments:        testEnvironmentsFromSnapshot(ctx, settings, store, projects, active, waiting),
 		WaitingTestSlotRequests: waiting,
 		Projects:                sliceOrEmpty(projects),
 		Workflows:               sliceOrEmpty(workflows),
@@ -326,7 +328,9 @@ func testRequestToPublic(lease Lease) TestSlotRequestPublic {
 }
 
 func testEnvironmentsFromSnapshot(
+	ctx context.Context,
 	settings Settings,
+	store ReadStore,
 	projects []Project,
 	active []Lease,
 	waiting []TestSlotRequestPublic,
@@ -379,67 +383,222 @@ func testEnvironmentsFromSnapshot(
 	}
 	sort.Strings(names)
 
+	slotStore := slotStoreFromReadStore(store)
+	historyStore := slotHistoryStoreFromReadStore(store)
+
 	envs := make([]TestEnvironmentPublic, 0)
 	for _, projectName := range names {
 		project := projectsByName[projectName]
 		slotCount := projectTestSlotCount(settings, project)
-		slotStatuses := testEnvironmentSlotStatuses(project)
+
+		// Build a per-slot view of the new slots collection. If the
+		// store doesn't implement SlotStore (in tests), fall back to
+		// reading from the project's legacy embedded array via
+		// testEnvironmentSlotStatuses — those tests will still pass
+		// until they migrate their fakes.
+		slotsByIndex := map[int]Slot{}
+		historiesByIndex := map[int][]SlotHistoryEntry{}
+		if slotStore != nil {
+			if rows, err := slotStore.ListSlotsByProject(ctx, projectName); err == nil {
+				for _, row := range rows {
+					slotsByIndex[row.SlotIndex] = row
+				}
+			}
+		}
+		if historyStore != nil {
+			if entries, err := historyStore.ListSlotHistory(ctx, projectName, nil); err == nil {
+				for _, entry := range entries {
+					if entry.SlotIndex == nil {
+						continue
+					}
+					historiesByIndex[*entry.SlotIndex] = append(historiesByIndex[*entry.SlotIndex], entry)
+				}
+			}
+		}
+		legacyStatuses := testEnvironmentSlotStatuses(project)
+
 		for slotIndex := 1; slotIndex <= slotCount; slotIndex++ {
 			lease, claimed := claimedByProject[projectName][slotIndex]
 			var publicLease *LeasePublic
-			slotStatus, hasStatus := slotStatuses[slotIndex]
-			// state mirrors durable slot status. When no record exists yet
-			// (count was just bumped and the reconciler has not seeded the
-			// slot), the state is empty — the API must not invent a placeholder
-			// here; that would be a UI lie about what's actually in storage.
-			state := slotStatus.State
-			if state == testSlotStateReady {
-				state = "available"
+			slot, hasSlot := slotsByIndex[slotIndex]
+			legacyStatus, hasLegacy := legacyStatuses[slotIndex]
+
+			// Prefer the new SlotStore row when present. Otherwise fall
+			// back to the legacy embedded status so single-replica
+			// in-memory tests (whose fakes only populate project
+			// metadata) keep rendering.
+			var (
+				state                 string
+				detail                *string
+				updatedAt             *time.Time
+				provisionedAt         *time.Time
+				activationAttempt     *int
+				activationStartedAt   *time.Time
+				activationCompletedAt *time.Time
+				activationJobName     *string
+				activationError       *string
+				activationState       *string
+				cleanupStartedAt      *time.Time
+				cleanupCompletedAt    *time.Time
+				cleanupError          *string
+				cleanupState          *string
+			)
+			if hasSlot {
+				state = publicSlotState(slot)
+				detail = slot.Detail
+				if !slot.UpdatedAt.IsZero() {
+					value := slot.UpdatedAt
+					updatedAt = &value
+				}
+				provisionedAt = slot.ProvisionedAt
+				activationAttempt = slot.ActivationAttempt
+				activationStartedAt = slot.ActivationStartedAt
+				activationCompletedAt = slot.ActivationCompletedAt
+				activationJobName = slot.ActivationJobName
+				activationError = slot.ActivationError
+				activationState = derivedActivationState(slot)
+				cleanupStartedAt = slot.CleanupStartedAt
+				cleanupCompletedAt = slot.CleanupCompletedAt
+				cleanupError = slot.CleanupError
+				cleanupState = derivedCleanupState(slot)
+			} else if hasLegacy {
+				state = legacyStatus.State
+				if state == testSlotStateReady {
+					state = "available"
+				}
+				detail = legacyStatus.Detail
+				if !legacyStatus.UpdatedAt.IsZero() {
+					value := legacyStatus.UpdatedAt
+					updatedAt = &value
+				}
+				provisionedAt = legacyStatus.ReadyAt
+				activationAttempt = legacyStatus.ActivationAttempt
+				activationStartedAt = legacyStatus.ActivationStartedAt
+				activationCompletedAt = legacyStatus.ActivationCompletedAt
+				activationJobName = legacyStatus.ActivationJobName
+				activationError = legacyStatus.ActivationError
+				activationState = legacyStatus.ActivationState
+				cleanupStartedAt = legacyStatus.CleanupStartedAt
+				cleanupCompletedAt = legacyStatus.CleanupCompletedAt
+				cleanupError = legacyStatus.CleanupError
+				cleanupState = legacyStatus.CleanupState
 			}
+
 			usable := false
 			if claimed {
-				if hasStatus && (slotStatus.State == testSlotStateActivating || slotStatus.State == testSlotStateActive || slotStatus.State == testSlotStateCleaning || slotStatus.State == "error") {
-					state = slotStatus.State
-				} else {
-					state = "claimed"
-				}
-				usable = state == testSlotStateActive
 				value := leaseToPublicForState(settings, lease)
 				publicLease = &value
+				if state == "available" || state == "" || state == SlotStateProvisioned {
+					state = "claimed"
+				}
+				usable = state == SlotStateRunning || state == testSlotStateActive
 			}
-			var updatedAt *time.Time
-			if !slotStatus.UpdatedAt.IsZero() {
-				value := slotStatus.UpdatedAt
-				updatedAt = &value
-			}
+
 			slotName := testEnvironmentName(projectName, slotIndex, project, lease)
-			envs = append(envs, TestEnvironmentPublic{
+			env := TestEnvironmentPublic{
 				Project:               projectName,
 				SlotIndex:             slotIndex,
 				SlotName:              slotName,
 				State:                 state,
 				Usable:                usable,
-				Detail:                slotStatus.Detail,
+				Detail:                detail,
 				UpdatedAt:             updatedAt,
-				ReadyAt:               slotStatus.ReadyAt,
-				ActivationAttempt:     slotStatus.ActivationAttempt,
-				ActivationState:       slotStatus.ActivationState,
-				ActivationStartedAt:   slotStatus.ActivationStartedAt,
-				ActivationCompletedAt: slotStatus.ActivationCompletedAt,
-				ActivationJobName:     slotStatus.ActivationJobName,
-				ActivationError:       slotStatus.ActivationError,
-				CleanupState:          slotStatus.CleanupState,
-				CleanupStartedAt:      slotStatus.CleanupStartedAt,
-				CleanupCompletedAt:    slotStatus.CleanupCompletedAt,
-				CleanupError:          slotStatus.CleanupError,
-				ReturnHistory:         slotStatus.ReturnHistory,
+				ReadyAt:               provisionedAt,
+				ActivationAttempt:     activationAttempt,
+				ActivationState:       activationState,
+				ActivationStartedAt:   activationStartedAt,
+				ActivationCompletedAt: activationCompletedAt,
+				ActivationJobName:     activationJobName,
+				ActivationError:       activationError,
+				CleanupState:          cleanupState,
+				CleanupStartedAt:      cleanupStartedAt,
+				CleanupCompletedAt:    cleanupCompletedAt,
+				CleanupError:          cleanupError,
 				Lease:                 publicLease,
 				WaitingRequests:       sliceOrEmpty(waitingByProject[projectName][slotIndex]),
 				PlaywrightWSEndpoint:  PlaywrightWSEndpointFor(settings, slotName),
-			})
+			}
+			if entries := historiesByIndex[slotIndex]; len(entries) > 0 {
+				env.ReturnHistory = legacyHistoryFromEntries(entries)
+			} else if hasLegacy {
+				env.ReturnHistory = legacyStatus.ReturnHistory
+			}
+			envs = append(envs, env)
 		}
 	}
 	return envs
+}
+
+// publicSlotState maps the new internal Slot.State to the value emitted
+// on /v1/state. The user-facing snapshot uses `available` as the derived
+// term for "provisioned + no active_lease_ref", per the lifecycle
+// contract.
+func publicSlotState(slot Slot) string {
+	if slot.State == SlotStateProvisioned && slot.ActiveLeaseRef == nil {
+		return "available"
+	}
+	return slot.State
+}
+
+// derivedActivationState is the legacy `activation_state` field derived
+// from the new Slot's activation-* fields. Preserved on the wire so
+// existing consumers (dashboard, mcp tools) keep rendering.
+func derivedActivationState(slot Slot) *string {
+	switch {
+	case slot.ActivationError != nil:
+		state := "error"
+		return &state
+	case slot.ActivationCompletedAt != nil:
+		state := "active"
+		return &state
+	case slot.ActivationStartedAt != nil:
+		state := "activating"
+		return &state
+	}
+	return nil
+}
+
+// derivedCleanupState mirrors derivedActivationState for the cleanup phase.
+func derivedCleanupState(slot Slot) *string {
+	if slot.CleanupCompletedAt != nil {
+		switch slot.State {
+		case SlotStateProvisioned:
+			state := "ready"
+			return &state
+		case SlotStateError:
+			state := "error"
+			return &state
+		}
+	}
+	if slot.CleanupStartedAt != nil {
+		state := "cleaning"
+		return &state
+	}
+	return nil
+}
+
+// legacyHistoryFromEntries converts new SlotHistoryEntry rows to the
+// legacy TestSlotReturnHistoryEntry shape for wire compatibility.
+func legacyHistoryFromEntries(entries []SlotHistoryEntry) []TestSlotReturnHistoryEntry {
+	out := make([]TestSlotReturnHistoryEntry, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, TestSlotReturnHistoryEntry{
+			Event:           entry.Event,
+			CreatedAt:       entry.CreatedAt,
+			Project:         entry.Project,
+			SlotIndex:       entry.SlotIndex,
+			SlotName:        entry.SlotName,
+			LeaseRef:        entry.LeaseRef,
+			LeaseNumber:     entry.LeaseNumber,
+			LeaseRequester:  entry.LeaseRequester,
+			CallerPodIP:     entry.CallerPodIP,
+			CallerSessionID: entry.CallerSessionID,
+			Source:          entry.Source,
+			Reason:          entry.Reason,
+			CleanupStarted:  entry.CleanupStarted,
+		})
+	}
+	return out
 }
 
 func projectTestSlotCount(_ Settings, project Project) int {

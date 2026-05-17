@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"errors"
-	"math/rand"
 	"sync"
 	"time"
 
@@ -117,187 +116,50 @@ func fireLeaseExpiry(store ReadStore, preparer TestSlotPreparer, project Project
 	beginTestSlotCleanup(store, preparer, project, lease, true, logf)
 }
 
-// claimTestSlotCleanup atomically transitions the slot status to `cleaning`
-// using a Cosmos etag-conditional write. Exactly one caller across all
-// glimmung replicas wins; the rest get ErrPreconditionFailed back. Returns
-// ErrUnsupported when the store doesn't implement the CAS interface (in
-// tests with a write-only fake the cleanup will run unconditionally).
+// claimTestSlotCleanup atomically transitions the slot to `cleaning` via
+// the new SlotStore's per-slot CAS write. Exactly one caller across all
+// glimmung replicas wins; the rest get ErrPreconditionFailed back if
+// they observe the slot already in `cleaning`.
 //
-// `source` is recorded on the return-history entry so dashboards can tell
-// timer-expiry from operator return.
-func claimTestSlotCleanup(ctx context.Context, store ReadStore, project Project, lease Lease, source string) (Project, error) {
-	claimer, hasClaimer := store.(ProjectTestEnvironmentSlotStatusClaimer)
-	reader, hasReader := store.(ProjectReader)
-	if !hasClaimer || !hasReader {
-		// No CAS support — fall back to the unconditional path. This is
-		// fine for single-replica deploys; multi-replica safety requires
-		// the store to implement both interfaces. Tests using the unconditional
-		// fake exercise this branch.
-		historyEntry := testSlotReturnHistoryEntry(lease, testSlotReturnAudit{
-			Source:         source,
-			CleanupStarted: true,
-		})
-		return setLeaseSlotCleanupStarting(ctx, store, project, lease, historyEntry)
+// `source` is appended to the slot_history collection so dashboards can
+// distinguish timer-expiry from operator-driven returns.
+func claimTestSlotCleanup(ctx context.Context, store ReadStore, _ Project, lease Lease, source string) (Project, error) {
+	slotStore := slotStoreFromReadStore(store)
+	if slotStore == nil {
+		return Project{}, errSlotStoreNotConfigured
 	}
-
-	projectKey := firstNonEmpty(lease.Project, project.ID, project.Name)
-	fresh, err := reader.ReadProject(ctx, projectKey)
+	slotIndex, projectKey, err := slotIdentityFromLease(lease)
 	if err != nil {
 		return Project{}, err
 	}
-	slotIndex := nativeSlotIndexFromMetadata(lease.Metadata)
-	if slotIndex == nil {
-		return Project{}, errors.New("test-slot lease missing slot index metadata")
+	now := time.Now().UTC()
+	if err := ensureSlotForLease(ctx, store, lease, now); err != nil {
+		return Project{}, err
 	}
-	current, hasCurrent := testEnvironmentSlotStatus(fresh, *slotIndex)
-	if hasCurrent && current.State == testSlotStateCleaning {
-		// Already in the cleaning state in durable storage — another
-		// replica's claim landed before our read. Treat as a lost race.
+	// Probe: if the slot is already in `cleaning`, another replica got
+	// here first.
+	if current, err := slotStore.GetSlot(ctx, projectKey, slotIndex); err == nil && current.State == SlotStateCleaning {
 		return Project{}, ErrPreconditionFailed
 	}
-
-	now := time.Now().UTC()
-	slotName := current.SlotName
-	if slotName == "" {
-		if name := nativeSlotNameFromMetadata(lease.Metadata); name != nil {
-			slotName = *name
-		}
+	if _, err := markLeaseSlotCleaning(ctx, store, lease, now); err != nil {
+		return Project{}, err
 	}
-	state := testSlotStateCleaning
-	status := current
-	status.SlotIndex = *slotIndex
-	status.SlotName = slotName
-	status.State = state
-	status.UpdatedAt = now
-	status.CleanupState = &state
-	status.CleanupStartedAt = &now
-	status.CleanupCompletedAt = nil
-	status.CleanupError = nil
-	status.ReturnHistory = appendBoundedTestSlotReturnHistory(status.ReturnHistory, testSlotReturnHistoryEntry(lease, testSlotReturnAudit{
+	// Append the return-history entry to the slot_history collection so
+	// the slot's audit trail records who triggered this cleanup.
+	if err := appendLeaseSlotHistory(ctx, store, slotHistoryEntryFromLegacy(testSlotReturnHistoryEntry(lease, testSlotReturnAudit{
 		Source:         source,
 		CleanupStarted: true,
-	}))
-
-	return claimer.SetProjectTestEnvironmentSlotStatusIfMatch(ctx, projectKey, status, fresh.ETag())
+	}))); err != nil {
+		return Project{}, err
+	}
+	return Project{}, nil
 }
 
 // warmupRetryRng generates the jitter used to spread out concurrent
-// warmup-CAS retries. A separately-seeded Rand avoids contention on the
-// global default Source under heavy goroutine pressure.
-var warmupRetryRng = rand.New(rand.NewSource(time.Now().UnixNano())) //nolint:gosec // jitter only
-
-var warmupRetryMu sync.Mutex
-
-func warmupRetryJitter(base time.Duration) time.Duration {
-	warmupRetryMu.Lock()
-	defer warmupRetryMu.Unlock()
-	if base <= 0 {
-		return 0
-	}
-	// Sleep duration ∈ [base, 2·base) — full-jitter exponential backoff.
-	return base + time.Duration(warmupRetryRng.Int63n(int64(base)))
-}
-
-// claimTestSlotWarmup writes the initial `warming` status for `slotIndex`
-// using an etag-conditional ReplaceItem. The atomic write IS the ownership
-// claim: when two replicas both fire warmup for the same slot, the second
-// will either observe state=warming on its retry-read and back off, or
-// race the first to the write and lose CAS.
-//
-// Cross-slot etag contention: a project doc's etag is bumped by writes
-// to *any* slot, not just this one. When PATCH count fires warmup for a
-// project with count=N, all N goroutines write to the same doc; each
-// cross-slot write triggers a 412 on every other in-flight goroutine.
-//
-// The retry loop distinguishes two kinds of 412 explicitly:
-//
-//  1. **Cross-slot contention** (our slot is still missing or stale-warming
-//     on re-read) — keep trying with jittered backoff. The previous
-//     5-attempt limit was too tight for count-of-10 warmup storms: one
-//     unlucky goroutine could lose 5 races in a row and silently give up,
-//     leaving a slot permanently un-warmed (observed on prod after the
-//     PR #516 rollout — slot 8 went missing for exactly this reason).
-//  2. **Lost claim** (our slot's state moved to `ready`, or to `warming`
-//     with a recent `updated_at`) — return ErrPreconditionFailed; another
-//     replica owns this slot's warmup and ours is a genuine no-op.
-//
-// Stores that don't implement the CAS interface fall through to an
-// unconditional write — safe for single-replica deploys and for in-process
-// test fakes.
-func claimTestSlotWarmup(ctx context.Context, store ReadStore, writer ProjectTestEnvironmentSlotStatusWriter, projectKey string, slotIndex int, slotName string, now time.Time) (Project, error) {
-	claimer, hasClaimer := store.(ProjectTestEnvironmentSlotStatusClaimer)
-	reader, hasReader := store.(ProjectReader)
-	if !hasClaimer || !hasReader {
-		return writer.SetProjectTestEnvironmentSlotStatus(ctx, projectKey, TestEnvironmentSlotStatus{
-			SlotIndex: slotIndex,
-			SlotName:  slotName,
-			State:     testSlotStateWarming,
-			UpdatedAt: now,
-		})
-	}
-
-	const (
-		maxAttempts     = 30
-		initialBackoff  = 5 * time.Millisecond
-		maxBackoff      = 200 * time.Millisecond
-	)
-	backoff := initialBackoff
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		fresh, err := reader.ReadProject(ctx, projectKey)
-		if err != nil {
-			return Project{}, err
-		}
-		status := TestEnvironmentSlotStatus{
-			SlotIndex: slotIndex,
-			SlotName:  slotName,
-			State:     testSlotStateWarming,
-			UpdatedAt: now,
-		}
-		if current, hasCurrent := testEnvironmentSlotStatus(fresh, slotIndex); hasCurrent {
-			// Already finished? `ready` means another writer completed the
-			// whole cycle while we were spinning up; nothing to do.
-			if current.State == testSlotStateReady {
-				return Project{}, ErrPreconditionFailed
-			}
-			// Already in-flight? state=warming with a recent updated_at
-			// means another writer's warmup is actively running. Stale
-			// warming (older than recoveryMinAge) is the resume case and
-			// is allowed to proceed.
-			if current.State == testSlotStateWarming && !current.UpdatedAt.IsZero() && time.Since(current.UpdatedAt) < recoveryMinAge {
-				return Project{}, ErrPreconditionFailed
-			}
-			// Preserve metadata (cleanup_state, return history) on the
-			// claim write — we only mutate state + updated_at.
-			current.SlotIndex = slotIndex
-			current.SlotName = slotName
-			current.State = testSlotStateWarming
-			current.UpdatedAt = now
-			status = current
-		}
-		updated, err := claimer.SetProjectTestEnvironmentSlotStatusIfMatch(ctx, projectKey, status, fresh.ETag())
-		if errors.Is(err, ErrPreconditionFailed) {
-			// Etag moved. Don't give up yet — back off and re-read. The
-			// state-check at the top of the next iteration will exit early
-			// if our slot was actually claimed by another writer; otherwise
-			// we'll attempt the CAS again with the fresh etag.
-			select {
-			case <-ctx.Done():
-				return Project{}, ctx.Err()
-			case <-time.After(warmupRetryJitter(backoff)):
-			}
-			if backoff < maxBackoff {
-				backoff *= 2
-				if backoff > maxBackoff {
-					backoff = maxBackoff
-				}
-			}
-			continue
-		}
-		return updated, err
-	}
-	// Retries exhausted under genuine contention. The slot may still be
-	// stuck if every retry lost; the next pod restart or PATCH count will
-	// retry. Return a distinct error so the caller logs loudly rather than
-	// silently treating it as "another replica owns it."
-	return Project{}, errors.New("warmup CAS exhausted retries under cross-slot contention")
-}
+// claimTestSlotWarmup was retired with the slot-storage rework. The
+// transition from unseeded to provisioning is now per-slot via
+// SlotStore.UpdateIfMatch (see markSlotProvisioning); cross-slot
+// contention vanishes because every slot is its own document. The
+// jittered-backoff retry loop, the warmupRetryRng/warmupRetryMu pair,
+// and the `recoveryMinAge`-gated re-read logic became unnecessary at
+// the same time.

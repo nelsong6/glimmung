@@ -1,7 +1,8 @@
 # Cosmos DB NoSQL Database. Containers: projects, workflows, leases,
-# runs, run_events, locks, signals, issues, playbooks, and reports.
-# Created here at the control plane; the runtime pod uses glimmung-identity
-# with Cosmos data-plane scope limited to this database.
+# runs, run_events, locks, signals, issues, playbooks, reports, slots,
+# and slot_history. Created here at the control plane; the runtime pod
+# uses glimmung-identity with Cosmos data-plane scope limited to this
+# database.
 
 resource "azurerm_cosmosdb_sql_database" "glimmung" {
   name                = "glimmung"
@@ -203,6 +204,46 @@ resource "azurerm_cosmosdb_sql_container" "playbooks" {
 
 resource "azurerm_cosmosdb_sql_container" "reports" {
   name                = "reports"
+  resource_group_name = local.infra.resource_group_name
+  account_name        = data.azurerm_cosmosdb_account.infra.name
+  database_name       = azurerm_cosmosdb_sql_database.glimmung.name
+  partition_key_paths = ["/project"]
+
+  indexing_policy {
+    indexing_mode = "consistent"
+    included_path {
+      path = "/*"
+    }
+  }
+}
+
+# Test-slot lifecycle state (`docs/test-slot-storage-rework.md`). Replaces
+# the embedded `project.metadata.native_standby_dns.slots[]` array. One
+# doc per (project, slot_index); doc id is `<project>:<slot_index>`.
+# Partition by `/project` so a project-scoped list query stays
+# single-partition. Per-slot writes don't contend because each slot is
+# its own document — the whole point of the rework.
+resource "azurerm_cosmosdb_sql_container" "slots" {
+  name                = "slots"
+  resource_group_name = local.infra.resource_group_name
+  account_name        = data.azurerm_cosmosdb_account.infra.name
+  database_name       = azurerm_cosmosdb_sql_database.glimmung.name
+  partition_key_paths = ["/project"]
+
+  indexing_policy {
+    indexing_mode = "consistent"
+    included_path {
+      path = "/*"
+    }
+  }
+}
+
+# Append-only slot history. Replaces the in-doc
+# `test_slot_return_history` array on slot records. Each entry has a
+# uuid id assigned at write time; queries are project-scoped and
+# typically filter by slot_index.
+resource "azurerm_cosmosdb_sql_container" "slot_history" {
+  name                = "slot_history"
   resource_group_name = local.infra.resource_group_name
   account_name        = data.azurerm_cosmosdb_account.infra.name
   database_name       = azurerm_cosmosdb_sql_database.glimmung.name

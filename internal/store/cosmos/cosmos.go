@@ -35,6 +35,8 @@ type Store struct {
 	reports                  *azcosmos.ContainerClient
 	playbooks                *azcosmos.ContainerClient
 	signals                  *azcosmos.ContainerClient
+	slots                    *azcosmos.ContainerClient
+	slotHistory              *azcosmos.ContainerClient
 	nativeProjectConcurrency int
 	nativeGlobalConcurrency  int
 }
@@ -91,6 +93,14 @@ func NewFromSettings(settings server.Settings) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create signals container client: %w", err)
 	}
+	slots, err := client.NewContainer(settings.CosmosDatabase, "slots")
+	if err != nil {
+		return nil, fmt.Errorf("create slots container client: %w", err)
+	}
+	slotHistory, err := client.NewContainer(settings.CosmosDatabase, "slot_history")
+	if err != nil {
+		return nil, fmt.Errorf("create slot_history container client: %w", err)
+	}
 	return &Store{
 		projects:                 projects,
 		workflows:                workflows,
@@ -102,6 +112,8 @@ func NewFromSettings(settings server.Settings) (*Store, error) {
 		reports:                  reports,
 		playbooks:                playbooks,
 		signals:                  signals,
+		slots:                    slots,
+		slotHistory:              slotHistory,
 		nativeProjectConcurrency: settings.NativeRunnerProjectConcurrency,
 		nativeGlobalConcurrency:  settings.NativeRunnerGlobalConcurrency,
 	}, nil
@@ -277,67 +289,54 @@ func (s *Store) SetProjectManagedAuthOriginStatus(ctx context.Context, project s
 	return projectFromMap(doc)
 }
 
-func (s *Store) SetProjectTestEnvironmentSlotStatus(ctx context.Context, project string, status server.TestEnvironmentSlotStatus) (server.Project, error) {
-	return s.setProjectTestEnvironmentSlotStatus(ctx, project, status, "")
-}
-
-// SetProjectTestEnvironmentSlotStatusIfMatch performs an etag-conditional
-// write so multiple replicas firing the same TTL-expiry timer can race
-// safely. The first writer wins; the second sees `http.StatusPreconditionFailed`
-// from Cosmos and gets server.ErrPreconditionFailed back, which the caller
-// treats as "another replica already claimed this slot."
-func (s *Store) SetProjectTestEnvironmentSlotStatusIfMatch(ctx context.Context, project string, status server.TestEnvironmentSlotStatus, ifMatchEtag string) (server.Project, error) {
-	return s.setProjectTestEnvironmentSlotStatus(ctx, project, status, ifMatchEtag)
-}
-
-func (s *Store) setProjectTestEnvironmentSlotStatus(ctx context.Context, project string, status server.TestEnvironmentSlotStatus, ifMatchEtag string) (server.Project, error) {
+// StripProjectTestEnvironmentSlotsArray removes the legacy
+// `metadata.native_standby_dns.slots[]` array from a project doc.
+// Called by the one-shot slot-storage-rework migration after slot data
+// has been copied to the new `slots` collection.
+//
+// Idempotent: if the array is already absent, the call is a no-op
+// (still does the read-modify-write so the project doc's updated_at
+// advances, which is harmless).
+func (s *Store) StripProjectTestEnvironmentSlotsArray(ctx context.Context, project string) error {
 	partitionKey := azcosmos.NewPartitionKeyString(project)
 	read, err := s.projects.ReadItem(ctx, partitionKey, project, nil)
 	if err != nil {
 		if isCosmosStatus(err, http.StatusNotFound) {
-			return server.Project{}, server.ErrNotFound
+			return server.ErrNotFound
 		}
-		return server.Project{}, err
+		return err
 	}
-
 	var doc map[string]any
 	if err := json.Unmarshal(read.Value, &doc); err != nil {
-		return server.Project{}, err
+		return err
 	}
 	metadata, _ := doc["metadata"].(map[string]any)
 	if metadata == nil {
-		metadata = map[string]any{}
+		return nil
 	}
 	standbyDNS, _ := metadata["native_standby_dns"].(map[string]any)
 	if standbyDNS == nil {
-		standbyDNS = map[string]any{}
+		return nil
 	}
-	standbyDNS["slots"] = setProjectTestEnvironmentSlotStatus(standbyDNS["slots"], status)
+	if _, present := standbyDNS["slots"]; !present {
+		return nil
+	}
+	delete(standbyDNS, "slots")
 	metadata["native_standby_dns"] = standbyDNS
 	doc["metadata"] = metadata
-
 	payload, err := json.Marshal(doc)
 	if err != nil {
-		return server.Project{}, err
+		return err
 	}
-	var opts *azcosmos.ItemOptions
-	if ifMatchEtag != "" {
-		etag := azcore.ETag(ifMatchEtag)
-		opts = &azcosmos.ItemOptions{IfMatchEtag: &etag}
+	if _, err := s.projects.ReplaceItem(ctx, partitionKey, project, payload, nil); err != nil {
+		return err
 	}
-	resp, err := s.projects.ReplaceItem(ctx, partitionKey, project, payload, opts)
-	if err != nil {
-		if isCosmosStatus(err, http.StatusPreconditionFailed) {
-			return server.Project{}, server.ErrPreconditionFailed
-		}
-		return server.Project{}, err
-	}
-	projectOut, err := projectFromMap(doc)
-	if err != nil {
-		return server.Project{}, err
-	}
-	return projectOut.WithETag(string(resp.ETag)), nil
+	return nil
 }
+
+// SetProjectTestEnvironmentSlotStatus and its IfMatch sibling were
+// retired with the slot-storage rework. Slot status now lives in the
+// `slots` collection; writes go through Store.UpdateIfMatch.
 
 // ReadProject performs a Cosmos point read for one project doc, returning
 // the captured resource etag on the Project so callers can do etag-conditional

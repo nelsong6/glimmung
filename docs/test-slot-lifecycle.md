@@ -4,6 +4,21 @@ This document is the product and implementation contract for native test-slot
 capacity. If implementation behavior disagrees with this contract, the
 implementation is wrong and should be migrated.
 
+## Storage
+
+Slot state lives in its own Cosmos collection (`slots`), one document
+per slot, partition key `project`, document id `<project>:<slot_index>`.
+Cross-slot writes do not contend because each slot is its own
+document. Audit history lives in a sibling `slot_history` collection.
+The project doc carries configuration only (count, github_repo,
+helm config, etc.) — *not* slot state.
+
+The slot doc's shape and operations are defined in
+[`internal/server/slot.go`](../internal/server/slot.go) and
+[`internal/server/slot_store.go`](../internal/server/slot_store.go).
+Every write is an etag-conditional `UpdateIfMatch` keyed on the slot
+row's own etag — never a read-modify-write of the project doc.
+
 ## Terms
 
 - **Slot**: a named capacity unit for a project, such as
@@ -17,32 +32,48 @@ implementation is wrong and should be migrated.
   include slot metadata, DNS and routing prerequisites, Entra redirect URIs,
   Azure federated identity credentials, namespaces, service accounts, RBAC,
   ExternalSecrets, and other zero-steady-runtime scaffolding.
-- **Warm** or **prepared**: all preliminary resources for the slot exist and
-  have reconciled successfully.
-- **Available**: warm and not currently leased.
+- **Provisioning** (formerly *warming*): the slot's preliminary resources
+  are being created.
+- **Provisioned** (formerly *ready*): all preliminary resources for the
+  slot exist and have reconciled successfully.
+- **Unseeded**: the slot doc exists (count says it should) but
+  provisioning has not yet started. New explicit state — replaces the
+  legacy "no record" implicit state.
+- **Available**: provisioned and not currently leased. Derived from
+  `state=provisioned + active_lease_ref=null` on the wire.
 - **Leased** or **assigned**: Glimmung has selected the slot for a checkout or
-  run request and recorded the lease.
-- **Hot** or **active runtime**: lease-scoped resources are running for the
-  assigned slot. This includes app deployments, API proxy deployments, session
-  pods, Playwright or browser-tooling pods, and any other workload that exists
-  to execute or serve the leased test environment.
+  run request and recorded the lease. The slot's `active_lease_ref`
+  field points at the lease.
+- **Running** (formerly *active*): lease-scoped runtime is up and
+  serving. App deployments, API proxy deployments, session pods,
+  Playwright or browser-tooling pods, validation jobs.
 
-Warm is not a weaker form of hot. A warm available slot should be cheap to keep
-around. It should not contain long-running app, proxy, session, Playwright, or
-agent workload pods.
+Provisioned is not a weaker form of running. A provisioned available
+slot should be cheap to keep around. It should not contain long-running
+app, proxy, session, Playwright, or agent workload pods.
 
 ## API Responsibilities
 
 ### Queue Size
 
 `PATCH /v1/projects/{project}/test-environments/count` writes the desired slot
-count and returns. It does not warm slots synchronously. Preliminary
-reconciliation for newly added slots is durable reconciler work — the
-test-slot reconciler tick seeds missing `slots[*]` records, runs
-`EnsureTestSlotPreliminaries`, and transitions each from `warming` to `ready`.
-A handler that blocked here would leave the project doc permanently
-inconsistent if it crashed mid-warm, and its `200 OK` would be a lie about
-what was actually stored.
+count and returns. It does not warm slots synchronously. The handler:
+
+1. Writes the new count to the project doc.
+2. Creates a slot doc in `unseeded` state for any new index in `1..count`
+   (idempotent via `If-None-Match: *`).
+3. Deletes any slot doc with index > new count (after verifying no
+   active lease references it).
+4. Fires per-slot provisioning goroutines for any slot still in
+   `unseeded`. Each goroutine writes its own slot doc via per-row CAS;
+   no cross-slot contention.
+
+A handler that blocked on provisioning would leave the system
+permanently inconsistent if it crashed mid-provision, and its `200 OK`
+would be a lie about what was actually stored. The provisioning work
+is durable: a process restart between this PATCH and provisioning
+completion is covered by `RecoverInFlightTestSlots`, which re-fires
+goroutines for slots still in `unseeded` or `provisioning`.
 
 This path must not create long-running runtime resources. It must not create or
 keep project app deployments, API proxy deployments, session pods, Playwright
@@ -68,7 +99,7 @@ have been created and reached readiness.
 Checkout may return before runtime activation completes. In that case it must
 return `202 Accepted`, `state: "activating"`, `usable: false`, the assigned
 slot name, lease reference, URL, and a status URL. Callers must poll the status
-URL, or `/v1/state`, until the slot reports `state: "active"` and
+URL, or `/v1/state`, until the slot reports `state: "running"` and
 `usable: true` before treating the environment as ready. A checkout response
 must not hold the public HTTP request open while rendering/applying the
 project chart or waiting for runtime deployments.
@@ -119,7 +150,7 @@ the slot can become available again without destructive re-provisioning.
 Return may be asynchronous. In that case it returns `202 Accepted`,
 `state: "cleaning"`, `usable: false`, the lease reference, and a status URL.
 Callers must poll the status URL, or `/v1/state`, until the slot reports
-`state: "available"` and no active lease. The lease remains claimed while
+`state: "available"` (derived: `provisioned` + no `active_lease_ref`) and no active lease. The lease remains claimed while
 cleanup runs so the allocator cannot hand the slot to a new caller before hot
 runtime is gone and preliminaries are ready again. Glimmung records
 `cleanup_state`, `cleanup_started_at`, `cleanup_completed_at`, and
@@ -141,13 +172,14 @@ lifecycle transition responds to an explicit event:
 
 | Event | Trigger | Effect |
 |---|---|---|
-| count changed | `PATCH /v1/projects/{project}/test-environments/count` | handler writes the new count, fires per-slot warm goroutines for any missing or in-flight-`warming` slot, returns immediately |
+| count changed | `PATCH /v1/projects/{project}/test-environments/count` | handler writes the new count, seeds missing slot docs as `unseeded`, deletes slot docs above the new count, fires per-slot provisioning goroutines for any in `unseeded`, returns immediately |
 | checkout | `POST /v1/test-slots/checkout` | acquires lease, arms a `time.AfterFunc` for `assigned_at + ttl_seconds`, starts activation goroutine |
 | return / callback release / admin cancel | `POST /v1/test-slots/return`, `POST /v1/lease-callbacks/.../release`, `POST /v1/leases/cancel` | stops the lease's TTL timer, starts cleanup goroutine |
 | TTL deadline | per-lease `time.AfterFunc` fires | starts cleanup goroutine with source `lease.ttl_expiry` |
-| activation finished | inline at end of activation goroutine | one-shot installer cleanup, write `active` status |
-| cleanup finished | inline at end of cleanup goroutine | release lease, write `ready` status |
-| process start | `RecoverInFlightTestSlots` (one-shot, called once from `cmd/glimmung-go/main.go`) | re-arm TTL timers for surviving `claimed` leases, resume in-flight `warming`/`activating`/`cleaning` goroutines, warm missing `slots[*]` entries |
+| activation finished | inline at end of activation goroutine | one-shot installer cleanup, mark slot `running` |
+| cleanup finished | inline at end of cleanup goroutine | release lease, mark slot `provisioned` |
+| process start | `RecoverInFlightTestSlots` (one-shot, called once from `cmd/glimmung-go/main.go`) | re-arm TTL timers for surviving `claimed` leases, resume in-flight `provisioning`/`activating`/`cleaning` goroutines, provision missing slot docs |
+| process start | `MigrateProjectSlotsIntoCollection` (one-shot, called once from `cmd/glimmung-go/main.go`) | one-time migration of any legacy `metadata.native_standby_dns.slots[]` arrays into the `slots` collection. Idempotent on subsequent boots. |
 
 The TTL timer is the design choice that lets the lifecycle stay event-driven
 without losing auto-expiry. Polling the lease list every N seconds to ask
@@ -168,37 +200,33 @@ returns, the lifecycle is purely event-driven until the next restart.
 The lifecycle does not require a single replica. During rolling deploys,
 node drains, or future horizontal scaling, every running pod independently
 arms a TTL timer for every claimed lease and runs its own
-`RecoverInFlightTestSlots` sweep on startup. Concurrency safety is layered:
+`RecoverInFlightTestSlots` sweep on startup. Concurrency safety is
+straightforward because each slot is its own Cosmos document:
 
-1. **Database CAS on meaningful state transitions.** When two pods both
-   attempt the same one-time state transition — `active → cleaning` for
-   TTL expiry, or `missing → warming` for first-time warmup — the
-   etag-conditional `ReplaceItem` makes the database the synchronization
-   point. The first writer wins; every loser gets `412 Precondition
-   Failed` (surfaced as `ErrPreconditionFailed`) and no-ops. No leader
-   election, no distributed lock.
-2. **Retry-on-conflict for cross-slot writes.** A project doc's etag is
-   bumped by writes to *any* slot, so two simultaneously-warming slots in
-   the same project will trigger 412 on each other even though they're
-   not actually racing for the same resource. The warmup claim handles
-   this with a bounded retry loop that re-reads, re-checks our slot's
-   state, and retries — only giving up if our slot has actually been
-   claimed (state moved to `warming` recently or `ready`).
-3. **`recoveryMinAge` skip.** Recent in-flight states (warming /
-   activating / cleaning with `updated_at` within the last 5 minutes) are
-   skipped by the recovery sweep — the assumption is that another live
-   pod is still doing the work. Without this, a freshly-booted pod during
-   a rolling-update overlap would race the live pod's Helm operation.
-4. **Per-process dedup**. Each pod's `testSlotActivations` /
-   `testSlotCleanups` / `testSlotWarmups` sync.Maps prevent the same pod
-   from spawning two goroutines for the same operation.
+1. **Per-row etag CAS.** Every slot mutation goes through
+   `SlotStore.UpdateIfMatch`, which reads the slot doc with its etag,
+   applies the requested transition, and writes with `IfMatch: <etag>`.
+   When two replicas attempt the same transition (e.g., both timers fire
+   `running → cleaning` for the same lease), exactly one's
+   `ReplaceItem` succeeds; the other gets `412 Precondition Failed`
+   surfaced as `ErrPreconditionFailed` and no-ops.
+2. **Per-process dedup.** Each pod's `testSlotActivations` /
+   `testSlotCleanups` sync.Maps prevent the same pod from spawning two
+   goroutines for the same operation. With per-row CAS as the durable
+   synchronization point, the in-process maps are a soft optimization
+   that avoids spawning a goroutine that would lose CAS anyway.
+
+The cross-slot contention layer from the previous design (multiple
+warmup goroutines racing on the project doc's shared etag) does not
+exist in the new shape — each slot's writes are independent. Retry
+budgets, jittered backoff, and the `recoveryMinAge` skip heuristic
+became unnecessary at the same time and were removed.
 
 Activation and cleanup *resume* (vs initiation) don't have a meaningful
-state transition to CAS on — the slot stays in `activating` or `cleaning`
-throughout the Helm operation. They rely on layers 3 and 4 plus Helm's
-own tolerance of "another operation in progress" errors. The window where
-this matters is small (rolling-update overlap during an in-flight Helm
-install).
+state transition to CAS on — the slot stays in `activating` or
+`cleaning` throughout the Helm operation. Per-process dedup plus Helm's
+own tolerance of "another operation in progress" errors covers the
+brief rolling-update overlap window.
 
 ### Graceful shutdown
 
@@ -228,7 +256,7 @@ sweep. A genuinely stuck slot is a code bug to fix, not a button to press.
 The following resources are preliminary when they are tied to the configured
 slot count and do not run a workload:
 
-- slot records in project metadata
+- slot records (docs in the `slots` collection)
 - Entra SPA redirect URIs
 - Azure managed identity federated identity credentials
 - DNS and Gateway API prerequisites
@@ -280,34 +308,43 @@ resources must move behind lease activation and be deleted on return.
 
 ## Slot Status Field Contract
 
-Every field on a slot's status doc describes the slot's **current** state, not
+Every field on a slot doc describes the slot's **current** state, not
 its history. When a field is present, consumers may trust that it describes
 something happening or true *right now*.
 
 Concretely:
 
-- `state`, `usable`, `detail`, `updated_at` always reflect the current slot
-  state.
-- `activation_attempt`, `activation_state`, `activation_started_at`,
+- `state`, `detail`, `updated_at`, `provisioned_at` always reflect the
+  current slot state.
+- `active_lease_ref` is set while a lease holds the slot
+  (`activating` / `running` / `cleaning`) and cleared on return to
+  `provisioned`. It is the canonical pointer to the lease doc; the slot
+  doc does not duplicate lease metadata.
+- `activation_attempt`, `activation_started_at`,
   `activation_completed_at`, `activation_job_name`, `activation_error`
   describe the **current** activation. They are populated while a slot is
-  `activating` or `active` and cleared by the cleanup pathway when the slot
-  returns to the pool (`ready` / `available`). They are deliberately kept on
-  the `error` state so an operator repairing the slot has the diagnostic
-  context for what failed.
-- `cleanup_state`, `cleanup_started_at`, `cleanup_completed_at`,
-  `cleanup_error` describe the current or most recent cleanup of the slot.
-  These are not cleared because they describe the slot itself (last time it
-  was cleaned), not a transient lease's footprint.
-- `test_slot_return_history` is the canonical audit trail of who used the
-  slot, by which lease number, when, and why each return happened. This is
-  the place to look for historical "what lease last used this slot" data;
-  the activation_* fields are not.
+  `activating` or `running` and cleared by the cleanup pathway when the
+  slot returns to the pool (`provisioned` / available). They are
+  deliberately kept on the `error` state so an operator repairing the
+  slot has the diagnostic context for what failed.
+- `cleanup_started_at`, `cleanup_completed_at`, `cleanup_error` describe
+  the current or most recent cleanup of the slot. These are not cleared
+  because they describe the slot itself (last time it was cleaned),
+  not a transient lease's footprint.
+- Slot history (return events, errors over time) lives in the separate
+  `slot_history` collection — *not* on the slot doc itself. Look there
+  for "what lease last used this slot" and "what happened over time"
+  data. The slot doc is current-state-only.
+
+The `/v1/state` snapshot derives wire-compat fields (`activation_state`,
+`cleanup_state`, `ready_at`, `test_slot_return_history`) from the new
+shape for consumers that haven't migrated. New consumers should read the
+slot doc fields directly.
 
 Consumers (dashboard, mcp-glimmung tooling, operators) must not encode
-"this field is only meaningful when the slot is in state X" logic in their
-rendering layer. If a field is present, it's current. If it has been
-superseded, the producer clears it.
+"this field is only meaningful when the slot is in state X" logic in
+their rendering layer. If a field is present, it's current. If it has
+been superseded, the producer clears it.
 
 ## Completion Checklist
 
@@ -328,13 +365,21 @@ The slot system is not complete until all of these are true:
   return for test-slot leases.
 - Expired claimed test-slot leases are cleaned by a per-lease
   `time.AfterFunc` armed at checkout. No polling loop scans for expirations.
-- Slots in `error`, stale `warming`, or stale `cleaning` are recovered by
-  `RecoverInFlightTestSlots` at process startup, not by a periodic tick.
-  There is no admin repair endpoint; the only way to remove capacity is
-  decreasing queue size.
-- Missing `slots[*]` entries are seeded by the PATCH-count handler when the
-  count changes and by the startup recovery sweep. There is no background
-  job that re-checks count vs `slots[*]` between those two triggers.
+- Slots in `error`, stale `provisioning`, or stale `cleaning` are
+  recovered by `RecoverInFlightTestSlots` at process startup, not by a
+  periodic tick. There is no admin repair endpoint; the only way to
+  remove capacity is decreasing queue size.
+- Missing slot docs are seeded by the PATCH-count handler when the count
+  changes and by the startup recovery sweep. There is no background
+  job that re-checks count vs the `slots` collection between those two
+  triggers.
+- Slot writes use per-row etag CAS via `SlotStore.UpdateIfMatch`. The
+  retired `SetProjectTestEnvironmentSlotStatus`,
+  `SetProjectTestEnvironmentSlotStatusIfMatch`,
+  `ProjectTestEnvironmentSlotStatusWriter`,
+  `ProjectTestEnvironmentSlotStatusClaimer`, and `claimTestSlotWarmup`
+  names must not return — they belonged to the embedded-array shape
+  this contract replaced.
 - Short-lived installer Jobs and clone Secrets are cleaned once at the end
   of the activation that produced them, and once defensively during the
   startup recovery sweep for any slot found in `active`.

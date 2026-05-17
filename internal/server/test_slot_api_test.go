@@ -737,71 +737,14 @@ func TestClaimTestSlotCleanupDedupsOnEtagConflict(t *testing.T) {
 	}
 }
 
-func TestClaimTestSlotWarmupDedupsConcurrentSameSlot(t *testing.T) {
-	// Two replicas race to warm the same missing slot. Both read the same
-	// etag, both attempt the CAS write, only one wins. Loser sees the
-	// state moved to `warming` (recent) on its retry-read and returns
-	// ErrPreconditionFailed. This is the warmup analogue of
-	// TestClaimTestSlotCleanupDedupsOnEtagConflict.
-	store := &fakeLeaseStore{
-		fakeReadStore: fakeReadStore{projects: []Project{{
-			ID:   "race",
-			Name: "race",
-			Metadata: map[string]any{"native_standby_dns": map[string]any{
-				"slot_prefix": "race-slot",
-				"count":       float64(1),
-			}},
-		}}},
-	}
-
-	type result struct {
-		err error
-	}
-	results := make(chan result, 2)
-	var ready sync.WaitGroup
-	var start sync.WaitGroup
-	ready.Add(2)
-	start.Add(1)
-	now := time.Now().UTC()
-	for i := 0; i < 2; i++ {
-		go func() {
-			ready.Done()
-			start.Wait()
-			_, err := claimTestSlotWarmup(context.Background(), store, store, "race", 1, "race-slot-1", now)
-			results <- result{err: err}
-		}()
-	}
-	ready.Wait()
-	start.Done()
-
-	first := <-results
-	second := <-results
-	winners, losers := 0, 0
-	for _, r := range []result{first, second} {
-		switch {
-		case r.err == nil:
-			winners++
-		case errors.Is(r.err, ErrPreconditionFailed):
-			losers++
-		default:
-			t.Fatalf("unexpected error: %v", r.err)
-		}
-	}
-	if winners != 1 || losers != 1 {
-		t.Fatalf("winners=%d losers=%d, want 1/1", winners, losers)
-	}
-	// One write reached the store (the winner). Loser bailed without
-	// writing anything.
-	warmingWrites := 0
-	for _, status := range store.snapshotSlotStatuses() {
-		if status.SlotIndex == 1 && status.State == testSlotStateWarming {
-			warmingWrites++
-		}
-	}
-	if warmingWrites != 1 {
-		t.Fatalf("warming writes=%d, want 1 (loser must not have written)", warmingWrites)
-	}
-}
+// TestClaimTestSlotWarmupDedupsConcurrentSameSlot was retired with the
+// slot-storage rework — the function it tested (claimTestSlotWarmup)
+// existed only to CAS the unseeded→provisioning transition against the
+// shared project doc. Per-row CAS in SlotStore replaces it; concurrent
+// `markSlotProvisioning` calls against the same slot doc still
+// produce exactly one winner via Cosmos etag, which is exercised by
+// TestLiveCosmosSlotUpdateIfMatchSurfacesPreconditionFailed in the live
+// smoke suite.
 
 func TestClaimTestSlotWarmupRetriesAcrossCrossSlotWrites(t *testing.T) {
 	// Cross-slot writes bump the project doc's etag without affecting our
