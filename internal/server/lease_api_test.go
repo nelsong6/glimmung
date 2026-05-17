@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/nelsong6/glimmung/internal/auth"
@@ -19,6 +20,12 @@ type fakeLeaseStore struct {
 	slotStatuses []TestEnvironmentSlotStatus
 	cancelledRef string
 	err          error
+	// mu guards slotStatuses and the project mutations performed by
+	// SetProjectTestEnvironmentSlotStatus. The reconciler now warms multiple
+	// slots concurrently, so several goroutines may write through this fake at
+	// the same time. Without the mutex appends race and the test sees a short
+	// count or corrupted slice header.
+	mu sync.Mutex
 }
 
 func (s *fakeLeaseStore) AcquireLease(_ context.Context, req LeaseAcquireRequest) (Lease, error) {
@@ -48,6 +55,8 @@ func (s *fakeLeaseStore) ListLeases(context.Context) ([]Lease, error) {
 }
 
 func (s *fakeLeaseStore) SetProjectTestEnvironmentSlotStatus(_ context.Context, project string, status TestEnvironmentSlotStatus) (Project, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.slotStatuses = append(s.slotStatuses, status)
 	for i := range s.projects {
 		if s.projects[i].Name != project && s.projects[i].ID != project {
@@ -80,6 +89,17 @@ func (s *fakeLeaseStore) SetProjectTestEnvironmentSlotStatus(_ context.Context, 
 		return s.projects[i], nil
 	}
 	return Project{}, ErrNotFound
+}
+
+// snapshotSlotStatuses returns a stable copy of the recorded status writes
+// under the same lock that protects them. Tests that read slotStatuses while
+// concurrent warmup goroutines are still appending must use this helper.
+func (s *fakeLeaseStore) snapshotSlotStatuses() []TestEnvironmentSlotStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]TestEnvironmentSlotStatus, len(s.slotStatuses))
+	copy(out, s.slotStatuses)
+	return out
 }
 
 func TestCreateLeaseRouteRetired(t *testing.T) {

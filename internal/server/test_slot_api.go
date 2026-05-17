@@ -17,6 +17,12 @@ const (
 	testSlotStateActive     = "active"
 	testSlotStateCleaning   = "cleaning"
 	testSlotStateReady      = "ready"
+	// testSlotStateWarming is recorded while the reconciler runs preliminary
+	// reconciliation for a slot. It is the only state through which a slot
+	// reaches `ready` from "no record at all". Nothing else may default a slot
+	// to this string; in particular the state API must not synthesize it as a
+	// UI placeholder for missing records.
+	testSlotStateWarming = "warming"
 
 	// testSlotDefaultTTLSeconds is the TTL applied to a test-slot lease when
 	// the caller does not pass `ttl_seconds`. Interactive review of a test
@@ -222,90 +228,6 @@ func returnTestSlot(store ReadStore, preparer TestSlotPreparer, _ NativeGitHubTo
 		}
 		writeJSON(w, http.StatusOK, resp)
 	}
-}
-
-func repairTestEnvironmentSlot(store ReadStore, preparer TestSlotPreparer) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if preparer == nil {
-			writeProblem(w, http.StatusServiceUnavailable, "test-slot preparer not configured")
-			return
-		}
-		projectKey := strings.TrimSpace(r.PathValue("project"))
-		slotName := strings.TrimSpace(r.PathValue("slot_name"))
-		if projectKey == "" || slotName == "" {
-			writeProblem(w, http.StatusBadRequest, "project and slot_name required")
-			return
-		}
-		project, ok, err := findProjectByKey(r.Context(), store, projectKey)
-		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "list projects failed")
-			return
-		}
-		if !ok {
-			writeProblem(w, http.StatusNotFound, "project not found")
-			return
-		}
-		slot, ok := testEnvironmentSlotByName(project, slotName)
-		if !ok {
-			writeProblem(w, http.StatusNotFound, "test environment slot not found")
-			return
-		}
-		lease, claimed := claimedTestSlotLeaseForSlot(r.Context(), store, project, slot)
-		if claimed && slot.State != "error" && slot.State != testSlotStateCleaning {
-			writeProblem(w, http.StatusConflict, "test environment slot has an active lease; return it before repair")
-			return
-		}
-		if !claimed {
-			lease = testEnvironmentWarmupLease(project, slot.SlotIndex, slot.SlotName)
-		}
-		if _, err := setLeaseSlotCleanupStarting(r.Context(), store, project, lease, testSlotReturnHistoryEntry(lease, testSlotReturnAudit{
-			Source:         "api.test_environments.repair",
-			CleanupStarted: true,
-		})); err != nil {
-			writeProblem(w, http.StatusInternalServerError, "record test-slot repair state failed")
-			return
-		}
-		beginTestSlotCleanup(store, preparer, project, lease, claimed, nil)
-		writeJSON(w, http.StatusAccepted, testSlotReturnResponse(project, projectKey, lease, testSlotStateCleaning, true))
-	}
-}
-
-func testEnvironmentSlotByName(project Project, slotName string) (TestEnvironmentSlotStatus, bool) {
-	for _, status := range testEnvironmentSlotStatuses(project) {
-		if status.SlotName == slotName {
-			return status, true
-		}
-	}
-	return TestEnvironmentSlotStatus{}, false
-}
-
-func claimedTestSlotLeaseForSlot(ctx context.Context, store ReadStore, project Project, slot TestEnvironmentSlotStatus) (Lease, bool) {
-	stateStore, ok := store.(StateStore)
-	if !ok || stateStore == nil {
-		return Lease{}, false
-	}
-	leases, err := stateStore.ListLeases(ctx)
-	if err != nil {
-		return Lease{}, false
-	}
-	projectNames := map[string]bool{}
-	for _, name := range []string{project.Name, project.ID} {
-		if strings.TrimSpace(name) != "" {
-			projectNames[strings.TrimSpace(name)] = true
-		}
-	}
-	for _, lease := range leases {
-		if lease.State != "claimed" || !boolFromMap(lease.Metadata, "test_slot_checkout") || !projectNames[lease.Project] {
-			continue
-		}
-		if nativeSlotNameMatches(lease.Metadata, slot.SlotName) {
-			return lease, true
-		}
-		if slotIndex := nativeSlotIndexFromMetadata(lease.Metadata); slotIndex != nil && *slotIndex == slot.SlotIndex {
-			return lease, true
-		}
-	}
-	return Lease{}, false
 }
 
 func markLeaseSlotStatus(ctx context.Context, store ReadStore, project Project, lease Lease, state string, cause error) {
@@ -928,7 +850,8 @@ func reconcileTestSlots(ctx context.Context, store ReadStore, preparer TestSlotP
 		if projectName == "" {
 			continue
 		}
-		for slotIndex, status := range testEnvironmentSlotStatuses(project) {
+		statuses := testEnvironmentSlotStatuses(project)
+		for slotIndex, status := range statuses {
 			if status.State != testSlotStateCleaning {
 				continue
 			}
@@ -947,8 +870,117 @@ func reconcileTestSlots(ctx context.Context, store ReadStore, preparer TestSlotP
 				started++
 			}
 		}
+
+		// Seed missing slot records (count is set but the slot is absent from
+		// `slots[*]`) and resume stale `warming` entries. Warming is durable
+		// reconciler work, not a one-shot side effect of PATCH count: a slot
+		// whose preliminary reconciliation crashed, was rolled back, or never
+		// ran will be picked up here on the next tick.
+		slotCount := projectTestSlotCount(Settings{}, project)
+		for slotIndex := 1; slotIndex <= slotCount; slotIndex++ {
+			if claimedSlots[projectName][slotIndex] {
+				// A claimed lease drives its own lifecycle (activation /
+				// cleaning / active). Don't re-warm under it.
+				continue
+			}
+			status, hasStatus := statuses[slotIndex]
+			switch {
+			case !hasStatus:
+				// missing entirely → seed and warm
+			case status.State == testSlotStateWarming:
+				if !status.UpdatedAt.IsZero() && now.Sub(status.UpdatedAt) < minAge {
+					continue
+				}
+				// stale warming → resume
+			default:
+				continue
+			}
+			if beginTestSlotWarmup(store, preparer, project, slotIndex, logf) {
+				started++
+			}
+		}
 	}
 	return started
+}
+
+// testSlotWarmups serializes warmup work per slot so concurrent reconciler
+// ticks don't double-fire EnsureTestSlotPreliminaries against the same slot.
+var testSlotWarmups sync.Map
+
+func beginTestSlotWarmup(store ReadStore, preparer TestSlotPreparer, project Project, slotIndex int, logf func(string, ...any)) bool {
+	if preparer == nil {
+		return false
+	}
+	projectKey := firstNonEmpty(project.Name, project.ID)
+	if projectKey == "" {
+		return false
+	}
+	slotName := testEnvironmentName(projectKey, slotIndex, project, Lease{})
+	if strings.TrimSpace(slotName) == "" {
+		return false
+	}
+	key := projectKey + ":warm:" + slotName
+	if _, loaded := testSlotWarmups.LoadOrStore(key, struct{}{}); loaded {
+		return false
+	}
+	go func() {
+		defer testSlotWarmups.Delete(key)
+		warmTestSlot(context.Background(), store, preparer, project, slotIndex, slotName, logf)
+	}()
+	return true
+}
+
+func warmTestSlot(ctx context.Context, store ReadStore, preparer TestSlotPreparer, project Project, slotIndex int, slotName string, logf func(string, ...any)) {
+	writer, ok := store.(ProjectTestEnvironmentSlotStatusWriter)
+	if !ok || writer == nil {
+		if logf != nil {
+			logf("test-slot warmup skipped: status writer not configured project=%s slot=%s", firstNonEmpty(project.Name, project.ID), slotName)
+		}
+		return
+	}
+	projectKey := firstNonEmpty(project.Name, project.ID)
+	now := time.Now().UTC()
+	updated, err := writer.SetProjectTestEnvironmentSlotStatus(ctx, projectKey, TestEnvironmentSlotStatus{
+		SlotIndex: slotIndex,
+		SlotName:  slotName,
+		State:     testSlotStateWarming,
+		UpdatedAt: now,
+	})
+	if err != nil {
+		if logf != nil {
+			logf("test-slot warmup record start failed project=%s slot=%s: %v", projectKey, slotName, err)
+		}
+		return
+	}
+	current := updated
+	lease := testEnvironmentWarmupLease(current, slotIndex, slotName)
+	if err := preparer.EnsureTestSlotPreliminaries(ctx, lease, current); err != nil {
+		detail := err.Error()
+		if _, writeErr := writer.SetProjectTestEnvironmentSlotStatus(ctx, projectKey, TestEnvironmentSlotStatus{
+			SlotIndex: slotIndex,
+			SlotName:  slotName,
+			State:     "error",
+			UpdatedAt: time.Now().UTC(),
+			Detail:    &detail,
+		}); writeErr != nil && logf != nil {
+			logf("test-slot warmup record error failed project=%s slot=%s: %v", projectKey, slotName, writeErr)
+		}
+		if logf != nil {
+			logf("test-slot warmup failed project=%s slot=%s: %v", projectKey, slotName, err)
+		}
+		return
+	}
+	cleanupTestSlotInstaller(ctx, preparer, lease, current, logf)
+	readyAt := time.Now().UTC()
+	if _, err := writer.SetProjectTestEnvironmentSlotStatus(ctx, projectKey, TestEnvironmentSlotStatus{
+		SlotIndex: slotIndex,
+		SlotName:  slotName,
+		State:     testSlotStateReady,
+		UpdatedAt: readyAt,
+		ReadyAt:   &readyAt,
+	}); err != nil && logf != nil {
+		logf("test-slot warmup record ready failed project=%s slot=%s: %v", projectKey, slotName, err)
+	}
 }
 
 func testSlotLeaseExpired(now time.Time, lease Lease) bool {

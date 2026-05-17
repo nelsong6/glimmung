@@ -35,17 +35,24 @@ agent workload pods.
 
 ### Queue Size
 
-`PATCH /v1/projects/{project}/test-environments/count` changes desired slot
-capacity. Increasing the count reconciles preliminary resources for the new
-slots and marks them available only after that reconciliation succeeds.
+`PATCH /v1/projects/{project}/test-environments/count` writes the desired slot
+count and returns. It does not warm slots synchronously. Preliminary
+reconciliation for newly added slots is durable reconciler work — the
+test-slot reconciler tick seeds missing `slots[*]` records, runs
+`EnsureTestSlotPreliminaries`, and transitions each from `warming` to `ready`.
+A handler that blocked here would leave the project doc permanently
+inconsistent if it crashed mid-warm, and its `200 OK` would be a lie about
+what was actually stored.
 
 This path must not create long-running runtime resources. It must not create or
 keep project app deployments, API proxy deployments, session pods, Playwright
 servers, or validation jobs as part of making a slot available.
 
-Decreasing the count is the destructive capacity path. It may delete
-preliminary resources for slots above the new count after ensuring no active
-lease still owns those slots.
+Decreasing the count is the destructive capacity path. It deletes preliminary
+resources for slots above the new count after ensuring no active lease still
+owns those slots. This is the only destructive scale path — there is no
+separate "repair" or "reset" surface that can damage capacity outside the
+queue-size handler.
 
 ### Checkout
 
@@ -127,18 +134,30 @@ path as `POST /v1/test-slots/return`. Callback release must not mark the lease
 released until hot runtime teardown and preliminary revalidation have
 completed.
 
-### Reconciliation And Repair
+### Reconciliation
 
-Glimmung runs a test-slot reconciler for durable lifecycle work. The reconciler
-restarts stale `activating` work, restarts stale `cleaning` work, cleans up
-short-lived installer Jobs and clone Secrets for active slots, and starts
-cleanup for expired claimed test-slot leases.
+Glimmung runs a single test-slot reconciler that owns durable lifecycle work.
+On every tick it:
 
-`POST /v1/projects/{project}/test-environments/{slot_name}/repair` is the
-explicit admin repair path for slots left in `error`, stale `warming`, or stale
-`cleaning` states. Repair reuses the return cleanup path and then revalidates
-preliminary resources. It must refuse to repair a healthy active lease; callers
-should return that lease instead.
+- seeds missing `slots[*]` records (count is set but the index is not in the
+  array) and runs preliminary reconciliation to bring them from `warming` to
+  `ready`;
+- resumes stale `warming` entries whose preliminary reconciliation crashed,
+  was rolled back, or never finished;
+- restarts stale `activating` work;
+- restarts stale `cleaning` work;
+- cleans up short-lived installer Jobs and clone Secrets for active slots;
+- starts cleanup for expired claimed test-slot leases.
+
+There is no separate admin "repair" endpoint. Any slot in `error`, stale
+`warming`, or stale `cleaning` is recovered on the next reconciler tick — an
+operator-driven escape hatch is an exception path the migration policy
+forbids. A genuinely stuck slot is a reconciler bug to fix, not a
+button-to-press; once the reconciler change is shipped, the only way to remove
+slot capacity is decreasing queue size.
+
+The reconciler must not re-warm a slot that has a current `claimed` lease;
+those slots are driven by the activation/cleaning paths attached to the lease.
 
 ## Resource Classification
 
@@ -214,12 +233,19 @@ The slot system is not complete until all of these are true:
   return for test-slot leases.
 - Expired or abandoned claimed test-slot leases are cleaned by reconciliation
   without requiring manual intervention.
-- Slots in `error`, stale `warming`, or stale `cleaning` can be repaired by an
-  explicit admin operation that does not require queue-size churn.
+- Slots in `error`, stale `warming`, or stale `cleaning` are recovered by the
+  test-slot reconciler on its next tick. There is no admin repair endpoint;
+  the only way to remove capacity is decreasing queue size.
+- Missing `slots[*]` entries are seeded by the reconciler. Setting
+  `native_standby_dns.count` is sufficient — the queue-size handler does not
+  warm synchronously.
 - Short-lived installer Jobs and clone Secrets are cleaned after success and
   reconciled after process restarts.
 - Dashboard slot rows expose enough activation and cleanup metadata to debug
-  stuck work without querying Cosmos directly.
+  stuck work without querying Cosmos directly. State for an unseeded slot is
+  empty in the API and labeled "unseeded" in the UI — neither layer
+  synthesizes "warming" as a placeholder, which would lie about durable
+  state.
 - CI or a dispatchable smoke workflow exercises checkout, activation, return,
   cleanup, and no-runtime-after-return against a live configured project.
 - Function names, resource names, and documentation use the slot lifecycle

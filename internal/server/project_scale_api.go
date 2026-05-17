@@ -179,16 +179,12 @@ func scaleProjectTestEnvironments(store ReadStore, workloadIdentities NativeWork
 				return
 			}
 		}
-		if preparer != nil && *req.Count > 0 {
-			warmed, err := warmProjectTestEnvironments(r.Context(), store, preparer, project, updated, *req.Count)
-			if err != nil {
-				writeProblem(w, http.StatusBadGateway, err.Error())
-				return
-			}
-			if warmed.ID != "" || warmed.Name != "" {
-				updated = warmed
-			}
-		}
+		// Warming is durable reconciler work, not a synchronous side effect of
+		// this handler. The test-slot reconciler (StartTestSlotReconcilerLoop)
+		// seeds missing slot status records and resumes stale `warming`
+		// entries on its next tick. A handler that blocked here would mean a
+		// crash, restart, or rollout during warmup left the project doc
+		// permanently inconsistent — see the slot lifecycle doc.
 		writeJSON(w, http.StatusOK, updated)
 	}
 }
@@ -231,59 +227,6 @@ func activeTestSlotLeasesAboveCount(ctx context.Context, store ReadStore, projec
 		return active[i].RequestedAt.Before(active[j].RequestedAt)
 	})
 	return active, nil
-}
-
-func warmProjectTestEnvironments(ctx context.Context, store ReadStore, preparer TestSlotPreparer, projectKey string, project Project, count int) (Project, error) {
-	writer, ok := store.(ProjectTestEnvironmentSlotStatusWriter)
-	if !ok || writer == nil {
-		return Project{}, nil
-	}
-	current := project
-	projectName := firstNonEmpty(project.Name, project.ID, projectKey)
-	for slotIndex := 1; slotIndex <= count; slotIndex++ {
-		if testEnvironmentSlotState(current, slotIndex) == "ready" {
-			continue
-		}
-		slotName := testEnvironmentName(projectName, slotIndex, current, Lease{})
-		warming := TestEnvironmentSlotStatus{
-			SlotIndex: slotIndex,
-			SlotName:  slotName,
-			State:     "warming",
-			UpdatedAt: time.Now().UTC(),
-		}
-		updated, err := writer.SetProjectTestEnvironmentSlotStatus(ctx, projectKey, warming)
-		if err != nil {
-			return current, err
-		}
-		current = updated
-
-		lease := testEnvironmentWarmupLease(current, slotIndex, slotName)
-		if err := preparer.EnsureTestSlotPreliminaries(ctx, lease, current); err != nil {
-			detail := err.Error()
-			_, _ = writer.SetProjectTestEnvironmentSlotStatus(ctx, projectKey, TestEnvironmentSlotStatus{
-				SlotIndex: slotIndex,
-				SlotName:  slotName,
-				State:     "error",
-				UpdatedAt: time.Now().UTC(),
-				Detail:    &detail,
-			})
-			return current, err
-		}
-		cleanupTestSlotInstaller(ctx, preparer, lease, current, nil)
-		now := time.Now().UTC()
-		updated, err = writer.SetProjectTestEnvironmentSlotStatus(ctx, projectKey, TestEnvironmentSlotStatus{
-			SlotIndex: slotIndex,
-			SlotName:  slotName,
-			State:     "ready",
-			UpdatedAt: now,
-			ReadyAt:   &now,
-		})
-		if err != nil {
-			return current, err
-		}
-		current = updated
-	}
-	return current, nil
 }
 
 func deprovisionProjectTestEnvironments(ctx context.Context, preparer TestSlotPreparer, project Project, slots []TestEnvironmentSlotStatus) error {

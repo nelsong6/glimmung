@@ -261,7 +261,11 @@ func TestScaleProjectTestEnvironmentsPersistsWorkloadIdentityStatus(t *testing.T
 	}
 }
 
-func TestScaleProjectTestEnvironmentsPreparesSlotsBeforeReady(t *testing.T) {
+func TestScaleProjectTestEnvironmentsDoesNotWarmSynchronously(t *testing.T) {
+	// Warming is durable reconciler work. PATCH count must return without
+	// running EnsureTestSlotPreliminaries — otherwise a crash mid-warm leaves
+	// the project doc permanently inconsistent and the handler's success
+	// signal is a lie about what's stored.
 	store := &fakeProjectScalerStore{project: Project{
 		ID:         "tank",
 		Name:       "tank",
@@ -285,28 +289,22 @@ func TestScaleProjectTestEnvironmentsPreparesSlotsBeforeReady(t *testing.T) {
 	var project Project
 	patchJSON(t, handler, "/v1/projects/tank/test-environments/count", `{"count":2}`, &project)
 
-	if !preparer.preliminaries {
-		t.Fatal("expected scale to prepare test slot preliminaries")
+	if preparer.preliminaries {
+		t.Fatal("PATCH count must not run preliminary reconciliation; that is the reconciler's job")
 	}
 	if preparer.activated {
 		t.Fatal("scale should not activate test slot runtime")
 	}
-	if got, want := strings.Join(preparer.cleanedSlots, ","), "tank-slot-1,tank-slot-2"; got != want {
-		t.Fatalf("installer cleanup slots=%q, want %q", got, want)
-	}
-	if len(store.slotStatuses) != 4 {
-		t.Fatalf("statuses=%#v", store.slotStatuses)
-	}
-	if store.slotStatuses[0].State != "warming" || store.slotStatuses[1].State != "ready" {
-		t.Fatalf("slot 1 statuses=%#v", store.slotStatuses[:2])
-	}
-	if store.slotStatuses[2].SlotIndex != 2 || store.slotStatuses[3].State != "ready" {
-		t.Fatalf("slot 2 statuses=%#v", store.slotStatuses[2:])
+	if len(store.slotStatuses) != 0 {
+		t.Fatalf("PATCH count must not write slot statuses: %#v", store.slotStatuses)
 	}
 	standby := project.Metadata["native_standby_dns"].(map[string]any)
-	slots := standby["slots"].([]any)
-	if len(slots) != 2 {
-		t.Fatalf("slots=%#v", slots)
+	if count, ok := positiveIntFromMap(standby, "count"); !ok || count != 2 {
+		t.Fatalf("count=%v, want 2", standby["count"])
+	}
+	// slots[*] is owned by the reconciler; PATCH leaves it untouched.
+	if slots, ok := standby["slots"].([]any); ok && len(slots) > 0 {
+		t.Fatalf("PATCH count must not seed slots[]: %#v", slots)
 	}
 }
 
