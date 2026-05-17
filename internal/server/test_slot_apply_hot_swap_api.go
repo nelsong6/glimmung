@@ -189,7 +189,7 @@ func applyTestSlotHotSwap(store ReadStore, performer applyHotSwapPerformer) http
 		// the DIMENSION (e.g., "tank-operator/session-id"); the caller
 		// The pod selector flows into the Job's swap script which
 		// resolves target pods at run-time via kubectl inside the
-		// bitnami/kubectl container — no kubectl needed in the glimmung
+		// alpine/k8s container — no kubectl needed in the glimmung
 		// pod. (Earlier cut resolved pods up-front in the handler and
 		// hit "kubectl: not found" in the glimmung runtime image.)
 
