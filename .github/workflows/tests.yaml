@@ -48,6 +48,17 @@ jobs:
       - name: Guard against writeProblem 5xx (must use writeInternalError)
         run: node scripts/check-handler-5xx-migration.mjs
 
+  check-cosmos-queries:
+    name: Cosmos query partition-strategy contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Guard against retired queryAllWhere / empty NewPartitionKey
+        run: node scripts/check-cosmos-queries.mjs
+
   frontend:
     runs-on: ubuntu-latest
     steps:

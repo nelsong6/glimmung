@@ -121,7 +121,7 @@ func NewFromSettings(settings server.Settings) (*Store, error) {
 
 func (s *Store) ListProjects(ctx context.Context) ([]server.Project, error) {
 	var docs []projectDoc
-	if err := queryAll(ctx, s.projects, &docs); err != nil {
+	if err := crossPartitionQuery(ctx, s.projects, "SELECT * FROM c", nil, &docs); err != nil {
 		return nil, err
 	}
 	rows := make([]server.Project, 0, len(docs))
@@ -129,6 +129,23 @@ func (s *Store) ListProjects(ctx context.Context) ([]server.Project, error) {
 		rows = append(rows, projectFromDoc(doc))
 	}
 	return rows, nil
+}
+
+// listProjectNames returns the partition-key values for every registered
+// project, suitable for fanOutByProject. Cosmos lists projects in any
+// order; the slice ordering is not contractual.
+func (s *Store) listProjectNames(ctx context.Context) ([]string, error) {
+	var docs []projectDoc
+	if err := crossPartitionQuery(ctx, s.projects, "SELECT c.id FROM c", nil, &docs); err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(docs))
+	for _, doc := range docs {
+		if doc.ID != "" {
+			names = append(names, doc.ID)
+		}
+	}
+	return names, nil
 }
 
 func (s *Store) UpsertProject(ctx context.Context, req server.ProjectRegister) (server.Project, error) {
@@ -463,7 +480,7 @@ func (s *Store) readProjectDoc(ctx context.Context, project string) (projectDoc,
 
 func (s *Store) ListWorkflows(ctx context.Context) ([]server.Workflow, error) {
 	var docs []workflowDoc
-	if err := queryAll(ctx, s.workflows, &docs); err != nil {
+	if err := crossPartitionQuery(ctx, s.workflows, "SELECT * FROM c", nil, &docs); err != nil {
 		return nil, err
 	}
 	rows := make([]server.Workflow, 0, len(docs))
@@ -577,7 +594,7 @@ func (s *Store) PatchWorkflow(ctx context.Context, project string, name string, 
 
 func (s *Store) ListLeases(ctx context.Context) ([]server.Lease, error) {
 	var docs []leaseDoc
-	if err := queryAll(ctx, s.leases, &docs); err != nil {
+	if err := crossPartitionQuery(ctx, s.leases, "SELECT * FROM c", nil, &docs); err != nil {
 		return nil, err
 	}
 	rows := make([]server.Lease, 0, len(docs))
@@ -637,9 +654,10 @@ func (s *Store) ReleaseLeaseByCallbackToken(ctx context.Context, token string) (
 
 func (s *Store) ListProjectRuns(ctx context.Context, project string, limit int) ([]server.RunReport, error) {
 	var docs []runDoc
-	if err := queryAllWhere(
+	if err := singlePartitionQuery(
 		ctx,
 		s.runs,
+		azcosmos.NewPartitionKeyString(project),
 		"SELECT * FROM c WHERE c.project = @project ORDER BY c.updated_at DESC",
 		[]azcosmos.QueryParameter{{Name: "@project", Value: project}},
 		&docs,
@@ -900,9 +918,10 @@ func (s *Store) nextIssueNumber(ctx context.Context, project string) (int, error
 
 func (s *Store) highestIssueNumber(ctx context.Context, project string) (int, error) {
 	var docs []issueDoc
-	if err := queryAllWhere(
+	if err := singlePartitionQuery(
 		ctx,
 		s.issues,
+		azcosmos.NewPartitionKeyString(project),
 		"SELECT * FROM c WHERE c.project = @project AND IS_DEFINED(c.number) AND c.kind != 'issue_number_counter'",
 		[]azcosmos.QueryParameter{{Name: "@project", Value: project}},
 		&docs,
@@ -1101,9 +1120,10 @@ func (s *Store) DeleteIssueComment(ctx context.Context, req server.IssueCommentD
 
 func (s *Store) readIssueByNumber(ctx context.Context, project string, number int) (issueDoc, error) {
 	var docs []issueDoc
-	if err := queryAllWhere(
+	if err := singlePartitionQuery(
 		ctx,
 		s.issues,
+		azcosmos.NewPartitionKeyString(project),
 		"SELECT * FROM c WHERE c.project = @project AND c.number = @number",
 		[]azcosmos.QueryParameter{
 			{Name: "@project", Value: project},
@@ -1121,7 +1141,7 @@ func (s *Store) readIssueByNumber(ctx context.Context, project string, number in
 
 func (s *Store) listIssueDocs(ctx context.Context) ([]issueDoc, error) {
 	var docs []issueDoc
-	if err := queryAll(ctx, s.issues, &docs); err != nil {
+	if err := crossPartitionQuery(ctx, s.issues, "SELECT * FROM c", nil, &docs); err != nil {
 		return nil, err
 	}
 	return docs, nil
@@ -1129,7 +1149,7 @@ func (s *Store) listIssueDocs(ctx context.Context) ([]issueDoc, error) {
 
 func (s *Store) listRunDocs(ctx context.Context) ([]runDoc, error) {
 	var docs []runDoc
-	if err := queryAll(ctx, s.runs, &docs); err != nil {
+	if err := crossPartitionQuery(ctx, s.runs, "SELECT * FROM c", nil, &docs); err != nil {
 		return nil, err
 	}
 	return docs, nil
@@ -1137,9 +1157,10 @@ func (s *Store) listRunDocs(ctx context.Context) ([]runDoc, error) {
 
 func (s *Store) listIssueLockDocs(ctx context.Context) ([]lockDoc, error) {
 	var docs []lockDoc
-	if err := queryAllWhere(
+	if err := singlePartitionQuery(
 		ctx,
 		s.locks,
+		azcosmos.NewPartitionKeyString("issue"),
 		"SELECT * FROM c WHERE c.scope = @scope",
 		[]azcosmos.QueryParameter{{Name: "@scope", Value: "issue"}},
 		&docs,
@@ -1152,9 +1173,10 @@ func (s *Store) listIssueLockDocs(ctx context.Context) ([]lockDoc, error) {
 func (s *Store) latestRunForIssue(ctx context.Context, issue issueDoc) (*runDoc, []runDoc, error) {
 	var docs []runDoc
 	if issue.ID != "" {
-		if err := queryAllWhere(
+		if err := singlePartitionQuery(
 			ctx,
 			s.runs,
+			azcosmos.NewPartitionKeyString(issue.Project),
 			"SELECT * FROM c WHERE c.project = @project AND c.issue_id = @issue_id",
 			[]azcosmos.QueryParameter{
 				{Name: "@project", Value: issue.Project},
@@ -1184,9 +1206,10 @@ func (s *Store) latestRunForIssue(ctx context.Context, issue issueDoc) (*runDoc,
 
 func (s *Store) issueLockHeld(ctx context.Context, project string, number int) (bool, error) {
 	var docs []lockDoc
-	if err := queryAllWhere(
+	if err := singlePartitionQuery(
 		ctx,
 		s.locks,
+		azcosmos.NewPartitionKeyString("issue"),
 		"SELECT * FROM c WHERE c.scope = @scope AND c.key = @key",
 		[]azcosmos.QueryParameter{
 			{Name: "@scope", Value: "issue"},
@@ -1208,9 +1231,10 @@ func (s *Store) issueLockHeld(ctx context.Context, project string, number int) (
 
 func (s *Store) issueRunDocs(ctx context.Context, project string, issueNumber int) ([]runDoc, error) {
 	var docs []runDoc
-	if err := queryAllWhere(
+	if err := singlePartitionQuery(
 		ctx,
 		s.runs,
+		azcosmos.NewPartitionKeyString(project),
 		"SELECT * FROM c WHERE c.project = @project AND c.issue_number = @issue_number ORDER BY c.created_at ASC",
 		[]azcosmos.QueryParameter{
 			{Name: "@project", Value: project},
@@ -1228,7 +1252,7 @@ func (s *Store) issueRunDocs(ctx context.Context, project string, issueNumber in
 
 func (s *Store) readLeaseDocByCallbackToken(ctx context.Context, token string) (leaseDoc, error) {
 	var docs []leaseDoc
-	if err := queryAllWhere(
+	if err := crossPartitionQuery(
 		ctx,
 		s.leases,
 		"SELECT * FROM c WHERE c.metadata.lease_callback_token = @token",
@@ -1246,29 +1270,11 @@ func (s *Store) readLeaseDocByCallbackToken(ctx context.Context, token string) (
 	return docs[0], nil
 }
 
-func queryAll[T any](ctx context.Context, container *azcosmos.ContainerClient, target *[]T) error {
-	return queryAllWhere(ctx, container, "SELECT * FROM c", nil, target)
-}
-
-func queryAllWhere[T any](ctx context.Context, container *azcosmos.ContainerClient, query string, parameters []azcosmos.QueryParameter, target *[]T) error {
-	pager := container.NewQueryItemsPager(query, azcosmos.NewPartitionKey(), &azcosmos.QueryOptions{
-		QueryParameters: parameters,
-	})
-	for pager.More() {
-		page, err := pager.NextPage(ctx)
-		if err != nil {
-			return err
-		}
-		for _, item := range page.Items {
-			var row T
-			if err := json.Unmarshal(item, &row); err != nil {
-				return err
-			}
-			*target = append(*target, row)
-		}
-	}
-	return nil
-}
+// Cosmos query primitives live in query.go. The legacy queryAll /
+// queryAllWhere helpers that defaulted to an empty partition key were
+// deleted as part of the queryAllWhere → singlePartitionQuery migration.
+// See docs/cosmos-partition-strategy.md and the migration guard at
+// scripts/check-cosmos-queries.sh.
 
 type projectDoc struct {
 	ID         string         `json:"id"`
@@ -2252,28 +2258,62 @@ type touchpointDoc struct {
 }
 
 func (s *Store) ListTouchpoints(ctx context.Context, filter server.TouchpointListFilter) ([]server.TouchpointRow, error) {
+	// The reports container is partitioned by /project. When the caller
+	// scopes to one project, this is a single-partition query and ORDER
+	// BY works locally. When the caller asks for the cross-project index
+	// (the touchpoints landing view), the Go SDK cannot fan out an
+	// ORDER BY query for us — we fan out per project here and merge in
+	// Go. See docs/cosmos-partition-strategy.md.
 	var touchpointDocs []touchpointDoc
-	query := "SELECT * FROM c"
-	var params []azcosmos.QueryParameter
-	var predicates []string
+
 	if filter.Project != "" {
-		predicates = append(predicates, "c.project = @project")
-		params = append(params, azcosmos.QueryParameter{Name: "@project", Value: filter.Project})
-	}
-	if filter.Repo != "" {
-		predicates = append(predicates, "c.repo = @repo")
-		params = append(params, azcosmos.QueryParameter{Name: "@repo", Value: filter.Repo})
-	}
-	if filter.State != "" {
-		predicates = append(predicates, "c.state = @state")
-		params = append(params, azcosmos.QueryParameter{Name: "@state", Value: filter.State})
-	}
-	if len(predicates) > 0 {
-		query = "SELECT * FROM c WHERE " + strings.Join(predicates, " AND ")
-	}
-	query += " ORDER BY c.updated_at DESC"
-	if err := queryAllWhere(ctx, s.reports, query, params, &touchpointDocs); err != nil {
-		return nil, err
+		// Single-partition path: include ORDER BY so Cosmos sorts within
+		// the partition; merge is unnecessary.
+		predicates := []string{"c.project = @project"}
+		params := []azcosmos.QueryParameter{{Name: "@project", Value: filter.Project}}
+		if filter.Repo != "" {
+			predicates = append(predicates, "c.repo = @repo")
+			params = append(params, azcosmos.QueryParameter{Name: "@repo", Value: filter.Repo})
+		}
+		if filter.State != "" {
+			predicates = append(predicates, "c.state = @state")
+			params = append(params, azcosmos.QueryParameter{Name: "@state", Value: filter.State})
+		}
+		query := "SELECT * FROM c WHERE " + strings.Join(predicates, " AND ") + " ORDER BY c.updated_at DESC"
+		if err := singlePartitionQuery(
+			ctx,
+			s.reports,
+			azcosmos.NewPartitionKeyString(filter.Project),
+			query,
+			params,
+			&touchpointDocs,
+		); err != nil {
+			return nil, err
+		}
+	} else {
+		// Cross-project fan-out: query each project partition in turn,
+		// then sort the merged result in Go.
+		projects, err := s.listProjectNames(ctx)
+		if err != nil {
+			return nil, err
+		}
+		predicates := []string{"c.project = @project"}
+		var params []azcosmos.QueryParameter
+		if filter.Repo != "" {
+			predicates = append(predicates, "c.repo = @repo")
+			params = append(params, azcosmos.QueryParameter{Name: "@repo", Value: filter.Repo})
+		}
+		if filter.State != "" {
+			predicates = append(predicates, "c.state = @state")
+			params = append(params, azcosmos.QueryParameter{Name: "@state", Value: filter.State})
+		}
+		query := "SELECT * FROM c WHERE " + strings.Join(predicates, " AND ")
+		if err := fanOutByProject(ctx, s.reports, projects, query, params, &touchpointDocs); err != nil {
+			return nil, err
+		}
+		sort.SliceStable(touchpointDocs, func(i, j int) bool {
+			return touchpointDocs[i].UpdatedAt > touchpointDocs[j].UpdatedAt
+		})
 	}
 
 	// Enrich with issue and run data.
@@ -2304,7 +2344,8 @@ func (s *Store) GetTouchpointForIssue(ctx context.Context, project string, issue
 	}
 	// Find touchpoint by linked_issue_id.
 	var docs []touchpointDoc
-	if err := queryAllWhere(ctx, s.reports,
+	if err := singlePartitionQuery(ctx, s.reports,
+		azcosmos.NewPartitionKeyString(project),
 		"SELECT * FROM c WHERE c.project = @project AND c.linked_issue_id = @iid ORDER BY c.updated_at DESC",
 		[]azcosmos.QueryParameter{
 			{Name: "@project", Value: project},
@@ -2334,7 +2375,8 @@ func (s *Store) EnsureTouchpoint(ctx context.Context, req server.TouchpointCreat
 	// If we have a linked issue, check for an existing touchpoint for that issue.
 	if linkedIssueID != nil {
 		var docs []touchpointDoc
-		_ = queryAllWhere(ctx, s.reports,
+		_ = singlePartitionQuery(ctx, s.reports,
+			azcosmos.NewPartitionKeyString(req.Project),
 			"SELECT * FROM c WHERE c.project = @project AND c.linked_issue_id = @iid ORDER BY c.updated_at DESC",
 			[]azcosmos.QueryParameter{
 				{Name: "@project", Value: req.Project},
@@ -2354,9 +2396,11 @@ func (s *Store) EnsureTouchpoint(ctx context.Context, req server.TouchpointCreat
 		}
 	}
 
-	// Fall back to (repo, number) idempotency key.
+	// Fall back to (repo, number) idempotency key. PRs are unique per
+	// repo so this lookup is by design cross-project; touchpoint detail
+	// uniqueness is enforced at write time by the (repo, number) key.
 	var existingDocs []touchpointDoc
-	_ = queryAllWhere(ctx, s.reports,
+	_ = crossPartitionQuery(ctx, s.reports,
 		"SELECT * FROM c WHERE c.repo = @repo AND c.number = @num",
 		[]azcosmos.QueryParameter{
 			{Name: "@repo", Value: req.Repo},
@@ -2414,24 +2458,34 @@ func (s *Store) EnsureTouchpoint(ctx context.Context, req server.TouchpointCreat
 }
 
 func (s *Store) buildTouchpointDetail(ctx context.Context, doc touchpointDoc) (server.TouchpointDetail, error) {
-	// Look up linked run.
+	// Look up linked run. Runs are partitioned by /project; touchpoints
+	// and their linked runs share a project, so scope the lookups
+	// accordingly. doc.Project is the partition key.
 	var run *runDoc
 	if doc.LinkedRunID != nil && *doc.LinkedRunID != "" {
 		var runDocs []runDoc
-		if err := queryAllWhere(ctx, s.runs,
-			"SELECT * FROM c WHERE c.id = @id",
-			[]azcosmos.QueryParameter{{Name: "@id", Value: *doc.LinkedRunID}},
+		if err := singlePartitionQuery(ctx, s.runs,
+			azcosmos.NewPartitionKeyString(doc.Project),
+			"SELECT * FROM c WHERE c.project = @project AND c.id = @id",
+			[]azcosmos.QueryParameter{
+				{Name: "@project", Value: doc.Project},
+				{Name: "@id", Value: *doc.LinkedRunID},
+			},
 			&runDocs,
 		); err == nil && len(runDocs) > 0 {
 			run = &runDocs[0]
 		}
 	}
 	if run == nil {
-		// Fall back to latest run by (repo, pr_number).
+		// Fall back to latest run by (repo, pr_number) scoped to this
+		// touchpoint's project — runs for the touchpoint's PR live in
+		// the same project as the touchpoint itself.
 		var runDocs []runDoc
-		if err := queryAllWhere(ctx, s.runs,
-			"SELECT * FROM c WHERE c.issue_repo = @repo AND c.pr_number = @num ORDER BY c.created_at DESC",
+		if err := singlePartitionQuery(ctx, s.runs,
+			azcosmos.NewPartitionKeyString(doc.Project),
+			"SELECT * FROM c WHERE c.project = @project AND c.issue_repo = @repo AND c.pr_number = @num ORDER BY c.created_at DESC",
 			[]azcosmos.QueryParameter{
+				{Name: "@project", Value: doc.Project},
 				{Name: "@repo", Value: doc.Repo},
 				{Name: "@num", Value: doc.Number},
 			},
@@ -2441,15 +2495,20 @@ func (s *Store) buildTouchpointDetail(ctx context.Context, doc touchpointDoc) (s
 		}
 	}
 
-	// Look up linked issue.
+	// Look up linked issue. Issues are partitioned by /project; the
+	// linked issue lives in the touchpoint's project.
 	var linkedIssueRef *string
 	var linkedIssueNumber *int
 	var linkedIssueTitle *string
 	if doc.LinkedIssueID != nil && *doc.LinkedIssueID != "" {
 		var issueDocs []issueDoc
-		_ = queryAllWhere(ctx, s.issues,
-			"SELECT * FROM c WHERE c.id = @id",
-			[]azcosmos.QueryParameter{{Name: "@id", Value: *doc.LinkedIssueID}},
+		_ = singlePartitionQuery(ctx, s.issues,
+			azcosmos.NewPartitionKeyString(doc.Project),
+			"SELECT * FROM c WHERE c.project = @project AND c.id = @id",
+			[]azcosmos.QueryParameter{
+				{Name: "@project", Value: doc.Project},
+				{Name: "@id", Value: *doc.LinkedIssueID},
+			},
 			&issueDocs,
 		)
 		if len(issueDocs) > 0 {
@@ -2524,7 +2583,8 @@ func (s *Store) replaceTouchpointDoc(ctx context.Context, doc touchpointDoc) err
 func (s *Store) prLockHeld(ctx context.Context, repo string, prNumber int) (bool, error) {
 	key := fmt.Sprintf("%s#%d", repo, prNumber)
 	var docs []lockDoc
-	if err := queryAllWhere(ctx, s.locks,
+	if err := singlePartitionQuery(ctx, s.locks,
+		azcosmos.NewPartitionKeyString("pr"),
 		"SELECT * FROM c WHERE c.scope = @scope AND c.key = @key",
 		[]azcosmos.QueryParameter{
 			{Name: "@scope", Value: "pr"},
@@ -2786,24 +2846,41 @@ type playbookDoc struct {
 }
 
 func (s *Store) ListPlaybooks(ctx context.Context, filter server.PlaybookListFilter) ([]server.PlaybookPublic, error) {
-	query := "SELECT * FROM c"
-	var params []azcosmos.QueryParameter
-	var predicates []string
-	if filter.Project != "" {
-		predicates = append(predicates, "c.project = @project")
-		params = append(params, azcosmos.QueryParameter{Name: "@project", Value: filter.Project})
-	}
-	if filter.State != "" {
-		predicates = append(predicates, "c.state = @state")
-		params = append(params, azcosmos.QueryParameter{Name: "@state", Value: filter.State})
-	}
-	if len(predicates) > 0 {
-		query = "SELECT * FROM c WHERE " + strings.Join(predicates, " AND ")
-	}
-	query += " ORDER BY c.created_at DESC"
+	// playbooks container is partitioned by /project. Single-partition
+	// when filter.Project is set, fan out otherwise. See
+	// docs/cosmos-partition-strategy.md.
 	var docs []playbookDoc
-	if err := queryAllWhere(ctx, s.playbooks, query, params, &docs); err != nil {
-		return nil, err
+	if filter.Project != "" {
+		predicates := []string{"c.project = @project"}
+		params := []azcosmos.QueryParameter{{Name: "@project", Value: filter.Project}}
+		if filter.State != "" {
+			predicates = append(predicates, "c.state = @state")
+			params = append(params, azcosmos.QueryParameter{Name: "@state", Value: filter.State})
+		}
+		query := "SELECT * FROM c WHERE " + strings.Join(predicates, " AND ") + " ORDER BY c.created_at DESC"
+		if err := singlePartitionQuery(ctx, s.playbooks,
+			azcosmos.NewPartitionKeyString(filter.Project),
+			query, params, &docs); err != nil {
+			return nil, err
+		}
+	} else {
+		projects, err := s.listProjectNames(ctx)
+		if err != nil {
+			return nil, err
+		}
+		predicates := []string{"c.project = @project"}
+		var params []azcosmos.QueryParameter
+		if filter.State != "" {
+			predicates = append(predicates, "c.state = @state")
+			params = append(params, azcosmos.QueryParameter{Name: "@state", Value: filter.State})
+		}
+		query := "SELECT * FROM c WHERE " + strings.Join(predicates, " AND ")
+		if err := fanOutByProject(ctx, s.playbooks, projects, query, params, &docs); err != nil {
+			return nil, err
+		}
+		sort.SliceStable(docs, func(i, j int) bool {
+			return docs[i].CreatedAt > docs[j].CreatedAt
+		})
 	}
 	if filter.Limit != nil && *filter.Limit < len(docs) {
 		docs = docs[:*filter.Limit]
@@ -2817,7 +2894,8 @@ func (s *Store) ListPlaybooks(ctx context.Context, filter server.PlaybookListFil
 
 func (s *Store) GetPlaybook(ctx context.Context, project, ref string) (server.PlaybookPublic, error) {
 	var docs []playbookDoc
-	if err := queryAllWhere(ctx, s.playbooks,
+	if err := singlePartitionQuery(ctx, s.playbooks,
+		azcosmos.NewPartitionKeyString(project),
 		"SELECT * FROM c WHERE c.project = @project ORDER BY c.created_at DESC",
 		[]azcosmos.QueryParameter{{Name: "@project", Value: project}},
 		&docs,
@@ -2898,12 +2976,18 @@ func (s *Store) playbookToPublic(ctx context.Context, doc playbookDoc) server.Pl
 		if e.RunRef != nil && *e.RunRef != "" {
 			pub.RunRef = e.RunRef
 		}
-		// Resolve created_issue_ref from created_issue_id.
+		// Resolve created_issue_ref from created_issue_id. The created
+		// issue lives in the playbook's project (issues partition key
+		// is /project).
 		if e.CreatedIssueID != nil && *e.CreatedIssueID != "" {
 			var issueDocs []issueDoc
-			if err := queryAllWhere(ctx, s.issues,
-				"SELECT * FROM c WHERE c.id = @id",
-				[]azcosmos.QueryParameter{{Name: "@id", Value: *e.CreatedIssueID}},
+			if err := singlePartitionQuery(ctx, s.issues,
+				azcosmos.NewPartitionKeyString(doc.Project),
+				"SELECT * FROM c WHERE c.project = @project AND c.id = @id",
+				[]azcosmos.QueryParameter{
+					{Name: "@project", Value: doc.Project},
+					{Name: "@id", Value: *e.CreatedIssueID},
+				},
 				&issueDocs,
 			); err == nil && len(issueDocs) > 0 {
 				ref := publicids.IssueRef(issueDocs[0].Project, &issueDocs[0].Number)
@@ -3080,20 +3164,43 @@ func (s *Store) resolveRunRefToID(ctx context.Context, project string, ref *stri
 }
 
 func (s *Store) ListPortfolioElements(ctx context.Context, filter server.PortfolioListFilter) ([]server.PortfolioElementPublic, error) {
-	query := "SELECT * FROM c WHERE c.kind = @kind"
-	params := []azcosmos.QueryParameter{{Name: "@kind", Value: "portfolio_element"}}
-	if filter.Project != "" {
-		query += " AND c.project = @project"
-		params = append(params, azcosmos.QueryParameter{Name: "@project", Value: filter.Project})
-	}
-	if filter.Status != "" {
-		query += " AND c.status = @status"
-		params = append(params, azcosmos.QueryParameter{Name: "@status", Value: filter.Status})
-	}
-	query += " ORDER BY c.updated_at DESC"
+	// issues container is partitioned by /project. Single-partition
+	// when filter.Project is set, fan-out otherwise.
 	var docs []portfolioElementDoc
-	if err := queryAllWhere(ctx, s.issues, query, params, &docs); err != nil {
-		return nil, err
+	if filter.Project != "" {
+		predicates := []string{"c.kind = @kind", "c.project = @project"}
+		params := []azcosmos.QueryParameter{
+			{Name: "@kind", Value: "portfolio_element"},
+			{Name: "@project", Value: filter.Project},
+		}
+		if filter.Status != "" {
+			predicates = append(predicates, "c.status = @status")
+			params = append(params, azcosmos.QueryParameter{Name: "@status", Value: filter.Status})
+		}
+		query := "SELECT * FROM c WHERE " + strings.Join(predicates, " AND ") + " ORDER BY c.updated_at DESC"
+		if err := singlePartitionQuery(ctx, s.issues,
+			azcosmos.NewPartitionKeyString(filter.Project),
+			query, params, &docs); err != nil {
+			return nil, err
+		}
+	} else {
+		projects, err := s.listProjectNames(ctx)
+		if err != nil {
+			return nil, err
+		}
+		predicates := []string{"c.kind = @kind", "c.project = @project"}
+		params := []azcosmos.QueryParameter{{Name: "@kind", Value: "portfolio_element"}}
+		if filter.Status != "" {
+			predicates = append(predicates, "c.status = @status")
+			params = append(params, azcosmos.QueryParameter{Name: "@status", Value: filter.Status})
+		}
+		query := "SELECT * FROM c WHERE " + strings.Join(predicates, " AND ")
+		if err := fanOutByProject(ctx, s.issues, projects, query, params, &docs); err != nil {
+			return nil, err
+		}
+		sort.SliceStable(docs, func(i, j int) bool {
+			return docs[i].UpdatedAt > docs[j].UpdatedAt
+		})
 	}
 	if filter.Limit != nil && *filter.Limit < len(docs) {
 		docs = docs[:*filter.Limit]
@@ -3152,9 +3259,10 @@ func (s *Store) UpsertPortfolioElement(ctx context.Context, req server.Portfolio
 }
 
 func (s *Store) PatchPortfolioElement(ctx context.Context, project, ref string, req server.PortfolioElementPatch) (server.PortfolioElementPublic, error) {
-	// Resolve ref â†’ doc ID by scanning project's portfolio elements.
+	// Resolve ref -> doc ID by scanning project's portfolio elements.
 	var docs []portfolioElementDoc
-	if err := queryAllWhere(ctx, s.issues,
+	if err := singlePartitionQuery(ctx, s.issues,
+		azcosmos.NewPartitionKeyString(project),
 		"SELECT * FROM c WHERE c.kind = @kind AND c.project = @project",
 		[]azcosmos.QueryParameter{
 			{Name: "@kind", Value: "portfolio_element"},
@@ -3217,7 +3325,8 @@ func (s *Store) PatchPortfolioElement(ctx context.Context, project, ref string, 
 
 func (s *Store) PatchPlaybookEntryGate(ctx context.Context, project, ref, entryID string, manualGate bool) (server.PlaybookPublic, error) {
 	var docs []playbookDoc
-	if err := queryAllWhere(ctx, s.playbooks,
+	if err := singlePartitionQuery(ctx, s.playbooks,
+		azcosmos.NewPartitionKeyString(project),
 		"SELECT * FROM c WHERE c.project = @project ORDER BY c.created_at DESC",
 		[]azcosmos.QueryParameter{{Name: "@project", Value: project}},
 		&docs,
@@ -3281,7 +3390,8 @@ func (s *Store) AdvancePlaybooksForRun(ctx context.Context, project, runID strin
 		return err
 	}
 	var docs []playbookDoc
-	if err := queryAllWhere(ctx, s.playbooks,
+	if err := singlePartitionQuery(ctx, s.playbooks,
+		azcosmos.NewPartitionKeyString(project),
 		"SELECT * FROM c WHERE c.project = @project ORDER BY c.created_at DESC",
 		[]azcosmos.QueryParameter{{Name: "@project", Value: project}},
 		&docs,
@@ -3304,7 +3414,8 @@ func (s *Store) AdvancePlaybooksForRun(ctx context.Context, project, runID strin
 
 func (s *Store) readPlaybookDocByRef(ctx context.Context, project, ref string) (*playbookDoc, error) {
 	var docs []playbookDoc
-	if err := queryAllWhere(ctx, s.playbooks,
+	if err := singlePartitionQuery(ctx, s.playbooks,
+		azcosmos.NewPartitionKeyString(project),
 		"SELECT * FROM c WHERE c.project = @project ORDER BY c.created_at DESC",
 		[]azcosmos.QueryParameter{{Name: "@project", Value: project}},
 		&docs,
@@ -3735,8 +3846,14 @@ func (s *Store) acquireNativeLease(ctx context.Context, req server.LeaseAcquireR
 }
 
 func (s *Store) availableNativeSlot(ctx context.Context, project string) (*int, error) {
+	// Global view of every claimed native-k8s lease across all projects:
+	// the function caps both per-project and global concurrency, so it
+	// has to see leases from every project. No ORDER BY, so a gateway
+	// cross-partition scan is fine. If this query starts dominating
+	// dispatch latency, the right fix is a per-slot summary doc, not
+	// fan-out — see docs/cosmos-partition-strategy.md.
 	var docs []leaseDoc
-	if err := queryAllWhere(
+	if err := crossPartitionQuery(
 		ctx,
 		s.leases,
 		"SELECT * FROM c WHERE c.state = @state AND c.metadata.native_k8s = true",
@@ -3833,8 +3950,9 @@ func (s *Store) nativeSlotPrefix(ctx context.Context, project string) string {
 func (s *Store) CancelLeaseByRef(ctx context.Context, project, ref string) (server.CancelLeaseResult, error) {
 	// Find the lease doc by iterating all leases for the project.
 	var docs []leaseDoc
-	if err := queryAllWhere(
+	if err := singlePartitionQuery(
 		ctx, s.leases,
+		azcosmos.NewPartitionKeyString(project),
 		"SELECT * FROM c WHERE c.project = @p",
 		[]azcosmos.QueryParameter{{Name: "@p", Value: project}},
 		&docs,
@@ -3873,8 +3991,9 @@ func (s *Store) CancelLeaseByRef(ctx context.Context, project, ref string) (serv
 
 func (s *Store) AppendTestSlotHotSwapHistory(ctx context.Context, project, ref string, entry server.TestSlotHotSwapHistoryEntry) (server.Lease, error) {
 	var docs []leaseDoc
-	if err := queryAllWhere(
+	if err := singlePartitionQuery(
 		ctx, s.leases,
+		azcosmos.NewPartitionKeyString(project),
 		"SELECT * FROM c WHERE c.project = @p",
 		[]azcosmos.QueryParameter{{Name: "@p", Value: project}},
 		&docs,
@@ -4017,8 +4136,9 @@ func (s *Store) highestLeaseNumber(ctx context.Context, project string) (int, er
 	var docs []struct {
 		LeaseNumber *float64 `json:"leaseNumber"`
 	}
-	if err := queryAllWhere(
+	if err := singlePartitionQuery(
 		ctx, s.leases,
+		azcosmos.NewPartitionKeyString(project),
 		"SELECT c.leaseNumber FROM c WHERE c.project = @p",
 		[]azcosmos.QueryParameter{{Name: "@p", Value: project}},
 		&docs,
@@ -4316,17 +4436,24 @@ func (s *Store) EnqueueSignal(ctx context.Context, req server.SignalEnqueue) (se
 }
 
 func (s *Store) ListGraphSignals(ctx context.Context, filter server.GraphSignalFilter) ([]server.GraphSignal, error) {
+	// signals container is partitioned by /target_repo and the dashboard
+	// asks for a global view across every repo. Cosmos cannot serve an
+	// ORDER BY across partitions from the Go SDK, so we drop ORDER BY
+	// here and sort in Go after — the docs are small (one per pending
+	// signal) and ListPendingSignals already follows the same pattern.
 	query := "SELECT * FROM c"
 	var params []azcosmos.QueryParameter
 	if strings.TrimSpace(filter.State) != "" {
 		query += " WHERE c.state = @state"
 		params = append(params, azcosmos.QueryParameter{Name: "@state", Value: filter.State})
 	}
-	query += " ORDER BY c.enqueued_at ASC"
 	var docs []signalDoc
-	if err := queryAllWhere(ctx, s.signals, query, params, &docs); err != nil {
+	if err := crossPartitionQuery(ctx, s.signals, query, params, &docs); err != nil {
 		return nil, err
 	}
+	sort.Slice(docs, func(i, j int) bool {
+		return docs[i].EnqueuedAt < docs[j].EnqueuedAt
+	})
 	signals := make([]server.GraphSignal, 0, len(docs))
 	for _, doc := range docs {
 		signals = append(signals, server.GraphSignal{
@@ -4346,9 +4473,12 @@ func (s *Store) ListGraphSignals(ctx context.Context, filter server.GraphSignalF
 }
 
 func (s *Store) ListPendingSignals(ctx context.Context, limit int) ([]server.QueuedSignal, error) {
+	// Global dispatch queue across every repo; signals container is
+	// partitioned by /target_repo. Cross-partition scan with no ORDER
+	// BY — the gateway handles this directly.
 	query := "SELECT * FROM c WHERE c.state = @state"
 	var docs []signalDoc
-	if err := queryAllWhere(ctx, s.signals, query,
+	if err := crossPartitionQuery(ctx, s.signals, query,
 		[]azcosmos.QueryParameter{{Name: "@state", Value: "pending"}},
 		&docs,
 	); err != nil {
@@ -4465,9 +4595,19 @@ func queuedSignalFromDoc(doc signalDoc) server.QueuedSignal {
 }
 
 func (s *Store) FindRunForPR(ctx context.Context, repo string, prNumber int) (server.RunReplayData, error) {
+	// Caller knows only (repo, pr_number); the runs container is
+	// partitioned by /project so we fan out across every project
+	// partition, then pick the most-recent doc by updated_at in Go.
+	// The per-partition queries omit ORDER BY (which would force the
+	// Go SDK down the unsupported query-plan path); ordering is
+	// applied after the merge.
+	projects, err := s.listProjectNames(ctx)
+	if err != nil {
+		return server.RunReplayData{}, err
+	}
 	var docs []runDoc
-	if err := queryAllWhere(ctx, s.runs,
-		"SELECT * FROM c WHERE c.issue_repo = @repo AND c.pr_number = @pr ORDER BY c.updated_at DESC",
+	if err := fanOutByProject(ctx, s.runs, projects,
+		"SELECT * FROM c WHERE c.project = @project AND c.issue_repo = @repo AND c.pr_number = @pr",
 		[]azcosmos.QueryParameter{
 			{Name: "@repo", Value: repo},
 			{Name: "@pr", Value: prNumber},
@@ -4479,6 +4619,9 @@ func (s *Store) FindRunForPR(ctx context.Context, repo string, prNumber int) (se
 	if len(docs) == 0 {
 		return server.RunReplayData{}, server.ErrNotFound
 	}
+	sort.SliceStable(docs, func(i, j int) bool {
+		return docs[i].UpdatedAt > docs[j].UpdatedAt
+	})
 	return s.ReadRunForReplay(ctx, docs[0].Project, docs[0].ID)
 }
 
@@ -4563,7 +4706,7 @@ func (s *Store) ReadRunIDForNumber(ctx context.Context, project string, issueNum
 // ReadRunIDForCallbackToken resolves a run callback token to (runID, project, runRef).
 func (s *Store) ReadRunIDForCallbackToken(ctx context.Context, token string) (string, string, string, error) {
 	var docs []runDoc
-	if err := queryAllWhere(
+	if err := crossPartitionQuery(
 		ctx, s.runs,
 		"SELECT * FROM c WHERE c.callback_token = @token",
 		[]azcosmos.QueryParameter{{Name: "@token", Value: token}},
@@ -4840,7 +4983,9 @@ func (s *Store) ListNativeEventsByID(ctx context.Context, project, runID string,
 	query += " ORDER BY c.attempt_index, c.job_id, c.seq"
 
 	var eventDocs []nativeEventDoc
-	if err := queryAllWhere(ctx, s.runEvents, query, params, &eventDocs); err != nil {
+	if err := singlePartitionQuery(ctx, s.runEvents,
+		azcosmos.NewPartitionKeyString(project),
+		query, params, &eventDocs); err != nil {
 		return server.NativeRunLogsResponse{}, err
 	}
 
@@ -5577,9 +5722,10 @@ func (s *Store) ReadIssueForDispatch(ctx context.Context, project string, issueN
 // ListProjectWorkflows returns all workflows registered for a project.
 func (s *Store) ListProjectWorkflows(ctx context.Context, project string) ([]server.Workflow, error) {
 	var docs []workflowDoc
-	if err := queryAllWhere(
+	if err := singlePartitionQuery(
 		ctx,
 		s.workflows,
+		azcosmos.NewPartitionKeyString(project),
 		"SELECT * FROM c WHERE c.project = @p",
 		[]azcosmos.QueryParameter{{Name: "@p", Value: project}},
 		&docs,
