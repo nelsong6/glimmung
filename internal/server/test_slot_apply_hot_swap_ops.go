@@ -107,7 +107,21 @@ func ApplyHotSwap(ctx context.Context, k8s k8sJobClient, opts ApplyHotSwapOption
 		opts.Timeout = 2 * time.Minute
 	}
 	if opts.JobNamespace == "" {
-		opts.JobNamespace = "glimmung"
+		// glimmung-runs is where the glimmung pod's SA has Job/create
+		// RBAC (via the glimmung-native-launcher Role). The glimmung
+		// namespace itself doesn't grant Job/create to the orchestrator's
+		// own SA — by design, since glimmung's namespace is for the
+		// orchestrator deployment, not for dispatched workloads.
+		opts.JobNamespace = "glimmung-runs"
+	}
+	if opts.ServiceAccount == "" {
+		// glimmung-native-runner is the SA for dispatched workloads in
+		// glimmung-runs. The apply-hot-swap Job's swap container runs
+		// `kubectl get/exec` against pods in the target slot's session
+		// namespace; the cross-namespace pods/get+list+exec permission
+		// is granted via charts/.../templates/native-runner-pods-exec-rbac.yaml
+		// (ClusterRole bound to this SA).
+		opts.ServiceAccount = "glimmung-native-runner"
 	}
 	if opts.SwapContainerImage == "" {
 		opts.SwapContainerImage = "bitnami/kubectl:1.31"
