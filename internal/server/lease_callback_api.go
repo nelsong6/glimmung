@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+
+	"github.com/nelsong6/glimmung/internal/metrics"
 )
 
 type LeaseCallbackReadStore interface {
@@ -108,6 +110,11 @@ func releaseLeaseByCallbackToken(store ReadStore, preparer TestSlotPreparer) htt
 			writeProblem(w, http.StatusInternalServerError, "release lease callback failed")
 			return
 		}
+		// Consumer-driven release: the agent finished and called back. Held
+		// gauge symmetry is approximate — purpose at release is not the
+		// purpose at acquire (see metrics package Help). Counter sum is
+		// authoritative.
+		metrics.RecordLeaseReleased("consumer_release", "completed")
 		writeJSON(w, http.StatusOK, leaseToPublic(lease))
 	}
 }

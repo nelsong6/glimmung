@@ -650,12 +650,12 @@ func dispatchForwardPhase(
 	if len(requirements) == 0 {
 		requirements = wf.DefaultRequirements
 	}
-	lease, err := store.AcquireLease(ctx, LeaseAcquireRequest{
+	lease, err := acquireLeaseInstrumented(ctx, LeasePurposeAdvance, LeaseAcquireRequest{
 		Project:      run.Project,
 		Workflow:     &wfName,
 		Requirements: requirements,
 		Metadata:     metadata,
-	})
+	}, store.AcquireLease)
 	if err != nil {
 		return fmt.Errorf("acquire lease for forward phase: %w", err)
 	}
@@ -762,7 +762,7 @@ func dispatchRetry(
 	if len(requirements) == 0 {
 		requirements = wf.DefaultRequirements
 	}
-	lease, err := store.AcquireLease(ctx, LeaseAcquireRequest{
+	lease, err := acquireLeaseInstrumented(ctx, LeasePurposeRetry, LeaseAcquireRequest{
 		Project:      run.Project,
 		Workflow:     &wfName,
 		Requirements: requirements,
@@ -772,7 +772,7 @@ func dispatchRetry(
 			Kind:     "retry",
 			Ref:      publicids.RunRef(run.Project, positiveIssueNumber(run.IssueNumber), fmt.Sprintf("%d", run.IssueNumber)),
 		},
-	})
+	}, store.AcquireLease)
 	if err != nil {
 		return fmt.Errorf("acquire lease for retry: %w", err)
 	}

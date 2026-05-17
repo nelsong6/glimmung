@@ -12,6 +12,11 @@ spec:
     metadata:
       annotations:
         glimmung.io/service-account-client-id: {{ .Values.serviceAccountClientId | quote }}
+        {{- if .Values.observability.scrapeAnnotations.enabled }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+        {{- end }}
       labels:
         app: glimmung
         azure.workload.identity/use: "true"

@@ -1,0 +1,30 @@
+{{- /*
+  ServiceMonitor for Prometheus Operator. Gated on
+  .Values.observability.serviceMonitor.enabled — default off, so a cluster
+  without the CRD installed can still helm install this chart. Glimmung
+  always exposes /metrics on the existing app port; this resource only
+  controls scraping.
+*/ -}}
+{{- if .Values.observability.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: glimmung
+  namespace: {{ .Values.observability.serviceMonitor.namespace | default .Values.namespace }}
+  {{- with .Values.observability.serviceMonitor.labels }}
+  labels:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Values.namespace }}
+  selector:
+    matchLabels:
+      app: glimmung
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.observability.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.observability.serviceMonitor.scrapeTimeout }}
+{{- end }}

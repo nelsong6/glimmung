@@ -22,6 +22,12 @@ spec:
       app.kubernetes.io/instance: {{ .Release.Name }}
   template:
     metadata:
+      {{- if .Values.observability.scrapeAnnotations.enabled }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+      {{- end }}
       labels:
         app.kubernetes.io/name: glimmung-issue
         app.kubernetes.io/instance: {{ .Release.Name }}

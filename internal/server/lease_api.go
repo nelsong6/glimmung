@@ -6,7 +6,52 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
+
+	"github.com/nelsong6/glimmung/internal/metrics"
 )
+
+// Lease purposes used in metric labels. Bounded, closed set — any new
+// caller must extend this list, which is the point: cardinality stays
+// controlled at the source.
+const (
+	LeasePurposeDispatch         = "dispatch"
+	LeasePurposeAdvance          = "advance"
+	LeasePurposeRetry            = "retry"
+	LeasePurposeResume           = "resume"
+	LeasePurposeSignalDrain      = "signal_drain"
+	LeasePurposeTestSlotCheckout = "test_slot_checkout"
+)
+
+// acquireLeaseInstrumented wraps a LeaseAcquire call with metric recording.
+// Use this everywhere AcquireLease is called from glimmung-internal code,
+// so glimmung_leases_acquired_total / glimmung_lease_acquire_wait_seconds
+// stay consistent. The purpose must be one of the LeasePurpose* constants.
+func acquireLeaseInstrumented(
+	ctx context.Context,
+	purpose string,
+	req LeaseAcquireRequest,
+	acquire func(context.Context, LeaseAcquireRequest) (Lease, error),
+) (Lease, error) {
+	start := time.Now()
+	lease, err := acquire(ctx, req)
+	outcome := classifyLeaseAcquire(lease, err)
+	metrics.RecordLeaseAcquire(purpose, outcome, time.Since(start))
+	return lease, err
+}
+
+func classifyLeaseAcquire(lease Lease, err error) string {
+	if err != nil {
+		if errors.Is(err, ErrUnavailable) {
+			return "conflict"
+		}
+		return "error"
+	}
+	if lease.State == "claimed" {
+		return "granted"
+	}
+	return "conflict"
+}
 
 type LeaseStore interface {
 	AcquireLease(ctx context.Context, req LeaseAcquireRequest) (Lease, error)
@@ -81,6 +126,17 @@ func cancelLeaseByRef(store ReadStore) http.HandlerFunc {
 		// is armed in-process. Stop it so it doesn't fire cleanup after the
 		// lease has already been released. Safe no-op for any other lease.
 		cancelLeaseExpiryTimer(body.LeaseRef)
+		metrics.RecordLeaseReleased(leasePurposeFromCancelResult(result), "cancelled")
 		writeJSON(w, http.StatusOK, result)
 	}
+}
+
+// leasePurposeFromCancelResult maps a cancelled lease back to its caller
+// purpose using the cancel result. State alone is not authoritative;
+// glimmung's release flows label the purpose at acquire time, but admin
+// cancel has no purpose context. We record "admin_cancel" so the released
+// counter still moves and the held gauge stays balanced — without claiming
+// to know which acquire site originally took the lease.
+func leasePurposeFromCancelResult(_ CancelLeaseResult) string {
+	return "admin_cancel"
 }
