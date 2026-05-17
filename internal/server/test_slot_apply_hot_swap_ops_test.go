@@ -93,7 +93,7 @@ func TestApplyHotSwapHappyPathDispatchesJob(t *testing.T) {
 	checks := []string{
 		`"image":"node:20-alpine"`,                          // builder_image
 		"npm run build",                                     // build command
-		`"image":"bitnami/kubectl:1.31"`,                    // default swap container
+		`"image":"bitnami/kubectl:latest"`,                  // default swap container
 		"kubectl -n 'tank-operator-slot-1-sessions'",        // namespace into kubectl
 		"tank-operator/session-id",                          // pod selector
 		"tar c -C /work/source",                             // tar-stream

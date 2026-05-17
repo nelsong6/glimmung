@@ -124,7 +124,14 @@ func ApplyHotSwap(ctx context.Context, k8s k8sJobClient, opts ApplyHotSwapOption
 		opts.ServiceAccount = "glimmung-native-runner"
 	}
 	if opts.SwapContainerImage == "" {
-		opts.SwapContainerImage = "bitnami/kubectl:1.31"
+		// `bitnami/kubectl:1.31` (and other version-pinned tags) were
+		// removed from Docker Hub in late 2025 when Bitnami changed
+		// their tagging policy — only `:latest` + SHA digest tags are
+		// published now. Use `:latest`; the swap container is short-
+		// lived and only needs sh + kubectl, so version drift is low-
+		// risk here. A caller can override SwapContainerImage to pin
+		// to a specific digest if reproducibility matters.
+		opts.SwapContainerImage = "bitnami/kubectl:latest"
 	}
 
 	jobName := "apply-hot-swap-" + randHex(8)
