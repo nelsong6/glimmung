@@ -74,7 +74,7 @@ func cancelLeaseByRef(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusNotFound, "lease not found")
 			return
 		case err != nil:
-			writeProblem(w, http.StatusInternalServerError, "cancel lease failed")
+			writeInternalError(w, r, err, "cancel lease failed")
 			return
 		}
 		// Admin cancel may target a claimed test-slot lease whose TTL timer

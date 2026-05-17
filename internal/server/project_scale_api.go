@@ -102,7 +102,7 @@ func scaleProjectTestEnvironments(store ReadStore, workloadIdentities NativeWork
 
 		before, hasBefore, err := findProjectByKey(r.Context(), store, project)
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "list projects failed")
+			writeInternalError(w, r, err, "list projects failed")
 			return
 		}
 		var removedSlots []TestEnvironmentSlotStatus
@@ -116,7 +116,7 @@ func scaleProjectTestEnvironments(store ReadStore, workloadIdentities NativeWork
 					writeProblem(w, http.StatusServiceUnavailable, "test-slot lease state store not configured")
 					return
 				}
-				writeProblem(w, http.StatusInternalServerError, "list test-slot leases failed")
+				writeInternalError(w, r, err, "list test-slot leases failed")
 				return
 			}
 			if len(activeRemoved) > 0 {
@@ -137,7 +137,7 @@ func scaleProjectTestEnvironments(store ReadStore, workloadIdentities NativeWork
 				writeProblem(w, http.StatusNotFound, "project not found")
 				return
 			}
-			writeProblem(w, http.StatusInternalServerError, "scale project test environments failed")
+			writeInternalError(w, r, err, "scale project test environments failed")
 			return
 		}
 		if workloadIdentities != nil {
@@ -150,7 +150,7 @@ func scaleProjectTestEnvironments(store ReadStore, workloadIdentities NativeWork
 				}
 				persisted, persistErr := statusWriter.SetProjectNativeWorkloadIdentityStatus(r.Context(), project, status)
 				if persistErr != nil {
-					writeProblem(w, http.StatusInternalServerError, "record workload identity status failed")
+					writeInternalError(w, r, persistErr, "record workload identity status failed")
 					return
 				}
 				updated = persisted
@@ -180,7 +180,7 @@ func scaleProjectTestEnvironments(store ReadStore, workloadIdentities NativeWork
 				}
 				persistedOrigins, persistErr := originWriter.SetProjectManagedAuthOriginStatus(r.Context(), project, originStatus)
 				if persistErr != nil {
-					writeProblem(w, http.StatusInternalServerError, "record managed auth origin status failed")
+					writeInternalError(w, r, persistErr, "record managed auth origin status failed")
 					return
 				}
 				updated = persistedOrigins

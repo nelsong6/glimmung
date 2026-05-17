@@ -91,7 +91,7 @@ func syncWorkflow(store ReadStore, ghClient WorkflowSyncClient) http.HandlerFunc
 		}
 		updated, err := syncWriter.UpsertWorkflowFromRegister(r.Context(), reg)
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "sync workflow failed")
+			writeInternalError(w, r, err, "sync workflow failed")
 			return
 		}
 		result.Current = &updated

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -114,7 +115,7 @@ func stateSnapshot(settings Settings, store ReadStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		snapshot, err := loadStateSnapshot(r.Context(), settings, store)
 		if err != nil {
-			writeStateSnapshotError(w, err)
+			writeStateSnapshotError(w, r, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, snapshot)
@@ -131,7 +132,7 @@ func testEnvironmentStatus(settings Settings, store ReadStore) http.HandlerFunc 
 		}
 		snapshot, err := loadStateSnapshot(r.Context(), settings, store)
 		if err != nil {
-			writeStateSnapshotError(w, err)
+			writeStateSnapshotError(w, r, err)
 			return
 		}
 		projectName := project
@@ -155,12 +156,12 @@ func stateEvents(settings Settings, store ReadStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			writeProblem(w, http.StatusInternalServerError, "streaming unsupported")
+			writeInternalError(w, r, errors.New("http.ResponseWriter does not implement http.Flusher"), "streaming unsupported")
 			return
 		}
 		snapshot, err := loadStateSnapshot(r.Context(), settings, store)
 		if err != nil {
-			writeStateSnapshotError(w, err)
+			writeStateSnapshotError(w, r, err)
 			return
 		}
 
@@ -171,7 +172,7 @@ func stateEvents(settings Settings, store ReadStore) http.HandlerFunc {
 		for {
 			payload, err := json.Marshal(snapshot)
 			if err != nil {
-				writeProblem(w, http.StatusInternalServerError, "encode state snapshot failed")
+				writeInternalError(w, r, err, "encode state snapshot failed")
 				return
 			}
 			_, _ = fmt.Fprintf(w, "event: state\ndata: %s\n\n", payload)
@@ -221,12 +222,12 @@ func loadStateSnapshot(ctx context.Context, settings Settings, store ReadStore) 
 	return computeStateSnapshot(settings, projects, workflows, leases), nil
 }
 
-func writeStateSnapshotError(w http.ResponseWriter, err error) {
+func writeStateSnapshotError(w http.ResponseWriter, r *http.Request, err error) {
 	if snapshotErr, ok := err.(stateSnapshotError); ok {
 		writeProblem(w, snapshotErr.status, snapshotErr.message)
 		return
 	}
-	writeProblem(w, http.StatusInternalServerError, "load state snapshot failed")
+	writeInternalError(w, r, err, "load state snapshot failed")
 }
 
 func computeStateSnapshot(

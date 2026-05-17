@@ -121,7 +121,7 @@ func replayRunDecisionByNumber(store ReadStore) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "read run failed")
+			writeInternalError(w, r, err, "read run failed")
 			return
 		}
 		if len(run.Attempts) == 0 {
@@ -147,7 +147,7 @@ func replayRunDecisionByNumber(store ReadStore) http.HandlerFunc {
 		} else {
 			wf, err := replayStore.GetWorkflowByName(r.Context(), run.Project, run.WorkflowName)
 			if err != nil {
-				writeProblem(w, http.StatusInternalServerError, "read workflow failed")
+				writeInternalError(w, r, err, "read workflow failed")
 				return
 			}
 			if wf == nil {

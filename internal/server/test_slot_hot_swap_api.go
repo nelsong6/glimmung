@@ -82,7 +82,7 @@ func appendTestSlotHotSwapHistory(store ReadStore) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "append test-slot hot-swap history failed")
+			writeInternalError(w, r, err, "append test-slot hot-swap history failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, TestSlotHotSwapHistoryResult{Lease: LeasePublicRefFromLease(lease), Entry: entry})

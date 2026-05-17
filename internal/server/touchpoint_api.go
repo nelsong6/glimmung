@@ -121,7 +121,7 @@ func listTouchpoints(store ReadStore) http.HandlerFunc {
 		}
 		rows, err := tpStore.ListTouchpoints(r.Context(), filter)
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "list touchpoints failed")
+			writeInternalError(w, r, err, "list touchpoints failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, rows)
@@ -146,7 +146,7 @@ func issueTouchpointDetail(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusNotFound, "touchpoint not found")
 			return
 		case err != nil:
-			writeProblem(w, http.StatusInternalServerError, "get touchpoint failed")
+			writeInternalError(w, r, err, "get touchpoint failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, detail)
@@ -208,7 +208,7 @@ func createTouchpoint(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusBadRequest, "referenced project not found")
 			return
 		case err != nil:
-			writeProblem(w, http.StatusInternalServerError, "ensure touchpoint failed")
+			writeInternalError(w, r, err, "ensure touchpoint failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, detail)

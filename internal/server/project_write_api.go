@@ -59,7 +59,7 @@ func registerProject(store ReadStore, managedOrigins ManagedOriginReconciler) ht
 			Metadata:   mapOrEmpty(req.Metadata),
 		})
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "register project failed")
+			writeInternalError(w, r, err, "register project failed")
 			return
 		}
 		// Reconcile glimmung-owned auth.romaine.life slot origins for this

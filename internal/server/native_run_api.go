@@ -91,7 +91,7 @@ func nativeRunEventsByNumber(store ReadStore) http.HandlerFunc {
 			parseOptionalStringQuery(r, "job_id"),
 			parseOptionalIntQuery(r, "limit"),
 		)
-		writeNativeLogsOrError(w, resp, err)
+		writeNativeLogsOrError(w, r, resp, err)
 	}
 }
 
@@ -184,7 +184,7 @@ func resolveRunByNumber(w http.ResponseWriter, r *http.Request, mutStore RunMuta
 		return "", "", false
 	}
 	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "read run failed")
+		writeInternalError(w, r, err, "read run failed")
 		return "", "", false
 	}
 	return runID, project, true
@@ -199,7 +199,7 @@ func resolveRunByCallbackToken(w http.ResponseWriter, r *http.Request, mutStore 
 		return "", "", false
 	}
 	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "read run by callback token failed")
+		writeInternalError(w, r, err, "read run by callback token failed")
 		return "", "", false
 	}
 	return runID, project, true
@@ -233,7 +233,7 @@ func postNativeEvent(w http.ResponseWriter, r *http.Request, store NativeRunStor
 		return
 	}
 	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "record native event failed")
+		writeInternalError(w, r, err, "record native event failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -250,19 +250,19 @@ func getNativeStatus(w http.ResponseWriter, r *http.Request, store NativeRunStor
 		return
 	}
 	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "get native run status failed")
+		writeInternalError(w, r, err, "get native run status failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func writeNativeLogsOrError(w http.ResponseWriter, resp NativeRunLogsResponse, err error) {
+func writeNativeLogsOrError(w http.ResponseWriter, r *http.Request, resp NativeRunLogsResponse, err error) {
 	if errors.Is(err, ErrNotFound) {
 		writeProblem(w, http.StatusNotFound, "run not found")
 		return
 	}
 	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "list native events failed")
+		writeInternalError(w, r, err, "list native events failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)

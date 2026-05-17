@@ -35,7 +35,7 @@ func readLeaseByCallbackToken(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusConflict, "lease callback token is ambiguous")
 			return
 		case err != nil:
-			writeProblem(w, http.StatusInternalServerError, "read lease callback failed")
+			writeInternalError(w, r, err, "read lease callback failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, leaseToPublic(lease))
@@ -61,7 +61,7 @@ func heartbeatLeaseByCallbackToken(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusConflict, "lease is not active")
 			return
 		case err != nil:
-			writeProblem(w, http.StatusInternalServerError, "heartbeat lease callback failed")
+			writeInternalError(w, r, err, "heartbeat lease callback failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, leaseToPublic(lease))
@@ -85,7 +85,7 @@ func releaseLeaseByCallbackToken(store ReadStore, preparer TestSlotPreparer) htt
 				writeProblem(w, http.StatusConflict, "lease callback token is ambiguous")
 				return
 			case err != nil:
-				writeProblem(w, http.StatusInternalServerError, "read lease callback failed")
+				writeInternalError(w, r, err, "read lease callback failed")
 				return
 			}
 			if boolFromMap(lease.Metadata, "test_slot_checkout") {
@@ -105,7 +105,7 @@ func releaseLeaseByCallbackToken(store ReadStore, preparer TestSlotPreparer) htt
 			writeProblem(w, http.StatusServiceUnavailable, "test slot cleanup is not configured")
 			return
 		case err != nil:
-			writeProblem(w, http.StatusInternalServerError, "release lease callback failed")
+			writeInternalError(w, r, err, "release lease callback failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, leaseToPublic(lease))
@@ -123,7 +123,7 @@ func releaseTestSlotLeaseByCallback(w http.ResponseWriter, r *http.Request, stor
 	}
 	project, ok, err := findProjectByKey(r.Context(), store, lease.Project)
 	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "list projects failed")
+		writeInternalError(w, r, err, "list projects failed")
 		return
 	}
 	if !ok {
@@ -134,7 +134,7 @@ func releaseTestSlotLeaseByCallback(w http.ResponseWriter, r *http.Request, stor
 		Source:         "lease_callback.release",
 		CleanupStarted: true,
 	})); err != nil {
-		writeProblem(w, http.StatusInternalServerError, "record test-slot cleanup state failed")
+		writeInternalError(w, r, err, "record test-slot cleanup state failed")
 		return
 	}
 	beginTestSlotCleanup(store, preparer, project, lease, true, nil)

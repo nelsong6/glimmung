@@ -143,13 +143,13 @@ func checkoutTestSlot(settings Settings, store ReadStore, preparer TestSlotPrepa
 				writeProblem(w, http.StatusServiceUnavailable, "no ready test environment slots available")
 				return
 			}
-			writeProblem(w, http.StatusInternalServerError, "test-slot checkout failed")
+			writeInternalError(w, r, err, "test-slot checkout failed")
 			return
 		}
 		if preparer != nil && lease.State == "claimed" && boolFromMap(lease.Metadata, "test_slot_checkout") {
 			if _, err := setLeaseSlotActivationStarting(r.Context(), store, project, lease); err != nil {
 				_, _ = leaseStore.CancelLeaseByRef(r.Context(), req.Project, LeasePublicRefFromLease(lease))
-				writeProblem(w, http.StatusInternalServerError, "record test-slot activation state failed")
+				writeInternalError(w, r, err, "record test-slot activation state failed")
 				return
 			}
 			// Arm TTL expiry as soon as the lease is claimed. Cleanup
@@ -206,7 +206,7 @@ func returnTestSlot(store ReadStore, preparer TestSlotPreparer, _ NativeGitHubTo
 				return
 			}
 			if _, err := setLeaseSlotCleanupStarting(r.Context(), store, project, lease, historyEntry); err != nil {
-				writeProblem(w, http.StatusInternalServerError, "record test-slot cleanup state failed")
+				writeInternalError(w, r, err, "record test-slot cleanup state failed")
 				return
 			}
 			beginTestSlotCleanup(store, preparer, project, lease, true, nil)
@@ -215,7 +215,7 @@ func returnTestSlot(store ReadStore, preparer TestSlotPreparer, _ NativeGitHubTo
 		}
 		result, err := leaseStore.CancelLeaseByRef(r.Context(), req.Project, LeasePublicRefFromLease(lease))
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "test-slot return failed")
+			writeInternalError(w, r, err, "test-slot return failed")
 			return
 		}
 		if project, ok, err := findProjectByKey(r.Context(), store, req.Project); err == nil && ok {
@@ -489,7 +489,7 @@ func testSlotActivationAttempt(lease Lease) *int {
 func findProjectForTestSlot(r *http.Request, w http.ResponseWriter, store ReadStore, name string) (Project, bool) {
 	projects, err := store.ListProjects(r.Context())
 	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "list projects failed")
+		writeInternalError(w, r, err, "list projects failed")
 		return Project{}, false
 	}
 	for _, project := range projects {

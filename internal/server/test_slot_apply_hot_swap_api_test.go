@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/nelsong6/glimmung/internal/auth"
-	
 )
 
 func newApplyHotSwapStore(t *testing.T) *fakeLeaseStore {
@@ -220,7 +219,7 @@ func TestApplyTestSlotHotSwapRejectsMissingFields(t *testing.T) {
 
 	bodies := []string{
 		`{"slot_name":"tank-operator-slot-1","artifact_kind":"agent_runner","git_ref":"x"}`,  // missing project
-		`{"project":"tank-operator","slot_name":"tank-operator-slot-1","git_ref":"x"}`,        // missing artifact_kind
+		`{"project":"tank-operator","slot_name":"tank-operator-slot-1","git_ref":"x"}`,       // missing artifact_kind
 		`{"project":"tank-operator","slot_name":"tank-operator-slot-1","artifact_kind":"x"}`, // missing git_ref
 	}
 	for i, body := range bodies {

@@ -35,7 +35,7 @@ func readArtifact(store ArtifactStore) http.HandlerFunc {
 			writeProblem(w, http.StatusNotFound, "artifact not found")
 			return
 		case err != nil:
-			writeProblem(w, http.StatusInternalServerError, "read artifact failed")
+			writeInternalError(w, r, err, "read artifact failed")
 			return
 		}
 		contentType := artifact.ContentType

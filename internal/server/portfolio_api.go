@@ -109,7 +109,7 @@ func listPortfolioElements(store ReadStore) http.HandlerFunc {
 		}
 		rows, err := ps.ListPortfolioElements(r.Context(), filter)
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "list portfolio elements failed")
+			writeInternalError(w, r, err, "list portfolio elements failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, rows)
@@ -146,7 +146,7 @@ func upsertPortfolioElement(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusUnprocessableEntity, "run ref not found")
 			return
 		case err != nil:
-			writeProblem(w, http.StatusInternalServerError, "upsert portfolio element failed")
+			writeInternalError(w, r, err, "upsert portfolio element failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, pub)
@@ -173,7 +173,7 @@ func patchPortfolioElement(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusNotFound, "portfolio element not found")
 			return
 		case err != nil:
-			writeProblem(w, http.StatusInternalServerError, "patch portfolio element failed")
+			writeInternalError(w, r, err, "patch portfolio element failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, pub)
@@ -213,7 +213,7 @@ func dispatchPortfolioElements(store ReadStore, nativeLauncher NativeLauncher) h
 			Limit:   req.Limit,
 		})
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "list portfolio elements failed")
+			writeInternalError(w, r, err, "list portfolio elements failed")
 			return
 		}
 		route := ""
@@ -256,11 +256,11 @@ func dispatchPortfolioElements(store ReadStore, nativeLauncher NativeLauncher) h
 			writeProblem(w, http.StatusBadRequest, err.Error())
 			return
 		case err != nil:
-			writeProblem(w, http.StatusInternalServerError, "create portfolio review issue failed")
+			writeInternalError(w, r, err, "create portfolio review issue failed")
 			return
 		}
 		if issue.Number == nil || *issue.Number <= 0 {
-			writeProblem(w, http.StatusInternalServerError, "created issue did not receive a project issue number")
+			writeInternalError(w, r, err, "created issue did not receive a project issue number")
 			return
 		}
 

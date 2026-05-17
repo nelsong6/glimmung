@@ -79,7 +79,7 @@ func nativeRunCompletedByCallbackToken(store ReadStore, nativeLauncher NativeLau
 			return
 		}
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "read run by callback token failed")
+			writeInternalError(w, r, err, "read run by callback token failed")
 			return
 		}
 
@@ -118,7 +118,7 @@ func nativeRunCompletedByCallbackToken(store ReadStore, nativeLauncher NativeLau
 			return
 		}
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "record native job completion failed")
+			writeInternalError(w, r, err, "record native job completion failed")
 			return
 		}
 		if !jobResult.CompletionReady {
@@ -138,7 +138,7 @@ func nativeRunCompletedByCallbackToken(store ReadStore, nativeLauncher NativeLau
 			return
 		}
 
-		result := processRunCompletion(r.Context(), w, completionStore, nativeLauncher, project, runID, jobResult.PhasePayload)
+		result := processRunCompletion(r.Context(), w, r, completionStore, nativeLauncher, project, runID, jobResult.PhasePayload)
 		if result != nil {
 			phaseComplete := true
 			result.PhaseComplete = &phaseComplete
@@ -188,6 +188,7 @@ func extractVerification(raw map[string]any, p *CompletionPayload) {
 func processRunCompletion(
 	ctx context.Context,
 	w http.ResponseWriter,
+	r *http.Request,
 	store RunCompletionStore,
 	nativeLauncher NativeLauncher,
 	project, runID string,
@@ -200,7 +201,7 @@ func processRunCompletion(
 		return nil
 	}
 	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "record completion failed")
+		writeInternalError(w, r, err, "record completion failed")
 		return nil
 	}
 
@@ -210,7 +211,7 @@ func processRunCompletion(
 	// 3. Read the workflow.
 	wf, err := store.GetWorkflowByName(ctx, run.Project, run.WorkflowName)
 	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "read workflow failed")
+		writeInternalError(w, r, err, "read workflow failed")
 		return nil
 	}
 	if wf == nil {
@@ -262,7 +263,7 @@ func processRunCompletion(
 	}
 	verdict, err := decision.Decide(decisionRun, decisionWorkflow)
 	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, fmt.Sprintf("decision engine: %s", err))
+		writeInternalError(w, r, err, fmt.Sprintf("decision engine: %s", err))
 		return nil
 	}
 
@@ -278,7 +279,7 @@ func processRunCompletion(
 		err := dispatchRetry(ctx, store, nativeLauncher, run, wf, lastAttempt.Phase)
 		if err != nil {
 			abortReason := fmt.Sprintf("retry_dispatch_failed: %s", err)
-			return abortRunWithWorkflowCleanup(ctx, w, store, nativeLauncher, run, wf, runRef, decision.AbortMalformed, abortReason)
+			return abortRunWithWorkflowCleanup(ctx, w, r, store, nativeLauncher, run, wf, runRef, decision.AbortMalformed, abortReason)
 		}
 		return &RunCallbackResult{RunRef: runRef, Decision: &verdictStr}
 
@@ -288,7 +289,7 @@ func processRunCompletion(
 			for _, target := range targets {
 				if err := dispatchForwardPhase(ctx, store, nativeLauncher, run, wf, target); err != nil {
 					abortReason := fmt.Sprintf("forward_dispatch_failed: %s", err)
-					return abortRunWithWorkflowCleanup(ctx, w, store, nativeLauncher, run, wf, runRef, decision.AbortMalformed, abortReason)
+					return abortRunWithWorkflowCleanup(ctx, w, r, store, nativeLauncher, run, wf, runRef, decision.AbortMalformed, abortReason)
 				}
 			}
 			verdictStr = "advance_phase"
@@ -304,7 +305,7 @@ func processRunCompletion(
 		}
 		result, err := store.SetRunTerminalState(ctx, project, runID, state, nil)
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "mark run terminal failed")
+			writeInternalError(w, r, err, "mark run terminal failed")
 			return nil
 		}
 		advancePlaybooksForTerminalRun(ctx, store, nativeLauncher, project, runID)
@@ -321,7 +322,7 @@ func processRunCompletion(
 			for _, target := range targets {
 				if err := dispatchForwardPhase(ctx, store, nativeLauncher, run, wf, target); err != nil {
 					abortReason := fmt.Sprintf("teardown_dispatch_failed: %s", err)
-					return markRunAborted(ctx, w, store, nativeLauncher, run, runRef, decision.AbortMalformed, abortReason)
+					return markRunAborted(ctx, w, r, store, nativeLauncher, run, runRef, decision.AbortMalformed, abortReason)
 				}
 			}
 			verdictStr = "advance_phase"
@@ -337,7 +338,7 @@ func processRunCompletion(
 		}
 		result, err := store.SetRunTerminalState(ctx, project, runID, "aborted", abortReason)
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "mark run aborted failed")
+			writeInternalError(w, r, err, "mark run aborted failed")
 			return nil
 		}
 		advancePlaybooksForTerminalRun(ctx, store, nativeLauncher, project, runID)
@@ -353,6 +354,7 @@ func processRunCompletion(
 func abortRunWithWorkflowCleanup(
 	ctx context.Context,
 	w http.ResponseWriter,
+	r *http.Request,
 	store RunCompletionStore,
 	nativeLauncher NativeLauncher,
 	run RunReplayData,
@@ -367,7 +369,7 @@ func abortRunWithWorkflowCleanup(
 		if len(targets) > 0 {
 			for _, target := range targets {
 				if err := dispatchForwardPhase(ctx, store, nativeLauncher, run, wf, target); err != nil {
-					return markRunAborted(ctx, w, store, nativeLauncher, run, runRef, decision.AbortMalformed, abortReason+"; cleanup_dispatch_failed: "+err.Error())
+					return markRunAborted(ctx, w, r, store, nativeLauncher, run, runRef, decision.AbortMalformed, abortReason+"; cleanup_dispatch_failed: "+err.Error())
 				}
 			}
 			decisionStr := "advance_phase"
@@ -377,12 +379,13 @@ func abortRunWithWorkflowCleanup(
 			return &RunCallbackResult{RunRef: runRef, Decision: &verdictStr}
 		}
 	}
-	return markRunAborted(ctx, w, store, nativeLauncher, run, runRef, verdict, abortReason)
+	return markRunAborted(ctx, w, r, store, nativeLauncher, run, runRef, verdict, abortReason)
 }
 
 func markRunAborted(
 	ctx context.Context,
 	w http.ResponseWriter,
+	r *http.Request,
 	store RunCompletionStore,
 	nativeLauncher NativeLauncher,
 	run RunReplayData,
@@ -393,7 +396,7 @@ func markRunAborted(
 	reason := abortReason
 	result, err := store.SetRunTerminalState(ctx, run.Project, run.ID, "aborted", &reason)
 	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "mark run aborted failed")
+		writeInternalError(w, r, err, "mark run aborted failed")
 		return nil
 	}
 	advancePlaybooksForTerminalRun(ctx, store, nativeLauncher, run.Project, run.ID)

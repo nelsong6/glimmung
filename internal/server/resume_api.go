@@ -123,7 +123,7 @@ func resumeRunHandler(store ReadStore, nativeLauncher NativeLauncher) http.Handl
 			return
 		}
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "read run by number failed")
+			writeInternalError(w, r, err, "read run by number failed")
 			return
 		}
 
@@ -134,7 +134,7 @@ func resumeRunHandler(store ReadStore, nativeLauncher NativeLauncher) http.Handl
 			return
 		}
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "read prior run failed")
+			writeInternalError(w, r, err, "read prior run failed")
 			return
 		}
 		if priorRun.State == "in_progress" {
@@ -145,7 +145,7 @@ func resumeRunHandler(store ReadStore, nativeLauncher NativeLauncher) http.Handl
 		// 3. Read workflow.
 		wf, err := resumeStore.GetWorkflowByName(ctx, project, priorRun.Workflow)
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "read workflow failed")
+			writeInternalError(w, r, err, "read workflow failed")
 			return
 		}
 		if wf == nil {
@@ -224,7 +224,7 @@ func resumeRunHandler(store ReadStore, nativeLauncher NativeLauncher) http.Handl
 				writeProblem(w, http.StatusConflict, err.Error())
 				return
 			}
-			writeProblem(w, http.StatusInternalServerError, "claim issue lock failed")
+			writeInternalError(w, r, err, "claim issue lock failed")
 			return
 		}
 
@@ -253,7 +253,7 @@ func resumeRunHandler(store ReadStore, nativeLauncher NativeLauncher) http.Handl
 				writeProblem(w, http.StatusUnprocessableEntity, err.Error())
 				return
 			}
-			writeProblem(w, http.StatusInternalServerError, "create resumed run failed")
+			writeInternalError(w, r, err, "create resumed run failed")
 			return
 		}
 
@@ -330,7 +330,7 @@ func resumeRunHandler(store ReadStore, nativeLauncher NativeLauncher) http.Handl
 				})
 				return
 			}
-			writeProblem(w, http.StatusInternalServerError, "acquire lease failed")
+			writeInternalError(w, r, err, "acquire lease failed")
 			return
 		}
 		if lease.State != "claimed" {

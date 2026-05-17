@@ -91,15 +91,15 @@ func TestApplyHotSwapHappyPathDispatchesJob(t *testing.T) {
 	jobJSON, _ := json.Marshal(k8s.appliedJobs[0])
 	s := string(jobJSON)
 	checks := []string{
-		`"image":"node:20-alpine"`,                          // builder_image
-		"npm run build",                                     // build command
-		`"image":"alpine/k8s:1.31.13"`,                      // default swap container
-		"kubectl -n 'tank-operator-slot-1-sessions'",        // namespace into kubectl
-		"tank-operator/session-id",                          // pod selector
-		"tar c -C /work/source",                             // tar-stream
-		`/var/run/agent-runner-hot/dist`,                    // target path
-		"kill -HUP 1",                                       // SIGHUP signal
-		"feat/x",                                            // git ref
+		`"image":"node:20-alpine"`,                   // builder_image
+		"npm run build",                              // build command
+		`"image":"alpine/k8s:1.31.13"`,               // default swap container
+		"kubectl -n 'tank-operator-slot-1-sessions'", // namespace into kubectl
+		"tank-operator/session-id",                   // pod selector
+		"tar c -C /work/source",                      // tar-stream
+		`/var/run/agent-runner-hot/dist`,             // target path
+		"kill -HUP 1",                                // SIGHUP signal
+		"feat/x",                                     // git ref
 	}
 	for _, c := range checks {
 		if !strings.Contains(s, c) {

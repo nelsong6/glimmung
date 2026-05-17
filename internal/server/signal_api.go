@@ -92,7 +92,7 @@ func createSignal(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusUnprocessableEntity, "signal target not found")
 			return
 		case err != nil:
-			writeProblem(w, http.StatusInternalServerError, "enqueue signal failed")
+			writeInternalError(w, r, err, "enqueue signal failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, sig)
