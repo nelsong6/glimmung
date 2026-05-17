@@ -167,20 +167,58 @@ returns, the lifecycle is purely event-driven until the next restart.
 
 The lifecycle does not require a single replica. During rolling deploys,
 node drains, or future horizontal scaling, every running pod independently
-arms a TTL timer for every claimed lease. When deadlines fire simultaneously
-across pods, the **database is the synchronization point**: each pod's
-cleanup path attempts an etag-conditional `ReplaceItem` against the project
-doc (`SetProjectTestEnvironmentSlotStatusIfMatch`), transitioning the slot
-status from `active` to `cleaning`. Cosmos returns `412 Precondition Failed`
-to every loser, which surfaces as `ErrPreconditionFailed` and is handled as
-"another replica won the claim — my work is done."
+arms a TTL timer for every claimed lease and runs its own
+`RecoverInFlightTestSlots` sweep on startup. Concurrency safety is layered:
 
-No leader election, no distributed lock, no special deployment strategy.
-Exactly one cleanup goroutine runs across the fleet because exactly one
-etag-conditional write succeeds. Followup work (Helm uninstall, lease
-cancel) happens in the winning pod's process; if it dies mid-cleanup, the
-next pod's startup sweep re-enters the cleanup pathway via the recorded
-`cleaning` status.
+1. **Database CAS on meaningful state transitions.** When two pods both
+   attempt the same one-time state transition — `active → cleaning` for
+   TTL expiry, or `missing → warming` for first-time warmup — the
+   etag-conditional `ReplaceItem` makes the database the synchronization
+   point. The first writer wins; every loser gets `412 Precondition
+   Failed` (surfaced as `ErrPreconditionFailed`) and no-ops. No leader
+   election, no distributed lock.
+2. **Retry-on-conflict for cross-slot writes.** A project doc's etag is
+   bumped by writes to *any* slot, so two simultaneously-warming slots in
+   the same project will trigger 412 on each other even though they're
+   not actually racing for the same resource. The warmup claim handles
+   this with a bounded retry loop that re-reads, re-checks our slot's
+   state, and retries — only giving up if our slot has actually been
+   claimed (state moved to `warming` recently or `ready`).
+3. **`recoveryMinAge` skip.** Recent in-flight states (warming /
+   activating / cleaning with `updated_at` within the last 5 minutes) are
+   skipped by the recovery sweep — the assumption is that another live
+   pod is still doing the work. Without this, a freshly-booted pod during
+   a rolling-update overlap would race the live pod's Helm operation.
+4. **Per-process dedup**. Each pod's `testSlotActivations` /
+   `testSlotCleanups` / `testSlotWarmups` sync.Maps prevent the same pod
+   from spawning two goroutines for the same operation.
+
+Activation and cleanup *resume* (vs initiation) don't have a meaningful
+state transition to CAS on — the slot stays in `activating` or `cleaning`
+throughout the Helm operation. They rely on layers 3 and 4 plus Helm's
+own tolerance of "another operation in progress" errors. The window where
+this matters is small (rolling-update overlap during an in-flight Helm
+install).
+
+### Graceful shutdown
+
+`cmd/glimmung-go/main.go` intercepts SIGTERM and SIGINT, drains the HTTP
+server with a 30s deadline, then waits up to 4 minutes for in-flight
+test-slot goroutines (warmup, activation, cleanup) to finish via
+`WaitForInflightTestSlots`. The pod's `terminationGracePeriodSeconds` in
+the Helm chart is 300s to fit this budget.
+
+The shutdown wait isn't load-bearing for correctness — orphaned in-flight
+states get picked up by the next pod's recovery sweep — but it keeps the
+orphan rate low so the `recoveryMinAge` gate's "skip recent in-flight
+states" heuristic is correct in practice. A pod that gets SIGKILL'd
+without draining is a partial-cleanup hazard that the lifecycle can
+handle, but graceful shutdown avoids the hazard entirely for normal
+evictions (node drains, rolling deploys).
+
+A `PodDisruptionBudget` (`maxUnavailable: 1`) explicitly documents that
+the single replica is always evictable — node drains never block on
+glimmung, and the correctness story handles the brief unavailability.
 
 There is no admin "repair" endpoint, no periodic reconciler, no scheduled
 sweep. A genuinely stuck slot is a code bug to fix, not a button to press.

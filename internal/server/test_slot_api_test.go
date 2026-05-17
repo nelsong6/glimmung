@@ -371,8 +371,12 @@ func TestCheckoutTestSlotHonorsExplicitTTL(t *testing.T) {
 
 func TestRecoverInFlightTestSlotsResumesActivation(t *testing.T) {
 	// Pod restart finds a claimed lease whose slot is mid-activation. The
-	// startup sweep must spawn a fresh activation goroutine.
+	// startup sweep must spawn a fresh activation goroutine. The slot
+	// status's updated_at must be older than recoveryMinAge — recent
+	// in-flight states are skipped under the assumption another live pod
+	// is still working on it (rolling-update overlap case).
 	now := time.Now().UTC()
+	stale := now.Add(-2 * recoveryMinAge)
 	store := &fakeLeaseStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{
 			ID:   "recover",
@@ -386,7 +390,7 @@ func TestRecoverInFlightTestSlotsResumesActivation(t *testing.T) {
 						"slot_index": float64(1),
 						"slot_name":  "recover-slot-1",
 						"state":      testSlotStateActivating,
-						"updated_at": now.Format(time.RFC3339Nano),
+						"updated_at": stale.Format(time.RFC3339Nano),
 					},
 				},
 			}},
@@ -427,7 +431,10 @@ func TestRecoverInFlightTestSlotsResumesActivation(t *testing.T) {
 }
 
 func TestRecoverInFlightTestSlotsResumesCleanup(t *testing.T) {
+	// Stale `cleaning` (older than recoveryMinAge) — recent in-flight
+	// states are skipped to avoid racing a live pod that's still cleaning.
 	now := time.Now().UTC()
+	stale := now.Add(-2 * recoveryMinAge)
 	store := &fakeLeaseStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{
 			ID:   "recover",
@@ -441,7 +448,7 @@ func TestRecoverInFlightTestSlotsResumesCleanup(t *testing.T) {
 						"slot_index": float64(1),
 						"slot_name":  "recover-slot-1",
 						"state":      testSlotStateCleaning,
-						"updated_at": now.Format(time.RFC3339Nano),
+						"updated_at": stale.Format(time.RFC3339Nano),
 					},
 				},
 			}},
@@ -488,7 +495,10 @@ func TestRecoverInFlightTestSlotsCleansSlotWithoutLease(t *testing.T) {
 	// Cleanup was recorded but the lease was already released and the
 	// goroutine died before finishing. Startup must drive cleanup to
 	// completion with releaseLease=false (no lease left to cancel).
+	// updated_at is stale so the recovery sweep doesn't assume another
+	// live pod is still working on it.
 	now := time.Now().UTC()
+	stale := now.Add(-2 * recoveryMinAge)
 	store := &fakeLeaseStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{
 			ID:   "recover",
@@ -502,7 +512,7 @@ func TestRecoverInFlightTestSlotsCleansSlotWithoutLease(t *testing.T) {
 						"slot_index": float64(1),
 						"slot_name":  "recover-slot-1",
 						"state":      testSlotStateCleaning,
-						"updated_at": now.Format(time.RFC3339Nano),
+						"updated_at": stale.Format(time.RFC3339Nano),
 					},
 				},
 			}},
@@ -727,6 +737,107 @@ func TestClaimTestSlotCleanupDedupsOnEtagConflict(t *testing.T) {
 	}
 }
 
+func TestClaimTestSlotWarmupDedupsConcurrentSameSlot(t *testing.T) {
+	// Two replicas race to warm the same missing slot. Both read the same
+	// etag, both attempt the CAS write, only one wins. Loser sees the
+	// state moved to `warming` (recent) on its retry-read and returns
+	// ErrPreconditionFailed. This is the warmup analogue of
+	// TestClaimTestSlotCleanupDedupsOnEtagConflict.
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "race",
+			Name: "race",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"slot_prefix": "race-slot",
+				"count":       float64(1),
+			}},
+		}}},
+	}
+
+	type result struct {
+		err error
+	}
+	results := make(chan result, 2)
+	var ready sync.WaitGroup
+	var start sync.WaitGroup
+	ready.Add(2)
+	start.Add(1)
+	now := time.Now().UTC()
+	for i := 0; i < 2; i++ {
+		go func() {
+			ready.Done()
+			start.Wait()
+			_, err := claimTestSlotWarmup(context.Background(), store, store, "race", 1, "race-slot-1", now)
+			results <- result{err: err}
+		}()
+	}
+	ready.Wait()
+	start.Done()
+
+	first := <-results
+	second := <-results
+	winners, losers := 0, 0
+	for _, r := range []result{first, second} {
+		switch {
+		case r.err == nil:
+			winners++
+		case errors.Is(r.err, ErrPreconditionFailed):
+			losers++
+		default:
+			t.Fatalf("unexpected error: %v", r.err)
+		}
+	}
+	if winners != 1 || losers != 1 {
+		t.Fatalf("winners=%d losers=%d, want 1/1", winners, losers)
+	}
+	// One write reached the store (the winner). Loser bailed without
+	// writing anything.
+	warmingWrites := 0
+	for _, status := range store.snapshotSlotStatuses() {
+		if status.SlotIndex == 1 && status.State == testSlotStateWarming {
+			warmingWrites++
+		}
+	}
+	if warmingWrites != 1 {
+		t.Fatalf("warming writes=%d, want 1 (loser must not have written)", warmingWrites)
+	}
+}
+
+func TestClaimTestSlotWarmupRetriesAcrossCrossSlotWrites(t *testing.T) {
+	// Cross-slot writes bump the project doc's etag without affecting our
+	// slot's state. Our claim's CAS will hit 412 the first time, retry,
+	// re-check state, and succeed. This is what makes PATCH count for
+	// count>1 work — multiple warmup goroutines firing simultaneously
+	// against the same project doc.
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "multi",
+			Name: "multi",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"slot_prefix": "multi-slot",
+				"count":       float64(3),
+			}},
+		}}},
+	}
+	preparer := &fakeTestSlotPreparer{}
+
+	// Fire all three warmups in parallel — exercise the cross-slot etag
+	// contention path. Without retry, two of them would fail with
+	// ErrPreconditionFailed and only one slot would warm.
+	EnsureProjectTestSlotsWarmed(context.Background(), store, preparer, store.projects[0], nil, nil)
+
+	waitForSlotStatusCount(t, store, 6) // 3 slots × (warming + ready)
+	seen := map[int]string{}
+	for _, status := range store.snapshotSlotStatuses() {
+		seen[status.SlotIndex] = status.State
+	}
+	for i := 1; i <= 3; i++ {
+		if seen[i] != testSlotStateReady {
+			t.Fatalf("slot %d final state=%q, want ready (cross-slot CAS contention must not block warmups)", i, seen[i])
+		}
+	}
+}
+
 func TestFireLeaseExpiryNoOpsWhenAnotherReplicaAlreadyClaimed(t *testing.T) {
 	// Pre-claim the slot for cleanup (simulating "another replica's timer
 	// fired first"). Then fire a stale timer. fireLeaseExpiry must see the
@@ -946,7 +1057,7 @@ func TestRecoverInFlightTestSlotsResumesStaleWarming(t *testing.T) {
 						"slot_index": float64(1),
 						"slot_name":  "stale-slot-1",
 						"state":      testSlotStateWarming,
-						"updated_at": time.Now().UTC().Add(-2 * time.Minute).Format(time.RFC3339Nano),
+						"updated_at": time.Now().UTC().Add(-2 * recoveryMinAge).Format(time.RFC3339Nano),
 					},
 				},
 			}},

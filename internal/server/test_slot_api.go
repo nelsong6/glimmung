@@ -81,6 +81,38 @@ type TestSlotReturnResult struct {
 var testSlotActivations sync.Map
 var testSlotCleanups sync.Map
 
+// testSlotInflight tracks every long-running goroutine spawned by the
+// begin* functions (warmup, activation, cleanup). Graceful shutdown in
+// cmd/glimmung-go/main.go waits on this group after the HTTP server has
+// drained, so in-flight Helm operations get a chance to finish on
+// SIGTERM before the pod exits. Without this, a pod evicted mid-Helm-
+// install would leave a partial release that the next pod's recovery
+// sweep has to clean up.
+var testSlotInflight sync.WaitGroup
+
+// WaitForInflightTestSlots blocks until every background test-slot
+// goroutine (warmup, activation, cleanup) has finished, or until ctx is
+// done. Called from main.go's shutdown sequence with a context whose
+// deadline matches the Pod's terminationGracePeriodSeconds.
+//
+// Returns ctx.Err() if the deadline lands before goroutines drain (some
+// Helm operation took longer than the budget). The caller's only
+// reasonable response is to log it and exit — the next pod's recovery
+// sweep will pick up the orphan state.
+func WaitForInflightTestSlots(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		testSlotInflight.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func checkoutTestSlot(settings Settings, store ReadStore, preparer TestSlotPreparer, minter NativeGitHubTokenMinter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		leaseStore, ok := store.(LeaseStore)
@@ -580,7 +612,9 @@ func beginTestSlotActivation(store ReadStore, preparer TestSlotPreparer, minter 
 	if _, loaded := testSlotActivations.LoadOrStore(key, struct{}{}); loaded {
 		return false
 	}
+	testSlotInflight.Add(1)
 	go func() {
+		defer testSlotInflight.Done()
 		defer testSlotActivations.Delete(key)
 		activateTestSlotRuntime(context.Background(), store, preparer, minter, project, lease, logf)
 	}()
@@ -588,6 +622,18 @@ func beginTestSlotActivation(store ReadStore, preparer TestSlotPreparer, minter 
 }
 
 func activateTestSlotRuntime(parent context.Context, store ReadStore, preparer TestSlotPreparer, minter NativeGitHubTokenMinter, project Project, lease Lease, logf func(string, ...any)) {
+	// Cross-replica dedup story for activation: there is no meaningful state
+	// transition we could CAS on (the slot stays in `activating` throughout
+	// the Helm install). We rely on three layers instead:
+	//   1. Per-process dedup via testSlotActivations sync.Map — same pod
+	//      never spawns two activation goroutines for the same lease.
+	//   2. The recoveryMinAge gate in RecoverInFlightTestSlots — a fresh
+	//      pod's startup sweep skips activating states whose updated_at is
+	//      recent, assuming the previous pod is still alive and working.
+	//   3. Helm itself returns a retryable "another operation in progress"
+	//      error if two pods do happen to install the same release at the
+	//      same instant — noisy but non-fatal; the winner's status update
+	//      makes the slot converge.
 	ctx, cancel := context.WithTimeout(parent, 10*time.Minute)
 	err := preparer.ActivateTestSlotRuntime(ctx, lease, project, minter)
 	cancel()
@@ -655,7 +701,9 @@ func beginTestSlotCleanup(store ReadStore, preparer TestSlotPreparer, project Pr
 	// cancel, or TTL expiry firing this very path), we don't want the TTL
 	// timer to fire a second time. Stop is idempotent.
 	cancelLeaseExpiryTimer(LeasePublicRefFromLease(lease))
+	testSlotInflight.Add(1)
 	go func() {
+		defer testSlotInflight.Done()
 		defer testSlotCleanups.Delete(key)
 		cleanupTestSlotRuntime(context.Background(), store, preparer, project, lease, releaseLease, logf)
 	}()
@@ -663,6 +711,14 @@ func beginTestSlotCleanup(store ReadStore, preparer TestSlotPreparer, project Pr
 }
 
 func cleanupTestSlotRuntime(parent context.Context, store ReadStore, preparer TestSlotPreparer, project Project, lease Lease, releaseLease bool, logf func(string, ...any)) {
+	// Cross-replica dedup for cleanup: initiation paths (return, callback
+	// release, TTL timer) already go through the etag-conditional
+	// claimTestSlotCleanup, which does the meaningful `active → cleaning`
+	// CAS. The resume path (RecoverInFlightTestSlots seeing `cleaning`)
+	// uses per-process dedup + recoveryMinAge — the same three-layer story
+	// as activation (see activateTestSlotRuntime). Helm uninstall is
+	// idempotent in the "release not found" sense if two replicas do hit
+	// it concurrently.
 	ctx, cancel := context.WithTimeout(parent, 10*time.Minute)
 	err := preparer.ReturnTestSlotRuntime(ctx, lease, project)
 	if err == nil {
@@ -767,6 +823,16 @@ func testSlotLeaseStillState(ctx context.Context, store ReadStore, project Proje
 	return false
 }
 
+// recoveryMinAge is the lower bound on `updated_at` for an in-flight status
+// (warming/activating/cleaning) before the recovery sweep considers it
+// "the previous pod is dead, I should resume." Recent in-flight states are
+// almost certainly still being worked by another live pod (the rolling-
+// update overlap case), so re-firing the goroutine would race the live
+// pod's Helm operation. Five minutes covers typical Helm install latency
+// with headroom; graceful shutdown's in-flight wait keeps the orphan-
+// state rate low so the 5-minute recovery delay is a rare path.
+const recoveryMinAge = 5 * time.Minute
+
 // RecoverInFlightTestSlots is the one-shot startup pass that replaces the old
 // polling reconciler. It walks Cosmos once after the process boots and:
 //
@@ -844,14 +910,28 @@ func RecoverInFlightTestSlots(ctx context.Context, store ReadStore, preparer Tes
 		// Resume in-flight per-slot work that the previous process started
 		// but did not finish. testSlotActivations / testSlotCleanups dedup
 		// per-lease so a fresh handler request that races with this is safe.
+		//
+		// Multi-replica safety: skip resume if the in-flight state was
+		// updated recently. During a rolling-update overlap the other pod
+		// is almost certainly still doing the work — re-firing would race
+		// the live Helm operation. The etag CAS inside each operation's
+		// goroutine is the second line of defense for the simultaneous-
+		// start case.
 		status, hasStatus := testEnvironmentSlotStatus(project, *slotIndex)
 		if !hasStatus {
 			continue
 		}
+		recent := !status.UpdatedAt.IsZero() && time.Since(status.UpdatedAt) < recoveryMinAge
 		switch status.State {
 		case testSlotStateActivating:
+			if recent {
+				continue
+			}
 			beginTestSlotActivation(store, preparer, minter, project, lease, logf)
 		case testSlotStateCleaning:
+			if recent {
+				continue
+			}
 			beginTestSlotCleanup(store, preparer, project, lease, true, logf)
 		case testSlotStateActive:
 			// Installer cleanup is a one-shot at end of activation; on
@@ -870,12 +950,17 @@ func RecoverInFlightTestSlots(ctx context.Context, store ReadStore, preparer Tes
 
 		// Resume `cleaning` for slots whose lease is already gone — that's
 		// the "cleanup started, lease released, but cleanup goroutine died"
-		// recovery case.
+		// recovery case. Skip if recent (assume another live pod is
+		// finishing it); CAS inside cleanupTestSlotRuntime is the defense
+		// against the simultaneous-start case.
 		for slotIndex, status := range statuses {
 			if status.State != testSlotStateCleaning {
 				continue
 			}
 			if claimedSlots[projectName][slotIndex] {
+				continue
+			}
+			if !status.UpdatedAt.IsZero() && time.Since(status.UpdatedAt) < recoveryMinAge {
 				continue
 			}
 			slotName := status.SlotName
@@ -918,8 +1003,13 @@ func EnsureProjectTestSlotsWarmed(_ context.Context, store ReadStore, preparer T
 		case !hasStatus:
 			// missing entirely → seed and warm
 		case status.State == testSlotStateWarming:
-			// in-flight warming whose goroutine may have died; the
-			// per-slot dedup map decides whether to actually re-fire
+			// in-flight warming. Skip if recent — another live pod is
+			// probably mid-warmup (rolling-update overlap case). The
+			// etag CAS in warmTestSlot handles the simultaneous-start
+			// case.
+			if !status.UpdatedAt.IsZero() && time.Since(status.UpdatedAt) < recoveryMinAge {
+				continue
+			}
 		default:
 			continue
 		}
@@ -947,7 +1037,9 @@ func beginTestSlotWarmup(store ReadStore, preparer TestSlotPreparer, project Pro
 	if _, loaded := testSlotWarmups.LoadOrStore(key, struct{}{}); loaded {
 		return false
 	}
+	testSlotInflight.Add(1)
 	go func() {
+		defer testSlotInflight.Done()
 		defer testSlotWarmups.Delete(key)
 		warmTestSlot(context.Background(), store, preparer, project, slotIndex, slotName, logf)
 	}()
@@ -964,13 +1056,20 @@ func warmTestSlot(ctx context.Context, store ReadStore, preparer TestSlotPrepare
 	}
 	projectKey := firstNonEmpty(project.Name, project.ID)
 	now := time.Now().UTC()
-	updated, err := writer.SetProjectTestEnvironmentSlotStatus(ctx, projectKey, TestEnvironmentSlotStatus{
-		SlotIndex: slotIndex,
-		SlotName:  slotName,
-		State:     testSlotStateWarming,
-		UpdatedAt: now,
-	})
+
+	// Cross-replica dedup: write the initial `warming` status with an
+	// etag-conditional ReplaceItem so two racing pods don't both kick off
+	// concurrent Helm installs against the same release. The first writer
+	// wins; the loser gets ErrPreconditionFailed and returns. Falls back to
+	// an unconditional write for stores that don't implement the CAS
+	// interface (test fakes).
+	updated, err := claimTestSlotWarmup(ctx, store, writer, projectKey, slotIndex, slotName, now)
 	if err != nil {
+		if errors.Is(err, ErrPreconditionFailed) {
+			// Another replica is starting warmup for this slot. Their
+			// goroutine owns the Helm install; ours is a no-op.
+			return
+		}
 		if logf != nil {
 			logf("test-slot warmup record start failed project=%s slot=%s: %v", projectKey, slotName, err)
 		}
