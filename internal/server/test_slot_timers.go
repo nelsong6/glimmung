@@ -179,3 +179,80 @@ func claimTestSlotCleanup(ctx context.Context, store ReadStore, project Project,
 
 	return claimer.SetProjectTestEnvironmentSlotStatusIfMatch(ctx, projectKey, status, fresh.ETag())
 }
+
+// claimTestSlotWarmup writes the initial `warming` status for `slotIndex`
+// using an etag-conditional ReplaceItem. The atomic write IS the ownership
+// claim: when two replicas both fire warmup for the same slot, the second
+// will either observe state=warming on its retry-read and back off, or
+// race the first to the write and lose CAS.
+//
+// Cross-slot retry: a project doc's etag is bumped by writes to ANY slot,
+// not just this one. If two slots in the same project are being warmed
+// concurrently (e.g., PATCH count for a project with count>1 fires
+// multiple warmup goroutines), the cross-slot writes will trigger 412 on
+// each other. The retry loop re-reads, re-checks our slot's state, and
+// retries — only giving up if our slot has actually been claimed by
+// someone else (state already warming, ready, etc.).
+//
+// Stores that don't implement the CAS interface fall through to an
+// unconditional write — safe for single-replica deploys and for in-process
+// test fakes.
+func claimTestSlotWarmup(ctx context.Context, store ReadStore, writer ProjectTestEnvironmentSlotStatusWriter, projectKey string, slotIndex int, slotName string, now time.Time) (Project, error) {
+	claimer, hasClaimer := store.(ProjectTestEnvironmentSlotStatusClaimer)
+	reader, hasReader := store.(ProjectReader)
+	if !hasClaimer || !hasReader {
+		return writer.SetProjectTestEnvironmentSlotStatus(ctx, projectKey, TestEnvironmentSlotStatus{
+			SlotIndex: slotIndex,
+			SlotName:  slotName,
+			State:     testSlotStateWarming,
+			UpdatedAt: now,
+		})
+	}
+
+	const maxAttempts = 5
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		fresh, err := reader.ReadProject(ctx, projectKey)
+		if err != nil {
+			return Project{}, err
+		}
+		status := TestEnvironmentSlotStatus{
+			SlotIndex: slotIndex,
+			SlotName:  slotName,
+			State:     testSlotStateWarming,
+			UpdatedAt: now,
+		}
+		if current, hasCurrent := testEnvironmentSlotStatus(fresh, slotIndex); hasCurrent {
+			// Already finished? `ready` means another writer completed the
+			// whole cycle while we were spinning up; nothing to do.
+			if current.State == testSlotStateReady {
+				return Project{}, ErrPreconditionFailed
+			}
+			// Already in-flight? state=warming with a recent updated_at
+			// means another writer's warmup is actively running. Stale
+			// warming (older than recoveryMinAge) is the resume case and
+			// is allowed to proceed.
+			if current.State == testSlotStateWarming && !current.UpdatedAt.IsZero() && time.Since(current.UpdatedAt) < recoveryMinAge {
+				return Project{}, ErrPreconditionFailed
+			}
+			// Preserve metadata (cleanup_state, return history) on the
+			// claim write — we only mutate state + updated_at.
+			current.SlotIndex = slotIndex
+			current.SlotName = slotName
+			current.State = testSlotStateWarming
+			current.UpdatedAt = now
+			status = current
+		}
+		updated, err := claimer.SetProjectTestEnvironmentSlotStatusIfMatch(ctx, projectKey, status, fresh.ETag())
+		if errors.Is(err, ErrPreconditionFailed) {
+			// Etag stale — most likely because another slot in this
+			// project was just written. Re-read and re-check our slot's
+			// state. The state check above will catch the case where our
+			// slot was the one that was just claimed.
+			lastErr = err
+			continue
+		}
+		return updated, err
+	}
+	return Project{}, lastErr
+}

@@ -6,6 +6,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/nelsong6/glimmung/internal/auth"
@@ -67,11 +69,49 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	// Graceful shutdown: SIGTERM (from k8s eviction or node drain) triggers
+	// HTTP draining followed by a bounded wait for in-flight test-slot
+	// goroutines (warmup, activation, cleanup) to finish their Helm
+	// operations. Without this, a pod evicted mid-Helm-install leaves a
+	// partial release that the next pod's recovery sweep has to clean up,
+	// and inbound HTTP requests get dropped instead of completing.
+	//
+	// The wait budget is sized to fit inside the Pod's
+	// terminationGracePeriodSeconds (300s in the chart) with margin for
+	// the HTTP drain and final cleanup. A Helm operation longer than this
+	// will be cut off; the next pod's recovery sweep handles it.
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stopSignals()
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		<-signalCtx.Done()
+		log.Printf("shutdown signal received; draining HTTP server")
+		httpCtx, httpCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := srv.Shutdown(httpCtx); err != nil {
+			log.Printf("http server shutdown error: %v", err)
+		}
+		httpCancel()
+
+		log.Printf("waiting for in-flight test-slot goroutines to finish")
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), 4*time.Minute)
+		if err := server.WaitForInflightTestSlots(waitCtx); err != nil {
+			log.Printf("in-flight test-slot wait exceeded budget: %v (orphans will be picked up by next pod's recovery sweep)", err)
+		} else {
+			log.Printf("in-flight test-slot goroutines drained")
+		}
+		waitCancel()
+	}()
+
 	log.Printf("starting glimmung-go on %s", addr)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Printf("server failed: %v", err)
 		os.Exit(1)
 	}
+	// Wait for the shutdown goroutine to finish its drain + wait before exiting.
+	<-shutdownDone
+	log.Printf("glimmung-go shutdown complete")
 }
 
 type gitHubClientAdapter struct {

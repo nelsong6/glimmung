@@ -22,6 +22,14 @@ spec:
         azure.workload.identity/use: "true"
     spec:
       serviceAccountName: {{ .Values.serviceAccount }}
+      # 5 minutes covers a typical Helm install (with cert-manager +
+      # ExternalSecret reconciliation) so an evicted pod can finish in-flight
+      # test-slot work before exit. main.go's signal handler runs HTTP
+      # drain + WaitForInflightTestSlots within this window. The pod gets
+      # SIGTERM at t=0 and SIGKILL at t=300s; cleanly draining inside that
+      # window is the difference between "pod replaced, slot lifecycle
+      # uninterrupted" and "pod killed mid-Helm-install, next pod recovers."
+      terminationGracePeriodSeconds: 300
       containers:
         - name: glimmung
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
