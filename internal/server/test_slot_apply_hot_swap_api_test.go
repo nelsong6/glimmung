@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/nelsong6/glimmung/internal/auth"
-	"github.com/nelsong6/glimmung/internal/ops/agentops"
+	
 )
 
 func newApplyHotSwapStore(t *testing.T) *fakeLeaseStore {
@@ -59,15 +59,14 @@ func newApplyHotSwapStore(t *testing.T) *fakeLeaseStore {
 // performer invoked with the right options → history entry recorded.
 func TestApplyTestSlotHotSwapHappyPathResolves(t *testing.T) {
 	store := newApplyHotSwapStore(t)
-	var seen agentops.ApplyHotSwapOptions
-	performer := func(_ context.Context, opts agentops.ApplyHotSwapOptions) (agentops.ApplyHotSwapResult, error) {
+	var seen ApplyHotSwapOptions
+	performer := func(_ context.Context, opts ApplyHotSwapOptions) (ApplyHotSwapResult, error) {
 		seen = opts
-		return agentops.ApplyHotSwapResult{
+		return ApplyHotSwapResult{
 			JobName:      "apply-hot-swap-abc",
 			ArtifactKind: opts.ArtifactKind,
 			GitRef:       opts.GitRef,
 			Outcome:      "persisted",
-			TargetPods:   []string{"session-5"},
 			Timings:      map[string]string{"total": "42s"},
 		}, nil
 	}
@@ -125,8 +124,8 @@ func TestApplyTestSlotHotSwapHappyPathResolves(t *testing.T) {
 // status. Durable state in the system, regardless of the response.
 func TestApplyTestSlotHotSwapRecordsFailureHistory(t *testing.T) {
 	store := newApplyHotSwapStore(t)
-	performer := func(_ context.Context, _ agentops.ApplyHotSwapOptions) (agentops.ApplyHotSwapResult, error) {
-		return agentops.ApplyHotSwapResult{
+	performer := func(_ context.Context, _ ApplyHotSwapOptions) (ApplyHotSwapResult, error) {
+		return ApplyHotSwapResult{
 			JobName:       "apply-hot-swap-xyz",
 			Outcome:       "build_failed",
 			BuildLogsTail: "npm ERR! missing script: build",
@@ -156,9 +155,9 @@ func TestApplyTestSlotHotSwapRecordsFailureHistory(t *testing.T) {
 func TestApplyTestSlotHotSwapClampsTimeout(t *testing.T) {
 	store := newApplyHotSwapStore(t)
 	var seenTimeout int
-	performer := func(_ context.Context, opts agentops.ApplyHotSwapOptions) (agentops.ApplyHotSwapResult, error) {
+	performer := func(_ context.Context, opts ApplyHotSwapOptions) (ApplyHotSwapResult, error) {
 		seenTimeout = int(opts.Timeout.Seconds())
-		return agentops.ApplyHotSwapResult{Outcome: "persisted", Timings: map[string]string{}}, nil
+		return ApplyHotSwapResult{Outcome: "persisted", Timings: map[string]string{}}, nil
 	}
 
 	handler := http.HandlerFunc(applyTestSlotHotSwap(store, performer))
@@ -191,9 +190,9 @@ func TestApplyTestSlotHotSwapRejectsBackendWithoutBuilderImage(t *testing.T) {
 		// builder_image intentionally absent
 	}
 
-	performer := func(_ context.Context, _ agentops.ApplyHotSwapOptions) (agentops.ApplyHotSwapResult, error) {
+	performer := func(_ context.Context, _ ApplyHotSwapOptions) (ApplyHotSwapResult, error) {
 		t.Fatal("performer should not be invoked when validation fails")
-		return agentops.ApplyHotSwapResult{}, nil
+		return ApplyHotSwapResult{}, nil
 	}
 
 	handler := http.HandlerFunc(applyTestSlotHotSwap(store, performer))
@@ -214,8 +213,8 @@ func TestApplyTestSlotHotSwapRejectsBackendWithoutBuilderImage(t *testing.T) {
 // validation: project, artifact_kind, git_ref all required.
 func TestApplyTestSlotHotSwapRejectsMissingFields(t *testing.T) {
 	store := newApplyHotSwapStore(t)
-	performer := func(_ context.Context, _ agentops.ApplyHotSwapOptions) (agentops.ApplyHotSwapResult, error) {
-		return agentops.ApplyHotSwapResult{}, nil
+	performer := func(_ context.Context, _ ApplyHotSwapOptions) (ApplyHotSwapResult, error) {
+		return ApplyHotSwapResult{}, nil
 	}
 	handler := http.HandlerFunc(applyTestSlotHotSwap(store, performer))
 

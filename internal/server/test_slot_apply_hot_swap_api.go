@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/nelsong6/glimmung/internal/domain/hotswap"
-	"github.com/nelsong6/glimmung/internal/ops/agentops"
 )
 
 // applyHotSwapTimeoutDefault is the server-side default when the caller
@@ -25,9 +24,9 @@ const applyHotSwapTimeoutDefault = 120 * time.Second
 const applyHotSwapTimeoutMax = 600 * time.Second
 
 // applyHotSwapPerformer is the function-typed seam the test harness
-// uses to inject a stub for ops.ApplyHotSwap. Production wires this
-// to (*agentops.Ops).ApplyHotSwap.
-type applyHotSwapPerformer func(ctx context.Context, opts agentops.ApplyHotSwapOptions) (agentops.ApplyHotSwapResult, error)
+// uses to inject a stub. Production wires this to ApplyHotSwap with a
+// real httpK8sJobClient.
+type applyHotSwapPerformer func(ctx context.Context, opts ApplyHotSwapOptions) (ApplyHotSwapResult, error)
 
 type TestSlotApplyHotSwapRequest struct {
 	Project        string  `json:"project"`
@@ -39,9 +38,9 @@ type TestSlotApplyHotSwapRequest struct {
 }
 
 type TestSlotApplyHotSwapResult struct {
-	Lease  string                        `json:"lease"`
-	Apply  agentops.ApplyHotSwapResult   `json:"apply"`
-	Entry  TestSlotHotSwapHistoryEntry   `json:"history_entry"`
+	Lease string                      `json:"lease"`
+	Apply ApplyHotSwapResult          `json:"apply"`
+	Entry TestSlotHotSwapHistoryEntry `json:"history_entry"`
 }
 
 // applyTestSlotHotSwap is the developer-driven build-and-swap endpoint.
@@ -188,22 +187,21 @@ func applyTestSlotHotSwap(store ReadStore, performer applyHotSwapPerformer) http
 
 		// Pod selector: the contract's agent_runner.pod_selector names
 		// the DIMENSION (e.g., "tank-operator/session-id"); the caller
-		// must constrain the VALUE (specific session). For v1, we use
-		// the bare label-key + any-value, which selects all session pods
-		// in the namespace. The slot's session namespace is typically
-		// one session at a time anyway.
-		podSelector := contract.AgentRunner.PodSelector
+		// The pod selector flows into the Job's swap script which
+		// resolves target pods at run-time via kubectl inside the
+		// bitnami/kubectl container — no kubectl needed in the glimmung
+		// pod. (Earlier cut resolved pods up-front in the handler and
+		// hit "kubectl: not found" in the glimmung runtime image.)
 
 		ctx := r.Context()
-		applyResult, applyErr := performer(ctx, agentops.ApplyHotSwapOptions{
-			Project:           req.Project,
-			ArtifactKind:      req.ArtifactKind,
-			GitRef:            req.GitRef,
-			RepoURL:           repoURL,
-			TargetNamespace:   targetNamespace,
-			TargetPodSelector: podSelector,
-			Contract:          contract,
-			Timeout:           timeout,
+		applyResult, applyErr := performer(ctx, ApplyHotSwapOptions{
+			Project:         req.Project,
+			ArtifactKind:    req.ArtifactKind,
+			GitRef:          req.GitRef,
+			RepoURL:         repoURL,
+			TargetNamespace: targetNamespace,
+			Contract:        contract,
+			Timeout:         timeout,
 		})
 
 		// Record hot-swap history on EVERY outcome. The history entry's
@@ -215,7 +213,6 @@ func applyTestSlotHotSwap(store ReadStore, performer applyHotSwapPerformer) http
 		}
 		summary := fmt.Sprintf("apply_hot_swap kind=%s git_ref=%s outcome=%s", req.ArtifactKind, req.GitRef, status)
 		diagnostics := map[string]any{
-			"target_pods":     applyResult.TargetPods,
 			"build_logs_tail": applyResult.BuildLogsTail,
 			"swap_logs_tail":  applyResult.SwapLogsTail,
 		}

@@ -1,14 +1,13 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-
-	"github.com/nelsong6/glimmung/internal/ops/agentops"
 )
 
 const (
@@ -278,11 +277,16 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	mux.Handle("POST /v1/test-slots/return", requireAdmin(adminAuthenticator, http.HandlerFunc(returnTestSlot(store, testSlotPreparer, nativeTokenMinter))))
 	mux.Handle("POST /v1/test-slots/hot-swap-history", requireAdmin(adminAuthenticator, http.HandlerFunc(appendTestSlotHotSwapHistory(store))))
 	// /v1/test-slots/apply-hot-swap — developer-driven build-and-swap.
-	// Sync UX per docs/test-slot-hot-swap.md. The performer is wired to
-	// the production ops.ApplyHotSwap; the agentops.Ops uses ExecRunner
-	// by default (calls real kubectl in-cluster).
-	applyHotSwapOps := agentops.New(nil)
-	mux.Handle("POST /v1/test-slots/apply-hot-swap", requireAdmin(adminAuthenticator, http.HandlerFunc(applyTestSlotHotSwap(store, applyHotSwapOps.ApplyHotSwap))))
+	// Sync UX per docs/test-slot-hot-swap.md. The performer wraps
+	// ApplyHotSwap with a real httpK8sJobClient that talks to the k8s
+	// API directly (no kubectl shell-out — glimmung's runtime image
+	// doesn't include kubectl, matching the existing native_launcher
+	// pattern of using `request()` over HTTP).
+	k8sClient := newHTTPK8sJobClient(settings)
+	applyPerformer := func(ctx context.Context, opts ApplyHotSwapOptions) (ApplyHotSwapResult, error) {
+		return ApplyHotSwap(ctx, k8sClient, opts)
+	}
+	mux.Handle("POST /v1/test-slots/apply-hot-swap", requireAdmin(adminAuthenticator, http.HandlerFunc(applyTestSlotHotSwap(store, applyPerformer))))
 	mux.Handle("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/replay", requireAdmin(adminAuthenticator, http.HandlerFunc(replayRunDecisionByNumber(store))))
 	mux.Handle("POST /v1/runs/dispatch", requireAdmin(adminAuthenticator, http.HandlerFunc(dispatchRunHandler(store, nativeLauncher))))
 	mux.Handle("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/resume", requireAdmin(adminAuthenticator, http.HandlerFunc(resumeRunHandler(store, nativeLauncher))))
