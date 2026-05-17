@@ -17,6 +17,13 @@ import (
 type StateStore interface {
 	ReadStore
 	ListLeases(ctx context.Context) ([]Lease, error)
+	// AnyLockHeld reports whether any lock with the given scope is
+	// currently held. Feeds StateSnapshot.InflightLocks so the SPA can
+	// derive its in-flight pulse from the SSE stream instead of
+	// polling /v1/issues + /v1/touchpoints. scope is the lock kind
+	// ("issue" or "pr") and matches the partition key of the locks
+	// container.
+	AnyLockHeld(ctx context.Context, scope string) (bool, error)
 }
 
 type StateSnapshot struct {
@@ -25,6 +32,21 @@ type StateSnapshot struct {
 	WaitingTestSlotRequests []TestSlotRequestPublic `json:"waiting_test_slot_requests"`
 	Projects                []Project               `json:"projects"`
 	Workflows               []Workflow              `json:"workflows"`
+	// InflightLocks summarizes whether any issue-scoped or pr-scoped
+	// lock is currently held. The SPA's "needs attention" nav uses
+	// this as a derived state on top of the SSE snapshot; before this
+	// field existed it polled /v1/issues + /v1/touchpoints every 20s
+	// only to compute the same boolean.
+	InflightLocks InflightLocksSummary `json:"inflight_locks"`
+}
+
+// InflightLocksSummary carries the cheapest summary the SPA needs to
+// drive its in-flight indicator. Two single-partition Cosmos queries
+// populate it on every snapshot tick (one per scope), so the cost is
+// bounded.
+type InflightLocksSummary struct {
+	Issues bool `json:"issues"`
+	PRs    bool `json:"prs"`
 }
 
 type Lease struct {
@@ -218,8 +240,23 @@ func loadStateSnapshot(ctx context.Context, settings Settings, store ReadStore) 
 	if err != nil {
 		return StateSnapshot{}, stateSnapshotError{status: http.StatusInternalServerError, message: "list leases failed"}
 	}
+	// Inflight-lock summary feeds the SPA's nav pulse. A lookup error
+	// here is non-fatal — the SSE stream still delivers the rest of the
+	// snapshot — but it is observable via the per-query Cosmos metrics
+	// shipped in the observability stage. Treat an error as "no locks
+	// held" rather than failing the whole snapshot so a transient
+	// Cosmos hiccup does not blank the dashboard.
+	inflight := InflightLocksSummary{}
+	if held, lerr := stateStore.AnyLockHeld(ctx, "issue"); lerr == nil {
+		inflight.Issues = held
+	}
+	if held, lerr := stateStore.AnyLockHeld(ctx, "pr"); lerr == nil {
+		inflight.PRs = held
+	}
 
-	return computeStateSnapshot(ctx, settings, store, projects, workflows, leases), nil
+	snapshot := computeStateSnapshot(ctx, settings, store, projects, workflows, leases)
+	snapshot.InflightLocks = inflight
+	return snapshot, nil
 }
 
 func writeStateSnapshotError(w http.ResponseWriter, r *http.Request, err error) {

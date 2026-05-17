@@ -361,6 +361,13 @@ func (s *fakeLeaseStore) ListLeases(context.Context) ([]Lease, error) {
 	return []Lease{s.lease}, nil
 }
 
+// AnyLockHeld satisfies StateStore. Lease tests do not exercise the
+// inflight-locks snapshot field, so a no-locks-held stub is the
+// honest answer here.
+func (s *fakeLeaseStore) AnyLockHeld(context.Context, string) (bool, error) {
+	return false, nil
+}
+
 func (s *fakeLeaseStore) SetProjectTestEnvironmentSlotStatus(_ context.Context, project string, status TestEnvironmentSlotStatus) (Project, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

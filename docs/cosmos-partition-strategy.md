@@ -183,14 +183,19 @@ contract migration did not absorb. As of Stage 2:
   observability layer because they bypass the helpers. Next time
   they're touched, fold them into `singlePartitionQuery` so both the
   allowlist and the metrics gap shrink.
-- The SPA poll at `frontend/src/App.tsx:359-385` calls `/v1/touchpoints`
-  with no project filter, which forces a fan-out on every 20-second
-  tick. Stage 3 of this rollout scopes or replaces the poll. Until
-  then, the fan-out cost is bounded by the number of registered
-  projects (small) and the once-a-minute external probe pointing at
-  `/v1/touchpoints` (also retargeted in Stage 3). The fan-out is now
-  fully observable: a sustained `glimmung_cosmos_fanout_partitions_total`
-  rate against the `reports` container quantifies the cost.
+- Stage 3 (shipped): the SPA's 20-second `/v1/issues` + `/v1/touchpoints`
+  poll was deleted. The "needs attention" pulse now derives from
+  `StateSnapshot.InflightLocks` (two single-partition `locks` queries
+  per snapshot tick, scoped to `/scope` = `"issue"` and `"pr"`). The
+  cross-project fan-out the poll used to force against `reports`
+  every 20s is gone; the only remaining `/v1/touchpoints` traffic is
+  user-driven (one fetch when the user opens the touchpoints view).
+- The once-a-minute external probe pointing at `/v1/touchpoints` is
+  out of scope for this PR — it is not configured inside this repo
+  and needs an owner conversation. `/healthz` is the right target
+  for an availability probe; it is what the k8s readiness/liveness
+  probes already use. Operators: retarget the external monitor at
+  `/healthz` and delete the `/v1/touchpoints` probe.
 - Stage 4 — `writeUnavailable` helper for deliberate 503 responses
   (test-slot saturation, etc.) so they leave a structured log line and
   a counter rather than being silent.

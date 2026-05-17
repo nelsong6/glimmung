@@ -182,11 +182,19 @@ type Snapshot = {
   waiting_test_slot_requests?: TestSlotRequest[];
   projects: Project[];
   workflows: Workflow[];
+  inflight_locks?: InflightLocks;
 };
 
 type Connection = "live" | "stale" | "dead";
 
-type Inflight = { issues: boolean };
+// Server pushes this on every SSE snapshot tick. Drives the "needs
+// attention" nav dot. Optional in the type because the snapshot may
+// arrive from an older server during a rolling deploy; treat as
+// all-false when missing.
+type InflightLocks = {
+  issues: boolean;
+  prs: boolean;
+};
 
 type Selection =
   | { kind: "all" }
@@ -273,7 +281,6 @@ function Layout() {
   const [authReady, setAuthReady] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [showAdmin, setShowAdmin] = useState(false);
-  const [inflight, setInflight] = useState<Inflight>({ issues: false });
 
   useEffect(() => {
     initAuth()
@@ -353,36 +360,13 @@ function Layout() {
     };
   }, []);
 
-  // Poll /v1/issues + /v1/touchpoints to drive the issue-workspace pulse
-  // when issue work or touchpoint review is in flight. Touchpoints are no
-  // longer primary navigation, but their locks still matter to issues.
-  useEffect(() => {
-    let cancelled = false;
-    const check = async () => {
-      try {
-        const [iRes, pRes] = await Promise.all([
-          fetch("/v1/issues"),
-          fetch("/v1/touchpoints"),
-        ]);
-        const issues = iRes.ok ? ((await iRes.json()) as Array<{ issue_lock_held?: boolean }>) : [];
-        const touchpoints = pRes.ok ? ((await pRes.json()) as Array<{ pr_lock_held?: boolean }>) : [];
-        if (cancelled) return;
-        setInflight({
-          issues:
-            (Array.isArray(issues) && issues.some((x) => x.issue_lock_held))
-            || (Array.isArray(touchpoints) && touchpoints.some((x) => x.pr_lock_held)),
-        });
-      } catch {
-        // keep last value on transient failures
-      }
-    };
-    void check();
-    const t = window.setInterval(() => void check(), 20000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(t);
-    };
-  }, []);
+  // The "needs attention" nav dot derives from snap.inflight_locks,
+  // which the server pushes on every SSE snapshot tick. The 20-second
+  // poll of /v1/issues + /v1/touchpoints that previously fed this
+  // boolean was deleted in the Cosmos query contract Stage 3 — it
+  // forced a cross-project fan-out on every tick only to compute a
+  // single bool. See docs/cosmos-partition-strategy.md.
+  const inflightIssues = Boolean(snap?.inflight_locks?.issues || snap?.inflight_locks?.prs);
 
   const ctx: LayoutContext = {
     snap,
@@ -491,7 +475,7 @@ function Layout() {
               </NavLink>
               <NavLink to="/needs-attention" className={dashboardLinkClass}>
                 needs attention
-                {inflight.issues && <span className="tab-dot" />}
+                {inflightIssues && <span className="tab-dot" />}
               </NavLink>
               <NavLink to="/projects" className={dashboardLinkClass}>
                 projects

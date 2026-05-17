@@ -13,8 +13,10 @@ import (
 
 type fakeStateStore struct {
 	fakeReadStore
-	leases []Lease
-	err    error
+	leases       []Lease
+	err          error
+	issuesLocked bool
+	prsLocked    bool
 }
 
 func (s fakeStateStore) ListLeases(context.Context) ([]Lease, error) {
@@ -22,6 +24,20 @@ func (s fakeStateStore) ListLeases(context.Context) ([]Lease, error) {
 		return nil, s.err
 	}
 	return s.leases, nil
+}
+
+// AnyLockHeld lets fakeStateStore satisfy StateStore so the state
+// snapshot handler can populate InflightLocks without polling. Tests
+// that care about the inflight summary set issuesLocked / prsLocked
+// directly; the default false/false matches the no-locks-held case.
+func (s fakeStateStore) AnyLockHeld(_ context.Context, scope string) (bool, error) {
+	switch scope {
+	case "issue":
+		return s.issuesLocked, nil
+	case "pr":
+		return s.prsLocked, nil
+	}
+	return false, nil
 }
 
 func TestStateSnapshotUsesPublicLeaseRefs(t *testing.T) {
@@ -56,6 +72,45 @@ func TestStateSnapshotUsesPublicLeaseRefs(t *testing.T) {
 	}
 	if strings.Contains(body, leaseID) {
 		t.Fatalf("body leaks backing lease id: %s", body)
+	}
+}
+
+// TestStateSnapshotIncludesInflightLocks pins the Stage 3 wire shape.
+// The SPA derives its "needs attention" pulse from this field; before
+// the migration it polled /v1/issues + /v1/touchpoints every 20s only
+// to compute the same booleans. A regression that drops the field
+// would silently revert the SPA to no pulse — visible to operators
+// but not to CI without this test.
+func TestStateSnapshotIncludesInflightLocks(t *testing.T) {
+	cases := []struct {
+		name         string
+		issuesLocked bool
+		prsLocked    bool
+		wantIssues   bool
+		wantPRs      bool
+	}{
+		{name: "no locks", issuesLocked: false, prsLocked: false, wantIssues: false, wantPRs: false},
+		{name: "issue lock only", issuesLocked: true, prsLocked: false, wantIssues: true, wantPRs: false},
+		{name: "pr lock only", issuesLocked: false, prsLocked: true, wantIssues: false, wantPRs: true},
+		{name: "both", issuesLocked: true, prsLocked: true, wantIssues: true, wantPRs: true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			store := fakeStateStore{
+				issuesLocked: tc.issuesLocked,
+				prsLocked:    tc.prsLocked,
+			}
+			handler := NewWithStore(Settings{}, store)
+			var snapshot StateSnapshot
+			getJSON(t, handler, "/v1/state", &snapshot)
+			if snapshot.InflightLocks.Issues != tc.wantIssues {
+				t.Errorf("inflight_locks.issues = %v, want %v", snapshot.InflightLocks.Issues, tc.wantIssues)
+			}
+			if snapshot.InflightLocks.PRs != tc.wantPRs {
+				t.Errorf("inflight_locks.prs = %v, want %v", snapshot.InflightLocks.PRs, tc.wantPRs)
+			}
+		})
 	}
 }
 

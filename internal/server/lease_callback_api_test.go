@@ -80,6 +80,12 @@ func (s *fakeLeaseCallbackStore) ListLeases(context.Context) ([]Lease, error) {
 	return []Lease{s.lease}, nil
 }
 
+// AnyLockHeld satisfies StateStore. Lease-callback tests do not
+// exercise the inflight-locks snapshot field.
+func (s *fakeLeaseCallbackStore) AnyLockHeld(context.Context, string) (bool, error) {
+	return false, nil
+}
+
 func (s *fakeLeaseCallbackStore) CancelLeaseByRef(_ context.Context, _, ref string) (CancelLeaseResult, error) {
 	s.cancelledRef = ref
 	if s.err != nil {
