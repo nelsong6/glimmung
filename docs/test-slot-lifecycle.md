@@ -163,6 +163,25 @@ remaining duration from the durable `assigned_at + ttl_seconds`. A deadline
 that has already passed fires cleanup immediately. After this one-shot pass
 returns, the lifecycle is purely event-driven until the next restart.
 
+### Multi-replica safety
+
+The lifecycle does not require a single replica. During rolling deploys,
+node drains, or future horizontal scaling, every running pod independently
+arms a TTL timer for every claimed lease. When deadlines fire simultaneously
+across pods, the **database is the synchronization point**: each pod's
+cleanup path attempts an etag-conditional `ReplaceItem` against the project
+doc (`SetProjectTestEnvironmentSlotStatusIfMatch`), transitioning the slot
+status from `active` to `cleaning`. Cosmos returns `412 Precondition Failed`
+to every loser, which surfaces as `ErrPreconditionFailed` and is handled as
+"another replica won the claim — my work is done."
+
+No leader election, no distributed lock, no special deployment strategy.
+Exactly one cleanup goroutine runs across the fleet because exactly one
+etag-conditional write succeeds. Followup work (Helm uninstall, lease
+cancel) happens in the winning pod's process; if it dies mid-cleanup, the
+next pod's startup sweep re-enters the cleanup pathway via the recorded
+`cleaning` status.
+
 There is no admin "repair" endpoint, no periodic reconciler, no scheduled
 sweep. A genuinely stuck slot is a code bug to fix, not a button to press.
 

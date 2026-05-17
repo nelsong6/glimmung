@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -632,6 +633,166 @@ func TestLeaseExpiryTimerCancelPreventsFire(t *testing.T) {
 		t.Fatal("expiry fired after cancel")
 	case <-time.After(1500 * time.Millisecond):
 		// expected: nothing fires
+	}
+}
+
+func TestClaimTestSlotCleanupDedupsOnEtagConflict(t *testing.T) {
+	// Simulates two replicas' TTL timers firing for the same lease at the
+	// same wall-clock instant. Both pods read the project doc at the same
+	// etag, both compute the cleaning-state mutation, both attempt the
+	// etag-conditional write. Exactly one wins; the other gets
+	// ErrPreconditionFailed back. The database is the synchronization
+	// point — no in-process coordination, no leader election.
+	now := time.Now().UTC()
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "race",
+			Name: "race",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"slot_prefix": "race-slot",
+				"count":       float64(1),
+				"slots": []any{
+					map[string]any{
+						"slot_index": float64(1),
+						"slot_name":  "race-slot-1",
+						"state":      testSlotStateActive,
+						"updated_at": now.Format(time.RFC3339Nano),
+					},
+				},
+			}},
+		}}},
+		lease: Lease{
+			Project:     "race",
+			LeaseNumber: intPtr(42),
+			Host:        stringPtr("native-k8s"),
+			State:       "claimed",
+			Metadata: map[string]any{
+				"test_slot_checkout": true,
+				"native_slot_index":  "1",
+				"native_slot_name":   "race-slot-1",
+			},
+			RequestedAt: now,
+			AssignedAt:  &now,
+			TTLSeconds:  3600,
+		},
+	}
+
+	type result struct {
+		err error
+	}
+	results := make(chan result, 2)
+	var ready sync.WaitGroup
+	var start sync.WaitGroup
+	ready.Add(2)
+	start.Add(1)
+	for i := 0; i < 2; i++ {
+		go func() {
+			ready.Done()
+			start.Wait()
+			_, err := claimTestSlotCleanup(context.Background(), store, store.projects[0], store.lease, "lease.ttl_expiry")
+			results <- result{err: err}
+		}()
+	}
+	ready.Wait()
+	start.Done()
+
+	first := <-results
+	second := <-results
+
+	winners := 0
+	losers := 0
+	for _, r := range []result{first, second} {
+		switch {
+		case r.err == nil:
+			winners++
+		case errors.Is(r.err, ErrPreconditionFailed):
+			losers++
+		default:
+			t.Fatalf("unexpected error: %v", r.err)
+		}
+	}
+	if winners != 1 || losers != 1 {
+		t.Fatalf("winners=%d losers=%d, want 1/1", winners, losers)
+	}
+	// Exactly one cleaning-state status write should be recorded — the loser
+	// returned before writing.
+	cleaningWrites := 0
+	for _, status := range store.snapshotSlotStatuses() {
+		if status.State == testSlotStateCleaning {
+			cleaningWrites++
+		}
+	}
+	if cleaningWrites != 1 {
+		t.Fatalf("cleaning writes=%d, want 1 (loser must not have written)", cleaningWrites)
+	}
+}
+
+func TestFireLeaseExpiryNoOpsWhenAnotherReplicaAlreadyClaimed(t *testing.T) {
+	// Pre-claim the slot for cleanup (simulating "another replica's timer
+	// fired first"). Then fire a stale timer. fireLeaseExpiry must see the
+	// CAS conflict and return without spawning a cleanup goroutine.
+	now := time.Now().UTC().Add(-time.Hour)
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "race",
+			Name: "race",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"slot_prefix": "race-slot",
+				"count":       float64(1),
+				"slots": []any{
+					map[string]any{
+						"slot_index": float64(1),
+						"slot_name":  "race-slot-1",
+						"state":      testSlotStateActive,
+						"updated_at": now.Format(time.RFC3339Nano),
+					},
+				},
+			}},
+		}}},
+		lease: Lease{
+			Project:     "race",
+			LeaseNumber: intPtr(42),
+			Host:        stringPtr("native-k8s"),
+			State:       "claimed",
+			Metadata: map[string]any{
+				"test_slot_checkout": true,
+				"native_slot_index":  "1",
+				"native_slot_name":   "race-slot-1",
+			},
+			RequestedAt: now,
+			AssignedAt:  &now,
+			TTLSeconds:  1,
+		},
+	}
+
+	// First claim wins.
+	if _, err := claimTestSlotCleanup(context.Background(), store, store.projects[0], store.lease, "lease.ttl_expiry"); err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+
+	preparer := &fakeTestSlotPreparer{
+		returnStarted: make(chan struct{}, 1),
+	}
+	// fireLeaseExpiry must see the claim is already taken and return
+	// without spawning preparer.ReturnTestSlotRuntime.
+	fireLeaseExpiry(store, preparer, store.projects[0], store.lease, nil)
+
+	select {
+	case <-preparer.returnStarted:
+		t.Fatal("fireLeaseExpiry should not start cleanup when another replica won the claim")
+	case <-time.After(300 * time.Millisecond):
+		// expected
+	}
+	// The single cleaning state write is from the first claim, not from
+	// fireLeaseExpiry's lost race.
+	cleaningWrites := 0
+	for _, status := range store.snapshotSlotStatuses() {
+		if status.State == testSlotStateCleaning {
+			cleaningWrites++
+		}
+	}
+	if cleaningWrites != 1 {
+		t.Fatalf("cleaning writes=%d, want 1 (fireLeaseExpiry must not have written after losing CAS)", cleaningWrites)
 	}
 }
 

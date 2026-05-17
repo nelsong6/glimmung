@@ -12,6 +12,13 @@ var ErrUnsupported = errors.New("unsupported")
 var ErrForbidden = errors.New("forbidden")
 var ErrUnavailable = errors.New("unavailable")
 
+// ErrPreconditionFailed is returned by etag-conditional store writes when
+// the document on disk has a different etag than the caller expected — i.e.,
+// another writer mutated the doc between read and write. Callers that race
+// for a "claim" (test-slot cleanup, slot warmup, etc.) treat this as
+// "someone else won, my work is done" rather than as an error.
+var ErrPreconditionFailed = errors.New("precondition failed")
+
 type ValidationError struct {
 	Message string
 }
