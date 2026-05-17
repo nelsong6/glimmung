@@ -364,9 +364,14 @@ func TestCheckoutTestSlotHonorsExplicitTTL(t *testing.T) {
 	}
 }
 
-func TestReconcileActivatingTestSlotsRestartsOldActivation(t *testing.T) {
+// The block of tests that follows exercises the event-driven test-slot
+// lifecycle: no polling reconciler, per-lease AfterFunc timers for TTL, and
+// a one-shot RecoverInFlightTestSlots sweep at process boot.
+
+func TestRecoverInFlightTestSlotsResumesActivation(t *testing.T) {
+	// Pod restart finds a claimed lease whose slot is mid-activation. The
+	// startup sweep must spawn a fresh activation goroutine.
 	now := time.Now().UTC()
-	stale := now.Add(-2 * time.Minute)
 	store := &fakeLeaseStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{
 			ID:   "recover",
@@ -380,7 +385,7 @@ func TestReconcileActivatingTestSlotsRestartsOldActivation(t *testing.T) {
 						"slot_index": float64(1),
 						"slot_name":  "recover-slot-1",
 						"state":      testSlotStateActivating,
-						"updated_at": stale.Format(time.RFC3339Nano),
+						"updated_at": now.Format(time.RFC3339Nano),
 					},
 				},
 			}},
@@ -405,9 +410,7 @@ func TestReconcileActivatingTestSlotsRestartsOldActivation(t *testing.T) {
 		activateDone:    make(chan struct{}, 1),
 	}
 
-	if got := reconcileTestSlots(context.Background(), store, preparer, nil, 30*time.Second, nil); got != 1 {
-		t.Fatalf("reconciled=%d, want 1", got)
-	}
+	RecoverInFlightTestSlots(context.Background(), store, preparer, nil, nil)
 	select {
 	case <-preparer.activateStarted:
 	case <-time.After(time.Second):
@@ -422,9 +425,8 @@ func TestReconcileActivatingTestSlotsRestartsOldActivation(t *testing.T) {
 	waitForSlotStatus(t, store, testSlotStateActive)
 }
 
-func TestReconcileCleaningTestSlotsRestartsOldCleanup(t *testing.T) {
+func TestRecoverInFlightTestSlotsResumesCleanup(t *testing.T) {
 	now := time.Now().UTC()
-	stale := now.Add(-2 * time.Minute)
 	store := &fakeLeaseStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{
 			ID:   "recover",
@@ -438,7 +440,7 @@ func TestReconcileCleaningTestSlotsRestartsOldCleanup(t *testing.T) {
 						"slot_index": float64(1),
 						"slot_name":  "recover-slot-1",
 						"state":      testSlotStateCleaning,
-						"updated_at": stale.Format(time.RFC3339Nano),
+						"updated_at": now.Format(time.RFC3339Nano),
 					},
 				},
 			}},
@@ -463,9 +465,7 @@ func TestReconcileCleaningTestSlotsRestartsOldCleanup(t *testing.T) {
 		returnDone:    make(chan struct{}, 1),
 	}
 
-	if got := reconcileTestSlots(context.Background(), store, preparer, nil, 30*time.Second, nil); got != 1 {
-		t.Fatalf("reconciled=%d, want 1", got)
-	}
+	RecoverInFlightTestSlots(context.Background(), store, preparer, nil, nil)
 	select {
 	case <-preparer.returnStarted:
 	case <-time.After(time.Second):
@@ -483,9 +483,11 @@ func TestReconcileCleaningTestSlotsRestartsOldCleanup(t *testing.T) {
 	}
 }
 
-func TestReconcileCleaningTestSlotWithoutLeaseMarksReady(t *testing.T) {
+func TestRecoverInFlightTestSlotsCleansSlotWithoutLease(t *testing.T) {
+	// Cleanup was recorded but the lease was already released and the
+	// goroutine died before finishing. Startup must drive cleanup to
+	// completion with releaseLease=false (no lease left to cancel).
 	now := time.Now().UTC()
-	stale := now.Add(-2 * time.Minute)
 	store := &fakeLeaseStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{
 			ID:   "recover",
@@ -499,7 +501,7 @@ func TestReconcileCleaningTestSlotWithoutLeaseMarksReady(t *testing.T) {
 						"slot_index": float64(1),
 						"slot_name":  "recover-slot-1",
 						"state":      testSlotStateCleaning,
-						"updated_at": stale.Format(time.RFC3339Nano),
+						"updated_at": now.Format(time.RFC3339Nano),
 					},
 				},
 			}},
@@ -508,17 +510,20 @@ func TestReconcileCleaningTestSlotWithoutLeaseMarksReady(t *testing.T) {
 	}
 	preparer := &fakeTestSlotPreparer{}
 
-	if got := reconcileTestSlots(context.Background(), store, preparer, nil, 30*time.Second, nil); got != 1 {
-		t.Fatalf("reconciled=%d, want 1", got)
-	}
+	RecoverInFlightTestSlots(context.Background(), store, preparer, nil, nil)
 	waitForSlotStatus(t, store, testSlotStateReady)
 	if store.cancelledRef != "" {
 		t.Fatalf("cancelledRef=%q, want empty", store.cancelledRef)
 	}
 }
 
-func TestReconcileExpiredTestSlotLeaseStartsCleanup(t *testing.T) {
-	now := time.Now().UTC().Add(-30 * time.Minute)
+func TestLeaseExpiryTimerFiresCleanup(t *testing.T) {
+	// Arm a timer with a 0 TTL so it fires immediately. The cleanup pathway
+	// must record the lease-expiry source and start the cleanup goroutine —
+	// the same one return / callback-release uses. This is the event-driven
+	// replacement for the polling-reconciler "did this lease expire yet"
+	// check that used to run every 15 seconds for every claimed lease.
+	now := time.Now().UTC().Add(-time.Hour) // assigned in the past
 	store := &fakeLeaseStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{
 			ID:   "expire",
@@ -549,7 +554,7 @@ func TestReconcileExpiredTestSlotLeaseStartsCleanup(t *testing.T) {
 			},
 			RequestedAt: now,
 			AssignedAt:  &now,
-			TTLSeconds:  60,
+			TTLSeconds:  1, // already exceeded by an hour
 		},
 	}
 	preparer := &fakeTestSlotPreparer{
@@ -558,33 +563,135 @@ func TestReconcileExpiredTestSlotLeaseStartsCleanup(t *testing.T) {
 		returnDone:    make(chan struct{}, 1),
 	}
 
-	if got := reconcileTestSlots(context.Background(), store, preparer, nil, 30*time.Second, nil); got != 1 {
-		t.Fatalf("reconciled=%d, want 1", got)
-	}
-	if len(store.slotStatuses) == 0 || store.slotStatuses[0].State != testSlotStateCleaning {
-		t.Fatalf("slot statuses=%#v, want cleaning", store.slotStatuses)
-	}
-	if len(store.slotStatuses[0].ReturnHistory) != 1 || store.slotStatuses[0].ReturnHistory[0].Source != "reconciler.test_slot_ttl" {
-		t.Fatalf("return history=%#v, want ttl source", store.slotStatuses[0].ReturnHistory)
-	}
+	armLeaseExpiryTimer(store, preparer, store.projects[0], store.lease, nil)
+
 	select {
 	case <-preparer.returnStarted:
-	case <-time.After(time.Second):
-		t.Fatal("expired cleanup did not start")
+	case <-time.After(2 * time.Second):
+		t.Fatal("expiry timer did not fire cleanup")
 	}
 	close(preparer.returnRelease)
 	select {
 	case <-preparer.returnDone:
 	case <-time.After(time.Second):
-		t.Fatal("expired cleanup did not finish")
+		t.Fatal("cleanup did not finish")
 	}
 	waitForSlotStatus(t, store, testSlotStateReady)
 	if store.cancelledRef != "expire-slot-1" {
 		t.Fatalf("cancelledRef=%q, want expire-slot-1", store.cancelledRef)
 	}
+	// The cleanup pathway records the trigger; the lease-ttl-expiry source
+	// distinguishes timer-driven expiry from operator return.
+	snapshot := store.snapshotSlotStatuses()
+	if len(snapshot) == 0 {
+		t.Fatal("no slot statuses recorded")
+	}
+	first := snapshot[0]
+	if len(first.ReturnHistory) != 1 || first.ReturnHistory[0].Source != "lease.ttl_expiry" {
+		t.Fatalf("return history=%#v, want source lease.ttl_expiry", first.ReturnHistory)
+	}
 }
 
-func TestReconcileActiveTestSlotCleansInstaller(t *testing.T) {
+func TestLeaseExpiryTimerCancelPreventsFire(t *testing.T) {
+	// Arm a 300ms timer, cancel immediately, wait long enough for the
+	// original deadline to elapse. The cleanup goroutine must not run.
+	now := time.Now().UTC()
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "expire",
+			Name: "expire",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"slot_prefix": "expire-slot",
+				"count":       float64(1),
+			}},
+		}}},
+		lease: Lease{
+			Project:     "expire",
+			LeaseNumber: intPtr(7),
+			Host:        stringPtr("native-k8s"),
+			State:       "claimed",
+			Metadata: map[string]any{
+				"test_slot_checkout": true,
+				"native_slot_index":  "1",
+				"native_slot_name":   "expire-slot-1",
+			},
+			RequestedAt: now,
+			AssignedAt:  &now,
+			TTLSeconds:  1, // ~1 second deadline
+		},
+	}
+	preparer := &fakeTestSlotPreparer{
+		returnStarted: make(chan struct{}, 1),
+	}
+
+	armLeaseExpiryTimer(store, preparer, store.projects[0], store.lease, nil)
+	cancelLeaseExpiryTimer(LeasePublicRefFromLease(store.lease))
+
+	select {
+	case <-preparer.returnStarted:
+		t.Fatal("expiry fired after cancel")
+	case <-time.After(1500 * time.Millisecond):
+		// expected: nothing fires
+	}
+}
+
+func TestRecoverInFlightTestSlotsArmsTimerForClaimedLease(t *testing.T) {
+	// On boot the in-memory timer map is empty. The startup sweep must
+	// re-arm a timer for any still-claimed test-slot lease so TTL
+	// enforcement survives process restarts.
+	now := time.Now().UTC().Add(-time.Hour)
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "expire",
+			Name: "expire",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"slot_prefix": "expire-slot",
+				"count":       float64(1),
+				"slots": []any{
+					map[string]any{
+						"slot_index": float64(1),
+						"slot_name":  "expire-slot-1",
+						"state":      testSlotStateActive,
+						"updated_at": now.Format(time.RFC3339Nano),
+					},
+				},
+			}},
+		}}},
+		lease: Lease{
+			Project:     "expire",
+			LeaseNumber: intPtr(7),
+			Host:        stringPtr("native-k8s"),
+			State:       "claimed",
+			Metadata: map[string]any{
+				"test_slot_checkout": true,
+				"native_slot_index":  "1",
+				"native_slot_name":   "expire-slot-1",
+			},
+			RequestedAt: now,
+			AssignedAt:  &now,
+			TTLSeconds:  1, // deadline already passed an hour ago
+		},
+	}
+	preparer := &fakeTestSlotPreparer{
+		returnStarted: make(chan struct{}, 1),
+		returnRelease: make(chan struct{}),
+		returnDone:    make(chan struct{}, 1),
+	}
+
+	RecoverInFlightTestSlots(context.Background(), store, preparer, nil, nil)
+
+	// The re-armed timer fires immediately because the deadline is in the
+	// past. The cleanup pathway is the same one operator returns trigger.
+	select {
+	case <-preparer.returnStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("re-armed timer did not fire cleanup after recovery")
+	}
+	close(preparer.returnRelease)
+	<-preparer.returnDone
+}
+
+func TestRecoverInFlightTestSlotsCleansInstallerForActiveSlot(t *testing.T) {
 	now := time.Now().UTC()
 	store := &fakeLeaseStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{
@@ -610,29 +717,30 @@ func TestReconcileActiveTestSlotCleansInstaller(t *testing.T) {
 			State:       "claimed",
 			Metadata: map[string]any{
 				"test_slot_checkout": true,
-				"native_k8s":         true,
 				"native_slot_index":  "1",
 				"native_slot_name":   "active-slot-1",
 			},
 			RequestedAt: now,
 			AssignedAt:  &now,
-			TTLSeconds:  900,
+			TTLSeconds:  3600,
 		},
 	}
 	preparer := &fakeTestSlotPreparer{}
 
-	if got := reconcileTestSlots(context.Background(), store, preparer, nil, 30*time.Second, nil); got != 0 {
-		t.Fatalf("reconciled=%d, want 0", got)
-	}
+	RecoverInFlightTestSlots(context.Background(), store, preparer, nil, nil)
+	// Stop the re-armed timer so it doesn't fire after the test returns
+	// (would race with other tests' assertions about cleanup state).
+	defer cancelLeaseExpiryTimer(LeasePublicRefFromLease(store.lease))
+
 	if !preparer.installerCleaned {
-		t.Fatal("expected installer cleanup for active slot")
+		t.Fatal("expected installer cleanup for active slot during recovery")
 	}
 }
 
-func TestReconcileSeedsMissingTestSlots(t *testing.T) {
+func TestRecoverInFlightTestSlotsWarmsMissingSlots(t *testing.T) {
 	// Project has count=3 but no slots[*] entries — exactly the state
-	// tank-operator landed in when warmup was a one-shot PATCH side effect.
-	// The reconciler must seed all three indices and bring them to ready.
+	// tank-operator landed in when warmup was a synchronous PATCH side
+	// effect. The startup sweep must seed all three indices.
 	store := &fakeLeaseStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{
 			ID:   "seed",
@@ -647,9 +755,8 @@ func TestReconcileSeedsMissingTestSlots(t *testing.T) {
 	}
 	preparer := &fakeTestSlotPreparer{}
 
-	if got := reconcileTestSlots(context.Background(), store, preparer, nil, 30*time.Second, nil); got != 3 {
-		t.Fatalf("reconciled=%d, want 3", got)
-	}
+	RecoverInFlightTestSlots(context.Background(), store, preparer, nil, nil)
+
 	waitForSlotStatusCount(t, store, 6) // 3 slots × (warming + ready)
 	seen := map[int]string{}
 	for _, status := range store.snapshotSlotStatuses() {
@@ -663,26 +770,9 @@ func TestReconcileSeedsMissingTestSlots(t *testing.T) {
 	if !preparer.preliminaries {
 		t.Fatal("expected EnsureTestSlotPreliminaries to run for seeded slots")
 	}
-	// Slots warm in parallel goroutines so cleanup order is non-deterministic;
-	// assert set membership instead of order.
-	gotCleaned := map[string]bool{}
-	for _, name := range preparer.cleanedSlots {
-		gotCleaned[name] = true
-	}
-	for _, want := range []string{"seed-slot-1", "seed-slot-2", "seed-slot-3"} {
-		if !gotCleaned[want] {
-			t.Fatalf("installer cleanup missing %s: got %#v", want, preparer.cleanedSlots)
-		}
-	}
 }
 
-func TestReconcileResumesStaleWarming(t *testing.T) {
-	// A slot whose preliminary reconciliation crashed mid-flight leaves a
-	// stale `warming` record. The reconciler must pick it up and bring it to
-	// ready — without this, the slot is permanently stuck unless an operator
-	// re-PATCHes count, which is the bug we're removing.
-	now := time.Now().UTC()
-	stale := now.Add(-2 * time.Minute)
+func TestRecoverInFlightTestSlotsResumesStaleWarming(t *testing.T) {
 	store := &fakeLeaseStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{
 			ID:   "stale",
@@ -695,7 +785,7 @@ func TestReconcileResumesStaleWarming(t *testing.T) {
 						"slot_index": float64(1),
 						"slot_name":  "stale-slot-1",
 						"state":      testSlotStateWarming,
-						"updated_at": stale.Format(time.RFC3339Nano),
+						"updated_at": time.Now().UTC().Add(-2 * time.Minute).Format(time.RFC3339Nano),
 					},
 				},
 			}},
@@ -704,70 +794,58 @@ func TestReconcileResumesStaleWarming(t *testing.T) {
 	}
 	preparer := &fakeTestSlotPreparer{}
 
-	if got := reconcileTestSlots(context.Background(), store, preparer, nil, 30*time.Second, nil); got != 1 {
-		t.Fatalf("reconciled=%d, want 1", got)
-	}
+	RecoverInFlightTestSlots(context.Background(), store, preparer, nil, nil)
 	waitForSlotStatus(t, store, testSlotStateReady)
 	if !preparer.preliminaries {
 		t.Fatal("expected EnsureTestSlotPreliminaries to run for stale warming slot")
 	}
 }
 
-func TestReconcileSkipsRecentWarmingAndClaimedSlots(t *testing.T) {
-	// Recent warming (within minAge) belongs to a still-running warmup; the
-	// reconciler must not double-fire. A claimed lease drives its own
-	// lifecycle and must not be re-warmed.
+func TestRecoverInFlightTestSlotsSkipsClaimedSlot(t *testing.T) {
+	// A claimed lease drives its own lifecycle (activation, cleaning, or
+	// installer cleanup once active). The recovery sweep must not fire a
+	// fresh warmup against a slot that's already busy.
 	now := time.Now().UTC()
-	fresh := now.Add(-5 * time.Second)
 	store := &fakeLeaseStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{
-			ID:   "skip",
-			Name: "skip",
+			ID:   "claim",
+			Name: "claim",
 			Metadata: map[string]any{"native_standby_dns": map[string]any{
-				"slot_prefix": "skip-slot",
-				"count":       float64(2),
+				"slot_prefix": "claim-slot",
+				"count":       float64(1),
 				"slots": []any{
 					map[string]any{
 						"slot_index": float64(1),
-						"slot_name":  "skip-slot-1",
-						"state":      testSlotStateWarming,
-						"updated_at": fresh.Format(time.RFC3339Nano),
-					},
-					map[string]any{
-						"slot_index": float64(2),
-						"slot_name":  "skip-slot-2",
-						"state":      testSlotStateReady,
-						"updated_at": fresh.Format(time.RFC3339Nano),
+						"slot_name":  "claim-slot-1",
+						"state":      testSlotStateActive,
+						"updated_at": now.Format(time.RFC3339Nano),
 					},
 				},
 			}},
 		}}},
 		lease: Lease{
-			Project:     "skip",
+			Project:     "claim",
 			LeaseNumber: intPtr(11),
 			Host:        stringPtr("native-k8s"),
 			State:       "claimed",
 			Metadata: map[string]any{
 				"test_slot_checkout": true,
-				"native_k8s":         true,
-				"native_slot_index":  "2",
-				"native_slot_name":   "skip-slot-2",
+				"native_slot_index":  "1",
+				"native_slot_name":   "claim-slot-1",
 			},
 			RequestedAt: now,
 			AssignedAt:  &now,
-			TTLSeconds:  900,
+			TTLSeconds:  3600,
 		},
 	}
 	preparer := &fakeTestSlotPreparer{}
 
-	// Slot 2 is active+claimed so the reconciler will run installer cleanup
-	// for it (counted as 0 reconciliation starts). Slot 1 is fresh warming,
-	// must be skipped. Net: zero warmup starts.
-	if got := reconcileTestSlots(context.Background(), store, preparer, nil, 30*time.Second, nil); got != 0 {
-		t.Fatalf("reconciled=%d, want 0 (fresh warming + claimed slot must be skipped)", got)
-	}
+	RecoverInFlightTestSlots(context.Background(), store, preparer, nil, nil)
+	defer cancelLeaseExpiryTimer(LeasePublicRefFromLease(store.lease))
+
+	// installer cleanup is allowed (single-shot); warmup is not.
 	if preparer.preliminaries {
-		t.Fatal("expected no preliminary work for fresh-warming or claimed slots")
+		t.Fatal("recovery must not run preliminary warmup against a claimed slot")
 	}
 }
 

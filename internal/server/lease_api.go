@@ -77,6 +77,10 @@ func cancelLeaseByRef(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusInternalServerError, "cancel lease failed")
 			return
 		}
+		// Admin cancel may target a claimed test-slot lease whose TTL timer
+		// is armed in-process. Stop it so it doesn't fire cleanup after the
+		// lease has already been released. Safe no-op for any other lease.
+		cancelLeaseExpiryTimer(body.LeaseRef)
 		writeJSON(w, http.StatusOK, result)
 	}
 }
