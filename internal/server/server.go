@@ -274,7 +274,7 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	mux.HandleFunc("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/github-token", nativeGitHubTokenByNumber(store, nativeTokenMinter))
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/github-token", nativeGitHubTokenByCallbackToken(store, nativeTokenMinter))
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/completed", nativeRunCompletedByCallbackToken(store, nativeLauncher))
-	mux.Handle("POST /v1/test-slots/checkout", requireAdmin(adminAuthenticator, http.HandlerFunc(checkoutTestSlot(store, testSlotPreparer, nativeTokenMinter))))
+	mux.Handle("POST /v1/test-slots/checkout", requireAdmin(adminAuthenticator, http.HandlerFunc(checkoutTestSlot(settings, store, testSlotPreparer, nativeTokenMinter))))
 	mux.Handle("POST /v1/test-slots/return", requireAdmin(adminAuthenticator, http.HandlerFunc(returnTestSlot(store, testSlotPreparer, nativeTokenMinter))))
 	mux.Handle("POST /v1/test-slots/hot-swap-history", requireAdmin(adminAuthenticator, http.HandlerFunc(appendTestSlotHotSwapHistory(store))))
 	// /v1/test-slots/apply-hot-swap — developer-driven build-and-swap.

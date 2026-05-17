@@ -36,17 +36,18 @@ type TestSlotCheckoutRequest struct {
 }
 
 type TestSlotCheckoutResult struct {
-	State     string  `json:"state"`
-	Project   string  `json:"project"`
-	Workflow  string  `json:"workflow"`
-	SlotIndex *int    `json:"slot_index,omitempty"`
-	SlotName  *string `json:"slot_name,omitempty"`
-	URL       *string `json:"url,omitempty"`
-	Lease     string  `json:"lease"`
-	Host      *string `json:"host,omitempty"`
-	Usable    bool    `json:"usable"`
-	StatusURL *string `json:"status_url,omitempty"`
-	Detail    *string `json:"detail,omitempty"`
+	State                string  `json:"state"`
+	Project              string  `json:"project"`
+	Workflow             string  `json:"workflow"`
+	SlotIndex            *int    `json:"slot_index,omitempty"`
+	SlotName             *string `json:"slot_name,omitempty"`
+	URL                  *string `json:"url,omitempty"`
+	PlaywrightWSEndpoint *string `json:"playwright_ws_endpoint,omitempty"`
+	Lease                string  `json:"lease"`
+	Host                 *string `json:"host,omitempty"`
+	Usable               bool    `json:"usable"`
+	StatusURL            *string `json:"status_url,omitempty"`
+	Detail               *string `json:"detail,omitempty"`
 }
 
 type TestSlotReturnRequest struct {
@@ -74,7 +75,7 @@ type TestSlotReturnResult struct {
 var testSlotActivations sync.Map
 var testSlotCleanups sync.Map
 
-func checkoutTestSlot(store ReadStore, preparer TestSlotPreparer, minter NativeGitHubTokenMinter) http.HandlerFunc {
+func checkoutTestSlot(settings Settings, store ReadStore, preparer TestSlotPreparer, minter NativeGitHubTokenMinter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		leaseStore, ok := store.(LeaseStore)
 		if !ok || leaseStore == nil {
@@ -146,10 +147,10 @@ func checkoutTestSlot(store ReadStore, preparer TestSlotPreparer, minter NativeG
 				return
 			}
 			beginTestSlotActivation(store, preparer, minter, project, lease, nil)
-			writeJSON(w, http.StatusAccepted, testSlotCheckoutResponse(project, workflow, lease, testSlotStateActivating))
+			writeJSON(w, http.StatusAccepted, testSlotCheckoutResponse(settings, project, workflow, lease, testSlotStateActivating))
 			return
 		}
-		writeJSON(w, http.StatusOK, testSlotCheckoutResponse(project, workflow, lease, lease.State))
+		writeJSON(w, http.StatusOK, testSlotCheckoutResponse(settings, project, workflow, lease, lease.State))
 	}
 }
 
@@ -554,7 +555,7 @@ func findProjectForTestSlot(r *http.Request, w http.ResponseWriter, store ReadSt
 	return Project{}, false
 }
 
-func testSlotCheckoutResponse(project Project, workflow string, lease Lease, state string) TestSlotCheckoutResult {
+func testSlotCheckoutResponse(settings Settings, project Project, workflow string, lease Lease, state string) TestSlotCheckoutResult {
 	slotIndex := nativeSlotIndexFromMetadata(lease.Metadata)
 	slotName := nativeSlotNameFromMetadata(lease.Metadata)
 	url := testSlotURL(project, slotName)
@@ -570,18 +571,23 @@ func testSlotCheckoutResponse(project Project, workflow string, lease Lease, sta
 		detail = &text
 	}
 	statusURL := testSlotStatusURL(project, slotName)
+	var playwrightEndpoint *string
+	if slotName != nil {
+		playwrightEndpoint = PlaywrightWSEndpointFor(settings, *slotName)
+	}
 	return TestSlotCheckoutResult{
-		State:     state,
-		Project:   project.Name,
-		Workflow:  workflow,
-		SlotIndex: slotIndex,
-		SlotName:  slotName,
-		URL:       url,
-		Lease:     ref,
-		Host:      hostName,
-		Usable:    state == testSlotStateActive,
-		StatusURL: statusURL,
-		Detail:    detail,
+		State:                state,
+		Project:              project.Name,
+		Workflow:             workflow,
+		SlotIndex:            slotIndex,
+		SlotName:             slotName,
+		URL:                  url,
+		PlaywrightWSEndpoint: playwrightEndpoint,
+		Lease:                ref,
+		Host:                 hostName,
+		Usable:               state == testSlotStateActive,
+		StatusURL:            statusURL,
+		Detail:               detail,
 	}
 }
 

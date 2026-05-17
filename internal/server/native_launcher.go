@@ -1218,6 +1218,31 @@ func playwrightResourceName(_ string, slotName string) string {
 	return "slot-playwright"
 }
 
+// PlaywrightWSEndpointFor returns the cluster-internal WebSocket URL of the
+// leased slot's `slot-playwright` Service, or nil when the cluster is not
+// running playwright-enabled slots or `slotName` is blank. mcp-glimmung and
+// other in-cluster callers connect to this URL to drive a Chromium running
+// inside the lease, instead of spawning one on a shared host.
+func PlaywrightWSEndpointFor(settings Settings, slotName string) *string {
+	if !settings.NativeRunnerPlaywrightEnabled {
+		return nil
+	}
+	slot := strings.TrimSpace(slotName)
+	if slot == "" {
+		return nil
+	}
+	name := playwrightResourceName("", slot)
+	if name == "" {
+		return nil
+	}
+	port := strings.TrimSpace(settings.NativeRunnerPlaywrightPort)
+	if port == "" {
+		port = "3000"
+	}
+	endpoint := fmt.Sprintf("ws://%s.%s.svc.cluster.local:%s", name, slot, port)
+	return &endpoint
+}
+
 func playwrightLabels(lease Lease, name string) map[string]string {
 	labels := map[string]string{
 		"app.kubernetes.io/managed-by":           "glimmung",

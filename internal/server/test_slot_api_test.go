@@ -197,6 +197,112 @@ func TestCheckoutTestSlotStartsAsyncActivation(t *testing.T) {
 	}
 }
 
+func TestCheckoutTestSlotExposesPlaywrightWSEndpointWhenEnabled(t *testing.T) {
+	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "tank-operator",
+			Name: "tank-operator",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"slot_prefix": "tank-slot",
+				"record_base": "tank.dev.romaine.life",
+				"count":       float64(1),
+				"slots": []any{
+					map[string]any{"slot_index": float64(1), "slot_name": "tank-slot-1", "state": "ready"},
+				},
+			}},
+		}}},
+		lease: Lease{
+			Project:     "tank-operator",
+			LeaseNumber: intPtr(3),
+			Host:        stringPtr("native-k8s"),
+			State:       "claimed",
+			Metadata: map[string]any{
+				"test_slot_checkout": true,
+				"native_k8s":         true,
+				"native_slot_index":  "1",
+				"native_slot_name":   "tank-slot-1",
+			},
+			RequestedAt: now,
+		},
+	}
+	preparer := &fakeTestSlotPreparer{
+		activateStarted: make(chan struct{}, 1),
+		activateRelease: make(chan struct{}, 1),
+		activateDone:    make(chan struct{}, 1),
+	}
+	close(preparer.activateRelease)
+	settings := Settings{
+		NativeRunnerPlaywrightEnabled: true,
+		NativeRunnerPlaywrightPort:    "3000",
+		NativeRunnerPlaywrightImage:   "playwright:latest",
+	}
+	handler := newHandler(settings, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, preparer)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/test-slots/checkout", strings.NewReader(`{"project":"tank-operator","tank_session_id":"42"}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	want := `"playwright_ws_endpoint":"ws://slot-playwright.tank-slot-1.svc.cluster.local:3000"`
+	if !strings.Contains(rec.Body.String(), want) {
+		t.Fatalf("checkout response missing %s: %s", want, rec.Body.String())
+	}
+}
+
+func TestCheckoutTestSlotOmitsPlaywrightWSEndpointWhenDisabled(t *testing.T) {
+	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "tank-operator",
+			Name: "tank-operator",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"slot_prefix": "tank-slot",
+				"record_base": "tank.dev.romaine.life",
+				"count":       float64(1),
+				"slots": []any{
+					map[string]any{"slot_index": float64(1), "slot_name": "tank-slot-1", "state": "ready"},
+				},
+			}},
+		}}},
+		lease: Lease{
+			Project:     "tank-operator",
+			LeaseNumber: intPtr(4),
+			Host:        stringPtr("native-k8s"),
+			State:       "claimed",
+			Metadata: map[string]any{
+				"test_slot_checkout": true,
+				"native_k8s":         true,
+				"native_slot_index":  "1",
+				"native_slot_name":   "tank-slot-1",
+			},
+			RequestedAt: now,
+		},
+	}
+	preparer := &fakeTestSlotPreparer{
+		activateStarted: make(chan struct{}, 1),
+		activateRelease: make(chan struct{}, 1),
+		activateDone:    make(chan struct{}, 1),
+	}
+	close(preparer.activateRelease)
+	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, preparer)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/test-slots/checkout", strings.NewReader(`{"project":"tank-operator","tank_session_id":"42"}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), `"playwright_ws_endpoint"`) {
+		t.Fatalf("checkout response should omit playwright_ws_endpoint when disabled: %s", rec.Body.String())
+	}
+}
+
 func TestCheckoutTestSlotHonorsExplicitTTL(t *testing.T) {
 	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
 	store := &fakeLeaseStore{
