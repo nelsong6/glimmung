@@ -401,6 +401,25 @@ func setLeaseSlotCleanupFinished(ctx context.Context, store ReadStore, project P
 		} else {
 			status.CleanupError = nil
 		}
+		// Slot status fields describe current state, not history. Once a
+		// clean cleanup returns the slot to the pool, the previous lease's
+		// activation_* fields are stale — leaving them populated forces the
+		// dashboard (and every other consumer) to encode "is this field
+		// still meaningful?" judgment in the rendering layer instead of
+		// trusting the data. ReturnHistory below preserves the audit trail
+		// of who used the slot and why it was returned.
+		//
+		// On the error path we keep the activation_* fields visible — they
+		// are diagnostic context for the operator who has to repair the
+		// slot.
+		if cause == nil && state == testSlotStateReady {
+			status.ActivationAttempt = nil
+			status.ActivationState = nil
+			status.ActivationStartedAt = nil
+			status.ActivationCompletedAt = nil
+			status.ActivationJobName = nil
+			status.ActivationError = nil
+		}
 	})
 }
 
