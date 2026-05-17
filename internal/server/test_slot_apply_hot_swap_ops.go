@@ -281,9 +281,27 @@ func renderApplyHotSwapJobSpec(in applyHotSwapJobInputs) map[string]any {
 func buildScriptFor(in applyHotSwapJobInputs) string {
 	// Init container: clone the repo at GIT_REF, run the build command,
 	// leave the resulting source dir at /work/source.
+	//
+	// `git` is always required (it's how the source enters the container)
+	// but it isn't always preinstalled in minimal builder images — e.g.
+	// `node:20-alpine` ships node + npm but no git. Rather than push that
+	// concern onto every contract author, the build prelude detects the
+	// package manager and installs git if missing. Costs ~5s on first run
+	// per builder image; not worth optimizing past that for v1.
 	return strings.Join([]string{
 		"set -e",
 		"set -x",
+		// Best-effort git install if missing. Handles alpine (apk),
+		// debian/ubuntu (apt-get), and the rare yum/dnf builder. If
+		// none match, the subsequent `git clone` fails with a clear
+		// "git: not found" that surfaces to the caller's build_logs_tail.
+		`if ! command -v git >/dev/null 2>&1; then`,
+		`  if command -v apk >/dev/null 2>&1; then apk add --no-cache git;`,
+		`  elif command -v apt-get >/dev/null 2>&1; then apt-get update -qq && apt-get install -y -qq git;`,
+		`  elif command -v dnf >/dev/null 2>&1; then dnf install -y -q git;`,
+		`  elif command -v yum >/dev/null 2>&1; then yum install -y -q git;`,
+		`  fi`,
+		`fi`,
 		`git clone --depth=1 --branch "$GIT_REF" "$REPO_URL" /work/repo`,
 		`cd /work/repo`,
 		in.BuildCommand,
