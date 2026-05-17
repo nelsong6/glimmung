@@ -122,7 +122,7 @@ func listPlaybooks(store ReadStore) http.HandlerFunc {
 		}
 		rows, err := pbStore.ListPlaybooks(r.Context(), filter)
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "list playbooks failed")
+			writeInternalError(w, r, err, "list playbooks failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, rows)
@@ -142,7 +142,7 @@ func getPlaybook(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusNotFound, "playbook not found")
 			return
 		case err != nil:
-			writeProblem(w, http.StatusInternalServerError, "get playbook failed")
+			writeInternalError(w, r, err, "get playbook failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, pb)
@@ -201,7 +201,7 @@ func createPlaybook(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusBadRequest, "project not registered")
 			return
 		case err != nil:
-			writeProblem(w, http.StatusInternalServerError, "create playbook failed")
+			writeInternalError(w, r, err, "create playbook failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, pb)
@@ -233,7 +233,7 @@ func patchPlaybookEntryGate(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusNotFound, "playbook or entry not found")
 			return
 		case err != nil:
-			writeProblem(w, http.StatusInternalServerError, "patch playbook entry gate failed")
+			writeInternalError(w, r, err, "patch playbook entry gate failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, pb)
@@ -258,7 +258,7 @@ func runPlaybook(store ReadStore, nativeLauncher NativeLauncher) http.HandlerFun
 			writeProblem(w, http.StatusNotFound, "playbook not found")
 			return
 		case err != nil:
-			writeProblem(w, http.StatusInternalServerError, "run playbook failed")
+			writeInternalError(w, r, err, "run playbook failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, pb)

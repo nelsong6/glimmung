@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -107,7 +108,7 @@ func listProjects(store ReadStore) http.HandlerFunc {
 		}
 		rows, err := store.ListProjects(r.Context())
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "list projects failed")
+			writeInternalError(w, r, err, "list projects failed")
 			return
 		}
 
@@ -142,7 +143,7 @@ func listWorkflows(store ReadStore) http.HandlerFunc {
 		}
 		rows, err := store.ListWorkflows(r.Context())
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "list workflows failed")
+			writeInternalError(w, r, err, "list workflows failed")
 			return
 		}
 
@@ -178,8 +179,42 @@ func parseLimit(w http.ResponseWriter, r *http.Request) (*int, bool) {
 	return &limit, true
 }
 
+// writeProblem writes a 4xx JSON problem response. Callers MUST NOT use
+// it for 5xx — every 5xx in this package goes through writeInternalError
+// so the underlying error survives in logs. The migration guard at
+// scripts/check-handler-5xx-migration.mjs fails CI on any callsite that
+// passes a 5xx status here. Removing the swallow path is the whole point
+// of glimmung#514: without the err, the only signal a 500 leaves is the
+// abstract `detail` body the SPA prints, and the actual cause (Cosmos
+// timeout, schema mismatch, IO error, etc.) is unrecoverable. See
+// docs/quality-timeframes.md for why observability is gating scope, not a
+// follow-up.
 func writeProblem(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"detail": message})
+}
+
+// writeInternalError writes a 500 JSON problem response and emits a
+// structured slog.Error capturing the request method, the registered
+// route pattern (r.Pattern, Go 1.22+ ServeMux), the public summary, and
+// the underlying error. The body remains the abstract `summary` so the
+// public API surface is unchanged; the err is preserved in logs only.
+//
+// Callers must supply an err that explains the 5xx. If a 5xx has no
+// underlying error to log, the right shape is usually a different status
+// (404, 409, 422) — investigate before defaulting to writeInternalError
+// with a synthesized error.
+func writeInternalError(w http.ResponseWriter, r *http.Request, err error, summary string) {
+	route := r.Pattern
+	if route == "" {
+		route = "(unmatched)"
+	}
+	slog.Error("handler returned 5xx",
+		"method", r.Method,
+		"route", route,
+		"summary", summary,
+		"err", err,
+	)
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"detail": summary})
 }
 
 func stringPtr(value string) *string {

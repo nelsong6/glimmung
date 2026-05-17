@@ -46,7 +46,7 @@ func nativeGitHubTokenByCallbackToken(store ReadStore, minter NativeGitHubTokenM
 			return
 		}
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "read run by callback token failed")
+			writeInternalError(w, r, err, "read run by callback token failed")
 			return
 		}
 		writeNativeGitHubToken(w, r, completionStore, minter, project, runID)
@@ -79,7 +79,7 @@ func nativeGitHubTokenByNumber(store ReadStore, minter NativeGitHubTokenMinter) 
 			return
 		}
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "read run failed")
+			writeInternalError(w, r, err, "read run failed")
 			return
 		}
 		writeNativeGitHubToken(w, r, completionStore, minter, r.PathValue("project"), runID)
@@ -93,7 +93,7 @@ func writeNativeGitHubToken(w http.ResponseWriter, r *http.Request, store RunCom
 		return
 	}
 	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "read run failed")
+		writeInternalError(w, r, err, "read run failed")
 		return
 	}
 	if run.IssueRepo == "" {

@@ -37,6 +37,17 @@ jobs:
       - name: Guard against MSAL/Entra/allowlist reintroduction
         run: node scripts/check-removed-msal.mjs
 
+  check-handler-5xx-migration:
+    name: Handler 5xx observability contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Guard against writeProblem 5xx (must use writeInternalError)
+        run: node scripts/check-handler-5xx-migration.mjs
+
   frontend:
     runs-on: ubuntu-latest
     steps:

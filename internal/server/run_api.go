@@ -85,7 +85,7 @@ func listProjectRuns(store ReadStore) http.HandlerFunc {
 		}
 		rows, err := runStore.ListProjectRuns(r.Context(), r.PathValue("project"), limit)
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "list project runs failed")
+			writeInternalError(w, r, err, "list project runs failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, rows)
@@ -115,7 +115,7 @@ func getRunReportByNumber(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusNotFound, "run not found")
 			return
 		case err != nil:
-			writeProblem(w, http.StatusInternalServerError, "get run report failed")
+			writeInternalError(w, r, err, "get run report failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, report)

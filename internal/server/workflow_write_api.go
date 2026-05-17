@@ -55,7 +55,7 @@ func registerWorkflow(store ReadStore) http.HandlerFunc {
 		}
 		project, ok, err := lookupProject(r.Context(), store, req.Project)
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "read project failed")
+			writeInternalError(w, r, err, "read project failed")
 			return
 		}
 		if !ok {
@@ -73,7 +73,7 @@ func registerWorkflow(store ReadStore) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "register workflow failed")
+			writeInternalError(w, r, err, "register workflow failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, workflow)
@@ -101,7 +101,7 @@ func patchWorkflow(store ReadStore) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "patch workflow failed")
+			writeInternalError(w, r, err, "patch workflow failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, workflow)
@@ -123,7 +123,7 @@ func deleteWorkflow(store ReadStore) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "delete workflow failed")
+			writeInternalError(w, r, err, "delete workflow failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, workflow)

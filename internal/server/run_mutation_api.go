@@ -69,7 +69,7 @@ func abortRunByNumber(store ReadStore) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "read run failed")
+			writeInternalError(w, r, err, "read run failed")
 			return
 		}
 
@@ -79,7 +79,7 @@ func abortRunByNumber(store ReadStore) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "abort run failed")
+			writeInternalError(w, r, err, "abort run failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, result)

@@ -135,7 +135,7 @@ func applyTestSlotHotSwap(store ReadStore, performer applyHotSwapPerformer) http
 		// pattern in record-history); we filter for an exact name match.
 		projects, err := store.ListProjects(r.Context())
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "list projects: "+err.Error())
+			writeInternalError(w, r, err, "list projects: "+err.Error())
 			return
 		}
 		var project Project

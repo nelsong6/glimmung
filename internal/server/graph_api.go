@@ -207,7 +207,7 @@ func issueGraphByNumber(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusNotFound, "issue not found")
 			return
 		case err != nil:
-			writeProblem(w, http.StatusInternalServerError, "build issue graph failed")
+			writeInternalError(w, r, err, "build issue graph failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, graph)
@@ -223,7 +223,7 @@ func systemGraph(store ReadStore) http.HandlerFunc {
 		}
 		graph, err := buildSystemGraph(r.Context(), graphStore, optionalGraphSignalStore(store), r.URL.Query().Get("project"))
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "build system graph failed")
+			writeInternalError(w, r, err, "build system graph failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, graph)

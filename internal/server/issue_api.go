@@ -109,7 +109,7 @@ func listIssues(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusBadRequest, err.Error())
 			return
 		case err != nil:
-			writeProblem(w, http.StatusInternalServerError, "list issues failed")
+			writeInternalError(w, r, err, "list issues failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, rows)
@@ -134,7 +134,7 @@ func issueDetailByNumber(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusNotFound, "issue not found")
 			return
 		case err != nil:
-			writeProblem(w, http.StatusInternalServerError, "get issue detail failed")
+			writeInternalError(w, r, err, "get issue detail failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, detail)
@@ -172,7 +172,7 @@ func archiveIssueByNumber(store ReadStore, action string) http.HandlerFunc {
 			writeProblem(w, http.StatusNotFound, "issue not found")
 			return
 		case err != nil:
-			writeProblem(w, http.StatusInternalServerError, "archive issue failed")
+			writeInternalError(w, r, err, "archive issue failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, detail)
@@ -276,7 +276,7 @@ func createIssue(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusBadRequest, err.Error())
 			return
 		case err != nil:
-			writeProblem(w, http.StatusInternalServerError, "create issue failed")
+			writeInternalError(w, r, err, "create issue failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, detail)
@@ -317,7 +317,7 @@ func patchIssueByNumber(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusBadRequest, err.Error())
 			return
 		case err != nil:
-			writeProblem(w, http.StatusInternalServerError, "patch issue failed")
+			writeInternalError(w, r, err, "patch issue failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, detail)
@@ -358,7 +358,7 @@ func createIssueComment(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusBadRequest, err.Error())
 			return
 		case err != nil:
-			writeProblem(w, http.StatusInternalServerError, "add comment failed")
+			writeInternalError(w, r, err, "add comment failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, comment)
@@ -403,7 +403,7 @@ func updateIssueComment(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusBadRequest, err.Error())
 			return
 		case err != nil:
-			writeProblem(w, http.StatusInternalServerError, "update comment failed")
+			writeInternalError(w, r, err, "update comment failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, comment)
@@ -432,7 +432,7 @@ func deleteIssueComment(store ReadStore) http.HandlerFunc {
 			writeProblem(w, http.StatusNotFound, "issue or comment not found")
 			return
 		case err != nil:
-			writeProblem(w, http.StatusInternalServerError, "delete comment failed")
+			writeInternalError(w, r, err, "delete comment failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, detail)
