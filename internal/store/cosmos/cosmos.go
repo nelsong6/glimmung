@@ -278,6 +278,19 @@ func (s *Store) SetProjectManagedAuthOriginStatus(ctx context.Context, project s
 }
 
 func (s *Store) SetProjectTestEnvironmentSlotStatus(ctx context.Context, project string, status server.TestEnvironmentSlotStatus) (server.Project, error) {
+	return s.setProjectTestEnvironmentSlotStatus(ctx, project, status, "")
+}
+
+// SetProjectTestEnvironmentSlotStatusIfMatch performs an etag-conditional
+// write so multiple replicas firing the same TTL-expiry timer can race
+// safely. The first writer wins; the second sees `http.StatusPreconditionFailed`
+// from Cosmos and gets server.ErrPreconditionFailed back, which the caller
+// treats as "another replica already claimed this slot."
+func (s *Store) SetProjectTestEnvironmentSlotStatusIfMatch(ctx context.Context, project string, status server.TestEnvironmentSlotStatus, ifMatchEtag string) (server.Project, error) {
+	return s.setProjectTestEnvironmentSlotStatus(ctx, project, status, ifMatchEtag)
+}
+
+func (s *Store) setProjectTestEnvironmentSlotStatus(ctx context.Context, project string, status server.TestEnvironmentSlotStatus, ifMatchEtag string) (server.Project, error) {
 	partitionKey := azcosmos.NewPartitionKeyString(project)
 	read, err := s.projects.ReadItem(ctx, partitionKey, project, nil)
 	if err != nil {
@@ -307,10 +320,47 @@ func (s *Store) SetProjectTestEnvironmentSlotStatus(ctx context.Context, project
 	if err != nil {
 		return server.Project{}, err
 	}
-	if _, err := s.projects.ReplaceItem(ctx, partitionKey, project, payload, nil); err != nil {
+	var opts *azcosmos.ItemOptions
+	if ifMatchEtag != "" {
+		etag := azcore.ETag(ifMatchEtag)
+		opts = &azcosmos.ItemOptions{IfMatchEtag: &etag}
+	}
+	resp, err := s.projects.ReplaceItem(ctx, partitionKey, project, payload, opts)
+	if err != nil {
+		if isCosmosStatus(err, http.StatusPreconditionFailed) {
+			return server.Project{}, server.ErrPreconditionFailed
+		}
 		return server.Project{}, err
 	}
-	return projectFromMap(doc)
+	projectOut, err := projectFromMap(doc)
+	if err != nil {
+		return server.Project{}, err
+	}
+	return projectOut.WithETag(string(resp.ETag)), nil
+}
+
+// ReadProject performs a Cosmos point read for one project doc, returning
+// the captured resource etag on the Project so callers can do etag-conditional
+// writes. Use this (rather than ListProjects) when you intend to race for an
+// optimistic-concurrency claim — list queries don't expose per-row etags.
+func (s *Store) ReadProject(ctx context.Context, project string) (server.Project, error) {
+	partitionKey := azcosmos.NewPartitionKeyString(project)
+	read, err := s.projects.ReadItem(ctx, partitionKey, project, nil)
+	if err != nil {
+		if isCosmosStatus(err, http.StatusNotFound) {
+			return server.Project{}, server.ErrNotFound
+		}
+		return server.Project{}, err
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(read.Value, &doc); err != nil {
+		return server.Project{}, err
+	}
+	p, err := projectFromMap(doc)
+	if err != nil {
+		return server.Project{}, err
+	}
+	return p.WithETag(string(read.ETag)), nil
 }
 
 func pruneProjectTestEnvironmentSlots(raw any, count int) []map[string]any {

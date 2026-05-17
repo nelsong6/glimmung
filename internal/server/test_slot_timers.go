@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 )
@@ -74,9 +75,13 @@ func cancelLeaseExpiryTimer(leaseRef string) {
 }
 
 // fireLeaseExpiry runs in the timer goroutine. It removes its own map entry,
-// re-checks the lease is still claimed (the lease may have been returned in
-// the small window between the deadline and this goroutine running), and
-// then enters the same cleanup pathway return/callback-release use.
+// re-checks the lease is still claimed, then atomically claims the cleanup
+// against the project doc's etag. The atomic claim is what makes the design
+// safe across multiple replicas: the same timer is armed in every running
+// pod, every pod's timer fires at the same wall-clock instant, but the
+// database arbitrates — exactly one pod's etag-conditional write succeeds
+// and the others get ErrPreconditionFailed back, which means "another
+// replica already won, my work is done."
 func fireLeaseExpiry(store ReadStore, preparer TestSlotPreparer, project Project, lease Lease, logf func(string, ...any)) {
 	ref := LeasePublicRefFromLease(lease)
 	testSlotLeaseTimers.Delete(ref)
@@ -88,15 +93,82 @@ func fireLeaseExpiry(store ReadStore, preparer TestSlotPreparer, project Project
 		return
 	}
 
-	historyEntry := testSlotReturnHistoryEntry(lease, testSlotReturnAudit{
-		Source:         "lease.ttl_expiry",
-		CleanupStarted: true,
-	})
-	if _, err := setLeaseSlotCleanupStarting(ctx, store, project, lease, historyEntry); err != nil {
+	if _, err := claimTestSlotCleanup(ctx, store, project, lease, "lease.ttl_expiry"); err != nil {
+		if errors.Is(err, ErrPreconditionFailed) {
+			// Another replica's timer fired first and won the etag race.
+			// Their cleanup is in flight; ours is a no-op. This is the
+			// path that makes multi-replica deploys (rolling updates, node
+			// drains) correct without leader election.
+			return
+		}
 		if logf != nil {
-			logf("test-slot lease expiry record failed project=%s lease=%s: %v", lease.Project, ref, err)
+			logf("test-slot lease expiry claim failed project=%s lease=%s: %v", lease.Project, ref, err)
 		}
 		return
 	}
 	beginTestSlotCleanup(store, preparer, project, lease, true, logf)
+}
+
+// claimTestSlotCleanup atomically transitions the slot status to `cleaning`
+// using a Cosmos etag-conditional write. Exactly one caller across all
+// glimmung replicas wins; the rest get ErrPreconditionFailed back. Returns
+// ErrUnsupported when the store doesn't implement the CAS interface (in
+// tests with a write-only fake the cleanup will run unconditionally).
+//
+// `source` is recorded on the return-history entry so dashboards can tell
+// timer-expiry from operator return.
+func claimTestSlotCleanup(ctx context.Context, store ReadStore, project Project, lease Lease, source string) (Project, error) {
+	claimer, hasClaimer := store.(ProjectTestEnvironmentSlotStatusClaimer)
+	reader, hasReader := store.(ProjectReader)
+	if !hasClaimer || !hasReader {
+		// No CAS support — fall back to the unconditional path. This is
+		// fine for single-replica deploys; multi-replica safety requires
+		// the store to implement both interfaces. Tests using the unconditional
+		// fake exercise this branch.
+		historyEntry := testSlotReturnHistoryEntry(lease, testSlotReturnAudit{
+			Source:         source,
+			CleanupStarted: true,
+		})
+		return setLeaseSlotCleanupStarting(ctx, store, project, lease, historyEntry)
+	}
+
+	projectKey := firstNonEmpty(lease.Project, project.ID, project.Name)
+	fresh, err := reader.ReadProject(ctx, projectKey)
+	if err != nil {
+		return Project{}, err
+	}
+	slotIndex := nativeSlotIndexFromMetadata(lease.Metadata)
+	if slotIndex == nil {
+		return Project{}, errors.New("test-slot lease missing slot index metadata")
+	}
+	current, hasCurrent := testEnvironmentSlotStatus(fresh, *slotIndex)
+	if hasCurrent && current.State == testSlotStateCleaning {
+		// Already in the cleaning state in durable storage — another
+		// replica's claim landed before our read. Treat as a lost race.
+		return Project{}, ErrPreconditionFailed
+	}
+
+	now := time.Now().UTC()
+	slotName := current.SlotName
+	if slotName == "" {
+		if name := nativeSlotNameFromMetadata(lease.Metadata); name != nil {
+			slotName = *name
+		}
+	}
+	state := testSlotStateCleaning
+	status := current
+	status.SlotIndex = *slotIndex
+	status.SlotName = slotName
+	status.State = state
+	status.UpdatedAt = now
+	status.CleanupState = &state
+	status.CleanupStartedAt = &now
+	status.CleanupCompletedAt = nil
+	status.CleanupError = nil
+	status.ReturnHistory = appendBoundedTestSlotReturnHistory(status.ReturnHistory, testSlotReturnHistoryEntry(lease, testSlotReturnAudit{
+		Source:         source,
+		CleanupStarted: true,
+	}))
+
+	return claimer.SetProjectTestEnvironmentSlotStatusIfMatch(ctx, projectKey, status, fresh.ETag())
 }

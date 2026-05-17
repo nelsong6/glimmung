@@ -20,6 +20,23 @@ type ProjectTestEnvironmentSlotStatusWriter interface {
 	SetProjectTestEnvironmentSlotStatus(ctx context.Context, project string, status TestEnvironmentSlotStatus) (Project, error)
 }
 
+// ProjectReader exposes a single-doc read that captures the Cosmos etag on
+// the returned Project (Project.ETag()). Required by callers doing
+// optimistic-concurrency writes (e.g., the test-slot cleanup claim).
+type ProjectReader interface {
+	ReadProject(ctx context.Context, project string) (Project, error)
+}
+
+// ProjectTestEnvironmentSlotStatusClaimer is the etag-conditional companion
+// of ProjectTestEnvironmentSlotStatusWriter. If `ifMatchEtag` is non-empty
+// and the project doc's etag has changed since it was read, the call
+// returns ErrPreconditionFailed without mutating anything. Callers racing
+// on a claim (timer-fire cleanup across multiple replicas) handle that as
+// "another replica won the claim, no-op."
+type ProjectTestEnvironmentSlotStatusClaimer interface {
+	SetProjectTestEnvironmentSlotStatusIfMatch(ctx context.Context, project string, status TestEnvironmentSlotStatus, ifMatchEtag string) (Project, error)
+}
+
 type TestEnvironmentScaleRequest struct {
 	Count *int `json:"count"`
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -26,6 +27,12 @@ type fakeLeaseStore struct {
 	// the same time. Without the mutex appends race and the test sees a short
 	// count or corrupted slice header.
 	mu sync.Mutex
+	// etag tracks the optimistic-concurrency cursor for the project doc.
+	// Bumped on every write; ReadProject captures the current value;
+	// SetProjectTestEnvironmentSlotStatusIfMatch returns ErrPreconditionFailed
+	// when the caller's etag is stale. Lets multi-replica cleanup-claim
+	// races be exercised in unit tests without a real Cosmos.
+	etag int
 }
 
 func (s *fakeLeaseStore) AcquireLease(_ context.Context, req LeaseAcquireRequest) (Lease, error) {
@@ -57,6 +64,24 @@ func (s *fakeLeaseStore) ListLeases(context.Context) ([]Lease, error) {
 func (s *fakeLeaseStore) SetProjectTestEnvironmentSlotStatus(_ context.Context, project string, status TestEnvironmentSlotStatus) (Project, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.writeSlotStatusLocked(project, status, "")
+}
+
+// SetProjectTestEnvironmentSlotStatusIfMatch implements
+// ProjectTestEnvironmentSlotStatusClaimer for the fake. When `ifMatchEtag`
+// is non-empty and disagrees with the store's current etag, returns
+// ErrPreconditionFailed without mutating state — simulating the Cosmos
+// 412 path that makes the multi-replica cleanup-claim race safe.
+func (s *fakeLeaseStore) SetProjectTestEnvironmentSlotStatusIfMatch(_ context.Context, project string, status TestEnvironmentSlotStatus, ifMatchEtag string) (Project, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.writeSlotStatusLocked(project, status, ifMatchEtag)
+}
+
+func (s *fakeLeaseStore) writeSlotStatusLocked(project string, status TestEnvironmentSlotStatus, ifMatchEtag string) (Project, error) {
+	if ifMatchEtag != "" && ifMatchEtag != s.currentEtagLocked() {
+		return Project{}, ErrPreconditionFailed
+	}
 	s.slotStatuses = append(s.slotStatuses, status)
 	for i := range s.projects {
 		if s.projects[i].Name != project && s.projects[i].ID != project {
@@ -86,9 +111,28 @@ func (s *fakeLeaseStore) SetProjectTestEnvironmentSlotStatus(_ context.Context, 
 		}
 		standby["slots"] = slots
 		s.projects[i].Metadata["native_standby_dns"] = standby
-		return s.projects[i], nil
+		s.etag++
+		return s.projects[i].WithETag(s.currentEtagLocked()), nil
 	}
 	return Project{}, ErrNotFound
+}
+
+// ReadProject implements ProjectReader for the fake. Returns the project
+// with the current etag attached so callers can attempt etag-conditional
+// writes.
+func (s *fakeLeaseStore) ReadProject(_ context.Context, project string) (Project, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, p := range s.projects {
+		if p.Name == project || p.ID == project {
+			return p.WithETag(s.currentEtagLocked()), nil
+		}
+	}
+	return Project{}, ErrNotFound
+}
+
+func (s *fakeLeaseStore) currentEtagLocked() string {
+	return "etag-" + strconv.Itoa(s.etag)
 }
 
 // snapshotSlotStatuses returns a stable copy of the recorded status writes
