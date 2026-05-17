@@ -163,11 +163,23 @@ func buildGitHubClient(settings server.Settings) server.WorkflowSyncClient {
 }
 
 func buildAuthenticator(settings server.Settings) auth.CompositeAuthenticator {
-	// Microsoft sign-in is delegated to auth.romaine.life. The CookieDelegate
-	// forwards the inbound .romaine.life session cookie to the auth service's
-	// get-session endpoint per request (cached 60s) and gates on the role
-	// claim (admin / user); no per-app config needed.
+	// auth.romaine.life is the single identity provider for the
+	// .romaine.life ecosystem. Three presentation formats arrive on the
+	// wire, all rooted in the same trust:
+	//
+	//   1. Session cookies for browser callers — forwarded to the IdP's
+	//      get-session endpoint per request (cached 60s), CookieDelegate.
+	//   2. Bearer JWTs minted by auth.romaine.life — verified locally
+	//      against the IdP's published JWKS, RomaineLifeJWTVerifier.
+	//      Carries role ∈ {admin, user, service}; service tokens
+	//      additionally carry actor_email naming the human on whose
+	//      behalf the bot is acting.
+	//   3. Legacy in-cluster K8s SA tokens — verified via Kubernetes
+	//      TokenReview, K8sAuthenticator. Retired once mcp-glimmung and
+	//      mcp-tank-operator switch to the JWT exchange flow; see
+	//      tank-operator#490 for the parallel cutover.
 	cookieDelegate := auth.NewCookieDelegate()
+	romaineJWT := auth.NewRomaineLifeJWTVerifier()
 
 	var k8s *auth.K8sAuthenticator
 	if settings.K8sSAAllowlist != "" {
@@ -184,5 +196,5 @@ func buildAuthenticator(settings server.Settings) auth.CompositeAuthenticator {
 		}
 	}
 
-	return auth.CompositeAuthenticator{Cookie: cookieDelegate, K8s: k8s}
+	return auth.CompositeAuthenticator{Cookie: cookieDelegate, Romaine: romaineJWT, K8s: k8s}
 }

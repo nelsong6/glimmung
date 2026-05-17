@@ -173,3 +173,57 @@ func newTestCookieDelegate(endpoint string) *CookieDelegate {
 	d.endpoint = endpoint
 	return d
 }
+
+func TestCompositeResolverResolvesRomaineJWT(t *testing.T) {
+	f := newRomaineJWKSFixture(t)
+	v := NewRomaineLifeJWTVerifierForTesting(f.issuer(), f.jwksURL(), f.server.Client())
+	resolver := CompositeAuthenticator{Romaine: v}
+
+	token := f.sign(adminClaims(f.issuer()))
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	user, isAdmin, ok := resolver.ResolveCaller(context.Background(), req)
+	if !ok || !isAdmin || user.Email != "admin@example.com" {
+		t.Fatalf("user=%#v isAdmin=%v ok=%v", user, isAdmin, ok)
+	}
+}
+
+func TestCompositeRequireAdminAcceptsRomaineJWT(t *testing.T) {
+	f := newRomaineJWKSFixture(t)
+	v := NewRomaineLifeJWTVerifierForTesting(f.issuer(), f.jwksURL(), f.server.Client())
+	resolver := CompositeAuthenticator{Romaine: v}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+f.sign(adminClaims(f.issuer())))
+	user, err := resolver.RequireAdmin(context.Background(), req)
+	if err != nil || user.Email != "admin@example.com" || user.Role != RomaineRoleAdmin {
+		t.Fatalf("user=%#v err=%v", user, err)
+	}
+}
+
+func TestCompositeRequireAdminAcceptsServiceJWT(t *testing.T) {
+	f := newRomaineJWKSFixture(t)
+	v := NewRomaineLifeJWTVerifierForTesting(f.issuer(), f.jwksURL(), f.server.Client())
+	resolver := CompositeAuthenticator{Romaine: v}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+f.sign(serviceClaims(f.issuer())))
+	user, err := resolver.RequireAdmin(context.Background(), req)
+	if err != nil || user.Role != RomaineRoleService || user.ActorEmail != "operator@example.com" {
+		t.Fatalf("user=%#v err=%v", user, err)
+	}
+}
+
+func TestCompositeRequireAdminBearerRequiresRomaineVerifier(t *testing.T) {
+	// Bearer JWT that's NOT a K8s SA token, but Romaine isn't wired —
+	// should surface as a configuration error rather than silently
+	// falling through to cookie auth (cookies don't accept Bearer).
+	resolver := CompositeAuthenticator{}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+jwtWithClaims(t, map[string]any{
+		"iss":  "https://auth.romaine.life",
+		"role": "admin",
+	}))
+	_, err := resolver.RequireAdmin(context.Background(), req)
+	assertAuthStatus(t, err, http.StatusServiceUnavailable, "auth.romaine.life JWT verifier not configured")
+}

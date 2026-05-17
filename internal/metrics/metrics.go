@@ -270,6 +270,38 @@ func RecordHotSwap(outcome string, duration time.Duration) {
 	hotSwapDurationSeconds.WithLabelValues(out).Observe(duration.Seconds())
 }
 
+// --- Auth (auth.romaine.life JWT verifier) -----------------------------------
+
+var authRomaineLifeRequestsTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "glimmung_auth_romaine_life_requests_total",
+		Help: "auth.romaine.life JWT verifier outcomes. Mirrors tank-operator's tank_service_role_requests_total contract: result is a closed enum so cardinality is bounded.",
+	},
+	[]string{"role", "result"},
+)
+
+// AuthOutcome values are the closed enum tank-operator established in
+// #490 plus glimmung's own additions for the missing-fields cases the
+// glimmung verifier surfaces.
+const (
+	AuthOutcomeOK                     = "ok"
+	AuthOutcomeDeniedToken            = "denied_token"
+	AuthOutcomeDeniedRole             = "denied_role"
+	AuthOutcomeDeniedActorMissing     = "denied_actor_missing"
+	AuthOutcomeDeniedIssuer           = "denied_issuer"
+	AuthOutcomeDeniedAudience         = "denied_audience"
+	AuthOutcomeErrorVerifierMisconfig = "error_verifier_unconfigured"
+)
+
+// RecordAuthRomaineLifeRequest records one verification outcome for an
+// inbound auth.romaine.life JWT. role is "admin" / "user" / "service" /
+// "unknown" (when the token was rejected before the role claim could be
+// read). result is one of the AuthOutcome* constants above. Both labels
+// are closed sets so the metric stays low-cardinality.
+func RecordAuthRomaineLifeRequest(role, result string) {
+	authRomaineLifeRequestsTotal.WithLabelValues(safeLabel(role), safeLabel(result)).Inc()
+}
+
 // --- Registration ------------------------------------------------------------
 //
 // k8s Job apply/terminal metrics are not in V1: the dispatch path emits a
@@ -295,6 +327,7 @@ func init() {
 		leaseAcquireWaitSeconds,
 		hotSwapOutcomesTotal,
 		hotSwapDurationSeconds,
+		authRomaineLifeRequestsTotal,
 	)
 }
 

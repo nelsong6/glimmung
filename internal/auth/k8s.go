@@ -18,7 +18,35 @@ type User struct {
 	Sub   string
 	Email string
 	Name  string
+	// Role is the platform-wide claim carried in the auth.romaine.life
+	// JWT. Empty for callers that didn't come through the JWT path
+	// (browser cookies, legacy K8s SA TokenReview). Values come from
+	// the closed set RomaineRoleAdmin / RomaineRoleUser /
+	// RomaineRoleService — see internal/auth/romaine_jwt.go.
+	Role string
+	// ActorEmail is the human-identity claim attached to service-role
+	// JWTs: when a bot calls glimmung with role=service, ActorEmail
+	// is the email of the human on whose behalf the bot is acting,
+	// minted by auth.romaine.life at token exchange time. Audit
+	// records and downstream telemetry log ActorEmail so service-
+	// principal calls remain attributable to a person.
+	ActorEmail string
 }
+
+// IsAdmin reports whether the resolved User holds the `admin` role on
+// auth.romaine.life.
+func (u User) IsAdmin() bool { return u.Role == RomaineRoleAdmin }
+
+// IsService reports whether the resolved User is a service principal
+// (role=service). When IsService is true, ActorEmail is the canonical
+// human-identity field — Email may be empty or echo ActorEmail.
+func (u User) IsService() bool { return u.Role == RomaineRoleService }
+
+// IsHuman reports whether the resolved User is a signed-in human (admin
+// or user). Browser-cookie callers always satisfy this (they're signed
+// in via Microsoft via auth.romaine.life); JWT callers satisfy it when
+// role is admin or user but not service.
+func (u User) IsHuman() bool { return u.Role == RomaineRoleAdmin || u.Role == RomaineRoleUser }
 
 type AuthError struct {
 	Status  int

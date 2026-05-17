@@ -60,9 +60,15 @@ const blocked = [
   { name: "Application.ReadWrite.All MS Graph permission", pattern: /Application\.ReadWrite\.(?:All|OwnedBy)/ },
   { name: "RomaineLifeAuthenticator (replaced by CookieDelegate)", pattern: /\bRomaineLifeAuthenticator\b/ },
   { name: "NewRomaineLifeAuthenticator", pattern: /\bNewRomaineLifeAuthenticator\b/ },
-  { name: "JWKS endpoint URL (cookie-only — no local JWT verify)", pattern: /auth\.romaine\.life\/api\/auth\/jwks/ },
-  { name: "auth.romaine.life /api/auth/token (cookie-only — no token fetch)", pattern: /auth\.romaine\.life\/api\/auth\/token/ },
-  { name: "createRemoteJWKSet (no JWT verify in app)", pattern: /\bcreateRemoteJWKSet\b/ },
+  // The JWKS / token-fetch / createRemoteJWKSet bans were originally
+  // here because glimmung first cut over to auth.romaine.life as a
+  // cookie-only relying party — no per-app JWT verify. Glimmung has
+  // since adopted the platform's broader pattern: auth.romaine.life is
+  // still the only IdP, but inbound bearer tokens are now verified
+  // locally against its published JWKS (internal/auth/romaine_jwt.go),
+  // matching the relying-party shape tank-operator established in
+  // #490. The bans are retired; the MSAL/Entra/allowlist guards above
+  // stay because that retirement is still valid.
   { name: "localStorage token storage", pattern: /localStorage\.(get|set|remove)Item\(['"`]?token/i },
 ];
 
