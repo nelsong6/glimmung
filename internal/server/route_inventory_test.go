@@ -11,6 +11,7 @@ import (
 
 var expectedGoRoutes = []string{
 	"GET /healthz",
+	"GET /metrics",
 	"GET /v1/config",
 	"GET /v1/auth/me",
 	"GET /v1/artifacts/{blob_path...}",

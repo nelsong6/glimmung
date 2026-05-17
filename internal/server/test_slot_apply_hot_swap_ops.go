@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/nelsong6/glimmung/internal/domain/hotswap"
+	"github.com/nelsong6/glimmung/internal/metrics"
 )
 
 // ApplyHotSwapOptions describes the inputs to the server-side
@@ -73,15 +74,21 @@ type k8sJobClient interface {
 //     sends the configured restart signal.
 //
 // v1 supports artifact_kind=agent_runner only.
-func ApplyHotSwap(ctx context.Context, k8s k8sJobClient, opts ApplyHotSwapOptions) (ApplyHotSwapResult, error) {
+func ApplyHotSwap(ctx context.Context, k8s k8sJobClient, opts ApplyHotSwapOptions) (result ApplyHotSwapResult, err error) {
 	start := time.Now()
-	result := ApplyHotSwapResult{
+	result = ApplyHotSwapResult{
 		ArtifactKind: opts.ArtifactKind,
 		GitRef:       opts.GitRef,
 		JobNamespace: opts.JobNamespace,
 		Outcome:      "swap_failed",
 		Timings:      map[string]string{},
 	}
+	// Wires the deferral named in scripts/check-apply-test-slot-hot-swap-migration.mjs:
+	// every terminal outcome (persisted | build_failed | swap_failed | timeout)
+	// increments glimmung_hot_swap_outcomes_total{outcome} exactly once.
+	defer func() {
+		metrics.RecordHotSwap(result.Outcome, time.Since(start))
+	}()
 
 	if opts.ArtifactKind != "agent_runner" {
 		result.Error = fmt.Sprintf("artifact_kind %q is not supported by the apply endpoint in v1 (use the glimmung-agent CLI for static/backend)", opts.ArtifactKind)

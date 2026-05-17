@@ -329,12 +329,12 @@ func dispatchTriage(ctx context.Context, store SignalDrainStore, nativeLauncher 
 	if len(requirements) == 0 {
 		requirements = decision.Workflow.DefaultRequirements
 	}
-	lease, err := store.AcquireLease(ctx, LeaseAcquireRequest{
+	lease, err := acquireLeaseInstrumented(ctx, LeasePurposeSignalDrain, LeaseAcquireRequest{
 		Project:      reopened.Project,
 		Workflow:     &wfName,
 		Requirements: requirements,
 		Metadata:     metadata,
-	})
+	}, store.AcquireLease)
 	if err != nil {
 		_, _ = store.AbortRunByID(ctx, reopened.Project, reopened.ID, "triage_lease_acquire_failed: "+err.Error())
 		return fmt.Errorf("acquire triage lease: %w", err)

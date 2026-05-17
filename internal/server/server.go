@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/nelsong6/glimmung/internal/metrics"
 )
 
 const (
@@ -189,6 +191,7 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
+	mux.Handle("GET /metrics", metrics.Handler())
 	mux.HandleFunc("GET /v1/config", publicConfig(settings))
 	mux.HandleFunc("GET /v1/auth/me", authMe(authResolver))
 	mux.HandleFunc("GET /v1/artifacts/{blob_path...}", readArtifact(artifactStore))
@@ -294,7 +297,7 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 		mux.HandleFunc("GET /assets/", serveAsset(settings))
 		mux.HandleFunc("GET /", serveSPA(settings))
 	}
-	return rejectUnsafeArtifactPaths(mux)
+	return metrics.Middleware(rejectUnsafeArtifactPaths(mux))
 }
 
 func healthz(w http.ResponseWriter, _ *http.Request) {

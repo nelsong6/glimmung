@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/nelsong6/glimmung/internal/domain/budget"
+	"github.com/nelsong6/glimmung/internal/metrics"
 )
 
 type RunDecision string
@@ -59,8 +60,18 @@ type Run struct {
 	Budget            budget.Config
 }
 
-// Decide returns the next verify-loop action for a run attempt.
-func Decide(run Run, workflow Workflow, attemptIndex ...int) (RunDecision, error) {
+// Decide returns the next verify-loop action for a run attempt. Every
+// well-formed decision is recorded to the glimmung_decisions_total counter
+// at the moment it is determined — Decide is the canonical site, so any
+// caller that re-uses the same decision (e.g. replay handlers) must not
+// re-record.
+func Decide(run Run, workflow Workflow, attemptIndex ...int) (decision RunDecision, err error) {
+	defer func() {
+		if err == nil && decision != "" {
+			metrics.RecordDecision(string(decision))
+		}
+	}()
+
 	if len(run.Attempts) == 0 {
 		return "", fmt.Errorf("decide called on run with no attempts")
 	}

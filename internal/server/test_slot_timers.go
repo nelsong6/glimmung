@@ -5,6 +5,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/nelsong6/glimmung/internal/metrics"
 )
 
 // testSlotLeaseTimers holds one *time.Timer per claimed test-slot lease that
@@ -106,6 +108,11 @@ func fireLeaseExpiry(store ReadStore, preparer TestSlotPreparer, project Project
 		}
 		return
 	}
+	// Only one replica wins the etag race and reaches here, so the
+	// counter increment is at-most-once per expired lease across the
+	// fleet. test_slot_checkout is the only purpose that arms a TTL
+	// timer, so the label is unambiguous.
+	metrics.RecordLeaseReleased(LeasePurposeTestSlotCheckout, "expired")
 	beginTestSlotCleanup(store, preparer, project, lease, true, logf)
 }
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/nelsong6/glimmung/internal/domain/budget"
 	"github.com/nelsong6/glimmung/internal/domain/publicids"
+	"github.com/nelsong6/glimmung/internal/metrics"
 )
 
 const defaultIssueLockTTLSeconds = 14400 // 4 hours
@@ -240,6 +241,7 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, nativeLaun
 		dispatchStore.ReleaseIssueLock(ctx, req.Project, req.IssueNumber, holderID)
 		return PublicDispatchResult{}, &dispatchProblem{status: http.StatusInternalServerError, message: "create run failed"}
 	}
+	metrics.RecordRunCreated(wf.Name)
 
 	issueNum := req.IssueNumber
 	issueRef := publicids.IssueRef(req.Project, &issueNum)
@@ -267,12 +269,12 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, nativeLaun
 		requirements = wf.DefaultRequirements
 	}
 	wfName := wf.Name
-	lease, err := dispatchStore.AcquireLease(ctx, LeaseAcquireRequest{
+	lease, err := acquireLeaseInstrumented(ctx, LeasePurposeDispatch, LeaseAcquireRequest{
 		Project:      req.Project,
 		Workflow:     &wfName,
 		Requirements: requirements,
 		Metadata:     metadata,
-	})
+	}, dispatchStore.AcquireLease)
 	if err != nil {
 		dispatchStore.AbortRunByID(ctx, req.Project, run.ID, "lease_acquire_failed") //nolint:errcheck
 		if errors.Is(err, ErrUnavailable) {

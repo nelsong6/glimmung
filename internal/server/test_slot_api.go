@@ -126,13 +126,13 @@ func checkoutTestSlot(settings Settings, store ReadStore, preparer TestSlotPrepa
 			defaultTTL := testSlotDefaultTTLSeconds
 			ttlSeconds = &defaultTTL
 		}
-		lease, err := leaseStore.AcquireLease(r.Context(), LeaseAcquireRequest{
+		lease, err := acquireLeaseInstrumented(r.Context(), LeasePurposeTestSlotCheckout, LeaseAcquireRequest{
 			Project:    req.Project,
 			Workflow:   &workflow,
 			Metadata:   metadata,
 			Requester:  requester,
 			TTLSeconds: ttlSeconds,
-		})
+		}, leaseStore.AcquireLease)
 		if err != nil {
 			var validationErr ValidationError
 			if errors.As(err, &validationErr) {

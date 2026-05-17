@@ -273,9 +273,17 @@ const CHECKS = [
     id: "observability-outcome-tracked-in-result",
     from: "Guarantee 3: sync UX + durable state",
     file: "internal/server/test_slot_apply_hot_swap_ops.go",
-    description: "Result struct carries a bounded Outcome field with the named failure modes (persisted | build_failed | swap_failed | timeout); these flow into the durable hot-swap history record. Prometheus counter deferred to a separate PR when glimmung gets a /metrics endpoint.",
+    description: "Result struct carries a bounded Outcome field with the named failure modes (persisted | build_failed | swap_failed | timeout); these flow into the durable hot-swap history record.",
     kind: "grep-present",
     pattern: /Outcome[\s\S]{0,400}?persisted[\s\S]{0,200}?build_failed[\s\S]{0,200}?swap_failed[\s\S]{0,200}?timeout/,
+  },
+  {
+    id: "observability-outcome-prometheus-counter",
+    from: "Guarantee 3: sync UX + durable state",
+    file: "internal/server/test_slot_apply_hot_swap_ops.go",
+    description: "ApplyHotSwap's terminal outcome increments glimmung_hot_swap_outcomes_total via a deferred metrics.RecordHotSwap call (so every return path is counted exactly once).",
+    kind: "grep-present",
+    pattern: /defer\s+func\(\)\s*\{[\s\S]{0,200}?metrics\.RecordHotSwap\(result\.Outcome/,
   },
 
   // ─────────────────────── Guarantee 4: nothing already-working is touched ───────────────────────

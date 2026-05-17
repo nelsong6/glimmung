@@ -312,12 +312,12 @@ func resumeRunHandler(store ReadStore, nativeLauncher NativeLauncher) http.Handl
 			requirements = wf.DefaultRequirements
 		}
 		wfName := wf.Name
-		lease, err := resumeStore.AcquireLease(ctx, LeaseAcquireRequest{
+		lease, err := acquireLeaseInstrumented(ctx, LeasePurposeResume, LeaseAcquireRequest{
 			Project:      project,
 			Workflow:     &wfName,
 			Requirements: requirements,
 			Metadata:     metadata,
-		})
+		}, resumeStore.AcquireLease)
 		if err != nil {
 			resumeStore.AbortRunByID(ctx, project, newRun.ID, "lease_acquire_failed") //nolint:errcheck
 			if errors.Is(err, ErrUnavailable) {

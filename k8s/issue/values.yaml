@@ -78,3 +78,11 @@ gatewayNamespace: envoy-gateway-system
 # --set prNumber=<N> after the PR opens so the cleanup workflow
 # (agent-pr-cleanup.yml) can find releases by label and uninstall them.
 prNumber: ""
+
+# Prometheus instrumentation. Per-issue releases are ephemeral and not
+# normally scraped, so even the pod scrape annotations default off. The
+# /metrics endpoint is always live for ad-hoc curl/portforward debugging.
+# See docs/observability.md.
+observability:
+  scrapeAnnotations:
+    enabled: false

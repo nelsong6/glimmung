@@ -134,3 +134,25 @@ externalSecret:
       kvKey: glimmung-github-app-private-key
     - envVar: GITHUB_WEBHOOK_SECRET
       kvKey: glimmung-github-webhook-secret
+
+# Prometheus instrumentation. Glimmung always serves /metrics on the
+# existing app port (alongside /healthz); the toggles below only control
+# the ServiceMonitor CRD and pod-level scrape annotations. Default off so
+# the chart installs cleanly in clusters that don't run the Prometheus
+# Operator — turn on per-environment when Prometheus is present.
+# See docs/observability.md for the metric families and label policy.
+observability:
+  # ServiceMonitor (monitoring.coreos.com/v1) for Prometheus Operator. Requires
+  # the CRD; chart render fails if the CRD is absent and this is enabled.
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    # Namespace the ServiceMonitor lands in. Empty = chart namespace.
+    namespace: ""
+    # Extra labels for Prometheus selectors (e.g. release: kube-prometheus).
+    labels: {}
+  # Pod-level scrape annotations for native Prometheus discovery without
+  # the Operator. Independent of serviceMonitor — turn either or both on.
+  scrapeAnnotations:
+    enabled: false
