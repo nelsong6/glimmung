@@ -809,31 +809,37 @@ func TestClaimTestSlotWarmupRetriesAcrossCrossSlotWrites(t *testing.T) {
 	// re-check state, and succeed. This is what makes PATCH count for
 	// count>1 work — multiple warmup goroutines firing simultaneously
 	// against the same project doc.
+	//
+	// Count of 10 deliberately exceeds the previous (broken) retry
+	// budget of 5 attempts so this test would fail before the fix: under
+	// the old code at least one slot was statistically likely to lose 5
+	// CAS races in a row to its 9 siblings and silently give up. That
+	// happened in production right after PR #516 — slot 8 went missing
+	// from the tank-operator project doc despite no error path being
+	// triggered.
+	const count = 10
 	store := &fakeLeaseStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{
 			ID:   "multi",
 			Name: "multi",
 			Metadata: map[string]any{"native_standby_dns": map[string]any{
 				"slot_prefix": "multi-slot",
-				"count":       float64(3),
+				"count":       float64(count),
 			}},
 		}}},
 	}
 	preparer := &fakeTestSlotPreparer{}
 
-	// Fire all three warmups in parallel — exercise the cross-slot etag
-	// contention path. Without retry, two of them would fail with
-	// ErrPreconditionFailed and only one slot would warm.
 	EnsureProjectTestSlotsWarmed(context.Background(), store, preparer, store.projects[0], nil, nil)
 
-	waitForSlotStatusCount(t, store, 6) // 3 slots × (warming + ready)
+	waitForSlotStatusCount(t, store, count*2) // count slots × (warming + ready)
 	seen := map[int]string{}
 	for _, status := range store.snapshotSlotStatuses() {
 		seen[status.SlotIndex] = status.State
 	}
-	for i := 1; i <= 3; i++ {
+	for i := 1; i <= count; i++ {
 		if seen[i] != testSlotStateReady {
-			t.Fatalf("slot %d final state=%q, want ready (cross-slot CAS contention must not block warmups)", i, seen[i])
+			t.Fatalf("slot %d final state=%q, want ready (cross-slot CAS contention must not strand a slot under retry exhaustion)", i, seen[i])
 		}
 	}
 }

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -180,19 +181,45 @@ func claimTestSlotCleanup(ctx context.Context, store ReadStore, project Project,
 	return claimer.SetProjectTestEnvironmentSlotStatusIfMatch(ctx, projectKey, status, fresh.ETag())
 }
 
+// warmupRetryRng generates the jitter used to spread out concurrent
+// warmup-CAS retries. A separately-seeded Rand avoids contention on the
+// global default Source under heavy goroutine pressure.
+var warmupRetryRng = rand.New(rand.NewSource(time.Now().UnixNano())) //nolint:gosec // jitter only
+
+var warmupRetryMu sync.Mutex
+
+func warmupRetryJitter(base time.Duration) time.Duration {
+	warmupRetryMu.Lock()
+	defer warmupRetryMu.Unlock()
+	if base <= 0 {
+		return 0
+	}
+	// Sleep duration ∈ [base, 2·base) — full-jitter exponential backoff.
+	return base + time.Duration(warmupRetryRng.Int63n(int64(base)))
+}
+
 // claimTestSlotWarmup writes the initial `warming` status for `slotIndex`
 // using an etag-conditional ReplaceItem. The atomic write IS the ownership
 // claim: when two replicas both fire warmup for the same slot, the second
 // will either observe state=warming on its retry-read and back off, or
 // race the first to the write and lose CAS.
 //
-// Cross-slot retry: a project doc's etag is bumped by writes to ANY slot,
-// not just this one. If two slots in the same project are being warmed
-// concurrently (e.g., PATCH count for a project with count>1 fires
-// multiple warmup goroutines), the cross-slot writes will trigger 412 on
-// each other. The retry loop re-reads, re-checks our slot's state, and
-// retries — only giving up if our slot has actually been claimed by
-// someone else (state already warming, ready, etc.).
+// Cross-slot etag contention: a project doc's etag is bumped by writes
+// to *any* slot, not just this one. When PATCH count fires warmup for a
+// project with count=N, all N goroutines write to the same doc; each
+// cross-slot write triggers a 412 on every other in-flight goroutine.
+//
+// The retry loop distinguishes two kinds of 412 explicitly:
+//
+//  1. **Cross-slot contention** (our slot is still missing or stale-warming
+//     on re-read) — keep trying with jittered backoff. The previous
+//     5-attempt limit was too tight for count-of-10 warmup storms: one
+//     unlucky goroutine could lose 5 races in a row and silently give up,
+//     leaving a slot permanently un-warmed (observed on prod after the
+//     PR #516 rollout — slot 8 went missing for exactly this reason).
+//  2. **Lost claim** (our slot's state moved to `ready`, or to `warming`
+//     with a recent `updated_at`) — return ErrPreconditionFailed; another
+//     replica owns this slot's warmup and ours is a genuine no-op.
 //
 // Stores that don't implement the CAS interface fall through to an
 // unconditional write — safe for single-replica deploys and for in-process
@@ -209,8 +236,12 @@ func claimTestSlotWarmup(ctx context.Context, store ReadStore, writer ProjectTes
 		})
 	}
 
-	const maxAttempts = 5
-	var lastErr error
+	const (
+		maxAttempts     = 30
+		initialBackoff  = 5 * time.Millisecond
+		maxBackoff      = 200 * time.Millisecond
+	)
+	backoff := initialBackoff
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		fresh, err := reader.ReadProject(ctx, projectKey)
 		if err != nil {
@@ -245,14 +276,28 @@ func claimTestSlotWarmup(ctx context.Context, store ReadStore, writer ProjectTes
 		}
 		updated, err := claimer.SetProjectTestEnvironmentSlotStatusIfMatch(ctx, projectKey, status, fresh.ETag())
 		if errors.Is(err, ErrPreconditionFailed) {
-			// Etag stale — most likely because another slot in this
-			// project was just written. Re-read and re-check our slot's
-			// state. The state check above will catch the case where our
-			// slot was the one that was just claimed.
-			lastErr = err
+			// Etag moved. Don't give up yet — back off and re-read. The
+			// state-check at the top of the next iteration will exit early
+			// if our slot was actually claimed by another writer; otherwise
+			// we'll attempt the CAS again with the fresh etag.
+			select {
+			case <-ctx.Done():
+				return Project{}, ctx.Err()
+			case <-time.After(warmupRetryJitter(backoff)):
+			}
+			if backoff < maxBackoff {
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+			}
 			continue
 		}
 		return updated, err
 	}
-	return Project{}, lastErr
+	// Retries exhausted under genuine contention. The slot may still be
+	// stuck if every retry lost; the next pod restart or PATCH count will
+	// retry. Return a distinct error so the caller logs loudly rather than
+	// silently treating it as "another replica owns it."
+	return Project{}, errors.New("warmup CAS exhausted retries under cross-slot contention")
 }
