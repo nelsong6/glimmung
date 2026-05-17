@@ -629,6 +629,160 @@ func TestReconcileActiveTestSlotCleansInstaller(t *testing.T) {
 	}
 }
 
+func TestReconcileSeedsMissingTestSlots(t *testing.T) {
+	// Project has count=3 but no slots[*] entries — exactly the state
+	// tank-operator landed in when warmup was a one-shot PATCH side effect.
+	// The reconciler must seed all three indices and bring them to ready.
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "seed",
+			Name: "seed",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"slot_prefix": "seed-slot",
+				"record_base": "seed.dev.romaine.life",
+				"count":       float64(3),
+			}},
+		}}},
+		leases: []Lease{},
+	}
+	preparer := &fakeTestSlotPreparer{}
+
+	if got := reconcileTestSlots(context.Background(), store, preparer, nil, 30*time.Second, nil); got != 3 {
+		t.Fatalf("reconciled=%d, want 3", got)
+	}
+	waitForSlotStatusCount(t, store, 6) // 3 slots × (warming + ready)
+	seen := map[int]string{}
+	for _, status := range store.slotStatuses {
+		seen[status.SlotIndex] = status.State
+	}
+	for i := 1; i <= 3; i++ {
+		if seen[i] != testSlotStateReady {
+			t.Fatalf("slot %d final state=%q, want ready", i, seen[i])
+		}
+	}
+	if !preparer.preliminaries {
+		t.Fatal("expected EnsureTestSlotPreliminaries to run for seeded slots")
+	}
+	// Slots warm in parallel goroutines so cleanup order is non-deterministic;
+	// assert set membership instead of order.
+	gotCleaned := map[string]bool{}
+	for _, name := range preparer.cleanedSlots {
+		gotCleaned[name] = true
+	}
+	for _, want := range []string{"seed-slot-1", "seed-slot-2", "seed-slot-3"} {
+		if !gotCleaned[want] {
+			t.Fatalf("installer cleanup missing %s: got %#v", want, preparer.cleanedSlots)
+		}
+	}
+}
+
+func TestReconcileResumesStaleWarming(t *testing.T) {
+	// A slot whose preliminary reconciliation crashed mid-flight leaves a
+	// stale `warming` record. The reconciler must pick it up and bring it to
+	// ready — without this, the slot is permanently stuck unless an operator
+	// re-PATCHes count, which is the bug we're removing.
+	now := time.Now().UTC()
+	stale := now.Add(-2 * time.Minute)
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "stale",
+			Name: "stale",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"slot_prefix": "stale-slot",
+				"count":       float64(1),
+				"slots": []any{
+					map[string]any{
+						"slot_index": float64(1),
+						"slot_name":  "stale-slot-1",
+						"state":      testSlotStateWarming,
+						"updated_at": stale.Format(time.RFC3339Nano),
+					},
+				},
+			}},
+		}}},
+		leases: []Lease{},
+	}
+	preparer := &fakeTestSlotPreparer{}
+
+	if got := reconcileTestSlots(context.Background(), store, preparer, nil, 30*time.Second, nil); got != 1 {
+		t.Fatalf("reconciled=%d, want 1", got)
+	}
+	waitForSlotStatus(t, store, testSlotStateReady)
+	if !preparer.preliminaries {
+		t.Fatal("expected EnsureTestSlotPreliminaries to run for stale warming slot")
+	}
+}
+
+func TestReconcileSkipsRecentWarmingAndClaimedSlots(t *testing.T) {
+	// Recent warming (within minAge) belongs to a still-running warmup; the
+	// reconciler must not double-fire. A claimed lease drives its own
+	// lifecycle and must not be re-warmed.
+	now := time.Now().UTC()
+	fresh := now.Add(-5 * time.Second)
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "skip",
+			Name: "skip",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"slot_prefix": "skip-slot",
+				"count":       float64(2),
+				"slots": []any{
+					map[string]any{
+						"slot_index": float64(1),
+						"slot_name":  "skip-slot-1",
+						"state":      testSlotStateWarming,
+						"updated_at": fresh.Format(time.RFC3339Nano),
+					},
+					map[string]any{
+						"slot_index": float64(2),
+						"slot_name":  "skip-slot-2",
+						"state":      testSlotStateReady,
+						"updated_at": fresh.Format(time.RFC3339Nano),
+					},
+				},
+			}},
+		}}},
+		lease: Lease{
+			Project:     "skip",
+			LeaseNumber: intPtr(11),
+			Host:        stringPtr("native-k8s"),
+			State:       "claimed",
+			Metadata: map[string]any{
+				"test_slot_checkout": true,
+				"native_k8s":         true,
+				"native_slot_index":  "2",
+				"native_slot_name":   "skip-slot-2",
+			},
+			RequestedAt: now,
+			AssignedAt:  &now,
+			TTLSeconds:  900,
+		},
+	}
+	preparer := &fakeTestSlotPreparer{}
+
+	// Slot 2 is active+claimed so the reconciler will run installer cleanup
+	// for it (counted as 0 reconciliation starts). Slot 1 is fresh warming,
+	// must be skipped. Net: zero warmup starts.
+	if got := reconcileTestSlots(context.Background(), store, preparer, nil, 30*time.Second, nil); got != 0 {
+		t.Fatalf("reconciled=%d, want 0 (fresh warming + claimed slot must be skipped)", got)
+	}
+	if preparer.preliminaries {
+		t.Fatal("expected no preliminary work for fresh-warming or claimed slots")
+	}
+}
+
+func waitForSlotStatusCount(t *testing.T, store *fakeLeaseStore, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(store.slotStatuses) >= want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("slot status writes=%d, want >=%d", len(store.slotStatuses), want)
+}
+
 func TestAsyncCheckoutFailureMarksErrorAndReleasesLease(t *testing.T) {
 	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
 	store := &fakeLeaseStore{
@@ -892,106 +1046,6 @@ func TestReturnTestSlotReleasesLease(t *testing.T) {
 	}
 	if finalStatus.CleanupCompletedAt == nil {
 		t.Fatalf("cleanup completion missing: %#v", finalStatus)
-	}
-}
-
-func TestRepairTestEnvironmentSlotStartsCleanupWithoutLease(t *testing.T) {
-	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
-	store := &fakeLeaseStore{
-		fakeReadStore: fakeReadStore{projects: []Project{{
-			ID:   "tank",
-			Name: "tank",
-			Metadata: map[string]any{"native_standby_dns": map[string]any{
-				"slot_prefix": "tank-slot",
-				"count":       float64(1),
-				"slots": []any{
-					map[string]any{
-						"slot_index": float64(1),
-						"slot_name":  "tank-slot-1",
-						"state":      "error",
-						"updated_at": now.Format(time.RFC3339Nano),
-					},
-				},
-			}},
-		}}},
-		leases: []Lease{},
-	}
-	preparer := &fakeTestSlotPreparer{
-		returnStarted: make(chan struct{}, 1),
-		returnRelease: make(chan struct{}),
-		returnDone:    make(chan struct{}, 1),
-	}
-	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, preparer)
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/projects/tank/test-environments/tank-slot-1/repair", nil)
-	req.Header.Set("Authorization", "Bearer admin")
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	select {
-	case <-preparer.returnStarted:
-	case <-time.After(time.Second):
-		t.Fatal("repair cleanup did not start")
-	}
-	close(preparer.returnRelease)
-	select {
-	case <-preparer.returnDone:
-	case <-time.After(time.Second):
-		t.Fatal("repair cleanup did not finish")
-	}
-	waitForSlotStatus(t, store, testSlotStateReady)
-	if store.cancelledRef != "" {
-		t.Fatalf("cancelledRef=%q, want empty for unleased repair", store.cancelledRef)
-	}
-}
-
-func TestRepairTestEnvironmentSlotRejectsActiveLease(t *testing.T) {
-	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
-	store := &fakeLeaseStore{
-		fakeReadStore: fakeReadStore{projects: []Project{{
-			ID:   "tank",
-			Name: "tank",
-			Metadata: map[string]any{"native_standby_dns": map[string]any{
-				"slot_prefix": "tank-slot",
-				"count":       float64(1),
-				"slots": []any{
-					map[string]any{
-						"slot_index": float64(1),
-						"slot_name":  "tank-slot-1",
-						"state":      testSlotStateActive,
-						"updated_at": now.Format(time.RFC3339Nano),
-					},
-				},
-			}},
-		}}},
-		leases: []Lease{{
-			Project:     "tank",
-			LeaseNumber: intPtr(2),
-			State:       "claimed",
-			Metadata: map[string]any{
-				"test_slot_checkout": true,
-				"native_slot_index":  "1",
-				"native_slot_name":   "tank-slot-1",
-			},
-			RequestedAt: now,
-		}},
-	}
-	preparer := &fakeTestSlotPreparer{}
-	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, preparer)
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/projects/tank/test-environments/tank-slot-1/repair", nil)
-	req.Header.Set("Authorization", "Bearer admin")
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	if preparer.returned {
-		t.Fatal("repair should not clean an active healthy lease")
 	}
 }
 

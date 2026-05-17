@@ -386,14 +386,18 @@ func testEnvironmentsFromSnapshot(
 		for slotIndex := 1; slotIndex <= slotCount; slotIndex++ {
 			lease, claimed := claimedByProject[projectName][slotIndex]
 			var publicLease *LeasePublic
-			slotStatus := slotStatuses[slotIndex]
-			state := firstNonEmpty(slotStatus.State, "warming")
-			usable := false
+			slotStatus, hasStatus := slotStatuses[slotIndex]
+			// state mirrors durable slot status. When no record exists yet
+			// (count was just bumped and the reconciler has not seeded the
+			// slot), the state is empty — the API must not invent a placeholder
+			// here; that would be a UI lie about what's actually in storage.
+			state := slotStatus.State
 			if state == testSlotStateReady {
 				state = "available"
 			}
+			usable := false
 			if claimed {
-				if slotStatus.State == testSlotStateActivating || slotStatus.State == testSlotStateActive || slotStatus.State == testSlotStateCleaning || slotStatus.State == "error" {
+				if hasStatus && (slotStatus.State == testSlotStateActivating || slotStatus.State == testSlotStateActive || slotStatus.State == testSlotStateCleaning || slotStatus.State == "error") {
 					state = slotStatus.State
 				} else {
 					state = "claimed"

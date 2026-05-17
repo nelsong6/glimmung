@@ -49,7 +49,10 @@ type TestEnvironment = {
   project: string;
   slot_index: number;
   slot_name: string;
-  state: "available" | "warming" | "activating" | "active" | "cleaning" | "claimed" | "error";
+  // "" means no durable slot status record exists yet (count was bumped and
+  // the reconciler has not yet seeded this slot). It is not synonymous with
+  // "warming" — warming means preliminary reconciliation is actually running.
+  state: "" | "available" | "warming" | "activating" | "active" | "cleaning" | "claimed" | "error";
   usable?: boolean;
   detail?: string | null;
   updated_at?: string | null;
@@ -2338,6 +2341,10 @@ function TestEnvironmentIndexView({
   const cleaning = environments.filter((env) => env.state === "cleaning");
   const claimed = environments.filter((env) => env.state === "claimed");
   const errored = environments.filter((env) => env.state === "error");
+  // "" means the count is set but the reconciler has not yet seeded a status
+  // record. It's expected for ~15s after a count bump or rollout; persistently
+  // non-zero suggests the reconciler is failing — surface it as its own KPI.
+  const unseeded = environments.filter((env) => env.state === "");
   const project = projectName ? snap.projects.find((p) => p.name === projectName) : null;
 
   return (
@@ -2355,6 +2362,7 @@ function TestEnvironmentIndexView({
           {cleaning.length > 0 && <div className="project-fact"><span>cleaning</span><strong>{cleaning.length}</strong></div>}
           {claimed.length > 0 && <div className="project-fact"><span>claimed</span><strong>{claimed.length}</strong></div>}
           {errored.length > 0 && <div className="project-fact"><span>error</span><strong>{errored.length}</strong></div>}
+          {unseeded.length > 0 && <div className="project-fact"><span>unseeded</span><strong>{unseeded.length}</strong></div>}
           {projectName && <div className="project-fact"><span>configured</span><strong>{environments.length}</strong></div>}
         </div>
       </section>
@@ -2396,7 +2404,7 @@ function TestEnvironmentIndexView({
                     <td><Link className="link" to={`/projects/${encodeURIComponent(env.project)}`}>{env.project}</Link></td>
                   )}
                   <td className="mono">{env.slot_name}</td>
-                  <td><span className={`pill ${testEnvironmentPillClass(env.state)}`} title={env.detail ?? env.state}>{env.state}</span></td>
+                  <td><span className={`pill ${testEnvironmentPillClass(env.state)}`} title={env.detail ?? testEnvironmentStateLabel(env.state)}>{testEnvironmentStateLabel(env.state)}</span></td>
                   <td className="mono dim" title={testEnvironmentWorkTitle(env)}>{testEnvironmentWorkLabel(env)}</td>
                   <td className="mono dim">
                     {env.lease && detailTo ? (
@@ -2667,12 +2675,20 @@ function testEnvironmentPillClass(state: TestEnvironment["state"]): "free" | "bu
       return "busy";
     case "error":
       return "drain";
+    case "":
     case "warming":
     case "activating":
     case "cleaning":
     default:
       return "info";
   }
+}
+
+function testEnvironmentStateLabel(state: TestEnvironment["state"]): string {
+  // Empty state means the reconciler has not yet seeded this slot. Surface
+  // that as "unseeded" rather than synthesizing one of the lifecycle states —
+  // those are reserved for real recorded transitions.
+  return state === "" ? "unseeded" : state;
 }
 
 function testEnvironmentWorkLabel(env: TestEnvironment): string {

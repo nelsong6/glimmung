@@ -166,6 +166,47 @@ func TestTestEnvironmentStatusShowsActivatingSlot(t *testing.T) {
 	}
 }
 
+func TestStateSnapshotEmitsEmptyStateForUnseededSlots(t *testing.T) {
+	// A project with count=3 but no slots[*] records yet (count just set, or
+	// reconciler has not ticked) must render state="" — not a synthesized
+	// "warming". The dashboard owns the labeling for unseeded slots; the API
+	// must mirror durable storage honestly.
+	now := time.Date(2026, 5, 11, 3, 0, 0, 0, time.UTC)
+	store := fakeStateStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "fresh",
+			Name: "fresh",
+			Metadata: map[string]any{
+				"native_standby_dns": map[string]any{
+					"enabled":     true,
+					"count":       float64(3),
+					"slot_prefix": "fresh-slot",
+				},
+			},
+			CreatedAt: now,
+		}}},
+	}
+	handler := NewWithStore(Settings{}, store)
+
+	var snapshot StateSnapshot
+	getJSON(t, handler, "/v1/state", &snapshot)
+
+	if len(snapshot.TestEnvironments) != 3 {
+		t.Fatalf("test_environments=%#v, want 3 rows for count=3", snapshot.TestEnvironments)
+	}
+	for i, env := range snapshot.TestEnvironments {
+		if env.State != "" {
+			t.Fatalf("env[%d].State=%q, want empty (no synthesized warming for unseeded slots)", i, env.State)
+		}
+		if env.Usable {
+			t.Fatalf("env[%d].Usable=true for unseeded slot", i)
+		}
+		if env.Lease != nil {
+			t.Fatalf("env[%d].Lease=%#v, want nil for unseeded slot", i, env.Lease)
+		}
+	}
+}
+
 func TestStateSnapshotDoesNotInferNativeSlotsFromAppType(t *testing.T) {
 	now := time.Date(2026, 5, 11, 3, 0, 0, 0, time.UTC)
 	store := fakeStateStore{
