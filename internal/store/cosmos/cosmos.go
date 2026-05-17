@@ -3773,32 +3773,47 @@ func (s *Store) availableNativeSlot(ctx context.Context, project string) (*int, 
 	return nil, nil
 }
 
+// nativeReadySlots returns the slot indices that are leasable RIGHT NOW
+// for the given project.
+//
+// Post slot-storage-rework (docs/test-slot-storage-rework.md), slots
+// live in the `slots` collection — one Cosmos document per slot, with a
+// durable `state` field. The startup migration in
+// internal/server/slot_migration.go strips the legacy
+// `metadata.native_standby_dns.slots[]` array off the project doc once
+// the per-slot docs exist. Pre-fix this function still read from that
+// stripped array, so `availableNativeSlot` saw an empty ready-set after
+// the migration ran and every `POST /v1/test-slots/checkout` returned
+// 503 "no ready test environment slots available". This is the second
+// half of the read path that the storage rework forgot to migrate —
+// docs/migration-policy.md "runtime reads whose purpose is to keep old
+// behavior working" is exactly the smell the stripped-array read
+// represented.
 func (s *Store) nativeReadySlots(ctx context.Context, project string) []int {
-	doc, err := s.readProjectDoc(ctx, project)
+	slots, err := s.ListSlotsByProject(ctx, project)
 	if err != nil {
 		return nil
 	}
-	standby, ok := doc.Metadata["native_standby_dns"].(map[string]any)
-	if !ok {
-		return nil
-	}
-	count, ok := positiveIntValue(standby["count"])
-	if !ok {
-		return nil
-	}
-	slots := make([]int, 0)
-	for _, slot := range mapSliceValue(standby["slots"]) {
-		index, ok := positiveIntValue(firstAny(slot["slot_index"], slot["slotIndex"]))
-		if !ok || index < 1 || index > count {
-			continue
+	return filterLeasableSlots(slots)
+}
+
+// filterLeasableSlots is the pure half of nativeReadySlots: given the
+// full set of slot docs for a project, return the indices that are
+// `provisioned` (the documented "ready to be acquired" state per the
+// transitions in internal/server/slot.go: unseeded → provisioning →
+// provisioned → activating → running → cleaning → provisioned).
+// `activating`/`running` slots are already held by a claimed lease;
+// earlier states are still being seeded. Extracted as a pure helper so
+// it is unit-testable without a Cosmos fake.
+func filterLeasableSlots(slots []server.Slot) []int {
+	out := make([]int, 0, len(slots))
+	for _, slot := range slots {
+		if slot.State == server.SlotStateProvisioned {
+			out = append(out, slot.SlotIndex)
 		}
-		state, _ := slot["state"].(string)
-		if strings.EqualFold(strings.TrimSpace(state), "ready") {
-			slots = append(slots, index)
-		}
 	}
-	sort.Ints(slots)
-	return slots
+	sort.Ints(out)
+	return out
 }
 
 func (s *Store) nativeGlobalCap() int {

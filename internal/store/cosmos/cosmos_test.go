@@ -539,3 +539,54 @@ func serverIssueRowForTest(ref string, state string) server.IssueRow {
 		LastRunState: &state,
 	}
 }
+
+// TestFilterLeasableSlotsRequiresProvisionedState pins the post-slot-
+// storage-rework contract that drives nativeReadySlots / availableNativeSlot
+// / POST /v1/test-slots/checkout. Only slots in `provisioned` state are
+// leasable; every other state must be filtered out so the lease acquire
+// path doesn't try to claim a slot the runtime is mid-seeding, mid-
+// activating, or already running. Pre-fix nativeReadySlots read from
+// the legacy `metadata.native_standby_dns.slots[]` array — which the
+// startup migration strips off the project doc — so the lease path
+// returned an empty ready-set after every boot and POST checkout 503'd.
+func TestFilterLeasableSlotsRequiresProvisionedState(t *testing.T) {
+	slots := []server.Slot{
+		{Project: "tank-operator", SlotIndex: 3, State: server.SlotStateProvisioned},
+		{Project: "tank-operator", SlotIndex: 1, State: server.SlotStateProvisioned},
+		{Project: "tank-operator", SlotIndex: 2, State: server.SlotStateActivating},
+		{Project: "tank-operator", SlotIndex: 4, State: server.SlotStateRunning},
+		{Project: "tank-operator", SlotIndex: 5, State: server.SlotStateProvisioning},
+		{Project: "tank-operator", SlotIndex: 6, State: server.SlotStateUnseeded},
+		{Project: "tank-operator", SlotIndex: 7, State: server.SlotStateCleaning},
+		{Project: "tank-operator", SlotIndex: 8, State: server.SlotStateError},
+		{Project: "tank-operator", SlotIndex: 9, State: server.SlotStateProvisioned},
+	}
+	got := filterLeasableSlots(slots)
+	want := []int{1, 3, 9}
+	if len(got) != len(want) {
+		t.Fatalf("filterLeasableSlots = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("filterLeasableSlots = %v, want %v (sorted ascending)", got, want)
+		}
+	}
+}
+
+// TestFilterLeasableSlotsHandlesEmpty covers the regression that caused
+// the 503 in production: pre-fix nativeReadySlots iterated the stripped
+// legacy array and returned an empty slice; availableNativeSlot then
+// returned ErrUnavailable. With the new shape an empty input still
+// produces an empty output, but the SOURCE is the slots collection,
+// which the migration populates with provisioned docs. The contract
+// asserted here is the safe-defaulting one: empty in, empty out, no
+// panic, no nil-vs-empty surprises.
+func TestFilterLeasableSlotsHandlesEmpty(t *testing.T) {
+	got := filterLeasableSlots(nil)
+	if got == nil {
+		t.Fatal("filterLeasableSlots(nil) must return non-nil empty slice")
+	}
+	if len(got) != 0 {
+		t.Fatalf("filterLeasableSlots(nil) = %v, want []", got)
+	}
+}
