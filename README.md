@@ -253,8 +253,16 @@ from the session checkout, copy the compiled artifact into the selected pod as
 `target.next`, atomically rename it to `target`, signal the supervisor, and
 optionally poll the configured health path.
 
-Glimmung validates the metadata on project registration. The first executor is
-the repo-local ops CLI:
+The developer-driven path is `POST /v1/test-slots/apply-hot-swap` (MCP tool
+`apply_test_slot_hot_swap`). It takes a `git_ref` and dispatches a one-off
+Kubernetes Job that clones, builds, kubectl-streams the artifact into the
+target pod, sends the configured restart signal, and records hot-swap history
+on the lease. Sync UX, 120s default timeout, 600s hard cap. See
+[`docs/test-slot-hot-swap.md`](docs/test-slot-hot-swap.md) for the workflow
+contract and the migration from the manual kubectl pattern.
+
+Glimmung validates the metadata on project registration. The verify-loop
+executor is the repo-local ops CLI:
 
 ```sh
 glimmung-agent test-slot-hot-swap \

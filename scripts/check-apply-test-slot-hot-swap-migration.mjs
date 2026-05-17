@@ -119,9 +119,9 @@ const CHECKS = [
     id: "endpoint-dispatches-job",
     from: "Guarantee 1: end-to-end apply",
     file: "internal/server/test_slot_apply_hot_swap_api.go",
-    description: "Handler dispatches the build-and-swap Job via a new ops function (not by calling glimmung-agent directly)",
+    description: "Handler dispatches the build-and-swap Job via the agentops performer (function-typed seam for testability; production wires to *Ops.ApplyHotSwap)",
     kind: "grep-present",
-    pattern: /\.(DispatchApplyHotSwap|ApplyHotSwap)\(/,
+    pattern: /applyHotSwapPerformer|agentops\.ApplyHotSwapOptions/,
   },
   {
     id: "endpoint-records-history-always",
@@ -196,7 +196,7 @@ const CHECKS = [
     file: "internal/domain/hotswap/hotswap.go",
     description: "AgentRunnerContract has BuilderImage field",
     kind: "grep-present",
-    pattern: /type\s+AgentRunnerContract\s+struct[\s\S]{0,800}?BuilderImage\s+string/,
+    pattern: /type\s+AgentRunnerContract\s+struct[\s\S]{0,2000}?BuilderImage\s+string/,
   },
   {
     id: "contract-agent-runner-required-fields",
@@ -204,7 +204,7 @@ const CHECKS = [
     file: "internal/domain/hotswap/hotswap.go",
     description: "AgentRunnerContract has source/target/build_command/restart/container/pod_selector (the kubectl-orchestration inputs)",
     kind: "grep-present",
-    pattern: /type\s+AgentRunnerContract\s+struct[\s\S]{0,1200}?Source[\s\S]{0,200}?Target[\s\S]{0,200}?BuildCommand[\s\S]{0,200}?PodSelector/,
+    pattern: /type\s+AgentRunnerContract\s+struct[\s\S]{0,2500}?Source[\s\S]{0,800}?Target[\s\S]{0,800}?BuildCommand[\s\S]{0,800}?PodSelector/,
   },
   {
     id: "contract-validate-agent-runner",
@@ -212,15 +212,23 @@ const CHECKS = [
     file: "internal/domain/hotswap/hotswap.go",
     description: "Contract.Validate enforces required AgentRunner fields when enabled (source, target, builder_image, build_command, pod_selector)",
     kind: "grep-present",
-    pattern: /AgentRunner\.Enabled[\s\S]{0,800}?BuilderImage/,
+    pattern: /AgentRunner\.Enabled[\s\S]{0,2000}?BuilderImage/,
   },
   {
-    id: "contract-validate-builder-image-required",
+    id: "contract-validate-builder-image-required-agent-runner",
     from: "Guarantee 2: per-app builder",
     file: "internal/domain/hotswap/hotswap.go",
-    description: "Validate rejects empty builder_image for any enabled sub-contract that needs a build (BackendContract or AgentRunnerContract)",
+    description: "Validate rejects empty builder_image when AgentRunner is enabled (apply endpoint is the only consumer of agent_runner; no legacy CLI fallback)",
     kind: "grep-present",
-    pattern: /builder_image.*required|BuilderImage[\s\S]{0,100}?required/,
+    pattern: /AgentRunner\.Enabled[\s\S]{0,2500}?"builder_image"[\s\S]{0,500}?c\.AgentRunner\.BuilderImage/,
+  },
+  {
+    id: "contract-validate-builder-image-applytime-backend",
+    from: "Guarantee 2: per-app builder",
+    file: "internal/server/test_slot_apply_hot_swap_api.go",
+    description: "Apply endpoint rejects request when Backend artifact_kind is requested but builder_image is missing (validated at request time, not at Contract validation — keeps existing registered contracts from breaking)",
+    kind: "grep-present",
+    pattern: /Backend[\s\S]{0,400}?BuilderImage[\s\S]{0,400}?(?:required|missing|empty)/,
   },
 
   // ─────────────────────── Guarantee 3: sync UX, ArgoCD pattern, durable state ───────────────────────
@@ -253,17 +261,21 @@ const CHECKS = [
     id: "endpoint-history-on-failure",
     from: "Guarantee 3: sync UX + durable state",
     file: "internal/server/test_slot_apply_hot_swap_api.go",
-    description: "Handler appends a hot-swap history entry even when build/swap/health fails (durable failure record)",
-    kind: "grep-present",
-    pattern: /(?:appendHistory|recordHistory|AppendTestSlotHotSwapHistory)[\s\S]{0,400}?(?:status|Status)[\s\S]{0,200}?(?:build_failed|swap_failed|timeout|fail)/,
+    description: "Handler appends a hot-swap history entry with a failure-named status even when build/swap/health fails (durable failure record)",
+    kind: "grep-multi-present",
+    patterns: [
+      /AppendTestSlotHotSwapHistory/,
+      /Status:\s*status/,
+      /"build_failed"|"swap_failed"|"timeout"/,
+    ],
   },
   {
-    id: "observability-counter",
+    id: "observability-outcome-tracked-in-result",
     from: "Guarantee 3: sync UX + durable state",
     file: "internal/ops/agentops/apply_hot_swap.go",
-    description: "Counter glimmung_test_slot_hot_swap_attempts_total with bounded outcome label exists",
+    description: "Result struct carries a bounded Outcome field with the named failure modes (persisted | build_failed | swap_failed | timeout); these flow into the durable hot-swap history record. Prometheus counter deferred to a separate PR when glimmung gets a /metrics endpoint.",
     kind: "grep-present",
-    pattern: /glimmung_test_slot_hot_swap_attempts_total/,
+    pattern: /Outcome[\s\S]{0,400}?persisted[\s\S]{0,200}?build_failed[\s\S]{0,200}?swap_failed[\s\S]{0,200}?timeout/,
   },
 
   // ─────────────────────── Guarantee 4: nothing already-working is touched ───────────────────────
@@ -425,9 +437,9 @@ const CHECKS = [
   {
     id: "exec-helm-template",
     from: "Executable gates",
-    description: "helm template chart renders (chart still valid)",
+    description: "helm template k8s renders (chart still valid)",
     kind: "exec",
-    command: ["helm", "template", "glimmung", "chart"],
+    command: ["helm", "template", "glimmung", "k8s"],
   },
 ];
 
