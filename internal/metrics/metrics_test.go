@@ -31,6 +31,7 @@ var expectedMetrics = []string{
 	"glimmung_cosmos_query_ru_charge_total",
 	"glimmung_cosmos_fanout_partitions_total",
 	"glimmung_cosmos_query_plan_error_total",
+	"glimmung_unavailable_total",
 }
 
 func TestHandlerServesAllRegisteredMetrics(t *testing.T) {
@@ -48,6 +49,7 @@ func TestHandlerServesAllRegisteredMetrics(t *testing.T) {
 	RecordCosmosQuery("reports", CosmosQueryModeSingle, 5*time.Millisecond, 2.5, CosmosQueryOutcomeSuccess, false)
 	RecordCosmosQuery("reports", CosmosQueryModeFanout, 25*time.Millisecond, 18.0, CosmosQueryOutcomeError, true)
 	RecordCosmosFanoutPartition("reports")
+	RecordUnavailable("POST /v1/test-slots/checkout", "test_slot_saturation")
 	// HTTP layer needs a request through the middleware.
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /probe-coverage", func(w http.ResponseWriter, _ *http.Request) {
@@ -133,6 +135,22 @@ func TestRecordCosmosQueryWiresEveryFamily(t *testing.T) {
 	// Histogram observed at least one sample.
 	if testutil.CollectAndCount(cosmosQueryDurationSeconds) == 0 {
 		t.Error("query_duration_seconds histogram has no samples")
+	}
+}
+
+// RecordUnavailable feeds the dedicated counter for deliberate 503
+// responses (saturation, etc.) so they surface on a dashboard instead
+// of being silent writeProblem outputs. The test pins the label
+// contract — route + reason — so a refactor cannot quietly drop one.
+func TestRecordUnavailableIncrementsCounter(t *testing.T) {
+	const route = "POST /v1/test-thing"
+	const reason = "saturation_unit_test"
+	before := testutil.ToFloat64(unavailableTotal.WithLabelValues(route, reason))
+	RecordUnavailable(route, reason)
+	RecordUnavailable(route, reason)
+	after := testutil.ToFloat64(unavailableTotal.WithLabelValues(route, reason))
+	if after-before != 2 {
+		t.Errorf("unavailable_total delta = %v, want 2", after-before)
 	}
 }
 

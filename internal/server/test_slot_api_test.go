@@ -5,12 +5,14 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/nelsong6/glimmung/internal/auth"
+	"github.com/nelsong6/glimmung/internal/metrics"
 )
 
 type fakeTestSlotPreparer struct {
@@ -1261,6 +1263,14 @@ func TestCheckoutTestSlotMapsUnavailable(t *testing.T) {
 	}
 	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil)
 
+	// Snapshot the counter before the request so the test is order-
+	// independent: any prior test that hit the same handler under
+	// saturation would already have moved the counter. The metric is
+	// scraped via the /metrics handler to keep the test free of
+	// metrics-package internals.
+	const labelLine = `glimmung_unavailable_total{reason="test_slot_saturation",route="POST /v1/test-slots/checkout"}`
+	before := scrapeMetricSample(t, labelLine)
+
 	req := httptest.NewRequest(http.MethodPost, "/v1/test-slots/checkout", strings.NewReader(`{"project":"tank-operator"}`))
 	req.Header.Set("Authorization", "Bearer admin")
 	rec := httptest.NewRecorder()
@@ -1272,6 +1282,41 @@ func TestCheckoutTestSlotMapsUnavailable(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "no ready") {
 		t.Fatalf("body=%s", rec.Body.String())
 	}
+	after := scrapeMetricSample(t, labelLine)
+	if after-before != 1 {
+		t.Fatalf("%s delta=%v, want 1", labelLine, after-before)
+	}
+}
+
+// scrapeMetricSample fetches /metrics and returns the value of the
+// sample line that starts with prefix (the metric name + label set).
+// Returns 0 if the line is absent — Prometheus omits metric families
+// with no samples, so an unmoved counter looks the same as a never-
+// observed one. The Helper marker makes failure backtraces point at
+// the caller.
+func scrapeMetricSample(t *testing.T, prefix string) float64 {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/metrics returned %d", rec.Code)
+	}
+	for _, line := range strings.Split(rec.Body.String(), "\n") {
+		if !strings.HasPrefix(line, prefix+" ") {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			t.Fatalf("malformed metric line: %q", line)
+		}
+		v, err := strconv.ParseFloat(parts[len(parts)-1], 64)
+		if err != nil {
+			t.Fatalf("parse %q: %v", line, err)
+		}
+		return v
+	}
+	return 0
 }
 
 func TestReturnTestSlotReleasesLease(t *testing.T) {
