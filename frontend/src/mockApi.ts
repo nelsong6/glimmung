@@ -179,6 +179,7 @@ export const mockSnapshot = {
       created_at: ago(4200),
     },
   ],
+  inflight_locks: { issues: false, prs: false },
 };
 
 const mockIssues = [

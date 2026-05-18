@@ -1204,6 +1204,39 @@ func (s *Store) latestRunForIssue(ctx context.Context, issue issueDoc) (*runDoc,
 	return &latest, docs, nil
 }
 
+// AnyLockHeld reports whether any lock with the given scope is currently
+// held (state == "held" and not past expires_at). Used by the state
+// snapshot to feed the SPA's inflight-lock pulse without forcing the
+// frontend to poll /v1/issues + /v1/touchpoints every 20 seconds. The
+// query is single-partition (locks PK is /scope) so cost is bounded.
+//
+// scope is the lock kind — "issue" or "pr" — and must match the value
+// the lock writer used (see ClaimLock at the bottom of this file).
+func (s *Store) AnyLockHeld(ctx context.Context, scope string) (bool, error) {
+	var docs []lockDoc
+	if err := singlePartitionQuery(
+		ctx,
+		s.locks,
+		azcosmos.NewPartitionKeyString(scope),
+		"SELECT * FROM c WHERE c.scope = @scope AND c.state = @state",
+		[]azcosmos.QueryParameter{
+			{Name: "@scope", Value: scope},
+			{Name: "@state", Value: "held"},
+		},
+		&docs,
+	); err != nil {
+		return false, err
+	}
+	now := time.Now().UTC()
+	for _, doc := range docs {
+		expiresAt := parseOptionalTime(doc.ExpiresAt)
+		if expiresAt != nil && expiresAt.After(now) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *Store) issueLockHeld(ctx context.Context, project string, number int) (bool, error) {
 	var docs []lockDoc
 	if err := singlePartitionQuery(

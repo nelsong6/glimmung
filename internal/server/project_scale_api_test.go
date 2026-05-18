@@ -36,6 +36,12 @@ func (s *fakeProjectScalerStore) ListLeases(context.Context) ([]Lease, error) {
 	return s.leases, nil
 }
 
+// AnyLockHeld satisfies StateStore. Project-scale tests do not
+// exercise the inflight-locks snapshot field.
+func (s *fakeProjectScalerStore) AnyLockHeld(context.Context, string) (bool, error) {
+	return false, nil
+}
+
 func (s *fakeProjectScalerStore) SetProjectTestEnvironmentCount(_ context.Context, project string, count int) (Project, error) {
 	s.name = project
 	s.count = count
