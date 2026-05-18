@@ -3923,6 +3923,24 @@ func (s *Store) availableNativeSlot(ctx context.Context, project string) (*int, 
 	return nil, nil
 }
 
+// nativeReadySlots returns the slot indices that are currently in the
+// `provisioned` state and therefore eligible to receive a new lease.
+//
+// Slot status moved into the dedicated `slots` Cosmos collection in
+// #518 ("test-slot: split slot status into its own Cosmos collection")
+// so that per-slot warmup writes stopped contending on the project doc's
+// etag. The dispatcher path was not updated at the same time: until this
+// fix it kept reading `project.metadata.native_standby_dns.slots[]`,
+// which #518 stopped populating, so every project's checkout returned
+// ErrUnavailable regardless of actual capacity. The Stage 4 deliberate-
+// 503 observability shipped in the contemporaneous Cosmos query
+// contract rollout surfaced this directly:
+// glimmung_unavailable_total{reason="test_slot_saturation"} ticked on
+// every checkout attempt.
+//
+// The query is single-partition (slots PK is /project). count from
+// project metadata still bounds the result so a stale slot doc cannot
+// extend capacity past the declared scale.
 func (s *Store) nativeReadySlots(ctx context.Context, project string) []int {
 	doc, err := s.readProjectDoc(ctx, project)
 	if err != nil {
@@ -3936,19 +3954,29 @@ func (s *Store) nativeReadySlots(ctx context.Context, project string) []int {
 	if !ok {
 		return nil
 	}
-	slots := make([]int, 0)
-	for _, slot := range mapSliceValue(standby["slots"]) {
-		index, ok := positiveIntValue(firstAny(slot["slot_index"], slot["slotIndex"]))
-		if !ok || index < 1 || index > count {
+	slotDocs, err := s.ListSlotsByProject(ctx, project)
+	if err != nil {
+		return nil
+	}
+	return selectReadySlotIndices(slotDocs, count)
+}
+
+// selectReadySlotIndices returns the sorted slot indices that are in
+// state provisioned and within the declared 1..count bound. Extracted
+// from nativeReadySlots so the selection contract is testable without a
+// live Cosmos round trip.
+func selectReadySlotIndices(slots []server.Slot, count int) []int {
+	out := make([]int, 0, len(slots))
+	for _, slot := range slots {
+		if slot.SlotIndex < 1 || slot.SlotIndex > count {
 			continue
 		}
-		state, _ := slot["state"].(string)
-		if strings.EqualFold(strings.TrimSpace(state), "ready") {
-			slots = append(slots, index)
+		if slot.State == server.SlotStateProvisioned {
+			out = append(out, slot.SlotIndex)
 		}
 	}
-	sort.Ints(slots)
-	return slots
+	sort.Ints(out)
+	return out
 }
 
 func (s *Store) nativeGlobalCap() int {
