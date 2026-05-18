@@ -366,6 +366,34 @@ func RecordCosmosFanoutPartition(container string) {
 	cosmosFanoutPartitionsTotal.WithLabelValues(safeLabel(container)).Inc()
 }
 
+// --- Deliberate 503 responses -----------------------------------------------
+//
+// writeProblem with http.StatusServiceUnavailable is silent by design (see
+// the comment block above writeProblem in internal/server/read_api.go);
+// it is the right shape for "X store not configured" responses, which
+// have no operational signal worth logging. Deliberate operational 503s
+// — saturation, retryable transient unavailability — are different: they
+// reflect runtime state operators want to know about. writeUnavailable
+// in the server package emits a structured slog.Warn and feeds this
+// counter so a saturation event is observable on a dashboard, not silent.
+
+var unavailableTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "glimmung_unavailable_total",
+		Help: "Deliberate 503 ServiceUnavailable responses emitted by writeUnavailable, labelled by registered route pattern and a short reason enum (e.g. test_slot_saturation). Configuration-absence 503s ('X store not configured') go through writeProblem and are intentionally not counted here.",
+	},
+	[]string{"route", "reason"},
+)
+
+// RecordUnavailable counts one deliberate 503 response. route is the
+// registered ServeMux pattern (already used by the HTTP middleware so
+// cardinality is bounded); reason is a short, closed-enum string the
+// callsite picks at compile time (e.g. test_slot_saturation). Raw user
+// input must not land in either label.
+func RecordUnavailable(route, reason string) {
+	unavailableTotal.WithLabelValues(safeLabel(route), safeLabel(reason)).Inc()
+}
+
 // --- Auth (auth.romaine.life JWT verifier) -----------------------------------
 
 var authRomaineLifeRequestsTotal = prometheus.NewCounterVec(
@@ -428,6 +456,7 @@ func init() {
 		cosmosQueryRuChargeTotal,
 		cosmosFanoutPartitionsTotal,
 		cosmosQueryPlanErrorTotal,
+		unavailableTotal,
 		authRomaineLifeRequestsTotal,
 	)
 }

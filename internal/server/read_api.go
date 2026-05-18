@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nelsong6/glimmung/internal/domain/budget"
+	"github.com/nelsong6/glimmung/internal/metrics"
 )
 
 type ReadStore interface {
@@ -179,16 +180,24 @@ func parseLimit(w http.ResponseWriter, r *http.Request) (*int, bool) {
 	return &limit, true
 }
 
-// writeProblem writes a 4xx JSON problem response. Callers MUST NOT use
-// it for 5xx — every 5xx in this package goes through writeInternalError
-// so the underlying error survives in logs. The migration guard at
-// scripts/check-handler-5xx-migration.mjs fails CI on any callsite that
-// passes a 5xx status here. Removing the swallow path is the whole point
-// of glimmung#514: without the err, the only signal a 500 leaves is the
-// abstract `detail` body the SPA prints, and the actual cause (Cosmos
-// timeout, schema mismatch, IO error, etc.) is unrecoverable. See
-// docs/quality-timeframes.md for why observability is gating scope, not a
-// follow-up.
+// writeProblem writes a 4xx JSON problem response. The one allowed 5xx
+// use of writeProblem is http.StatusServiceUnavailable for
+// configuration-absence callsites ("X store not configured"); those
+// genuinely have no operational signal worth logging — the deploy
+// didn't wire a dependency, the boot will be retried, the error class
+// is "ops misconfig" not "runtime saturation". Every other 5xx must go
+// through writeInternalError (for unexpected errors) or
+// writeUnavailable (for deliberate operational 503s). The migration
+// guard at scripts/check-handler-5xx-migration.mjs fails CI on
+// writeProblem with StatusInternalServerError; the companion guard at
+// scripts/check-503-observability.mjs enforces that any
+// writeProblem-503 carries a "not configured" literal and that
+// operational 503s use writeUnavailable.
+//
+// Removing the swallow path is the whole point of glimmung#514: without
+// the err the only signal a 500 leaves is the abstract `detail` body
+// the SPA prints, and the actual cause is unrecoverable. See
+// docs/quality-timeframes.md for why observability is gating scope.
 func writeProblem(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"detail": message})
 }
@@ -215,6 +224,36 @@ func writeInternalError(w http.ResponseWriter, r *http.Request, err error, summa
 		"err", err,
 	)
 	writeJSON(w, http.StatusInternalServerError, map[string]string{"detail": summary})
+}
+
+// writeUnavailable writes a 503 JSON problem response and emits a
+// structured slog.Warn capturing the request method, the registered
+// route pattern, the public summary, and a short reason enum. Also
+// increments the glimmung_unavailable_total counter so deliberate
+// 503s are observable on a dashboard — the operator's question is
+// "is the cluster saturated?" not "what was the err?".
+//
+// Use this for runtime, retryable 503s: saturation (no free slots),
+// transient dependency unavailability with a backoff signal, etc.
+// reason is a closed-enum string the callsite picks at compile time
+// (e.g. "test_slot_saturation") so the metric label stays bounded.
+//
+// For 5xx caused by an unexpected error, use writeInternalError
+// instead. For configuration-absence 503s ("X store not configured"),
+// continue using writeProblem — those have no operational signal.
+func writeUnavailable(w http.ResponseWriter, r *http.Request, summary, reason string) {
+	route := r.Pattern
+	if route == "" {
+		route = "(unmatched)"
+	}
+	slog.Warn("handler returned 503",
+		"method", r.Method,
+		"route", route,
+		"summary", summary,
+		"reason", reason,
+	)
+	metrics.RecordUnavailable(route, reason)
+	writeJSON(w, http.StatusServiceUnavailable, map[string]string{"detail": summary})
 }
 
 func stringPtr(value string) *string {

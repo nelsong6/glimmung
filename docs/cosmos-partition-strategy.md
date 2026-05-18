@@ -196,6 +196,15 @@ contract migration did not absorb. As of Stage 2:
   for an availability probe; it is what the k8s readiness/liveness
   probes already use. Operators: retarget the external monitor at
   `/healthz` and delete the `/v1/touchpoints` probe.
-- Stage 4 — `writeUnavailable` helper for deliberate 503 responses
-  (test-slot saturation, etc.) so they leave a structured log line and
-  a counter rather than being silent.
+- Stage 4 (shipped): `writeUnavailable(w, r, summary, reason)` in
+  `internal/server/read_api.go` is the canonical helper for deliberate
+  operational 503s (e.g. test-slot saturation). It emits `slog.Warn`
+  with `route`, `summary`, `reason` and increments
+  `glimmung_unavailable_total{route, reason}`. `writeProblem` with
+  `StatusServiceUnavailable` remains the right shape for
+  configuration-absence 503s ("X store not configured"), which have
+  no operational signal worth logging. The CI guard at
+  `scripts/check-503-observability.mjs` enforces the split: any
+  `writeProblem` 503 must contain a "not configured" literal (or be
+  in the explicit allowlist) — new operational 503s must use
+  `writeUnavailable`.

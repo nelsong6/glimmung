@@ -59,6 +59,17 @@ jobs:
       - name: Guard against retired queryAllWhere / empty NewPartitionKey
         run: node scripts/check-cosmos-queries.mjs
 
+  check-503-observability:
+    name: Deliberate 503 observability contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Guard against silent writeProblem 503s for operational signals
+        run: node scripts/check-503-observability.mjs
+
   frontend:
     runs-on: ubuntu-latest
     steps:
