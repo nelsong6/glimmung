@@ -9,6 +9,88 @@ import (
 	"github.com/nelsong6/glimmung/internal/server"
 )
 
+// selectReadySlotIndices is the pure-function form of the slot-eligibility
+// filter the dispatcher uses. It only returns indices whose state is
+// `provisioned` and which fall inside the project's declared 1..count
+// bound. The function exists so the contract is testable without a
+// live Cosmos round trip; the wrapper nativeReadySlots is the
+// Cosmos-backed callsite and is exercised in live_smoke_test.go.
+//
+// The bug this fix repairs (PR #518 left nativeReadySlots reading
+// project metadata that #518 stopped populating) means the production
+// observation before the fix was "0 ready slots, every checkout 503s,
+// glimmung_unavailable_total ticks". The fixture cases below pin the
+// post-fix contract.
+func TestSelectReadySlotIndices(t *testing.T) {
+	t.Parallel()
+	mk := func(idx int, state string) server.Slot {
+		return server.Slot{Project: "p", SlotIndex: idx, State: state}
+	}
+	cases := []struct {
+		name  string
+		slots []server.Slot
+		count int
+		want  []int
+	}{
+		{
+			name:  "no slots returns empty",
+			slots: nil,
+			count: 5,
+			want:  []int{},
+		},
+		{
+			name: "only provisioned counts",
+			slots: []server.Slot{
+				mk(1, server.SlotStateProvisioned),
+				mk(2, server.SlotStateUnseeded),
+				mk(3, server.SlotStateProvisioning),
+				mk(4, server.SlotStateActivating),
+				mk(5, server.SlotStateRunning),
+				mk(6, server.SlotStateCleaning),
+				mk(7, server.SlotStateError),
+			},
+			count: 10,
+			want:  []int{1},
+		},
+		{
+			name: "out-of-range indices are dropped",
+			slots: []server.Slot{
+				mk(0, server.SlotStateProvisioned),
+				mk(1, server.SlotStateProvisioned),
+				mk(2, server.SlotStateProvisioned),
+				mk(3, server.SlotStateProvisioned),
+			},
+			count: 2,
+			want:  []int{1, 2},
+		},
+		{
+			name: "result is sorted ascending",
+			slots: []server.Slot{
+				mk(5, server.SlotStateProvisioned),
+				mk(1, server.SlotStateProvisioned),
+				mk(3, server.SlotStateProvisioned),
+			},
+			count: 5,
+			want:  []int{1, 3, 5},
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := selectReadySlotIndices(tc.slots, tc.count)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("got %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
 func TestSlotDocMarshalsCanonicalShape(t *testing.T) {
 	now := time.Date(2026, 5, 17, 8, 0, 0, 0, time.UTC)
 	slot := server.NewUnseededSlot("tank-operator", 5, "tank-operator-slot-5", now)
