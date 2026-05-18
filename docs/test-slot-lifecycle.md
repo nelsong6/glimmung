@@ -195,6 +195,95 @@ remaining duration from the durable `assigned_at + ttl_seconds`. A deadline
 that has already passed fires cleanup immediately. After this one-shot pass
 returns, the lifecycle is purely event-driven until the next restart.
 
+### Cleanup interrupts activation
+
+Activation goroutines spawned by `beginTestSlotActivation` are cancellable.
+Every cleanup-entry path (return, callback release, TTL timer, startup
+recovery) cancels any in-flight activation goroutine for the lease AND
+awaits its unwind before issuing K8s deletes. The contract is necessary
+because activation directly creates the lease-scoped `slot-playwright`
+Deployment (and waits on the installer Job that helm-installs the
+project's runtime workloads); without the cancel-await, cleanup races
+those creates and `waitForNoPodsInNamespaces` spins until its 5-minute
+timeout fires.
+
+The implementation: `testSlotActivations` maps each in-flight activation
+to a `*testSlotActivation` with a `cancel` func and a `done` channel
+the goroutine closes from a defer. `cancelInflightActivation` looks up
+the token, calls cancel, waits on done (bounded by
+`activationCancelWait`, currently 30s). Activation goroutines inherit
+the cancellable context end-to-end so every K8s API call honors it; the
+post-cancel state-machine checks (`testSlotLeaseStillClaimed` /
+`testSlotLeaseStillActivating`) catch the case where the slot has
+transitioned to `cleaning` while the activation goroutine was unwinding,
+and the activation bails without writing an error or invoking the
+on-error inline cleanup.
+
+`ReturnTestSlotRuntime` also reorders its K8s deletes for defense in
+depth: the helm-install installer Job (the durable K8s-side producer of
+slot-namespace workloads) is deleted first, its pods are awaited via
+`waitForInstallerPodsTerminated`, and only then are the slot-namespace
+workloads deleted. With both the in-process goroutine and the K8s Job
+dead, the final `waitForNoPodsInNamespaces` sees a static target.
+
+The cancel-from-cleanup path is observable via
+`glimmung_test_slot_activation_cancelled_total{cause=...}`.
+
+### Error recovery
+
+`SlotStateError` is recoverable through cleanup-retry, not terminal in
+the dead-end sense. A slot whose previous cleanup attempt landed it in
+error with `cleanup_error` set converges to `provisioned` when a new
+cleanup trigger fires: a follow-up `returnTestSlot`, callback release,
+TTL timer, or the startup recovery sweep. K8s deletes underneath are
+idempotent, so the retry either succeeds or re-errors with new
+diagnostic context appended to `slot_history`.
+
+`validSlotTransitions[SlotStateError]` allows `SlotStateCleaning`.
+`MarkCleaning` and `MarkCleaned` both accept `error` as a prior state
+(walking through `cleaning` first when invoked directly without an
+intervening `claimTestSlotCleanup`). `claimTestSlotCleanup`'s probe
+short-circuits only when the slot is already in `cleaning` (another
+replica/caller won the race), not when it's in `error`.
+
+`RecoverInFlightTestSlots` covers two error cases at startup:
+
+- **Claimed lease + slot in error + `cleanup_error` set.** The slot
+  belongs to a session whose cleanup goroutine died with the previous
+  process. Recovery re-fires cleanup with `releaseLease=true` so a
+  successful retry releases the lease and returns the slot to
+  `provisioned`.
+- **No claimed lease + slot in error + `cleanup_error` set.** The slot
+  is orphaned (lease released or never recovered). Recovery re-fires
+  cleanup with `releaseLease=false` via a synthetic warmup lease so the
+  cleanup pathway is uniform.
+
+Activation-error slots without a `cleanup_error` are intentionally not
+re-fired automatically: the activation-error path already runs inline
+cleanup before recording error, and re-running activation against a
+slot whose lease may have been canceled is not a safe automatic
+recovery. The decrease-then-increase count path remains the last-resort
+operator action for genuinely stuck error states (cleanup retry also
+failed).
+
+### Cleanup-entry CAS contract
+
+All cleanup-entry paths route through `claimTestSlotCleanup`, which
+performs the durable `* → cleaning` state transition under the
+SlotStore's per-row etag CAS. The probe rejects the claim if the slot
+is already in `cleaning` (another caller/replica got there first); the
+loser responds with the same 202 the granted-claim path returns
+because the durable state is correct from the caller's perspective.
+Outcomes are observable via
+`glimmung_test_slot_cleanup_claim_total{source,outcome}` where source
+is one of `return | callback_release | ttl_expiry | recovery` and
+outcome is `granted | lost_race | error`.
+
+This makes simultaneous-trigger races safe by construction: a public
+return, a TTL timer firing on the same lease in another replica, and a
+callback-release for the same lease all serialize on the slot doc's
+etag — exactly one wins, the rest no-op.
+
 ### Multi-replica safety
 
 The lifecycle does not require a single replica. During rolling deploys,
@@ -365,10 +454,15 @@ The slot system is not complete until all of these are true:
   return for test-slot leases.
 - Expired claimed test-slot leases are cleaned by a per-lease
   `time.AfterFunc` armed at checkout. No polling loop scans for expirations.
-- Slots in `error`, stale `provisioning`, or stale `cleaning` are
-  recovered by `RecoverInFlightTestSlots` at process startup, not by a
-  periodic tick. There is no admin repair endpoint; the only way to
-  remove capacity is decreasing queue size.
+- Slots in `error` (with `cleanup_error` set), stale `provisioning`, or
+  stale `cleaning` are recovered by `RecoverInFlightTestSlots` at
+  process startup, not by a periodic tick. Operator-driven cleanup
+  retry via a follow-up `returnTestSlot` against an error slot is also
+  supported and goes through the same `error → cleaning` state-machine
+  transition; the API-level retry exists so a flaky cleanup doesn't
+  require a process restart. There is no admin repair endpoint; the
+  last-resort capacity-removal path for a genuinely stuck error slot
+  (cleanup retry also failed) remains decreasing queue size.
 - Missing slot docs are seeded by the PATCH-count handler when the count
   changes and by the startup recovery sweep. There is no background
   job that re-checks count vs the `slots` collection between those two

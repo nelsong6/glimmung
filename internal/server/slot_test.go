@@ -71,6 +71,7 @@ var allValidTransitions = []struct{ from, to string }{
 	{SlotStateRunning, SlotStateError},
 	{SlotStateCleaning, SlotStateProvisioned},
 	{SlotStateCleaning, SlotStateError},
+	{SlotStateError, SlotStateCleaning},
 }
 
 func TestCanTransitionToAcceptsValidTransitions(t *testing.T) {
@@ -128,12 +129,21 @@ func TestCanTransitionToRejectsUnknownFromState(t *testing.T) {
 	}
 }
 
-func TestErrorTerminal(t *testing.T) {
-	// Any forward transition from error is rejected — recovery is operator-
-	// driven via decrease-then-increase count, not a state machine path.
+func TestErrorAllowsCleaningRetry(t *testing.T) {
+	// error→cleaning is the recovery-retry transition: a prior cleanup
+	// attempt failed, and a fresh trigger (returnTestSlot, callback
+	// release, TTL timer, or startup recovery) is asking for another
+	// attempt. K8s ops are idempotent so retry either converges or
+	// re-errors with new diagnostic context. Any OTHER forward
+	// transition from error stays rejected — recovery from a stuck
+	// error-after-retry slot is operator-driven via decrease-then-
+	// increase count, not a state-machine path.
 	s := Slot{State: SlotStateError}
+	if err := s.CanTransitionTo(SlotStateCleaning); err != nil {
+		t.Errorf("transition error -> cleaning must be allowed for retry: %v", err)
+	}
 	for _, to := range SlotStates {
-		if to == SlotStateError {
+		if to == SlotStateError || to == SlotStateCleaning {
 			continue
 		}
 		if err := s.CanTransitionTo(to); err == nil {

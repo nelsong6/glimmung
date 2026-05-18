@@ -150,16 +150,86 @@ func (l *KubernetesNativeLauncher) ActivateTestSlotRuntime(ctx context.Context, 
 
 func (l *KubernetesNativeLauncher) ReturnTestSlotRuntime(ctx context.Context, lease Lease, project Project) error {
 	slotName, _ := stringFromMap(lease.Metadata, "native_slot_name")
-	if strings.TrimSpace(slotName) != "" {
-		if err := l.deletePlaywrightResources(ctx, lease, slotName); err != nil {
-			return err
-		}
-		if err := l.deleteTestSlotRuntimeResources(ctx, lease, project, slotName); err != nil {
-			return err
-		}
-		return l.deleteTestSlotInstaller(ctx, lease)
+	if strings.TrimSpace(slotName) == "" {
+		return nil
+	}
+	// 1. Delete the installer Job + clone Secret first. The Job's pods run
+	//    `helm install`, which creates the slot-scoped Deployments / Pods /
+	//    Services we're about to delete. If we deleted those outputs first
+	//    while the Job was still running, helm would recreate them faster
+	//    than we could delete them and waitForNoPodsInNamespaces would spin
+	//    until its 5-minute timeout fired — the failure mode that previously
+	//    stranded the slot in `error`. See docs/test-slot-lifecycle.md.
+	if err := l.deleteTestSlotInstaller(ctx, lease); err != nil {
+		return err
+	}
+	// 2. Wait for the installer Job's pods to terminate. The helm-install
+	//    process lives in the pod; once the pod is gone, helm cannot create
+	//    further K8s objects. Background propagation on the Job DELETE marks
+	//    its pods for GC; we poll until the GC catches up so the next steps
+	//    don't race the helm tail.
+	if err := l.waitForInstallerPodsTerminated(ctx, l.Settings.NativeRunnerNamespace, testSlotInstallerJobName(lease), 90*time.Second); err != nil {
+		return err
+	}
+	// 3. Delete the lease-scoped Playwright Deployment and Service. Cleanup
+	//    creates these via ensurePlaywrightForSlot during activation; the
+	//    in-process activation goroutine that creates them has already been
+	//    cancelled and awaited by beginTestSlotCleanup before reaching this
+	//    function — so this delete sees a static target.
+	if err := l.deletePlaywrightResources(ctx, lease, slotName); err != nil {
+		return err
+	}
+	// 4. Delete the remaining slot-namespace workloads (project app
+	//    Deployments, Services, leftover Jobs/Pods) and wait for every pod
+	//    in the slot namespace(s) to terminate. With the installer Job dead
+	//    and the activation goroutine unwound, no producer is left racing
+	//    this final sweep.
+	if err := l.deleteTestSlotRuntimeResources(ctx, lease, project, slotName); err != nil {
+		return err
 	}
 	return nil
+}
+
+// waitForInstallerPodsTerminated polls for the helm-install pod(s) spawned
+// by the installer Job to be gone. The Job's DELETE call (with Background
+// propagation) marks the pods for GC; this poll waits for the GC to catch
+// up so the cleanup path that follows doesn't race the helm tail still
+// running inside an undead pod. Selector is the standard K8s job-name
+// label that controller-runtime attaches to Job pods.
+func (l *KubernetesNativeLauncher) waitForInstallerPodsTerminated(ctx context.Context, namespace, jobName string, timeout time.Duration) error {
+	namespace = strings.TrimSpace(namespace)
+	jobName = strings.TrimSpace(jobName)
+	if namespace == "" || jobName == "" {
+		return nil
+	}
+	if timeout <= 0 {
+		timeout = 90 * time.Second
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	selector := "job-name=" + labelValue(jobName)
+	path := "/api/v1/namespaces/" + namespace + "/pods?labelSelector=" + url.QueryEscape(selector)
+	for {
+		status, list, err := l.request(ctx, http.MethodGet, path, nil)
+		if err != nil {
+			if status == http.StatusNotFound || status == http.StatusForbidden {
+				return nil
+			}
+			return err
+		}
+		if len(anySlice(list["items"])) == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("installer job %s/%s pods did not terminate within %s", namespace, jobName, timeout)
+		case <-ticker.C:
+		}
+	}
 }
 
 func (l *KubernetesNativeLauncher) CleanupTestSlotInstaller(ctx context.Context, lease Lease, _ Project) error {

@@ -366,6 +366,59 @@ func RecordCosmosFanoutPartition(container string) {
 	cosmosFanoutPartitionsTotal.WithLabelValues(safeLabel(container)).Inc()
 }
 
+// --- Test slot lifecycle -----------------------------------------------------
+//
+// The activation_cancelled counter exists because the activation/cleanup race
+// it tracks is the failure mode that previously stranded slots in `error`
+// state: a return arriving mid-activation raced the in-flight activation
+// goroutine, the goroutine kept recreating the lease-scoped Playwright
+// Deployment, waitForNoPodsInNamespaces timed out, and the slot transitioned
+// to terminal-error. The cancel-await wiring eliminates the race; this
+// counter makes the cancel-from-cleanup path observable so a regression
+// surfaces on a dashboard, not as a stranded slot the next operator finds.
+// cause is a closed enum (return, callback_release, ttl_expiry, recovery);
+// label cardinality is bounded.
+
+var testSlotActivationCancelledTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "glimmung_test_slot_activation_cancelled_total",
+		Help: "Test-slot activation goroutines cancelled by a cleanup path before completing on their own, labelled by trigger cause (return, callback_release, ttl_expiry, recovery).",
+	},
+	[]string{"cause"},
+)
+
+// RecordTestSlotActivationCancelled counts one cleanup-driven cancellation
+// of an in-flight activation goroutine. Called from cancelInflightActivation
+// when there was a live token in testSlotActivations — same-key cancellation
+// is at-most-once per goroutine because the activation token is removed
+// from the map by the goroutine's own defer chain.
+func RecordTestSlotActivationCancelled(cause string) {
+	testSlotActivationCancelledTotal.WithLabelValues(safeLabel(cause)).Inc()
+}
+
+var testSlotCleanupClaimTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "glimmung_test_slot_cleanup_claim_total",
+		Help: "Outcomes of the etag-CAS that transitions a slot to `cleaning`, labelled by source (return, callback_release, ttl_expiry, recovery) and outcome (granted, lost_race, error). Granted means this caller won the claim and is running cleanup; lost_race means another replica got there first (multi-replica safety); error is a real store failure.",
+	},
+	[]string{"source", "outcome"},
+)
+
+// Test-slot cleanup-claim outcome labels.
+const (
+	CleanupClaimOutcomeGranted  = "granted"
+	CleanupClaimOutcomeLostRace = "lost_race"
+	CleanupClaimOutcomeError    = "error"
+)
+
+// RecordTestSlotCleanupClaim counts one outcome of claimTestSlotCleanup.
+// source mirrors the activationCancel* and history-entry source strings
+// (return, callback_release, ttl_expiry, recovery); outcome is one of the
+// CleanupClaimOutcome* constants.
+func RecordTestSlotCleanupClaim(source, outcome string) {
+	testSlotCleanupClaimTotal.WithLabelValues(safeLabel(source), safeLabel(outcome)).Inc()
+}
+
 // --- Deliberate 503 responses -----------------------------------------------
 //
 // writeProblem with http.StatusServiceUnavailable is silent by design (see
@@ -458,6 +511,8 @@ func init() {
 		cosmosQueryPlanErrorTotal,
 		unavailableTotal,
 		authRomaineLifeRequestsTotal,
+		testSlotActivationCancelledTotal,
+		testSlotCleanupClaimTotal,
 	)
 }
 

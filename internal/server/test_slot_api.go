@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/nelsong6/glimmung/internal/metrics"
 )
 
 const (
@@ -78,6 +80,25 @@ type TestSlotReturnResult struct {
 	Detail         *string `json:"detail,omitempty"`
 }
 
+// testSlotActivation tracks one in-flight activation goroutine. Stored in
+// testSlotActivations keyed by testSlotActivationKey(lease). Cleanup paths
+// (return, callback release, TTL expiry) cancel the activation and wait on
+// done before issuing K8s deletes, so the activation goroutine has fully
+// unwound by the time cleanup starts deleting resources it might recreate.
+//
+// The activation goroutine closes done from a defer; cancel is idempotent
+// and is also called from the same defer chain. Callers that miss the
+// goroutine (token already gone from the map) treat that as "no activation
+// to cancel" — the goroutine already exited.
+type testSlotActivation struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// testSlotActivations maps testSlotActivationKey(lease) → *testSlotActivation
+// for every activation goroutine currently in flight on this pod. Cleanup
+// paths look up the token, call cancel(), and wait on done before issuing
+// K8s deletes — see cancelInflightActivation.
 var testSlotActivations sync.Map
 var testSlotCleanups sync.Map
 
@@ -230,23 +251,45 @@ func returnTestSlot(store ReadStore, preparer TestSlotPreparer, _ NativeGitHubTo
 			return
 		}
 		cleanupStarted := lease.State == "claimed" && boolFromMap(lease.Metadata, "test_slot_checkout")
-		historyEntry := testSlotReturnHistoryEntry(lease, testSlotReturnAudit{
+		audit := testSlotReturnAudit{
 			Source:          stringPointerOrDefault(req.Source, "api.test_slots.return"),
 			Reason:          trimmedOptionalString(req.Reason),
 			CallerPodIP:     trimmedOptionalString(req.CallerPodIP),
 			CallerSessionID: trimmedOptionalString(req.CallerSessionID),
 			CleanupStarted:  cleanupStarted,
-		})
+		}
+		historyEntry := testSlotReturnHistoryEntry(lease, audit)
 		if preparer != nil && cleanupStarted {
 			project, ok := findProjectForTestSlot(r, w, store, req.Project)
 			if !ok {
 				return
 			}
-			if _, err := setLeaseSlotCleanupStarting(r.Context(), store, project, lease, historyEntry); err != nil {
-				writeInternalError(w, r, err, "record test-slot cleanup state failed")
+			// Route through claimTestSlotCleanup so every cleanup-entry
+			// path uses the same etag-CAS as the TTL-timer path. Multi-
+			// replica safety relies on this: simultaneous return + timer
+			// + callback-release calls all race the same CAS and exactly
+			// one wins; the rest get ErrPreconditionFailed (the slot is
+			// already in `cleaning`) and respond with 202 too — same
+			// observable outcome from the caller's perspective.
+			//
+			// error→cleaning is a valid prior transition (recovery
+			// retry); see slot.go validSlotTransitions[SlotStateError].
+			if _, err := claimTestSlotCleanup(r.Context(), store, project, lease, audit); err != nil {
+				if errors.Is(err, ErrPreconditionFailed) {
+					metrics.RecordTestSlotCleanupClaim(activationCancelReturn, metrics.CleanupClaimOutcomeLostRace)
+					// Another replica/timer already started cleanup. The
+					// slot is in `cleaning` durably, so respond with the
+					// same 202 the granted-claim path returns. The caller
+					// polls /v1/state for completion either way.
+					writeJSON(w, http.StatusAccepted, testSlotReturnResponse(project, req.Project, lease, testSlotStateCleaning, true))
+					return
+				}
+				metrics.RecordTestSlotCleanupClaim(activationCancelReturn, metrics.CleanupClaimOutcomeError)
+				writeInternalError(w, r, err, "claim test-slot cleanup failed")
 				return
 			}
-			beginTestSlotCleanup(store, preparer, project, lease, true, nil)
+			metrics.RecordTestSlotCleanupClaim(activationCancelReturn, metrics.CleanupClaimOutcomeGranted)
+			beginTestSlotCleanup(store, preparer, project, lease, true, activationCancelReturn, nil)
 			writeJSON(w, http.StatusAccepted, testSlotReturnResponse(project, req.Project, lease, testSlotStateCleaning, true))
 			return
 		}
@@ -594,17 +637,72 @@ func beginTestSlotActivation(store ReadStore, preparer TestSlotPreparer, minter 
 	if key == "" {
 		return false
 	}
-	if _, loaded := testSlotActivations.LoadOrStore(key, struct{}{}); loaded {
+	ctx, cancel := context.WithCancel(context.Background())
+	token := &testSlotActivation{
+		cancel: cancel,
+		done:   make(chan struct{}),
+	}
+	if _, loaded := testSlotActivations.LoadOrStore(key, token); loaded {
+		// Another goroutine already owns this key. Release the unused
+		// cancel func so it isn't leaked, then bail.
+		cancel()
 		return false
 	}
 	testSlotInflight.Add(1)
 	go func() {
 		defer testSlotInflight.Done()
 		defer testSlotActivations.Delete(key)
-		activateTestSlotRuntime(context.Background(), store, preparer, minter, project, lease, logf)
+		defer cancel()
+		defer close(token.done)
+		activateTestSlotRuntime(ctx, store, preparer, minter, project, lease, logf)
 	}()
 	return true
 }
+
+// cancelInflightActivation cancels an in-flight activation goroutine for
+// the given lease key and waits for it to unwind (or for waitCtx to expire).
+// Returns true if there was an activation to cancel.
+//
+// Cleanup paths call this before issuing K8s deletes so the activation
+// goroutine — which directly creates the slot-playwright Deployment and
+// other lease-scoped runtime resources — is fully out of the way before
+// cleanup starts removing those same resources. Without the await, the
+// activation goroutine would race cleanup and recreate resources cleanup
+// just deleted, causing waitForNoPodsInNamespaces to spin until its
+// 5-minute timeout fires and the slot lands in `error`.
+//
+// `cause` is recorded on glimmung_test_slot_activation_cancelled_total so
+// the cancel-from-cleanup path is observable on a dashboard. cause must be
+// one of the activationCancel* constants below.
+func cancelInflightActivation(waitCtx context.Context, key, cause string) bool {
+	if key == "" {
+		return false
+	}
+	raw, ok := testSlotActivations.Load(key)
+	if !ok {
+		return false
+	}
+	token, ok := raw.(*testSlotActivation)
+	if !ok || token == nil {
+		return false
+	}
+	token.cancel()
+	metrics.RecordTestSlotActivationCancelled(cause)
+	select {
+	case <-token.done:
+	case <-waitCtx.Done():
+	}
+	return true
+}
+
+// Activation-cancel cause labels. Closed enum so the
+// glimmung_test_slot_activation_cancelled_total{cause} cardinality is bounded.
+const (
+	activationCancelReturn          = "return"
+	activationCancelCallbackRelease = "callback_release"
+	activationCancelTTLExpiry       = "ttl_expiry"
+	activationCancelRecovery        = "recovery"
+)
 
 func activateTestSlotRuntime(parent context.Context, store ReadStore, preparer TestSlotPreparer, minter NativeGitHubTokenMinter, project Project, lease Lease, logf func(string, ...any)) {
 	// Cross-replica dedup story for activation: there is no meaningful state
@@ -671,7 +769,7 @@ func cleanupTestSlotInstaller(parent context.Context, preparer TestSlotPreparer,
 	}
 }
 
-func beginTestSlotCleanup(store ReadStore, preparer TestSlotPreparer, project Project, lease Lease, releaseLease bool, logf func(string, ...any)) bool {
+func beginTestSlotCleanup(store ReadStore, preparer TestSlotPreparer, project Project, lease Lease, releaseLease bool, cause string, logf func(string, ...any)) bool {
 	if preparer == nil {
 		return false
 	}
@@ -690,10 +788,35 @@ func beginTestSlotCleanup(store ReadStore, preparer TestSlotPreparer, project Pr
 	go func() {
 		defer testSlotInflight.Done()
 		defer testSlotCleanups.Delete(key)
+		// Cancel any in-flight activation goroutine for this lease and
+		// wait for it to unwind BEFORE we issue any K8s deletes. The
+		// activation goroutine directly creates the lease-scoped
+		// Playwright Deployment (and waits on the installer Job that
+		// helm-installs the project's runtime workloads); without this
+		// await, cleanup races those creates and waitForNoPodsInNamespaces
+		// times out against a slot whose live activation keeps recreating
+		// the pods being deleted. See docs/test-slot-lifecycle.md.
+		//
+		// Bounded by activationCancelWait so a misbehaving activation
+		// can't strand cleanup indefinitely; expiry is rare and the K8s
+		// deletes below are idempotent against any tail-end resources
+		// activation may still create after the wait expires.
+		waitCtx, cancelWait := context.WithTimeout(context.Background(), activationCancelWait)
+		cancelInflightActivation(waitCtx, key, cause)
+		cancelWait()
 		cleanupTestSlotRuntime(context.Background(), store, preparer, project, lease, releaseLease, logf)
 	}()
 	return true
 }
+
+// activationCancelWait bounds how long beginTestSlotCleanup waits for an
+// in-flight activation goroutine to honor cancellation. activation unwind
+// is dominated by the time it takes the in-flight K8s API call to return
+// ctx.Err() (sub-second) plus a Cosmos read in the post-cancel state-checks
+// (~100ms). 30s is generous; expiry is observable via
+// glimmung_test_slot_activation_cancelled_total minus the cleanup-completed
+// counter (a delta means an activation didn't unwind cleanly).
+const activationCancelWait = 30 * time.Second
 
 func cleanupTestSlotRuntime(parent context.Context, store ReadStore, preparer TestSlotPreparer, project Project, lease Lease, releaseLease bool, logf func(string, ...any)) {
 	// Cross-replica dedup for cleanup: initiation paths (return, callback
@@ -808,6 +931,36 @@ func testSlotLeaseStillState(ctx context.Context, store ReadStore, _ Project, le
 	return slot.State == state
 }
 
+// recoveredSlotStatus reads the slot's current state for the recovery
+// sweep. Prefers the SlotStore collection (the durable source post-#518);
+// falls back to the legacy project-metadata reader so in-memory tests
+// with fakes that only populate project metadata keep working.
+//
+// Returns (state, updated_at, cleanup_error, found). cleanup_error is
+// surfaced separately because the error→cleaning recovery branch needs
+// to distinguish "error from a failed cleanup" (retry-eligible) from
+// "error from a failed activation whose inline cleanup did not record
+// a separate cleanup_error" (skip; lease is typically gone by then).
+func recoveredSlotStatus(ctx context.Context, store ReadStore, project Project, slotIndex int) (string, time.Time, *string, bool) {
+	if slotStore := slotStoreFromReadStore(store); slotStore != nil {
+		projectKey := firstNonEmpty(project.Name, project.ID)
+		if projectKey != "" {
+			if slot, err := slotStore.GetSlot(ctx, projectKey, slotIndex); err == nil {
+				return slot.State, slot.UpdatedAt, slot.CleanupError, true
+			}
+		}
+	}
+	status, ok := testEnvironmentSlotStatus(project, slotIndex)
+	if !ok {
+		return "", time.Time{}, nil, false
+	}
+	// The legacy embedded array predates the cleanup_error field; tests
+	// that drive recovery via legacy fakes won't exercise the
+	// error→cleaning retry path, which is correct (error recovery is a
+	// new behavior tied to the new shape).
+	return status.State, status.UpdatedAt, nil, true
+}
+
 // recoveryMinAge is the lower bound on `updated_at` for an in-flight status
 // (warming/activating/cleaning) before the recovery sweep considers it
 // "the previous pod is dead, I should resume." Recent in-flight states are
@@ -913,26 +1066,51 @@ func RecoverInFlightTestSlots(ctx context.Context, store ReadStore, preparer Tes
 		// the live Helm operation. The etag CAS inside each operation's
 		// goroutine is the second line of defense for the simultaneous-
 		// start case.
-		status, hasStatus := testEnvironmentSlotStatus(project, *slotIndex)
+		//
+		// Slot status is read from the new SlotStore collection where the
+		// store implements it; the legacy testEnvironmentSlotStatus reader
+		// only sees post-#518-migration project metadata (which is empty)
+		// so it would silently skip every slot otherwise. The fallback
+		// keeps in-memory single-replica tests with legacy-only fakes
+		// rendering until they migrate.
+		slotState, updatedAt, slotCleanupError, hasStatus := recoveredSlotStatus(ctx, store, project, *slotIndex)
 		if !hasStatus {
 			continue
 		}
-		recent := !status.UpdatedAt.IsZero() && time.Since(status.UpdatedAt) < recoveryMinAge
-		switch status.State {
-		case testSlotStateActivating:
+		recent := !updatedAt.IsZero() && time.Since(updatedAt) < recoveryMinAge
+		switch slotState {
+		case SlotStateActivating:
 			if recent {
 				continue
 			}
 			beginTestSlotActivation(store, preparer, minter, project, lease, logf)
-		case testSlotStateCleaning:
+		case SlotStateCleaning:
 			if recent {
 				continue
 			}
-			beginTestSlotCleanup(store, preparer, project, lease, true, logf)
-		case testSlotStateActive:
+			beginTestSlotCleanup(store, preparer, project, lease, true, activationCancelRecovery, logf)
+		case SlotStateError:
+			// error→cleaning retry: a prior cleanup attempt left the slot
+			// in error with cleanup_error set, and the lease is still
+			// claimed (no one released it). Re-fire cleanup. K8s ops
+			// underneath are idempotent so the retry either converges on
+			// success or re-errors with new diagnostic context appended
+			// to slot_history. activation_error-only slots (cleanup not
+			// yet attempted) are skipped — the activation-error path
+			// already runs cleanup inline before recording error, and
+			// re-running activation against a slot whose lease may have
+			// been canceled is not a safe automatic recovery.
+			if slotCleanupError == nil {
+				continue
+			}
+			if recent {
+				continue
+			}
+			beginTestSlotCleanup(store, preparer, project, lease, true, activationCancelRecovery, logf)
+		case SlotStateRunning, testSlotStateActive:
 			// Installer cleanup is a one-shot at end of activation; on
 			// startup, drive it once defensively for slots that reached
-			// active before the previous process exited.
+			// running/active before the previous process exited.
 			cleanupTestSlotInstaller(ctx, preparer, lease, project, logf)
 		}
 	}
@@ -964,7 +1142,50 @@ func RecoverInFlightTestSlots(ctx context.Context, store ReadStore, preparer Tes
 				slotName = testEnvironmentName(projectName, slotIndex, project, Lease{})
 			}
 			lease := testEnvironmentWarmupLease(project, slotIndex, slotName)
-			beginTestSlotCleanup(store, preparer, project, lease, false, logf)
+			beginTestSlotCleanup(store, preparer, project, lease, false, activationCancelRecovery, logf)
+		}
+
+		// Slot-collection sweep for `error` slots without a claimed lease.
+		// These are slots whose prior cleanup failed AND whose lease release
+		// then succeeded or was lost — there's no one driving recovery via
+		// the public API. Re-fire cleanup with releaseLease=false; the
+		// cleanup pathway will converge on `provisioned` if K8s state is
+		// reachable, or re-error with new diagnostic context appended to
+		// slot_history. The legacy testEnvironmentSlotStatuses loop above
+		// only sees pre-#518-migration project metadata, so this is the
+		// only path that recovers orphan-error slots after migration.
+		if slotStore := slotStoreFromReadStore(store); slotStore != nil {
+			if rows, err := slotStore.ListSlotsByProject(ctx, projectName); err == nil {
+				for _, slot := range rows {
+					if slot.State != SlotStateError {
+						continue
+					}
+					if claimedSlots[projectName][slot.SlotIndex] {
+						// A claimed lease drives recovery through the
+						// claimed-leases loop above.
+						continue
+					}
+					if slot.CleanupError == nil {
+						// activation_error only; cleanup wasn't attempted
+						// (or its outcome wasn't recorded). Re-running
+						// cleanup against a slot that may never have had
+						// a partial helm install is a no-op; skip to
+						// avoid the spurious K8s 404 storm.
+						continue
+					}
+					if !slot.UpdatedAt.IsZero() && time.Since(slot.UpdatedAt) < recoveryMinAge {
+						continue
+					}
+					slotName := slot.SlotName
+					if strings.TrimSpace(slotName) == "" {
+						slotName = testEnvironmentName(projectName, slot.SlotIndex, project, Lease{})
+					}
+					lease := testEnvironmentWarmupLease(project, slot.SlotIndex, slotName)
+					beginTestSlotCleanup(store, preparer, project, lease, false, activationCancelRecovery, logf)
+				}
+			} else if logf != nil {
+				logf("test-slot recovery slot collection list failed project=%s: %v", projectName, err)
+			}
 		}
 
 		// Warm missing or stale-`warming` slots. Same per-slot dedup as the
