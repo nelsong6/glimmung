@@ -70,6 +70,17 @@ jobs:
       - name: Guard against silent writeProblem 503s for operational signals
         run: node scripts/check-503-observability.mjs
 
+  check-slot-cleanup-migration:
+    name: Slot cleanup migration contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Guard against retired legacy embedded-slot-array surface + PR #525 race-fix revert
+        run: node scripts/check-slot-cleanup-migration.mjs
+
   frontend:
     runs-on: ubuntu-latest
     steps:

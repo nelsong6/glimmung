@@ -221,7 +221,13 @@ func (s *Store) SetProjectTestEnvironmentCount(ctx context.Context, project stri
 		standbyDNS = map[string]any{}
 	}
 	standbyDNS["count"] = count
-	standbyDNS["slots"] = pruneProjectTestEnvironmentSlots(standbyDNS["slots"], count)
+	// The legacy `slots` embedded array is the durable source of slot
+	// state on pre-#518 projects; the boot migration strips it once and
+	// PATCH-count must not write it back. Slot state lives in the
+	// `slots` Cosmos collection, owned by the SlotStore. Decreasing the
+	// count is handled by the orchestrator's PATCH handler deleting the
+	// affected slot rows via SlotStore.DeleteSlot.
+	delete(standbyDNS, "slots")
 	metadata["native_standby_dns"] = standbyDNS
 	if workloadIdentity, ok := metadata["native_standby_workload_identity"].(map[string]any); ok {
 		workloadIdentity["count"] = count
@@ -379,89 +385,12 @@ func (s *Store) ReadProject(ctx context.Context, project string) (server.Project
 	return p.WithETag(string(read.ETag)), nil
 }
 
-func pruneProjectTestEnvironmentSlots(raw any, count int) []map[string]any {
-	slots := make([]map[string]any, 0)
-	for _, slot := range mapSliceValue(raw) {
-		index, ok := positiveIntValue(firstAny(slot["slot_index"], slot["slotIndex"]))
-		if !ok || index > count {
-			continue
-		}
-		slots = append(slots, slot)
-	}
-	return slots
-}
-
-func setProjectTestEnvironmentSlotStatus(raw any, status server.TestEnvironmentSlotStatus) []map[string]any {
-	slots := make([]map[string]any, 0)
-	replaced := false
-	for _, slot := range mapSliceValue(raw) {
-		index, ok := positiveIntValue(firstAny(slot["slot_index"], slot["slotIndex"]))
-		if ok && index == status.SlotIndex {
-			slots = append(slots, projectTestEnvironmentSlotStatusMap(status))
-			replaced = true
-			continue
-		}
-		slots = append(slots, slot)
-	}
-	if !replaced {
-		slots = append(slots, projectTestEnvironmentSlotStatusMap(status))
-	}
-	sort.SliceStable(slots, func(i, j int) bool {
-		left, _ := positiveIntValue(firstAny(slots[i]["slot_index"], slots[i]["slotIndex"]))
-		right, _ := positiveIntValue(firstAny(slots[j]["slot_index"], slots[j]["slotIndex"]))
-		return left < right
-	})
-	return slots
-}
-
-func projectTestEnvironmentSlotStatusMap(status server.TestEnvironmentSlotStatus) map[string]any {
-	slot := map[string]any{
-		"slot_index": status.SlotIndex,
-		"slot_name":  status.SlotName,
-		"state":      status.State,
-		"updated_at": status.UpdatedAt.Format(time.RFC3339Nano),
-	}
-	if status.Detail != nil && strings.TrimSpace(*status.Detail) != "" {
-		slot["detail"] = strings.TrimSpace(*status.Detail)
-	}
-	if status.ReadyAt != nil {
-		slot["ready_at"] = status.ReadyAt.Format(time.RFC3339Nano)
-	}
-	if status.ActivationAttempt != nil {
-		slot["activation_attempt"] = *status.ActivationAttempt
-	}
-	if status.ActivationState != nil && strings.TrimSpace(*status.ActivationState) != "" {
-		slot["activation_state"] = strings.TrimSpace(*status.ActivationState)
-	}
-	if status.ActivationStartedAt != nil {
-		slot["activation_started_at"] = status.ActivationStartedAt.Format(time.RFC3339Nano)
-	}
-	if status.ActivationCompletedAt != nil {
-		slot["activation_completed_at"] = status.ActivationCompletedAt.Format(time.RFC3339Nano)
-	}
-	if status.ActivationJobName != nil && strings.TrimSpace(*status.ActivationJobName) != "" {
-		slot["activation_job_name"] = strings.TrimSpace(*status.ActivationJobName)
-	}
-	if status.ActivationError != nil && strings.TrimSpace(*status.ActivationError) != "" {
-		slot["activation_error"] = strings.TrimSpace(*status.ActivationError)
-	}
-	if status.CleanupState != nil && strings.TrimSpace(*status.CleanupState) != "" {
-		slot["cleanup_state"] = strings.TrimSpace(*status.CleanupState)
-	}
-	if status.CleanupStartedAt != nil {
-		slot["cleanup_started_at"] = status.CleanupStartedAt.Format(time.RFC3339Nano)
-	}
-	if status.CleanupCompletedAt != nil {
-		slot["cleanup_completed_at"] = status.CleanupCompletedAt.Format(time.RFC3339Nano)
-	}
-	if status.CleanupError != nil && strings.TrimSpace(*status.CleanupError) != "" {
-		slot["cleanup_error"] = strings.TrimSpace(*status.CleanupError)
-	}
-	if len(status.ReturnHistory) > 0 {
-		slot["test_slot_return_history"] = status.ReturnHistory
-	}
-	return slot
-}
+// The legacy slot-status writers that produced
+// project.metadata.native_standby_dns.slots entries have been removed.
+// Slot state lives in the `slots` Cosmos collection, written
+// exclusively through SlotStore.UpdateIfMatch. The boot migration in
+// internal/server/slot_migration.go strips the embedded array; this
+// PATCH-count handler no longer rewrites it.
 
 func (s *Store) readProjectDoc(ctx context.Context, project string) (projectDoc, error) {
 	read, err := s.projects.ReadItem(ctx, azcosmos.NewPartitionKeyString(project), project, nil)

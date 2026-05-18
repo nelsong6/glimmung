@@ -428,11 +428,11 @@ func testEnvironmentsFromSnapshot(
 		project := projectsByName[projectName]
 		slotCount := projectTestSlotCount(settings, project)
 
-		// Build a per-slot view of the new slots collection. If the
-		// store doesn't implement SlotStore (in tests), fall back to
-		// reading from the project's legacy embedded array via
-		// testEnvironmentSlotStatuses — those tests will still pass
-		// until they migrate their fakes.
+		// Per-slot view of the durable slots collection. Production code
+		// reads slot state exclusively from here; legacy fixtures in
+		// tests are bridged into the collection by the fake's
+		// ListSlotsByProject, so the rendering path doesn't need a
+		// fallback to the embedded array.
 		slotsByIndex := map[int]Slot{}
 		historiesByIndex := map[int][]SlotHistoryEntry{}
 		if slotStore != nil {
@@ -452,18 +452,12 @@ func testEnvironmentsFromSnapshot(
 				}
 			}
 		}
-		legacyStatuses := testEnvironmentSlotStatuses(project)
 
 		for slotIndex := 1; slotIndex <= slotCount; slotIndex++ {
 			lease, claimed := claimedByProject[projectName][slotIndex]
 			var publicLease *LeasePublic
 			slot, hasSlot := slotsByIndex[slotIndex]
-			legacyStatus, hasLegacy := legacyStatuses[slotIndex]
 
-			// Prefer the new SlotStore row when present. Otherwise fall
-			// back to the legacy embedded status so single-replica
-			// in-memory tests (whose fakes only populate project
-			// metadata) keep rendering.
 			var (
 				state                 string
 				detail                *string
@@ -498,27 +492,6 @@ func testEnvironmentsFromSnapshot(
 				cleanupCompletedAt = slot.CleanupCompletedAt
 				cleanupError = slot.CleanupError
 				cleanupState = derivedCleanupState(slot)
-			} else if hasLegacy {
-				state = legacyStatus.State
-				if state == testSlotStateReady {
-					state = "available"
-				}
-				detail = legacyStatus.Detail
-				if !legacyStatus.UpdatedAt.IsZero() {
-					value := legacyStatus.UpdatedAt
-					updatedAt = &value
-				}
-				provisionedAt = legacyStatus.ReadyAt
-				activationAttempt = legacyStatus.ActivationAttempt
-				activationStartedAt = legacyStatus.ActivationStartedAt
-				activationCompletedAt = legacyStatus.ActivationCompletedAt
-				activationJobName = legacyStatus.ActivationJobName
-				activationError = legacyStatus.ActivationError
-				activationState = legacyStatus.ActivationState
-				cleanupStartedAt = legacyStatus.CleanupStartedAt
-				cleanupCompletedAt = legacyStatus.CleanupCompletedAt
-				cleanupError = legacyStatus.CleanupError
-				cleanupState = legacyStatus.CleanupState
 			}
 
 			usable := false
@@ -557,8 +530,6 @@ func testEnvironmentsFromSnapshot(
 			}
 			if entries := historiesByIndex[slotIndex]; len(entries) > 0 {
 				env.ReturnHistory = legacyHistoryFromEntries(entries)
-			} else if hasLegacy {
-				env.ReturnHistory = legacyStatus.ReturnHistory
 			}
 			envs = append(envs, env)
 		}
@@ -648,148 +619,14 @@ func projectTestSlotCount(_ Settings, project Project) int {
 	return 0
 }
 
-func testEnvironmentSlotStates(project Project) map[int]string {
-	statuses := testEnvironmentSlotStatuses(project)
-	states := map[int]string{}
-	for index, status := range statuses {
-		states[index] = status.State
-	}
-	return states
-}
-
-func testEnvironmentSlotStatus(project Project, slotIndex int) (TestEnvironmentSlotStatus, bool) {
-	statuses := testEnvironmentSlotStatuses(project)
-	status, ok := statuses[slotIndex]
-	return status, ok
-}
-
-func testEnvironmentSlotStatuses(project Project) map[int]TestEnvironmentSlotStatus {
-	statuses := map[int]TestEnvironmentSlotStatus{}
-	if standbyDNS, ok := mapFromMap(project.Metadata, "native_standby_dns"); ok {
-		for _, slot := range mapSliceFromAnySlice(anySlice(standbyDNS["slots"])) {
-			index, ok := positiveIntFromMap(slot, "slot_index")
-			if !ok {
-				index, ok = positiveIntFromMap(slot, "slotIndex")
-			}
-			if !ok {
-				continue
-			}
-			status := TestEnvironmentSlotStatus{SlotIndex: index}
-			if value, ok := stringFromMap(slot, "slot_name"); ok && strings.TrimSpace(value) != "" {
-				status.SlotName = strings.TrimSpace(value)
-			}
-			if status.SlotName == "" {
-				if value, ok := stringFromMap(slot, "slotName"); ok && strings.TrimSpace(value) != "" {
-					status.SlotName = strings.TrimSpace(value)
-				}
-			}
-			if value, ok := stringFromMap(slot, "state"); ok && strings.TrimSpace(value) != "" {
-				status.State = strings.TrimSpace(value)
-			}
-			if value, ok := stringFromMap(slot, "detail"); ok && strings.TrimSpace(value) != "" {
-				detail := strings.TrimSpace(value)
-				status.Detail = &detail
-			}
-			if value, ok := stringFromMap(slot, "updated_at"); ok && strings.TrimSpace(value) != "" {
-				if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value)); err == nil {
-					status.UpdatedAt = parsed
-				}
-			}
-			if value, ok := stringFromMap(slot, "updatedAt"); ok && status.UpdatedAt.IsZero() && strings.TrimSpace(value) != "" {
-				if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value)); err == nil {
-					status.UpdatedAt = parsed
-				}
-			}
-			if value, ok := stringFromMap(slot, "ready_at"); ok && strings.TrimSpace(value) != "" {
-				if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value)); err == nil {
-					status.ReadyAt = &parsed
-				}
-			}
-			if value, ok := stringFromMap(slot, "readyAt"); ok && status.ReadyAt == nil && strings.TrimSpace(value) != "" {
-				if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value)); err == nil {
-					status.ReadyAt = &parsed
-				}
-			}
-			status.ActivationAttempt = slotPositiveIntPointer(slot, "activation_attempt", "activationAttempt")
-			status.ActivationState = slotStringPointer(slot, "activation_state", "activationState")
-			status.ActivationStartedAt = slotTimePointer(slot, "activation_started_at", "activationStartedAt")
-			status.ActivationCompletedAt = slotTimePointer(slot, "activation_completed_at", "activationCompletedAt")
-			status.ActivationJobName = slotStringPointer(slot, "activation_job_name", "activationJobName")
-			status.ActivationError = slotStringPointer(slot, "activation_error", "activationError")
-			status.CleanupState = slotStringPointer(slot, "cleanup_state", "cleanupState")
-			status.CleanupStartedAt = slotTimePointer(slot, "cleanup_started_at", "cleanupStartedAt")
-			status.CleanupCompletedAt = slotTimePointer(slot, "cleanup_completed_at", "cleanupCompletedAt")
-			status.CleanupError = slotStringPointer(slot, "cleanup_error", "cleanupError")
-			status.ReturnHistory = testSlotReturnHistoryFromAny(slot["test_slot_return_history"])
-			statuses[index] = status
-		}
-	}
-	return statuses
-}
-
-func testSlotReturnHistoryFromAny(raw any) []TestSlotReturnHistoryEntry {
-	var history []TestSlotReturnHistoryEntry
-	for _, item := range anySlice(raw) {
-		entryMap, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		event, _ := stringFromMap(entryMap, "event")
-		source, _ := stringFromMap(entryMap, "source")
-		leaseRef, _ := stringFromMap(entryMap, "lease_ref")
-		createdAt := slotTimePointer(entryMap, "created_at", "createdAt")
-		if event == "" || source == "" || leaseRef == "" || createdAt == nil {
-			continue
-		}
-		entry := TestSlotReturnHistoryEntry{
-			Event:           event,
-			CreatedAt:       *createdAt,
-			Project:         stringValue(entryMap["project"]),
-			SlotIndex:       slotPositiveIntPointer(entryMap, "slot_index", "slotIndex"),
-			SlotName:        slotStringPointer(entryMap, "slot_name", "slotName"),
-			LeaseRef:        leaseRef,
-			LeaseNumber:     slotPositiveIntPointer(entryMap, "lease_number", "leaseNumber"),
-			LeaseRequester:  slotStringPointer(entryMap, "lease_requester", "leaseRequester"),
-			CallerPodIP:     slotStringPointer(entryMap, "caller_pod_ip", "callerPodIP"),
-			CallerSessionID: slotStringPointer(entryMap, "caller_session_id", "callerSessionID"),
-			Source:          source,
-			Reason:          slotStringPointer(entryMap, "reason"),
-			CleanupStarted:  boolFromMap(entryMap, "cleanup_started"),
-		}
-		history = append(history, entry)
-	}
-	return history
-}
-
-func slotStringPointer(slot map[string]any, keys ...string) *string {
-	for _, key := range keys {
-		if value, ok := stringFromMap(slot, key); ok && strings.TrimSpace(value) != "" {
-			text := strings.TrimSpace(value)
-			return &text
-		}
-	}
-	return nil
-}
-
-func slotTimePointer(slot map[string]any, keys ...string) *time.Time {
-	for _, key := range keys {
-		if value, ok := stringFromMap(slot, key); ok && strings.TrimSpace(value) != "" {
-			if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value)); err == nil {
-				return &parsed
-			}
-		}
-	}
-	return nil
-}
-
-func slotPositiveIntPointer(slot map[string]any, keys ...string) *int {
-	for _, key := range keys {
-		if value, ok := positiveIntFromMap(slot, key); ok {
-			return &value
-		}
-	}
-	return nil
-}
+// The legacy slot-status readers (testEnvironmentSlot* and the supporting
+// pointer/history helpers) that used to walk
+// project.metadata.native_standby_dns.slots have been removed. The
+// slot-storage rework (PR #518) split slot state into its own Cosmos
+// collection and the boot migration strips the embedded array.
+// Production reads go through SlotStore.GetSlot / ListSlotsByProject;
+// legacy test fixtures are bridged into the new collection by the
+// fake's ListSlotsByProject.
 
 func testEnvironmentName(project string, slotIndex int, projectDoc Project, _ Lease) string {
 	prefix := firstNonEmpty(projectDoc.Name, projectDoc.ID, project)
