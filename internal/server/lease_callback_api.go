@@ -137,13 +137,22 @@ func releaseTestSlotLeaseByCallback(w http.ResponseWriter, r *http.Request, stor
 		writeProblem(w, http.StatusBadRequest, "project not registered")
 		return
 	}
-	if _, err := setLeaseSlotCleanupStarting(r.Context(), store, project, lease, testSlotReturnHistoryEntry(lease, testSlotReturnAudit{
-		Source:         "lease_callback.release",
-		CleanupStarted: true,
-	})); err != nil {
-		writeInternalError(w, r, err, "record test-slot cleanup state failed")
+	// Route through claimTestSlotCleanup so callback-release shares the
+	// etag-CAS path that the public return endpoint and the TTL timer
+	// use. error→cleaning is a valid recovery retry — see slot.go
+	// validSlotTransitions[SlotStateError].
+	audit := testSlotReturnAudit{Source: "lease_callback.release"}
+	if _, err := claimTestSlotCleanup(r.Context(), store, project, lease, audit); err != nil {
+		if errors.Is(err, ErrPreconditionFailed) {
+			metrics.RecordTestSlotCleanupClaim(activationCancelCallbackRelease, metrics.CleanupClaimOutcomeLostRace)
+			writeJSON(w, http.StatusAccepted, testSlotReturnResponse(project, lease.Project, lease, testSlotStateCleaning, true))
+			return
+		}
+		metrics.RecordTestSlotCleanupClaim(activationCancelCallbackRelease, metrics.CleanupClaimOutcomeError)
+		writeInternalError(w, r, err, "claim test-slot cleanup failed")
 		return
 	}
-	beginTestSlotCleanup(store, preparer, project, lease, true, nil)
+	metrics.RecordTestSlotCleanupClaim(activationCancelCallbackRelease, metrics.CleanupClaimOutcomeGranted)
+	beginTestSlotCleanup(store, preparer, project, lease, true, activationCancelCallbackRelease, nil)
 	writeJSON(w, http.StatusAccepted, testSlotReturnResponse(project, lease.Project, lease, testSlotStateCleaning, true))
 }

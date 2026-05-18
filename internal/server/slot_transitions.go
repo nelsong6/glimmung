@@ -236,7 +236,13 @@ func markLeaseSlotCleaned(ctx context.Context, store ReadStore, lease Lease, now
 	}
 	return slotStore.UpdateIfMatch(ctx, projectKey, slotIndex, func(s Slot) (Slot, error) {
 		switch s.State {
-		case SlotStateRunning, SlotStateActivating:
+		case SlotStateRunning, SlotStateActivating, SlotStateError:
+			// SlotStateError is the recovery-retry case: the previous
+			// cleanup attempt left the slot in error with cleanup_error
+			// set, and the recovery sweep (or a follow-up returnTestSlot
+			// that bypassed claimTestSlotCleanup) is asking to converge
+			// directly. Walk through cleaning so the transition to
+			// provisioned is well-formed.
 			next, err := s.MarkCleaning(now)
 			if err != nil {
 				return s, err

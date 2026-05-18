@@ -18,6 +18,7 @@ import (
 type fakeTestSlotPreparer struct {
 	preliminaries         bool
 	activated             bool
+	activateCtxCancelled  bool
 	returned              bool
 	installerCleaned      bool
 	cleanedSlots          []string
@@ -55,14 +56,23 @@ func (p *fakeTestSlotPreparer) EnsureTestSlotPreliminaries(_ context.Context, _ 
 	return p.preliminariesErr
 }
 
-func (p *fakeTestSlotPreparer) ActivateTestSlotRuntime(_ context.Context, _ Lease, project Project, _ NativeGitHubTokenMinter) error {
+func (p *fakeTestSlotPreparer) ActivateTestSlotRuntime(ctx context.Context, _ Lease, project Project, _ NativeGitHubTokenMinter) error {
 	p.activated = true
 	p.project = project
 	signalTestChannel(p.activateStarted)
-	if p.activateRelease != nil {
-		<-p.activateRelease
-	}
 	defer signalTestChannel(p.activateDone)
+	// Honor ctx.Done() alongside activateRelease so cancellation tests
+	// can verify the activation goroutine actually unwinds on cancel.
+	// Existing tests that close activateRelease before any cancel still
+	// take the activateRelease branch.
+	if p.activateRelease != nil {
+		select {
+		case <-p.activateRelease:
+		case <-ctx.Done():
+			p.activateCtxCancelled = true
+			return ctx.Err()
+		}
+	}
 	return p.activateErr
 }
 
@@ -701,7 +711,7 @@ func TestClaimTestSlotCleanupDedupsOnEtagConflict(t *testing.T) {
 		go func() {
 			ready.Done()
 			start.Wait()
-			_, err := claimTestSlotCleanup(context.Background(), store, store.projects[0], store.lease, "lease.ttl_expiry")
+			_, err := claimTestSlotCleanup(context.Background(), store, store.projects[0], store.lease, testSlotReturnAudit{Source: "lease.ttl_expiry"})
 			results <- result{err: err}
 		}()
 	}
@@ -828,7 +838,7 @@ func TestFireLeaseExpiryNoOpsWhenAnotherReplicaAlreadyClaimed(t *testing.T) {
 	}
 
 	// First claim wins.
-	if _, err := claimTestSlotCleanup(context.Background(), store, store.projects[0], store.lease, "lease.ttl_expiry"); err != nil {
+	if _, err := claimTestSlotCleanup(context.Background(), store, store.projects[0], store.lease, testSlotReturnAudit{Source: "lease.ttl_expiry"}); err != nil {
 		t.Fatalf("first claim: %v", err)
 	}
 

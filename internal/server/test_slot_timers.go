@@ -95,25 +95,28 @@ func fireLeaseExpiry(store ReadStore, preparer TestSlotPreparer, project Project
 		return
 	}
 
-	if _, err := claimTestSlotCleanup(ctx, store, project, lease, "lease.ttl_expiry"); err != nil {
+	if _, err := claimTestSlotCleanup(ctx, store, project, lease, testSlotReturnAudit{Source: "lease.ttl_expiry"}); err != nil {
 		if errors.Is(err, ErrPreconditionFailed) {
 			// Another replica's timer fired first and won the etag race.
 			// Their cleanup is in flight; ours is a no-op. This is the
 			// path that makes multi-replica deploys (rolling updates, node
 			// drains) correct without leader election.
+			metrics.RecordTestSlotCleanupClaim(activationCancelTTLExpiry, metrics.CleanupClaimOutcomeLostRace)
 			return
 		}
+		metrics.RecordTestSlotCleanupClaim(activationCancelTTLExpiry, metrics.CleanupClaimOutcomeError)
 		if logf != nil {
 			logf("test-slot lease expiry claim failed project=%s lease=%s: %v", lease.Project, ref, err)
 		}
 		return
 	}
+	metrics.RecordTestSlotCleanupClaim(activationCancelTTLExpiry, metrics.CleanupClaimOutcomeGranted)
 	// Only one replica wins the etag race and reaches here, so the
 	// counter increment is at-most-once per expired lease across the
 	// fleet. test_slot_checkout is the only purpose that arms a TTL
 	// timer, so the label is unambiguous.
 	metrics.RecordLeaseReleased(LeasePurposeTestSlotCheckout, "expired")
-	beginTestSlotCleanup(store, preparer, project, lease, true, logf)
+	beginTestSlotCleanup(store, preparer, project, lease, true, activationCancelTTLExpiry, logf)
 }
 
 // claimTestSlotCleanup atomically transitions the slot to `cleaning` via
@@ -121,9 +124,20 @@ func fireLeaseExpiry(store ReadStore, preparer TestSlotPreparer, project Project
 // glimmung replicas wins; the rest get ErrPreconditionFailed back if
 // they observe the slot already in `cleaning`.
 //
-// `source` is appended to the slot_history collection so dashboards can
-// distinguish timer-expiry from operator-driven returns.
-func claimTestSlotCleanup(ctx context.Context, store ReadStore, _ Project, lease Lease, source string) (Project, error) {
+// The slot may be in any pre-cleanup state — provisioned, activating,
+// running, or error. error→cleaning is a recovery retry: the prior
+// cleanup attempt left the slot in error with cleanup_error set, and a
+// new caller (return, callback release, TTL timer, or startup recovery)
+// is asking for another attempt. K8s ops underneath are idempotent, so
+// retry converges or re-errors with diagnostic context preserved in
+// slot_history. The validSlotTransitions map enforces this explicitly.
+//
+// `audit` is what the caller knows about who triggered the cleanup and
+// is appended to the slot_history collection so dashboards can
+// distinguish timer-expiry, return-API, callback-release, and startup-
+// recovery sources from each other and carry per-call context like
+// caller pod IP, session ID, and reason where available.
+func claimTestSlotCleanup(ctx context.Context, store ReadStore, _ Project, lease Lease, audit testSlotReturnAudit) (Project, error) {
 	slotStore := slotStoreFromReadStore(store)
 	if slotStore == nil {
 		return Project{}, errSlotStoreNotConfigured
@@ -137,19 +151,18 @@ func claimTestSlotCleanup(ctx context.Context, store ReadStore, _ Project, lease
 		return Project{}, err
 	}
 	// Probe: if the slot is already in `cleaning`, another replica got
-	// here first.
+	// here first. error→cleaning is a valid retry transition (see slot.go
+	// validSlotTransitions), so we don't short-circuit on `error` here.
 	if current, err := slotStore.GetSlot(ctx, projectKey, slotIndex); err == nil && current.State == SlotStateCleaning {
 		return Project{}, ErrPreconditionFailed
 	}
 	if _, err := markLeaseSlotCleaning(ctx, store, lease, now); err != nil {
 		return Project{}, err
 	}
-	// Append the return-history entry to the slot_history collection so
-	// the slot's audit trail records who triggered this cleanup.
-	if err := appendLeaseSlotHistory(ctx, store, slotHistoryEntryFromLegacy(testSlotReturnHistoryEntry(lease, testSlotReturnAudit{
-		Source:         source,
-		CleanupStarted: true,
-	}))); err != nil {
+	// Append the audit entry to the slot_history collection so the slot's
+	// audit trail records who triggered this cleanup.
+	audit.CleanupStarted = true
+	if err := appendLeaseSlotHistory(ctx, store, slotHistoryEntryFromLegacy(testSlotReturnHistoryEntry(lease, audit))); err != nil {
 		return Project{}, err
 	}
 	return Project{}, nil

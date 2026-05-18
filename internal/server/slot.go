@@ -131,10 +131,17 @@ var validSlotTransitions = map[string]map[string]bool{
 		SlotStateError:       true,
 	},
 	SlotStateError: {
-		// No valid forward transition from error. Recovery requires
-		// decreasing count (deletes the slot doc) then increasing count
-		// (creates a fresh `unseeded` slot). No admin repair endpoint
-		// per docs/test-slot-lifecycle.md.
+		// Error is a "last attempt failed" tag, not a permanent dead-end.
+		// A repeat of the failed operation is the recovery: returnTestSlot
+		// (or the release-callback path / TTL timer) re-fires cleanup against
+		// an error slot, and RecoverInFlightTestSlots does the same on
+		// startup. Helm install/uninstall and the K8s deletes underneath are
+		// idempotent, so retrying converges on success — or the slot re-errors
+		// with diagnostic context preserved in slot_history for an operator to
+		// look at. A genuinely stuck slot (cleanup retry also fails) is still
+		// recovered by decreasing then re-increasing count; that path remains
+		// the last resort.
+		SlotStateCleaning: true,
 	},
 }
 
