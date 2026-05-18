@@ -26,6 +26,73 @@ func (s fakeStateStore) ListLeases(context.Context) ([]Lease, error) {
 	return s.leases, nil
 }
 
+// SlotStore + SlotHistoryStore satisfied so state_api tests with legacy
+// embedded-slot fixtures still render through the production code path
+// that now reads exclusively from the SlotStore. The reads bridge fresh
+// from the embedded legacy array on every call; writes panic because
+// fakeStateStore is used by /v1/state tests that don't mutate slots —
+// any future test that needs write paths should use fakeLeaseStore,
+// which has the full slot machinery.
+func (s fakeStateStore) ListSlotsByProject(_ context.Context, project string) ([]Slot, error) {
+	var out []Slot
+	for _, p := range s.projects {
+		if p.Name != project && p.ID != project {
+			continue
+		}
+		for _, entry := range readLegacyProjectSlots(p) {
+			slot := slotFromLegacyEntry(project, entry, time.Now().UTC())
+			if v, ok := stringFromMap(entry.raw, "detail"); ok && strings.TrimSpace(v) != "" {
+				detail := strings.TrimSpace(v)
+				slot.Detail = &detail
+			}
+			out = append(out, slot)
+		}
+	}
+	return out, nil
+}
+
+func (s fakeStateStore) GetSlot(_ context.Context, project string, slotIndex int) (Slot, error) {
+	for _, p := range s.projects {
+		if p.Name != project && p.ID != project {
+			continue
+		}
+		for _, entry := range readLegacyProjectSlots(p) {
+			if entry.slotIndex == slotIndex {
+				slot := slotFromLegacyEntry(project, entry, time.Now().UTC())
+				if v, ok := stringFromMap(entry.raw, "detail"); ok && strings.TrimSpace(v) != "" {
+					detail := strings.TrimSpace(v)
+					slot.Detail = &detail
+				}
+				return slot, nil
+			}
+		}
+	}
+	return Slot{}, ErrNotFound
+}
+
+func (s fakeStateStore) CreateSlot(context.Context, Slot) (Slot, error) {
+	panic("fakeStateStore is read-only; use fakeLeaseStore for slot write paths")
+}
+
+func (s fakeStateStore) UpdateIfMatch(context.Context, string, int, func(Slot) (Slot, error)) (Slot, error) {
+	panic("fakeStateStore is read-only; use fakeLeaseStore for slot write paths")
+}
+
+func (s fakeStateStore) DeleteSlot(context.Context, string, int) error {
+	panic("fakeStateStore is read-only; use fakeLeaseStore for slot write paths")
+}
+
+// ListSlotHistory returns empty so state_api can render envs without a
+// history-store crash. fakeStateStore tests that need history use
+// fakeLeaseStore instead.
+func (s fakeStateStore) ListSlotHistory(_ context.Context, _ string, _ map[string]any) ([]SlotHistoryEntry, error) {
+	return nil, nil
+}
+
+func (s fakeStateStore) AppendSlotHistory(context.Context, SlotHistoryEntry) (SlotHistoryEntry, error) {
+	panic("fakeStateStore is read-only; use fakeLeaseStore for slot write paths")
+}
+
 // AnyLockHeld lets fakeStateStore satisfy StateStore so the state
 // snapshot handler can populate InflightLocks without polling. Tests
 // that care about the inflight summary set issuesLocked / prsLocked

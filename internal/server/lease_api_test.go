@@ -145,6 +145,52 @@ func (s *fakeLeaseStore) ListSlotsByProject(_ context.Context, project string) (
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ensureSlotsInitLocked()
+	// Bridge: lazy-translate any legacy embedded-array entries into the
+	// new collection so tests that only populate project metadata see
+	// them through this listing path. Mirrors the GetSlot bridge above —
+	// production code now reads slots exclusively from the new
+	// collection, so the legacy fixture compat lives entirely in the
+	// fake. Idempotent: per-key existence check prevents the bridge
+	// from clobbering slots already written via UpdateIfMatch.
+	for _, p := range s.projects {
+		if p.Name != project && p.ID != project {
+			continue
+		}
+		for _, entry := range readLegacyProjectSlots(p) {
+			key := SlotDocID(project, entry.slotIndex)
+			if _, exists := s.slots[key]; exists {
+				continue
+			}
+			slot := slotFromLegacyEntry(project, entry, time.Now().UTC())
+			if v, ok := positiveIntFromMap(entry.raw, "activation_attempt"); ok {
+				attempt := v
+				slot.ActivationAttempt = &attempt
+			}
+			if v, ok := stringFromMap(entry.raw, "activation_job_name"); ok && strings.TrimSpace(v) != "" {
+				job := strings.TrimSpace(v)
+				slot.ActivationJobName = &job
+			}
+			if v, ok := stringFromMap(entry.raw, "activation_started_at"); ok {
+				if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
+					slot.ActivationStartedAt = &t
+				}
+			}
+			if v, ok := stringFromMap(entry.raw, "activation_completed_at"); ok {
+				if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
+					slot.ActivationCompletedAt = &t
+				}
+			}
+			if slot.ActivationCompletedAt == nil && slot.State == SlotStateRunning {
+				t := slot.UpdatedAt
+				slot.ActivationCompletedAt = &t
+				if slot.ActivationStartedAt == nil {
+					slot.ActivationStartedAt = &t
+				}
+			}
+			s.slotEtags[key]++
+			s.slots[key] = slot
+		}
+	}
 	var out []Slot
 	for _, slot := range s.slots {
 		if slot.Project == project {

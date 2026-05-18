@@ -518,25 +518,11 @@ func setLeaseSlotCleanupFinished(ctx context.Context, store ReadStore, _ Project
 
 // setLeaseSlotStatus and currentLeaseSlotStatus were the central writer/
 // reader against the legacy `project.metadata.native_standby_dns.slots[]`
-// array. Stage 2 of the slot-storage rework replaced them with the
-// markLeaseSlot*/SlotStore.UpdateIfMatch path. The functions stay deleted;
-// any new code path that thinks it needs them should use the Mark* helpers
-// directly so the slot row stays the single source of truth.
-
-func currentLeaseSlotStatus(ctx context.Context, store ReadStore, project Project, lease Lease, slotIndex int) (TestEnvironmentSlotStatus, bool) {
-	projects, err := store.ListProjects(ctx)
-	if err == nil {
-		for _, current := range projects {
-			if current.Name != lease.Project && current.ID != lease.Project && current.Name != project.Name && current.ID != project.ID {
-				continue
-			}
-			if status, ok := testEnvironmentSlotStatus(current, slotIndex); ok {
-				return status, true
-			}
-		}
-	}
-	return testEnvironmentSlotStatus(project, slotIndex)
-}
+// array. The slot-storage rework replaced them with the
+// markLeaseSlot*/SlotStore.UpdateIfMatch path; both functions stay
+// deleted. Any new code path that thinks it needs them should use the
+// Mark* helpers (writes) or slotStore.GetSlot (reads) so the slot row
+// stays the single source of truth.
 
 func testSlotActivationAttempt(lease Lease) *int {
 	if lease.LeaseNumber == nil || *lease.LeaseNumber <= 0 {
@@ -932,33 +918,26 @@ func testSlotLeaseStillState(ctx context.Context, store ReadStore, _ Project, le
 }
 
 // recoveredSlotStatus reads the slot's current state for the recovery
-// sweep. Prefers the SlotStore collection (the durable source post-#518);
-// falls back to the legacy project-metadata reader so in-memory tests
-// with fakes that only populate project metadata keep working.
-//
-// Returns (state, updated_at, cleanup_error, found). cleanup_error is
-// surfaced separately because the error→cleaning recovery branch needs
-// to distinguish "error from a failed cleanup" (retry-eligible) from
+// sweep from the durable SlotStore collection. Returns
+// (state, updated_at, cleanup_error, found). cleanup_error is surfaced
+// separately because the error→cleaning recovery branch needs to
+// distinguish "error from a failed cleanup" (retry-eligible) from
 // "error from a failed activation whose inline cleanup did not record
 // a separate cleanup_error" (skip; lease is typically gone by then).
 func recoveredSlotStatus(ctx context.Context, store ReadStore, project Project, slotIndex int) (string, time.Time, *string, bool) {
-	if slotStore := slotStoreFromReadStore(store); slotStore != nil {
-		projectKey := firstNonEmpty(project.Name, project.ID)
-		if projectKey != "" {
-			if slot, err := slotStore.GetSlot(ctx, projectKey, slotIndex); err == nil {
-				return slot.State, slot.UpdatedAt, slot.CleanupError, true
-			}
-		}
-	}
-	status, ok := testEnvironmentSlotStatus(project, slotIndex)
-	if !ok {
+	slotStore := slotStoreFromReadStore(store)
+	if slotStore == nil {
 		return "", time.Time{}, nil, false
 	}
-	// The legacy embedded array predates the cleanup_error field; tests
-	// that drive recovery via legacy fakes won't exercise the
-	// error→cleaning retry path, which is correct (error recovery is a
-	// new behavior tied to the new shape).
-	return status.State, status.UpdatedAt, nil, true
+	projectKey := firstNonEmpty(project.Name, project.ID)
+	if projectKey == "" {
+		return "", time.Time{}, nil, false
+	}
+	slot, err := slotStore.GetSlot(ctx, projectKey, slotIndex)
+	if err != nil {
+		return "", time.Time{}, nil, false
+	}
+	return slot.State, slot.UpdatedAt, slot.CleanupError, true
 }
 
 // recoveryMinAge is the lower bound on `updated_at` for an in-flight status
@@ -1107,10 +1086,10 @@ func RecoverInFlightTestSlots(ctx context.Context, store ReadStore, preparer Tes
 				continue
 			}
 			beginTestSlotCleanup(store, preparer, project, lease, true, activationCancelRecovery, logf)
-		case SlotStateRunning, testSlotStateActive:
+		case SlotStateRunning:
 			// Installer cleanup is a one-shot at end of activation; on
 			// startup, drive it once defensively for slots that reached
-			// running/active before the previous process exited.
+			// running before the previous process exited.
 			cleanupTestSlotInstaller(ctx, preparer, lease, project, logf)
 		}
 	}
@@ -1120,57 +1099,40 @@ func RecoverInFlightTestSlots(ctx context.Context, store ReadStore, preparer Tes
 		if projectName == "" {
 			continue
 		}
-		statuses := testEnvironmentSlotStatuses(project)
 
-		// Resume `cleaning` for slots whose lease is already gone — that's
-		// the "cleanup started, lease released, but cleanup goroutine died"
-		// recovery case. Skip if recent (assume another live pod is
-		// finishing it); CAS inside cleanupTestSlotRuntime is the defense
-		// against the simultaneous-start case.
-		for slotIndex, status := range statuses {
-			if status.State != testSlotStateCleaning {
-				continue
-			}
-			if claimedSlots[projectName][slotIndex] {
-				continue
-			}
-			if !status.UpdatedAt.IsZero() && time.Since(status.UpdatedAt) < recoveryMinAge {
-				continue
-			}
-			slotName := status.SlotName
-			if strings.TrimSpace(slotName) == "" {
-				slotName = testEnvironmentName(projectName, slotIndex, project, Lease{})
-			}
-			lease := testEnvironmentWarmupLease(project, slotIndex, slotName)
-			beginTestSlotCleanup(store, preparer, project, lease, false, activationCancelRecovery, logf)
-		}
-
-		// Slot-collection sweep for `error` slots without a claimed lease.
-		// These are slots whose prior cleanup failed AND whose lease release
-		// then succeeded or was lost — there's no one driving recovery via
-		// the public API. Re-fire cleanup with releaseLease=false; the
-		// cleanup pathway will converge on `provisioned` if K8s state is
-		// reachable, or re-error with new diagnostic context appended to
-		// slot_history. The legacy testEnvironmentSlotStatuses loop above
-		// only sees pre-#518-migration project metadata, so this is the
-		// only path that recovers orphan-error slots after migration.
+		// Slot-collection sweep for orphan slots that need cleanup:
+		//   * State=cleaning with no claimed lease — "cleanup started,
+		//     lease released, but cleanup goroutine died" case.
+		//   * State=error with cleanup_error set and no claimed lease —
+		//     "prior cleanup attempt failed, lease then released" case.
+		//     (error slots without cleanup_error are skipped; their
+		//     activation-error path already ran inline cleanup and the
+		//     lease is typically gone.)
+		// Both fire cleanup with releaseLease=false via a synthetic
+		// warmup lease so the cleanup pathway is uniform. The
+		// recoveryMinAge gate skips recent in-flight states to avoid
+		// racing another live pod finishing the same work.
 		if slotStore := slotStoreFromReadStore(store); slotStore != nil {
-			if rows, err := slotStore.ListSlotsByProject(ctx, projectName); err == nil {
+			rows, err := slotStore.ListSlotsByProject(ctx, projectName)
+			if err != nil {
+				if logf != nil {
+					logf("test-slot recovery slot collection list failed project=%s: %v", projectName, err)
+				}
+			} else {
 				for _, slot := range rows {
-					if slot.State != SlotStateError {
-						continue
-					}
 					if claimedSlots[projectName][slot.SlotIndex] {
-						// A claimed lease drives recovery through the
-						// claimed-leases loop above.
+						// Claimed-lease slots flow through the leases
+						// loop above; don't double-fire here.
 						continue
 					}
-					if slot.CleanupError == nil {
-						// activation_error only; cleanup wasn't attempted
-						// (or its outcome wasn't recorded). Re-running
-						// cleanup against a slot that may never have had
-						// a partial helm install is a no-op; skip to
-						// avoid the spurious K8s 404 storm.
+					switch slot.State {
+					case SlotStateCleaning:
+						// fall through
+					case SlotStateError:
+						if slot.CleanupError == nil {
+							continue
+						}
+					default:
 						continue
 					}
 					if !slot.UpdatedAt.IsZero() && time.Since(slot.UpdatedAt) < recoveryMinAge {
@@ -1183,8 +1145,6 @@ func RecoverInFlightTestSlots(ctx context.Context, store ReadStore, preparer Tes
 					lease := testEnvironmentWarmupLease(project, slot.SlotIndex, slotName)
 					beginTestSlotCleanup(store, preparer, project, lease, false, activationCancelRecovery, logf)
 				}
-			} else if logf != nil {
-				logf("test-slot recovery slot collection list failed project=%s: %v", projectName, err)
 			}
 		}
 
@@ -1195,12 +1155,13 @@ func RecoverInFlightTestSlots(ctx context.Context, store ReadStore, preparer Tes
 }
 
 // EnsureProjectTestSlotsWarmed walks `1..count` for the project and fires a
-// warm goroutine for every slot index whose `slots[*]` entry is missing or
-// stale `warming`. Called from two triggers: PATCH /test-environments/count
-// (immediately after the count is written) and the startup recovery sweep.
-// Both paths dedup via `testSlotWarmups`, so the same trigger firing twice or
-// the two triggers racing each other are both safe.
-func EnsureProjectTestSlotsWarmed(_ context.Context, store ReadStore, preparer TestSlotPreparer, project Project, claimed map[int]bool, logf func(string, ...any)) {
+// warm goroutine for every slot index whose durable slot doc is missing,
+// in `unseeded`, or in stale `provisioning`. Called from two triggers:
+// PATCH /test-environments/count (immediately after the count is written)
+// and the startup recovery sweep. Both paths dedup via `testSlotWarmups`,
+// so the same trigger firing twice or the two triggers racing each other
+// are both safe.
+func EnsureProjectTestSlotsWarmed(ctx context.Context, store ReadStore, preparer TestSlotPreparer, project Project, claimed map[int]bool, logf func(string, ...any)) {
 	if preparer == nil {
 		return
 	}
@@ -1208,23 +1169,35 @@ func EnsureProjectTestSlotsWarmed(_ context.Context, store ReadStore, preparer T
 	if slotCount <= 0 {
 		return
 	}
-	statuses := testEnvironmentSlotStatuses(project)
+	slotsByIndex := map[int]Slot{}
+	if slotStore := slotStoreFromReadStore(store); slotStore != nil {
+		projectKey := firstNonEmpty(project.Name, project.ID)
+		if projectKey != "" {
+			if rows, err := slotStore.ListSlotsByProject(ctx, projectKey); err == nil {
+				for _, slot := range rows {
+					slotsByIndex[slot.SlotIndex] = slot
+				}
+			} else if logf != nil {
+				logf("test-slot warmup-sweep slot list failed project=%s: %v", projectKey, err)
+			}
+		}
+	}
 	for slotIndex := 1; slotIndex <= slotCount; slotIndex++ {
 		if claimed[slotIndex] {
 			// A claimed lease drives its own lifecycle (activation /
-			// cleaning / active). Don't re-warm under it.
+			// cleaning / running). Don't re-warm under it.
 			continue
 		}
-		status, hasStatus := statuses[slotIndex]
+		slot, hasSlot := slotsByIndex[slotIndex]
 		switch {
-		case !hasStatus:
-			// missing entirely → seed and warm
-		case status.State == testSlotStateWarming:
-			// in-flight warming. Skip if recent — another live pod is
-			// probably mid-warmup (rolling-update overlap case). The
+		case !hasSlot, slot.State == SlotStateUnseeded:
+			// missing entirely or seeded-but-not-started → warm
+		case slot.State == SlotStateProvisioning:
+			// in-flight provisioning. Skip if recent — another live pod
+			// is probably mid-warmup (rolling-update overlap case). The
 			// etag CAS in warmTestSlot handles the simultaneous-start
 			// case.
-			if !status.UpdatedAt.IsZero() && time.Since(status.UpdatedAt) < recoveryMinAge {
+			if !slot.UpdatedAt.IsZero() && time.Since(slot.UpdatedAt) < recoveryMinAge {
 				continue
 			}
 		default:
