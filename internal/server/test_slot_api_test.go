@@ -264,6 +264,16 @@ func TestCheckoutTestSlotExposesPlaywrightWSEndpointWhenEnabled(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), want) {
 		t.Fatalf("checkout response missing %s: %s", want, rec.Body.String())
 	}
+	select {
+	case <-preparer.activateStarted:
+	case <-time.After(time.Second):
+		t.Fatal("background activation did not start")
+	}
+	select {
+	case <-preparer.activateDone:
+	case <-time.After(time.Second):
+		t.Fatal("background activation did not finish")
+	}
 }
 
 func TestCheckoutTestSlotOmitsPlaywrightWSEndpointWhenDisabled(t *testing.T) {
@@ -313,6 +323,16 @@ func TestCheckoutTestSlotOmitsPlaywrightWSEndpointWhenDisabled(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), `"playwright_ws_endpoint"`) {
 		t.Fatalf("checkout response should omit playwright_ws_endpoint when disabled: %s", rec.Body.String())
+	}
+	select {
+	case <-preparer.activateStarted:
+	case <-time.After(time.Second):
+		t.Fatal("background activation did not start")
+	}
+	select {
+	case <-preparer.activateDone:
+	case <-time.After(time.Second):
+		t.Fatal("background activation did not finish")
 	}
 }
 
@@ -655,6 +675,51 @@ func TestLeaseExpiryTimerCancelPreventsFire(t *testing.T) {
 		t.Fatal("expiry fired after cancel")
 	case <-time.After(1500 * time.Millisecond):
 		// expected: nothing fires
+	}
+}
+
+func TestFireLeaseExpirySkipsExtendedDurableDeadline(t *testing.T) {
+	oldAssignedAt := time.Now().UTC().Add(-2 * time.Hour)
+	currentAssignedAt := time.Now().UTC().Add(-30 * time.Minute)
+	staleLease := Lease{
+		Project:     "expire",
+		LeaseNumber: intPtr(8),
+		Host:        stringPtr("native-k8s"),
+		State:       "claimed",
+		Metadata: map[string]any{
+			"test_slot_checkout": true,
+			"native_slot_index":  "1",
+			"native_slot_name":   "expire-slot-1",
+		},
+		RequestedAt: oldAssignedAt,
+		AssignedAt:  &oldAssignedAt,
+		TTLSeconds:  3600,
+	}
+	currentLease := staleLease
+	currentLease.RequestedAt = currentAssignedAt
+	currentLease.AssignedAt = &currentAssignedAt
+	currentLease.TTLSeconds = 7200
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "expire",
+			Name: "expire",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"slot_prefix": "expire-slot",
+				"count":       float64(1),
+			}},
+		}}},
+		lease: currentLease,
+	}
+	preparer := &fakeTestSlotPreparer{returnStarted: make(chan struct{}, 1)}
+	defer cancelLeaseExpiryTimer(LeasePublicRefFromLease(currentLease))
+
+	fireLeaseExpiry(store, preparer, store.projects[0], staleLease, nil)
+
+	select {
+	case <-preparer.returnStarted:
+		t.Fatal("expiry fired cleanup before the durable extended deadline")
+	case <-time.After(100 * time.Millisecond):
+		// expected: stale timer re-arms from the current lease instead.
 	}
 }
 

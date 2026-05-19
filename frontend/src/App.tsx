@@ -2219,6 +2219,7 @@ function LeaseIndexView({
 function LeaseDetailView({
   snap,
   signedIn,
+  isAdmin,
   kind,
   leaseId,
   projectName,
@@ -2292,6 +2293,10 @@ function LeaseDetailView({
           </div>
         ))}
       </div>
+
+      {leaseKind(lease) === "test" && (
+        <LeaseTTLAction lease={lease} signedIn={signedIn} isAdmin={isAdmin} />
+      )}
 
       <h2>Requirements</h2>
       <pre className="json-block">{formatJson(lease.requirements)}</pre>
@@ -2372,6 +2377,7 @@ function TestEnvironmentIndexView({
               <th>State</th>
               <th>Work</th>
               <th>Lease</th>
+              <th>TTL</th>
               <th>Requester</th>
               <th>Purpose</th>
             </tr>
@@ -2394,6 +2400,13 @@ function TestEnvironmentIndexView({
                     {env.lease && detailTo ? (
                       <Link className="link mono" to={detailTo}>{leaseDisplayName(env.lease)}</Link>
                     ) : "-"}
+                  </td>
+                  <td>
+                    {env.lease ? (
+                      <LeaseTTLAction lease={env.lease} signedIn={signedIn} isAdmin={isAdmin} compact />
+                    ) : (
+                      <span className="mono dim">-</span>
+                    )}
                   </td>
                   <td className="mono dim" title={requester.title}>{requester.label}</td>
                   <td className="lease-purpose" title={env.lease ? leasePurpose(env.lease) : "-"}>{env.lease ? leasePurpose(env.lease) : "-"}</td>
@@ -2616,6 +2629,115 @@ function LeaseCancelAction({ lease, compact = false }: { lease: Lease; compact?:
       </button>
       {cancelError && !compact && <div className="empty error">{cancelError}</div>}
     </>
+  );
+}
+
+function LeaseTTLAction({
+  lease,
+  signedIn,
+  isAdmin,
+  compact = false,
+}: {
+  lease: Lease;
+  signedIn: boolean;
+  isAdmin: boolean;
+  compact?: boolean;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draftMinutes, setDraftMinutes] = useState(() => String(ttlMinutesFromSeconds(lease.ttl_seconds)));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [localTTLSeconds, setLocalTTLSeconds] = useState<number | null>(null);
+  const displayTTLSeconds = localTTLSeconds ?? lease.ttl_seconds;
+  const canEdit = signedIn && isAdmin && lease.state === "claimed" && leaseKind(lease) === "test";
+
+  useEffect(() => {
+    if (!editing && !saving) {
+      setDraftMinutes(String(ttlMinutesFromSeconds(displayTTLSeconds)));
+    }
+  }, [displayTTLSeconds, editing, saving]);
+
+  useEffect(() => {
+    setLocalTTLSeconds(null);
+  }, [lease.ttl_seconds]);
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!canEdit) return;
+    const minutes = Number.parseInt(draftMinutes, 10);
+    if (!Number.isFinite(minutes) || minutes <= 0) {
+      setError("ttl must be positive minutes");
+      return;
+    }
+    const ttlSeconds = minutes * 60;
+    setSaving(true);
+    setError(null);
+    try {
+      const response = await authedFetch("/v1/leases/ttl", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project: lease.project, lease_ref: lease.ref, ttl_seconds: ttlSeconds }),
+      });
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        setError(`${response.status} ${text || response.statusText}`);
+        return;
+      }
+      setLocalTTLSeconds(ttlSeconds);
+      setEditing(false);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!canEdit && !error) {
+    return <span className="mono dim">{formatTTL(displayTTLSeconds)}</span>;
+  }
+
+  if (!editing) {
+    return (
+      <span className={`lease-ttl-control ${compact ? "compact" : ""}`}>
+        <button type="button" className="link mono" onClick={() => setEditing(true)} disabled={saving || !canEdit}>
+          ttl {formatTTL(displayTTLSeconds)}
+        </button>
+        {error && <span className="danger-text mono">{error}</span>}
+      </span>
+    );
+  }
+
+  return (
+    <form className={`lease-ttl-editor ${compact ? "compact" : ""}`} onSubmit={submit}>
+      {!compact && <label htmlFor={`ttl-${lease.ref}`}>ttl</label>}
+      <input
+        id={`ttl-${lease.ref}`}
+        type="number"
+        min={1}
+        step={1}
+        value={draftMinutes}
+        onChange={(event) => setDraftMinutes(event.target.value)}
+        disabled={saving}
+      />
+      <span className="mono dim">min</span>
+      <button type="submit" className="link" disabled={saving || !canEdit}>
+        {saving ? "applying..." : "apply"}
+      </button>
+      <span className="sep">/</span>
+      <button
+        type="button"
+        className="link"
+        onClick={() => {
+          setEditing(false);
+          setError(null);
+          setDraftMinutes(String(ttlMinutesFromSeconds(displayTTLSeconds)));
+        }}
+        disabled={saving}
+      >
+        keep
+      </button>
+      {error && <span className="danger-text mono">{error}</span>}
+    </form>
   );
 }
 
@@ -2876,6 +2998,18 @@ function formatJson(value: unknown): string {
 
 function formatDateTime(iso: string | null): string {
   return iso ? new Date(iso).toLocaleString() : "-";
+}
+
+function ttlMinutesFromSeconds(seconds: number): number {
+  if (!Number.isFinite(seconds) || seconds <= 0) return 1;
+  return Math.max(1, Math.ceil(seconds / 60));
+}
+
+function formatTTL(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "-";
+  if (seconds % 3600 === 0) return `${seconds / 3600}h`;
+  if (seconds % 60 === 0) return `${seconds / 60}m`;
+  return `${seconds}s`;
 }
 
 function relTime(iso: string | null): string {

@@ -62,6 +62,10 @@ type LeaseCanceller interface {
 	CancelLeaseByRef(ctx context.Context, project, ref string) (CancelLeaseResult, error)
 }
 
+type LeaseTTLUpdater interface {
+	UpdateLeaseTTLByRef(ctx context.Context, project, ref string, ttlSeconds int) (Lease, error)
+}
+
 type LeaseAcquireRequest struct {
 	Project      string
 	Workflow     *string
@@ -83,6 +87,16 @@ type LeaseRequesterInput struct {
 type CancelLeaseRequest struct {
 	Project  string `json:"project"`
 	LeaseRef string `json:"lease_ref"`
+}
+
+type UpdateLeaseTTLRequest struct {
+	Project    string `json:"project"`
+	LeaseRef   string `json:"lease_ref"`
+	TTLSeconds int    `json:"ttl_seconds"`
+}
+
+type UpdateLeaseTTLResult struct {
+	Lease LeasePublic `json:"lease"`
 }
 
 type CancelLeaseResult struct {
@@ -129,6 +143,82 @@ func cancelLeaseByRef(store ReadStore) http.HandlerFunc {
 		metrics.RecordLeaseReleased(leasePurposeFromCancelResult(result), "cancelled")
 		writeJSON(w, http.StatusOK, result)
 	}
+}
+
+func updateLeaseTTLByRef(store ReadStore, preparer TestSlotPreparer) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		updater, ok := store.(LeaseTTLUpdater)
+		if !ok || updater == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "lease TTL updater not configured")
+			return
+		}
+		var body UpdateLeaseTTLRequest
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&body); err != nil {
+			writeProblem(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+			return
+		}
+		body.Project = strings.TrimSpace(body.Project)
+		body.LeaseRef = strings.TrimSpace(body.LeaseRef)
+		if body.Project == "" {
+			writeProblem(w, http.StatusBadRequest, "project required")
+			return
+		}
+		if body.LeaseRef == "" {
+			writeProblem(w, http.StatusBadRequest, "lease_ref required")
+			return
+		}
+		if body.TTLSeconds <= 0 {
+			writeProblem(w, http.StatusBadRequest, "ttl_seconds must be positive")
+			return
+		}
+		lease, err := updater.UpdateLeaseTTLByRef(r.Context(), body.Project, body.LeaseRef, body.TTLSeconds)
+		var validationErr ValidationError
+		switch {
+		case errors.As(err, &validationErr):
+			writeProblem(w, http.StatusBadRequest, validationErr.Message)
+			return
+		case errors.Is(err, ErrNotFound):
+			writeProblem(w, http.StatusNotFound, "lease not found")
+			return
+		case errors.Is(err, ErrConflict):
+			writeProblem(w, http.StatusConflict, "lease is not claimed")
+			return
+		case err != nil:
+			writeInternalError(w, r, err, "lease TTL update failed")
+			return
+		}
+		rearmUpdatedLeaseTimer(r.Context(), store, preparer, lease)
+		writeJSON(w, http.StatusOK, UpdateLeaseTTLResult{Lease: leaseToPublic(lease)})
+	}
+}
+
+func rearmUpdatedLeaseTimer(ctx context.Context, store ReadStore, preparer TestSlotPreparer, lease Lease) {
+	if preparer == nil || lease.State != "claimed" || !boolFromMap(lease.Metadata, "test_slot_checkout") {
+		return
+	}
+	project, ok := projectByName(ctx, store, lease.Project)
+	if !ok {
+		return
+	}
+	armLeaseExpiryTimer(store, preparer, project, lease, nil)
+}
+
+func projectByName(ctx context.Context, store ReadStore, name string) (Project, bool) {
+	if store == nil {
+		return Project{}, false
+	}
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		return Project{}, false
+	}
+	for _, project := range projects {
+		if project.Name == name || project.ID == name {
+			return project, true
+		}
+	}
+	return Project{}, false
 }
 
 // leasePurposeFromCancelResult maps a cancelled lease back to its caller

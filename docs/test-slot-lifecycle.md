@@ -179,6 +179,7 @@ lifecycle transition responds to an explicit event:
 |---|---|---|
 | count changed | `PATCH /v1/projects/{project}/test-environments/count` | handler writes the new count, seeds missing slot docs as `unseeded`, deletes slot docs above the new count, fires per-slot provisioning goroutines for any in `unseeded`, returns immediately |
 | checkout | `POST /v1/test-slots/checkout` | acquires lease, arms a `time.AfterFunc` for `assigned_at + ttl_seconds`, starts activation goroutine |
+| TTL changed | `PATCH /v1/leases/ttl` | updates the claimed lease document and re-arms this replica's timer from the durable deadline |
 | return / callback release / admin cancel | `POST /v1/test-slots/return`, `POST /v1/lease-callbacks/.../release`, `POST /v1/leases/cancel` | stops the lease's TTL timer, starts cleanup goroutine |
 | TTL deadline | per-lease `time.AfterFunc` fires | starts cleanup goroutine with source `lease.ttl_expiry` |
 | activation finished | inline at end of activation goroutine | one-shot installer cleanup, mark slot `running` |
@@ -199,6 +200,12 @@ re-arms an `AfterFunc` for every still-`claimed` test-slot lease, computing
 remaining duration from the durable `assigned_at + ttl_seconds`. A deadline
 that has already passed fires cleanup immediately. After this one-shot pass
 returns, the lifecycle is purely event-driven until the next restart.
+
+When a claimed lease's TTL is changed, only the handling replica can replace
+its in-process timer immediately. Other replicas may still hold the previous
+timer, so the timer callback re-reads the current lease document before
+claiming cleanup. If the durable deadline has moved later, the stale callback
+re-arms itself from the current document instead of cleaning the slot early.
 
 ### Cleanup interrupts activation
 

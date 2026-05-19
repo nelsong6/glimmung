@@ -56,6 +56,7 @@ var expectedGoRoutes = []string{
 	"POST /v1/playbooks/{project}/{playbook_ref}/run",
 	"POST /v1/playbooks/{project}/{playbook_ref}/entries/{entry_id}/gate",
 	"POST /v1/leases/cancel",
+	"PATCH /v1/leases/ttl",
 	"GET /v1/projects/{project}/workflows/{name}/upstream",
 	"POST /v1/projects/{project}/workflows/{name}/sync",
 	"POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/abort",

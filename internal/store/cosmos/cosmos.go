@@ -3979,6 +3979,68 @@ func (s *Store) CancelLeaseByRef(ctx context.Context, project, ref string) (serv
 	}, nil
 }
 
+func (s *Store) UpdateLeaseTTLByRef(ctx context.Context, project, ref string, ttlSeconds int) (server.Lease, error) {
+	if ttlSeconds <= 0 {
+		return server.Lease{}, server.ValidationError{Message: "ttl_seconds must be positive"}
+	}
+	docID, err := s.leaseDocIDByPublicRef(ctx, project, ref)
+	if err != nil {
+		return server.Lease{}, err
+	}
+	pk := azcosmos.NewPartitionKeyString(project)
+	for attempt := 0; attempt < maxLeaseConflictRetries; attempt++ {
+		read, err := s.leases.ReadItem(ctx, pk, docID, nil)
+		if err != nil {
+			if isCosmosStatus(err, http.StatusNotFound) {
+				return server.Lease{}, server.ErrNotFound
+			}
+			return server.Lease{}, fmt.Errorf("read lease: %w", err)
+		}
+		var doc leaseDoc
+		if err := json.Unmarshal(read.Value, &doc); err != nil {
+			return server.Lease{}, err
+		}
+		if doc.Project != project {
+			return server.Lease{}, server.ErrNotFound
+		}
+		if doc.State != "claimed" {
+			return server.Lease{}, server.ErrConflict
+		}
+		doc.TTLSeconds = ttlSeconds
+		payload, err := json.Marshal(doc)
+		if err != nil {
+			return server.Lease{}, err
+		}
+		etag := azcore.ETag(read.ETag)
+		if _, err := s.leases.ReplaceItem(ctx, pk, doc.ID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
+			if isCosmosStatus(err, http.StatusPreconditionFailed) {
+				continue
+			}
+			return server.Lease{}, fmt.Errorf("update lease TTL: %w", err)
+		}
+		return leaseFromDoc(doc), nil
+	}
+	return server.Lease{}, fmt.Errorf("update lease TTL: too many etag conflicts")
+}
+
+func (s *Store) leaseDocIDByPublicRef(ctx context.Context, project, ref string) (string, error) {
+	var docs []leaseDoc
+	if err := singlePartitionQuery(
+		ctx, s.leases,
+		azcosmos.NewPartitionKeyString(project),
+		"SELECT * FROM c WHERE c.project = @p",
+		[]azcosmos.QueryParameter{{Name: "@p", Value: project}},
+		&docs,
+	); err != nil {
+		return "", fmt.Errorf("query leases: %w", err)
+	}
+	found := selectLeaseDocByPublicRef(docs, ref)
+	if found == nil {
+		return "", server.ErrNotFound
+	}
+	return found.ID, nil
+}
+
 func (s *Store) AppendTestSlotHotSwapHistory(ctx context.Context, project, ref string, entry server.TestSlotHotSwapHistoryEntry) (server.Lease, error) {
 	var docs []leaseDoc
 	if err := singlePartitionQuery(
