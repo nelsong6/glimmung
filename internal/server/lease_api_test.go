@@ -406,11 +406,22 @@ func (s *fakeLeaseStore) UpdateLeaseTTLByRef(_ context.Context, project, ref str
 	if s.err != nil {
 		return Lease{}, s.err
 	}
+	if s.leases != nil {
+		for i := range s.leases {
+			if s.leases[i].Project != project || LeasePublicRefFromLease(s.leases[i]) != ref {
+				continue
+			}
+			s.leases[i].TTLSeconds = ttlSeconds
+			return s.leases[i], nil
+		}
+		return Lease{}, ErrNotFound
+	}
 	lease := s.lease
 	if lease.Project == "" {
 		lease.Project = project
 	}
 	lease.TTLSeconds = ttlSeconds
+	s.lease = lease
 	return lease, nil
 }
 

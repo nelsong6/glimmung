@@ -71,6 +71,7 @@ var expectedGoRoutes = []string{
 	"POST /v1/run-callbacks/{callback_token}/native/completed",
 	"POST /v1/test-slots/checkout",
 	"POST /v1/test-slots/return",
+	"POST /v1/test-slots/extend",
 	"POST /v1/test-slots/hot-swap-history",
 	"POST /v1/test-slots/apply-hot-swap",
 	"POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/replay",

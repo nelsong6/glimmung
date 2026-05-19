@@ -138,9 +138,18 @@ wrapper for `POST /v1/test-slots/checkout`. Its tool signature must match the
 HTTP request contract: project identity, requester/Tank session identity,
 optional workflow, and optional TTL only.
 
-The MCP tool must not expose or forward `slot_index`, `mode`, `phase_inputs`,
-or any other caller-owned slot identity or cleanup controls. Glimmung chooses
-the slot, and destructive cleanup is reserved for return and queue-size changes.
+The checkout MCP tool must not expose or forward `slot_index`, `mode`,
+`phase_inputs`, or any other caller-owned slot identity or cleanup controls.
+Glimmung chooses the slot, and destructive cleanup is reserved for return and
+queue-size changes.
+
+`extend_test_slot_lease` wraps `POST /v1/test-slots/extend`. It updates the
+claimed lease's durable `ttl_seconds` and re-arms the in-process expiry timer
+from the Cosmos lease row. The endpoint requires `extend_seconds` and either a
+slot selector (`slot_index` or `slot_name`) or the Tank session id that owns the
+checkout. When both are present, the session id must match the lease requester
+metadata. Extension is rejected after the current durable deadline has passed or
+once slot cleanup has started.
 
 When this API changes, update `mcp-glimmung`'s tool signature, docstring, and
 payload tests in the same rollout. A stale MCP tool is a contract bug even when
@@ -181,6 +190,7 @@ lifecycle transition responds to an explicit event:
 | default TTL changed | `PATCH /v1/test-slots/default-ttl` | updates the global generated test-slot lease TTL, or a project's override; future checkouts use the new default unless they pass `ttl_seconds` explicitly |
 | checkout | `POST /v1/test-slots/checkout` | acquires lease, arms a `time.AfterFunc` for `assigned_at + ttl_seconds`, starts activation goroutine |
 | TTL changed | `PATCH /v1/leases/ttl` | updates the claimed lease document and re-arms this replica's timer from the durable deadline |
+| extend | `POST /v1/test-slots/extend` | validates Tank-session ownership, adds `extend_seconds` to the claimed lease TTL, and uses the durable TTL update path |
 | return / callback release / admin cancel | `POST /v1/test-slots/return`, `POST /v1/lease-callbacks/.../release`, `POST /v1/leases/cancel` | stops the lease's TTL timer, starts cleanup goroutine |
 | TTL deadline | per-lease `time.AfterFunc` fires | starts cleanup goroutine with source `lease.ttl_expiry` |
 | activation finished | inline at end of activation goroutine | one-shot installer cleanup, mark slot `running` |

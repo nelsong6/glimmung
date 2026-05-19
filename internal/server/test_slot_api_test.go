@@ -1553,6 +1553,90 @@ func TestReturnTestSlotReleasesLease(t *testing.T) {
 	}
 }
 
+func TestExtendTestSlotLeaseByTankSession(t *testing.T) {
+	now := time.Now().UTC().Add(-time.Minute)
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{ID: "tank-operator", Name: "tank-operator"}}},
+		lease: Lease{
+			Project:     "tank-operator",
+			LeaseNumber: intPtr(2),
+			State:       "claimed",
+			Metadata: map[string]any{
+				"test_slot_checkout": true,
+				"native_slot_index":  "1",
+				"native_slot_name":   "tank-slot-1",
+				"requester": map[string]any{
+					"consumer": "tank-operator",
+					"kind":     "tank_session",
+					"ref":      "tank-operator/session/abc123",
+					"metadata": map[string]any{"tank_session_id": "abc123"},
+				},
+			},
+			RequestedAt: now,
+			AssignedAt:  &now,
+			TTLSeconds:  3600,
+		},
+	}
+	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/test-slots/extend", strings.NewReader(`{"project":"tank-operator","tank_session_id":"session-abc123","extend_seconds":1800}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	defer cancelLeaseExpiryTimer(LeasePublicRefFromLease(store.lease))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.lease.TTLSeconds != 5400 {
+		t.Fatalf("ttl=%d, want 5400", store.lease.TTLSeconds)
+	}
+	for _, want := range []string{`"state":"claimed"`, `"lease":"tank-slot-1"`, `"ttl_seconds":5400`, `"extended_by_seconds":1800`, `"status_url":"/v1/projects/tank-operator/test-environments/tank-slot-1"`} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("response missing %s: %s", want, rec.Body.String())
+		}
+	}
+}
+
+func TestExtendTestSlotLeaseRejectsWrongTankSession(t *testing.T) {
+	now := time.Now().UTC().Add(-time.Minute)
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{ID: "tank-operator", Name: "tank-operator"}}},
+		lease: Lease{
+			Project:     "tank-operator",
+			LeaseNumber: intPtr(2),
+			State:       "claimed",
+			Metadata: map[string]any{
+				"test_slot_checkout": true,
+				"native_slot_index":  "1",
+				"native_slot_name":   "tank-slot-1",
+				"requester": map[string]any{
+					"consumer": "tank-operator",
+					"kind":     "tank_session",
+					"ref":      "tank-operator/session/owner",
+					"metadata": map[string]any{"tank_session_id": "owner"},
+				},
+			},
+			RequestedAt: now,
+			AssignedAt:  &now,
+			TTLSeconds:  3600,
+		},
+	}
+	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/test-slots/extend", strings.NewReader(`{"project":"tank-operator","slot_name":"tank-slot-1","tank_session_id":"intruder","extend_seconds":1800}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.lease.TTLSeconds != 3600 {
+		t.Fatalf("ttl changed to %d", store.lease.TTLSeconds)
+	}
+}
+
 func TestSetLeaseSlotCleanupFinishedClearsActivationFieldsOnSuccess(t *testing.T) {
 	// Successful cleanup returns the slot to the pool. The previous lease's
 	// activation_* fields are now historical and must not linger — leaving

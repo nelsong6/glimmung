@@ -279,6 +279,7 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/completed", nativeRunCompletedByCallbackToken(store, nativeLauncher))
 	mux.Handle("POST /v1/test-slots/checkout", requireAdmin(adminAuthenticator, http.HandlerFunc(checkoutTestSlot(settings, store, testSlotPreparer, nativeTokenMinter))))
 	mux.Handle("POST /v1/test-slots/return", requireAdmin(adminAuthenticator, http.HandlerFunc(returnTestSlot(store, testSlotPreparer, nativeTokenMinter))))
+	mux.Handle("POST /v1/test-slots/extend", requireAdmin(adminAuthenticator, http.HandlerFunc(extendTestSlotLease(store, testSlotPreparer))))
 	mux.Handle("POST /v1/test-slots/hot-swap-history", requireAdmin(adminAuthenticator, http.HandlerFunc(appendTestSlotHotSwapHistory(store))))
 	// /v1/test-slots/apply-hot-swap — developer-driven build-and-swap.
 	// Sync UX per docs/test-slot-hot-swap.md. The performer wraps
