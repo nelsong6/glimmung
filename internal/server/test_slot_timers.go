@@ -151,25 +151,16 @@ func fireLeaseExpiry(store ReadStore, preparer TestSlotPreparer, project Project
 // recovery sources from each other and carry per-call context like
 // caller pod IP, session ID, and reason where available.
 func claimTestSlotCleanup(ctx context.Context, store ReadStore, _ Project, lease Lease, audit testSlotReturnAudit) (Project, error) {
-	slotStore := slotStoreFromReadStore(store)
-	if slotStore == nil {
-		return Project{}, errSlotStoreNotConfigured
-	}
-	slotIndex, projectKey, err := slotIdentityFromLease(lease)
-	if err != nil {
-		return Project{}, err
-	}
 	now := time.Now().UTC()
 	if err := ensureSlotForLease(ctx, store, lease, now); err != nil {
 		return Project{}, err
 	}
-	// Probe: if the slot is already in `cleaning`, another replica got
-	// here first. error→cleaning is a valid retry transition (see slot.go
-	// validSlotTransitions), so we don't short-circuit on `error` here.
-	if current, err := slotStore.GetSlot(ctx, projectKey, slotIndex); err == nil && current.State == SlotStateCleaning {
-		return Project{}, ErrPreconditionFailed
-	}
-	if _, err := markLeaseSlotCleaning(ctx, store, lease, now); err != nil {
+	// Claim the cleaning transition inside the same CAS mutation that writes
+	// the slot. A pre-read alone is stale under concurrent return/timer calls:
+	// a loser can observe "running", then reach the write after the winner has
+	// already moved the slot to "cleaning". error->cleaning remains a valid
+	// retry; cleaning->cleaning means another caller already owns this cleanup.
+	if _, err := claimLeaseSlotCleaning(ctx, store, lease, now); err != nil {
 		return Project{}, err
 	}
 	// Append the audit entry to the slot_history collection so the slot's

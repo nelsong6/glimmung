@@ -172,6 +172,14 @@ func markLeaseSlotRunning(ctx context.Context, store ReadStore, lease Lease, now
 // cleaning. The active_lease_ref is retained until cleanup finishes so
 // the allocator can't hand the slot to a new caller mid-cleanup.
 func markLeaseSlotCleaning(ctx context.Context, store ReadStore, lease Lease, now time.Time) (Slot, error) {
+	return updateLeaseSlotCleaning(ctx, store, lease, now, false)
+}
+
+func claimLeaseSlotCleaning(ctx context.Context, store ReadStore, lease Lease, now time.Time) (Slot, error) {
+	return updateLeaseSlotCleaning(ctx, store, lease, now, true)
+}
+
+func updateLeaseSlotCleaning(ctx context.Context, store ReadStore, lease Lease, now time.Time, rejectAlreadyCleaning bool) (Slot, error) {
 	slotStore := slotStoreFromReadStore(store)
 	if slotStore == nil {
 		return Slot{}, errSlotStoreNotConfigured
@@ -184,6 +192,9 @@ func markLeaseSlotCleaning(ctx context.Context, store ReadStore, lease Lease, no
 		return Slot{}, err
 	}
 	return slotStore.UpdateIfMatch(ctx, projectKey, slotIndex, func(s Slot) (Slot, error) {
+		if rejectAlreadyCleaning && s.State == SlotStateCleaning {
+			return s, ErrPreconditionFailed
+		}
 		// Tolerate a transition from any pre-cleanup state. If the
 		// slot was found in unseeded/provisioning/provisioned and
 		// cleanup is being fired against it (TTL expiry on a lease
