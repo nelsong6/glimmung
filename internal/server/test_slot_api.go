@@ -80,6 +80,35 @@ type TestSlotReturnResult struct {
 	Detail         *string `json:"detail,omitempty"`
 }
 
+type TestSlotExtendRequest struct {
+	Project       string  `json:"project"`
+	SlotIndex     *int    `json:"slot_index"`
+	SlotName      *string `json:"slot_name"`
+	TankSessionID *string `json:"tank_session_id"`
+	ExtendSeconds *int    `json:"extend_seconds"`
+	CallerPodIP   *string `json:"caller_pod_ip"`
+	Source        *string `json:"source"`
+	Reason        *string `json:"reason"`
+}
+
+type TestSlotExtendResult struct {
+	State      string     `json:"state"`
+	Project    string     `json:"project"`
+	Lease      string     `json:"lease"`
+	SlotIndex  *int       `json:"slot_index,omitempty"`
+	SlotName   *string    `json:"slot_name,omitempty"`
+	TTLSeconds int        `json:"ttl_seconds"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	ExtendedBy int        `json:"extended_by_seconds"`
+	Usable     bool       `json:"usable"`
+	StatusURL  *string    `json:"status_url,omitempty"`
+	Detail     *string    `json:"detail,omitempty"`
+}
+
+type TestSlotLeaseExtender interface {
+	ExtendLeaseTTLByRef(ctx context.Context, project, ref string, extendSeconds int) (Lease, error)
+}
+
 // testSlotActivation tracks one in-flight activation goroutine. Stored in
 // testSlotActivations keyed by testSlotActivationKey(lease). Cleanup paths
 // (return, callback release, TTL expiry) cancel the activation and wait on
@@ -312,6 +341,78 @@ func returnTestSlot(store ReadStore, preparer TestSlotPreparer, _ NativeGitHubTo
 			StatusURL:      testSlotStatusURL(Project{Name: req.Project}, nativeSlotNameFromMetadata(lease.Metadata)),
 		}
 		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+func extendTestSlotLease(store ReadStore, preparer TestSlotPreparer) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		extender, ok := store.(TestSlotLeaseExtender)
+		stateStore, hasState := store.(StateStore)
+		if !ok || extender == nil || !hasState || stateStore == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "test-slot lease extender not configured")
+			return
+		}
+		var req TestSlotExtendRequest
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&req); err != nil {
+			writeProblem(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+			return
+		}
+		req.Project = strings.TrimSpace(req.Project)
+		if req.Project == "" {
+			writeProblem(w, http.StatusBadRequest, "project required")
+			return
+		}
+		if req.ExtendSeconds == nil || *req.ExtendSeconds <= 0 {
+			writeProblem(w, http.StatusBadRequest, "extend_seconds must be greater than zero")
+			return
+		}
+		project, ok := findProjectForTestSlot(r, w, store, req.Project)
+		if !ok {
+			return
+		}
+		lease, err := resolveTestSlotLeaseForExtend(r, stateStore, req)
+		if err != nil {
+			switch {
+			case errors.Is(err, ErrNotFound):
+				writeProblem(w, http.StatusNotFound, "test slot lease not found")
+			case errors.Is(err, ErrForbidden):
+				writeProblem(w, http.StatusForbidden, "tank session does not own the test slot lease")
+			default:
+				writeProblem(w, http.StatusBadRequest, err.Error())
+			}
+			return
+		}
+		if lease.State != "claimed" {
+			writeProblem(w, http.StatusConflict, "test slot lease is not active")
+			return
+		}
+		slotState, hasSlotState := currentTestSlotState(r.Context(), store, lease)
+		if hasSlotState && slotState == SlotStateCleaning {
+			writeProblem(w, http.StatusConflict, "test slot cleanup already started")
+			return
+		}
+		ref := LeasePublicRefFromLease(lease)
+		updated, err := extender.ExtendLeaseTTLByRef(r.Context(), req.Project, ref, *req.ExtendSeconds)
+		switch {
+		case errors.Is(err, ErrNotFound):
+			writeProblem(w, http.StatusNotFound, "test slot lease not found")
+			return
+		case errors.Is(err, ErrConflict):
+			writeProblem(w, http.StatusConflict, "test slot lease cannot be extended")
+			return
+		case err != nil:
+			var validationErr ValidationError
+			if errors.As(err, &validationErr) {
+				writeProblem(w, http.StatusBadRequest, validationErr.Message)
+				return
+			}
+			writeInternalError(w, r, err, "extend test-slot lease failed")
+			return
+		}
+		armLeaseExpiryTimer(store, preparer, project, updated, nil)
+		writeJSON(w, http.StatusOK, testSlotExtendResponse(project, updated, *req.ExtendSeconds, hasSlotState && slotState == SlotStateRunning))
 	}
 }
 
@@ -865,20 +966,28 @@ func testSlotActivationKey(lease Lease) string {
 }
 
 func testSlotLeaseStillClaimed(ctx context.Context, store ReadStore, lease Lease) bool {
+	current, ok := currentTestSlotLease(ctx, store, lease)
+	if !ok {
+		return false
+	}
+	return current.State == "claimed"
+}
+
+func currentTestSlotLease(ctx context.Context, store ReadStore, lease Lease) (Lease, bool) {
 	stateStore, ok := store.(StateStore)
 	if !ok || stateStore == nil {
-		return true
+		return lease, true
 	}
 	leases, err := stateStore.ListLeases(ctx)
 	if err != nil {
-		return true
+		return lease, true
 	}
 	for _, current := range leases {
 		if sameTestSlotLease(current, lease) {
-			return current.State == "claimed"
+			return current, true
 		}
 	}
-	return false
+	return Lease{}, false
 }
 
 func sameTestSlotLease(left Lease, right Lease) bool {
@@ -1329,6 +1438,131 @@ func resolveTestSlotLease(r *http.Request, store StateStore, req TestSlotReturnR
 	}
 	sortLeasesForReturn(candidates)
 	return candidates[0], nil
+}
+
+func resolveTestSlotLeaseForExtend(r *http.Request, store StateStore, req TestSlotExtendRequest) (Lease, error) {
+	tankSessionID := normalizeTankSessionID(req.TankSessionID)
+	hasSlotSelector := req.SlotIndex != nil || (req.SlotName != nil && strings.TrimSpace(*req.SlotName) != "")
+	if hasSlotSelector {
+		lease, err := resolveTestSlotLease(r, store, TestSlotReturnRequest{
+			Project:   req.Project,
+			SlotIndex: req.SlotIndex,
+			SlotName:  req.SlotName,
+		})
+		if err != nil {
+			return Lease{}, err
+		}
+		if tankSessionID != "" && !testSlotLeaseMatchesTankSession(lease, tankSessionID) {
+			return Lease{}, ErrForbidden
+		}
+		return lease, nil
+	}
+	if tankSessionID == "" {
+		return Lease{}, errors.New("slot_index, slot_name, or tank_session_id required")
+	}
+	leases, err := store.ListLeases(r.Context())
+	if err != nil {
+		return Lease{}, err
+	}
+	var candidates []Lease
+	for _, lease := range leases {
+		if lease.Project != req.Project || !boolFromMap(lease.Metadata, "test_slot_checkout") {
+			continue
+		}
+		if lease.State != "claimed" && lease.State != "pending" {
+			continue
+		}
+		if testSlotLeaseMatchesTankSession(lease, tankSessionID) {
+			candidates = append(candidates, lease)
+		}
+	}
+	if len(candidates) == 0 {
+		return Lease{}, ErrNotFound
+	}
+	sortLeasesForReturn(candidates)
+	return candidates[0], nil
+}
+
+func testSlotLeaseMatchesTankSession(lease Lease, tankSessionID string) bool {
+	target := strings.TrimSpace(normalizeTankSessionID(&tankSessionID))
+	if target == "" {
+		return false
+	}
+	if value, ok := stringFromMap(lease.Metadata, "tank_session_id"); ok && normalizeTankSessionID(&value) == target {
+		return true
+	}
+	if value, ok := stringFromMap(lease.Metadata, "tankSessionId"); ok && normalizeTankSessionID(&value) == target {
+		return true
+	}
+	if value, ok := stringFromMap(lease.Metadata, "requester_ref"); ok && strings.TrimSpace(value) == "tank-operator/session/"+target {
+		return true
+	}
+	if requester, ok := mapFromMap(lease.Metadata, "requester"); ok {
+		if metadata, ok := mapFromMap(requester, "metadata"); ok {
+			if value, ok := stringFromMap(metadata, "tank_session_id"); ok && normalizeTankSessionID(&value) == target {
+				return true
+			}
+			if value, ok := stringFromMap(metadata, "tankSessionId"); ok && normalizeTankSessionID(&value) == target {
+				return true
+			}
+		}
+		if value, ok := stringFromMap(requester, "ref"); ok && strings.TrimSpace(value) == "tank-operator/session/"+target {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeTankSessionID(value *string) string {
+	if value == nil {
+		return ""
+	}
+	clean := strings.TrimSpace(*value)
+	return strings.TrimPrefix(clean, "session-")
+}
+
+func currentTestSlotState(ctx context.Context, store ReadStore, lease Lease) (string, bool) {
+	slotIndex := nativeSlotIndexFromMetadata(lease.Metadata)
+	if slotIndex == nil {
+		return "", false
+	}
+	slotStore := slotStoreFromReadStore(store)
+	if slotStore == nil {
+		return "", false
+	}
+	slot, err := slotStore.GetSlot(ctx, lease.Project, *slotIndex)
+	if err != nil {
+		return "", false
+	}
+	return slot.State, true
+}
+
+func testSlotExtendResponse(project Project, lease Lease, extendedBy int, usable bool) TestSlotExtendResult {
+	expiresAt := testSlotLeaseExpiresAt(lease)
+	return TestSlotExtendResult{
+		State:      lease.State,
+		Project:    lease.Project,
+		Lease:      LeasePublicRefFromLease(lease),
+		SlotIndex:  nativeSlotIndexFromMetadata(lease.Metadata),
+		SlotName:   nativeSlotNameFromMetadata(lease.Metadata),
+		TTLSeconds: lease.TTLSeconds,
+		ExpiresAt:  expiresAt,
+		ExtendedBy: extendedBy,
+		Usable:     usable,
+		StatusURL:  testSlotStatusURL(project, nativeSlotNameFromMetadata(lease.Metadata)),
+	}
+}
+
+func testSlotLeaseExpiresAt(lease Lease) *time.Time {
+	if lease.TTLSeconds <= 0 {
+		return nil
+	}
+	started := lease.RequestedAt
+	if lease.AssignedAt != nil {
+		started = *lease.AssignedAt
+	}
+	expiresAt := started.Add(time.Duration(lease.TTLSeconds) * time.Second)
+	return &expiresAt
 }
 
 func testSlotRequesterRef(req TestSlotCheckoutRequest) string {

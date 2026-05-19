@@ -89,13 +89,21 @@ func fireLeaseExpiry(store ReadStore, preparer TestSlotPreparer, project Project
 	testSlotLeaseTimers.Delete(ref)
 
 	ctx := context.Background()
-	if !testSlotLeaseStillClaimed(ctx, store, lease) {
+	current, ok := currentTestSlotLease(ctx, store, lease)
+	if !ok || current.State != "claimed" {
 		// Returned out from under us. Nothing to do — the return path is
 		// already running or has already finished cleanup.
 		return
 	}
+	if expiresAt := testSlotLeaseExpiresAt(current); expiresAt != nil && time.Now().UTC().Before(*expiresAt) {
+		// The lease was extended after this timer was armed. Re-arm from
+		// the durable lease row so a stale in-process timer cannot tear
+		// down a still-valid slot.
+		armLeaseExpiryTimer(store, preparer, project, current, logf)
+		return
+	}
 
-	if _, err := claimTestSlotCleanup(ctx, store, project, lease, testSlotReturnAudit{Source: "lease.ttl_expiry"}); err != nil {
+	if _, err := claimTestSlotCleanup(ctx, store, project, current, testSlotReturnAudit{Source: "lease.ttl_expiry"}); err != nil {
 		if errors.Is(err, ErrPreconditionFailed) {
 			// Another replica's timer fired first and won the etag race.
 			// Their cleanup is in flight; ours is a no-op. This is the
@@ -116,7 +124,7 @@ func fireLeaseExpiry(store ReadStore, preparer TestSlotPreparer, project Project
 	// fleet. test_slot_checkout is the only purpose that arms a TTL
 	// timer, so the label is unambiguous.
 	metrics.RecordLeaseReleased(LeasePurposeTestSlotCheckout, "expired")
-	beginTestSlotCleanup(store, preparer, project, lease, true, activationCancelTTLExpiry, logf)
+	beginTestSlotCleanup(store, preparer, project, current, true, activationCancelTTLExpiry, logf)
 }
 
 // claimTestSlotCleanup atomically transitions the slot to `cleaning` via

@@ -397,6 +397,38 @@ func (s *fakeLeaseStore) CancelLeaseByRef(_ context.Context, _, ref string) (Can
 	return s.result, nil
 }
 
+func (s *fakeLeaseStore) ExtendLeaseTTLByRef(_ context.Context, project, ref string, extendSeconds int) (Lease, error) {
+	if s.err != nil {
+		return Lease{}, s.err
+	}
+	var leases []Lease
+	if s.leases != nil {
+		leases = s.leases
+	} else {
+		leases = []Lease{s.lease}
+	}
+	for i := range leases {
+		if leases[i].Project != project || LeasePublicRefFromLease(leases[i]) != ref {
+			continue
+		}
+		if leases[i].State != "claimed" {
+			return Lease{}, ErrConflict
+		}
+		expiresAt := testSlotLeaseExpiresAt(leases[i])
+		if expiresAt == nil || !expiresAt.After(time.Now().UTC()) {
+			return Lease{}, ErrConflict
+		}
+		leases[i].TTLSeconds += extendSeconds
+		if s.leases != nil {
+			s.leases[i] = leases[i]
+		} else {
+			s.lease = leases[i]
+		}
+		return leases[i], nil
+	}
+	return Lease{}, ErrNotFound
+}
+
 func (s *fakeLeaseStore) ListLeases(context.Context) ([]Lease, error) {
 	if s.err != nil {
 		return nil, s.err

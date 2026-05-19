@@ -3979,6 +3979,72 @@ func (s *Store) CancelLeaseByRef(ctx context.Context, project, ref string) (serv
 	}, nil
 }
 
+func (s *Store) ExtendLeaseTTLByRef(ctx context.Context, project, ref string, extendSeconds int) (server.Lease, error) {
+	if extendSeconds <= 0 {
+		return server.Lease{}, server.ValidationError{Message: "extend_seconds must be greater than zero"}
+	}
+	var docs []leaseDoc
+	if err := singlePartitionQuery(
+		ctx, s.leases,
+		azcosmos.NewPartitionKeyString(project),
+		"SELECT * FROM c WHERE c.project = @p",
+		[]azcosmos.QueryParameter{{Name: "@p", Value: project}},
+		&docs,
+	); err != nil {
+		return server.Lease{}, fmt.Errorf("query leases: %w", err)
+	}
+	found := selectLeaseDocByPublicRef(docs, ref)
+	if found == nil {
+		return server.Lease{}, server.ErrNotFound
+	}
+	if found.State != "claimed" {
+		return server.Lease{}, server.ErrConflict
+	}
+	lease := leaseFromDoc(*found)
+	if !boolValue(lease.Metadata["test_slot_checkout"]) {
+		return server.Lease{}, server.ErrConflict
+	}
+	expiresAt := leaseExpiryDeadline(lease)
+	now := time.Now().UTC()
+	if !expiresAt.After(now) {
+		return server.Lease{}, server.ErrConflict
+	}
+	newExpiresAt := expiresAt.Add(time.Duration(extendSeconds) * time.Second)
+	started := lease.RequestedAt
+	if lease.AssignedAt != nil {
+		started = *lease.AssignedAt
+	}
+	found.TTLSeconds = secondsCeil(newExpiresAt.Sub(started))
+	payload, err := json.Marshal(found)
+	if err != nil {
+		return server.Lease{}, err
+	}
+	leasePK := azcosmos.NewPartitionKeyString(project)
+	if _, err := s.leases.ReplaceItem(ctx, leasePK, found.ID, payload, nil); err != nil {
+		return server.Lease{}, fmt.Errorf("extend lease ttl: %w", err)
+	}
+	return leaseFromDoc(*found), nil
+}
+
+func leaseExpiryDeadline(lease server.Lease) time.Time {
+	started := lease.RequestedAt
+	if lease.AssignedAt != nil {
+		started = *lease.AssignedAt
+	}
+	return started.Add(time.Duration(lease.TTLSeconds) * time.Second)
+}
+
+func secondsCeil(d time.Duration) int {
+	seconds := int(d / time.Second)
+	if time.Duration(seconds)*time.Second < d {
+		seconds++
+	}
+	if seconds < 1 {
+		return 1
+	}
+	return seconds
+}
+
 func (s *Store) AppendTestSlotHotSwapHistory(ctx context.Context, project, ref string, entry server.TestSlotHotSwapHistoryEntry) (server.Lease, error) {
 	var docs []leaseDoc
 	if err := singlePartitionQuery(
