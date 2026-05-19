@@ -145,7 +145,7 @@ func (l *KubernetesNativeLauncher) ActivateTestSlotRuntime(ctx context.Context, 
 			return err
 		}
 	}
-	return l.ensurePlaywrightForSlot(ctx, lease, slotName)
+	return l.ensurePlaywrightForSlot(ctx, lease, slotName, true)
 }
 
 func (l *KubernetesNativeLauncher) ReturnTestSlotRuntime(ctx context.Context, lease Lease, project Project) error {
@@ -375,10 +375,10 @@ func (l *KubernetesNativeLauncher) remainingPodsInNamespaces(ctx context.Context
 func (l *KubernetesNativeLauncher) ensurePlaywrightForNativePhase(ctx context.Context, req NativeLaunchRequest) error {
 	slotName, _ := stringFromMap(req.Lease.Metadata, "native_slot_name")
 	slotName = strings.TrimSpace(slotName)
-	return l.ensurePlaywrightForSlot(ctx, req.Lease, slotName)
+	return l.ensurePlaywrightForSlot(ctx, req.Lease, slotName, false)
 }
 
-func (l *KubernetesNativeLauncher) ensurePlaywrightForSlot(ctx context.Context, lease Lease, slotName string) error {
+func (l *KubernetesNativeLauncher) ensurePlaywrightForSlot(ctx context.Context, lease Lease, slotName string, waitForReady bool) error {
 	if !l.Settings.NativeRunnerPlaywrightEnabled {
 		return nil
 	}
@@ -396,6 +396,9 @@ func (l *KubernetesNativeLauncher) ensurePlaywrightForSlot(ctx context.Context, 
 	}
 	if err := l.createServiceInNamespace(ctx, slotName, playwrightService(l.Settings, slotName, name, labels)); err != nil {
 		return err
+	}
+	if !waitForReady {
+		return nil
 	}
 	return l.waitForDeploymentReady(ctx, slotName, name, 2*time.Minute)
 }

@@ -378,7 +378,7 @@ func resumeRunHandler(store ReadStore, nativeLauncher NativeLauncher) http.Handl
 				Phase:        req.EntrypointPhase,
 			}},
 		}
-		if _, err := nativeLauncher.LaunchNativePhase(ctx, NativeLaunchRequest{
+		if _, err := launchCommittedNativePhase(ctx, nativeLauncher, NativeLaunchRequest{
 			Lease:    lease,
 			Workflow: *wf,
 			Phase:    entryPhase,

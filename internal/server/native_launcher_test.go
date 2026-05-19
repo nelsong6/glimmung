@@ -360,7 +360,7 @@ func TestActivateTestSlotRuntimeCreatesReadyPlaywrightRuntime(t *testing.T) {
 	}
 }
 
-func TestLaunchNativePhaseCreatesSlotPlaywrightRuntime(t *testing.T) {
+func TestLaunchNativePhaseCreatesSlotPlaywrightRuntimeWithoutReadinessWait(t *testing.T) {
 	tokenPath := tempTokenFile(t)
 	var paths []string
 	launcher := &KubernetesNativeLauncher{
@@ -378,14 +378,10 @@ func TestLaunchNativePhaseCreatesSlotPlaywrightRuntime(t *testing.T) {
 		},
 		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			paths = append(paths, req.Method+" "+req.URL.Path)
-			body := `{}`
-			if req.Method == http.MethodGet && req.URL.Path == "/apis/apps/v1/namespaces/tank-operator-slot-1/deployments/slot-playwright" {
-				body = `{"status":{"readyReplicas":1,"availableReplicas":1}}`
-			}
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Header:     make(http.Header),
-				Body:       io.NopCloser(strings.NewReader(body)),
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
 			}, nil
 		})},
 	}
@@ -422,8 +418,8 @@ func TestLaunchNativePhaseCreatesSlotPlaywrightRuntime(t *testing.T) {
 	if !containsPath(paths, "POST /api/v1/namespaces/tank-operator-slot-1/services") {
 		t.Fatalf("launch should create slot Playwright service, paths=%#v", paths)
 	}
-	if !containsPath(paths, "GET /apis/apps/v1/namespaces/tank-operator-slot-1/deployments/slot-playwright") {
-		t.Fatalf("launch should wait for slot Playwright readiness, paths=%#v", paths)
+	if containsPath(paths, "GET /apis/apps/v1/namespaces/tank-operator-slot-1/deployments/slot-playwright") {
+		t.Fatalf("launch should not wait for slot Playwright readiness, paths=%#v", paths)
 	}
 	if containsPath(paths, "POST /apis/apps/v1/namespaces/glimmung-runs/deployments") {
 		t.Fatalf("launch should not create Playwright in glimmung-runs, paths=%#v", paths)

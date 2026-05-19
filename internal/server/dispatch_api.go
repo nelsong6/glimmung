@@ -331,7 +331,7 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, nativeLaun
 				Phase:        initPhase.Name,
 			}},
 		}
-		if _, err := nativeLauncher.LaunchNativePhase(ctx, NativeLaunchRequest{
+		if _, err := launchCommittedNativePhase(ctx, nativeLauncher, NativeLaunchRequest{
 			Lease:    lease,
 			Workflow: *wf,
 			Phase:    initPhase,
