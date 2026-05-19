@@ -41,7 +41,7 @@ nativeRunner:
     # Built from slot-playwright/Dockerfile. The slot-playwright build workflow
     # rewrites this to a fingerprinted glimmung-slot-playwright image after
     # pushing the image to ACR.
-    image: romainecr.azurecr.io/agent-container:latest
+    image: romainecr.azurecr.io/glimmung-slot-playwright:slot-playwright-12db48477387c4dd74152b7547411e7eb21f36517641b8b57122ac203275f81a
     port: 3000
     resources:
       requests:
