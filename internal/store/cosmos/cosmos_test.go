@@ -2,6 +2,7 @@ package cosmos
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -32,6 +33,28 @@ func TestProjectFromDocConvertsCamelCaseFields(t *testing.T) {
 	}
 	if project.CreatedAt.IsZero() {
 		t.Fatal("CreatedAt should be populated")
+	}
+}
+
+func TestSortNativeEventDocsOrdersInMemory(t *testing.T) {
+	docs := []nativeEventDoc{
+		{AttemptIndex: 1, JobID: "verify", Seq: 2, CreatedAt: "2026-05-19T00:00:04Z"},
+		{AttemptIndex: 0, JobID: "implement", Seq: 2, CreatedAt: "2026-05-19T00:00:03Z"},
+		{AttemptIndex: 0, JobID: "implement", Seq: 1, CreatedAt: "2026-05-19T00:00:02Z"},
+		{AttemptIndex: 0, JobID: "plan", Seq: 1, CreatedAt: "2026-05-19T00:00:01Z"},
+	}
+
+	sortNativeEventDocs(docs)
+
+	got := []string{
+		fmt.Sprintf("%s:%d", docs[0].JobID, docs[0].Seq),
+		fmt.Sprintf("%s:%d", docs[1].JobID, docs[1].Seq),
+		fmt.Sprintf("%s:%d", docs[2].JobID, docs[2].Seq),
+		fmt.Sprintf("%s:%d", docs[3].JobID, docs[3].Seq),
+	}
+	want := []string{"implement:1", "implement:2", "plan:1", "verify:2"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("order=%v, want %v", got, want)
 	}
 }
 

@@ -5162,14 +5162,13 @@ func (s *Store) ListNativeEventsByID(ctx context.Context, project, runID string,
 		query += " AND c.job_id = @job_id"
 		params = append(params, azcosmos.QueryParameter{Name: "@job_id", Value: *jobID})
 	}
-	query += " ORDER BY c.attempt_index, c.job_id, c.seq"
-
 	var eventDocs []nativeEventDoc
 	if err := singlePartitionQuery(ctx, s.runEvents,
 		azcosmos.NewPartitionKeyString(project),
 		query, params, &eventDocs); err != nil {
 		return server.NativeRunLogsResponse{}, err
 	}
+	sortNativeEventDocs(eventDocs)
 
 	if limit != nil && *limit > 0 && len(eventDocs) > *limit {
 		eventDocs = eventDocs[:*limit]
@@ -5204,6 +5203,22 @@ func (s *Store) ListNativeEventsByID(ctx context.Context, project, runID string,
 		JobID:        jobID,
 		Events:       events,
 	}, nil
+}
+
+func sortNativeEventDocs(eventDocs []nativeEventDoc) {
+	sort.SliceStable(eventDocs, func(i, j int) bool {
+		left, right := eventDocs[i], eventDocs[j]
+		if left.AttemptIndex != right.AttemptIndex {
+			return left.AttemptIndex < right.AttemptIndex
+		}
+		if left.JobID != right.JobID {
+			return left.JobID < right.JobID
+		}
+		if left.Seq != right.Seq {
+			return left.Seq < right.Seq
+		}
+		return left.CreatedAt < right.CreatedAt
+	})
 }
 
 func stringOrEmpty(s *string) string {

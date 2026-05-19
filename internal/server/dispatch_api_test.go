@@ -43,14 +43,16 @@ type fakeDispatchStore struct {
 }
 
 type fakeNativeLauncher struct {
-	called bool
-	req    NativeLaunchRequest
-	err    error
+	called        bool
+	req           NativeLaunchRequest
+	err           error
+	ctxErrOnEntry error
 }
 
-func (l *fakeNativeLauncher) LaunchNativePhase(_ context.Context, req NativeLaunchRequest) ([]string, error) {
+func (l *fakeNativeLauncher) LaunchNativePhase(ctx context.Context, req NativeLaunchRequest) ([]string, error) {
 	l.called = true
 	l.req = req
+	l.ctxErrOnEntry = ctx.Err()
 	if l.err != nil {
 		return nil, l.err
 	}
@@ -277,6 +279,25 @@ func TestDispatchRunDispatchedNativeK8sJob(t *testing.T) {
 	}
 	if store.leaseReq == nil || store.leaseReq.Metadata["native_k8s"] != true {
 		t.Fatalf("lease request=%#v", store.leaseReq)
+	}
+}
+
+func TestDispatchRunLaunchUsesPostCommitContext(t *testing.T) {
+	store := minimalDispatchStore()
+	launcher := &fakeNativeLauncher{}
+	rec := httptest.NewRecorder()
+	req := dispatchRequest("proj", 1)
+	ctx, cancel := context.WithCancel(req.Context())
+	cancel()
+	newDispatchTestHandler(store, launcher).ServeHTTP(rec, req.WithContext(ctx))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !launcher.called {
+		t.Fatal("native launcher was not called")
+	}
+	if launcher.ctxErrOnEntry != nil {
+		t.Fatalf("launch context err=%v, want nil", launcher.ctxErrOnEntry)
 	}
 }
 

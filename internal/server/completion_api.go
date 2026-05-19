@@ -658,7 +658,7 @@ func dispatchForwardPhase(
 	if lease.State != "claimed" {
 		return fmt.Errorf("native lease was not claimed")
 	}
-	_, err = nativeLauncher.LaunchNativePhase(ctx, NativeLaunchRequest{
+	_, err = launchCommittedNativePhase(ctx, nativeLauncher, NativeLaunchRequest{
 		Lease:    lease,
 		Workflow: *wf,
 		Phase:    targetPhase,
@@ -775,7 +775,7 @@ func dispatchRetry(
 	if lease.State != "claimed" {
 		return fmt.Errorf("native lease was not claimed")
 	}
-	_, err = nativeLauncher.LaunchNativePhase(ctx, NativeLaunchRequest{
+	_, err = launchCommittedNativePhase(ctx, nativeLauncher, NativeLaunchRequest{
 		Lease:    lease,
 		Workflow: *wf,
 		Phase:    *targetPhase,

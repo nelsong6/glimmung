@@ -343,7 +343,7 @@ func dispatchTriage(ctx context.Context, store SignalDrainStore, nativeLauncher 
 		_, _ = store.AbortRunByID(ctx, reopened.Project, reopened.ID, "triage_dispatch_failed: native lease was not claimed")
 		return errors.New("native lease was not claimed")
 	}
-	if _, err := nativeLauncher.LaunchNativePhase(ctx, NativeLaunchRequest{
+	if _, err := launchCommittedNativePhase(ctx, nativeLauncher, NativeLaunchRequest{
 		Lease:    lease,
 		Workflow: *decision.Workflow,
 		Phase:    *target,
