@@ -102,7 +102,17 @@ type PhaseSpec = {
   outputs: string[];
   requirements: Record<string, unknown> | null;
   verify: boolean;
+  always?: boolean;
+  evidence_verification_gate?: boolean;
+  depends_on?: string[];
   recycle_policy: RecyclePolicy | null;
+  jobs?: NativeJobSpec[];
+};
+
+type NativeJobSpec = {
+  id: string;
+  name?: string | null;
+  image?: string;
 };
 
 type PrPrimitiveSpec = {
@@ -1186,14 +1196,21 @@ function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
         : phase.verify
           ? "verify"
           : phase.kind;
+    const jobs = phase.jobs && phase.jobs.length > 0
+      ? phase.jobs
+      : [{ id: phase.name, name: phase.name }];
     return (
-      <div className="dag-node dag-node-phase dag-node-definition">
-        <div className="dag-job-head">
-          <span className="dag-job-title">{phase.name}</span>
-          <span className="dag-job-kicker">job</span>
-        </div>
-        <div className="dag-node-meta dim mono">{meta}</div>
-      </div>
+      <>
+        {jobs.map((job) => (
+          <div className="dag-node dag-node-phase dag-node-definition" key={job.id}>
+            <div className="dag-job-head">
+              <span className="dag-job-title">{job.name || job.id}</span>
+              <span className="dag-job-kicker">job</span>
+            </div>
+            <div className="dag-node-meta dim mono">{job.id === phase.name ? meta : job.id}</div>
+          </div>
+        ))}
+      </>
     );
   };
 

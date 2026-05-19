@@ -1897,10 +1897,8 @@ h2 .inline-action,
   flex-wrap: wrap;
 }
 
-/* Pipeline DAG (#81). Horizontal flow of phase nodes followed by a
-   trailing PR node. v1 phases-v1 ships single-phase, so this is
-   `[phase] → [pr]` — boring but honest. Layout extends cleanly when
-   multi-phase orchestration lands. */
+/* Pipeline graph (#81). Phases flow left-to-right; jobs stack inside
+   each phase and run as parallel siblings. */
 .dag-wrap {
   margin: 12px 0;
 }
@@ -2423,6 +2421,5 @@ h2 .inline-action,
   font-size: 0.85rem;
 }
 
-/* Phase graph: depth-grouped phase columns. Sequential workflows render
-   one job in each phase column. Parallel branches at the same depth stack
-   as jobs inside the same visible phase column. */
+/* Phase graph: workflow phases render as ordered columns. Parallel work
+   appears only as multiple jobs inside a single phase column. */

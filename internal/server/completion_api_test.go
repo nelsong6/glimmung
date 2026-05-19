@@ -424,6 +424,22 @@ func TestAllReadyDispatchTargetsHandlesLinearPhasesAndTeardown(t *testing.T) {
 	assertPhaseTargets(t, allReadyDispatchTargets(wf, run, decision.AbortBudgetAttempts), "cleanup")
 }
 
+func TestAllReadyDispatchTargetsUsesPhaseOrderNotDependencyDepth(t *testing.T) {
+	wf := &Workflow{Phases: []PhaseSpec{
+		{Name: "prepare"},
+		{Name: "plan", DependsOn: []string{"prepare"}},
+		{Name: "implement", DependsOn: []string{"prepare"}},
+		{Name: "verify", Verify: true, DependsOn: []string{"plan", "implement"}},
+		{Name: "cleanup", Always: true, DependsOn: []string{"verify"}},
+	}}
+	run := RunReplayData{Attempts: []RunAttemptData{{AttemptIndex: 0, Phase: "prepare", Completed: true, Decision: string(decision.Advance)}}}
+
+	assertPhaseTargets(t, allReadyDispatchTargets(wf, run, decision.Advance), "plan")
+
+	run.Attempts = append(run.Attempts, RunAttemptData{AttemptIndex: 1, Phase: "plan", Completed: true, Decision: string(decision.Advance)})
+	assertPhaseTargets(t, allReadyDispatchTargets(wf, run, decision.Advance), "implement")
+}
+
 func TestNativeRunCompletedByCallbackTokenAbortBudgetAttempts(t *testing.T) {
 	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
 	store.run = &RunReplayData{

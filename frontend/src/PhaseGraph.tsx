@@ -23,6 +23,13 @@ export type PhaseGraphPhase = {
   always?: boolean;
   evidence_verification_gate?: boolean;
   depends_on?: string[];
+  jobs?: PhaseGraphJob[];
+};
+
+export type PhaseGraphJob = {
+  id: string;
+  name?: string | null;
+  image?: string;
 };
 
 export type RecycleArrow = {
@@ -83,46 +90,13 @@ const TOUCHPOINT_FALLBACK_HEIGHT = 55;
 const ENTRY_OFFSET_PERCENT = 13;
 
 function estimatedPhaseHeight(col: PhaseGraphPhase[]): number {
-  return PHASE_BASE_HEIGHT + Math.max(1, col.length) * JOB_HEIGHT;
-}
-
-function computeDepths(phases: PhaseGraphPhase[]): Map<string, number> {
-  const byName = new Map<string, PhaseGraphPhase>();
-  phases.forEach((p) => byName.set(p.name, p));
-  const depths = new Map<string, number>();
-  const visit = (name: string, visiting: Set<string>): number => {
-    if (depths.has(name)) return depths.get(name)!;
-    if (visiting.has(name)) return 0;
-    visiting.add(name);
-    const phase = byName.get(name);
-    if (!phase) return 0;
-    let d = 0;
-    for (const dep of phase.depends_on ?? []) {
-      const depDepth = visit(dep, visiting);
-      if (depDepth + 1 > d) d = depDepth + 1;
-    }
-    visiting.delete(name);
-    depths.set(name, d);
-    return d;
-  };
-  for (const p of phases) visit(p.name, new Set());
-  return depths;
+  const phase = col[0];
+  const jobCount = Math.max(1, phase?.jobs?.length ?? 0);
+  return PHASE_BASE_HEIGHT + jobCount * JOB_HEIGHT;
 }
 
 function columnsFor(phases: PhaseGraphPhase[]): PhaseGraphPhase[][] {
-  const depths = computeDepths(phases);
-  const byDepth = new Map<number, PhaseGraphPhase[]>();
-  let maxDepth = 0;
-  for (const phase of phases) {
-    const d = depths.get(phase.name) ?? 0;
-    maxDepth = Math.max(maxDepth, d);
-    const list = byDepth.get(d) ?? [];
-    list.push(phase);
-    byDepth.set(d, list);
-  }
-  const columns: PhaseGraphPhase[][] = [];
-  for (let d = 0; d <= maxDepth; d += 1) columns.push(byDepth.get(d) ?? []);
-  return columns;
+  return phases.map((phase) => [phase]);
 }
 
 function defaultPhaseNode(phase: PhaseGraphPhase): ReactNode {
@@ -133,14 +107,21 @@ function defaultPhaseNode(phase: PhaseGraphPhase): ReactNode {
       : phase.verify
         ? "verify"
         : phase.kind;
+  const jobs = phase.jobs && phase.jobs.length > 0
+    ? phase.jobs
+    : [{ id: phase.name, name: phase.name }];
   return (
-    <div className="dag-node dag-node-phase dag-node-definition">
-      <div className="dag-job-head">
-        <span className="dag-job-title">{phase.name}</span>
-        <span className="dag-job-kicker">job</span>
-      </div>
-      <div className="dag-node-meta dim mono">{meta}</div>
-    </div>
+    <>
+      {jobs.map((job) => (
+        <div className="dag-node dag-node-phase dag-node-definition" key={job.id}>
+          <div className="dag-job-head">
+            <span className="dag-job-title">{job.name || job.id}</span>
+            <span className="dag-job-kicker">job</span>
+          </div>
+          <div className="dag-node-meta dim mono">{job.id === phase.name ? meta : job.id}</div>
+        </div>
+      ))}
+    </>
   );
 }
 
@@ -159,9 +140,10 @@ function handleTop(index: number, count: number): string {
 }
 
 function PhaseFlowNode({ data }: NodeProps<Node<PhaseNodeData>>) {
+  const hasParallelJobs = data.col.some((phase) => (phase.jobs?.length ?? 0) > 1);
   return (
     <div
-      className={`dag-phase dag-phase-column${data.col.length > 1 ? " dag-phase-parallel" : ""}`}
+      className={`dag-phase dag-phase-column${hasParallelJobs ? " dag-phase-parallel" : ""}`}
       ref={(el) => {
         for (const phase of data.col) data.phaseRef?.(phase, el);
       }}
