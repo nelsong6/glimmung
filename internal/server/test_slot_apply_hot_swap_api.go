@@ -54,7 +54,7 @@ type TestSlotApplyHotSwapResult struct {
 //  1. POST { project, slot_index|slot_name, artifact_kind, git_ref, timeout_seconds }
 //  2. Endpoint resolves the active test-slot lease for project+slot.
 //  3. Endpoint reads the project's hot-swap contract from metadata.
-//  4. Endpoint validates artifact_kind is supported (v1: agent_runner)
+//  4. Endpoint validates artifact_kind is supported (v1: agent_runner or codex_runner)
 //     and the relevant builder_image is present.
 //  5. Endpoint dispatches a build-and-swap Job via ops.ApplyHotSwap,
 //     blocks on completion.
@@ -163,7 +163,7 @@ func applyTestSlotHotSwap(store ReadStore, performer applyHotSwapPerformer) http
 		// registered contracts predate the field), so the apply endpoint
 		// validates it here at request time when artifact_kind=backend
 		// is invoked. AgentRunner builder_image is required at Validate
-		// time (the only consumer of agent_runner is the apply endpoint;
+		// time (the only consumer of runner artifacts is the apply endpoint;
 		// no legacy CLI fallback).
 		if req.ArtifactKind == "backend" {
 			if strings.TrimSpace(contract.Backend.BuilderImage) == "" {

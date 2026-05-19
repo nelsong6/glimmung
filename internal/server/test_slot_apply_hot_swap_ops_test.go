@@ -112,6 +112,60 @@ func TestApplyHotSwapHappyPathDispatchesJob(t *testing.T) {
 	}
 }
 
+func TestApplyHotSwapCodexRunnerDispatchesJob(t *testing.T) {
+	k8s := &fakeK8sJobClient{
+		waitResult: "complete",
+		buildLogs:  "build ok",
+		swapLogs:   "swap ok",
+	}
+	result, err := ApplyHotSwap(context.Background(), k8s, ApplyHotSwapOptions{
+		Project:         "tank-operator",
+		ArtifactKind:    "codex_runner",
+		GitRef:          "feat/codex",
+		RepoURL:         "https://github.com/nelsong6/tank-operator.git",
+		TargetNamespace: "tank-operator-slot-1-sessions",
+		JobNamespace:    "glimmung",
+		Timeout:         30 * time.Second,
+		Contract: hotswap.Contract{
+			Enabled: true,
+			CodexRunner: hotswap.AgentRunnerContract{
+				Enabled:      true,
+				Source:       "codex-runner/dist",
+				Target:       "/var/run/codex-runner-hot/dist",
+				BuildCommand: "cd codex-runner && npm run build",
+				PodSelector:  "tank-operator/session-id",
+				Container:    "codex-runner",
+				Restart:      "SIGHUP",
+				BuilderImage: "node:20-alpine",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("err: %v (result %+v)", err, result)
+	}
+	if result.Outcome != "persisted" {
+		t.Fatalf("outcome = %q, want persisted", result.Outcome)
+	}
+	if len(k8s.appliedJobs) != 1 {
+		t.Fatalf("applied jobs = %d, want 1", len(k8s.appliedJobs))
+	}
+
+	jobJSON, _ := json.Marshal(k8s.appliedJobs[0])
+	s := string(jobJSON)
+	checks := []string{
+		`"glimmung.io/apply-hot-swap-kind":"codex_runner"`,
+		"codex-runner/dist",
+		`/var/run/codex-runner-hot/dist`,
+		"codex-runner",
+		"kill -HUP 1",
+	}
+	for _, c := range checks {
+		if !strings.Contains(s, c) {
+			t.Errorf("Job spec missing %q\nspec=%s", c, s)
+		}
+	}
+}
+
 func TestApplyHotSwapRejectsUnsupportedKind(t *testing.T) {
 	k8s := &fakeK8sJobClient{}
 	for _, kind := range []string{"static", "backend", "", "frontend"} {

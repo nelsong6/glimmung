@@ -73,7 +73,7 @@ type k8sJobClient interface {
 //     pod tar-streams /work/source into contract.<kind>.target and
 //     sends the configured restart signal.
 //
-// v1 supports artifact_kind=agent_runner only.
+// v1 supports session-pod runner artifacts: agent_runner and codex_runner.
 func ApplyHotSwap(ctx context.Context, k8s k8sJobClient, opts ApplyHotSwapOptions) (result ApplyHotSwapResult, err error) {
 	start := time.Now()
 	result = ApplyHotSwapResult{
@@ -90,16 +90,17 @@ func ApplyHotSwap(ctx context.Context, k8s k8sJobClient, opts ApplyHotSwapOption
 		metrics.RecordHotSwap(result.Outcome, time.Since(start))
 	}()
 
-	if opts.ArtifactKind != "agent_runner" {
+	runner, ok := runnerContractForArtifact(opts.Contract, opts.ArtifactKind)
+	if !ok {
 		result.Error = fmt.Sprintf("artifact_kind %q is not supported by the apply endpoint in v1 (use the glimmung-agent CLI for static/backend)", opts.ArtifactKind)
 		return result, fmt.Errorf("%s", result.Error)
 	}
-	if !opts.Contract.AgentRunner.Enabled {
-		result.Error = "contract.agent_runner is not enabled"
+	if !runner.Enabled {
+		result.Error = fmt.Sprintf("contract.%s is not enabled", opts.ArtifactKind)
 		return result, fmt.Errorf("%s", result.Error)
 	}
-	if strings.TrimSpace(opts.Contract.AgentRunner.BuilderImage) == "" {
-		result.Error = "contract.agent_runner.builder_image is required"
+	if strings.TrimSpace(runner.BuilderImage) == "" {
+		result.Error = fmt.Sprintf("contract.%s.builder_image is required", opts.ArtifactKind)
 		return result, fmt.Errorf("%s", result.Error)
 	}
 	if strings.TrimSpace(opts.TargetNamespace) == "" {
@@ -159,17 +160,18 @@ func ApplyHotSwap(ctx context.Context, k8s k8sJobClient, opts ApplyHotSwapOption
 		JobNamespace:       opts.JobNamespace,
 		ServiceAccount:     opts.ServiceAccount,
 		Project:            opts.Project,
+		ArtifactKind:       opts.ArtifactKind,
 		GitRef:             opts.GitRef,
 		RepoURL:            opts.RepoURL,
-		BuilderImage:       opts.Contract.AgentRunner.BuilderImage,
-		BuildCommand:       opts.Contract.AgentRunner.BuildCommand,
+		BuilderImage:       runner.BuilderImage,
+		BuildCommand:       runner.BuildCommand,
 		SwapContainerImage: opts.SwapContainerImage,
-		Source:             opts.Contract.AgentRunner.Source,
-		Target:             opts.Contract.AgentRunner.Target,
+		Source:             runner.Source,
+		Target:             runner.Target,
 		TargetNamespace:    opts.TargetNamespace,
-		TargetPodSelector:  opts.Contract.AgentRunner.PodSelector,
-		TargetContainer:    opts.Contract.AgentRunner.Container,
-		RestartSignal:      opts.Contract.AgentRunner.Restart,
+		TargetPodSelector:  runner.PodSelector,
+		TargetContainer:    runner.Container,
+		RestartSignal:      runner.Restart,
 	})
 
 	applyStart := time.Now()
@@ -222,11 +224,23 @@ func ApplyHotSwap(ctx context.Context, k8s k8sJobClient, opts ApplyHotSwapOption
 	return result, nil
 }
 
+func runnerContractForArtifact(contract hotswap.Contract, artifactKind string) (hotswap.AgentRunnerContract, bool) {
+	switch artifactKind {
+	case "agent_runner":
+		return contract.AgentRunner, true
+	case "codex_runner":
+		return contract.CodexRunner, true
+	default:
+		return hotswap.AgentRunnerContract{}, false
+	}
+}
+
 type applyHotSwapJobInputs struct {
 	JobName            string
 	JobNamespace       string
 	ServiceAccount     string
 	Project            string
+	ArtifactKind       string
 	GitRef             string
 	RepoURL            string
 	BuilderImage       string
@@ -244,7 +258,7 @@ func renderApplyHotSwapJobSpec(in applyHotSwapJobInputs) map[string]any {
 	labels := map[string]any{
 		"app.kubernetes.io/name":          "glimmung-apply-hot-swap",
 		"glimmung.io/project":             in.Project,
-		"glimmung.io/apply-hot-swap-kind": "agent_runner",
+		"glimmung.io/apply-hot-swap-kind": in.ArtifactKind,
 	}
 	buildScript := buildScriptFor(in)
 	swapScript := swapScriptFor(in)

@@ -28,12 +28,13 @@ type Contract struct {
 	Static      StaticContract      `json:"static"`
 	Backend     BackendContract     `json:"backend"`
 	AgentRunner AgentRunnerContract `json:"agent_runner"`
+	CodexRunner AgentRunnerContract `json:"codex_runner"`
 }
 
 type StaticContract struct {
-	Enabled      bool   `json:"enabled"`
-	Source       string `json:"source"`
-	Target       string `json:"target"`
+	Enabled bool   `json:"enabled"`
+	Source  string `json:"source"`
+	Target  string `json:"target"`
 	// BuilderImage names the OCI image used as the init container in the
 	// apply_test_slot_hot_swap Job. The project owns this choice — see
 	// docs/test-slot-hot-swap.md. Required when the project consumes the
@@ -67,7 +68,7 @@ type BackendContract struct {
 //
 // Lands alongside Static and Backend; existing sub-contracts unchanged.
 type AgentRunnerContract struct {
-	Enabled bool   `json:"enabled"`
+	Enabled bool `json:"enabled"`
 	// Source is the directory inside the cloned repo whose contents
 	// (recursively) are streamed into Target inside the session pod.
 	Source string `json:"source"`
@@ -126,8 +127,8 @@ func (c Contract) Validate() error {
 	if !c.Enabled {
 		return nil
 	}
-	if !c.Static.Enabled && !c.Backend.Enabled && !c.AgentRunner.Enabled {
-		return errors.New("test_slot_hot_swap must enable static, backend, or agent_runner")
+	if !c.Static.Enabled && !c.Backend.Enabled && !c.AgentRunner.Enabled && !c.CodexRunner.Enabled {
+		return errors.New("test_slot_hot_swap must enable static, backend, agent_runner, or codex_runner")
 	}
 	if c.Static.Enabled {
 		if strings.TrimSpace(c.Static.Source) == "" {
@@ -175,38 +176,48 @@ func (c Contract) Validate() error {
 		// static swap at request time if builder_image is unset.
 		_ = c.Static.BuilderImage
 	}
-	if c.AgentRunner.Enabled {
+	if err := validateRunnerContract("agent_runner", c.AgentRunner); err != nil {
+		return err
+	}
+	if err := validateRunnerContract("codex_runner", c.CodexRunner); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateRunnerContract(kind string, runner AgentRunnerContract) error {
+	if runner.Enabled {
 		required := []struct {
 			name  string
 			value string
 		}{
-			{name: "source", value: c.AgentRunner.Source},
-			{name: "target", value: c.AgentRunner.Target},
-			{name: "build_command", value: c.AgentRunner.BuildCommand},
-			{name: "pod_selector", value: c.AgentRunner.PodSelector},
-			{name: "container", value: c.AgentRunner.Container},
-			{name: "restart", value: c.AgentRunner.Restart},
-			// builder_image is required for AgentRunner because there's
+			{name: "source", value: runner.Source},
+			{name: "target", value: runner.Target},
+			{name: "build_command", value: runner.BuildCommand},
+			{name: "pod_selector", value: runner.PodSelector},
+			{name: "container", value: runner.Container},
+			{name: "restart", value: runner.Restart},
+			// builder_image is required for runner contracts because there's
 			// no legacy CLI path that runs without it — the only consumer
-			// of agent_runner is the apply endpoint, which needs the
+			// is the apply endpoint, which needs the
 			// image to provision the init container. We require it at
 			// validation time so the registration call fails fast on
 			// missing config. Backend's builder_image stays optional at
 			// validation time because the existing glimmung-agent CLI
 			// path doesn't need it; the apply endpoint validates it at
 			// request time. See ApplyTestSlotHotSwap.
-			{name: "builder_image", value: c.AgentRunner.BuilderImage},
+			{name: "builder_image", value: runner.BuilderImage},
 		}
 		for _, field := range required {
 			if strings.TrimSpace(field.value) == "" {
-				return fmt.Errorf("test_slot_hot_swap.agent_runner.%s is required", field.name)
+				return fmt.Errorf("test_slot_hot_swap.%s.%s is required", kind, field.name)
 			}
 		}
-		if !strings.HasPrefix(strings.TrimSpace(c.AgentRunner.Target), "/") {
-			return errors.New("test_slot_hot_swap.agent_runner.target must be an absolute container path")
+		if !strings.HasPrefix(strings.TrimSpace(runner.Target), "/") {
+			return fmt.Errorf("test_slot_hot_swap.%s.target must be an absolute container path", kind)
 		}
-		if restart := strings.TrimSpace(c.AgentRunner.Restart); restart != "SIGHUP" {
-			return fmt.Errorf("test_slot_hot_swap.agent_runner.restart %q is not supported (only SIGHUP today)", restart)
+		if restart := strings.TrimSpace(runner.Restart); restart != "SIGHUP" {
+			return fmt.Errorf("test_slot_hot_swap.%s.restart %q is not supported (only SIGHUP today)", kind, restart)
 		}
 	}
 	return nil
