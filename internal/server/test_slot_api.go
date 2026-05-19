@@ -105,10 +105,6 @@ type TestSlotExtendResult struct {
 	Detail     *string    `json:"detail,omitempty"`
 }
 
-type TestSlotLeaseExtender interface {
-	ExtendLeaseTTLByRef(ctx context.Context, project, ref string, extendSeconds int) (Lease, error)
-}
-
 // testSlotActivation tracks one in-flight activation goroutine. Stored in
 // testSlotActivations keyed by testSlotActivationKey(lease). Cleanup paths
 // (return, callback release, TTL expiry) cancel the activation and wait on
@@ -205,7 +201,7 @@ func checkoutTestSlot(settings Settings, store ReadStore, preparer TestSlotPrepa
 		}
 		ttlSeconds := req.TTLSeconds
 		if ttlSeconds == nil {
-			defaultTTL := testSlotDefaultTTLSeconds
+			defaultTTL := defaultTTLForGeneratedTestLease(r.Context(), store, project)
 			ttlSeconds = &defaultTTL
 		}
 		lease, err := acquireLeaseInstrumented(r.Context(), LeasePurposeTestSlotCheckout, LeaseAcquireRequest{
@@ -346,10 +342,10 @@ func returnTestSlot(store ReadStore, preparer TestSlotPreparer, _ NativeGitHubTo
 
 func extendTestSlotLease(store ReadStore, preparer TestSlotPreparer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		extender, ok := store.(TestSlotLeaseExtender)
+		updater, ok := store.(LeaseTTLUpdater)
 		stateStore, hasState := store.(StateStore)
-		if !ok || extender == nil || !hasState || stateStore == nil {
-			writeProblem(w, http.StatusServiceUnavailable, "test-slot lease extender not configured")
+		if !ok || updater == nil || !hasState || stateStore == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "test-slot lease TTL updater not configured")
 			return
 		}
 		var req TestSlotExtendRequest
@@ -393,8 +389,14 @@ func extendTestSlotLease(store ReadStore, preparer TestSlotPreparer) http.Handle
 			writeProblem(w, http.StatusConflict, "test slot cleanup already started")
 			return
 		}
+		expiresAt := testSlotLeaseExpiresAt(lease)
+		if expiresAt == nil || !expiresAt.After(time.Now().UTC()) {
+			writeProblem(w, http.StatusConflict, "test slot lease cannot be extended")
+			return
+		}
 		ref := LeasePublicRefFromLease(lease)
-		updated, err := extender.ExtendLeaseTTLByRef(r.Context(), req.Project, ref, *req.ExtendSeconds)
+		newTTLSeconds := lease.TTLSeconds + *req.ExtendSeconds
+		updated, err := updater.UpdateLeaseTTLByRef(r.Context(), req.Project, ref, newTTLSeconds)
 		switch {
 		case errors.Is(err, ErrNotFound):
 			writeProblem(w, http.StatusNotFound, "test slot lease not found")
@@ -411,7 +413,7 @@ func extendTestSlotLease(store ReadStore, preparer TestSlotPreparer) http.Handle
 			writeInternalError(w, r, err, "extend test-slot lease failed")
 			return
 		}
-		armLeaseExpiryTimer(store, preparer, project, updated, nil)
+		rearmUpdatedLeaseTimer(r.Context(), store, preparer, updated)
 		writeJSON(w, http.StatusOK, testSlotExtendResponse(project, updated, *req.ExtendSeconds, hasSlotState && slotState == SlotStateRunning))
 	}
 }
@@ -966,28 +968,42 @@ func testSlotActivationKey(lease Lease) string {
 }
 
 func testSlotLeaseStillClaimed(ctx context.Context, store ReadStore, lease Lease) bool {
-	current, ok := currentTestSlotLease(ctx, store, lease)
-	if !ok {
-		return false
+	current, ok, err := currentTestSlotLease(ctx, store, lease)
+	if err != nil {
+		return true
 	}
-	return current.State == "claimed"
+	return ok && current.State == "claimed"
 }
 
-func currentTestSlotLease(ctx context.Context, store ReadStore, lease Lease) (Lease, bool) {
+func currentTestSlotLease(ctx context.Context, store ReadStore, lease Lease) (Lease, bool, error) {
 	stateStore, ok := store.(StateStore)
 	if !ok || stateStore == nil {
-		return lease, true
+		return lease, true, nil
 	}
 	leases, err := stateStore.ListLeases(ctx)
 	if err != nil {
-		return lease, true
+		return Lease{}, false, err
 	}
 	for _, current := range leases {
 		if sameTestSlotLease(current, lease) {
-			return current, true
+			return current, true, nil
 		}
 	}
-	return Lease{}, false
+	return Lease{}, false, nil
+}
+
+func testSlotLeaseDeadlineReached(lease Lease, now time.Time) bool {
+	if lease.TTLSeconds <= 0 {
+		return false
+	}
+	started := lease.RequestedAt
+	if lease.AssignedAt != nil {
+		started = *lease.AssignedAt
+	}
+	if started.IsZero() {
+		return true
+	}
+	return !now.Before(started.Add(time.Duration(lease.TTLSeconds) * time.Second))
 }
 
 func sameTestSlotLease(left Lease, right Lease) bool {

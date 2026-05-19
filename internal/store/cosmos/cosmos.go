@@ -121,7 +121,7 @@ func NewFromSettings(settings server.Settings) (*Store, error) {
 
 func (s *Store) ListProjects(ctx context.Context) ([]server.Project, error) {
 	var docs []projectDoc
-	if err := crossPartitionQuery(ctx, s.projects, "SELECT * FROM c", nil, &docs); err != nil {
+	if err := crossPartitionQuery(ctx, s.projects, "SELECT * FROM c WHERE NOT IS_DEFINED(c.kind) OR c.kind = 'project'", nil, &docs); err != nil {
 		return nil, err
 	}
 	rows := make([]server.Project, 0, len(docs))
@@ -136,7 +136,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]server.Project, error) {
 // order; the slice ordering is not contractual.
 func (s *Store) listProjectNames(ctx context.Context) ([]string, error) {
 	var docs []projectDoc
-	if err := crossPartitionQuery(ctx, s.projects, "SELECT c.id FROM c", nil, &docs); err != nil {
+	if err := crossPartitionQuery(ctx, s.projects, "SELECT c.id FROM c WHERE NOT IS_DEFINED(c.kind) OR c.kind = 'project'", nil, &docs); err != nil {
 		return nil, err
 	}
 	names := make([]string, 0, len(docs))
@@ -300,6 +300,107 @@ func (s *Store) SetProjectManagedAuthOriginStatus(ctx context.Context, project s
 		metadata = map[string]any{}
 	}
 	metadata["managed_auth_origins_status"] = status
+	doc["metadata"] = metadata
+
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return server.Project{}, err
+	}
+	if _, err := s.projects.ReplaceItem(ctx, partitionKey, project, payload, nil); err != nil {
+		return server.Project{}, err
+	}
+	return projectFromMap(doc)
+}
+
+const (
+	testLeaseDefaultsDocID   = "__glimmung_test_lease_defaults"
+	testLeaseDefaultsDocKind = "test_lease_defaults"
+)
+
+func (s *Store) ReadTestLeaseDefaults(ctx context.Context) (server.TestLeaseDefaults, error) {
+	pk := azcosmos.NewPartitionKeyString(testLeaseDefaultsDocID)
+	read, err := s.projects.ReadItem(ctx, pk, testLeaseDefaultsDocID, nil)
+	if err != nil {
+		if isCosmosStatus(err, http.StatusNotFound) {
+			return server.TestLeaseDefaults{}, server.ErrNotFound
+		}
+		return server.TestLeaseDefaults{}, err
+	}
+	var doc testLeaseDefaultsDoc
+	if err := json.Unmarshal(read.Value, &doc); err != nil {
+		return server.TestLeaseDefaults{}, err
+	}
+	return server.TestLeaseDefaults{GlobalTTLSeconds: doc.GlobalTTLSeconds}, nil
+}
+
+func (s *Store) SetGlobalTestLeaseDefaultTTL(ctx context.Context, ttlSeconds *int) (server.TestLeaseDefaults, error) {
+	if ttlSeconds != nil && *ttlSeconds <= 0 {
+		return server.TestLeaseDefaults{}, server.ValidationError{Message: "ttl_seconds must be positive"}
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	doc := testLeaseDefaultsDoc{
+		ID:        testLeaseDefaultsDocID,
+		Kind:      testLeaseDefaultsDocKind,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	pk := azcosmos.NewPartitionKeyString(testLeaseDefaultsDocID)
+	read, err := s.projects.ReadItem(ctx, pk, testLeaseDefaultsDocID, nil)
+	if err == nil {
+		if err := json.Unmarshal(read.Value, &doc); err != nil {
+			return server.TestLeaseDefaults{}, err
+		}
+		doc.ID = testLeaseDefaultsDocID
+		doc.Kind = testLeaseDefaultsDocKind
+		if doc.CreatedAt == "" {
+			doc.CreatedAt = now
+		}
+		doc.UpdatedAt = now
+	} else if !isCosmosStatus(err, http.StatusNotFound) {
+		return server.TestLeaseDefaults{}, err
+	}
+	if ttlSeconds == nil {
+		doc.GlobalTTLSeconds = 0
+	} else {
+		doc.GlobalTTLSeconds = *ttlSeconds
+	}
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return server.TestLeaseDefaults{}, err
+	}
+	if _, err := s.projects.UpsertItem(ctx, pk, payload, nil); err != nil {
+		return server.TestLeaseDefaults{}, err
+	}
+	return server.TestLeaseDefaults{GlobalTTLSeconds: doc.GlobalTTLSeconds}, nil
+}
+
+func (s *Store) SetProjectTestLeaseDefaultTTL(ctx context.Context, project string, ttlSeconds *int) (server.Project, error) {
+	if ttlSeconds != nil && *ttlSeconds <= 0 {
+		return server.Project{}, server.ValidationError{Message: "ttl_seconds must be positive"}
+	}
+	partitionKey := azcosmos.NewPartitionKeyString(project)
+	read, err := s.projects.ReadItem(ctx, partitionKey, project, nil)
+	if err != nil {
+		if isCosmosStatus(err, http.StatusNotFound) {
+			return server.Project{}, server.ErrNotFound
+		}
+		return server.Project{}, err
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(read.Value, &doc); err != nil {
+		return server.Project{}, err
+	}
+	metadata, _ := doc["metadata"].(map[string]any)
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	delete(metadata, "testLeaseDefaultTTLSeconds")
+	if ttlSeconds == nil {
+		delete(metadata, "test_lease_default_ttl_seconds")
+	} else {
+		metadata["test_lease_default_ttl_seconds"] = *ttlSeconds
+	}
 	doc["metadata"] = metadata
 
 	payload, err := json.Marshal(doc)
@@ -1240,6 +1341,7 @@ func (s *Store) readLeaseDocByCallbackToken(ctx context.Context, token string) (
 
 type projectDoc struct {
 	ID         string         `json:"id"`
+	Kind       string         `json:"kind,omitempty"`
 	Name       string         `json:"name"`
 	GitHubRepo string         `json:"githubRepo"`
 	ArgoCDApp  string         `json:"argocdApp"`
@@ -1249,10 +1351,19 @@ type projectDoc struct {
 
 type projectWriteDoc struct {
 	ID         string         `json:"id"`
+	Kind       string         `json:"kind,omitempty"`
 	Name       string         `json:"name"`
 	GitHubRepo string         `json:"githubRepo"`
 	Metadata   map[string]any `json:"metadata"`
 	CreatedAt  string         `json:"createdAt"`
+}
+
+type testLeaseDefaultsDoc struct {
+	ID               string `json:"id"`
+	Kind             string `json:"kind"`
+	GlobalTTLSeconds int    `json:"globalTTLSeconds,omitempty"`
+	CreatedAt        string `json:"createdAt"`
+	UpdatedAt        string `json:"updatedAt"`
 }
 
 type workflowDoc struct {
@@ -3979,10 +4090,51 @@ func (s *Store) CancelLeaseByRef(ctx context.Context, project, ref string) (serv
 	}, nil
 }
 
-func (s *Store) ExtendLeaseTTLByRef(ctx context.Context, project, ref string, extendSeconds int) (server.Lease, error) {
-	if extendSeconds <= 0 {
-		return server.Lease{}, server.ValidationError{Message: "extend_seconds must be greater than zero"}
+func (s *Store) UpdateLeaseTTLByRef(ctx context.Context, project, ref string, ttlSeconds int) (server.Lease, error) {
+	if ttlSeconds <= 0 {
+		return server.Lease{}, server.ValidationError{Message: "ttl_seconds must be positive"}
 	}
+	docID, err := s.leaseDocIDByPublicRef(ctx, project, ref)
+	if err != nil {
+		return server.Lease{}, err
+	}
+	pk := azcosmos.NewPartitionKeyString(project)
+	for attempt := 0; attempt < maxLeaseConflictRetries; attempt++ {
+		read, err := s.leases.ReadItem(ctx, pk, docID, nil)
+		if err != nil {
+			if isCosmosStatus(err, http.StatusNotFound) {
+				return server.Lease{}, server.ErrNotFound
+			}
+			return server.Lease{}, fmt.Errorf("read lease: %w", err)
+		}
+		var doc leaseDoc
+		if err := json.Unmarshal(read.Value, &doc); err != nil {
+			return server.Lease{}, err
+		}
+		if doc.Project != project {
+			return server.Lease{}, server.ErrNotFound
+		}
+		if doc.State != "claimed" {
+			return server.Lease{}, server.ErrConflict
+		}
+		doc.TTLSeconds = ttlSeconds
+		payload, err := json.Marshal(doc)
+		if err != nil {
+			return server.Lease{}, err
+		}
+		etag := azcore.ETag(read.ETag)
+		if _, err := s.leases.ReplaceItem(ctx, pk, doc.ID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
+			if isCosmosStatus(err, http.StatusPreconditionFailed) {
+				continue
+			}
+			return server.Lease{}, fmt.Errorf("update lease TTL: %w", err)
+		}
+		return leaseFromDoc(doc), nil
+	}
+	return server.Lease{}, fmt.Errorf("update lease TTL: too many etag conflicts")
+}
+
+func (s *Store) leaseDocIDByPublicRef(ctx context.Context, project, ref string) (string, error) {
 	var docs []leaseDoc
 	if err := singlePartitionQuery(
 		ctx, s.leases,
@@ -3991,58 +4143,13 @@ func (s *Store) ExtendLeaseTTLByRef(ctx context.Context, project, ref string, ex
 		[]azcosmos.QueryParameter{{Name: "@p", Value: project}},
 		&docs,
 	); err != nil {
-		return server.Lease{}, fmt.Errorf("query leases: %w", err)
+		return "", fmt.Errorf("query leases: %w", err)
 	}
 	found := selectLeaseDocByPublicRef(docs, ref)
 	if found == nil {
-		return server.Lease{}, server.ErrNotFound
+		return "", server.ErrNotFound
 	}
-	if found.State != "claimed" {
-		return server.Lease{}, server.ErrConflict
-	}
-	lease := leaseFromDoc(*found)
-	if !boolValue(lease.Metadata["test_slot_checkout"]) {
-		return server.Lease{}, server.ErrConflict
-	}
-	expiresAt := leaseExpiryDeadline(lease)
-	now := time.Now().UTC()
-	if !expiresAt.After(now) {
-		return server.Lease{}, server.ErrConflict
-	}
-	newExpiresAt := expiresAt.Add(time.Duration(extendSeconds) * time.Second)
-	started := lease.RequestedAt
-	if lease.AssignedAt != nil {
-		started = *lease.AssignedAt
-	}
-	found.TTLSeconds = secondsCeil(newExpiresAt.Sub(started))
-	payload, err := json.Marshal(found)
-	if err != nil {
-		return server.Lease{}, err
-	}
-	leasePK := azcosmos.NewPartitionKeyString(project)
-	if _, err := s.leases.ReplaceItem(ctx, leasePK, found.ID, payload, nil); err != nil {
-		return server.Lease{}, fmt.Errorf("extend lease ttl: %w", err)
-	}
-	return leaseFromDoc(*found), nil
-}
-
-func leaseExpiryDeadline(lease server.Lease) time.Time {
-	started := lease.RequestedAt
-	if lease.AssignedAt != nil {
-		started = *lease.AssignedAt
-	}
-	return started.Add(time.Duration(lease.TTLSeconds) * time.Second)
-}
-
-func secondsCeil(d time.Duration) int {
-	seconds := int(d / time.Second)
-	if time.Duration(seconds)*time.Second < d {
-		seconds++
-	}
-	if seconds < 1 {
-		return 1
-	}
-	return seconds
+	return found.ID, nil
 }
 
 func (s *Store) AppendTestSlotHotSwapHistory(ctx context.Context, project, ref string, entry server.TestSlotHotSwapHistoryEntry) (server.Lease, error) {

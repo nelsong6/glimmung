@@ -30,6 +30,7 @@ type StateSnapshot struct {
 	ActiveLeases            []LeasePublic           `json:"active_leases"`
 	TestEnvironments        []TestEnvironmentPublic `json:"test_environments"`
 	WaitingTestSlotRequests []TestSlotRequestPublic `json:"waiting_test_slot_requests"`
+	TestLeaseDefaults       TestLeaseDefaults       `json:"test_lease_defaults"`
 	Projects                []Project               `json:"projects"`
 	Workflows               []Workflow              `json:"workflows"`
 	// InflightLocks summarizes whether any issue-scoped or pr-scoped
@@ -295,6 +296,7 @@ func computeStateSnapshot(
 		ActiveLeases:            activePublic,
 		TestEnvironments:        testEnvironmentsFromSnapshot(ctx, settings, store, projects, active, waiting),
 		WaitingTestSlotRequests: waiting,
+		TestLeaseDefaults:       readTestLeaseDefaultsOrFallback(ctx, store),
 		Projects:                sliceOrEmpty(projects),
 		Workflows:               sliceOrEmpty(workflows),
 	}
