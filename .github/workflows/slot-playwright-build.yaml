@@ -1,12 +1,11 @@
-name: build
+name: build slot-playwright
 
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - 'k8s/**'
-      - 'README.md'
+    paths:
       - 'slot-playwright/**'
+      - 'scripts/image-fingerprint.sh'
       - '.github/workflows/slot-playwright-build.yaml'
   workflow_dispatch:
     inputs:
@@ -19,12 +18,17 @@ permissions:
   id-token: write
   contents: write
 
+concurrency:
+  group: slot-playwright-build
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
     env:
       REGISTRY: romainecr.azurecr.io
-      IMAGE: glimmung
+      IMAGE: glimmung-slot-playwright
+      VERSION_TAG: playwright-1.56.1
     steps:
       - uses: actions/checkout@v4
         with:
@@ -71,14 +75,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          fingerprint="$(scripts/image-fingerprint.sh \
-            --image app \
-            --dockerfile Dockerfile \
+          output="$(scripts/image-fingerprint.sh \
+            --image slot-playwright \
+            --dockerfile slot-playwright/Dockerfile \
             --context . \
-            --paths 'Dockerfile .dockerignore go.mod go.sum cmd internal frontend/package.json frontend/package-lock.json frontend/index.html frontend/src frontend/tsconfig.json frontend/vite.config.ts design-system' \
-            | tee /tmp/glimmung-image-fingerprint.txt \
-            | awk -F= '$1 == "fingerprint" { print $2 }')"
-          echo "ALIAS_TAG=app-${fingerprint}" >> "$GITHUB_ENV"
+            --paths 'slot-playwright/Dockerfile')"
+          printf '%s\n' "${output}"
+          alias_tag="$(printf '%s\n' "${output}" | awk -F= '$1 == "proof_tag" { print $2 }')"
+          echo "fingerprint=$(printf '%s\n' "${output}" | awk -F= '$1 == "fingerprint" { print $2 }')" >> "${GITHUB_OUTPUT}"
+          echo "proof_tag=${alias_tag}" >> "${GITHUB_OUTPUT}"
+          echo "ALIAS_TAG=${alias_tag}" >> "$GITHUB_ENV"
 
       - name: Check existing image
         id: image
@@ -94,7 +100,7 @@ jobs:
             echo "Found reusable image ${REGISTRY}/${IMAGE}:${ALIAS_TAG}"
           else
             echo "exists=false" >>"${GITHUB_OUTPUT}"
-            echo "No reusable image found for app fingerprint ${{ steps.fingerprint.outputs.fingerprint }}"
+            echo "No reusable image found for slot-playwright fingerprint ${{ steps.fingerprint.outputs.fingerprint }}"
           fi
 
       - name: Build and push image
@@ -102,19 +108,20 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: slot-playwright/Dockerfile
           push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ env.ALIAS_TAG }}
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE }}-build-cache:app
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE }}-build-cache:app,mode=max
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ env.ALIAS_TAG }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ env.VERSION_TAG }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE }}-build-cache:slot-playwright
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE }}-build-cache:slot-playwright,mode=max
 
-      - name: Bump chart image tag
+      - name: Bump chart Playwright image
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          tag="${ALIAS_TAG}"
-          # Targeted sed: only the line beginning with two spaces + `tag:` under image.
-          # Quote the value so YAML never reinterprets image tags.
+          image="${REGISTRY}/${IMAGE}:${ALIAS_TAG}"
           bump() {
-            sed -i -E "s|^(  tag: ).*$|\1\"${tag}\"|" k8s/values.yaml
+            sed -i -E "s|^(    image: ).*$|\1${image}|" k8s/values.yaml
           }
           bump
           if git diff --quiet k8s/values.yaml; then
@@ -125,10 +132,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add k8s/values.yaml
-          git commit -m "chart: bump image tag to fingerprint ${tag} [skip ci]"
-          # Concurrent builds race on this same line. On rebase conflict the
-          # latest tag wins — re-apply our sed against the post-rebase tree
-          # and continue.
+          git commit -m "chart: bump slot-playwright image to ${ALIAS_TAG} [skip ci]"
           for i in 1 2 3; do
             if git push origin HEAD:main; then exit 0; fi
             git fetch origin main

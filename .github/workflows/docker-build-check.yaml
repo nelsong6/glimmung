@@ -31,6 +31,12 @@ jobs:
             cache-ref: romainecr.azurecr.io/glimmung-build-cache:app
             image-repo: glimmung
             fingerprint-paths: Dockerfile .dockerignore go.mod go.sum cmd internal frontend/package.json frontend/package-lock.json frontend/index.html frontend/src frontend/tsconfig.json frontend/vite.config.ts design-system
+          - name: slot-playwright
+            file: slot-playwright/Dockerfile
+            context: .
+            cache-ref: romainecr.azurecr.io/glimmung-slot-playwright-build-cache:slot-playwright
+            image-repo: glimmung-slot-playwright
+            fingerprint-paths: slot-playwright/Dockerfile
     steps:
       - name: Checkout
         uses: actions/checkout@v4

@@ -109,7 +109,7 @@ func SettingsFromEnv() Settings {
 		),
 		NativeRunnerPlaywrightImage: envOrDefault(
 			"NATIVE_RUNNER_PLAYWRIGHT_IMAGE",
-			"romainecr.azurecr.io/agent-container:latest",
+			"romainecr.azurecr.io/glimmung-slot-playwright:playwright-1.56.1",
 		),
 		NativeRunnerPlaywrightPort: envOrDefault(
 			"NATIVE_RUNNER_PLAYWRIGHT_PORT",

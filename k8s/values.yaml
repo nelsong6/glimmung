@@ -38,6 +38,9 @@ nativeRunner:
     secretKey: auth.json
   playwright:
     enabled: true
+    # Built from slot-playwright/Dockerfile. The slot-playwright build workflow
+    # rewrites this to a fingerprinted glimmung-slot-playwright image after
+    # pushing the image to ACR.
     image: romainecr.azurecr.io/agent-container:latest
     port: 3000
     resources:
