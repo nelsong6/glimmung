@@ -218,8 +218,8 @@ func TestDrainSignalsDispatchesRequestChangesTriage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DrainSignals: %v", err)
 	}
-	if !launcher.called {
-		t.Fatal("expected native launcher to be called")
+	if launcher.called {
+		t.Fatalf("signal drain must not launch native work directly: %#v", launcher.req)
 	}
 	if result.Processed != 1 || store.processedDecision != triageDispatch {
 		t.Fatalf("result=%#v decision=%q", result, store.processedDecision)

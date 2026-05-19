@@ -33,6 +33,7 @@ type RunReplayData struct {
 	IssueLockHolderID *string
 	PRNumber          *int
 	PRLockHolderID    *string
+	TestSlotLeaseRef  *string
 }
 
 // RunAttemptData holds one attempt's decision-engine-relevant fields.
@@ -44,6 +45,7 @@ type RunAttemptData struct {
 	Decision     string
 	Completed    bool
 	PhaseOutputs map[string]string
+	PhaseInputs  map[string]string
 }
 
 // RunVerificationData holds the status and reasons from a verification result.

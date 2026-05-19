@@ -27,6 +27,9 @@ The detailed cleanup inventory lives in
 - `docs/workflow-shape.md` owns the workflow model and native job conventions.
 - `docs/test-slot-lifecycle.md` owns the native test-slot terms, lifecycle
   states, and warm-versus-hot resource boundary.
+- `docs/project-run-queue-and-test-slot-leases.md` owns project run queue
+  admission, issue/PR lock ownership while queued, and the handoff from
+  reserved test-slot lease to the `env-prep` workflow job.
 - `docs/go-runtime-cleanup-inventory.md` records the final cleanup notes for
   the Python retirement.
 - `CLAUDE.md` owns architecture direction for human and agent contributors.

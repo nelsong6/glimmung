@@ -43,6 +43,8 @@ type CreateResumedRunRequest struct {
 	PriorRun          RunForResume
 	Workflow          Workflow
 	EntrypointPhase   string
+	PhaseInputs       map[string]string
+	LaunchMetadata    map[string]any
 	IssueLockHolderID string
 	TriggerSource     map[string]any
 }
@@ -76,8 +78,6 @@ type RunResumeStore interface {
 	ClaimIssueLock(ctx context.Context, project string, issueNumber int, holderID string, ttlSeconds int) error
 	ReleaseIssueLock(ctx context.Context, project string, issueNumber int, holderID string)
 	CreateResumedRun(ctx context.Context, req CreateResumedRunRequest) (CreatedRun, error)
-	AcquireLease(ctx context.Context, req LeaseAcquireRequest) (Lease, error)
-	AbortRunByID(ctx context.Context, project, runID, reason string) (AbortRunResult, error)
 	SubstitutePhaseInputs(phase PhaseSpec, priorOutputs map[string]map[string]string) (map[string]string, error)
 	CollectPriorOutputs(attempts []AttemptForResume) map[string]map[string]string
 }
@@ -239,34 +239,15 @@ func resumeRunHandler(store ReadStore, nativeLauncher NativeLauncher) http.Handl
 			triggerSource["resumed_from_run_id"] = priorRunID
 		}
 
-		// 7. Create the resumed run (validates skipped phase outputs).
-		newRun, err := resumeStore.CreateResumedRun(ctx, CreateResumedRunRequest{
-			PriorRun:          priorRun,
-			Workflow:          *wf,
-			EntrypointPhase:   req.EntrypointPhase,
-			IssueLockHolderID: holderID,
-			TriggerSource:     triggerSource,
-		})
-		if err != nil {
-			resumeStore.ReleaseIssueLock(ctx, project, issueNumber, holderID)
-			if errors.Is(err, ErrOutputsMissing) {
-				writeProblem(w, http.StatusUnprocessableEntity, err.Error())
-				return
-			}
-			writeInternalError(w, r, err, "create resumed run failed")
-			return
-		}
-
-		// 8. Build lease metadata (same pattern as dispatch, but entrypoint_index may be > 0).
+		// 7. Resolve entrypoint inputs before creating the queued run so
+		// admission can launch from durable run state alone.
 		issueNum := issueNumber
 		issueRef := publicids.IssueRef(project, &issueNum)
-		runRef := publicids.RunRef(project, &issueNum, newRun.RunDisplay)
 		priorRef := publicids.RunRef(project, &issueNum, runNumberStr)
 		priorOutputs := resumeStore.CollectPriorOutputs(priorRun.Attempts)
 		substituted, subErr := resumeStore.SubstitutePhaseInputs(entryPhase, priorOutputs)
 		if subErr != nil {
-			// Abort run (releases lock) and surface as 422.
-			resumeStore.AbortRunByID(ctx, project, newRun.ID, "input substitution failed: "+subErr.Error()) //nolint:errcheck
+			resumeStore.ReleaseIssueLock(ctx, project, issueNumber, holderID)
 			writeProblem(w, http.StatusUnprocessableEntity, "input substitution failed: "+subErr.Error())
 			return
 		}
@@ -281,15 +262,9 @@ func resumeRunHandler(store ReadStore, nativeLauncher NativeLauncher) http.Handl
 			"issue_repo":           priorRun.IssueRepo,
 			"issue_title":          "",
 			"issue_lock_holder_id": holderID,
-			"run_id":               newRun.ID,
-			"run_ref":              runRef,
-			"run_callback_token":   newRun.CallbackToken,
-			"run_number":           strconv.Itoa(newRun.RunNumber),
-			"run_display_number":   newRun.RunDisplay,
 			"attempt_index":        strconv.Itoa(entrypointIndex),
 			"phase_name":           req.EntrypointPhase,
 			"issue_number":         strconv.Itoa(issueNumber),
-			"work_context_branch":  fmt.Sprintf("issue-%d-run-%s", issueNumber, newRun.RunDisplay),
 			"phase_inputs":         substituted,
 			"native_k8s":           true,
 		}
@@ -306,85 +281,36 @@ func resumeRunHandler(store ReadStore, nativeLauncher NativeLauncher) http.Handl
 			metadata["context"] = req.Context
 		}
 
-		// 9. Acquire lease.
-		requirements := entryPhase.Requirements
-		if len(requirements) == 0 {
-			requirements = wf.DefaultRequirements
-		}
-		wfName := wf.Name
-		lease, err := resumeStore.AcquireLease(ctx, LeaseAcquireRequest{
-			Project:      project,
-			Workflow:     &wfName,
-			Requirements: requirements,
-			Metadata:     metadata,
+		// 8. Create the resumed run as queued. The project-run reconciler
+		// performs capacity admission and native launch from the run snapshot.
+		newRun, err := resumeStore.CreateResumedRun(ctx, CreateResumedRunRequest{
+			PriorRun:          priorRun,
+			Workflow:          *wf,
+			EntrypointPhase:   req.EntrypointPhase,
+			PhaseInputs:       substituted,
+			LaunchMetadata:    metadata,
+			IssueLockHolderID: holderID,
+			TriggerSource:     triggerSource,
 		})
 		if err != nil {
-			resumeStore.AbortRunByID(ctx, project, newRun.ID, "lease_acquire_failed") //nolint:errcheck
-			if errors.Is(err, ErrUnavailable) {
-				detail := "native capacity unavailable"
-				writeJSON(w, http.StatusOK, PublicResumeResult{
-					State:       "no_capacity",
-					NewRunRef:   &runRef,
-					PriorRunRef: &priorRef,
-					Detail:      &detail,
-				})
+			resumeStore.ReleaseIssueLock(ctx, project, issueNumber, holderID)
+			if errors.Is(err, ErrOutputsMissing) {
+				writeProblem(w, http.StatusUnprocessableEntity, err.Error())
 				return
 			}
-			writeInternalError(w, r, err, "acquire lease failed")
-			return
-		}
-		if lease.State != "claimed" {
-			resumeStore.AbortRunByID(ctx, project, newRun.ID, "native_lease_not_claimed") //nolint:errcheck
-			detail := "native lease was not claimed"
-			writeJSON(w, http.StatusOK, PublicResumeResult{
-				State:       "dispatch_failed",
-				NewRunRef:   &runRef,
-				PriorRunRef: &priorRef,
-				Detail:      &detail,
-			})
+			writeInternalError(w, r, err, "create resumed run failed")
 			return
 		}
 
+		runRef := publicids.RunRef(project, &issueNum, newRun.RunDisplay)
 		newRef := runRef
 		result := PublicResumeResult{
+			State:       "queued",
 			NewRunRef:   &newRef,
 			PriorRunRef: &priorRef,
+			Detail:      stringPtr("run queued for project admission"),
 		}
-		leaseStr := "claimed"
-
-		runData := RunReplayData{
-			ID:               newRun.ID,
-			Project:          project,
-			WorkflowName:     wf.Name,
-			IssueNumber:      issueNumber,
-			RunNumber:        &newRun.RunNumber,
-			RunDisplayNumber: &newRun.RunDisplay,
-			IssueRepo:        priorRun.IssueRepo,
-			CallbackToken:    &newRun.CallbackToken,
-			Attempts: []RunAttemptData{{
-				AttemptIndex: entrypointIndex,
-				Phase:        req.EntrypointPhase,
-			}},
-		}
-		if _, err := nativeLauncher.LaunchNativePhase(ctx, NativeLaunchRequest{
-			Lease:    lease,
-			Workflow: *wf,
-			Phase:    entryPhase,
-			Run:      runData,
-		}); err != nil {
-			resumeStore.AbortRunByID(ctx, project, newRun.ID, "native_dispatch_failed: "+err.Error()) //nolint:errcheck
-			detail := fmt.Sprintf("native dispatch failed: %s", err)
-			writeJSON(w, http.StatusOK, PublicResumeResult{
-				State:       "dispatch_failed",
-				NewRunRef:   &newRef,
-				PriorRunRef: &priorRef,
-				Detail:      &detail,
-			})
-			return
-		}
-		result.State = "dispatched"
-		result.Host = lease.Host
-		result.Lease = &leaseStr
+		wakeRunProjectReconciler(ctx, resumeStore, nativeLauncher, project)
 
 		writeJSON(w, http.StatusOK, result)
 	}

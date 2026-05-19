@@ -1320,36 +1320,71 @@ type leaseDoc struct {
 }
 
 type runDoc struct {
-	ID                  string         `json:"id"`
-	Project             string         `json:"project"`
-	Workflow            string         `json:"workflow"`
-	RunNumber           *int           `json:"run_number"`
-	RunDisplayNumber    *string        `json:"run_display_number"`
-	ParentRunID         *string        `json:"parent_run_id"`
-	RootRunID           *string        `json:"root_run_id"`
-	OriginKind          *string        `json:"origin_kind"`
-	IsCycle             bool           `json:"is_cycle"`
-	CycleNumber         *int           `json:"cycle_number"`
-	IssueID             string         `json:"issue_id"`
-	IssueRepo           string         `json:"issue_repo"`
-	IssueNumber         int            `json:"issue_number"`
-	PRNumber            *int           `json:"pr_number"`
-	State               string         `json:"state"`
-	Attempts            []attemptDoc   `json:"attempts"`
-	CumulativeCostUSD   float64        `json:"cumulative_cost_usd"`
-	Budget              *budgetDoc     `json:"budget,omitempty"`
-	ValidationURL       *string        `json:"validation_url"`
-	ScreenshotsMarkdown *string        `json:"screenshots_markdown"`
-	AbortReason         *string        `json:"abort_reason"`
-	ClonedFromRunID     *string        `json:"cloned_from_run_id"`
-	EntrypointPhase     *string        `json:"entrypoint_phase,omitempty"`
-	TriggerSource       map[string]any `json:"trigger_source"`
-	CreatedAt           string         `json:"created_at"`
-	UpdatedAt           string         `json:"updated_at"`
+	ID                       string               `json:"id"`
+	Project                  string               `json:"project"`
+	Workflow                 string               `json:"workflow"`
+	WorkflowSnapshot         *workflowSnapshotDoc `json:"workflow_snapshot,omitempty"`
+	RunNumber                *int                 `json:"run_number"`
+	RunDisplayNumber         *string              `json:"run_display_number"`
+	ParentRunID              *string              `json:"parent_run_id"`
+	RootRunID                *string              `json:"root_run_id"`
+	OriginKind               *string              `json:"origin_kind"`
+	IsCycle                  bool                 `json:"is_cycle"`
+	CycleNumber              *int                 `json:"cycle_number"`
+	IssueID                  string               `json:"issue_id"`
+	IssueRepo                string               `json:"issue_repo"`
+	IssueNumber              int                  `json:"issue_number"`
+	PRNumber                 *int                 `json:"pr_number"`
+	State                    string               `json:"state"`
+	PhaseStates              []runPhaseStateDoc   `json:"phase_states,omitempty"`
+	Attempts                 []attemptDoc         `json:"attempts"`
+	TestSlotLeaseID          *string              `json:"test_slot_lease_id,omitempty"`
+	TestSlotLeaseRef         *string              `json:"test_slot_lease_ref,omitempty"`
+	TestSlotName             *string              `json:"test_slot_name,omitempty"`
+	TestSlotIndex            *int                 `json:"test_slot_index,omitempty"`
+	CumulativeCostUSD        float64              `json:"cumulative_cost_usd"`
+	Budget                   *budgetDoc           `json:"budget,omitempty"`
+	ValidationURL            *string              `json:"validation_url"`
+	ScreenshotsMarkdown      *string              `json:"screenshots_markdown"`
+	AbortReason              *string              `json:"abort_reason"`
+	ClonedFromRunID          *string              `json:"cloned_from_run_id"`
+	EntrypointPhase          *string              `json:"entrypoint_phase,omitempty"`
+	EntrypointPhaseInputs    map[string]string    `json:"entrypoint_phase_inputs,omitempty"`
+	EntrypointLaunchMetadata map[string]any       `json:"entrypoint_launch_metadata,omitempty"`
+	TriggerSource            map[string]any       `json:"trigger_source"`
+	CreatedAt                string               `json:"created_at"`
+	UpdatedAt                string               `json:"updated_at"`
+	CompletedAt              string               `json:"completed_at,omitempty"`
 	// Fields for mutation operations (populated from Cosmos documents as needed).
 	CallbackToken     *string `json:"callback_token,omitempty"`
 	IssueLockHolderID *string `json:"issue_lock_holder_id,omitempty"`
 	PRLockHolderID    *string `json:"pr_lock_holder_id,omitempty"`
+}
+
+type workflowSnapshotDoc struct {
+	Project             string         `json:"project"`
+	Name                string         `json:"name"`
+	Phases              []phaseDoc     `json:"phases"`
+	PR                  prDoc          `json:"pr"`
+	Budget              budgetDoc      `json:"budget"`
+	DefaultRequirements map[string]any `json:"defaultRequirements"`
+	Metadata            map[string]any `json:"metadata"`
+}
+
+type runPhaseStateDoc struct {
+	Name      string           `json:"name"`
+	State     string           `json:"state"`
+	Kind      string           `json:"kind"`
+	Verify    bool             `json:"verify"`
+	Always    bool             `json:"always"`
+	DependsOn []string         `json:"depends_on"`
+	Jobs      []runJobStateDoc `json:"jobs"`
+}
+
+type runJobStateDoc struct {
+	ID    string  `json:"id"`
+	Name  *string `json:"name,omitempty"`
+	State string  `json:"state"`
 }
 
 type issueDoc struct {
@@ -1405,8 +1440,15 @@ type attemptDoc struct {
 	Decision              *string                           `json:"decision"`
 	LogArchiveURL         *string                           `json:"log_archive_url"`
 	SkippedFromRunID      *string                           `json:"skipped_from_run_id"`
+	PhaseInputs           map[string]string                 `json:"phase_inputs,omitempty"`
 	PhaseOutputs          map[string]string                 `json:"phase_outputs,omitempty"`
 	JobCompletions        map[string]nativeJobCompletionDoc `json:"job_completions,omitempty"`
+	LaunchMetadata        map[string]any                    `json:"launch_metadata,omitempty"`
+	NativeLaunchState     string                            `json:"native_launch_state,omitempty"`
+	NativeLaunchStartedAt string                            `json:"native_launch_started_at,omitempty"`
+	NativeLaunchedAt      string                            `json:"native_launched_at,omitempty"`
+	NativeJobNames        []string                          `json:"native_job_names,omitempty"`
+	NativeLaunchError     *string                           `json:"native_launch_error,omitempty"`
 	CancelRequestedAt     *string                           `json:"cancel_requested_at,omitempty"`
 	CancelReason          *string                           `json:"cancel_reason,omitempty"`
 	CapabilityTokenSHA256 *string                           `json:"capability_token_sha256,omitempty"`
@@ -1533,6 +1575,78 @@ func workflowFromDoc(doc workflowDoc) server.Workflow {
 		Metadata:            mapOrEmpty(doc.Metadata),
 		CreatedAt:           parseTimeOrNow(doc.CreatedAt),
 	}
+}
+
+func workflowSnapshotDocFromWorkflow(w server.Workflow) workflowSnapshotDoc {
+	phases := make([]phaseDoc, 0, len(w.Phases))
+	for _, phase := range w.Phases {
+		phases = append(phases, phaseDocFromSpec(phase))
+	}
+	return workflowSnapshotDoc{
+		Project:             w.Project,
+		Name:                w.Name,
+		Phases:              phases,
+		PR:                  prDocFromSpec(w.PR),
+		Budget:              budgetDoc{Total: w.Budget.Total},
+		DefaultRequirements: mapOrEmpty(w.DefaultRequirements),
+		Metadata:            mapOrEmpty(w.Metadata),
+	}
+}
+
+func ptrWorkflowSnapshot(snapshot workflowSnapshotDoc) *workflowSnapshotDoc {
+	return &snapshot
+}
+
+func workflowFromSnapshotDoc(doc *workflowSnapshotDoc) server.Workflow {
+	if doc == nil {
+		return server.Workflow{}
+	}
+	phases := make([]server.PhaseSpec, 0, len(doc.Phases))
+	for _, phase := range doc.Phases {
+		phases = append(phases, phaseFromDoc(phase))
+	}
+	return server.Workflow{
+		Project:             doc.Project,
+		Name:                doc.Name,
+		Phases:              phases,
+		PR:                  prFromDoc(doc.PR),
+		Budget:              budget.Config{Total: doc.Budget.Total},
+		DefaultRequirements: mapOrEmpty(doc.DefaultRequirements),
+		Metadata:            mapOrEmpty(doc.Metadata),
+	}
+}
+
+func phaseFromWorkflowSnapshot(wf server.Workflow, name string) server.PhaseSpec {
+	for _, phase := range wf.Phases {
+		if phase.Name == name {
+			return phase
+		}
+	}
+	return server.PhaseSpec{}
+}
+
+func phaseStatesFromWorkflow(w server.Workflow) []runPhaseStateDoc {
+	states := make([]runPhaseStateDoc, 0, len(w.Phases))
+	for _, phase := range w.Phases {
+		jobs := make([]runJobStateDoc, 0, len(phase.Jobs))
+		for _, job := range phase.Jobs {
+			jobs = append(jobs, runJobStateDoc{
+				ID:    job.ID,
+				Name:  job.Name,
+				State: "not_started",
+			})
+		}
+		states = append(states, runPhaseStateDoc{
+			Name:      phase.Name,
+			State:     "not_started",
+			Kind:      firstNonEmpty(phase.Kind, "k8s_job"),
+			Verify:    phase.Verify,
+			Always:    phase.Always,
+			DependsOn: sliceOrEmpty(phase.DependsOn),
+			Jobs:      jobs,
+		})
+	}
+	return states
 }
 
 func leaseFromDoc(doc leaseDoc) server.Lease {
@@ -1749,6 +1863,9 @@ func runReportFromDoc(doc runDoc, lineageByID map[string]string) server.RunRepor
 	}
 	if doc.State == "in_progress" {
 		completed = nil
+	}
+	if doc.CompletedAt != "" {
+		completed = parseOptionalTime(doc.CompletedAt)
 	}
 	var currentPhase *string
 	if len(doc.Attempts) > 0 {
@@ -2051,6 +2168,22 @@ func positiveIntValue(value any) (int, bool) {
 		return n, err == nil && n > 0
 	default:
 		return 0, false
+	}
+}
+
+func intValueFromAny(value any) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case string:
+		n, _ := strconv.Atoi(strings.TrimSpace(typed))
+		return n
+	default:
+		return 0
 	}
 }
 
@@ -3411,7 +3544,7 @@ func (s *Store) advancePlaybookDoc(ctx context.Context, doc *playbookDoc, dispat
 			continue
 		}
 		switch result.State {
-		case "dispatched", "pending", "already_running":
+		case "queued", "pending", "already_running":
 			entry.State = "running"
 			active++
 			started++
@@ -3872,6 +4005,23 @@ func (s *Store) CancelLeaseByRef(ctx context.Context, project, ref string) (serv
 	}, nil
 }
 
+func (s *Store) ReadLeaseByRef(ctx context.Context, project, ref string) (server.Lease, error) {
+	var docs []leaseDoc
+	if err := queryAllWhere(
+		ctx, s.leases,
+		"SELECT * FROM c WHERE c.project = @p",
+		[]azcosmos.QueryParameter{{Name: "@p", Value: project}},
+		&docs,
+	); err != nil {
+		return server.Lease{}, fmt.Errorf("query leases: %w", err)
+	}
+	found := selectLeaseDocByPublicRef(docs, ref)
+	if found == nil {
+		return server.Lease{}, server.ErrNotFound
+	}
+	return leaseFromDoc(*found), nil
+}
+
 func (s *Store) AppendTestSlotHotSwapHistory(ctx context.Context, project, ref string, entry server.TestSlotHotSwapHistoryEntry) (server.Lease, error) {
 	var docs []leaseDoc
 	if err := queryAllWhere(
@@ -4112,6 +4262,72 @@ func nativeSlotIndex(metadata map[string]any) *int {
 	return nil
 }
 
+func nativeSlotName(metadata map[string]any) string {
+	if value, ok := metadata["native_slot_name"].(string); ok {
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
+
+func phaseStatesStarted(raw any, phaseName string) any {
+	states, ok := raw.([]any)
+	if !ok {
+		return raw
+	}
+	out := make([]any, 0, len(states))
+	for _, item := range states {
+		state, ok := item.(map[string]any)
+		if !ok {
+			out = append(out, item)
+			continue
+		}
+		copy := map[string]any{}
+		for k, v := range state {
+			copy[k] = v
+		}
+		if strings.TrimSpace(fmt.Sprint(copy["name"])) == phaseName {
+			copy["state"] = "in_progress"
+			jobs, _ := copy["jobs"].([]any)
+			nextJobs := make([]any, 0, len(jobs))
+			for _, jobItem := range jobs {
+				job, ok := jobItem.(map[string]any)
+				if !ok {
+					nextJobs = append(nextJobs, jobItem)
+					continue
+				}
+				jobCopy := map[string]any{}
+				for k, v := range job {
+					jobCopy[k] = v
+				}
+				jobCopy["state"] = "in_progress"
+				nextJobs = append(nextJobs, jobCopy)
+			}
+			copy["jobs"] = nextJobs
+		}
+		out = append(out, copy)
+	}
+	return out
+}
+
+func onlySkippedAttempts(attempts []attemptDoc) bool {
+	for _, attempt := range attempts {
+		if attempt.SkippedFromRunID == nil || *attempt.SkippedFromRunID == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func nextAttemptIndexFromDocs(attempts []attemptDoc) int {
+	next := 0
+	for _, attempt := range attempts {
+		if attempt.AttemptIndex >= next {
+			next = attempt.AttemptIndex + 1
+		}
+	}
+	return next
+}
+
 func setNativeSlotMetadata(metadata map[string]any, project string, slotIndex int, slotPrefix string) {
 	metadata["native_slot_index"] = strconv.Itoa(slotIndex)
 	prefix := strings.Trim(strings.TrimSpace(slotPrefix), ".")
@@ -4231,6 +4447,7 @@ func (s *Store) ReadRunForReplay(ctx context.Context, project, runID string) (se
 			Decision:     stringOrEmpty(a.Decision),
 			Completed:    a.CompletedAt != "",
 			PhaseOutputs: stringMapOrEmpty(a.PhaseOutputs),
+			PhaseInputs:  stringMapOrEmpty(a.PhaseInputs),
 		})
 	}
 	var bdg budget.Config
@@ -4252,6 +4469,7 @@ func (s *Store) ReadRunForReplay(ctx context.Context, project, runID string) (se
 		IssueLockHolderID: doc.IssueLockHolderID,
 		PRNumber:          doc.PRNumber,
 		PRLockHolderID:    doc.PRLockHolderID,
+		TestSlotLeaseRef:  doc.TestSlotLeaseRef,
 	}, nil
 }
 
@@ -4508,11 +4726,15 @@ func (s *Store) ReopenRunForTriage(ctx context.Context, req server.TriageReopenR
 			}
 		}
 		attempt := map[string]any{
-			"attempt_index":     nextIdx,
-			"phase":             req.PhaseName,
-			"phase_kind":        req.PhaseKind,
-			"workflow_filename": req.WorkflowFilename,
-			"dispatched_at":     time.Now().UTC().Format(time.RFC3339Nano),
+			"attempt_index":       nextIdx,
+			"phase":               req.PhaseName,
+			"phase_kind":          req.PhaseKind,
+			"workflow_filename":   req.WorkflowFilename,
+			"dispatched_at":       time.Now().UTC().Format(time.RFC3339Nano),
+			"native_launch_state": "pending",
+		}
+		if len(req.LaunchMetadata) > 0 {
+			attempt["launch_metadata"] = req.LaunchMetadata
 		}
 		raw["attempts"] = append(attempts, attempt)
 		raw["state"] = "in_progress"
@@ -4621,7 +4843,9 @@ func (s *Store) AbortRunByID(ctx context.Context, project, runID, reason string)
 	}
 	raw["state"] = "aborted"
 	raw["abort_reason"] = reason
-	raw["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	raw["updated_at"] = now
+	raw["completed_at"] = now
 
 	payload, err := json.Marshal(raw)
 	if err != nil {
@@ -4937,7 +5161,7 @@ func (s *Store) RecordNativeJobCompletion(ctx context.Context, project, runID st
 			return server.NativeJobCompletionResult{}, server.ErrConflict
 		}
 
-		expectedJobIDs, err := s.expectedNativeJobIDs(ctx, project, doc.Workflow, attempt.Phase)
+		expectedJobIDs, err := s.expectedNativeJobIDs(ctx, project, doc, attempt.Phase)
 		if err != nil {
 			return server.NativeJobCompletionResult{}, err
 		}
@@ -4995,13 +5219,10 @@ func (s *Store) RecordNativeJobCompletion(ctx context.Context, project, runID st
 	return server.NativeJobCompletionResult{}, fmt.Errorf("record native job completion: too many etag conflicts")
 }
 
-func (s *Store) expectedNativeJobIDs(ctx context.Context, project, workflowName, phaseName string) ([]string, error) {
-	wf, err := s.GetWorkflowByName(ctx, project, workflowName)
-	if err != nil {
-		return nil, err
-	}
-	if wf == nil {
-		return nil, server.ValidationError{Message: fmt.Sprintf("workflow %q is not registered", workflowName)}
+func (s *Store) expectedNativeJobIDs(_ context.Context, _ string, run runDoc, phaseName string) ([]string, error) {
+	wf := workflowFromSnapshotDoc(run.WorkflowSnapshot)
+	if strings.TrimSpace(wf.Name) == "" {
+		return nil, server.ValidationError{Message: fmt.Sprintf("run %q has no workflow snapshot", run.ID)}
 	}
 	for _, phase := range wf.Phases {
 		if phase.Name != phaseName {
@@ -5025,7 +5246,7 @@ func (s *Store) expectedNativeJobIDs(ctx context.Context, project, workflowName,
 		}
 		return ids, nil
 	}
-	return nil, server.ValidationError{Message: fmt.Sprintf("phase %q is not registered on workflow %q", phaseName, workflowName)}
+	return nil, server.ValidationError{Message: fmt.Sprintf("phase %q is not registered on workflow %q", phaseName, wf.Name)}
 }
 
 func nativeJobCompletionDocFromPayload(jobID string, p server.CompletionPayload, completedAt string) nativeJobCompletionDoc {
@@ -5374,7 +5595,9 @@ func (s *Store) SetRunTerminalState(ctx context.Context, project, runID, state s
 		return server.AbortRunResult{}, err
 	}
 	raw["state"] = state
-	raw["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	raw["updated_at"] = now
+	raw["completed_at"] = now
 	if abortReason != nil {
 		raw["abort_reason"] = *abortReason
 	}
@@ -5407,22 +5630,32 @@ func (s *Store) SetRunTerminalState(ctx context.Context, project, runID, state s
 	}, nil
 }
 
-// AppendRunAttempt appends a new PhaseAttempt to an in-progress run before retry dispatch.
-// Returns the new attempt's index.
-func (s *Store) AppendRunAttempt(ctx context.Context, project, runID, phase, phaseKind, workflowFilename string) (int, error) {
-	pk := azcosmos.NewPartitionKeyString(project)
+// QueueRunAttempt appends a durable phase attempt that the project-run
+// reconciler will launch against the run-held test-slot lease.
+func (s *Store) QueueRunAttempt(ctx context.Context, req server.QueueRunAttemptRequest) (server.RunReplayData, int, error) {
+	pk := azcosmos.NewPartitionKeyString(req.Project)
 	const maxRetries = 5
 	for i := 0; i < maxRetries; i++ {
-		resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
+		resp, err := s.runs.ReadItem(ctx, pk, req.RunID, nil)
 		if isCosmosStatus(err, http.StatusNotFound) {
-			return 0, server.ErrNotFound
+			return server.RunReplayData{}, 0, server.ErrNotFound
 		}
 		if err != nil {
-			return 0, err
+			return server.RunReplayData{}, 0, err
+		}
+		var doc runDoc
+		if err := json.Unmarshal(resp.Value, &doc); err != nil {
+			return server.RunReplayData{}, 0, err
+		}
+		if doc.State != "in_progress" {
+			return server.RunReplayData{}, 0, server.ErrConflict
+		}
+		if doc.TestSlotLeaseRef == nil || strings.TrimSpace(*doc.TestSlotLeaseRef) == "" {
+			return server.RunReplayData{}, 0, server.ErrConflict
 		}
 		var raw map[string]any
 		if err := json.Unmarshal(resp.Value, &raw); err != nil {
-			return 0, err
+			return server.RunReplayData{}, 0, err
 		}
 		attempts, _ := raw["attempts"].([]any)
 		nextIdx := len(attempts)
@@ -5433,30 +5666,140 @@ func (s *Store) AppendRunAttempt(ctx context.Context, project, runID, phase, pha
 				}
 			}
 		}
+		now := time.Now().UTC().Format(time.RFC3339Nano)
 		newAttempt := map[string]any{
-			"attempt_index":     nextIdx,
-			"phase":             phase,
-			"phase_kind":        phaseKind,
-			"workflow_filename": workflowFilename,
-			"dispatched_at":     time.Now().UTC().Format(time.RFC3339Nano),
+			"attempt_index":       nextIdx,
+			"phase":               req.Phase.Name,
+			"phase_kind":          req.PhaseKind,
+			"workflow_filename":   req.WorkflowFilename,
+			"dispatched_at":       now,
+			"native_launch_state": "pending",
+		}
+		if len(req.PhaseInputs) > 0 {
+			newAttempt["phase_inputs"] = req.PhaseInputs
+		}
+		if len(req.LaunchMetadata) > 0 {
+			newAttempt["launch_metadata"] = req.LaunchMetadata
 		}
 		raw["attempts"] = append(attempts, newAttempt)
-		raw["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+		raw["state"] = "in_progress"
+		raw["updated_at"] = now
+		raw["phase_states"] = phaseStatesStarted(raw["phase_states"], req.Phase.Name)
 
 		payload, err := json.Marshal(raw)
 		if err != nil {
-			return 0, err
+			return server.RunReplayData{}, 0, err
+		}
+		etag := azcore.ETag(resp.ETag)
+		if _, err := s.runs.ReplaceItem(ctx, pk, req.RunID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
+			if isCosmosStatus(err, http.StatusPreconditionFailed) {
+				continue
+			}
+			return server.RunReplayData{}, 0, err
+		}
+		run, err := s.ReadRunForReplay(ctx, req.Project, req.RunID)
+		return run, nextIdx, err
+	}
+	return server.RunReplayData{}, 0, fmt.Errorf("queue run attempt: too many etag conflicts")
+}
+
+func (s *Store) MarkRunAttemptLaunching(ctx context.Context, req server.RunAttemptLaunchStateRequest) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	return s.updateRunAttempt(ctx, req.Project, req.RunID, req.AttemptIndex, func(attempt map[string]any) error {
+		if strings.TrimSpace(stringValue(attempt["completed_at"])) != "" {
+			return server.ErrConflict
+		}
+		if strings.TrimSpace(stringValue(attempt["native_launch_state"])) == "launched" {
+			return server.ErrConflict
+		}
+		attempt["native_launch_state"] = "launching"
+		attempt["native_launch_started_at"] = now
+		delete(attempt, "native_launch_error")
+		return nil
+	})
+}
+
+func (s *Store) MarkRunAttemptLaunched(ctx context.Context, req server.RunAttemptLaunchedRequest) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	return s.updateRunAttempt(ctx, req.Project, req.RunID, req.AttemptIndex, func(attempt map[string]any) error {
+		if strings.TrimSpace(stringValue(attempt["completed_at"])) != "" {
+			return server.ErrConflict
+		}
+		attempt["native_launch_state"] = "launched"
+		attempt["native_launched_at"] = now
+		attempt["native_job_names"] = sliceOrEmpty(req.JobNames)
+		delete(attempt, "native_launch_error")
+		return nil
+	})
+}
+
+func (s *Store) MarkRunAttemptLaunchFailed(ctx context.Context, req server.RunAttemptLaunchStateRequest) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	return s.updateRunAttempt(ctx, req.Project, req.RunID, req.AttemptIndex, func(attempt map[string]any) error {
+		if strings.TrimSpace(stringValue(attempt["completed_at"])) != "" {
+			return server.ErrConflict
+		}
+		attempt["native_launch_state"] = "launch_failed"
+		attempt["native_launch_error"] = req.Reason
+		attempt["native_launch_failed_at"] = now
+		return nil
+	})
+}
+
+func (s *Store) updateRunAttempt(ctx context.Context, project, runID string, attemptIndex int, mutate func(map[string]any) error) error {
+	pk := azcosmos.NewPartitionKeyString(project)
+	const maxRetries = 5
+	for i := 0; i < maxRetries; i++ {
+		resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
+		if isCosmosStatus(err, http.StatusNotFound) {
+			return server.ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(resp.Value, &raw); err != nil {
+			return err
+		}
+		attempts, _ := raw["attempts"].([]any)
+		target := -1
+		for idx, item := range attempts {
+			attempt, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if intValueFromAny(attempt["attempt_index"]) == attemptIndex {
+				target = idx
+				break
+			}
+		}
+		if target < 0 {
+			return server.ErrNotFound
+		}
+		attempt, ok := attempts[target].(map[string]any)
+		if !ok {
+			return server.ErrConflict
+		}
+		if err := mutate(attempt); err != nil {
+			return err
+		}
+		attempts[target] = attempt
+		raw["attempts"] = attempts
+		raw["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+		payload, err := json.Marshal(raw)
+		if err != nil {
+			return err
 		}
 		etag := azcore.ETag(resp.ETag)
 		if _, err := s.runs.ReplaceItem(ctx, pk, runID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
 			if isCosmosStatus(err, http.StatusPreconditionFailed) {
 				continue
 			}
-			return 0, err
+			return err
 		}
-		return nextIdx, nil
+		return nil
 	}
-	return 0, fmt.Errorf("append run attempt: too many etag conflicts")
+	return fmt.Errorf("update run attempt: too many etag conflicts")
 }
 
 // ---------------------------------------------------------------------------
@@ -5594,8 +5937,8 @@ func (s *Store) ListProjectWorkflows(ctx context.Context, project string) ([]ser
 	return rows, nil
 }
 
-// CreateRun creates a new run document with its first PhaseAttempt. The caller must
-// hold the issue lock before calling this so the run-number allocation is serialized.
+// CreateRun creates a queued run document. The caller must hold the issue lock
+// before calling this so the run-number allocation is serialized.
 func (s *Store) CreateRun(ctx context.Context, req server.CreateRunRequest) (server.CreatedRun, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
@@ -5626,33 +5969,28 @@ func (s *Store) CreateRun(ctx context.Context, req server.CreateRunRequest) (ser
 	}
 
 	doc := runDoc{
-		ID:               runID,
-		Project:          req.Project,
-		Workflow:         req.Workflow,
-		RunNumber:        &runNumber,
-		RunDisplayNumber: &runDisplay,
-		RootRunID:        &runID,
-		OriginKind:       &originKind,
-		IsCycle:          false,
-		CycleNumber:      &cycleNum,
-		IssueID:          req.IssueID,
-		IssueRepo:        req.IssueRepo,
-		IssueNumber:      req.IssueNumber,
-		State:            "in_progress",
-		Budget:           budgetDoc,
-		Attempts: []attemptDoc{
-			{
-				AttemptIndex:     0,
-				Phase:            req.InitialPhaseName,
-				PhaseKind:        req.InitialPhaseKind,
-				WorkflowFilename: req.InitialWorkflowFilename,
-				DispatchedAt:     now,
-			},
-		},
+		ID:                runID,
+		Project:           req.Project,
+		Workflow:          req.Workflow,
+		WorkflowSnapshot:  ptrWorkflowSnapshot(workflowSnapshotDocFromWorkflow(req.WorkflowSnapshot)),
+		RunNumber:         &runNumber,
+		RunDisplayNumber:  &runDisplay,
+		RootRunID:         &runID,
+		OriginKind:        &originKind,
+		IsCycle:           false,
+		CycleNumber:       &cycleNum,
+		IssueID:           req.IssueID,
+		IssueRepo:         req.IssueRepo,
+		IssueNumber:       req.IssueNumber,
+		State:             "queued",
+		Budget:            budgetDoc,
+		PhaseStates:       phaseStatesFromWorkflow(req.WorkflowSnapshot),
+		Attempts:          []attemptDoc{},
 		CumulativeCostUSD: 0.0,
 		TriggerSource:     req.TriggerSource,
 		CallbackToken:     &callbackToken,
 		IssueLockHolderID: &req.IssueLockHolderID,
+		EntrypointPhase:   optionalNonEmptyStringPtr(req.InitialPhaseName),
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}
@@ -5670,6 +6008,234 @@ func (s *Store) CreateRun(ctx context.Context, req server.CreateRunRequest) (ser
 		RunNumber:     runNumber,
 		RunDisplay:    runDisplay,
 		CallbackToken: callbackToken,
+	}, nil
+}
+
+func (s *Store) ListQueuedProjectRuns(ctx context.Context, project string) ([]server.QueuedProjectRun, error) {
+	var docs []runDoc
+	if err := queryAllWhere(
+		ctx,
+		s.runs,
+		"SELECT * FROM c WHERE c.project = @p AND c.state = @state ORDER BY c.created_at ASC",
+		[]azcosmos.QueryParameter{
+			{Name: "@p", Value: project},
+			{Name: "@state", Value: "queued"},
+		},
+		&docs,
+	); err != nil {
+		return nil, err
+	}
+	rows := make([]server.QueuedProjectRun, 0, len(docs))
+	for _, doc := range docs {
+		rows = append(rows, server.QueuedProjectRun{
+			ID:                doc.ID,
+			Project:           doc.Project,
+			WorkflowName:      doc.Workflow,
+			WorkflowSnapshot:  workflowFromSnapshotDoc(doc.WorkflowSnapshot),
+			IssueRepo:         doc.IssueRepo,
+			IssueNumber:       doc.IssueNumber,
+			RunNumber:         doc.RunNumber,
+			RunDisplayNumber:  doc.RunDisplayNumber,
+			CallbackToken:     doc.CallbackToken,
+			IssueLockHolderID: doc.IssueLockHolderID,
+			EntrypointPhase:   doc.EntrypointPhase,
+			CreatedAt:         parseTimeOrNow(doc.CreatedAt),
+		})
+	}
+	return rows, nil
+}
+
+func (s *Store) ListLaunchPendingProjectRuns(ctx context.Context, project string) ([]server.LaunchPendingProjectRun, error) {
+	var docs []runDoc
+	if err := queryAllWhere(
+		ctx,
+		s.runs,
+		"SELECT * FROM c WHERE c.project = @p AND c.state = @state ORDER BY c.updated_at ASC",
+		[]azcosmos.QueryParameter{
+			{Name: "@p", Value: project},
+			{Name: "@state", Value: "in_progress"},
+		},
+		&docs,
+	); err != nil {
+		return nil, err
+	}
+	rows := make([]server.LaunchPendingProjectRun, 0)
+	for _, doc := range docs {
+		leaseRef := strings.TrimSpace(stringOrEmpty(doc.TestSlotLeaseRef))
+		if leaseRef == "" {
+			continue
+		}
+		wf := workflowFromSnapshotDoc(doc.WorkflowSnapshot)
+		run, err := s.ReadRunForReplay(ctx, doc.Project, doc.ID)
+		if err != nil {
+			return nil, err
+		}
+		priorRealAttemptFinished := false
+		for _, attempt := range doc.Attempts {
+			if attempt.SkippedFromRunID != nil && *attempt.SkippedFromRunID != "" {
+				continue
+			}
+			state := strings.TrimSpace(attempt.NativeLaunchState)
+			if attempt.CompletedAt != "" || state == "launched" {
+				priorRealAttemptFinished = true
+				continue
+			}
+			if state == "" {
+				continue
+			}
+			phase := phaseFromWorkflowSnapshot(wf, attempt.Phase)
+			if phase.Name == "" {
+				phase = server.PhaseSpec{
+					Name:             attempt.Phase,
+					Kind:             firstNonEmpty(attempt.PhaseKind, "k8s_job"),
+					WorkflowFilename: attempt.WorkflowFilename,
+				}
+			}
+			rows = append(rows, server.LaunchPendingProjectRun{
+				Run:              run,
+				WorkflowSnapshot: wf,
+				LeaseRef:         leaseRef,
+				AttemptIndex:     attempt.AttemptIndex,
+				Phase:            phase,
+				PhaseKind:        firstNonEmpty(attempt.PhaseKind, "k8s_job"),
+				WorkflowFilename: attempt.WorkflowFilename,
+				PhaseInputs:      stringMapOrEmpty(attempt.PhaseInputs),
+				LaunchMetadata:   mapOrEmpty(attempt.LaunchMetadata),
+				AdmissionAttempt: !priorRealAttemptFinished,
+			})
+		}
+	}
+	return rows, nil
+}
+
+func (s *Store) StartQueuedRun(ctx context.Context, req server.StartQueuedRunRequest) (server.RunReplayData, error) {
+	pk := azcosmos.NewPartitionKeyString(req.Project)
+	const maxRetries = 5
+	for i := 0; i < maxRetries; i++ {
+		resp, err := s.runs.ReadItem(ctx, pk, req.RunID, nil)
+		if isCosmosStatus(err, http.StatusNotFound) {
+			return server.RunReplayData{}, server.ErrNotFound
+		}
+		if err != nil {
+			return server.RunReplayData{}, err
+		}
+		var doc runDoc
+		if err := json.Unmarshal(resp.Value, &doc); err != nil {
+			return server.RunReplayData{}, err
+		}
+		if doc.State != "queued" || !onlySkippedAttempts(doc.Attempts) {
+			return server.RunReplayData{}, server.ErrConflict
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(resp.Value, &raw); err != nil {
+			return server.RunReplayData{}, err
+		}
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		attempts, _ := raw["attempts"].([]any)
+		nextIdx := nextAttemptIndexFromDocs(doc.Attempts)
+		raw["state"] = "in_progress"
+		raw["updated_at"] = now
+		raw["attempts"] = append(attempts, map[string]any{
+			"attempt_index":       nextIdx,
+			"phase":               req.Phase.Name,
+			"phase_kind":          req.PhaseKind,
+			"workflow_filename":   req.WorkflowFilename,
+			"dispatched_at":       now,
+			"native_launch_state": "pending",
+		})
+		newAttempts, _ := raw["attempts"].([]any)
+		if len(newAttempts) > 0 {
+			if attempt, ok := newAttempts[len(newAttempts)-1].(map[string]any); ok {
+				if len(doc.EntrypointPhaseInputs) > 0 {
+					attempt["phase_inputs"] = doc.EntrypointPhaseInputs
+				}
+				if len(doc.EntrypointLaunchMetadata) > 0 {
+					attempt["launch_metadata"] = doc.EntrypointLaunchMetadata
+				}
+				newAttempts[len(newAttempts)-1] = attempt
+				raw["attempts"] = newAttempts
+			}
+		}
+		leaseRef := server.LeasePublicRefFromLease(req.Lease)
+		raw["test_slot_lease_id"] = req.Lease.ID
+		raw["test_slot_lease_ref"] = leaseRef
+		if slotName := nativeSlotName(req.Lease.Metadata); slotName != "" {
+			raw["test_slot_name"] = slotName
+		}
+		if slotIndex := nativeSlotIndex(req.Lease.Metadata); slotIndex != nil {
+			raw["test_slot_index"] = *slotIndex
+		}
+		raw["phase_states"] = phaseStatesStarted(raw["phase_states"], req.Phase.Name)
+
+		payload, err := json.Marshal(raw)
+		if err != nil {
+			return server.RunReplayData{}, err
+		}
+		etag := azcore.ETag(resp.ETag)
+		if _, err := s.runs.ReplaceItem(ctx, pk, req.RunID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
+			if isCosmosStatus(err, http.StatusPreconditionFailed) {
+				continue
+			}
+			return server.RunReplayData{}, err
+		}
+		return s.ReadRunForReplay(ctx, req.Project, req.RunID)
+	}
+	return server.RunReplayData{}, fmt.Errorf("start queued run: too many etag conflicts")
+}
+
+func (s *Store) FailQueuedRunAdmission(ctx context.Context, project, runID, reason string) (server.AbortRunResult, error) {
+	pk := azcosmos.NewPartitionKeyString(project)
+	resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
+	if isCosmosStatus(err, http.StatusNotFound) {
+		return server.AbortRunResult{}, server.ErrNotFound
+	}
+	if err != nil {
+		return server.AbortRunResult{}, err
+	}
+	var doc runDoc
+	if err := json.Unmarshal(resp.Value, &doc); err != nil {
+		return server.AbortRunResult{}, err
+	}
+	if doc.State != "queued" && doc.State != "in_progress" {
+		return server.AbortRunResult{}, server.ErrConflict
+	}
+	siblings, _ := s.issueRunDocs(ctx, project, doc.IssueNumber)
+	numbers := runNumberMap(siblings)
+	runRef := publicids.RunRef(doc.Project, positiveIssueNumberPtr(doc.IssueNumber), runDisplayNumber(doc, numbers[doc.ID]))
+
+	var raw map[string]any
+	if err := json.Unmarshal(resp.Value, &raw); err != nil {
+		return server.AbortRunResult{}, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	raw["state"] = "failed_to_start"
+	raw["abort_reason"] = reason
+	raw["updated_at"] = now
+	raw["completed_at"] = now
+	payload, err := json.Marshal(raw)
+	if err != nil {
+		return server.AbortRunResult{}, err
+	}
+	etag := azcore.ETag(resp.ETag)
+	if _, err := s.runs.ReplaceItem(ctx, pk, runID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
+		return server.AbortRunResult{}, err
+	}
+	var issueLockReleased, prLockReleased *bool
+	if doc.IssueLockHolderID != nil && *doc.IssueLockHolderID != "" && doc.IssueNumber > 0 {
+		released := s.releaseLock(ctx, "issue", fmt.Sprintf("%s#%d", project, doc.IssueNumber), *doc.IssueLockHolderID)
+		issueLockReleased = &released
+	}
+	if doc.PRLockHolderID != nil && *doc.PRLockHolderID != "" && doc.PRNumber != nil && doc.IssueRepo != "" {
+		released := s.releaseLock(ctx, "pr", fmt.Sprintf("%s#%d", doc.IssueRepo, *doc.PRNumber), *doc.PRLockHolderID)
+		prLockReleased = &released
+	}
+	return server.AbortRunResult{
+		State:             "failed_to_start",
+		RunRef:            runRef,
+		RunNumber:         doc.RunNumber,
+		RunDisplayNumber:  doc.RunDisplayNumber,
+		IssueLockReleased: issueLockReleased,
+		PRLockReleased:    prLockReleased,
 	}, nil
 }
 
@@ -5739,9 +6305,10 @@ func (s *Store) ReadRunForResume(ctx context.Context, project, runID string) (se
 	}, nil
 }
 
-// CreateResumedRun creates a new run from priorRun, skipping phases before entrypoint.
-// Skipped phases carry their phase_outputs forward. The entrypoint phase gets a fresh
-// attempt (attempt_index = entrypoint_index) with dispatched_at set.
+// CreateResumedRun creates a queued run from priorRun, skipping phases before
+// entrypoint. Skipped phases carry their phase_outputs forward. The entrypoint
+// phase attempt is materialized only when project queue admission starts the
+// run and reserves its test-slot lease.
 // Returns an error wrapping server.ErrOutputsMissing if a skipped phase has no outputs.
 func (s *Store) CreateResumedRun(ctx context.Context, req server.CreateResumedRunRequest) (server.CreatedRun, error) {
 	prior := req.PriorRun
@@ -5800,24 +6367,7 @@ func (s *Store) CreateResumedRun(ctx context.Context, req server.CreateResumedRu
 		})
 	}
 
-	// Entrypoint phase attempt.
-	entryPhase := wf.Phases[entrypointIndex]
-	entryKind := entryPhase.Kind
-	if entryKind == "" {
-		entryKind = "k8s_job"
-	}
-	entryFilename := entryPhase.WorkflowFilename
-	if entryFilename == "" {
-		entryFilename = fmt.Sprintf("%s:%s", entryKind, entryPhase.Name)
-	}
-	entrypointAttempt := attemptDoc{
-		AttemptIndex:     entrypointIndex,
-		Phase:            entryPhase.Name,
-		PhaseKind:        entryKind,
-		WorkflowFilename: entryFilename,
-		DispatchedAt:     now,
-	}
-	allAttempts := append(skippedAttempts, entrypointAttempt)
+	allAttempts := skippedAttempts
 
 	// Allocate run number and cycle display number.
 	docs, err := s.issueRunDocs(ctx, prior.Project, prior.IssueNumber)
@@ -5887,31 +6437,35 @@ func (s *Store) CreateResumedRun(ctx context.Context, req server.CreateResumedRu
 	bdg := &budgetDoc{Total: prior.Budget.Total}
 
 	doc := runDoc{
-		ID:                runID,
-		Project:           prior.Project,
-		Workflow:          prior.Workflow,
-		RunNumber:         &runNumber,
-		RunDisplayNumber:  &runDisplay,
-		ParentRunID:       &parentRunID,
-		RootRunID:         &rootRunID,
-		OriginKind:        &originKind,
-		IsCycle:           true,
-		CycleNumber:       &cycleNumber,
-		IssueID:           prior.IssueID,
-		IssueRepo:         prior.IssueRepo,
-		IssueNumber:       prior.IssueNumber,
-		State:             "in_progress",
-		Budget:            bdg,
-		ValidationURL:     prior.ValidationURL,
-		ClonedFromRunID:   &parentRunID,
-		EntrypointPhase:   &entrypointPhase,
-		Attempts:          allAttempts,
-		CumulativeCostUSD: 0.0,
-		TriggerSource:     req.TriggerSource,
-		CallbackToken:     &callbackToken,
-		IssueLockHolderID: &req.IssueLockHolderID,
-		CreatedAt:         now,
-		UpdatedAt:         now,
+		ID:                       runID,
+		Project:                  prior.Project,
+		Workflow:                 prior.Workflow,
+		RunNumber:                &runNumber,
+		RunDisplayNumber:         &runDisplay,
+		ParentRunID:              &parentRunID,
+		RootRunID:                &rootRunID,
+		OriginKind:               &originKind,
+		IsCycle:                  true,
+		CycleNumber:              &cycleNumber,
+		IssueID:                  prior.IssueID,
+		IssueRepo:                prior.IssueRepo,
+		IssueNumber:              prior.IssueNumber,
+		State:                    "queued",
+		Budget:                   bdg,
+		WorkflowSnapshot:         ptrWorkflowSnapshot(workflowSnapshotDocFromWorkflow(wf)),
+		PhaseStates:              phaseStatesFromWorkflow(wf),
+		ValidationURL:            prior.ValidationURL,
+		ClonedFromRunID:          &parentRunID,
+		EntrypointPhase:          &entrypointPhase,
+		EntrypointPhaseInputs:    req.PhaseInputs,
+		EntrypointLaunchMetadata: req.LaunchMetadata,
+		Attempts:                 allAttempts,
+		CumulativeCostUSD:        0.0,
+		TriggerSource:            req.TriggerSource,
+		CallbackToken:            &callbackToken,
+		IssueLockHolderID:        &req.IssueLockHolderID,
+		CreatedAt:                now,
+		UpdatedAt:                now,
 	}
 
 	payload, err := json.Marshal(doc)

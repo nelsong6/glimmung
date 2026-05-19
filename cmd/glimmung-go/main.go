@@ -58,6 +58,7 @@ func main() {
 			// no polling loop.
 			go server.RecoverInFlightTestSlots(context.Background(), store, nativeLauncher, nativeMinter, log.Printf)
 		}
+		go server.RecoverProjectRunQueues(context.Background(), store, nativeLauncher, log.Printf)
 	}
 	addr := ":" + settings.Port
 

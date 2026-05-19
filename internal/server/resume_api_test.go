@@ -215,30 +215,20 @@ func TestResumeRunOutputsMissing(t *testing.T) {
 	}
 }
 
-func TestResumeRunAcquireLeaseFails(t *testing.T) {
+func TestResumeRunQueuesWithoutCapacityCheck(t *testing.T) {
 	store := minimalResumeStore()
 	store.resumeLeaseErr = errors.New("cosmos unavailable")
-	rec := httptest.NewRecorder()
-	newResumeTestHandler(store, &fakeNativeLauncher{}).ServeHTTP(rec, resumeReq("agent-execute"))
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestResumeRunNoCapacity(t *testing.T) {
-	store := minimalResumeStore()
-	store.resumeLeaseErr = ErrUnavailable
 	rec := httptest.NewRecorder()
 	newResumeTestHandler(store, &fakeNativeLauncher{}).ServeHTTP(rec, resumeReq("agent-execute"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if got := readResumeResult(t, rec).State; got != "no_capacity" {
+	if got := readResumeResult(t, rec).State; got != "queued" {
 		t.Fatalf("state=%q", got)
 	}
 }
 
-func TestResumeRunDispatched(t *testing.T) {
+func TestResumeRunQueued(t *testing.T) {
 	launcher := &fakeNativeLauncher{}
 	rec := httptest.NewRecorder()
 	newResumeTestHandler(minimalResumeStore(), launcher).ServeHTTP(rec, resumeReq("agent-execute"))
@@ -246,24 +236,21 @@ func TestResumeRunDispatched(t *testing.T) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	result := readResumeResult(t, rec)
-	if result.State != "dispatched" {
+	if result.State != "queued" {
 		t.Fatalf("state=%q", result.State)
 	}
-	if result.Host == nil || *result.Host != "native-k8s" {
-		t.Fatalf("host=%v", result.Host)
-	}
-	if !launcher.called || launcher.req.Phase.Name != "agent-execute" {
-		t.Fatalf("launch=%#v", launcher.req)
+	if launcher.called {
+		t.Fatalf("resume request must not launch native work directly: %#v", launcher.req)
 	}
 }
 
-func TestResumeRunDispatchFailed(t *testing.T) {
+func TestResumeRunLauncherFailureDoesNotFailQueueing(t *testing.T) {
 	rec := httptest.NewRecorder()
 	newResumeTestHandler(minimalResumeStore(), &fakeNativeLauncher{err: errors.New("kube unavailable")}).ServeHTTP(rec, resumeReq("agent-execute"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if got := readResumeResult(t, rec).State; got != "dispatch_failed" {
+	if got := readResumeResult(t, rec).State; got != "queued" {
 		t.Fatalf("state=%q", got)
 	}
 }
@@ -305,7 +292,7 @@ func TestResumeRunEntriesAtPhaseZero(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if got := readResumeResult(t, rec).State; got != "dispatched" {
+	if got := readResumeResult(t, rec).State; got != "queued" {
 		t.Fatalf("state=%q", got)
 	}
 }

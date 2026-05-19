@@ -37,15 +37,9 @@ type fakeCompletionStore struct {
 	terminalResult AbortRunResult
 	terminalErr    error
 
-	appendIdx   int
-	appendErr   error
-	appendPhase string
-	appendKind  string
-	appendFile  string
-
-	leaseResult Lease
-	leaseErr    error
-	leaseReq    LeaseAcquireRequest
+	queueIdx int
+	queueErr error
+	queueReq *QueueRunAttemptRequest
 
 	nativeExpectedJobs []string
 	nativeCompletions  map[string]CompletionPayload
@@ -114,16 +108,15 @@ func (s *fakeCompletionStore) SetRunTerminalState(context.Context, string, strin
 	return s.terminalResult, s.terminalErr
 }
 
-func (s *fakeCompletionStore) AppendRunAttempt(_ context.Context, _, _, phase, phaseKind, workflowFilename string) (int, error) {
-	s.appendPhase = phase
-	s.appendKind = phaseKind
-	s.appendFile = workflowFilename
-	return s.appendIdx, s.appendErr
-}
-
-func (s *fakeCompletionStore) AcquireLease(_ context.Context, req LeaseAcquireRequest) (Lease, error) {
-	s.leaseReq = req
-	return s.leaseResult, s.leaseErr
+func (s *fakeCompletionStore) QueueRunAttempt(_ context.Context, req QueueRunAttemptRequest) (RunReplayData, int, error) {
+	s.queueReq = &req
+	if s.queueErr != nil {
+		return RunReplayData{}, 0, s.queueErr
+	}
+	if s.run == nil {
+		return RunReplayData{}, 0, ErrNotFound
+	}
+	return *s.run, s.queueIdx, nil
 }
 
 func (s *fakeCompletionStore) RecordNativeJobCompletion(_ context.Context, _, _ string, p CompletionPayload) (NativeJobCompletionResult, error) {
@@ -343,18 +336,10 @@ func TestNativeRunCompletedByCallbackTokenAdvanceReviewRequired(t *testing.T) {
 }
 
 func TestNativeRunCompletedByCallbackTokenAdvanceDispatchesNextPhase(t *testing.T) {
-	leaseNumber := 12
 	store := &fakeCompletionStore{
 		tokenRunID:   "r1",
 		tokenProject: "proj",
-		appendIdx:    1,
-		leaseResult: Lease{
-			Project:     "proj",
-			LeaseNumber: &leaseNumber,
-			Host:        stringPtr("native-k8s"),
-			State:       "claimed",
-			Metadata:    map[string]any{"lease_callback_token": "lease-token", "native_k8s": true},
-		},
+		queueIdx:     1,
 	}
 	store.run = &RunReplayData{
 		ID:           "r1",
@@ -392,18 +377,15 @@ func TestNativeRunCompletedByCallbackTokenAdvanceDispatchesNextPhase(t *testing.
 	if result.Decision == nil || *result.Decision != "advance_phase" {
 		t.Fatalf("decision=%v", result.Decision)
 	}
-	if store.appendPhase != "agent-execute" || store.appendKind != "k8s_job" || store.appendFile != "k8s_job:agent-execute" {
-		t.Fatalf("append=(%q,%q,%q)", store.appendPhase, store.appendKind, store.appendFile)
+	if store.queueReq == nil || store.queueReq.Phase.Name != "agent-execute" || store.queueReq.PhaseKind != "k8s_job" || store.queueReq.WorkflowFilename != "k8s_job:agent-execute" {
+		t.Fatalf("queue request=%#v", store.queueReq)
 	}
-	if !launcher.called || launcher.req.Phase.Name != "agent-execute" {
-		t.Fatalf("native launch=%#v", launcher.req)
+	if launcher.called {
+		t.Fatalf("completion must not launch native work directly: %#v", launcher.req)
 	}
-	phaseInputs, ok := store.leaseReq.Metadata["phase_inputs"].(map[string]string)
-	if !ok || phaseInputs["validation_url"] != "https://preview.example" {
-		t.Fatalf("phase_inputs=%#v", store.leaseReq.Metadata["phase_inputs"])
-	}
-	if store.leaseReq.Metadata["native_k8s"] != true {
-		t.Fatalf("lease metadata=%#v", store.leaseReq.Metadata)
+	phaseInputs := store.queueReq.PhaseInputs
+	if phaseInputs["validation_url"] != "https://preview.example" {
+		t.Fatalf("phase_inputs=%#v", phaseInputs)
 	}
 }
 

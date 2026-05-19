@@ -22,6 +22,9 @@ implementation is wrong and should be migrated.
 - **Available**: warm and not currently leased.
 - **Leased** or **assigned**: Glimmung has selected the slot for a checkout or
   run request and recorded the lease.
+- **Reserved/unprovisioned**: a Glimmung-managed run has reserved the slot and
+  recorded the lease, but the workflow's `env-prep` job has not yet made
+  the hot runtime usable.
 - **Hot** or **active runtime**: lease-scoped resources are running for the
   assigned slot. This includes app deployments, API proxy deployments, session
   pods, Playwright or browser-tooling pods, and any other workload that exists
@@ -110,6 +113,28 @@ When this API changes, update `mcp-glimmung`'s tool signature, docstring, and
 payload tests in the same rollout. A stale MCP tool is a contract bug even when
 the Go API correctly rejects the obsolete fields.
 
+### Glimmung-Managed Run Admission
+
+Glimmung-managed issue runs use the same project test-slot pool as checkout,
+but they do not call checkout from inside the workflow. The project run queue
+and lease handoff contract lives in
+[`project-run-queue-and-test-slot-leases.md`](project-run-queue-and-test-slot-leases.md).
+
+The run path reserves capacity before native workflow execution starts:
+
+1. Run creation records a queued run, acquires the issue/PR lock, stores the
+   workflow snapshot, and materializes phase/job rows.
+2. The project reconciler admits queued runs in project queue order.
+3. Admission validates startability before reserving any slot.
+4. Admission reserves one available slot as a claimed
+   reserved/unprovisioned lease.
+5. The workflow's `env-prep` job provisions the already-reserved lease.
+6. Cleanup releases the lease only after hot runtime teardown completes.
+
+The `env-prep` job must not request, choose, or reassign the slot. It receives
+the existing lease identity from durable run state. Reserved/unprovisioned
+leases consume project capacity until cleanup releases them.
+
 ### Return
 
 `POST /v1/test-slots/return` starts release of the lease and teardown of hot
@@ -143,7 +168,9 @@ lifecycle transition responds to an explicit event:
 |---|---|---|
 | count changed | `PATCH /v1/projects/{project}/test-environments/count` | handler writes the new count, fires per-slot warm goroutines for any missing or in-flight-`warming` slot, returns immediately |
 | checkout | `POST /v1/test-slots/checkout` | acquires lease, arms a `time.AfterFunc` for `assigned_at + ttl_seconds`, starts activation goroutine |
+| run admission | project run reconciler admits a queued run | acquires a reserved/unprovisioned lease, records it on the run, and launches environment prep from durable job state |
 | return / callback release / admin cancel | `POST /v1/test-slots/return`, `POST /v1/lease-callbacks/.../release`, `POST /v1/leases/cancel` | stops the lease's TTL timer, starts cleanup goroutine |
+| workflow cleanup | `env-destroy` job completes for a Glimmung-managed run | starts or confirms the same cleanup/release path used by return |
 | TTL deadline | per-lease `time.AfterFunc` fires | starts cleanup goroutine with source `lease.ttl_expiry` |
 | activation finished | inline at end of activation goroutine | one-shot installer cleanup, write `active` status |
 | cleanup finished | inline at end of cleanup goroutine | release lease, write `ready` status |

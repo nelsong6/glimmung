@@ -22,8 +22,6 @@ type SignalDrainStore interface {
 	ClaimIssueLock(ctx context.Context, project string, issueNumber int, holderID string, ttlSeconds int) error
 	ReleaseIssueLock(ctx context.Context, project string, issueNumber int, holderID string)
 	ReopenRunForTriage(ctx context.Context, req TriageReopenRequest) (RunReplayData, int, error)
-	AcquireLease(ctx context.Context, req LeaseAcquireRequest) (Lease, error)
-	AbortRunByID(ctx context.Context, project, runID, reason string) (AbortRunResult, error)
 }
 
 type QueuedSignal struct {
@@ -45,6 +43,7 @@ type TriageReopenRequest struct {
 	WorkflowFilename  string
 	IssueLockHolderID string
 	PRLockHolderID    string
+	LaunchMetadata    map[string]any
 }
 
 type SignalDrainResult struct {
@@ -296,7 +295,15 @@ func dispatchTriage(ctx context.Context, store SignalDrainStore, nativeLauncher 
 	if workflowFilename == "" {
 		workflowFilename = fmt.Sprintf("%s:%s", phaseKind, target.Name)
 	}
-	reopened, attemptIndex, err := store.ReopenRunForTriage(ctx, TriageReopenRequest{
+	metadata := map[string]any{
+		"phase_name":           target.Name,
+		"issue_number":         strconv.Itoa(run.IssueNumber),
+		"issue_lock_holder_id": holderID,
+		"triage_signal_id":     signal.ID,
+		"feedback":             decision.Feedback,
+		"native_k8s":           true,
+	}
+	reopened, _, err := store.ReopenRunForTriage(ctx, TriageReopenRequest{
 		Project:           run.Project,
 		RunID:             run.ID,
 		PhaseName:         target.Name,
@@ -304,54 +311,13 @@ func dispatchTriage(ctx context.Context, store SignalDrainStore, nativeLauncher 
 		WorkflowFilename:  workflowFilename,
 		IssueLockHolderID: holderID,
 		PRLockHolderID:    holderID,
+		LaunchMetadata:    metadata,
 	})
 	if err != nil {
 		store.ReleaseIssueLock(ctx, run.Project, run.IssueNumber, holderID)
 		return fmt.Errorf("reopen run for triage: %w", err)
 	}
-
-	wfName := decision.Workflow.Name
-	metadata := map[string]any{
-		"run_id":               reopened.ID,
-		"run_ref":              runRefFromData(reopened),
-		"phase_name":           target.Name,
-		"attempt_index":        strconv.Itoa(attemptIndex),
-		"issue_number":         strconv.Itoa(reopened.IssueNumber),
-		"issue_lock_holder_id": holderID,
-		"triage_signal_id":     signal.ID,
-		"feedback":             decision.Feedback,
-		"native_k8s":           true,
-	}
-	if reopened.CallbackToken != nil && *reopened.CallbackToken != "" {
-		metadata["run_callback_token"] = *reopened.CallbackToken
-	}
-	requirements := target.Requirements
-	if len(requirements) == 0 {
-		requirements = decision.Workflow.DefaultRequirements
-	}
-	lease, err := store.AcquireLease(ctx, LeaseAcquireRequest{
-		Project:      reopened.Project,
-		Workflow:     &wfName,
-		Requirements: requirements,
-		Metadata:     metadata,
-	})
-	if err != nil {
-		_, _ = store.AbortRunByID(ctx, reopened.Project, reopened.ID, "triage_lease_acquire_failed: "+err.Error())
-		return fmt.Errorf("acquire triage lease: %w", err)
-	}
-	if lease.State != "claimed" {
-		_, _ = store.AbortRunByID(ctx, reopened.Project, reopened.ID, "triage_dispatch_failed: native lease was not claimed")
-		return errors.New("native lease was not claimed")
-	}
-	if _, err := nativeLauncher.LaunchNativePhase(ctx, NativeLaunchRequest{
-		Lease:    lease,
-		Workflow: *decision.Workflow,
-		Phase:    *target,
-		Run:      runWithAttempt(reopened, attemptIndex, target.Name),
-	}); err != nil {
-		_, _ = store.AbortRunByID(ctx, reopened.Project, reopened.ID, "triage_dispatch_failed: "+err.Error())
-		return fmt.Errorf("native dispatch: %w", err)
-	}
+	wakeRunProjectReconciler(ctx, store, nativeLauncher, reopened.Project)
 	return nil
 }
 

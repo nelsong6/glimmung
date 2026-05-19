@@ -207,7 +207,7 @@ func TestDispatchPortfolioElementsCreatesIssueAndDispatches(t *testing.T) {
 	if store.runReq.TriggerSource["kind"] != "portfolio_review" || store.runReq.TriggerSource["element_count"] != 1 {
 		t.Fatalf("trigger source=%#v", store.runReq.TriggerSource)
 	}
-	if !strings.Contains(rec.Body.String(), `"state":"dispatched"`) {
+	if !strings.Contains(rec.Body.String(), `"state":"queued"`) {
 		t.Fatalf("body=%s", rec.Body.String())
 	}
 }

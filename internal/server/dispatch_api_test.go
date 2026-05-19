@@ -254,7 +254,7 @@ func TestDispatchRunRequiresNativeLauncher(t *testing.T) {
 	}
 }
 
-func TestDispatchRunDispatchedNativeK8sJob(t *testing.T) {
+func TestDispatchRunQueuesNativeK8sJob(t *testing.T) {
 	store := minimalDispatchStore()
 	launcher := &fakeNativeLauncher{}
 	rec := httptest.NewRecorder()
@@ -263,24 +263,24 @@ func TestDispatchRunDispatchedNativeK8sJob(t *testing.T) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	result := readDispatchResult(t, rec)
-	if result.State != "dispatched" {
+	if result.State != "queued" {
 		t.Fatalf("state=%q", result.State)
 	}
-	if !launcher.called {
-		t.Fatal("native launcher was not called")
-	}
-	if launcher.req.Phase.Name != "prep" || launcher.req.Run.ID != "run-1" {
-		t.Fatalf("launch request=%#v", launcher.req)
+	if launcher.called {
+		t.Fatal("dispatch request must not launch native work")
 	}
 	if store.runReq == nil || store.runReq.InitialPhaseKind != "k8s_job" {
 		t.Fatalf("run request=%#v", store.runReq)
 	}
-	if store.leaseReq == nil || store.leaseReq.Metadata["native_k8s"] != true {
-		t.Fatalf("lease request=%#v", store.leaseReq)
+	if store.runReq.WorkflowSnapshot.Name != "main" || len(store.runReq.WorkflowSnapshot.Phases) != 3 {
+		t.Fatalf("workflow snapshot=%#v", store.runReq.WorkflowSnapshot)
+	}
+	if store.leaseReq != nil {
+		t.Fatalf("dispatch request must not reserve a lease: %#v", store.leaseReq)
 	}
 }
 
-func TestDispatchRunNoCapacity(t *testing.T) {
+func TestDispatchRunDoesNotCheckCapacityInRequest(t *testing.T) {
 	store := minimalDispatchStore()
 	store.leaseErr = ErrUnavailable
 	rec := httptest.NewRecorder()
@@ -288,12 +288,15 @@ func TestDispatchRunNoCapacity(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if got := readDispatchResult(t, rec).State; got != "no_capacity" {
+	if got := readDispatchResult(t, rec).State; got != "queued" {
 		t.Fatalf("state=%q", got)
+	}
+	if store.leaseReq != nil {
+		t.Fatalf("dispatch request must not acquire lease: %#v", store.leaseReq)
 	}
 }
 
-func TestDispatchRunNativeDispatchFailed(t *testing.T) {
+func TestDispatchRunDoesNotLaunchInRequest(t *testing.T) {
 	store := minimalDispatchStore()
 	rec := httptest.NewRecorder()
 	newDispatchTestHandler(store, &fakeNativeLauncher{err: errors.New("kube unavailable")}).ServeHTTP(rec, dispatchRequest("proj", 1))
@@ -301,7 +304,7 @@ func TestDispatchRunNativeDispatchFailed(t *testing.T) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	result := readDispatchResult(t, rec)
-	if result.State != "dispatch_failed" || result.Detail == nil {
+	if result.State != "queued" || result.Detail == nil {
 		t.Fatalf("result=%#v", result)
 	}
 }
@@ -349,7 +352,7 @@ func TestDispatchRunWorkflowAlias(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if got := readDispatchResult(t, rec).State; got != "dispatched" {
+	if got := readDispatchResult(t, rec).State; got != "queued" {
 		t.Fatalf("state=%q", got)
 	}
 }

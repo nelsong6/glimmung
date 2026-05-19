@@ -46,8 +46,7 @@ type RunCompletionStore interface {
 	StampRunCompletion(ctx context.Context, project, runID string, p CompletionPayload) (RunReplayData, error)
 	StampRunDecision(ctx context.Context, project, runID, decision string) error
 	SetRunTerminalState(ctx context.Context, project, runID, state string, abortReason *string) (AbortRunResult, error)
-	AppendRunAttempt(ctx context.Context, project, runID, phase, phaseKind, workflowFilename string) (int, error)
-	AcquireLease(ctx context.Context, req LeaseAcquireRequest) (Lease, error)
+	QueueRunAttempt(ctx context.Context, req QueueRunAttemptRequest) (RunReplayData, int, error)
 }
 
 type NativeJobCompletionStore interface {
@@ -276,7 +275,7 @@ func processRunCompletion(
 	// 7. Route on decision.
 	switch verdict {
 	case decision.Retry:
-		err := dispatchRetry(ctx, store, nativeLauncher, run, wf, lastAttempt.Phase)
+		err := queueRetryPhase(ctx, store, nativeLauncher, run, wf, lastAttempt.Phase)
 		if err != nil {
 			abortReason := fmt.Sprintf("retry_dispatch_failed: %s", err)
 			return abortRunWithWorkflowCleanup(ctx, w, r, store, nativeLauncher, run, wf, runRef, decision.AbortMalformed, abortReason)
@@ -287,7 +286,7 @@ func processRunCompletion(
 		targets := allReadyDispatchTargets(wf, run, verdict)
 		if len(targets) > 0 {
 			for _, target := range targets {
-				if err := dispatchForwardPhase(ctx, store, nativeLauncher, run, wf, target); err != nil {
+				if err := queueForwardPhase(ctx, store, nativeLauncher, run, wf, target); err != nil {
 					abortReason := fmt.Sprintf("forward_dispatch_failed: %s", err)
 					return abortRunWithWorkflowCleanup(ctx, w, r, store, nativeLauncher, run, wf, runRef, decision.AbortMalformed, abortReason)
 				}
@@ -300,7 +299,9 @@ func processRunCompletion(
 		}
 		// Mark run passed (or review_required if PR primitive enabled).
 		state := "passed"
-		if wf.PR.Enabled {
+		if runHasNonAlwaysAbort(wf.Phases, run) {
+			state = "aborted"
+		} else if wf.PR.Enabled {
 			state = "review_required"
 		}
 		result, err := store.SetRunTerminalState(ctx, project, runID, state, nil)
@@ -320,7 +321,7 @@ func processRunCompletion(
 		targets := allReadyDispatchTargets(wf, run, verdict)
 		if len(targets) > 0 {
 			for _, target := range targets {
-				if err := dispatchForwardPhase(ctx, store, nativeLauncher, run, wf, target); err != nil {
+				if err := queueForwardPhase(ctx, store, nativeLauncher, run, wf, target); err != nil {
 					abortReason := fmt.Sprintf("teardown_dispatch_failed: %s", err)
 					return markRunAborted(ctx, w, r, store, nativeLauncher, run, runRef, decision.AbortMalformed, abortReason)
 				}
@@ -368,7 +369,7 @@ func abortRunWithWorkflowCleanup(
 		targets := allReadyDispatchTargets(wf, run, verdict)
 		if len(targets) > 0 {
 			for _, target := range targets {
-				if err := dispatchForwardPhase(ctx, store, nativeLauncher, run, wf, target); err != nil {
+				if err := queueForwardPhase(ctx, store, nativeLauncher, run, wf, target); err != nil {
 					return markRunAborted(ctx, w, r, store, nativeLauncher, run, runRef, decision.AbortMalformed, abortReason+"; cleanup_dispatch_failed: "+err.Error())
 				}
 			}
@@ -603,7 +604,7 @@ func isAbortDecision(value string) bool {
 	}
 }
 
-func dispatchForwardPhase(
+func queueForwardPhase(
 	ctx context.Context,
 	store RunCompletionStore,
 	nativeLauncher NativeLauncher,
@@ -626,54 +627,19 @@ func dispatchForwardPhase(
 	if err != nil {
 		return err
 	}
-	newAttemptIdx, err := store.AppendRunAttempt(ctx, run.Project, run.ID, targetPhase.Name, phaseKind, workflowFilename)
-	if err != nil {
-		return fmt.Errorf("append forward attempt: %w", err)
-	}
-	runRef := runRefFromData(run)
-	wfName := wf.Name
-	metadata := map[string]any{
-		"run_id":              run.ID,
-		"run_ref":             runRef,
-		"phase_name":          targetPhase.Name,
-		"attempt_index":       strconv.Itoa(newAttemptIdx),
-		"phase_inputs":        substituted,
-		"issue_ref":           publicids.IssueRef(run.Project, positiveIssueNumber(run.IssueNumber)),
-		"issue_number":        strconv.Itoa(run.IssueNumber),
-		"work_context_branch": fmt.Sprintf("issue-%d-run-unknown", run.IssueNumber),
-		"native_k8s":          true,
-	}
-	if run.CallbackToken != nil && *run.CallbackToken != "" {
-		metadata["run_callback_token"] = *run.CallbackToken
-	}
-	if run.IssueLockHolderID != nil && *run.IssueLockHolderID != "" {
-		metadata["issue_lock_holder_id"] = *run.IssueLockHolderID
-	}
-	requirements := targetPhase.Requirements
-	if len(requirements) == 0 {
-		requirements = wf.DefaultRequirements
-	}
-	lease, err := store.AcquireLease(ctx, LeaseAcquireRequest{
-		Project:      run.Project,
-		Workflow:     &wfName,
-		Requirements: requirements,
-		Metadata:     metadata,
+	queuedRun, newAttemptIdx, err := store.QueueRunAttempt(ctx, QueueRunAttemptRequest{
+		Project:          run.Project,
+		RunID:            run.ID,
+		Phase:            targetPhase,
+		PhaseKind:        phaseKind,
+		WorkflowFilename: workflowFilename,
+		PhaseInputs:      substituted,
 	})
 	if err != nil {
-		return fmt.Errorf("acquire lease for forward phase: %w", err)
+		return fmt.Errorf("queue forward attempt: %w", err)
 	}
-	if lease.State != "claimed" {
-		return fmt.Errorf("native lease was not claimed")
-	}
-	_, err = nativeLauncher.LaunchNativePhase(ctx, NativeLaunchRequest{
-		Lease:    lease,
-		Workflow: *wf,
-		Phase:    targetPhase,
-		Run:      runWithAttempt(run, newAttemptIdx, targetPhase.Name),
-	})
-	if err != nil {
-		return fmt.Errorf("native dispatch: %w", err)
-	}
+	wakeRunProjectReconciler(ctx, store, nativeLauncher, firstNonEmpty(queuedRun.Project, run.Project))
+	_ = newAttemptIdx
 	return nil
 }
 
@@ -694,8 +660,9 @@ func substituteCompletionPhaseInputs(phase PhaseSpec, run RunReplayData) (map[st
 	}, priorOutputs)
 }
 
-// dispatchRetry appends a new attempt and launches the native retry phase.
-func dispatchRetry(
+// queueRetryPhase appends a new attempt and lets the project-run reconciler
+// launch it against the run-held test-slot lease.
+func queueRetryPhase(
 	ctx context.Context,
 	store RunCompletionStore,
 	nativeLauncher NativeLauncher,
@@ -738,69 +705,29 @@ func dispatchRetry(
 	if workflowFilename == "" {
 		workflowFilename = fmt.Sprintf("%s:%s", phaseKind, targetPhase.Name)
 	}
-	newAttemptIdx, err := store.AppendRunAttempt(ctx, run.Project, run.ID, targetPhase.Name, phaseKind, workflowFilename)
-	if err != nil {
-		return fmt.Errorf("append retry attempt: %w", err)
-	}
-
-	// Acquire a lease for the target phase.
-	wfName := wf.Name
-	metadata := map[string]any{
-		"run_id":              run.ID,
-		"run_ref":             runRefFromData(run),
-		"phase_name":          targetPhase.Name,
-		"attempt_index":       strconv.Itoa(newAttemptIdx),
-		"issue_ref":           publicids.IssueRef(run.Project, positiveIssueNumber(run.IssueNumber)),
-		"issue_number":        strconv.Itoa(run.IssueNumber),
-		"work_context_branch": fmt.Sprintf("issue-%d-run-unknown", run.IssueNumber),
-		"native_k8s":          true,
-	}
-	if run.CallbackToken != nil && *run.CallbackToken != "" {
-		metadata["run_callback_token"] = *run.CallbackToken
-	}
-	if run.IssueLockHolderID != nil && *run.IssueLockHolderID != "" {
-		metadata["issue_lock_holder_id"] = *run.IssueLockHolderID
-	}
-	requirements := targetPhase.Requirements
-	if len(requirements) == 0 {
-		requirements = wf.DefaultRequirements
-	}
-	lease, err := store.AcquireLease(ctx, LeaseAcquireRequest{
-		Project:      run.Project,
-		Workflow:     &wfName,
-		Requirements: requirements,
-		Metadata:     metadata,
-		Requester: LeaseRequesterInput{
-			Consumer: "run",
-			Kind:     "retry",
-			Ref:      publicids.RunRef(run.Project, positiveIssueNumber(run.IssueNumber), fmt.Sprintf("%d", run.IssueNumber)),
-		},
+	queuedRun, _, err := store.QueueRunAttempt(ctx, QueueRunAttemptRequest{
+		Project:          run.Project,
+		RunID:            run.ID,
+		Phase:            *targetPhase,
+		PhaseKind:        phaseKind,
+		WorkflowFilename: workflowFilename,
 	})
 	if err != nil {
-		return fmt.Errorf("acquire lease for retry: %w", err)
+		return fmt.Errorf("queue retry attempt: %w", err)
 	}
-	if lease.State != "claimed" {
-		return fmt.Errorf("native lease was not claimed")
-	}
-	_, err = nativeLauncher.LaunchNativePhase(ctx, NativeLaunchRequest{
-		Lease:    lease,
-		Workflow: *wf,
-		Phase:    *targetPhase,
-		Run:      runWithAttempt(run, newAttemptIdx, targetPhase.Name),
-	})
-	if err != nil {
-		return fmt.Errorf("native dispatch: %w", err)
-	}
+	wakeRunProjectReconciler(ctx, store, nativeLauncher, firstNonEmpty(queuedRun.Project, run.Project))
 	return nil
 }
 
-func runWithAttempt(run RunReplayData, attemptIndex int, phase string) RunReplayData {
-	out := run
-	out.Attempts = append(append([]RunAttemptData{}, run.Attempts...), RunAttemptData{
-		AttemptIndex: attemptIndex,
-		Phase:        phase,
-	})
-	return out
+func wakeRunProjectReconciler(ctx context.Context, store any, nativeLauncher NativeLauncher, project string) {
+	if nativeLauncher == nil {
+		return
+	}
+	readStore, ok := store.(ReadStore)
+	if !ok || readStore == nil {
+		return
+	}
+	WakeProjectRunReconciler(context.WithoutCancel(ctx), readStore, nativeLauncher, project)
 }
 
 func runRefFromData(run RunReplayData) string {
