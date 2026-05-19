@@ -14,7 +14,7 @@ work for one-off debugging, but should not be the documented dev loop.
 ## The contract — project-side
 
 Each Glimmung project that opts into test-slot hot-swap declares a
-`test_slot_hot_swap` block in its `metadata`. The block has three
+`test_slot_hot_swap` block in its `metadata`. The block has four
 sub-contracts; a project enables whichever ones it needs.
 
 ```json
@@ -47,6 +47,17 @@ sub-contracts; a project enables whichever ones it needs.
       "container": "agent-runner",
       "restart": "SIGHUP",
       "builder_image": "node:20-alpine"
+    },
+
+    "codex_runner": {
+      "enabled": true,
+      "source": "codex-runner/dist",
+      "target": "/var/run/codex-runner-hot/dist",
+      "build_command": "cd codex-runner && npm run build",
+      "pod_selector": "tank-operator/session-id",
+      "container": "codex-runner",
+      "restart": "SIGHUP",
+      "builder_image": "node:20-alpine"
     }
   }
 }
@@ -59,9 +70,9 @@ Kubernetes Job's init container using exactly the image named here. No
 language heuristics, no hardcoded defaults — the contract owns this so
 the project's build environment is explicit and reproducible.
 
-For `agent_runner`, `builder_image` is **required at contract
-validation time**: there is no legacy CLI path for this kind, so a
-missing image is unambiguous misconfiguration. For `backend`,
+For `agent_runner` and `codex_runner`, `builder_image` is **required at
+contract validation time**: there is no legacy CLI path for these
+kinds, so a missing image is unambiguous misconfiguration. For `backend`,
 `builder_image` is **optional at validation time** (existing registered
 contracts predate the field) but **required at request time** when the
 apply endpoint is invoked with `artifact_kind=backend`.

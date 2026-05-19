@@ -70,6 +70,33 @@ func TestContractAgentRunnerRoundtrip(t *testing.T) {
 	}
 }
 
+func TestContractCodexRunnerRoundtrip(t *testing.T) {
+	contract, ok, err := FromMetadata(map[string]any{
+		"test_slot_hot_swap": map[string]any{
+			"enabled": true,
+			"codex_runner": map[string]any{
+				"enabled":       true,
+				"source":        "codex-runner/dist",
+				"target":        "/var/run/codex-runner-hot/dist",
+				"build_command": "cd codex-runner && npm run build",
+				"pod_selector":  "tank-operator/session-id",
+				"container":     "codex-runner",
+				"restart":       "SIGHUP",
+				"builder_image": "node:20-alpine",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || !contract.Enabled || !contract.CodexRunner.Enabled {
+		t.Fatalf("contract=%#v ok=%v", contract, ok)
+	}
+	if contract.CodexRunner.Target != "/var/run/codex-runner-hot/dist" {
+		t.Fatalf("target = %q", contract.CodexRunner.Target)
+	}
+}
+
 // TestValidateRejectsAgentRunnerMissingBuilderImage pins that the apply
 // endpoint's primary consumer (the new AgentRunner kind) requires
 // builder_image at Validate time — there is no legacy CLI path for

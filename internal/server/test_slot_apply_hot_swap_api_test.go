@@ -33,6 +33,16 @@ func newApplyHotSwapStore(t *testing.T) *fakeLeaseStore {
 								"restart":       "SIGHUP",
 								"builder_image": "node:20-alpine",
 							},
+							"codex_runner": map[string]any{
+								"enabled":       true,
+								"source":        "codex-runner/dist",
+								"target":        "/var/run/codex-runner-hot/dist",
+								"build_command": "cd codex-runner && npm run build",
+								"pod_selector":  "tank-operator/session-id",
+								"container":     "codex-runner",
+								"restart":       "SIGHUP",
+								"builder_image": "node:20-alpine",
+							},
 						},
 					},
 				},
@@ -113,6 +123,39 @@ func TestApplyTestSlotHotSwapHappyPathResolves(t *testing.T) {
 
 	// History was recorded with status=persisted (the fakeLeaseStore
 	// writes the last hot-swap status to leases[0].Metadata).
+	if got := store.leases[0].Metadata["last_hot_swap_status"]; got != "persisted" {
+		t.Fatalf("history not recorded with persisted; got %v", got)
+	}
+}
+
+func TestApplyTestSlotHotSwapCodexRunnerResolves(t *testing.T) {
+	store := newApplyHotSwapStore(t)
+	var seen ApplyHotSwapOptions
+	performer := func(_ context.Context, opts ApplyHotSwapOptions) (ApplyHotSwapResult, error) {
+		seen = opts
+		return ApplyHotSwapResult{
+			ArtifactKind: opts.ArtifactKind,
+			GitRef:       opts.GitRef,
+			Outcome:      "persisted",
+			Timings:      map[string]string{},
+		}, nil
+	}
+
+	handler := http.HandlerFunc(applyTestSlotHotSwap(store, performer))
+	body := `{"project":"tank-operator","slot_name":"tank-operator-slot-1","artifact_kind":"codex_runner","git_ref":"feat/codex"}`
+	req := authedApplyRequest(t, body)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if seen.ArtifactKind != "codex_runner" {
+		t.Fatalf("performer ArtifactKind = %q", seen.ArtifactKind)
+	}
+	if seen.Contract.CodexRunner.Container != "codex-runner" {
+		t.Fatalf("codex runner contract not flowed correctly: %#v", seen.Contract.CodexRunner)
+	}
 	if got := store.leases[0].Metadata["last_hot_swap_status"]; got != "persisted" {
 		t.Fatalf("history not recorded with persisted; got %v", got)
 	}
