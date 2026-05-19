@@ -23,6 +23,7 @@ type fakeLeaseStore struct {
 	cancelledRef string
 	updatedRef   string
 	updatedTTL   int
+	defaults     TestLeaseDefaults
 	err          error
 	// mu guards slotStatuses and the project mutations performed by
 	// SetProjectTestEnvironmentSlotStatus. The reconciler now warms multiple
@@ -411,6 +412,49 @@ func (s *fakeLeaseStore) UpdateLeaseTTLByRef(_ context.Context, project, ref str
 	}
 	lease.TTLSeconds = ttlSeconds
 	return lease, nil
+}
+
+func (s *fakeLeaseStore) ReadTestLeaseDefaults(context.Context) (TestLeaseDefaults, error) {
+	if s.err != nil {
+		return TestLeaseDefaults{}, s.err
+	}
+	return s.defaults, nil
+}
+
+func (s *fakeLeaseStore) SetGlobalTestLeaseDefaultTTL(_ context.Context, ttlSeconds *int) (TestLeaseDefaults, error) {
+	if s.err != nil {
+		return TestLeaseDefaults{}, s.err
+	}
+	if ttlSeconds == nil {
+		s.defaults.GlobalTTLSeconds = 0
+	} else {
+		s.defaults.GlobalTTLSeconds = *ttlSeconds
+	}
+	return s.defaults, nil
+}
+
+func (s *fakeLeaseStore) SetProjectTestLeaseDefaultTTL(_ context.Context, project string, ttlSeconds *int) (Project, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return Project{}, s.err
+	}
+	for i := range s.projects {
+		if s.projects[i].Name != project && s.projects[i].ID != project {
+			continue
+		}
+		if s.projects[i].Metadata == nil {
+			s.projects[i].Metadata = map[string]any{}
+		}
+		delete(s.projects[i].Metadata, testLeaseProjectDefaultTTLSecondsLegacyKey)
+		if ttlSeconds == nil {
+			delete(s.projects[i].Metadata, testLeaseProjectDefaultTTLSecondsKey)
+		} else {
+			s.projects[i].Metadata[testLeaseProjectDefaultTTLSecondsKey] = *ttlSeconds
+		}
+		return s.projects[i], nil
+	}
+	return Project{}, ErrNotFound
 }
 
 func (s *fakeLeaseStore) ListLeases(context.Context) ([]Lease, error) {

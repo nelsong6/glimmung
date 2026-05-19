@@ -180,9 +180,14 @@ type Snapshot = {
   active_leases: Lease[];
   test_environments?: TestEnvironment[];
   waiting_test_slot_requests?: TestSlotRequest[];
+  test_lease_defaults?: TestLeaseDefaults;
   projects: Project[];
   workflows: Workflow[];
   inflight_locks?: InflightLocks;
+};
+
+type TestLeaseDefaults = {
+  global_ttl_seconds: number;
 };
 
 type Connection = "live" | "stale" | "dead";
@@ -209,6 +214,7 @@ type LayoutContext = {
 };
 
 const ALL: Selection = { kind: "all" };
+const testSlotBuiltInDefaultTTLSeconds = 3600;
 
 export function App() {
   // Routes-only — Layout owns the SSE/auth state and provides it via Outlet
@@ -2356,6 +2362,13 @@ function TestEnvironmentIndexView({
         </div>
       </section>
 
+      <TestLeaseDefaultTTLSettings
+        snap={snap}
+        project={project ?? undefined}
+        signedIn={signedIn}
+        isAdmin={isAdmin}
+      />
+
       {projectName && project && (
         <TestEnvironmentScaleControl
           project={project}
@@ -2417,6 +2430,170 @@ function TestEnvironmentIndexView({
         </table>
       )}
     </div>
+  );
+}
+
+function TestLeaseDefaultTTLSettings({
+  snap,
+  project,
+  signedIn,
+  isAdmin,
+}: {
+  snap: Snapshot;
+  project?: Project;
+  signedIn: boolean;
+  isAdmin: boolean;
+}) {
+  const globalTTL = snapshotGlobalTestLeaseDefaultTTL(snap);
+  return (
+    <section className="test-lease-defaults" aria-label="test lease defaults">
+      <TestLeaseDefaultTTLControl
+        label="global default TTL"
+        valueSeconds={globalTTL}
+        effectiveSeconds={globalTTL}
+        signedIn={signedIn}
+        isAdmin={isAdmin}
+      />
+      {project && (
+        <TestLeaseDefaultTTLControl
+          label="project default TTL"
+          project={project}
+          valueSeconds={projectTestLeaseDefaultTTLSeconds(project)}
+          effectiveSeconds={projectTestLeaseDefaultTTLSeconds(project) ?? globalTTL}
+          inheritedSeconds={globalTTL}
+          signedIn={signedIn}
+          isAdmin={isAdmin}
+        />
+      )}
+    </section>
+  );
+}
+
+function TestLeaseDefaultTTLControl({
+  label,
+  project,
+  valueSeconds,
+  effectiveSeconds,
+  inheritedSeconds,
+  signedIn,
+  isAdmin,
+}: {
+  label: string;
+  project?: Project;
+  valueSeconds: number | null;
+  effectiveSeconds: number;
+  inheritedSeconds?: number;
+  signedIn: boolean;
+  isAdmin: boolean;
+}) {
+  const [draftMinutes, setDraftMinutes] = useState(() => String(ttlMinutesFromSeconds(effectiveSeconds)));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [localValueSeconds, setLocalValueSeconds] = useState<number | null | undefined>(undefined);
+  const configuredSeconds = localValueSeconds !== undefined ? localValueSeconds : valueSeconds;
+  const displaySeconds = configuredSeconds ?? inheritedSeconds ?? effectiveSeconds;
+  const canSave = signedIn && isAdmin;
+  const isProject = Boolean(project);
+  const hasProjectOverride = isProject && configuredSeconds !== null && configuredSeconds !== undefined;
+  const isGlobalResettable = !isProject && configuredSeconds !== testSlotBuiltInDefaultTTLSeconds;
+
+  useEffect(() => {
+    if (!saving) {
+      setDraftMinutes(String(ttlMinutesFromSeconds(displaySeconds)));
+    }
+  }, [displaySeconds, saving]);
+
+  useEffect(() => {
+    setLocalValueSeconds(undefined);
+  }, [valueSeconds]);
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!canSave) return;
+    const minutes = Number.parseInt(draftMinutes, 10);
+    if (!Number.isFinite(minutes) || minutes <= 0) {
+      setError("ttl must be positive minutes");
+      return;
+    }
+    const nextSeconds = minutes * 60;
+    setSaving(true);
+    setError(null);
+    try {
+      const response = await authedFetch("/v1/test-slots/default-ttl", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...(project ? { project: project.name } : {}),
+          ttl_seconds: nextSeconds,
+        }),
+      });
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        setError(`${response.status} ${text || response.statusText}`);
+        return;
+      }
+      setLocalValueSeconds(nextSeconds);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const reset = async () => {
+    if (!canSave || (!hasProjectOverride && !isGlobalResettable)) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const response = await authedFetch("/v1/test-slots/default-ttl", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...(project ? { project: project.name } : {}),
+          reset: true,
+        }),
+      });
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        setError(`${response.status} ${text || response.statusText}`);
+        return;
+      }
+      setLocalValueSeconds(project ? null : testSlotBuiltInDefaultTTLSeconds);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <form className="test-lease-default" onSubmit={submit}>
+      <label htmlFor={`test-lease-default-${project?.name ?? "global"}`}>{label}</label>
+      <strong className="mono">{formatTTL(displaySeconds)}</strong>
+      {isProject && !hasProjectOverride && (
+        <span className="mono dim">inherits {formatTTL(inheritedSeconds ?? effectiveSeconds)}</span>
+      )}
+      <input
+        id={`test-lease-default-${project?.name ?? "global"}`}
+        type="number"
+        min={1}
+        step={1}
+        value={draftMinutes}
+        onChange={(event) => setDraftMinutes(event.target.value)}
+        disabled={!canSave || saving}
+      />
+      <span className="mono dim">min</span>
+      <button type="submit" disabled={!canSave || saving || draftMinutes === String(ttlMinutesFromSeconds(displaySeconds))}>
+        {saving ? "saving..." : "apply"}
+      </button>
+      {(hasProjectOverride || isGlobalResettable) && (
+        <button type="button" className="link" onClick={reset} disabled={!canSave || saving}>
+          {isProject ? "use global" : "use built-in"}
+        </button>
+      )}
+      {!canSave && <span className="dim mono">admin sign-in required</span>}
+      {error && <span className="danger-text mono">{error}</span>}
+    </form>
   );
 }
 
@@ -2848,6 +3025,23 @@ function projectTestEnvironmentCount(project: Project, fallback: number): number
     }
   }
   return fallback;
+}
+
+function snapshotGlobalTestLeaseDefaultTTL(snap: Snapshot): number {
+  const ttl = snap.test_lease_defaults?.global_ttl_seconds;
+  return typeof ttl === "number" && Number.isFinite(ttl) && ttl > 0
+    ? ttl
+    : testSlotBuiltInDefaultTTLSeconds;
+}
+
+function projectTestLeaseDefaultTTLSeconds(project: Project): number | null {
+  const raw = project.metadata?.test_lease_default_ttl_seconds ?? project.metadata?.testLeaseDefaultTTLSeconds;
+  if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) return raw;
+  if (typeof raw === "string" && raw.trim()) {
+    const parsed = Number.parseInt(raw, 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return null;
 }
 
 function nativeAuthRedirectStatus(project: Project): { state: string; pill: "free" | "drain" | "info"; title: string } | null {

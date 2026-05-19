@@ -397,6 +397,87 @@ func TestCheckoutTestSlotHonorsExplicitTTL(t *testing.T) {
 	}
 }
 
+func TestCheckoutTestSlotUsesGlobalDefaultTTL(t *testing.T) {
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "tank-operator",
+			Name: "tank-operator",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"count": float64(1),
+			}},
+		}}},
+		defaults: TestLeaseDefaults{GlobalTTLSeconds: 7200},
+		lease: Lease{
+			Project:     "tank-operator",
+			LeaseNumber: intPtr(3),
+			Host:        stringPtr("native-k8s"),
+			State:       "claimed",
+			Metadata: map[string]any{
+				"test_slot_checkout": true,
+				"native_k8s":         true,
+				"native_slot_index":  "1",
+				"native_slot_name":   "tank-operator-slot-1",
+			},
+			RequestedAt: time.Now().UTC(),
+		},
+	}
+	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/test-slots/checkout", strings.NewReader(`{"project":"tank-operator","tank_session_id":"99"}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.leaseReq.TTLSeconds == nil || *store.leaseReq.TTLSeconds != 7200 {
+		t.Fatalf("global default ttl ignored: ttl=%v, want 7200", store.leaseReq.TTLSeconds)
+	}
+}
+
+func TestCheckoutTestSlotUsesProjectDefaultTTL(t *testing.T) {
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "tank-operator",
+			Name: "tank-operator",
+			Metadata: map[string]any{
+				"native_standby_dns": map[string]any{
+					"count": float64(1),
+				},
+				testLeaseProjectDefaultTTLSecondsKey: 14400,
+			},
+		}}},
+		defaults: TestLeaseDefaults{GlobalTTLSeconds: 7200},
+		lease: Lease{
+			Project:     "tank-operator",
+			LeaseNumber: intPtr(3),
+			Host:        stringPtr("native-k8s"),
+			State:       "claimed",
+			Metadata: map[string]any{
+				"test_slot_checkout": true,
+				"native_k8s":         true,
+				"native_slot_index":  "1",
+				"native_slot_name":   "tank-operator-slot-1",
+			},
+			RequestedAt: time.Now().UTC(),
+		},
+	}
+	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/test-slots/checkout", strings.NewReader(`{"project":"tank-operator","tank_session_id":"99"}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.leaseReq.TTLSeconds == nil || *store.leaseReq.TTLSeconds != 14400 {
+		t.Fatalf("project default ttl ignored: ttl=%v, want 14400", store.leaseReq.TTLSeconds)
+	}
+}
+
 // The block of tests that follows exercises the event-driven test-slot
 // lifecycle: no polling reconciler, per-lease AfterFunc timers for TTL, and
 // a one-shot RecoverInFlightTestSlots sweep at process boot.

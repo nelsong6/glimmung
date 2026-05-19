@@ -2294,6 +2294,32 @@ h2 .inline-action,
   white-space: pre-wrap;
 }
 
+.test-lease-defaults {
+  display: flex;
+  align-items: stretch;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin: 4px 0 18px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.test-lease-default {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+  min-height: 34px;
+}
+.test-lease-default label {
+  color: var(--fg-muted);
+  font-size: 0.74rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.test-lease-default input {
+  width: 76px;
+}
+
 .test-env-scale {
   display: flex;
   align-items: center;

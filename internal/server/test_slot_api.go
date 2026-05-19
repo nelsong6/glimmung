@@ -176,7 +176,7 @@ func checkoutTestSlot(settings Settings, store ReadStore, preparer TestSlotPrepa
 		}
 		ttlSeconds := req.TTLSeconds
 		if ttlSeconds == nil {
-			defaultTTL := testSlotDefaultTTLSeconds
+			defaultTTL := defaultTTLForGeneratedTestLease(r.Context(), store, project)
 			ttlSeconds = &defaultTTL
 		}
 		lease, err := acquireLeaseInstrumented(r.Context(), LeasePurposeTestSlotCheckout, LeaseAcquireRequest{
