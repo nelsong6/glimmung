@@ -22,8 +22,10 @@ func TestNativeJobManifestIncludesRunnerCallbackEnv(t *testing.T) {
 			LeaseNumber: &leaseNumber,
 			State:       "claimed",
 			Metadata: map[string]any{
-				"native_slot_name":  "tank-operator-slot-1",
-				"native_slot_index": "1",
+				"native_slot_name":     "tank-operator-slot-1",
+				"native_slot_index":    "1",
+				"entrypoint_job_id":    "test",
+				"entrypoint_step_slug": "verify-ui",
 				"phase_inputs": map[string]any{
 					"target": "provision",
 				},
@@ -50,7 +52,15 @@ func TestNativeJobManifestIncludesRunnerCallbackEnv(t *testing.T) {
 		NativeRunnerCodexMountPath:    "/etc/codex-creds",
 		NativeRunnerPlaywrightEnabled: true,
 		NativeRunnerPlaywrightPort:    "3000",
-	}, req, NativeJobSpec{ID: "test", Image: "runner:latest", TimeoutSeconds: &timeout}, "job", "secret", "attempt")
+	}, req, NativeJobSpec{
+		ID:             "test",
+		Image:          "runner:latest",
+		TimeoutSeconds: &timeout,
+		Env: map[string]string{
+			"AZURE_SUBSCRIPTION_ID": "sub-123",
+			"GLIMMUNG_PROJECT":      "must-not-override",
+		},
+	}, "job", "secret", "attempt")
 
 	env := nativeManifestEnv(manifest)
 	if env["GLIMMUNG_COMPLETED_URL"] != "http://glimmung.glimmung.svc.cluster.local/v1/run-callbacks/callback-token/native/completed" {
@@ -67,6 +77,18 @@ func TestNativeJobManifestIncludesRunnerCallbackEnv(t *testing.T) {
 	}
 	if env["GLIMMUNG_INPUT_TARGET"] != "provision" {
 		t.Fatalf("phase input env=%q", env["GLIMMUNG_INPUT_TARGET"])
+	}
+	if env["GLIMMUNG_VALIDATION_NAMESPACE"] != "tank-operator-slot-1" {
+		t.Fatalf("validation namespace=%q", env["GLIMMUNG_VALIDATION_NAMESPACE"])
+	}
+	if env["GLIMMUNG_ENTRYPOINT_JOB_ID"] != "test" || env["GLIMMUNG_ENTRYPOINT_STEP_SLUG"] != "verify-ui" {
+		t.Fatalf("entrypoint env job=%q step=%q", env["GLIMMUNG_ENTRYPOINT_JOB_ID"], env["GLIMMUNG_ENTRYPOINT_STEP_SLUG"])
+	}
+	if env["AZURE_SUBSCRIPTION_ID"] != "sub-123" {
+		t.Fatalf("job env=%q", env["AZURE_SUBSCRIPTION_ID"])
+	}
+	if env["GLIMMUNG_PROJECT"] != "tank-operator" {
+		t.Fatalf("system env was overridden: %q", env["GLIMMUNG_PROJECT"])
 	}
 	if env["PLAYWRIGHT_WS_ENDPOINT"] != "ws://slot-playwright.tank-operator-slot-1.svc.cluster.local:3000" {
 		t.Fatalf("Playwright endpoint=%q", env["PLAYWRIGHT_WS_ENDPOINT"])

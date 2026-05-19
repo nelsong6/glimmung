@@ -16,6 +16,10 @@ describe("workflowToPhaseGraphModel", () => {
           kind: "k8s_job",
           verify: true,
           depends_on: [],
+          jobs: [
+            { id: "plan", name: "plan" },
+            { id: "implement", name: "implement", image: "runner:latest" },
+          ],
           recycle_policy: {
             max_attempts: 2,
             on: ["failed", "needs_review"],
@@ -42,6 +46,10 @@ describe("workflowToPhaseGraphModel", () => {
           always: undefined,
           evidence_verification_gate: undefined,
           depends_on: [],
+          jobs: [
+            { id: "plan", name: "plan", image: undefined },
+            { id: "implement", name: "implement", image: "runner:latest" },
+          ],
         },
         {
           name: "verification",
@@ -50,6 +58,7 @@ describe("workflowToPhaseGraphModel", () => {
           always: true,
           evidence_verification_gate: true,
           depends_on: ["implementation"],
+          jobs: [],
         },
       ],
       prEnabled: true,

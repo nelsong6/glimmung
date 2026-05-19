@@ -843,7 +843,7 @@ func nativeJobManifest(settings Settings, req NativeLaunchRequest, job NativeJob
 	container := map[string]any{
 		"name":  dnsLabel(job.ID),
 		"image": job.Image,
-		"env":   nativeJobEnv(settings, req, job.ID, secretName),
+		"env":   nativeJobEnv(settings, req, job, secretName),
 		"volumeMounts": []any{
 			map[string]any{"name": "glimmung-attempt-token", "mountPath": "/var/run/glimmung", "readOnly": true},
 			map[string]any{"name": "codex-credentials", "mountPath": settings.NativeRunnerCodexMountPath, "readOnly": true},
@@ -886,7 +886,7 @@ func nativeJobManifest(settings Settings, req NativeLaunchRequest, job NativeJob
 	}
 }
 
-func nativeJobEnv(settings Settings, req NativeLaunchRequest, jobID, secretName string) []map[string]any {
+func nativeJobEnv(settings Settings, req NativeLaunchRequest, job NativeJobSpec, secretName string) []map[string]any {
 	metadata := req.Lease.Metadata
 	baseURL := strings.TrimRight(settings.NativeRunnerCallbackBaseURL, "/")
 	callback := ""
@@ -901,7 +901,7 @@ func nativeJobEnv(settings Settings, req NativeLaunchRequest, jobID, secretName 
 		{"name": "GLIMMUNG_PHASE", "value": req.Phase.Name},
 		{"name": "GLIMMUNG_RUN_ID", "value": req.Run.ID},
 		{"name": "GLIMMUNG_RUN_REF", "value": runRefFromData(req.Run)},
-		{"name": "GLIMMUNG_JOB_ID", "value": jobID},
+		{"name": "GLIMMUNG_JOB_ID", "value": job.ID},
 		{"name": "GLIMMUNG_ATTEMPT_INDEX", "value": strconv.Itoa(nativeAttemptIndex(req))},
 		{"name": "GLIMMUNG_LEASE_REF", "value": leasePublicRef(req.Lease)},
 		{"name": "GLIMMUNG_EVENTS_URL", "value": baseURL + nativePath + "/events"},
@@ -910,27 +910,61 @@ func nativeJobEnv(settings Settings, req NativeLaunchRequest, jobID, secretName 
 		{"name": "GLIMMUNG_GITHUB_TOKEN_URL", "value": baseURL + nativePath + "/github-token"},
 		{"name": "GLIMMUNG_ATTEMPT_TOKEN", "valueFrom": map[string]any{"secretKeyRef": map[string]any{"name": secretName, "key": "attempt-token"}}},
 	}
-	for _, key := range []string{"issue_repo", "issue_number", "issue_title", "issue_body", "native_slot_index", "native_slot_name", "work_context_id", "work_context_branch", "work_context_base_ref", "work_context_state"} {
+	seen := envNameSet(env)
+	for _, key := range []string{"issue_repo", "issue_number", "issue_title", "issue_body", "native_slot_index", "native_slot_name", "entrypoint_job_id", "entrypoint_step_slug", "work_context_id", "work_context_branch", "work_context_base_ref", "work_context_state"} {
 		if value, ok := metadata[key]; ok {
-			env = append(env, map[string]any{"name": "GLIMMUNG_" + envName(key), "value": fmt.Sprint(value)})
+			env = appendLiteralEnv(env, seen, "GLIMMUNG_"+envName(key), fmt.Sprint(value))
 		}
 	}
+	if slotName := mapStringValueOrEmpty(metadata, "native_slot_name"); slotName != "" {
+		env = appendLiteralEnv(env, seen, "GLIMMUNG_VALIDATION_NAMESPACE", slotName)
+	}
 	if phaseInputs := anyMap(metadata["phase_inputs"]); len(phaseInputs) > 0 {
-		for k, v := range phaseInputs {
-			env = append(env, map[string]any{"name": "GLIMMUNG_INPUT_" + envName(k), "value": fmt.Sprint(v)})
+		keys := make([]string, 0, len(phaseInputs))
+		for key := range phaseInputs {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			env = appendLiteralEnv(env, seen, "GLIMMUNG_INPUT_"+envName(key), fmt.Sprint(phaseInputs[key]))
 		}
 	}
 	if settings.NativeRunnerPlaywrightEnabled {
 		if slotName, ok := metadata["native_slot_name"].(string); ok && slotName != "" {
 			endpoint := fmt.Sprintf("ws://%s.%s.svc.cluster.local:%s", playwrightResourceName(req.Lease.Project, slotName), slotName, settings.NativeRunnerPlaywrightPort)
-			env = append(env,
-				map[string]any{"name": "GLIMMUNG_PLAYWRIGHT_WS_ENDPOINT", "value": endpoint},
-				map[string]any{"name": "PLAYWRIGHT_WS_ENDPOINT", "value": endpoint},
-				map[string]any{"name": "PW_TEST_CONNECT_WS_ENDPOINT", "value": endpoint},
-			)
+			env = appendLiteralEnv(env, seen, "GLIMMUNG_PLAYWRIGHT_WS_ENDPOINT", endpoint)
+			env = appendLiteralEnv(env, seen, "PLAYWRIGHT_WS_ENDPOINT", endpoint)
+			env = appendLiteralEnv(env, seen, "PW_TEST_CONNECT_WS_ENDPOINT", endpoint)
 		}
 	}
+	jobEnvNames := make([]string, 0, len(job.Env))
+	for name := range job.Env {
+		jobEnvNames = append(jobEnvNames, name)
+	}
+	sort.Strings(jobEnvNames)
+	for _, name := range jobEnvNames {
+		env = appendLiteralEnv(env, seen, name, job.Env[name])
+	}
 	return env
+}
+
+func envNameSet(env []map[string]any) map[string]bool {
+	seen := map[string]bool{}
+	for _, row := range env {
+		if name, ok := row["name"].(string); ok && strings.TrimSpace(name) != "" {
+			seen[name] = true
+		}
+	}
+	return seen
+}
+
+func appendLiteralEnv(env []map[string]any, seen map[string]bool, name, value string) []map[string]any {
+	name = strings.TrimSpace(name)
+	if name == "" || seen[name] {
+		return env
+	}
+	seen[name] = true
+	return append(env, map[string]any{"name": name, "value": value})
 }
 
 type testSlotHelmSettings struct {

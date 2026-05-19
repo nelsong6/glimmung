@@ -67,6 +67,11 @@ export function workflowToPhaseGraphModel(
       always: phase.always,
       evidence_verification_gate: phase.evidence_verification_gate,
       depends_on: phase.depends_on ?? [],
+      jobs: (phase.jobs ?? []).map((job) => ({
+        id: job.id,
+        name: job.name,
+        image: job.image,
+      })),
     })),
     prEnabled: workflow.pr.enabled,
     recycleArrows: [

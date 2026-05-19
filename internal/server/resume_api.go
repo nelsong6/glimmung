@@ -152,6 +152,18 @@ func resumeRunHandler(store ReadStore, nativeLauncher NativeLauncher) http.Handl
 			writeProblem(w, http.StatusNotFound, fmt.Sprintf("workflow %s/%q no longer registered", project, priorRun.Workflow))
 			return
 		}
+		if err := ValidateWorkflowRegister(WorkflowRegister{
+			Project:             wf.Project,
+			Name:                wf.Name,
+			Phases:              wf.Phases,
+			PR:                  wf.PR,
+			Budget:              wf.Budget,
+			DefaultRequirements: wf.DefaultRequirements,
+			Metadata:            wf.Metadata,
+		}); err != nil {
+			writeProblem(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 
 		// 4. Validate entrypoint phase.
 		entrypointIndex := -1

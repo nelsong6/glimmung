@@ -481,19 +481,21 @@ func allReadyDispatchTargets(wf *Workflow, run RunReplayData, verdict decision.R
 func listReadyPhases(phases []PhaseSpec, run RunReplayData, includeAlways bool) []PhaseSpec {
 	completed := completedAdvancePhases(run)
 	attempted := attemptedPhases(run)
-	ready := make([]PhaseSpec, 0)
-	for _, phase := range phases {
+	for i, phase := range phases {
 		if attempted[phase.Name] {
 			continue
 		}
 		if phase.Always && !includeAlways {
 			continue
 		}
-		if allPhaseDepsAdvanced(phase, completed) {
-			ready = append(ready, phase)
+		if i == 0 {
+			continue
+		}
+		if completed[phases[i-1].Name] {
+			return []PhaseSpec{phase}
 		}
 	}
-	return ready
+	return nil
 }
 
 func completedAdvancePhases(run RunReplayData) map[string]bool {
@@ -523,15 +525,6 @@ func attemptedPhases(run RunReplayData) map[string]bool {
 		attempted[attempt.Phase] = true
 	}
 	return attempted
-}
-
-func allPhaseDepsAdvanced(phase PhaseSpec, completed map[string]bool) bool {
-	for _, dep := range phase.DependsOn {
-		if !completed[dep] {
-			return false
-		}
-	}
-	return true
 }
 
 func runHasNonAlwaysAbort(phases []PhaseSpec, run RunReplayData) bool {

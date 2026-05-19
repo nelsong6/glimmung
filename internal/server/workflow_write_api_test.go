@@ -121,6 +121,23 @@ func TestRegisterWorkflowDefaultsBlankKindToK8sJob(t *testing.T) {
 	}
 }
 
+func TestRegisterWorkflowAcceptsParallelJobsInsideStrictPhase(t *testing.T) {
+	store := &fakeWorkflowWriteStore{fakeReadStore: fakeReadStore{projects: []Project{{ID: "ambience", Name: "ambience"}}}}
+	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/workflows", strings.NewReader(`{"project":"ambience","name":"agent-run","phases":[{"name":"prep","jobs":[{"id":"prep"}]},{"name":"work","depends_on":["prep"],"jobs":[{"id":"test-plan"},{"id":"implement"}]},{"name":"verify","verify":true,"depends_on":["work"],"jobs":[{"id":"verify"}]},{"name":"cleanup","always":true,"depends_on":["verify"],"jobs":[{"id":"cleanup"}]}]}`))
+	req.Header.Set("Authorization", "Bearer token")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := len(store.upsert.Phases[1].Jobs); got != 2 {
+		t.Fatalf("work jobs=%d, want 2", got)
+	}
+}
+
 func TestRegisterWorkflowRejectsNonNativeKind(t *testing.T) {
 	store := &fakeWorkflowWriteStore{fakeReadStore: fakeReadStore{projects: []Project{{
 		ID:       "glimmung",

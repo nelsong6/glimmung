@@ -12,10 +12,8 @@
  *     to load that run in the run tab.
  *   - touchpoint: issue-level decision surface and evidence summary.
  *
- * Conceptual move per #81: "list of steps that ran" → "graph that
- * runs". Today the DAG is `[phase] → [pr]` (single-phase v1, per
- * #69) — boring but honest, and the layout extends cleanly when
- * multi-phase orchestration lands.
+ * Conceptual move per #81: "list of steps that ran" -> "graph that
+ * runs". Phases render left-to-right; sibling jobs stack inside a phase.
  *
  * Routed canonically via `/projects/<project>/issues/<number>`.
  */
@@ -235,6 +233,13 @@ type WorkflowPhase = {
   evidence_verification_gate?: boolean;
   depends_on?: string[];
   recycle_policy: WorkflowRecyclePolicy | null;
+  jobs?: WorkflowJob[];
+};
+
+type WorkflowJob = {
+  id: string;
+  name?: string | null;
+  image?: string;
 };
 
 type WorkflowRecyclePolicy = {
@@ -1404,10 +1409,8 @@ function DefinitionDag({
   );
 }
 
-// Pipeline DAG painted with the focused run's state. Builds the node
-// list from the run's attempts (one node per distinct phase touched,
-// in order) plus a trailing PR node colored by pr linkage. Click a
-// node to drill in.
+// Pipeline graph painted with the focused run's state. Workflow topology
+// supplies phase columns and declared jobs; attempts paint runtime state.
 
 function PipelineDag({
   run,
@@ -1498,18 +1501,42 @@ function PipelineDag({
       jobLabel: graphPhase.name,
     };
     const nativeJobs = nativeAttemptJobs(rollup.latest.metadata.jobs);
-    if (nativeJobs.length > 1) {
+    const plannedJobs = graphPhase.jobs && graphPhase.jobs.length > 0
+      ? graphPhase.jobs
+      : [{ id: graphPhase.name, name: graphPhase.name }];
+    const nativeByID = new Map(nativeJobs.map((job) => [job.job_id, job]));
+    const plannedIDs = new Set(plannedJobs.map((job) => job.id));
+    const jobNodes = [
+      ...plannedJobs.map((job) => {
+        const native = nativeByID.get(job.id);
+        return {
+          id: job.id,
+          label: native?.name || job.name || job.id,
+          state: native?.state || rollup.status.text,
+          cls: native ? nativeStatePill(native.state || "") : rollup.status.cls,
+        };
+      }),
+      ...nativeJobs
+        .filter((job) => !plannedIDs.has(job.job_id))
+        .map((job) => ({
+          id: job.job_id,
+          label: job.name || job.job_id,
+          state: job.state || rollup.status.text,
+          cls: nativeStatePill(job.state || ""),
+        })),
+    ];
+    if (jobNodes.length > 1) {
       return (
         <>
-          {nativeJobs.map((job) => (
+          {jobNodes.map((job) => (
             <DagPhaseNode
-              key={job.job_id}
+              key={job.id}
               phase={{
                 ...rollup,
-                jobLabel: job.name || job.job_id,
+                jobLabel: job.label,
                 status: {
-                  cls: nativeStatePill(job.state || ""),
-                  text: job.state || rollup.status.text,
+                  cls: job.cls,
+                  text: job.state,
                 },
               }}
               selected={selectedNodeId === `phase:${graphPhase.name}`}
