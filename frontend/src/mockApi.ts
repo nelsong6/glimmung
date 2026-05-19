@@ -62,6 +62,9 @@ export const mockSnapshot = {
       ttl_seconds: 7200,
     },
   ],
+  test_lease_defaults: {
+    global_ttl_seconds: 3600,
+  },
   projects: [
     {
       id: "project-glimmung",
@@ -670,6 +673,11 @@ function handleMockRequest(url: URL, init?: RequestInit): Response {
     return row ? json(row) : json({ error: "not found" }, { status: 404 });
   }
   if (path === "/v1/leases/cancel" && method === "POST") return json({ state: "cancelled", lease_ref: "glimmung/leases/11" });
+  if (path === "/v1/test-slots/default-ttl" && method === "PATCH") {
+    const body = parseMockBody(init?.body);
+    const ttl = typeof body.ttl_seconds === "number" && body.ttl_seconds > 0 ? body.ttl_seconds : mockSnapshot.test_lease_defaults.global_ttl_seconds;
+    return json({ defaults: { global_ttl_seconds: body.reset ? 3600 : ttl } });
+  }
   if (path === "/v1/signals" && method === "POST") return json({ ref: `signal:mock:${Date.now()}`, state: "pending" });
   if (["/v1/projects", "/v1/workflows", "/v1/issues"].includes(path) && method === "POST") {
     return json({ id: `mock-${Date.now()}`, ok: true }, { status: 201 });
@@ -715,6 +723,16 @@ function json(body: unknown, init: MockResponseInit = {}): Response {
     status: init.status ?? 200,
     headers: { "Content-Type": "application/json", ...(init.headers ?? {}) },
   });
+}
+
+function parseMockBody(body: BodyInit | null | undefined): Record<string, any> {
+  if (typeof body !== "string") return {};
+  try {
+    const parsed = JSON.parse(body);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
 }
 
 function filterGraph(project: string | null) {

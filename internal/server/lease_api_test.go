@@ -21,6 +21,9 @@ type fakeLeaseStore struct {
 	leaseReq     LeaseAcquireRequest
 	slotStatuses []TestEnvironmentSlotStatus
 	cancelledRef string
+	updatedRef   string
+	updatedTTL   int
+	defaults     TestLeaseDefaults
 	err          error
 	// mu guards slotStatuses and the project mutations performed by
 	// SetProjectTestEnvironmentSlotStatus. The reconciler now warms multiple
@@ -397,6 +400,63 @@ func (s *fakeLeaseStore) CancelLeaseByRef(_ context.Context, _, ref string) (Can
 	return s.result, nil
 }
 
+func (s *fakeLeaseStore) UpdateLeaseTTLByRef(_ context.Context, project, ref string, ttlSeconds int) (Lease, error) {
+	s.updatedRef = ref
+	s.updatedTTL = ttlSeconds
+	if s.err != nil {
+		return Lease{}, s.err
+	}
+	lease := s.lease
+	if lease.Project == "" {
+		lease.Project = project
+	}
+	lease.TTLSeconds = ttlSeconds
+	return lease, nil
+}
+
+func (s *fakeLeaseStore) ReadTestLeaseDefaults(context.Context) (TestLeaseDefaults, error) {
+	if s.err != nil {
+		return TestLeaseDefaults{}, s.err
+	}
+	return s.defaults, nil
+}
+
+func (s *fakeLeaseStore) SetGlobalTestLeaseDefaultTTL(_ context.Context, ttlSeconds *int) (TestLeaseDefaults, error) {
+	if s.err != nil {
+		return TestLeaseDefaults{}, s.err
+	}
+	if ttlSeconds == nil {
+		s.defaults.GlobalTTLSeconds = 0
+	} else {
+		s.defaults.GlobalTTLSeconds = *ttlSeconds
+	}
+	return s.defaults, nil
+}
+
+func (s *fakeLeaseStore) SetProjectTestLeaseDefaultTTL(_ context.Context, project string, ttlSeconds *int) (Project, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return Project{}, s.err
+	}
+	for i := range s.projects {
+		if s.projects[i].Name != project && s.projects[i].ID != project {
+			continue
+		}
+		if s.projects[i].Metadata == nil {
+			s.projects[i].Metadata = map[string]any{}
+		}
+		delete(s.projects[i].Metadata, testLeaseProjectDefaultTTLSecondsLegacyKey)
+		if ttlSeconds == nil {
+			delete(s.projects[i].Metadata, testLeaseProjectDefaultTTLSecondsKey)
+		} else {
+			s.projects[i].Metadata[testLeaseProjectDefaultTTLSecondsKey] = *ttlSeconds
+		}
+		return s.projects[i], nil
+	}
+	return Project{}, ErrNotFound
+}
+
 func (s *fakeLeaseStore) ListLeases(context.Context) ([]Lease, error) {
 	if s.err != nil {
 		return nil, s.err
@@ -548,6 +608,60 @@ func TestCancelLeaseByRefRequiresStore(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/leases/cancel", strings.NewReader(`{}`)))
 	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestUpdateLeaseTTLByRef(t *testing.T) {
+	assignedAt := time.Date(2026, 5, 19, 7, 0, 0, 0, time.UTC)
+	store := &fakeLeaseStore{
+		lease: Lease{
+			Project:      "myproject",
+			State:        "claimed",
+			Workflow:     stringPtr("test-slot-checkout"),
+			Metadata:     map[string]any{"test_slot_checkout": true},
+			RequestedAt:  assignedAt,
+			AssignedAt:   &assignedAt,
+			Requirements: map[string]any{},
+		},
+	}
+	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}})
+	body := `{"project":"myproject","lease_ref":"myproject/leases/3","ttl_seconds":14400}`
+	req := httptest.NewRequest(http.MethodPatch, "/v1/leases/ttl", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.updatedRef != "myproject/leases/3" || store.updatedTTL != 14400 {
+		t.Fatalf("update call ref=%q ttl=%d", store.updatedRef, store.updatedTTL)
+	}
+	if !strings.Contains(rec.Body.String(), `"ttl_seconds":14400`) {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
+func TestUpdateLeaseTTLByRefRejectsTerminalLease(t *testing.T) {
+	handler := NewWithDependencies(Settings{}, &fakeLeaseStore{err: ErrConflict}, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}})
+	body := `{"project":"myproject","lease_ref":"myproject/leases/3","ttl_seconds":14400}`
+	req := httptest.NewRequest(http.MethodPatch, "/v1/leases/ttl", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestUpdateLeaseTTLByRefValidatesTTL(t *testing.T) {
+	handler := NewWithDependencies(Settings{}, &fakeLeaseStore{}, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}})
+	body := `{"project":"myproject","lease_ref":"myproject/leases/3","ttl_seconds":0}`
+	req := httptest.NewRequest(http.MethodPatch, "/v1/leases/ttl", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }

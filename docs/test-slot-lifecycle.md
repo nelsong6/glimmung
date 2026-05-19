@@ -178,13 +178,22 @@ lifecycle transition responds to an explicit event:
 | Event | Trigger | Effect |
 |---|---|---|
 | count changed | `PATCH /v1/projects/{project}/test-environments/count` | handler writes the new count, seeds missing slot docs as `unseeded`, deletes slot docs above the new count, fires per-slot provisioning goroutines for any in `unseeded`, returns immediately |
+| default TTL changed | `PATCH /v1/test-slots/default-ttl` | updates the global generated test-slot lease TTL, or a project's override; future checkouts use the new default unless they pass `ttl_seconds` explicitly |
 | checkout | `POST /v1/test-slots/checkout` | acquires lease, arms a `time.AfterFunc` for `assigned_at + ttl_seconds`, starts activation goroutine |
+| TTL changed | `PATCH /v1/leases/ttl` | updates the claimed lease document and re-arms this replica's timer from the durable deadline |
 | return / callback release / admin cancel | `POST /v1/test-slots/return`, `POST /v1/lease-callbacks/.../release`, `POST /v1/leases/cancel` | stops the lease's TTL timer, starts cleanup goroutine |
 | TTL deadline | per-lease `time.AfterFunc` fires | starts cleanup goroutine with source `lease.ttl_expiry` |
 | activation finished | inline at end of activation goroutine | one-shot installer cleanup, mark slot `running` |
 | cleanup finished | inline at end of cleanup goroutine | release lease, mark slot `provisioned` |
 | process start | `RecoverInFlightTestSlots` (one-shot, called once from `cmd/glimmung-go/main.go`) | re-arm TTL timers for surviving `claimed` leases, resume in-flight `provisioning`/`activating`/`cleaning` goroutines, provision missing slot docs |
 | process start | `MigrateProjectSlotsIntoCollection` (one-shot, called once from `cmd/glimmung-go/main.go`) | one-time migration of any legacy `metadata.native_standby_dns.slots[]` arrays into the `slots` collection. Idempotent on subsequent boots. |
+
+Generated test-slot leases resolve their TTL with this precedence:
+explicit checkout `ttl_seconds`, project `metadata.test_lease_default_ttl_seconds`,
+global `test_lease_defaults.global_ttl_seconds`, then the built-in one-hour
+fallback. The `/v1/state` snapshot includes the global default, and project
+metadata carries any project override so the Test leases UI can edit both
+scopes without a separate read path.
 
 The TTL timer is the design choice that lets the lifecycle stay event-driven
 without losing auto-expiry. Polling the lease list every N seconds to ask
@@ -199,6 +208,12 @@ re-arms an `AfterFunc` for every still-`claimed` test-slot lease, computing
 remaining duration from the durable `assigned_at + ttl_seconds`. A deadline
 that has already passed fires cleanup immediately. After this one-shot pass
 returns, the lifecycle is purely event-driven until the next restart.
+
+When a claimed lease's TTL is changed, only the handling replica can replace
+its in-process timer immediately. Other replicas may still hold the previous
+timer, so the timer callback re-reads the current lease document before
+claiming cleanup. If the durable deadline has moved later, the stale callback
+re-arms itself from the current document instead of cleaning the slot early.
 
 ### Cleanup interrupts activation
 

@@ -176,7 +176,7 @@ func checkoutTestSlot(settings Settings, store ReadStore, preparer TestSlotPrepa
 		}
 		ttlSeconds := req.TTLSeconds
 		if ttlSeconds == nil {
-			defaultTTL := testSlotDefaultTTLSeconds
+			defaultTTL := defaultTTLForGeneratedTestLease(r.Context(), store, project)
 			ttlSeconds = &defaultTTL
 		}
 		lease, err := acquireLeaseInstrumented(r.Context(), LeasePurposeTestSlotCheckout, LeaseAcquireRequest{
@@ -865,20 +865,42 @@ func testSlotActivationKey(lease Lease) string {
 }
 
 func testSlotLeaseStillClaimed(ctx context.Context, store ReadStore, lease Lease) bool {
-	stateStore, ok := store.(StateStore)
-	if !ok || stateStore == nil {
-		return true
-	}
-	leases, err := stateStore.ListLeases(ctx)
+	current, ok, err := currentTestSlotLease(ctx, store, lease)
 	if err != nil {
 		return true
 	}
+	return ok && current.State == "claimed"
+}
+
+func currentTestSlotLease(ctx context.Context, store ReadStore, lease Lease) (Lease, bool, error) {
+	stateStore, ok := store.(StateStore)
+	if !ok || stateStore == nil {
+		return lease, true, nil
+	}
+	leases, err := stateStore.ListLeases(ctx)
+	if err != nil {
+		return Lease{}, false, err
+	}
 	for _, current := range leases {
 		if sameTestSlotLease(current, lease) {
-			return current.State == "claimed"
+			return current, true, nil
 		}
 	}
-	return false
+	return Lease{}, false, nil
+}
+
+func testSlotLeaseDeadlineReached(lease Lease, now time.Time) bool {
+	if lease.TTLSeconds <= 0 {
+		return false
+	}
+	started := lease.RequestedAt
+	if lease.AssignedAt != nil {
+		started = *lease.AssignedAt
+	}
+	if started.IsZero() {
+		return true
+	}
+	return !now.Before(started.Add(time.Duration(lease.TTLSeconds) * time.Second))
 }
 
 func sameTestSlotLease(left Lease, right Lease) bool {

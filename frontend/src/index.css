@@ -2294,6 +2294,32 @@ h2 .inline-action,
   white-space: pre-wrap;
 }
 
+.test-lease-defaults {
+  display: flex;
+  align-items: stretch;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin: 4px 0 18px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.test-lease-default {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+  min-height: 34px;
+}
+.test-lease-default label {
+  color: var(--fg-muted);
+  font-size: 0.74rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.test-lease-default input {
+  width: 76px;
+}
+
 .test-env-scale {
   display: flex;
   align-items: center;
@@ -2318,6 +2344,48 @@ h2 .inline-action,
   gap: 6px;
   color: var(--fg-muted);
   font-size: 0.78rem;
+}
+.lease-ttl-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.lease-ttl-control.compact {
+  white-space: nowrap;
+}
+.lease-ttl-editor {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 4px 0 14px;
+}
+.lease-ttl-editor.compact {
+  margin: 0;
+}
+.lease-ttl-editor label {
+  color: var(--fg-muted);
+  font-size: 0.74rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.lease-ttl-editor input {
+  width: 72px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  padding: 3px 6px;
+}
+.lease-ttl-editor input:focus {
+  outline: none;
+  border-color: var(--state-success-fg);
+}
+.lease-ttl-editor .sep {
+  color: var(--fg-faintest);
 }
 
 /* Upstream sync (`.glimmung/workflows/<name>.yaml` -> Cosmos).

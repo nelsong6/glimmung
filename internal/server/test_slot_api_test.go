@@ -264,6 +264,16 @@ func TestCheckoutTestSlotExposesPlaywrightWSEndpointWhenEnabled(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), want) {
 		t.Fatalf("checkout response missing %s: %s", want, rec.Body.String())
 	}
+	select {
+	case <-preparer.activateStarted:
+	case <-time.After(time.Second):
+		t.Fatal("background activation did not start")
+	}
+	select {
+	case <-preparer.activateDone:
+	case <-time.After(time.Second):
+		t.Fatal("background activation did not finish")
+	}
 }
 
 func TestCheckoutTestSlotOmitsPlaywrightWSEndpointWhenDisabled(t *testing.T) {
@@ -313,6 +323,16 @@ func TestCheckoutTestSlotOmitsPlaywrightWSEndpointWhenDisabled(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), `"playwright_ws_endpoint"`) {
 		t.Fatalf("checkout response should omit playwright_ws_endpoint when disabled: %s", rec.Body.String())
+	}
+	select {
+	case <-preparer.activateStarted:
+	case <-time.After(time.Second):
+		t.Fatal("background activation did not start")
+	}
+	select {
+	case <-preparer.activateDone:
+	case <-time.After(time.Second):
+		t.Fatal("background activation did not finish")
 	}
 }
 
@@ -374,6 +394,87 @@ func TestCheckoutTestSlotHonorsExplicitTTL(t *testing.T) {
 	case <-preparer.activateDone:
 	case <-time.After(time.Second):
 		t.Fatal("background activation did not finish")
+	}
+}
+
+func TestCheckoutTestSlotUsesGlobalDefaultTTL(t *testing.T) {
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "tank-operator",
+			Name: "tank-operator",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"count": float64(1),
+			}},
+		}}},
+		defaults: TestLeaseDefaults{GlobalTTLSeconds: 7200},
+		lease: Lease{
+			Project:     "tank-operator",
+			LeaseNumber: intPtr(3),
+			Host:        stringPtr("native-k8s"),
+			State:       "claimed",
+			Metadata: map[string]any{
+				"test_slot_checkout": true,
+				"native_k8s":         true,
+				"native_slot_index":  "1",
+				"native_slot_name":   "tank-operator-slot-1",
+			},
+			RequestedAt: time.Now().UTC(),
+		},
+	}
+	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/test-slots/checkout", strings.NewReader(`{"project":"tank-operator","tank_session_id":"99"}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.leaseReq.TTLSeconds == nil || *store.leaseReq.TTLSeconds != 7200 {
+		t.Fatalf("global default ttl ignored: ttl=%v, want 7200", store.leaseReq.TTLSeconds)
+	}
+}
+
+func TestCheckoutTestSlotUsesProjectDefaultTTL(t *testing.T) {
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "tank-operator",
+			Name: "tank-operator",
+			Metadata: map[string]any{
+				"native_standby_dns": map[string]any{
+					"count": float64(1),
+				},
+				testLeaseProjectDefaultTTLSecondsKey: 14400,
+			},
+		}}},
+		defaults: TestLeaseDefaults{GlobalTTLSeconds: 7200},
+		lease: Lease{
+			Project:     "tank-operator",
+			LeaseNumber: intPtr(3),
+			Host:        stringPtr("native-k8s"),
+			State:       "claimed",
+			Metadata: map[string]any{
+				"test_slot_checkout": true,
+				"native_k8s":         true,
+				"native_slot_index":  "1",
+				"native_slot_name":   "tank-operator-slot-1",
+			},
+			RequestedAt: time.Now().UTC(),
+		},
+	}
+	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/test-slots/checkout", strings.NewReader(`{"project":"tank-operator","tank_session_id":"99"}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.leaseReq.TTLSeconds == nil || *store.leaseReq.TTLSeconds != 14400 {
+		t.Fatalf("project default ttl ignored: ttl=%v, want 14400", store.leaseReq.TTLSeconds)
 	}
 }
 
@@ -655,6 +756,51 @@ func TestLeaseExpiryTimerCancelPreventsFire(t *testing.T) {
 		t.Fatal("expiry fired after cancel")
 	case <-time.After(1500 * time.Millisecond):
 		// expected: nothing fires
+	}
+}
+
+func TestFireLeaseExpirySkipsExtendedDurableDeadline(t *testing.T) {
+	oldAssignedAt := time.Now().UTC().Add(-2 * time.Hour)
+	currentAssignedAt := time.Now().UTC().Add(-30 * time.Minute)
+	staleLease := Lease{
+		Project:     "expire",
+		LeaseNumber: intPtr(8),
+		Host:        stringPtr("native-k8s"),
+		State:       "claimed",
+		Metadata: map[string]any{
+			"test_slot_checkout": true,
+			"native_slot_index":  "1",
+			"native_slot_name":   "expire-slot-1",
+		},
+		RequestedAt: oldAssignedAt,
+		AssignedAt:  &oldAssignedAt,
+		TTLSeconds:  3600,
+	}
+	currentLease := staleLease
+	currentLease.RequestedAt = currentAssignedAt
+	currentLease.AssignedAt = &currentAssignedAt
+	currentLease.TTLSeconds = 7200
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "expire",
+			Name: "expire",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"slot_prefix": "expire-slot",
+				"count":       float64(1),
+			}},
+		}}},
+		lease: currentLease,
+	}
+	preparer := &fakeTestSlotPreparer{returnStarted: make(chan struct{}, 1)}
+	defer cancelLeaseExpiryTimer(LeasePublicRefFromLease(currentLease))
+
+	fireLeaseExpiry(store, preparer, store.projects[0], staleLease, nil)
+
+	select {
+	case <-preparer.returnStarted:
+		t.Fatal("expiry fired cleanup before the durable extended deadline")
+	case <-time.After(100 * time.Millisecond):
+		// expected: stale timer re-arms from the current lease instead.
 	}
 }
 

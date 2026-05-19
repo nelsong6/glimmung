@@ -89,10 +89,23 @@ func fireLeaseExpiry(store ReadStore, preparer TestSlotPreparer, project Project
 	testSlotLeaseTimers.Delete(ref)
 
 	ctx := context.Background()
-	if !testSlotLeaseStillClaimed(ctx, store, lease) {
+	current, ok, err := currentTestSlotLease(ctx, store, lease)
+	if err != nil {
+		if logf != nil {
+			logf("test-slot lease expiry state check failed project=%s lease=%s: %v", lease.Project, ref, err)
+		}
+	} else if !ok || current.State != "claimed" {
 		// Returned out from under us. Nothing to do — the return path is
 		// already running or has already finished cleanup.
 		return
+	} else if !testSlotLeaseDeadlineReached(current, time.Now()) {
+		// Another replica or API request extended the durable TTL after this
+		// process armed its old timer. Re-arm from the current document so
+		// the old deadline cannot clean up the lease early.
+		armLeaseExpiryTimer(store, preparer, project, current, logf)
+		return
+	} else {
+		lease = current
 	}
 
 	if _, err := claimTestSlotCleanup(ctx, store, project, lease, testSlotReturnAudit{Source: "lease.ttl_expiry"}); err != nil {
