@@ -421,6 +421,22 @@ func TestIssueDetailFromDocBuildsPublicShape(t *testing.T) {
 	}
 }
 
+func TestCanonicalIssueDocsRequiresIssueShape(t *testing.T) {
+	docs := []issueDoc{
+		{ID: "issue-17", Project: "ambience", Number: 17, Title: "real issue", State: "open"},
+		{ID: "__counter:issue-number:ambience", Project: "ambience"},
+		{ID: "portfolio-element", Project: "ambience"},
+		{ID: "missing-project", Number: 18},
+		{ID: "numbered-non-issue", Project: "ambience", Number: 19, State: "pending"},
+	}
+
+	filtered := canonicalIssueDocs(docs)
+
+	if len(filtered) != 1 || filtered[0].ID != "issue-17" {
+		t.Fatalf("filtered=%#v", filtered)
+	}
+}
+
 func TestIssueRunContextMapsLatestRunAndNeedsAttention(t *testing.T) {
 	runNumber := 2
 	docs := []runDoc{

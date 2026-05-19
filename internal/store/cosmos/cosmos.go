@@ -873,6 +873,7 @@ func (s *Store) ArchiveIssueByNumber(ctx context.Context, req server.IssueArchiv
 }
 
 const issueCounterPrefix = "__counter:issue-number:"
+const canonicalIssuePredicate = "IS_DEFINED(c.number) AND c.number > 0 AND (c.state = 'open' OR c.state = 'closed')"
 
 type issueNumberCounterDoc struct {
 	ID              string `json:"id"`
@@ -952,7 +953,7 @@ func (s *Store) highestIssueNumber(ctx context.Context, project string) (int, er
 		ctx,
 		s.issues,
 		azcosmos.NewPartitionKeyString(project),
-		"SELECT * FROM c WHERE c.project = @project AND IS_DEFINED(c.number) AND c.kind != 'issue_number_counter'",
+		"SELECT * FROM c WHERE c.project = @project AND "+canonicalIssuePredicate,
 		[]azcosmos.QueryParameter{{Name: "@project", Value: project}},
 		&docs,
 	); err != nil {
@@ -1154,7 +1155,7 @@ func (s *Store) readIssueByNumber(ctx context.Context, project string, number in
 		ctx,
 		s.issues,
 		azcosmos.NewPartitionKeyString(project),
-		"SELECT * FROM c WHERE c.project = @project AND c.number = @number",
+		"SELECT * FROM c WHERE c.project = @project AND c.number = @number AND "+canonicalIssuePredicate,
 		[]azcosmos.QueryParameter{
 			{Name: "@project", Value: project},
 			{Name: "@number", Value: number},
@@ -1171,10 +1172,28 @@ func (s *Store) readIssueByNumber(ctx context.Context, project string, number in
 
 func (s *Store) listIssueDocs(ctx context.Context) ([]issueDoc, error) {
 	var docs []issueDoc
-	if err := crossPartitionQuery(ctx, s.issues, "SELECT * FROM c", nil, &docs); err != nil {
+	if err := crossPartitionQuery(ctx, s.issues, "SELECT * FROM c WHERE "+canonicalIssuePredicate, nil, &docs); err != nil {
 		return nil, err
 	}
-	return docs, nil
+	return canonicalIssueDocs(docs), nil
+}
+
+func canonicalIssueDocs(docs []issueDoc) []issueDoc {
+	filtered := docs[:0]
+	for _, doc := range docs {
+		if !isCanonicalIssueDoc(doc) {
+			continue
+		}
+		filtered = append(filtered, doc)
+	}
+	return filtered
+}
+
+func isCanonicalIssueDoc(doc issueDoc) bool {
+	if doc.ID == "" || doc.Project == "" || doc.Number <= 0 {
+		return false
+	}
+	return doc.State == "open" || doc.State == "closed"
 }
 
 func (s *Store) listRunDocs(ctx context.Context) ([]runDoc, error) {
@@ -2577,7 +2596,7 @@ func (s *Store) buildTouchpointDetail(ctx context.Context, doc touchpointDoc) (s
 		var issueDocs []issueDoc
 		_ = singlePartitionQuery(ctx, s.issues,
 			azcosmos.NewPartitionKeyString(doc.Project),
-			"SELECT * FROM c WHERE c.project = @project AND c.id = @id",
+			"SELECT * FROM c WHERE c.project = @project AND c.id = @id AND "+canonicalIssuePredicate,
 			[]azcosmos.QueryParameter{
 				{Name: "@project", Value: doc.Project},
 				{Name: "@id", Value: *doc.LinkedIssueID},
@@ -3056,7 +3075,7 @@ func (s *Store) playbookToPublic(ctx context.Context, doc playbookDoc) server.Pl
 			var issueDocs []issueDoc
 			if err := singlePartitionQuery(ctx, s.issues,
 				azcosmos.NewPartitionKeyString(doc.Project),
-				"SELECT * FROM c WHERE c.project = @project AND c.id = @id",
+				"SELECT * FROM c WHERE c.project = @project AND c.id = @id AND "+canonicalIssuePredicate,
 				[]azcosmos.QueryParameter{
 					{Name: "@project", Value: doc.Project},
 					{Name: "@id", Value: *e.CreatedIssueID},
