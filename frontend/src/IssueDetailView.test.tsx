@@ -1,0 +1,213 @@
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { MemoryRouter, Outlet, Route, Routes, useLocation } from "react-router-dom";
+
+import { IssueDetailView } from "./IssueDetailView";
+
+const issueDetail = {
+  ref: "ambience#172",
+  project: "ambience",
+  repo: "nelsong6/ambience",
+  number: 172,
+  title: "Effect: Distant storm at sea horizon",
+  body: "storm",
+  state: "open",
+  labels: ["ambient-effects"],
+  html_url: null,
+  metadata: {},
+  comments: [],
+  last_run_ref: "ambience#172/runs/7.1",
+  last_run_number: 7,
+  last_run_state: "in_progress",
+  issue_lock_held: true,
+};
+
+const runProjection = {
+  issue_ref: "ambience#172",
+  current_run_ref: "ambience#172/runs/7.1",
+  default_focus: { kind: "run", ref: "ambience#172/runs/7.1" },
+  next_action: { kind: "watch_run", label: "watch run", target_ref: "ambience#172/runs/7.1" },
+  touchpoints: [],
+  signals: [],
+  edges: [],
+  runs: [{
+    run_ref: "ambience#172/runs/7.1",
+    run_number: 7,
+    run_display_number: "7.1",
+    cycle_number: 7,
+    run_cycle_number: 1,
+    workflow: "default",
+    state: "in_progress",
+    current_phase: "env-prep",
+    validation_url: null,
+    cost_usd: 0,
+    attempts_count: 1,
+    started_at: "2026-05-20T17:24:09.336Z",
+    updated_at: "2026-05-20T17:24:09.696Z",
+    completed_at: null,
+    evidence: [],
+    phases: [{
+      name: "env-prep",
+      kind: "k8s_job",
+      state: "dispatching",
+      verify: false,
+      always: false,
+      depends_on: [],
+      jobs: [{
+        id: "env-prep",
+        name: "Environment prep",
+        state: "dispatching",
+        k8s_job_name: "glim-ambience-172-runs-7-1-0-env-prep",
+        steps: [
+          { slug: "clone-repo", title: "Clone repository", state: "not_started" },
+          { slug: "build-validation-image", title: "Build validation image", state: "not_started" },
+        ],
+      }],
+      attempts: [{
+        attempt_index: 0,
+        state: "dispatching",
+        conclusion: null,
+        verification_status: null,
+        decision: null,
+        log_archive_url: null,
+        evidence_refs: [],
+        job_completions: [],
+      }],
+    }],
+  }],
+};
+
+const issueGraph = {
+  issue_ref: "ambience#172",
+  nodes: [
+    {
+      id: "issue:ambience#172",
+      kind: "issue",
+      label: "#172 Effect: Distant storm at sea horizon",
+      state: "open",
+      timestamp: null,
+      metadata: { project: "ambience", number: 172 },
+    },
+    {
+      id: "run:ambience#172/runs/7.1",
+      kind: "run",
+      label: "Run 7.1",
+      state: "in_progress",
+      timestamp: "2026-05-20T17:24:09.336Z",
+      metadata: {
+        run_number: 7,
+        run_display_number: "7.1",
+        cycle_number: 7,
+        run_cycle_number: 1,
+        workflow: "default",
+      },
+    },
+  ],
+  edges: [
+    { source: "issue:ambience#172", target: "run:ambience#172/runs/7.1", kind: "spawned" },
+  ],
+  projection: runProjection,
+};
+
+const nativeEvents = {
+  project: "ambience",
+  run_ref: "ambience#172/runs/7.1",
+  attempt_index: 0,
+  job_id: "env-prep",
+  archive_url: null,
+  events: [
+    {
+      project: "ambience",
+      run_ref: "ambience#172/runs/7.1",
+      attempt_index: 0,
+      phase: "env-prep",
+      job_id: "env-prep",
+      seq: 1,
+      event: "log",
+      step_slug: "clone-repo",
+      message: "cloning repo",
+      exit_code: null,
+      metadata: {},
+      created_at: "2026-05-20T17:24:10.000Z",
+    },
+  ],
+};
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe("IssueDetailView run execution graph", () => {
+  it("routes a dispatching job click to its selected step log", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string"
+          ? new URL(input, "https://glimmung.test")
+          : input instanceof URL
+            ? input
+            : new URL(input.url);
+      if (url.pathname === "/v1/issues/by-number/ambience/172") return json(issueDetail);
+      if (url.pathname === "/v1/issues/by-number/ambience/172/graph") return json(issueGraph);
+      if (url.pathname === "/v1/projects/ambience/issues/172/runs/7/cycles/1/graph") return json(runProjection);
+      if (url.pathname === "/v1/workflows") return json([]);
+      if (url.pathname === "/v1/projects/ambience/issues/172/runs/7.1/native/events") return json(nativeEvents);
+      throw new Error(`unhandled fetch ${url.pathname}`);
+    }));
+
+    renderIssueDetail("/projects/ambience/issues/172/runs/7/cycles/1");
+
+    const jobLabel = await screen.findByText("Environment prep");
+    const jobButton = jobLabel.closest("button");
+    if (!jobButton) throw new Error("missing graph job button");
+    await userEvent.click(jobButton);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("path")).toHaveTextContent(
+        "/projects/ambience/issues/172/runs/7/cycles/1/phases/env-prep/jobs/env-prep/steps/clone-repo",
+      );
+    });
+    expect(await screen.findByText("native job inspector")).toBeInTheDocument();
+    expect(await screen.findByText(/cloning repo/)).toBeInTheDocument();
+  });
+});
+
+function renderIssueDetail(initialPath: string) {
+  return render(
+    <MemoryRouter initialEntries={[initialPath]}>
+      <Routes>
+        <Route element={<TestLayout />}>
+          <Route path="/projects/:project/issues/:issueNumber" element={<IssueDetailView />}>
+            <Route path="summary" element={null} />
+            <Route path="runs" element={null} />
+            <Route path="runs/:runId" element={null} />
+            <Route path="runs/:runId/cycles/:cycleId" element={null} />
+            <Route path="runs/:runId/cycles/:cycleId/phases/:phaseId" element={null} />
+            <Route path="runs/:runId/cycles/:cycleId/phases/:phaseId/jobs/:jobId" element={null} />
+            <Route path="runs/:runId/cycles/:cycleId/phases/:phaseId/jobs/:jobId/steps/:stepId" element={null} />
+            <Route path="workflow" element={null} />
+            <Route path="workflow/:workflowRunId" element={null} />
+            <Route path="touchpoint" element={null} />
+          </Route>
+        </Route>
+      </Routes>
+    </MemoryRouter>,
+  );
+}
+
+function TestLayout() {
+  const location = useLocation();
+  return (
+    <>
+      <div data-testid="path">{location.pathname}</div>
+      <Outlet context={{ signedIn: true, isAdmin: true, snap: { projects: [], workflows: [] } }} />
+    </>
+  );
+}
+
+function json(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}

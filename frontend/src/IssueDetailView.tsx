@@ -17,7 +17,7 @@
  *
  * Routed canonically via `/projects/<project>/issues/<number>`.
  */
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { authedFetch } from "./auth";
 import { PhaseGraph, type PhaseGraphPhase, type RecycleArrow } from "./PhaseGraph";
@@ -2320,6 +2320,7 @@ function RunExecutionView({
   onSelectNode: (selection: ProjectionSelection) => void;
   onOpenTouchpoint: () => void;
 }) {
+  const inspectorRef = useRef<HTMLDivElement | null>(null);
   const selectedPhase = selectedPhaseId
     ? run.phases.find((phase) => phase.name === selectedPhaseId) ?? null
     : null;
@@ -2334,6 +2335,12 @@ function RunExecutionView({
     : selectedPhase
       ? `phase:${selectedPhase.name}`
       : null;
+  const selectedRouteKey = [selectedPhaseId, selectedJobId, selectedStepId].filter(Boolean).join(":");
+
+  useEffect(() => {
+    if (!selectedPhaseId) return;
+    inspectorRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+  }, [selectedPhaseId, selectedRouteKey]);
 
   return (
     <>
@@ -2350,20 +2357,22 @@ function RunExecutionView({
         onSelectNode={onSelectNode}
         onOpenTouchpoint={onOpenTouchpoint}
       />
-      {selectedPhase ? (
-        <ProjectionInspector
-          run={run}
-          phase={selectedPhase}
-          job={selectedJob}
-          step={selectedStep}
-          project={project}
-          issueNumber={issueNumber}
-          repo={repo}
-          onClose={() => onSelectNode({})}
-        />
-      ) : (
-        <ProjectionRunMetaSummary run={run} repo={repo} />
-      )}
+      <div ref={inspectorRef}>
+        {selectedPhase ? (
+          <ProjectionInspector
+            run={run}
+            phase={selectedPhase}
+            job={selectedJob}
+            step={selectedStep}
+            project={project}
+            issueNumber={issueNumber}
+            repo={repo}
+            onClose={() => onSelectNode({})}
+          />
+        ) : (
+          <ProjectionRunMetaSummary run={run} repo={repo} />
+        )}
+      </div>
     </>
   );
 }
@@ -2402,7 +2411,7 @@ function ProjectionPipelineDag({
               type="button"
               className={`dag-node dag-node-phase${selectedKey === key ? " selected" : ""}`}
               key={job.id}
-              onClick={() => onSelectNode({ phase: phase.name, job: job.id })}
+              onClick={() => onSelectNode({ phase: phase.name, job: job.id, step: preferredProjectionStepSlug(job) })}
               aria-pressed={selectedKey === key}
             >
               <div className="dag-job-head">
@@ -2440,6 +2449,17 @@ function ProjectionPipelineDag({
         entryPhaseName={run.current_phase ?? null}
       />
     </div>
+  );
+}
+
+function preferredProjectionStepSlug(job: RunProjectionPhase["jobs"][number]): string | null {
+  return (
+    job.steps.find((step) => step.state === "active")?.slug
+    ?? job.steps.find((step) => step.state === "failed")?.slug
+    ?? job.steps.find((step) => step.state === "dispatching" || step.state === "claimed")?.slug
+    ?? job.steps.find((step) => step.state === "not_started")?.slug
+    ?? job.steps[0]?.slug
+    ?? null
   );
 }
 

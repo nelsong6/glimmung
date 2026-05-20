@@ -1931,6 +1931,7 @@ h2 .inline-action,
   color: inherit;
   padding: 0;
   width: auto;
+  pointer-events: all;
 }
 .dag-rf .react-flow__edge-path {
   stroke: var(--fg-dimmer);
