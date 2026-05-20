@@ -323,6 +323,7 @@ func returnTestSlot(store ReadStore, preparer TestSlotPreparer, _ NativeGitHubTo
 			writeInternalError(w, r, err, "test-slot return failed")
 			return
 		}
+		wakeRunQueue("")
 		if project, ok, err := findProjectByKey(r.Context(), store, req.Project); err == nil && ok {
 			_, _ = appendLeaseSlotReturnHistory(r.Context(), store, project, lease, historyEntry)
 		}
@@ -947,10 +948,12 @@ func cleanupTestSlotRuntime(parent context.Context, store ReadStore, preparer Te
 			_, _ = setLeaseSlotCleanupFinished(context.Background(), store, project, lease, "error", cancelErr)
 			return
 		}
+		wakeRunQueue("")
 	}
 	if _, statusErr := setLeaseSlotCleanupFinished(context.Background(), store, project, lease, testSlotStateReady, nil); statusErr != nil && logf != nil {
 		logf("record test-slot cleanup success failed project=%s lease=%s: %v", lease.Project, LeasePublicRefFromLease(lease), statusErr)
 	}
+	wakeRunQueue("")
 }
 
 func testSlotActivationKey(lease Lease) string {
@@ -1414,8 +1417,12 @@ func warmTestSlot(ctx context.Context, store ReadStore, preparer TestSlotPrepare
 		return
 	}
 	cleanupTestSlotInstaller(ctx, preparer, lease, project, logf)
-	if _, err := markSlotProvisioned(ctx, store, projectKey, slotIndex, time.Now().UTC()); err != nil && logf != nil {
-		logf("test-slot warmup mark-provisioned failed project=%s slot=%s: %v", projectKey, slotName, err)
+	if _, err := markSlotProvisioned(ctx, store, projectKey, slotIndex, time.Now().UTC()); err != nil {
+		if logf != nil {
+			logf("test-slot warmup mark-provisioned failed project=%s slot=%s: %v", projectKey, slotName, err)
+		}
+	} else {
+		wakeRunQueue(projectKey)
 	}
 }
 

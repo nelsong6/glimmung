@@ -16,10 +16,6 @@ import (
 // controlled at the source.
 const (
 	LeasePurposeDispatch         = "dispatch"
-	LeasePurposeAdvance          = "advance"
-	LeasePurposeRetry            = "retry"
-	LeasePurposeResume           = "resume"
-	LeasePurposeSignalDrain      = "signal_drain"
 	LeasePurposeTestSlotCheckout = "test_slot_checkout"
 )
 
@@ -141,6 +137,7 @@ func cancelLeaseByRef(store ReadStore) http.HandlerFunc {
 		// lease has already been released. Safe no-op for any other lease.
 		cancelLeaseExpiryTimer(body.LeaseRef)
 		metrics.RecordLeaseReleased(leasePurposeFromCancelResult(result), "cancelled")
+		wakeRunQueue("")
 		writeJSON(w, http.StatusOK, result)
 	}
 }

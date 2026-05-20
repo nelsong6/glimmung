@@ -13,7 +13,7 @@ type GraphNode = {
 type GraphEdge = {
   source: string;
   target: string;
-  kind: "spawned" | "attempted" | "retried" | "opened" | "feedback" | "re_dispatched" | "resumed_from";
+  kind: "spawned" | "attempted" | "retried" | "opened" | "feedback" | "re_dispatched" | "cycled_from";
 };
 
 type SystemGraph = {
@@ -173,7 +173,7 @@ export function GraphView({
 function nodeClass(node: GraphNode): string {
   if (isStale(node)) return "drain stale";
   if (node.kind === "signal") return "info";
-  if (node.state === "in_progress") return "busy";
+  if (node.state === "in_progress" || node.state === "queued") return "busy";
   if (node.state === "pending") return "pending";
   if (node.state === "review_required") return "info";
   if (node.state === "aborted" || node.state === "failure") return "drain";

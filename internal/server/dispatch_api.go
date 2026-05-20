@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/nelsong6/glimmung/internal/domain/budget"
@@ -44,6 +43,7 @@ type IssueDispatchData struct {
 type CreateRunRequest struct {
 	Project                 string
 	Workflow                string
+	WorkflowSchemaRef       string
 	IssueID                 string
 	IssueRepo               string
 	IssueNumber             int
@@ -59,8 +59,26 @@ type CreateRunRequest struct {
 type CreatedRun struct {
 	ID            string
 	RunNumber     int
+	CycleNumber   int
+	RunCycle      int
 	RunDisplay    string
 	CallbackToken string
+}
+
+type StartRunCycleRequest struct {
+	Project          string
+	RunID            string
+	PhaseName        string
+	PhaseKind        string
+	WorkflowFilename string
+	SlotLeaseRef     string
+}
+
+type CreateRecycleCycleRequest struct {
+	Parent            RunReplayData
+	WorkflowSchemaRef string
+	TargetPhaseName   string
+	TriggerSource     map[string]any
 }
 
 // RunDispatchStore provides all store operations needed by the dispatch handler.
@@ -72,7 +90,9 @@ type RunDispatchStore interface {
 	ClaimIssueLock(ctx context.Context, project string, issueNumber int, holderID string, ttlSeconds int) error
 	ReleaseIssueLock(ctx context.Context, project string, issueNumber int, holderID string)
 	CreateRun(ctx context.Context, req CreateRunRequest) (CreatedRun, error)
+	StartRunCycle(ctx context.Context, req StartRunCycleRequest) (int, error)
 	AcquireLease(ctx context.Context, req LeaseAcquireRequest) (Lease, error)
+	CancelLeaseByRef(ctx context.Context, project, ref string) (CancelLeaseResult, error)
 	AbortRunByID(ctx context.Context, project, runID, reason string) (AbortRunResult, error)
 }
 
@@ -92,6 +112,8 @@ type PublicDispatchResult struct {
 	IssueRef    *string `json:"issue_ref,omitempty"`
 	IssueNumber *int    `json:"issue_number,omitempty"`
 	RunNumber   *int    `json:"run_number"`
+	CycleNumber *int    `json:"cycle_number,omitempty"`
+	RunCycle    *int    `json:"run_cycle_number,omitempty"`
 	RunID       *string `json:"run_id,omitempty"`
 	RunRef      *string `json:"run_ref,omitempty"`
 	Host        *string `json:"host"`
@@ -227,6 +249,7 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, nativeLaun
 	run, err := dispatchStore.CreateRun(ctx, CreateRunRequest{
 		Project:                 req.Project,
 		Workflow:                wf.Name,
+		WorkflowSchemaRef:       wf.SchemaRef,
 		IssueID:                 issue.ID,
 		IssueRepo:               issueRepo,
 		IssueNumber:             req.IssueNumber,
@@ -246,108 +269,40 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, nativeLaun
 	issueNum := req.IssueNumber
 	issueRef := publicids.IssueRef(req.Project, &issueNum)
 	runRef := publicids.RunRef(req.Project, &issueNum, run.RunDisplay)
-	metadata := map[string]any{
-		"issue_body":           issue.Body,
-		"issue_ref":            issueRef,
-		"issue_repo":           issueRepo,
-		"issue_title":          issue.Title,
-		"issue_lock_holder_id": holderID,
-		"run_id":               run.ID,
-		"run_ref":              runRef,
-		"run_callback_token":   run.CallbackToken,
-		"run_number":           strconv.Itoa(run.RunNumber),
-		"run_display_number":   run.RunDisplay,
-		"attempt_index":        "0",
-		"phase_name":           initPhase.Name,
-		"issue_number":         strconv.Itoa(req.IssueNumber),
-		"work_context_branch":  fmt.Sprintf("issue-%d-run-%s", req.IssueNumber, run.RunDisplay),
+	runData := RunReplayData{
+		ID:                run.ID,
+		Project:           req.Project,
+		WorkflowName:      wf.Name,
+		WorkflowSchemaRef: wf.SchemaRef,
+		IssueNumber:       req.IssueNumber,
+		RunNumber:         &run.RunNumber,
+		CycleNumber:       &run.CycleNumber,
+		RunCycleNumber:    &run.RunCycle,
+		RunDisplayNumber:  &run.RunDisplay,
+		IssueRepo:         issueRepo,
+		CallbackToken:     &run.CallbackToken,
+		IssueLockHolderID: &holderID,
+		TriggerSource:     triggerSource,
 	}
-	metadata["native_k8s"] = true
-
-	requirements := initPhase.Requirements
-	if len(requirements) == 0 {
-		requirements = wf.DefaultRequirements
-	}
-	wfName := wf.Name
-	lease, err := acquireLeaseInstrumented(ctx, LeasePurposeDispatch, LeaseAcquireRequest{
-		Project:      req.Project,
-		Workflow:     &wfName,
-		Requirements: requirements,
-		Metadata:     metadata,
-	}, dispatchStore.AcquireLease)
+	admission, err := admitRunCycle(ctx, dispatchStore, nativeLauncher, runData, wf, issue, issueRepo, LeasePurposeDispatch)
 	if err != nil {
-		dispatchStore.AbortRunByID(ctx, req.Project, run.ID, "lease_acquire_failed") //nolint:errcheck
-		if errors.Is(err, ErrUnavailable) {
-			return PublicDispatchResult{
-				State:       "no_capacity",
-				IssueRef:    &issueRef,
-				IssueNumber: &issueNum,
-				RunNumber:   &run.RunNumber,
-				RunID:       &run.ID,
-				RunRef:      &runRef,
-				Workflow:    &wf.Name,
-				Detail:      stringPtr("native capacity unavailable"),
-			}, nil
-		}
-		return PublicDispatchResult{}, &dispatchProblem{status: http.StatusInternalServerError, message: "acquire lease failed"}
+		return PublicDispatchResult{}, &dispatchProblem{status: http.StatusInternalServerError, message: "admit run cycle failed"}
 	}
-	if lease.State != "claimed" {
-		dispatchStore.AbortRunByID(ctx, req.Project, run.ID, "native_lease_not_claimed") //nolint:errcheck
-		return PublicDispatchResult{
-			State:       "dispatch_failed",
-			IssueRef:    &issueRef,
-			IssueNumber: &issueNum,
-			RunNumber:   &run.RunNumber,
-			RunID:       &run.ID,
-			RunRef:      &runRef,
-			Workflow:    &wf.Name,
-			Detail:      stringPtr("native lease was not claimed"),
-		}, nil
-	}
-
 	wfNameStr := wf.Name
-	result := PublicDispatchResult{
+	return PublicDispatchResult{
+		State:       admission.State,
 		IssueRef:    &issueRef,
 		IssueNumber: &issueNum,
 		RunNumber:   &run.RunNumber,
+		CycleNumber: &run.CycleNumber,
+		RunCycle:    &run.RunCycle,
 		RunID:       &run.ID,
 		RunRef:      &runRef,
 		Workflow:    &wfNameStr,
-		Lease:       "claimed",
-	}
-
-	if lease.State == "claimed" {
-		runData := RunReplayData{
-			ID:               run.ID,
-			Project:          req.Project,
-			WorkflowName:     wf.Name,
-			IssueNumber:      req.IssueNumber,
-			RunNumber:        &run.RunNumber,
-			RunDisplayNumber: &run.RunDisplay,
-			IssueRepo:        issueRepo,
-			CallbackToken:    &run.CallbackToken,
-			Attempts: []RunAttemptData{{
-				AttemptIndex: 0,
-				Phase:        initPhase.Name,
-			}},
-		}
-		if _, err := launchCommittedNativePhase(ctx, nativeLauncher, NativeLaunchRequest{
-			Lease:    lease,
-			Workflow: *wf,
-			Phase:    initPhase,
-			Run:      runData,
-		}); err != nil {
-			dispatchStore.AbortRunByID(ctx, req.Project, run.ID, "native_dispatch_failed: "+err.Error()) //nolint:errcheck
-			detail := fmt.Sprintf("native dispatch failed: %s", err)
-			result.State = "dispatch_failed"
-			result.Detail = &detail
-			return result, nil
-		}
-		result.State = "dispatched"
-		result.Host = lease.Host
-	}
-
-	return result, nil
+		Lease:       admission.Lease,
+		Host:        admission.Host,
+		Detail:      admission.Detail,
+	}, nil
 }
 
 func workflowEntryPhase(phases []PhaseSpec) (PhaseSpec, bool) {

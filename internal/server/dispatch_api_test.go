@@ -97,12 +97,20 @@ func (s *fakeDispatchStore) CreateRun(_ context.Context, req CreateRunRequest) (
 	if s.run != nil {
 		return *s.run, nil
 	}
-	return CreatedRun{ID: "run-1", RunNumber: 1, RunDisplay: "1", CallbackToken: "tok"}, nil
+	return CreatedRun{ID: "run-1", RunNumber: 1, CycleNumber: 1, RunCycle: 1, RunDisplay: "1.1", CallbackToken: "tok"}, nil
+}
+
+func (s *fakeDispatchStore) StartRunCycle(context.Context, StartRunCycleRequest) (int, error) {
+	return 0, nil
 }
 
 func (s *fakeDispatchStore) AcquireLease(_ context.Context, req LeaseAcquireRequest) (Lease, error) {
 	s.leaseReq = &req
 	return s.leaseResult, s.leaseErr
+}
+
+func (s *fakeDispatchStore) CancelLeaseByRef(context.Context, string, string) (CancelLeaseResult, error) {
+	return CancelLeaseResult{}, nil
 }
 
 func (s *fakeDispatchStore) AbortRunByID(context.Context, string, string, string) (AbortRunResult, error) {
@@ -309,7 +317,7 @@ func TestDispatchRunNoCapacity(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if got := readDispatchResult(t, rec).State; got != "no_capacity" {
+	if got := readDispatchResult(t, rec).State; got != "queued" {
 		t.Fatalf("state=%q", got)
 	}
 }

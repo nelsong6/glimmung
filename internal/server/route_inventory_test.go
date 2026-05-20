@@ -76,7 +76,6 @@ var expectedGoRoutes = []string{
 	"POST /v1/test-slots/apply-hot-swap",
 	"POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/replay",
 	"POST /v1/runs/dispatch",
-	"POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/resume",
 	"POST /v1/webhook/github",
 	"GET /assets/",
 	"GET /",
@@ -105,6 +104,7 @@ func TestRetiredRouteFamiliesStayDeleted(t *testing.T) {
 		"/aborted",
 		"/v1/issues/{repo_owner}",
 		"/v1/touchpoints/{repo_owner}",
+		"/resume",
 	} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("retired route family %q is registered:\n%s", forbidden, got)

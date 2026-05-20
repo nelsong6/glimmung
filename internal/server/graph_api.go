@@ -94,23 +94,25 @@ type RunProjectionAction struct {
 }
 
 type RunProjectionRun struct {
-	RunRef           string                  `json:"run_ref"`
-	RunNumber        *int                    `json:"run_number,omitempty"`
-	RunDisplayNumber *string                 `json:"run_display_number,omitempty"`
-	Workflow         string                  `json:"workflow"`
-	State            string                  `json:"state"`
-	CurrentPhase     *string                 `json:"current_phase,omitempty"`
-	OriginKind       *string                 `json:"origin_kind,omitempty"`
-	IsCycle          bool                    `json:"is_cycle"`
-	CycleNumber      *int                    `json:"cycle_number,omitempty"`
-	ValidationURL    *string                 `json:"validation_url,omitempty"`
-	CostUSD          float64                 `json:"cost_usd"`
-	AttemptsCount    int                     `json:"attempts_count"`
-	StartedAt        string                  `json:"started_at"`
-	UpdatedAt        string                  `json:"updated_at"`
-	CompletedAt      *string                 `json:"completed_at,omitempty"`
-	Phases           []RunProjectionPhase    `json:"phases"`
-	Evidence         []RunProjectionEvidence `json:"evidence"`
+	RunRef            string                  `json:"run_ref"`
+	RunNumber         *int                    `json:"run_number,omitempty"`
+	RunDisplayNumber  *string                 `json:"run_display_number,omitempty"`
+	Workflow          string                  `json:"workflow"`
+	WorkflowSchemaRef string                  `json:"workflow_schema_ref,omitempty"`
+	State             string                  `json:"state"`
+	CurrentPhase      *string                 `json:"current_phase,omitempty"`
+	OriginKind        *string                 `json:"origin_kind,omitempty"`
+	IsCycle           bool                    `json:"is_cycle"`
+	CycleNumber       *int                    `json:"cycle_number,omitempty"`
+	RunCycleNumber    *int                    `json:"run_cycle_number,omitempty"`
+	ValidationURL     *string                 `json:"validation_url,omitempty"`
+	CostUSD           float64                 `json:"cost_usd"`
+	AttemptsCount     int                     `json:"attempts_count"`
+	StartedAt         string                  `json:"started_at"`
+	UpdatedAt         string                  `json:"updated_at"`
+	CompletedAt       *string                 `json:"completed_at,omitempty"`
+	Phases            []RunProjectionPhase    `json:"phases"`
+	Evidence          []RunProjectionEvidence `json:"evidence"`
 }
 
 type RunProjectionPhase struct {
@@ -290,6 +292,7 @@ func buildIssueGraphByNumber(ctx context.Context, store GraphRuntimeStore, signa
 	for _, wf := range workflows {
 		workflowsByKey[wf.Project+"/"+wf.Name] = wf
 	}
+	addWorkflowSchemasForRuns(ctx, store, runs, workflowsByKey)
 
 	touchpoints, err := store.ListTouchpoints(ctx, TouchpointListFilter{Project: issue.Project})
 	if err != nil {
@@ -309,13 +312,13 @@ func buildIssueGraphByNumber(ctx context.Context, store GraphRuntimeStore, signa
 	}
 
 	for _, run := range runs {
-		graph.Nodes = append(graph.Nodes, graphNodeFromRunReport(run, workflowsByKey[run.Project+"/"+run.Workflow]))
+		graph.Nodes = append(graph.Nodes, graphNodeFromRunReport(run, workflowForRunReport(run, workflowsByKey)))
 		graph.Edges = append(graph.Edges, GraphEdge{Source: issueNodeID, Target: "run:" + run.RunRef, Kind: "spawned"})
 		if run.ParentRunRef != nil && runRefs[*run.ParentRunRef] {
-			graph.Edges = append(graph.Edges, GraphEdge{Source: "run:" + *run.ParentRunRef, Target: "run:" + run.RunRef, Kind: "resumed_from"})
+			graph.Edges = append(graph.Edges, GraphEdge{Source: "run:" + *run.ParentRunRef, Target: "run:" + run.RunRef, Kind: "cycled_from"})
 		}
 		previousAttemptNode := ""
-		workflow := workflowsByKey[run.Project+"/"+run.Workflow]
+		workflow := workflowForRunReport(run, workflowsByKey)
 		for _, attempt := range run.Attempts {
 			attemptNodeID := fmt.Sprintf("attempt:%s:%d", run.RunRef, attempt.AttemptIndex)
 			graph.Nodes = append(graph.Nodes, graphNodeFromRunAttempt(run, attempt, workflow))
@@ -397,9 +400,10 @@ func buildSystemGraph(ctx context.Context, store GraphRuntimeStore, signalStore 
 		if err != nil {
 			return IssueGraph{}, err
 		}
+		addWorkflowSchemasForRuns(ctx, store, runs, workflowsByKey)
 		sort.SliceStable(runs, func(i, j int) bool { return runs[i].StartedAt.Before(runs[j].StartedAt) })
 		for _, run := range runs {
-			if run.State != "in_progress" || run.IssueRef == nil {
+			if !runStateIsActive(run.State) || run.IssueRef == nil {
 				continue
 			}
 			issueNodeID := issueNodeByRef[*run.IssueRef]
@@ -411,10 +415,10 @@ func buildSystemGraph(ctx context.Context, store GraphRuntimeStore, signalStore 
 			if run.ID != "" {
 				runNodeByID[run.ID] = "run:" + run.RunRef
 			}
-			graph.Nodes = append(graph.Nodes, graphNodeFromRunReport(run, workflowsByKey[run.Project+"/"+run.Workflow]))
+			graph.Nodes = append(graph.Nodes, graphNodeFromRunReport(run, workflowForRunReport(run, workflowsByKey)))
 			graph.Edges = append(graph.Edges, GraphEdge{Source: issueNodeID, Target: "run:" + run.RunRef, Kind: "spawned"})
 			previousAttemptNode := ""
-			workflow := workflowsByKey[run.Project+"/"+run.Workflow]
+			workflow := workflowForRunReport(run, workflowsByKey)
 			for _, attempt := range run.Attempts {
 				attemptNodeID := fmt.Sprintf("attempt:%s:%d", run.RunRef, attempt.AttemptIndex)
 				graph.Nodes = append(graph.Nodes, graphNodeFromRunAttempt(run, attempt, workflow))
@@ -519,15 +523,16 @@ func graphNodeFromRunReport(run RunReport, workflow Workflow) GraphNode {
 		"origin_kind":          run.OriginKind,
 		"is_cycle":             run.IsCycle,
 		"cycle_number":         run.CycleNumber,
+		"run_cycle_number":     run.RunCycleNumber,
 		"project":              run.Project,
 		"workflow":             run.Workflow,
+		"workflow_schema_ref":  run.WorkflowSchemaRef,
 		"issue_ref":            run.IssueRef,
 		"issue_repo":           run.IssueRepo,
 		"validation_url":       run.ValidationURL,
 		"screenshots_markdown": run.ScreenshotsMarkdown,
 		"abort_reason":         run.AbortReason,
 		"cumulative_cost_usd":  run.CumulativeCostUSD,
-		"cloned_from_run_ref":  run.ParentRunRef,
 		"entrypoint_phase":     run.EntrypointPhase,
 		"workflow_graph":       workflowGraphMetadata(workflow),
 		"run_graph":            runGraphMetadata(run),
@@ -592,9 +597,6 @@ func runGraphLabel(run RunReport) string {
 }
 
 func attemptGraphState(attempt RunReportAttempt) string {
-	if attempt.SkippedFromRunRef != nil {
-		return "skipped"
-	}
 	if attempt.VerificationStatus != nil && *attempt.VerificationStatus != "" {
 		return *attempt.VerificationStatus
 	}
@@ -614,23 +616,22 @@ func attemptGraphMetadata(run RunReport, attempt RunReportAttempt, workflow Work
 	}
 	jobs := attemptGraphJobs(attempt, workflow)
 	return map[string]any{
-		"attempt_index":        attempt.AttemptIndex,
-		"phase":                attempt.Phase,
-		"phase_kind":           attempt.PhaseKind,
-		"workflow_filename":    attempt.WorkflowFilename,
-		"completed_at":         attempt.CompletedAt,
-		"decision":             attempt.Decision,
-		"verification":         verification,
-		"cost_usd":             attempt.CostUSD,
-		"conclusion":           attempt.Conclusion,
-		"phase_outputs":        attempt.PhaseOutputs,
-		"log_archive_url":      attempt.LogArchiveURL,
-		"jobs":                 jobs,
-		"jobs_count":           len(jobs),
-		"steps_count":          countAttemptGraphSteps(jobs),
-		"run_ref":              run.RunRef,
-		"run_number":           run.RunNumber,
-		"skipped_from_run_ref": attempt.SkippedFromRunRef,
+		"attempt_index":     attempt.AttemptIndex,
+		"phase":             attempt.Phase,
+		"phase_kind":        attempt.PhaseKind,
+		"workflow_filename": attempt.WorkflowFilename,
+		"completed_at":      attempt.CompletedAt,
+		"decision":          attempt.Decision,
+		"verification":      verification,
+		"cost_usd":          attempt.CostUSD,
+		"conclusion":        attempt.Conclusion,
+		"phase_outputs":     attempt.PhaseOutputs,
+		"log_archive_url":   attempt.LogArchiveURL,
+		"jobs":              jobs,
+		"jobs_count":        len(jobs),
+		"steps_count":       countAttemptGraphSteps(jobs),
+		"run_ref":           run.RunRef,
+		"run_number":        run.RunNumber,
 	}
 }
 
@@ -844,8 +845,8 @@ func runGraphMetadata(run RunReport) map[string]any {
 		"run_ref":    run.RunRef,
 		"run_number": run.RunNumber,
 		"lineage": map[string]any{
-			"cloned_from_run_ref": run.ParentRunRef,
-			"entrypoint_phase":    run.EntrypointPhase,
+			"parent_run_ref":   run.ParentRunRef,
+			"entrypoint_phase": run.EntrypointPhase,
 		},
 		"cycles": cycles,
 	}
@@ -859,7 +860,7 @@ func buildRunGraphProjection(issueRef string, runs []RunReport, workflowsByKey m
 		Signals:     projectionSignals(issueRef, runs, touchpoints, signals),
 	}
 	for _, run := range runs {
-		workflow := workflowsByKey[run.Project+"/"+run.Workflow]
+		workflow := workflowForRunReport(run, workflowsByKey)
 		projection.Runs = append(projection.Runs, runProjectionFromReport(run, workflow, touchpoints))
 	}
 	projection.Edges = projectionEdges(projection.Runs, projection.Touchpoints, projection.Signals)
@@ -869,29 +870,69 @@ func buildRunGraphProjection(issueRef string, runs []RunReport, workflowsByKey m
 	return projection
 }
 
+type workflowSchemaLookupStore interface {
+	GetWorkflowBySchemaRef(ctx context.Context, project, schemaRef string) (*Workflow, error)
+}
+
+func addWorkflowSchemasForRuns(ctx context.Context, store ReadStore, runs []RunReport, workflowsByKey map[string]Workflow) {
+	lookup, ok := store.(workflowSchemaLookupStore)
+	if !ok || lookup == nil {
+		return
+	}
+	for _, run := range runs {
+		if strings.TrimSpace(run.WorkflowSchemaRef) == "" {
+			continue
+		}
+		key := workflowSchemaMapKey(run.Project, run.WorkflowSchemaRef)
+		if _, exists := workflowsByKey[key]; exists {
+			continue
+		}
+		wf, err := lookup.GetWorkflowBySchemaRef(ctx, run.Project, run.WorkflowSchemaRef)
+		if err != nil || wf == nil {
+			continue
+		}
+		workflowsByKey[key] = *wf
+	}
+}
+
+func workflowForRunReport(run RunReport, workflowsByKey map[string]Workflow) Workflow {
+	if strings.TrimSpace(run.WorkflowSchemaRef) != "" {
+		if wf, ok := workflowsByKey[workflowSchemaMapKey(run.Project, run.WorkflowSchemaRef)]; ok {
+			return wf
+		}
+	}
+	return workflowsByKey[run.Project+"/"+run.Workflow]
+}
+
+func workflowSchemaMapKey(project, schemaRef string) string {
+	return project + "/schema/" + schemaRef
+}
+
 func runProjectionFromReport(run RunReport, workflow Workflow, touchpoints []TouchpointRow) RunProjectionRun {
 	attemptsCount := run.AttemptsCount
 	if attemptsCount == 0 {
 		attemptsCount = len(run.Attempts)
 	}
 	return RunProjectionRun{
-		RunRef:           run.RunRef,
-		RunNumber:        run.RunNumber,
-		RunDisplayNumber: run.RunDisplayNumber,
-		Workflow:         run.Workflow,
-		State:            firstNonEmpty(run.State, "unknown"),
-		CurrentPhase:     run.CurrentPhase,
-		OriginKind:       run.OriginKind,
-		IsCycle:          run.IsCycle,
-		CycleNumber:      run.CycleNumber,
-		ValidationURL:    run.ValidationURL,
-		CostUSD:          run.CumulativeCostUSD,
-		AttemptsCount:    attemptsCount,
-		StartedAt:        run.StartedAt.Format(time.RFC3339Nano),
-		UpdatedAt:        run.UpdatedAt.Format(time.RFC3339Nano),
-		CompletedAt:      timeStringPtr(run.CompletedAt),
-		Phases:           runProjectionPhases(run, workflow),
-		Evidence:         runProjectionEvidence(run, touchpoints),
+		RunRef:            run.RunRef,
+		RunNumber:         run.RunNumber,
+		RunDisplayNumber:  run.RunDisplayNumber,
+		Workflow:          run.Workflow,
+		WorkflowSchemaRef: run.WorkflowSchemaRef,
+		State:             firstNonEmpty(run.State, "unknown"),
+		CurrentPhase:      run.CurrentPhase,
+		OriginKind:        run.OriginKind,
+		IsCycle:           run.IsCycle,
+		CycleNumber:       run.CycleNumber,
+		RunCycleNumber:    run.RunCycleNumber,
+		ValidationURL:     run.ValidationURL,
+		CostUSD:           run.CumulativeCostUSD,
+		AttemptsCount:     attemptsCount,
+		StartedAt:         run.StartedAt.Format(time.RFC3339Nano),
+		UpdatedAt:         run.UpdatedAt.Format(time.RFC3339Nano),
+		CompletedAt:       timeStringPtr(run.CompletedAt),
+		Phases:            runProjectionPhases(run, workflow),
+		Evidence:          runProjectionEvidence(run, touchpoints),
 	}
 }
 
@@ -957,12 +998,9 @@ func projectionPhaseState(phaseName string, currentPhase *string, attempts []Run
 		if currentPhase != nil && *currentPhase == phaseName {
 			return "active"
 		}
-		return "pending"
+		return "not_started"
 	}
 	latest := attempts[len(attempts)-1]
-	if latest.SkippedFromRunRef != nil {
-		return "skipped"
-	}
 	if latest.CompletedAt == nil {
 		return "active"
 	}
@@ -1092,6 +1130,8 @@ func projectionJobState(phaseState string) string {
 		return "active"
 	case "skipped":
 		return "skipped"
+	case "not_started":
+		return "not_started"
 	default:
 		return "pending"
 	}
@@ -1099,7 +1139,7 @@ func projectionJobState(phaseState string) string {
 
 func projectionStepState(phaseState string, attempted bool) string {
 	if !attempted {
-		return "pending"
+		return "not_started"
 	}
 	return projectionJobState(phaseState)
 }
@@ -1128,9 +1168,6 @@ func runProjectionAttempts(attempts []RunReportAttempt) []RunProjectionAttempt {
 }
 
 func projectionAttemptState(attempt RunReportAttempt) string {
-	if attempt.SkippedFromRunRef != nil {
-		return "skipped"
-	}
 	if attempt.CompletedAt == nil {
 		return "active"
 	}
@@ -1354,7 +1391,7 @@ func signalMatchesProjection(issueRef string, runs []RunReport, touchpoints []To
 
 func projectionCurrentRunRef(runs []RunProjectionRun) *string {
 	for i := len(runs) - 1; i >= 0; i-- {
-		if runs[i].State == "in_progress" || runs[i].State == "pending" {
+		if runStateIsActive(runs[i].State) {
 			return &runs[i].RunRef
 		}
 	}
@@ -1367,7 +1404,7 @@ func projectionCurrentRunRef(runs []RunProjectionRun) *string {
 func projectionDefaultFocus(runs []RunProjectionRun, touchpoints []RunProjectionTouchpoint) *RunProjectionFocus {
 	for i := len(runs) - 1; i >= 0; i-- {
 		run := runs[i]
-		if run.State != "in_progress" && run.State != "pending" {
+		if !runStateIsActive(run.State) {
 			continue
 		}
 		for _, phase := range run.Phases {
@@ -1396,7 +1433,7 @@ func projectionNextAction(runs []RunProjectionRun, touchpoints []RunProjectionTo
 		}
 	}
 	for i := len(runs) - 1; i >= 0; i-- {
-		if runs[i].State == "in_progress" || runs[i].State == "pending" {
+		if runStateIsActive(runs[i].State) {
 			return RunProjectionAction{Kind: "watch_run", Label: "watch run", TargetRef: &runs[i].RunRef}
 		}
 	}
@@ -1414,6 +1451,10 @@ func projectionNextAction(runs []RunProjectionRun, touchpoints []RunProjectionTo
 	return RunProjectionAction{Kind: "none", Label: "no action"}
 }
 
+func runStateIsActive(state string) bool {
+	return state == "in_progress" || state == "pending" || state == "queued"
+}
+
 func touchpointNeedsDecision(tp RunProjectionTouchpoint) bool {
 	switch tp.State {
 	case "ready", "needs_review", "open", "review_required":
@@ -1424,9 +1465,6 @@ func touchpointNeedsDecision(tp RunProjectionTouchpoint) bool {
 }
 
 func workflowRunStepState(attempt RunReportAttempt) string {
-	if attempt.SkippedFromRunRef != nil {
-		return "skipped"
-	}
 	if attempt.CompletedAt != nil {
 		if attempt.VerificationStatus != nil {
 			switch *attempt.VerificationStatus {

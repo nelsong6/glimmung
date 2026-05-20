@@ -131,6 +131,9 @@ type ProjectRun = {
   project: string;
   workflow: string;
   run_number?: number | null;
+  run_display_number?: string | null;
+  cycle_number?: number | null;
+  run_cycle_number?: number | null;
   issue_number: number | null;
   title: string;
   state: string;
@@ -155,7 +158,6 @@ type RunReportAttempt = {
   decision: string | null;
   cost_usd: number | null;
   log_archive_url: string | null;
-  skipped_from_run_ref: string | null;
 };
 
 type RunReport = {
@@ -164,11 +166,16 @@ type RunReport = {
   run_ref: string;
   run_number: number | null;
   run_display_number: string | null;
+  run_cycle_number: number | null;
   parent_run_ref: string | null;
   root_run_ref: string | null;
   origin_kind: string | null;
   is_cycle: boolean;
   cycle_number: number | null;
+  workflow_schema_ref: string | null;
+  queue_state: string | null;
+  admission_error: string | null;
+  slot_lease_ref: string | null;
   workflow: string;
   issue_ref: string | null;
   issue_repo: string | null;
@@ -1625,7 +1632,7 @@ function ProjectRunsView({
   const runs = isMockMode()
     ? mockRuns.filter((run) => run.project === project.name)
     : liveRuns;
-  const completedRuns = runs.filter((run) => run.state !== "in_progress" && run.state !== "pending");
+  const completedRuns = runs.filter((run) => !runStateIsActive(run.state));
 
   return (
     <div className="project-workspace">
@@ -1684,11 +1691,12 @@ function ProjectRunsTable({ title, runs, project }: { title: string; runs: Proje
       <table>
         <thead>
           <tr>
+            <th>Cycle</th>
             <th>Run</th>
+            <th>Run cycle</th>
             <th>Workflow</th>
             <th>Issue</th>
             <th>State</th>
-            <th>Cycle</th>
             <th>Phase</th>
             <th>Cost</th>
             <th>Updated</th>
@@ -1711,6 +1719,8 @@ function ProjectRunsTable({ title, runs, project }: { title: string; runs: Proje
                   </Link>
                   <div className="dim">{run.title}</div>
                 </td>
+              <td className="mono">{run.run_number ?? "-"}</td>
+              <td className="mono">{run.run_cycle_number ?? "-"}</td>
               <td className="mono dim">
                 <Link
                   className="link mono"
@@ -1734,7 +1744,6 @@ function ProjectRunsTable({ title, runs, project }: { title: string; runs: Proje
                 )}
               </td>
               <td><span className={`pill ${runStatePill(run.state)}`}>{run.state}</span></td>
-              <td className="mono">{run.cycles}</td>
               <td className="mono dim">{run.current_phase}</td>
               <td className="mono dim">${run.cost_usd.toFixed(2)}</td>
               <td className="mono dim">{relTime(run.updated_at)}</td>
@@ -1748,15 +1757,18 @@ function ProjectRunsTable({ title, runs, project }: { title: string; runs: Proje
 }
 
 function projectRunLabel(run: ProjectRun, runs: ProjectRun[], index: number): string {
-  if (run.issue_number !== null && run.run_number) return `#${run.issue_number}-${run.run_number}`;
+  if (run.cycle_number !== null && run.cycle_number !== undefined) return `cycle ${run.cycle_number}`;
+  if (run.run_display_number) return `cycle ${run.run_display_number}`;
   if (run.issue_number === null) return `run-${index + 1}`;
   const sameIssue = runs.filter((candidate) => candidate.issue_number === run.issue_number);
   const ordinal = sameIssue.findIndex((candidate) => candidate.id === run.id) + 1;
-  return `#${run.issue_number}-${Math.max(ordinal, 1)}`;
+  return `cycle ${Math.max(ordinal, 1)}`;
 }
 
 function projectRunSlug(run: ProjectRun, runs: ProjectRun[], index: number): string {
-  return projectRunLabel(run, runs, index).replace(/^#/, "");
+  if (run.run_display_number) return run.run_display_number;
+  if (run.cycle_number !== null && run.cycle_number !== undefined) return String(run.cycle_number);
+  return projectRunLabel(run, runs, index).replace(/^cycle\s+/, "").replace(/^#/, "");
 }
 
 function projectRunHref(run: ProjectRun, runSlug: string): string {
@@ -1767,15 +1779,7 @@ function projectRunHref(run: ProjectRun, runSlug: string): string {
 }
 
 function runSlugDisplay(slug: string): string {
-  return /^\d+-\d+$/.test(slug) ? `#${slug}` : slug;
-}
-
-function issueScopedRunNumberFromSlug(issueNumber: number | null, slug: string): number | null {
-  if (issueNumber === null) return null;
-  if (/^\d+$/.test(slug)) return parseInt(slug, 10);
-  const match = slug.match(/^(\d+)-(\d+)$/);
-  if (!match) return null;
-  return parseInt(match[1], 10) === issueNumber ? parseInt(match[2], 10) : null;
+  return /^\d+(\.\d+)?$/.test(slug) ? `cycle ${slug}` : slug;
 }
 
 function titleCase(value: string): string {
@@ -1821,6 +1825,10 @@ function projectRunGraph(run: ProjectRun, workflow: Workflow | undefined, projec
     timestamp: run.started_at,
     metadata: {
       workflow: run.workflow,
+      run_number: run.run_number,
+      run_display_number: run.run_display_number,
+      cycle_number: run.cycle_number,
+      run_cycle_number: run.run_cycle_number,
       cycles_count: run.cycles,
       cumulative_cost_usd: run.cost_usd,
       entrypoint_phase: phaseNames[0] ?? run.current_phase,
@@ -1844,7 +1852,7 @@ function projectRunGraph(run: ProjectRun, workflow: Workflow | undefined, projec
         attempt_index: index,
         phase,
         phase_kind: workflow?.phases.find((candidate) => candidate.name === phase)?.kind ?? "agent",
-        completed_at: run.state === "pending" || run.state === "in_progress" ? null : run.updated_at,
+        completed_at: runStateIsActive(run.state) ? null : run.updated_at,
         verification_status: run.state === "passed" ? "pass" : null,
         steps: [
           {
@@ -1878,6 +1886,9 @@ function projectRunFromReport(report: RunReport): ProjectRun {
     project: report.project,
     workflow: report.workflow,
     run_number: report.run_number,
+    run_display_number: report.run_display_number,
+    cycle_number: report.cycle_number,
+    run_cycle_number: report.run_cycle_number,
     issue_number: report.issue_number,
     title: report.issue_number ? `Issue #${report.issue_number}` : report.run_ref,
     state: report.state,
@@ -1913,7 +1924,7 @@ function projectRunReportGraph(report: RunReport, workflow: Workflow | undefined
   const runNode = {
     id: `run:${report.run_ref}`,
     kind: "run" as const,
-    label: report.run_display_number ?? (report.run_number !== null ? `Run ${report.run_number}` : report.run_ref),
+    label: report.cycle_number !== null ? `cycle ${report.cycle_number}` : report.run_display_number ?? report.run_ref,
     state: report.state,
     timestamp: report.started_at,
     metadata: {
@@ -1925,6 +1936,11 @@ function projectRunReportGraph(report: RunReport, workflow: Workflow | undefined
       origin_kind: report.origin_kind,
       is_cycle: report.is_cycle,
       cycle_number: report.cycle_number,
+      run_cycle_number: report.run_cycle_number,
+      workflow_schema_ref: report.workflow_schema_ref,
+      queue_state: report.queue_state,
+      admission_error: report.admission_error,
+      slot_lease_ref: report.slot_lease_ref,
       workflow: report.workflow,
       cost_usd: report.cumulative_cost_usd,
       issue_ref: report.issue_ref,
@@ -1963,7 +1979,6 @@ function projectRunReportGraph(report: RunReport, workflow: Workflow | undefined
       decision: attempt.decision,
       cost_usd: attempt.cost_usd,
       log_archive_url: attempt.log_archive_url,
-      skipped_from_run_ref: attempt.skipped_from_run_ref,
     },
   }));
   return {
@@ -1999,13 +2014,12 @@ function ProjectRunView({
     setLiveReport(null);
     setLiveError(null);
     setLiveLoading(true);
-    const issueScopedRunNumber = issueScopedRunNumberFromSlug(issueNumber, runId);
-    if (issueScopedRunNumber === null) {
+    if (issueNumber === null) {
       setLiveLoading(false);
-      setLiveError("Issue-scoped run number required");
+      setLiveError("Issue-scoped cycle required");
       return;
     }
-    const reportUrl = `/v1/projects/${encodeURIComponent(projectName)}/issues/${issueNumber}/runs/${issueScopedRunNumber}/report`;
+    const reportUrl = `/v1/projects/${encodeURIComponent(projectName)}/issues/${issueNumber}/runs/${encodeURIComponent(runId)}/report`;
     fetch(reportUrl)
       .then(async (res) => {
         if (!res.ok) throw new Error(`run report ${res.status}`);
@@ -2142,7 +2156,7 @@ function ProjectRunView({
         project={project.name}
         repo={project.github_repo}
         workflow={workflow}
-        inFlight={run.state === "in_progress"}
+        inFlight={runStateIsActive(run.state)}
         dispatchState={RUN_VIEWER_IDLE_DISPATCH}
         onRedispatch={() => undefined}
         abortState={RUN_VIEWER_IDLE_ABORT}
@@ -2164,10 +2178,13 @@ function ProjectRunView({
 
 function runStatePill(state: string): string {
   if (state === "passed") return "free";
-  if (state === "in_progress" || state === "needs_review") return "busy";
-  if (state === "pending") return "info";
+  if (state === "in_progress" || state === "queued" || state === "pending" || state === "needs_review") return "busy";
   if (state === "aborted" || state === "failed") return "drain";
   return "info";
+}
+
+function runStateIsActive(state: string): boolean {
+  return state === "in_progress" || state === "queued" || state === "pending";
 }
 
 function CurrentWorkTable({ leases, emptyText }: { leases: Lease[]; emptyText: string }) {

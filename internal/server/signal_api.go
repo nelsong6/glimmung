@@ -95,6 +95,7 @@ func createSignal(store ReadStore) http.HandlerFunc {
 			writeInternalError(w, r, err, "enqueue signal failed")
 			return
 		}
+		wakeSignalDrain()
 		writeJSON(w, http.StatusOK, sig)
 	}
 }

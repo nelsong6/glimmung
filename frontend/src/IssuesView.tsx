@@ -305,7 +305,7 @@ function rowKey(row: IssueRow): string {
 
 function renderLastRun(row: IssueRow): string {
   if (!row.last_run_ref) return "—";
-  const label = row.last_run_number !== null ? `run ${row.last_run_number}` : row.last_run_state ?? "?";
+  const label = row.last_run_number !== null ? `cycle ${row.last_run_number}` : row.last_run_state ?? "?";
   if (row.issue_lock_held) return `${label} (in flight)`;
   return label;
 }
@@ -324,7 +324,7 @@ function attentionReason(row: IssueRow): { label: string; detail: string | null;
   if (row.issue_lock_held) {
     return {
       label: "run in flight",
-      detail: row.last_run_number !== null ? `run ${row.last_run_number} is still holding the issue lock` : null,
+      detail: row.last_run_number !== null ? `cycle ${row.last_run_number} is still holding the issue lock` : null,
       kind: "busy",
     };
   }
@@ -342,10 +342,10 @@ function attentionReason(row: IssueRow): { label: string; detail: string | null;
       kind: "drain",
     };
   }
-  if (row.last_run_state === "in_progress" || row.last_run_state === "pending") {
+  if (row.last_run_state === "in_progress" || row.last_run_state === "queued" || row.last_run_state === "pending") {
     return {
-      label: row.last_run_state === "pending" ? "run pending" : "run still active",
-      detail: row.last_run_number !== null ? `run ${row.last_run_number} is ${row.last_run_state}` : null,
+      label: row.last_run_state === "queued" || row.last_run_state === "pending" ? "run queued" : "run still active",
+      detail: row.last_run_number !== null ? `cycle ${row.last_run_number} is ${row.last_run_state}` : null,
       kind: row.last_run_state === "pending" ? "pending" : "busy",
     };
   }
@@ -372,6 +372,7 @@ function attentionReason(row: IssueRow): { label: string; detail: string | null;
 
 function pillClass(state: string): string {
   if (state === "dispatched") return "free";
+  if (state === "queued") return "busy";
   if (state === "pending") return "pending";
   if (state === "already_running") return "busy";
   return "drain";

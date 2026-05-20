@@ -250,7 +250,7 @@ func workflowsInSync(upstream WorkflowRegister, current *Workflow) bool {
 	if err := json.Unmarshal(bBytes, &bMap); err != nil {
 		return false
 	}
-	for _, key := range []string{"id", "created_at", "metadata"} {
+	for _, key := range []string{"id", "created_at", "metadata", "schema_ref"} {
 		delete(aMap, key)
 		delete(bMap, key)
 	}

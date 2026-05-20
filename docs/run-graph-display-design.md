@@ -7,10 +7,11 @@ but the graph shown to the user must follow Glimmung's product model:
 
 ```text
 Issue
-  -> Run[]                  # flat issue-scoped history
-    -> Phase
-      -> Job
-        -> Step
+  -> Run[]                  # user/reviewer intent history
+    -> Cycle[]              # flat issue-scoped execution ledger
+      -> Phase
+        -> Job
+          -> Step
     -> Evidence
   -> Touchpoint
 ```
@@ -28,8 +29,8 @@ Suggested mapping:
 
 ```text
 Issue          -> Issue / origin
-Run            -> One durable execution record
-Cycle          -> A run whose origin is recycle/resume/request-changes
+Run            -> User/reviewer intent
+Cycle          -> One durable execution record / ledger row
 Workflow phase -> Phase
 Native job -> Job
 Native step -> Step
@@ -42,26 +43,29 @@ prefer phase/job/step language unless it is showing raw backend metadata.
 
 The key distinction is **Phase vs Attempt**:
 
-- A **Run** is the durable unit of execution, scheduling, logs, cost,
-  lifecycle, abort, and reporting.
-- A **Cycle** is not a nested object. It is a run whose origin links it to
-  an earlier run, usually because a recycle policy, resume action, or
-  request-changes signal re-entered the workflow.
+- A **Run** is the user/reviewer intent. A user pressing Run starts a new
+  run. Reviewer feedback or a touchpoint requesting more work starts a new
+  run.
+- A **Cycle** is the durable unit of execution, scheduling, logs, cost,
+  lifecycle, abort, and reporting. The issue history's leftmost number is a
+  flat cycle ledger (`1`, `2`, `3`, ...). Each cycle also has a run number
+  and a run-local cycle ordinal, displayed compactly as `1.1`, `1.2`, `2.1`.
+  Recycle policy creates a new cycle under the same run.
 - A **Phase** is a workflow column. Phases flow left-to-right according
   to the workflow's `depends_on` graph.
 - A **Job** is a runnable box inside a phase. Multiple jobs in one phase
   stack vertically and run in parallel.
-- An **Attempt** is a lower-level executor fact. It can explain retries,
-  resumes, and historical execution, but it should not replace phase or
+- An **Attempt** is a lower-level executor fact. It can explain executor retries
+  and historical execution, but it should not replace phase or
   job as the main UI container.
 
-This lets Glimmung show a flat issue run history while preserving the
-pipeline shape inside each run: issue -> run -> phase -> job -> step.
+This lets Glimmung show a flat issue cycle history while preserving the
+pipeline shape inside each run: issue -> run -> cycle -> phase -> job -> step.
 
 **Touchpoint** replaces the old user-facing `Report` concept. A
 Touchpoint is the issue-level live summary and navigation page: what the
 human needs to inspect, approve, reject, or discuss now. Touchpoints are
-strictly one-to-one with Issues; repeated Runs, retries, resumes, and PR
+strictly one-to-one with Issues; repeated Runs, cycles, and PR
 updates revise the same Touchpoint rather than creating additional
 Touchpoints. A GitHub PR, validation URL, screenshots, generated design
 portfolio rows, logs, or artifacts can be linked from the Touchpoint as
@@ -87,7 +91,7 @@ Glimmung needs to explain things Argo does not own:
 
 - Issues and issue locks.
 - Leases and scarce agent capacity.
-- Phase attempts and resume/recycle paths.
+- Phase attempts and recycle paths.
 - Run cycle lineage.
 - Validation environments.
 - Screenshots and UI review evidence.
@@ -135,12 +139,12 @@ The overview should show the high-level execution shape:
 
 ```text
 env-prep -> agent-execute -> verify -> touchpoint
-Run 1:   env-prep -> agent-execute -> touchpoint
-Run 1.1: agent-execute -> verify -> touchpoint
+Cycle 1 (run 1.1): env-prep -> agent-execute -> touchpoint
+Cycle 2 (run 1.2): env-prep -> agent-execute -> verify -> touchpoint
 ```
 
 For more complex runs, the overview should show phase ordering and
-branching/recycle/resume relationships. The graph should answer:
+branching/recycle relationships. The graph should answer:
 
 - What ran?
 - What is running now?
@@ -188,9 +192,8 @@ Phase detail should show:
 - validation URL or artifacts produced by the phase,
 - child jobs.
 
-Phases may be skipped during resume. Skipped phases should remain
-visible because they explain why a resumed run started later in the
-workflow.
+The normal product workflow starts cycles at the workflow entry phase.
+Skipped phase markers are not part of the default run model.
 
 In the overview, phase information should usually appear as a lane or
 column heading rather than as a full graph box. The full phase detail can
@@ -294,7 +297,6 @@ Add portfolio rows for at least:
 - simple two-phase run,
 - native job with step list and selected terminal log,
 - failed step with log output,
-- resumed run with skipped earlier phases,
 - phase recycle/retry,
 - cycle run created by recycle/retry,
 - waiting/no-capacity state,

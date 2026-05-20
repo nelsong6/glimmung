@@ -604,9 +604,9 @@ Decision logic and edge-case coverage live in
 
 Generic mutual-exclusion claims are stored in the `locks` Cosmos container and
 keyed by `(scope, key)`. Active Go callers use the primitive for per-issue
-dispatch/resume serialization and PR/issue lock release at terminal run states.
+run serialization and PR/issue lock release at terminal run states.
 The implementation lives in [`internal/store/cosmos`](internal/store/cosmos),
-with handler coverage in dispatch, resume, abort, and completion tests.
+with handler coverage in dispatch, abort, signal-drain, and completion tests.
 
 Important active operations:
 

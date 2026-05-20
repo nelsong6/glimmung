@@ -19,7 +19,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/nelsong6/glimmung/internal/domain/budget"
-	"github.com/nelsong6/glimmung/internal/domain/phaserefs"
 	"github.com/nelsong6/glimmung/internal/domain/publicids"
 	"github.com/nelsong6/glimmung/internal/server"
 )
@@ -40,6 +39,8 @@ type Store struct {
 	nativeProjectConcurrency int
 	nativeGlobalConcurrency  int
 }
+
+const workflowSchemaKind = "workflow_schema"
 
 func NewFromSettings(settings server.Settings) (*Store, error) {
 	if settings.CosmosEndpoint == "" || settings.CosmosDatabase == "" {
@@ -515,6 +516,9 @@ func (s *Store) ListWorkflows(ctx context.Context) ([]server.Workflow, error) {
 	}
 	rows := make([]server.Workflow, 0, len(docs))
 	for _, doc := range docs {
+		if isWorkflowSchemaDoc(doc) {
+			continue
+		}
 		rows = append(rows, workflowFromDoc(doc))
 	}
 	return rows, nil
@@ -533,8 +537,15 @@ func (s *Store) UpsertWorkflow(ctx context.Context, req server.WorkflowRegister)
 		return server.Workflow{}, err
 	}
 
-	doc := workflowDocFromRegister(req, time.Now().UTC().Format(time.RFC3339Nano))
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	doc := workflowDocFromRegister(req, now)
+	doc.Kind = "workflow"
+	doc.SchemaRef = workflowSchemaRef(doc)
+	schemaDoc := workflowSchemaDocFromWorkflow(doc)
 	pk := azcosmos.NewPartitionKeyString(req.Project)
+	if err := s.createWorkflowSchemaIfMissing(ctx, pk, schemaDoc); err != nil {
+		return server.Workflow{}, err
+	}
 	existing, err := s.workflows.ReadItem(ctx, pk, req.Name, nil)
 	if err == nil {
 		var existingDoc workflowDoc
@@ -592,34 +603,18 @@ func (s *Store) PatchWorkflow(ctx context.Context, project string, name string, 
 	if err != nil {
 		return server.Workflow{}, err
 	}
-	var doc map[string]any
+	var doc workflowDoc
 	if err := json.Unmarshal(read.Value, &doc); err != nil {
 		return server.Workflow{}, err
 	}
+	reg := workflowRegisterFromDoc(doc)
 	if req.PREnabled != nil {
-		pr, _ := doc["pr"].(map[string]any)
-		if pr == nil {
-			pr = map[string]any{}
-		}
-		pr["enabled"] = *req.PREnabled
-		doc["pr"] = pr
+		reg.PR.Enabled = *req.PREnabled
 	}
 	if req.BudgetTotal != nil {
-		budget, _ := doc["budget"].(map[string]any)
-		if budget == nil {
-			budget = map[string]any{}
-		}
-		budget["total"] = *req.BudgetTotal
-		doc["budget"] = budget
+		reg.Budget.Total = *req.BudgetTotal
 	}
-	payload, err := json.Marshal(doc)
-	if err != nil {
-		return server.Workflow{}, err
-	}
-	if _, err := s.workflows.ReplaceItem(ctx, pk, name, payload, nil); err != nil {
-		return server.Workflow{}, err
-	}
-	return workflowFromMap(doc)
+	return s.UpsertWorkflow(ctx, reg)
 }
 
 func (s *Store) ListLeases(ctx context.Context) ([]server.Lease, error) {
@@ -663,14 +658,19 @@ func (s *Store) ReleaseLeaseByCallbackToken(ctx context.Context, token string) (
 		return server.Lease{}, err
 	}
 	if doc.State == "released" || doc.State == "expired" {
-		return leaseFromDoc(doc), nil
+		lease := leaseFromDoc(doc)
+		if boolValue(lease.Metadata["native_k8s"]) && !boolValue(lease.Metadata["test_slot_checkout"]) {
+			_ = s.releaseNativeSlotReservation(ctx, lease, time.Now().UTC())
+		}
+		return lease, nil
 	}
 	if boolValue(doc.Metadata["test_slot_checkout"]) {
 		return server.Lease{}, server.ErrUnsupported
 	}
 
+	now := time.Now().UTC()
 	doc.State = "released"
-	doc.ReleasedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	doc.ReleasedAt = now.Format(time.RFC3339Nano)
 	payload, err := json.Marshal(doc)
 	if err != nil {
 		return server.Lease{}, err
@@ -679,7 +679,11 @@ func (s *Store) ReleaseLeaseByCallbackToken(ctx context.Context, token string) (
 	if _, err := s.leases.ReplaceItem(ctx, partitionKey, doc.ID, payload, nil); err != nil {
 		return server.Lease{}, err
 	}
-	return leaseFromDoc(doc), nil
+	lease := leaseFromDoc(doc)
+	if boolValue(lease.Metadata["native_k8s"]) && !boolValue(lease.Metadata["test_slot_checkout"]) {
+		_ = s.releaseNativeSlotReservation(ctx, lease, now)
+	}
+	return lease, nil
 }
 
 func (s *Store) ListProjectRuns(ctx context.Context, project string, limit int) ([]server.RunReport, error) {
@@ -1387,8 +1391,10 @@ type testLeaseDefaultsDoc struct {
 
 type workflowDoc struct {
 	ID                  string         `json:"id"`
+	Kind                string         `json:"kind,omitempty"`
 	Project             string         `json:"project"`
 	Name                string         `json:"name"`
+	SchemaRef           string         `json:"schema_ref,omitempty"`
 	Phases              []phaseDoc     `json:"phases"`
 	PR                  prDoc          `json:"pr"`
 	Budget              budgetDoc      `json:"budget"`
@@ -1420,7 +1426,9 @@ type runDoc struct {
 	ID                  string         `json:"id"`
 	Project             string         `json:"project"`
 	Workflow            string         `json:"workflow"`
+	WorkflowSchemaRef   string         `json:"workflow_schema_ref,omitempty"`
 	RunNumber           *int           `json:"run_number"`
+	RunCycleNumber      *int           `json:"run_cycle_number,omitempty"`
 	RunDisplayNumber    *string        `json:"run_display_number"`
 	ParentRunID         *string        `json:"parent_run_id"`
 	RootRunID           *string        `json:"root_run_id"`
@@ -1432,13 +1440,15 @@ type runDoc struct {
 	IssueNumber         int            `json:"issue_number"`
 	PRNumber            *int           `json:"pr_number"`
 	State               string         `json:"state"`
+	QueueState          *string        `json:"queue_state,omitempty"`
+	AdmissionError      *string        `json:"admission_error,omitempty"`
+	SlotLeaseRef        *string        `json:"slot_lease_ref,omitempty"`
 	Attempts            []attemptDoc   `json:"attempts"`
 	CumulativeCostUSD   float64        `json:"cumulative_cost_usd"`
 	Budget              *budgetDoc     `json:"budget,omitempty"`
 	ValidationURL       *string        `json:"validation_url"`
 	ScreenshotsMarkdown *string        `json:"screenshots_markdown"`
 	AbortReason         *string        `json:"abort_reason"`
-	ClonedFromRunID     *string        `json:"cloned_from_run_id"`
 	EntrypointPhase     *string        `json:"entrypoint_phase,omitempty"`
 	TriggerSource       map[string]any `json:"trigger_source"`
 	CreatedAt           string         `json:"created_at"`
@@ -1501,7 +1511,6 @@ type attemptDoc struct {
 	CostUSD               *float64                          `json:"cost_usd"`
 	Decision              *string                           `json:"decision"`
 	LogArchiveURL         *string                           `json:"log_archive_url"`
-	SkippedFromRunID      *string                           `json:"skipped_from_run_id"`
 	PhaseOutputs          map[string]string                 `json:"phase_outputs,omitempty"`
 	JobCompletions        map[string]nativeJobCompletionDoc `json:"job_completions,omitempty"`
 	CancelRequestedAt     *string                           `json:"cancel_requested_at,omitempty"`
@@ -1623,6 +1632,7 @@ func workflowFromDoc(doc workflowDoc) server.Workflow {
 		ID:                  firstNonEmpty(doc.ID, doc.Name),
 		Project:             doc.Project,
 		Name:                doc.Name,
+		SchemaRef:           firstNonEmpty(doc.SchemaRef, workflowSchemaRef(doc)),
 		Phases:              phases,
 		PR:                  prFromDoc(doc.PR),
 		Budget:              budget.Config{Total: defaultBudgetTotal(doc.Budget.Total)},
@@ -1807,11 +1817,12 @@ func runNumberMap(docs []runDoc) map[string]int {
 	assigned := map[string]int{}
 	used := map[int]bool{}
 	for _, doc := range docs {
-		if doc.RunNumber == nil || *doc.RunNumber <= 0 || used[*doc.RunNumber] {
+		n := runLedgerNumber(doc)
+		if n <= 0 || used[n] {
 			continue
 		}
-		assigned[doc.ID] = *doc.RunNumber
-		used[*doc.RunNumber] = true
+		assigned[doc.ID] = n
+		used[n] = true
 	}
 	next := 1
 	for _, doc := range docs {
@@ -1825,6 +1836,16 @@ func runNumberMap(docs []runDoc) map[string]int {
 		used[next] = true
 	}
 	return assigned
+}
+
+func runLedgerNumber(doc runDoc) int {
+	if doc.CycleNumber != nil && *doc.CycleNumber > 0 {
+		return *doc.CycleNumber
+	}
+	if doc.RunNumber != nil && *doc.RunNumber > 0 {
+		return *doc.RunNumber
+	}
+	return 0
 }
 
 func runReportFromDoc(doc runDoc, lineageByID map[string]string) server.RunReport {
@@ -1852,9 +1873,6 @@ func runReportFromDoc(doc runDoc, lineageByID map[string]string) server.RunRepor
 		currentPhase = optionalNonEmptyStringPtr(doc.Attempts[len(doc.Attempts)-1].Phase)
 	}
 	parentID := doc.ParentRunID
-	if parentID == nil || *parentID == "" {
-		parentID = doc.ClonedFromRunID
-	}
 	rootID := doc.RootRunID
 	if (rootID == nil || *rootID == "") && parentID != nil && *parentID != "" {
 		rootID = parentID
@@ -1864,7 +1882,7 @@ func runReportFromDoc(doc runDoc, lineageByID map[string]string) server.RunRepor
 		if value := stringValue(doc.TriggerSource["kind"]); value != "" {
 			originKind = optionalNonEmptyStringPtr(value)
 		} else {
-			originKind = optionalNonEmptyStringPtr("resume")
+			originKind = optionalNonEmptyStringPtr("cycle")
 		}
 	}
 	return server.RunReport{
@@ -1880,6 +1898,11 @@ func runReportFromDoc(doc runDoc, lineageByID map[string]string) server.RunRepor
 		EntrypointPhase:     emptyStringNil(doc.EntrypointPhase),
 		IsCycle:             doc.IsCycle,
 		CycleNumber:         doc.CycleNumber,
+		RunCycleNumber:      doc.RunCycleNumber,
+		WorkflowSchemaRef:   doc.WorkflowSchemaRef,
+		QueueState:          emptyStringNil(doc.QueueState),
+		AdmissionError:      emptyStringNil(doc.AdmissionError),
+		SlotLeaseRef:        emptyStringNil(doc.SlotLeaseRef),
 		Workflow:            doc.Workflow,
 		IssueRef:            optionalNonEmptyStringPtr(publicids.IssueRef(doc.Project, positiveIssueNumberPtr(doc.IssueNumber))),
 		IssueRepo:           optionalNonEmptyStringPtr(doc.IssueRepo),
@@ -1933,7 +1956,6 @@ func runReportAttemptFromDoc(doc attemptDoc, lineageByID map[string]string) serv
 		Decision:           emptyStringNil(doc.Decision),
 		CostUSD:            cost,
 		LogArchiveURL:      emptyStringNil(doc.LogArchiveURL),
-		SkippedFromRunRef:  refPtr(lineageByID, doc.SkippedFromRunID),
 		PhaseOutputs:       mapStringOrEmpty(doc.PhaseOutputs),
 		JobCompletions:     jobCompletions,
 	}
@@ -2014,6 +2036,70 @@ func workflowDocFromRegister(req server.WorkflowRegister, createdAt string) work
 		Metadata:            mapOrEmpty(req.Metadata),
 		CreatedAt:           createdAt,
 	}
+}
+
+func workflowRegisterFromDoc(doc workflowDoc) server.WorkflowRegister {
+	phases := make([]server.PhaseSpec, 0, len(doc.Phases))
+	for _, phase := range doc.Phases {
+		phases = append(phases, phaseFromDoc(phase))
+	}
+	return server.WorkflowRegister{
+		Project:             doc.Project,
+		Name:                doc.Name,
+		Phases:              phases,
+		PR:                  prFromDoc(doc.PR),
+		Budget:              budget.Config{Total: defaultBudgetTotal(doc.Budget.Total)},
+		DefaultRequirements: mapOrEmpty(doc.DefaultRequirements),
+		Metadata:            mapOrEmpty(doc.Metadata),
+	}
+}
+
+func workflowSchemaRef(doc workflowDoc) string {
+	canonical := struct {
+		Project             string         `json:"project"`
+		Name                string         `json:"name"`
+		Phases              []phaseDoc     `json:"phases"`
+		PR                  prDoc          `json:"pr"`
+		Budget              budgetDoc      `json:"budget"`
+		DefaultRequirements map[string]any `json:"defaultRequirements"`
+		Metadata            map[string]any `json:"metadata"`
+	}{
+		Project:             doc.Project,
+		Name:                doc.Name,
+		Phases:              doc.Phases,
+		PR:                  doc.PR,
+		Budget:              doc.Budget,
+		DefaultRequirements: mapOrEmpty(doc.DefaultRequirements),
+		Metadata:            mapOrEmpty(doc.Metadata),
+	}
+	payload, _ := json.Marshal(canonical)
+	sum := sha256.Sum256(payload)
+	return fmt.Sprintf("wfs_%x", sum[:8])
+}
+
+func workflowSchemaDocID(name, schemaRef string) string {
+	return "schema:" + name + ":" + schemaRef
+}
+
+func workflowSchemaDocFromWorkflow(doc workflowDoc) workflowDoc {
+	doc.ID = workflowSchemaDocID(doc.Name, doc.SchemaRef)
+	doc.Kind = workflowSchemaKind
+	return doc
+}
+
+func isWorkflowSchemaDoc(doc workflowDoc) bool {
+	return doc.Kind == workflowSchemaKind || strings.HasPrefix(doc.ID, "schema:")
+}
+
+func (s *Store) createWorkflowSchemaIfMissing(ctx context.Context, pk azcosmos.PartitionKey, doc workflowDoc) error {
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	if _, err := s.workflows.CreateItem(ctx, pk, payload, nil); err != nil && !isCosmosStatus(err, http.StatusConflict) {
+		return err
+	}
+	return nil
 }
 
 func phaseDocFromSpec(phase server.PhaseSpec) phaseDoc {
@@ -3934,7 +4020,36 @@ func (s *Store) acquireNativeLease(ctx context.Context, req server.LeaseAcquireR
 		return server.Lease{}, fmt.Errorf("create native lease doc: %w", err)
 	}
 	lease := leaseFromDoc(doc)
+	if err := s.reserveNativeSlotForLease(ctx, lease, now); err != nil {
+		_, _ = s.CancelLeaseByRef(ctx, req.Project, server.LeasePublicRefFromLease(lease))
+		if errors.Is(err, server.ErrInvalidSlotTransition) || errors.Is(err, server.ErrPreconditionFailed) {
+			return server.Lease{}, server.ErrUnavailable
+		}
+		return server.Lease{}, err
+	}
 	return lease, nil
+}
+
+func (s *Store) reserveNativeSlotForLease(ctx context.Context, lease server.Lease, now time.Time) error {
+	slot := nativeSlotIndex(lease.Metadata)
+	if slot == nil {
+		return fmt.Errorf("native lease missing native_slot_index")
+	}
+	ref := server.LeasePublicRefFromLease(lease)
+	if strings.TrimSpace(ref) == "" {
+		return fmt.Errorf("native lease missing public ref")
+	}
+	const maxRetries = 5
+	for i := 0; i < maxRetries; i++ {
+		_, err := s.UpdateIfMatch(ctx, lease.Project, *slot, func(s server.Slot) (server.Slot, error) {
+			return s.MarkReserved(now, ref)
+		})
+		if errors.Is(err, server.ErrPreconditionFailed) {
+			continue
+		}
+		return err
+	}
+	return server.ErrPreconditionFailed
 }
 
 func (s *Store) availableNativeSlot(ctx context.Context, project string) (*int, error) {
@@ -4030,7 +4145,7 @@ func selectReadySlotIndices(slots []server.Slot, count int) []int {
 		if slot.SlotIndex < 1 || slot.SlotIndex > count {
 			continue
 		}
-		if slot.State == server.SlotStateProvisioned {
+		if slot.State == server.SlotStateProvisioned && slot.ActiveLeaseRef == nil {
 			out = append(out, slot.SlotIndex)
 		}
 	}
@@ -4103,10 +4218,51 @@ func (s *Store) CancelLeaseByRef(ctx context.Context, project, ref string) (serv
 	if _, err := s.leases.ReplaceItem(ctx, leasePK, found.ID, payload, nil); err != nil {
 		return server.CancelLeaseResult{}, fmt.Errorf("release lease: %w", err)
 	}
+	lease := leaseFromDoc(*found)
+	if boolValue(lease.Metadata["native_k8s"]) && !boolValue(lease.Metadata["test_slot_checkout"]) {
+		_ = s.releaseNativeSlotReservation(ctx, lease, time.Now().UTC())
+	}
 	return server.CancelLeaseResult{
 		State:    "no_active_run",
 		LeaseRef: publicRef,
 	}, nil
+}
+
+func (s *Store) releaseNativeSlotReservation(ctx context.Context, lease server.Lease, now time.Time) error {
+	slot := nativeSlotIndex(lease.Metadata)
+	if slot == nil {
+		return nil
+	}
+	ref := server.LeasePublicRefFromLease(lease)
+	const maxRetries = 5
+	for i := 0; i < maxRetries; i++ {
+		_, err := s.UpdateIfMatch(ctx, lease.Project, *slot, func(s server.Slot) (server.Slot, error) {
+			return s.MarkReservationReleased(now, ref)
+		})
+		if errors.Is(err, server.ErrPreconditionFailed) {
+			continue
+		}
+		return err
+	}
+	return server.ErrPreconditionFailed
+}
+
+func (s *Store) ReadLeaseByRef(ctx context.Context, project, ref string) (server.Lease, error) {
+	var docs []leaseDoc
+	if err := singlePartitionQuery(
+		ctx, s.leases,
+		azcosmos.NewPartitionKeyString(project),
+		"SELECT * FROM c WHERE c.project = @p",
+		[]azcosmos.QueryParameter{{Name: "@p", Value: project}},
+		&docs,
+	); err != nil {
+		return server.Lease{}, fmt.Errorf("query leases: %w", err)
+	}
+	found := selectLeaseDocByPublicRef(docs, ref)
+	if found == nil {
+		return server.Lease{}, server.ErrNotFound
+	}
+	return leaseFromDoc(*found), nil
 }
 
 func (s *Store) UpdateLeaseTTLByRef(ctx context.Context, project, ref string, ttlSeconds int) (server.Lease, error) {
@@ -4496,6 +4652,37 @@ func (s *Store) GetWorkflowByName(ctx context.Context, project, name string) (*s
 	return &w, nil
 }
 
+func (s *Store) GetWorkflowBySchemaRef(ctx context.Context, project, schemaRef string) (*server.Workflow, error) {
+	if strings.TrimSpace(schemaRef) == "" {
+		return nil, nil
+	}
+	var docs []workflowDoc
+	if err := singlePartitionQuery(
+		ctx,
+		s.workflows,
+		azcosmos.NewPartitionKeyString(project),
+		"SELECT * FROM c WHERE c.project = @p AND c.schema_ref = @schema_ref",
+		[]azcosmos.QueryParameter{
+			{Name: "@p", Value: project},
+			{Name: "@schema_ref", Value: schemaRef},
+		},
+		&docs,
+	); err != nil {
+		return nil, err
+	}
+	for _, doc := range docs {
+		if isWorkflowSchemaDoc(doc) {
+			w := workflowFromDoc(doc)
+			return &w, nil
+		}
+	}
+	if len(docs) > 0 {
+		w := workflowFromDoc(docs[0])
+		return &w, nil
+	}
+	return nil, nil
+}
+
 // ReadRunForReplay reads a run document and returns the minimal fields
 // needed by the replay decision engine.
 func (s *Store) ReadRunForReplay(ctx context.Context, project, runID string) (server.RunReplayData, error) {
@@ -4511,6 +4698,36 @@ func (s *Store) ReadRunForReplay(ctx context.Context, project, runID string) (se
 	if err := json.Unmarshal(resp.Value, &doc); err != nil {
 		return server.RunReplayData{}, err
 	}
+	return runReplayDataFromDoc(doc), nil
+}
+
+func (s *Store) ListQueuedRunCycles(ctx context.Context, project string, limit int) ([]server.RunReplayData, error) {
+	var docs []runDoc
+	if err := singlePartitionQuery(
+		ctx,
+		s.runs,
+		azcosmos.NewPartitionKeyString(project),
+		"SELECT * FROM c WHERE c.project = @p AND c.state = @state AND c.queue_state = @queue_state ORDER BY c.created_at ASC",
+		[]azcosmos.QueryParameter{
+			{Name: "@p", Value: project},
+			{Name: "@state", Value: "queued"},
+			{Name: "@queue_state", Value: "queued"},
+		},
+		&docs,
+	); err != nil {
+		return nil, err
+	}
+	if limit > 0 && len(docs) > limit {
+		docs = docs[:limit]
+	}
+	out := make([]server.RunReplayData, 0, len(docs))
+	for _, doc := range docs {
+		out = append(out, runReplayDataFromDoc(doc))
+	}
+	return out, nil
+}
+
+func runReplayDataFromDoc(doc runDoc) server.RunReplayData {
 	attempts := make([]server.RunAttemptData, 0, len(doc.Attempts))
 	for _, a := range doc.Attempts {
 		conclusion := ""
@@ -4542,18 +4759,24 @@ func (s *Store) ReadRunForReplay(ctx context.Context, project, runID string) (se
 		ID:                doc.ID,
 		Project:           doc.Project,
 		WorkflowName:      doc.Workflow,
+		WorkflowSchemaRef: doc.WorkflowSchemaRef,
 		Attempts:          attempts,
 		CumulativeCostUSD: doc.CumulativeCostUSD,
 		Budget:            bdg,
 		IssueNumber:       doc.IssueNumber,
 		RunNumber:         doc.RunNumber,
+		CycleNumber:       doc.CycleNumber,
+		RunCycleNumber:    doc.RunCycleNumber,
 		RunDisplayNumber:  doc.RunDisplayNumber,
 		IssueRepo:         doc.IssueRepo,
 		CallbackToken:     doc.CallbackToken,
 		IssueLockHolderID: doc.IssueLockHolderID,
 		PRNumber:          doc.PRNumber,
 		PRLockHolderID:    doc.PRLockHolderID,
-	}, nil
+		SlotLeaseRef:      doc.SlotLeaseRef,
+		EntrypointPhase:   doc.EntrypointPhase,
+		TriggerSource:     mapOrEmpty(doc.TriggerSource),
+	}
 }
 
 func (s *Store) UpsertWorkflowFromRegister(ctx context.Context, reg server.WorkflowRegister) (server.Workflow, error) {
@@ -4807,61 +5030,6 @@ func (s *Store) FindRunForPR(ctx context.Context, repo string, prNumber int) (se
 	return s.ReadRunForReplay(ctx, docs[0].Project, docs[0].ID)
 }
 
-func (s *Store) ReopenRunForTriage(ctx context.Context, req server.TriageReopenRequest) (server.RunReplayData, int, error) {
-	pk := azcosmos.NewPartitionKeyString(req.Project)
-	const maxRetries = 5
-	for i := 0; i < maxRetries; i++ {
-		resp, err := s.runs.ReadItem(ctx, pk, req.RunID, nil)
-		if isCosmosStatus(err, http.StatusNotFound) {
-			return server.RunReplayData{}, 0, server.ErrNotFound
-		}
-		if err != nil {
-			return server.RunReplayData{}, 0, err
-		}
-		var raw map[string]any
-		if err := json.Unmarshal(resp.Value, &raw); err != nil {
-			return server.RunReplayData{}, 0, err
-		}
-		attempts, _ := raw["attempts"].([]any)
-		nextIdx := len(attempts)
-		if len(attempts) > 0 {
-			if last, ok := attempts[len(attempts)-1].(map[string]any); ok {
-				if ai, ok := last["attempt_index"].(float64); ok {
-					nextIdx = int(ai) + 1
-				}
-			}
-		}
-		attempt := map[string]any{
-			"attempt_index":     nextIdx,
-			"phase":             req.PhaseName,
-			"phase_kind":        req.PhaseKind,
-			"workflow_filename": req.WorkflowFilename,
-			"dispatched_at":     time.Now().UTC().Format(time.RFC3339Nano),
-		}
-		raw["attempts"] = append(attempts, attempt)
-		raw["state"] = "in_progress"
-		delete(raw, "abort_reason")
-		raw["issue_lock_holder_id"] = req.IssueLockHolderID
-		raw["pr_lock_holder_id"] = req.PRLockHolderID
-		raw["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
-
-		payload, err := json.Marshal(raw)
-		if err != nil {
-			return server.RunReplayData{}, 0, err
-		}
-		etag := azcore.ETag(resp.ETag)
-		if _, err := s.runs.ReplaceItem(ctx, pk, req.RunID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
-			if isCosmosStatus(err, http.StatusPreconditionFailed) {
-				continue
-			}
-			return server.RunReplayData{}, 0, err
-		}
-		run, err := s.ReadRunForReplay(ctx, req.Project, req.RunID)
-		return run, nextIdx, err
-	}
-	return server.RunReplayData{}, 0, fmt.Errorf("reopen run for triage: too many conflicts")
-}
-
 // ---- RunMutationStore implementation ----
 
 // ReadRunIDForNumber resolves an issue-scoped run number to (runID, runRef).
@@ -4922,7 +5090,7 @@ func (s *Store) AbortRunByID(ctx context.Context, project, runID, reason string)
 		return server.AbortRunResult{}, err
 	}
 
-	terminal := doc.State == "passed" || doc.State == "review_required" || doc.State == "aborted"
+	terminal := doc.State == "passed" || doc.State == "review_required" || doc.State == "aborted" || doc.State == "recycled"
 
 	// Compute run_ref for the result.
 	siblings, _ := s.issueRunDocs(ctx, project, doc.IssueNumber)
@@ -4945,6 +5113,7 @@ func (s *Store) AbortRunByID(ctx context.Context, project, runID, reason string)
 	}
 	raw["state"] = "aborted"
 	raw["abort_reason"] = reason
+	delete(raw, "queue_state")
 	raw["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
 
 	payload, err := json.Marshal(raw)
@@ -5715,6 +5884,7 @@ func (s *Store) SetRunTerminalState(ctx context.Context, project, runID, state s
 		return server.AbortRunResult{}, err
 	}
 	raw["state"] = state
+	delete(raw, "queue_state")
 	raw["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
 	if abortReason != nil {
 		raw["abort_reason"] = *abortReason
@@ -5798,6 +5968,67 @@ func (s *Store) AppendRunAttempt(ctx context.Context, project, runID, phase, pha
 		return nextIdx, nil
 	}
 	return 0, fmt.Errorf("append run attempt: too many etag conflicts")
+}
+
+func (s *Store) StartRunCycle(ctx context.Context, req server.StartRunCycleRequest) (int, error) {
+	pk := azcosmos.NewPartitionKeyString(req.Project)
+	const maxRetries = 5
+	for i := 0; i < maxRetries; i++ {
+		resp, err := s.runs.ReadItem(ctx, pk, req.RunID, nil)
+		if isCosmosStatus(err, http.StatusNotFound) {
+			return 0, server.ErrNotFound
+		}
+		if err != nil {
+			return 0, err
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(resp.Value, &raw); err != nil {
+			return 0, err
+		}
+		if stringValue(raw["state"]) != "queued" {
+			return 0, server.ErrConflict
+		}
+		attempts, _ := raw["attempts"].([]any)
+		if len(attempts) > 0 {
+			return 0, server.ErrConflict
+		}
+		nextIdx := len(attempts)
+		if len(attempts) > 0 {
+			if last, ok := attempts[len(attempts)-1].(map[string]any); ok {
+				if ai, ok := last["attempt_index"].(float64); ok {
+					nextIdx = int(ai) + 1
+				}
+			}
+		}
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		newAttempt := map[string]any{
+			"attempt_index":     nextIdx,
+			"phase":             req.PhaseName,
+			"phase_kind":        req.PhaseKind,
+			"workflow_filename": req.WorkflowFilename,
+			"dispatched_at":     now,
+		}
+		raw["attempts"] = append(attempts, newAttempt)
+		raw["state"] = "in_progress"
+		raw["queue_state"] = "admitted"
+		raw["slot_lease_ref"] = req.SlotLeaseRef
+		delete(raw, "admission_error")
+		raw["updated_at"] = now
+
+		payload, err := json.Marshal(raw)
+		if err != nil {
+			return 0, err
+		}
+		etag := azcore.ETag(resp.ETag)
+		if _, err := s.runs.ReplaceItem(ctx, pk, req.RunID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
+			if isCosmosStatus(err, http.StatusPreconditionFailed) {
+				continue
+			}
+			return 0, err
+		}
+		return nextIdx, nil
+	}
+	return 0, fmt.Errorf("start run cycle: too many etag conflicts")
 }
 
 // ---------------------------------------------------------------------------
@@ -5931,34 +6162,45 @@ func (s *Store) ListProjectWorkflows(ctx context.Context, project string) ([]ser
 	}
 	rows := make([]server.Workflow, 0, len(docs))
 	for _, doc := range docs {
+		if isWorkflowSchemaDoc(doc) {
+			continue
+		}
 		rows = append(rows, workflowFromDoc(doc))
 	}
 	return rows, nil
 }
 
-// CreateRun creates a new run document with its first PhaseAttempt. The caller must
-// hold the issue lock before calling this so the run-number allocation is serialized.
+// CreateRun creates a queued first cycle for a new issue run. The caller must
+// hold the issue lock before calling this so cycle/run-number allocation is serialized.
 func (s *Store) CreateRun(ctx context.Context, req server.CreateRunRequest) (server.CreatedRun, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
-	// Allocate next run number under the issue lock.
+	// Allocate the flat cycle ledger number and the logical run number under
+	// the issue lock.
 	docs, err := s.issueRunDocs(ctx, req.Project, req.IssueNumber)
 	if err != nil {
 		return server.CreatedRun{}, fmt.Errorf("query issue runs: %w", err)
 	}
 	numbers := runNumberMap(docs)
-	runNumber := 1
+	cycleNumber := 1
 	for _, n := range numbers {
-		if n >= runNumber {
-			runNumber = n + 1
+		if n >= cycleNumber {
+			cycleNumber = n + 1
 		}
 	}
+	runNumber := 1
+	for _, doc := range docs {
+		if doc.RunNumber != nil && *doc.RunNumber >= runNumber {
+			runNumber = *doc.RunNumber + 1
+		}
+	}
+	runCycle := 1
 
 	runID := uuid.New().String()
 	callbackToken := uuid.New().String()[:32]
-	runDisplay := strconv.Itoa(runNumber)
-	cycleNum := 0
+	runDisplay := fmt.Sprintf("%d.%d", runNumber, runCycle)
 	budgetDoc := &budgetDoc{Total: req.Budget.Total}
+	queueState := "queued"
 
 	originKind := "dispatch"
 	if req.TriggerSource != nil {
@@ -5968,29 +6210,24 @@ func (s *Store) CreateRun(ctx context.Context, req server.CreateRunRequest) (ser
 	}
 
 	doc := runDoc{
-		ID:               runID,
-		Project:          req.Project,
-		Workflow:         req.Workflow,
-		RunNumber:        &runNumber,
-		RunDisplayNumber: &runDisplay,
-		RootRunID:        &runID,
-		OriginKind:       &originKind,
-		IsCycle:          false,
-		CycleNumber:      &cycleNum,
-		IssueID:          req.IssueID,
-		IssueRepo:        req.IssueRepo,
-		IssueNumber:      req.IssueNumber,
-		State:            "in_progress",
-		Budget:           budgetDoc,
-		Attempts: []attemptDoc{
-			{
-				AttemptIndex:     0,
-				Phase:            req.InitialPhaseName,
-				PhaseKind:        req.InitialPhaseKind,
-				WorkflowFilename: req.InitialWorkflowFilename,
-				DispatchedAt:     now,
-			},
-		},
+		ID:                runID,
+		Project:           req.Project,
+		Workflow:          req.Workflow,
+		WorkflowSchemaRef: req.WorkflowSchemaRef,
+		RunNumber:         &runNumber,
+		CycleNumber:       &cycleNumber,
+		RunCycleNumber:    &runCycle,
+		RunDisplayNumber:  &runDisplay,
+		RootRunID:         &runID,
+		OriginKind:        &originKind,
+		IsCycle:           true,
+		IssueID:           req.IssueID,
+		IssueRepo:         req.IssueRepo,
+		IssueNumber:       req.IssueNumber,
+		State:             "queued",
+		QueueState:        &queueState,
+		Budget:            budgetDoc,
+		Attempts:          []attemptDoc{},
 		CumulativeCostUSD: 0.0,
 		TriggerSource:     req.TriggerSource,
 		CallbackToken:     &callbackToken,
@@ -6010,6 +6247,131 @@ func (s *Store) CreateRun(ctx context.Context, req server.CreateRunRequest) (ser
 	return server.CreatedRun{
 		ID:            runID,
 		RunNumber:     runNumber,
+		CycleNumber:   cycleNumber,
+		RunCycle:      runCycle,
+		RunDisplay:    runDisplay,
+		CallbackToken: callbackToken,
+	}, nil
+}
+
+func (s *Store) CreateRecycleCycle(ctx context.Context, req server.CreateRecycleCycleRequest) (server.CreatedRun, error) {
+	pk := azcosmos.NewPartitionKeyString(req.Parent.Project)
+	parentResp, err := s.runs.ReadItem(ctx, pk, req.Parent.ID, nil)
+	if isCosmosStatus(err, http.StatusNotFound) {
+		return server.CreatedRun{}, server.ErrNotFound
+	}
+	if err != nil {
+		return server.CreatedRun{}, err
+	}
+	var parent runDoc
+	if err := json.Unmarshal(parentResp.Value, &parent); err != nil {
+		return server.CreatedRun{}, err
+	}
+	if parent.SlotLeaseRef == nil || *parent.SlotLeaseRef == "" {
+		return server.CreatedRun{}, fmt.Errorf("parent cycle has no slot lease to recycle")
+	}
+
+	docs, err := s.issueRunDocs(ctx, parent.Project, parent.IssueNumber)
+	if err != nil {
+		return server.CreatedRun{}, fmt.Errorf("query issue runs: %w", err)
+	}
+	numbers := runNumberMap(docs)
+	cycleNumber := 1
+	for _, n := range numbers {
+		if n >= cycleNumber {
+			cycleNumber = n + 1
+		}
+	}
+	runNumber := runLedgerNumber(parent)
+	if parent.RunNumber != nil && *parent.RunNumber > 0 {
+		runNumber = *parent.RunNumber
+	}
+	if runNumber <= 0 {
+		runNumber = cycleNumber
+	}
+	runCycle := 1
+	if parent.RunCycleNumber != nil && *parent.RunCycleNumber > 0 {
+		runCycle = *parent.RunCycleNumber + 1
+	} else if parent.CycleNumber != nil && parent.IsCycle && *parent.CycleNumber > 0 {
+		runCycle = *parent.CycleNumber + 1
+	} else if parent.RunDisplayNumber != nil {
+		if parts := strings.Split(*parent.RunDisplayNumber, "."); len(parts) == 2 {
+			if parsed, err := strconv.Atoi(parts[1]); err == nil && parsed > 0 {
+				runCycle = parsed + 1
+			}
+		}
+	}
+	runDisplay := fmt.Sprintf("%d.%d", runNumber, runCycle)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	recycledState := "recycled"
+	parent.State = recycledState
+	parent.QueueState = nil
+	parent.UpdatedAt = now
+	parentPayload, err := json.Marshal(parent)
+	if err != nil {
+		return server.CreatedRun{}, err
+	}
+	parentETag := azcore.ETag(parentResp.ETag)
+	if _, err := s.runs.ReplaceItem(ctx, pk, parent.ID, parentPayload, &azcosmos.ItemOptions{IfMatchEtag: &parentETag}); err != nil {
+		return server.CreatedRun{}, err
+	}
+
+	runID := uuid.New().String()
+	callbackToken := uuid.New().String()[:32]
+	originKind := "recycle_policy"
+	if req.TriggerSource != nil {
+		if k, ok := req.TriggerSource["kind"].(string); ok && k != "" {
+			originKind = k
+		}
+	}
+	rootRunID := parent.ID
+	if parent.RootRunID != nil && *parent.RootRunID != "" {
+		rootRunID = *parent.RootRunID
+	}
+	queueState := "queued"
+	doc := runDoc{
+		ID:                runID,
+		Project:           parent.Project,
+		Workflow:          parent.Workflow,
+		WorkflowSchemaRef: firstNonEmpty(req.WorkflowSchemaRef, parent.WorkflowSchemaRef),
+		RunNumber:         &runNumber,
+		CycleNumber:       &cycleNumber,
+		RunCycleNumber:    &runCycle,
+		RunDisplayNumber:  &runDisplay,
+		ParentRunID:       &parent.ID,
+		RootRunID:         &rootRunID,
+		OriginKind:        &originKind,
+		IsCycle:           true,
+		IssueID:           parent.IssueID,
+		IssueRepo:         parent.IssueRepo,
+		IssueNumber:       parent.IssueNumber,
+		PRNumber:          parent.PRNumber,
+		State:             "queued",
+		QueueState:        &queueState,
+		SlotLeaseRef:      parent.SlotLeaseRef,
+		EntrypointPhase:   optionalNonEmptyStringPtr(req.TargetPhaseName),
+		Budget:            parent.Budget,
+		Attempts:          []attemptDoc{},
+		CumulativeCostUSD: parent.CumulativeCostUSD,
+		TriggerSource:     req.TriggerSource,
+		CallbackToken:     &callbackToken,
+		IssueLockHolderID: parent.IssueLockHolderID,
+		PRLockHolderID:    parent.PRLockHolderID,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return server.CreatedRun{}, err
+	}
+	if _, err := s.runs.CreateItem(ctx, pk, payload, nil); err != nil {
+		return server.CreatedRun{}, fmt.Errorf("create recycle cycle doc: %w", err)
+	}
+	return server.CreatedRun{
+		ID:            runID,
+		RunNumber:     runNumber,
+		CycleNumber:   cycleNumber,
+		RunCycle:      runCycle,
 		RunDisplay:    runDisplay,
 		CallbackToken: callbackToken,
 	}, nil
@@ -6037,264 +6399,4 @@ func (s *Store) ReadRunByNumber(ctx context.Context, project string, issueNumber
 		}
 	}
 	return "", server.ErrNotFound
-}
-
-// ReadRunForResume reads a run by ID and returns the minimal shape needed for resume dispatch.
-func (s *Store) ReadRunForResume(ctx context.Context, project, runID string) (server.RunForResume, error) {
-	pk := azcosmos.NewPartitionKeyString(project)
-	resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
-	if isCosmosStatus(err, http.StatusNotFound) {
-		return server.RunForResume{}, server.ErrNotFound
-	}
-	if err != nil {
-		return server.RunForResume{}, err
-	}
-	var doc runDoc
-	if err := json.Unmarshal(resp.Value, &doc); err != nil {
-		return server.RunForResume{}, err
-	}
-	attempts := make([]server.AttemptForResume, 0, len(doc.Attempts))
-	for _, a := range doc.Attempts {
-		attempts = append(attempts, server.AttemptForResume{
-			Phase:        a.Phase,
-			PhaseOutputs: a.PhaseOutputs,
-		})
-	}
-	var bdg budget.Config
-	if doc.Budget != nil {
-		bdg.Total = doc.Budget.Total
-	}
-	return server.RunForResume{
-		ID:               doc.ID,
-		Project:          doc.Project,
-		Workflow:         doc.Workflow,
-		State:            doc.State,
-		IssueID:          doc.IssueID,
-		IssueRepo:        doc.IssueRepo,
-		IssueNumber:      doc.IssueNumber,
-		ValidationURL:    doc.ValidationURL,
-		Budget:           bdg,
-		RootRunID:        doc.RootRunID,
-		RunDisplayNumber: doc.RunDisplayNumber,
-		IsCycle:          doc.IsCycle,
-		Attempts:         attempts,
-	}, nil
-}
-
-// CreateResumedRun creates a new run from priorRun, skipping phases before entrypoint.
-// Skipped phases carry their phase_outputs forward. The entrypoint phase gets a fresh
-// attempt (attempt_index = entrypoint_index) with dispatched_at set.
-// Returns an error wrapping server.ErrOutputsMissing if a skipped phase has no outputs.
-func (s *Store) CreateResumedRun(ctx context.Context, req server.CreateResumedRunRequest) (server.CreatedRun, error) {
-	prior := req.PriorRun
-	wf := req.Workflow
-
-	// Find entrypoint phase index and validate.
-	entrypointIndex := -1
-	for i, p := range wf.Phases {
-		if p.Name == req.EntrypointPhase {
-			entrypointIndex = i
-			break
-		}
-	}
-	if entrypointIndex < 0 {
-		return server.CreatedRun{}, fmt.Errorf("entrypoint phase %q not found in workflow", req.EntrypointPhase)
-	}
-
-	// Collect last attempt per phase from prior run.
-	priorAttemptByPhase := map[string]server.AttemptForResume{}
-	for _, a := range prior.Attempts {
-		priorAttemptByPhase[a.Phase] = a
-	}
-
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-
-	// Build skipped attempts for all phases before the entrypoint.
-	skippedAttempts := make([]attemptDoc, 0, entrypointIndex)
-	for idx, phase := range wf.Phases[:entrypointIndex] {
-		prior, ok := priorAttemptByPhase[phase.Name]
-		if !ok {
-			return server.CreatedRun{}, fmt.Errorf(
-				"%w: phase %q (skipped before entrypoint %q) has no attempts on prior run %s",
-				server.ErrOutputsMissing, phase.Name, req.EntrypointPhase, req.PriorRun.ID,
-			)
-		}
-		wfFilename := phase.WorkflowFilename
-		if wfFilename == "" {
-			phaseKind := phase.Kind
-			if phaseKind == "" {
-				phaseKind = "k8s_job"
-			}
-			wfFilename = fmt.Sprintf("%s:%s", phaseKind, phase.Name)
-		}
-		conclusion := "success"
-		priorRunID := req.PriorRun.ID
-		skippedAttempts = append(skippedAttempts, attemptDoc{
-			AttemptIndex:     idx,
-			Phase:            phase.Name,
-			PhaseKind:        phase.Kind,
-			WorkflowFilename: wfFilename,
-			DispatchedAt:     now,
-			CompletedAt:      now,
-			Conclusion:       &conclusion,
-			PhaseOutputs:     prior.PhaseOutputs,
-			SkippedFromRunID: &priorRunID,
-		})
-	}
-
-	// Entrypoint phase attempt.
-	entryPhase := wf.Phases[entrypointIndex]
-	entryKind := entryPhase.Kind
-	if entryKind == "" {
-		entryKind = "k8s_job"
-	}
-	entryFilename := entryPhase.WorkflowFilename
-	if entryFilename == "" {
-		entryFilename = fmt.Sprintf("%s:%s", entryKind, entryPhase.Name)
-	}
-	entrypointAttempt := attemptDoc{
-		AttemptIndex:     entrypointIndex,
-		Phase:            entryPhase.Name,
-		PhaseKind:        entryKind,
-		WorkflowFilename: entryFilename,
-		DispatchedAt:     now,
-	}
-	allAttempts := append(skippedAttempts, entrypointAttempt)
-
-	// Allocate run number and cycle display number.
-	docs, err := s.issueRunDocs(ctx, prior.Project, prior.IssueNumber)
-	if err != nil {
-		return server.CreatedRun{}, fmt.Errorf("query issue runs: %w", err)
-	}
-	numbers := runNumberMap(docs)
-	runNumber := 1
-	for _, n := range numbers {
-		if n >= runNumber {
-			runNumber = n + 1
-		}
-	}
-
-	// Cycle display: "{rootDisplay}.{cycleN}".
-	rootRunID := prior.ID
-	if prior.RootRunID != nil && *prior.RootRunID != "" {
-		rootRunID = *prior.RootRunID
-	}
-	rootDisplay := ""
-	if prior.RunDisplayNumber != nil {
-		rootDisplay = *prior.RunDisplayNumber
-	}
-	if prior.IsCycle && rootDisplay != "" {
-		// Strip any existing suffix (e.g. "3.2" â†’ "3").
-		if i := strings.Index(rootDisplay, "."); i >= 0 {
-			rootDisplay = rootDisplay[:i]
-		}
-	}
-	if rootDisplay == "" {
-		rootDisplay = strconv.Itoa(runNumber - 1)
-	}
-	prefix := rootDisplay + "."
-	maxCycle := 0
-	for _, doc := range docs {
-		if doc.RootRunID == nil && doc.ID != rootRunID {
-			continue
-		}
-		if doc.RootRunID != nil && *doc.RootRunID != rootRunID && doc.ID != rootRunID {
-			continue
-		}
-		display := ""
-		if doc.RunDisplayNumber != nil {
-			display = *doc.RunDisplayNumber
-		}
-		if !strings.HasPrefix(display, prefix) {
-			continue
-		}
-		suffix := display[len(prefix):]
-		if n, err2 := strconv.Atoi(suffix); err2 == nil && n > maxCycle {
-			maxCycle = n
-		}
-	}
-	cycleNumber := maxCycle + 1
-	runDisplay := fmt.Sprintf("%s.%d", rootDisplay, cycleNumber)
-
-	runID := uuid.New().String()
-	callbackToken := uuid.New().String()[:32]
-	originKind := "resume"
-	if req.TriggerSource != nil {
-		if k, ok := req.TriggerSource["kind"].(string); ok && k != "" {
-			originKind = k
-		}
-	}
-	parentRunID := prior.ID
-	entrypointPhase := req.EntrypointPhase
-	bdg := &budgetDoc{Total: prior.Budget.Total}
-
-	doc := runDoc{
-		ID:                runID,
-		Project:           prior.Project,
-		Workflow:          prior.Workflow,
-		RunNumber:         &runNumber,
-		RunDisplayNumber:  &runDisplay,
-		ParentRunID:       &parentRunID,
-		RootRunID:         &rootRunID,
-		OriginKind:        &originKind,
-		IsCycle:           true,
-		CycleNumber:       &cycleNumber,
-		IssueID:           prior.IssueID,
-		IssueRepo:         prior.IssueRepo,
-		IssueNumber:       prior.IssueNumber,
-		State:             "in_progress",
-		Budget:            bdg,
-		ValidationURL:     prior.ValidationURL,
-		ClonedFromRunID:   &parentRunID,
-		EntrypointPhase:   &entrypointPhase,
-		Attempts:          allAttempts,
-		CumulativeCostUSD: 0.0,
-		TriggerSource:     req.TriggerSource,
-		CallbackToken:     &callbackToken,
-		IssueLockHolderID: &req.IssueLockHolderID,
-		CreatedAt:         now,
-		UpdatedAt:         now,
-	}
-
-	payload, err := json.Marshal(doc)
-	if err != nil {
-		return server.CreatedRun{}, err
-	}
-	pk := azcosmos.NewPartitionKeyString(prior.Project)
-	if _, err := s.runs.CreateItem(ctx, pk, payload, nil); err != nil {
-		return server.CreatedRun{}, fmt.Errorf("create resumed run doc: %w", err)
-	}
-	return server.CreatedRun{
-		ID:            runID,
-		RunNumber:     runNumber,
-		RunDisplay:    runDisplay,
-		CallbackToken: callbackToken,
-	}, nil
-}
-
-// collectPriorOutputs builds a map[phaseName]map[outputKey]value from all attempts.
-// Last attempt per phase wins (matches Python's _collect_phase_outputs).
-func collectPriorOutputs(attempts []server.AttemptForResume) map[string]map[string]string {
-	result := map[string]map[string]string{}
-	for _, a := range attempts {
-		if len(a.PhaseOutputs) > 0 {
-			result[a.Phase] = a.PhaseOutputs
-		}
-	}
-	return result
-}
-
-// SubstitutePhaseInputs resolves a phase's inputs against prior run outputs.
-// Exposed for use by the resume handler; delegates to phaserefs.Substitute.
-func SubstitutePhaseInputs(phase server.PhaseSpec, priorOutputs map[string]map[string]string) (map[string]string, error) {
-	return phaserefs.Substitute(phaserefs.Phase{
-		Name:    phase.Name,
-		Inputs:  phase.Inputs,
-		Outputs: phase.Outputs,
-	}, priorOutputs)
-}
-
-// CollectPriorOutputs is the exported wrapper around collectPriorOutputs.
-func CollectPriorOutputs(attempts []server.AttemptForResume) map[string]map[string]string {
-	return collectPriorOutputs(attempts)
 }

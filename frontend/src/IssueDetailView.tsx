@@ -74,10 +74,7 @@ export type IssueGraph = {
       | "opened"
       | "feedback"
       | "re_dispatched"
-      // Resume primitive (#111) — links a prior Run to a Run that
-      // resumed from it (cloned_from_run_ref). Renders in the runs
-      // table + run-meta panel as "resumed from Run X".
-      | "resumed_from";
+      | "cycled_from";
   }>;
   projection?: RunGraphProjection;
 };
@@ -102,6 +99,12 @@ type RunProjectionRun = {
   run_ref: string;
   run_number?: number | null;
   run_display_number?: string | null;
+  cycle_number?: number | null;
+  run_cycle_number?: number | null;
+  workflow_schema_ref?: string | null;
+  queue_state?: string | null;
+  admission_error?: string | null;
+  slot_lease_ref?: string | null;
   workflow: string;
   state: string;
   current_phase?: string | null;
@@ -464,12 +467,13 @@ export function IssueDetailView() {
     }
   };
 
-  const abortRun = async (runNumber: number) => {
+  const abortRun = async (runNumber: string) => {
     if (!detail || detail.number === null) return;
     setAbortState({ kind: "aborting" });
     try {
+      const runPath = encodeURIComponent(runNumber);
       const r = await authedFetch(
-        `/v1/projects/${encodeURIComponent(detail.project)}/issues/${detail.number}/runs/${runNumber}/abort?reason=aborted_via_ui`,
+        `/v1/projects/${encodeURIComponent(detail.project)}/issues/${detail.number}/runs/${runPath}/abort?reason=aborted_via_ui`,
         { method: "POST" },
       );
       if (!r.ok) {
@@ -554,7 +558,7 @@ export function IssueDetailView() {
   // While the run tab is open and a run is actually in flight, poll
   // detail+graph so DAG nodes fill in as conclusions / verification /
   // decisions land server-side.
-  const isInFlight = !!(detail && (detail.issue_lock_held || detail.last_run_state === "in_progress"));
+  const isInFlight = !!(detail && (detail.issue_lock_held || runStateIsActive(detail.last_run_state ?? "")));
 
   useEffect(() => {
     if (tab !== "runs") return;
@@ -689,10 +693,10 @@ function IssueHeader({ detail, heading }: { detail: IssueDetail; heading: string
           <strong>{detail.labels.length}</strong>
         </div>
         <div className="project-fact">
-          <span>last run</span>
+          <span>last cycle</span>
           <strong>
             {detail.last_run_number !== null
-              ? `run ${detail.last_run_number}`
+              ? `cycle ${detail.last_run_number}`
               : detail.last_run_state ?? "none"}
           </strong>
         </div>
@@ -1172,7 +1176,7 @@ export function RunViewer({
   abortState: AbortState;
   onArmAbort: () => void;
   onCancelAbort: () => void;
-  onConfirmAbort: (runNumber: number) => void;
+  onConfirmAbort: (runNumber: string) => void;
   selectedRunId: string | null;
   onBackToRuns: () => void;
   onOpenTouchpoint: () => void;
@@ -1218,7 +1222,7 @@ export function RunViewer({
   // Always targets the currently in-flight run, even when a different
   // historical run is selected for viewing in the run tab.
   const activeRun = findActiveRun(graph);
-  const abortableRunNumber = activeRun ? numberOrNull(activeRun.metadata.run_number) : null;
+  const abortableRunNumber = activeRun ? runRouteSlugFromNode(activeRun) : null;
   const aborting = abortState.kind === "aborting";
   const armed = abortState.kind === "armed";
   const dispatchLabel = dispatching
@@ -1650,14 +1654,6 @@ function phaseStatus(attempt: GraphNode): { cls: string; text: string } {
   const nativeRunning = nativeJobs.some((j) => j.state === "active" || j.steps.some((s) => s.state === "active"));
   const nativeFailed = nativeJobs.some((j) => j.state === "failed" || j.steps.some((s) => s.state === "failed"));
   const nativeSucceeded = nativeJobs.length > 0 && nativeJobs.every((j) => j.state === "succeeded" || j.state === "skipped");
-  // Resume primitive (#111) — synthesized skip-marks render as "skipped"
-  // ahead of any other state since they're never dispatched. No pill
-  // (skipped isn't one of {free, busy, drain, info}); the caller renders
-  // it as dim text. Also propagates upward via the attempt node's
-  // `state === "skipped"` value emitted by the graph endpoint.
-  if (attempt.state === "skipped" || stringOrNull(meta.skipped_from_run_ref)) {
-    return { cls: "", text: "skipped" };
-  }
   if (!completed) {
     if (nativeRunning) {
       return { cls: "busy", text: "running" };
@@ -1851,10 +1847,7 @@ function RunMetaSummary({
   const workflow = stringOrNull(meta.workflow);
   const abortReason = stringOrNull(meta.abort_reason);
   const prNumber = numberOrNull(meta.pr_number);
-  // Resume primitive (#111) — set on the resumed Run so the user
-  // sees why earlier phases are pre-satisfied and which prior Run's
-  // outputs got carried forward.
-  const clonedFromRunId = stringOrNull(meta.cloned_from_run_ref);
+  const parentRunRef = stringOrNull(meta.parent_run_ref);
   const entrypointPhase = stringOrNull(meta.entrypoint_phase);
   return (
     <div className="run-panel-meta" style={{ marginTop: "0.5rem" }}>
@@ -1868,11 +1861,11 @@ function RunMetaSummary({
           <span className="key">workflow</span> <span className="mono">{workflow}</span>
         </div>
       )}
-      {clonedFromRunId && (
+      {parentRunRef && (
         <div>
-          <span className="key">resumed from</span>{" "}
-          <span className="mono" title={clonedFromRunId}>
-            {clonedFromRunId.slice(0, 8)}…
+          <span className="key">previous cycle</span>{" "}
+          <span className="mono" title={parentRunRef}>
+            {parentRunRef}
           </span>
           {entrypointPhase && (
             <>
@@ -1946,7 +1939,7 @@ function RunsPane({
   abortState: AbortState;
   onArmAbort: () => void;
   onCancelAbort: () => void;
-  onConfirmAbort: (runNumber: number) => void;
+  onConfirmAbort: (runNumber: string) => void;
   selectedRunId: string | null;
   onSelectRun: (runId: string | null) => void;
   onViewRunWorkflow: (runId: string) => void;
@@ -1974,7 +1967,7 @@ function RunsPane({
     : undefined;
   const activeRunNumber = (() => {
     const node = graph ? findActiveRun(graph) : null;
-    return node ? numberOrNull(node.metadata.run_number) : null;
+    return node ? runRouteSlugFromNode(node) : null;
   })();
   const aborting = abortState.kind === "aborting";
   const armed = abortState.kind === "armed";
@@ -2090,12 +2083,12 @@ function RunsPane({
       <table>
         <thead>
           <tr>
+            <th>Cycle</th>
             <th>Run</th>
+            <th>Run cycle</th>
             <th>State</th>
             <th>Started</th>
-            <th title="How many retries deep this run is. 0 = original.">Retry</th>
-            <th title="The original run this retry chain started from.">Origin</th>
-            <th title="The run that directly spawned this one. Differs from origin when this is retry ≥ 2.">Kicked off by</th>
+            <th title="The prior cycle that directly produced this cycle, when any.">Previous</th>
             <th>Cost</th>
             <th>Touchpoint</th>
             <th></th>
@@ -2108,13 +2101,7 @@ function RunsPane({
             const meta = r.metadata;
             const cost = numberOrNull(meta.cumulative_cost_usd);
             const prNumber = numberOrNull(meta.pr_number);
-            // Walk the cloned_from_run_ref chain to compute retry depth +
-            // origin. Each retry IS a fresh run (decided model), so
-            // "depth" is the chain length back to the run that has no
-            // parent. Origin is the chain root, including first-level
-            // resumes where the origin and kicker are the same run.
-            const lineage = computeRetryLineage(graph, id);
-            const entrypointPhase = stringOrNull(meta.entrypoint_phase);
+            const lineage = computeCycleLineage(graph, id);
             return (
               <tr key={r.id}>
                 <td className="mono">
@@ -2127,6 +2114,8 @@ function RunsPane({
                     {runSlugDisplay(slug)}
                   </button>
                 </td>
+                <td className="mono">{runNumberDisplay(r)}</td>
+                <td className="mono">{runCycleDisplay(r)}</td>
                 <td>
                   <button
                     type="button"
@@ -2138,23 +2127,6 @@ function RunsPane({
                   </button>
                 </td>
                 <td className="mono dim">{r.timestamp ? formatTime(r.timestamp) : "—"}</td>
-                <td
-                  className="mono"
-                  title={
-                    entrypointPhase && lineage.depth > 0
-                      ? `Resumed at phase ${entrypointPhase}.`
-                      : undefined
-                  }
-                >
-                  {lineage.depth}
-                </td>
-                <td className="mono">
-                  {lineage.depth >= 1 && lineage.origin ? (
-                    <RunRefLink graph={graph} runId={lineage.origin} onSelectRun={onSelectRun} />
-                  ) : (
-                    <span className="dim">—</span>
-                  )}
-                </td>
                 <td className="mono">
                   {lineage.kicker ? (
                     <RunRefLink graph={graph} runId={lineage.kicker} onSelectRun={onSelectRun} />
@@ -2302,7 +2274,7 @@ function RunDetailView({
   const abortReason = stringOrNull(meta.abort_reason);
   const cumulativeCost = numberOrNull(meta.cumulative_cost_usd);
   const prNumber = numberOrNull(meta.pr_number);
-  const lineage = computeRetryLineage(graph, runIdFromNode(run));
+  const lineage = computeCycleLineage(graph, runIdFromNode(run));
   return (
     <>
       <div className="run-section-header">
@@ -2332,18 +2304,30 @@ function RunDetailView({
             <span className="val mono">{currentWorkflow?.name ?? "unavailable"}</span>
           </div>
           <div className="row">
+            <span className="key">cycle</span>
+            <span className="val mono">{issueRunSlug(graph, run)}</span>
+          </div>
+          <div className="row">
+            <span className="key">run</span>
+            <span className="val mono">{runNumberDisplay(run)}</span>
+          </div>
+          <div className="row">
+            <span className="key">run cycle</span>
+            <span className="val mono">{runCycleDisplay(run)}</span>
+          </div>
+          <div className="row">
             <span className="key">started</span>
             <span className="val mono">{run.timestamp ? formatTime(run.timestamp) : "—"}</span>
           </div>
           <div className="row">
-            <span className="key">retry depth</span>
+            <span className="key">cycle depth</span>
             <span className="val mono">{lineage.depth}</span>
           </div>
           <div className="row">
-            <span className="key">origin</span>
+            <span className="key">previous</span>
             <span className="val mono">
-              {lineage.origin ? (
-                <RunRefLink graph={graph} runId={lineage.origin} onSelectRun={() => undefined} />
+              {lineage.kicker ? (
+                <RunRefLink graph={graph} runId={lineage.kicker} onSelectRun={() => undefined} />
               ) : "—"}
             </span>
           </div>
@@ -2605,7 +2589,8 @@ function latestProjectionRun(projection: RunGraphProjection | undefined | null):
 }
 
 function projectionRunLabel(run: RunProjectionRun): string {
-  if (run.run_display_number) return `run ${run.run_display_number}`;
+  if (run.cycle_number !== null && run.cycle_number !== undefined) return `cycle ${run.cycle_number}`;
+  if (run.run_display_number) return `cycle ${run.run_display_number}`;
   if (run.run_number !== null && run.run_number !== undefined) return `run ${run.run_number}`;
   return run.run_ref;
 }
@@ -2656,11 +2641,6 @@ function AttemptCard({
   const workflowFilename = stringOrNull(meta.workflow_filename);
   const verification = isRecord(meta.verification) ? meta.verification : null;
   const verificationStatus = verification ? stringOrNull(verification.status) : null;
-  // Resume primitive (#111) — set on synthesized skip-marks. The phase
-  // wasn't actually dispatched; outputs were carried from the named
-  // prior Run. Renders the card in a dim/dashed style so it reads as
-  // "this slot was satisfied, no work happened here."
-  const skippedFromRunId = stringOrNull(meta.skipped_from_run_ref);
   // Cost prefers the phase-reported top-level cost_usd (#69 — non-verify
   // LLM phases set this directly without a verification.json) and falls
   // back to verification.cost_usd for verify phases that emit the artifact.
@@ -2700,7 +2680,6 @@ function AttemptCard({
     : null;
 
   const statusPill = (() => {
-    if (skippedFromRunId) return { cls: "", text: "skipped" };
     if (dispatching) return { cls: "pending", text: "pending" };
     if (running) return { cls: "busy", text: "running" };
     if (verificationStatus === "pass") return { cls: "free", text: "pass" };
@@ -2720,23 +2699,12 @@ function AttemptCard({
   const branchName = runIdFromAttempt ? `glimmung/${runIdFromAttempt}` : null;
 
   return (
-    <div
-      className={`attempt-card${running ? " running" : ""}${stuckDispatching ? " stuck" : ""}${skippedFromRunId ? " skipped" : ""}`}
-    >
+    <div className={`attempt-card${running ? " running" : ""}${stuckDispatching ? " stuck" : ""}`}>
       <div className="attempt-card-head">
         <strong>{attempt.label}</strong>
-        {skippedFromRunId ? (
-          <span
-            className="dim mono"
-            title={`satisfied by run ${skippedFromRunId} — no dispatch happened on this run`}
-          >
-            skipped
-          </span>
-        ) : (
-          <span className={`pill ${statusPill.cls}`}>{statusPill.text}</span>
-        )}
+        <span className={`pill ${statusPill.cls}`}>{statusPill.text}</span>
         <span className="dim mono">{phase}</span>
-        {elapsedLabel && !skippedFromRunId && <span className="dim mono">{elapsedLabel}</span>}
+        {elapsedLabel && <span className="dim mono">{elapsedLabel}</span>}
         {stuckDispatching && (
           <span className="pill drain" title="No native job activity recorded after dispatch.">
             stuck
@@ -2744,19 +2712,13 @@ function AttemptCard({
         )}
       </div>
       <div className="attempt-card-body">
-        {skippedFromRunId && (
-          <div>
-            <span className="key">satisfied by</span>{" "}
-            <span className="mono">{skippedFromRunId.slice(0, 8)}…</span>
-          </div>
-        )}
-        {dispatchedAt && !skippedFromRunId && (
+        {dispatchedAt && (
           <div>
             <span className="key">dispatched</span>{" "}
             <span className="mono">{formatTime(dispatchedAt)}</span>
           </div>
         )}
-        {completedAt && !skippedFromRunId && (
+        {completedAt && (
           <div>
             <span className="key">completed</span>{" "}
             <span className="mono">{formatTime(completedAt)}</span>
@@ -3073,12 +3035,12 @@ function nativeStepIsLlm(step: NativeAttemptStep): boolean {
 }
 
 function findActiveRun(graph: IssueGraph): GraphNode | null {
-  return graph.nodes.find((n) => n.kind === "run" && n.state === "in_progress") ?? null;
+  return graph.nodes.find((n) => n.kind === "run" && runStateIsActive(n.state ?? "")) ?? null;
 }
 
 function findLastCompletedRun(graph: IssueGraph): GraphNode | null {
   const completed = graph.nodes
-    .filter((n) => n.kind === "run" && n.state !== "in_progress")
+    .filter((n) => n.kind === "run" && !runStateIsActive(n.state ?? ""))
     .sort((a, b) => (b.timestamp ?? "").localeCompare(a.timestamp ?? ""));
   return completed[0] ?? null;
 }
@@ -3102,8 +3064,10 @@ function runIdFromNode(n: GraphNode): string {
 }
 
 function issueRunSlug(graph: IssueGraph, run: GraphNode): string {
-  const explicit = numberOrNull(run.metadata.run_number);
+  const explicit = numberOrNull(run.metadata.cycle_number);
   if (explicit !== null) return String(explicit);
+  const display = stringOrNull(run.metadata.run_display_number);
+  if (display) return display;
   const issueRuns = graph.nodes
     .filter((node) => node.kind === "run")
     .slice()
@@ -3113,21 +3077,41 @@ function issueRunSlug(graph: IssueGraph, run: GraphNode): string {
 }
 
 function runSlugDisplay(slug: string): string {
-  return /^\d+$/.test(slug) ? `run ${slug}` : `${slug.slice(0, 8)}…`;
+  return /^\d+(\.\d+)?$/.test(slug) ? `cycle ${slug}` : `${slug.slice(0, 8)}…`;
 }
 
-type RetryLineage = {
+function runRouteSlugFromNode(run: GraphNode): string | null {
+  const display = stringOrNull(run.metadata.run_display_number);
+  if (display) return display;
+  const cycle = numberOrNull(run.metadata.cycle_number);
+  if (cycle !== null) return String(cycle);
+  const logicalRun = numberOrNull(run.metadata.run_number);
+  if (logicalRun !== null) return String(logicalRun);
+  return null;
+}
+
+function runNumberDisplay(run: GraphNode): string {
+  const runNumber = numberOrNull(run.metadata.run_number);
+  return runNumber !== null ? String(runNumber) : "—";
+}
+
+function runCycleDisplay(run: GraphNode): string {
+  const runCycle = numberOrNull(run.metadata.run_cycle_number);
+  if (runCycle !== null) return String(runCycle);
+  const display = stringOrNull(run.metadata.run_display_number);
+  return display ?? "—";
+}
+
+type CycleLineage = {
   depth: number;
   kicker: string | null;
   origin: string | null;
 };
 
-// Walk the cloned_from_run_ref chain to compute retry depth + origin.
-// Each retry is its own Run (decided model — no in-run retries), so
-// "depth" is the chain length back to the run with no parent. The
-// kicker is the immediate parent (depth >= 1). Origin is the chain root.
+// Walk the parent_run_ref chain to compute automatic cycle depth + origin.
+// The kicker is the immediate parent (depth >= 1). Origin is the chain root.
 // Cycles are guarded against malformed graphs.
-function computeRetryLineage(graph: IssueGraph, runId: string): RetryLineage {
+function computeCycleLineage(graph: IssueGraph, runId: string): CycleLineage {
   const byId = new Map<string, GraphNode>();
   for (const node of graph.nodes) {
     if (node.kind === "run") byId.set(runIdFromNode(node), node);
@@ -3142,7 +3126,7 @@ function computeRetryLineage(graph: IssueGraph, runId: string): RetryLineage {
     visited.add(cursor);
     const node = byId.get(cursor);
     if (!node) break;
-    const parent = stringOrNull(node.metadata.cloned_from_run_ref)
+    const parent = stringOrNull(node.metadata.parent_run_ref)
       ?? stringOrNull(node.metadata.parent_run_ref);
     if (!parent) {
       origin = depth === 0 ? null : cursor;
@@ -3415,11 +3399,14 @@ function IssueEditForm({
 
 function runStatePill(state: string): string {
   if (state === "passed") return "free";
-  if (state === "in_progress") return "busy";
-  if (state === "pending") return "pending";
+  if (state === "in_progress" || state === "queued" || state === "pending") return "busy";
   if (state === "review_required") return "info";
   if (state === "aborted") return "drain";
   return "";
+}
+
+function runStateIsActive(state: string): boolean {
+  return state === "in_progress" || state === "queued" || state === "pending";
 }
 
 function formatTimestamp(value: string): string {

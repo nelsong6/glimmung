@@ -106,7 +106,7 @@ type fakeSignalDrainStore struct {
 	processedDecision string
 	prLockReleased    bool
 	issueLockClaimed  bool
-	reopened          bool
+	createdRun        bool
 }
 
 func (s *fakeSignalDrainStore) ListPendingSignals(context.Context, int) ([]QueuedSignal, error) {
@@ -158,10 +158,21 @@ func (s *fakeSignalDrainStore) FindRunForPR(context.Context, string, int) (RunRe
 
 func (s *fakeSignalDrainStore) GetWorkflowByName(context.Context, string, string) (*Workflow, error) {
 	return &Workflow{
-		Name: "agent",
+		Project: "glimmung",
+		Name:    "agent",
 		Phases: []PhaseSpec{{
-			Name: "impl",
+			Name: "env-prep",
 			Kind: "k8s_job",
+		}, {
+			Name:      "impl",
+			Kind:      "k8s_job",
+			Verify:    true,
+			DependsOn: []string{"env-prep"},
+		}, {
+			Name:      "cleanup",
+			Kind:      "k8s_job",
+			Always:    true,
+			DependsOn: []string{"impl"},
 		}},
 		PR: PrPrimitive{RecyclePolicy: &RecyclePolicy{MaxAttempts: 3, LandsAt: "impl"}},
 	}, nil
@@ -174,23 +185,42 @@ func (s *fakeSignalDrainStore) ClaimIssueLock(context.Context, string, int, stri
 
 func (s *fakeSignalDrainStore) ReleaseIssueLock(context.Context, string, int, string) {}
 
-func (s *fakeSignalDrainStore) ReopenRunForTriage(_ context.Context, req TriageReopenRequest) (RunReplayData, int, error) {
-	s.reopened = true
-	pr := 42
-	callback := "tok"
-	return RunReplayData{
-		ID:            req.RunID,
-		Project:       req.Project,
-		WorkflowName:  "agent",
-		IssueRepo:     "owner/repo",
-		IssueNumber:   7,
-		PRNumber:      &pr,
-		CallbackToken: &callback,
-	}, 1, nil
+func (s *fakeSignalDrainStore) ReadProjectGitHubRepo(context.Context, string) (string, error) {
+	return "owner/repo", nil
+}
+
+func (s *fakeSignalDrainStore) ReadIssueForDispatch(context.Context, string, int) (IssueDispatchData, error) {
+	return IssueDispatchData{ID: "issue-7", Title: "Fix thing", Body: "body"}, nil
+}
+
+func (s *fakeSignalDrainStore) ListProjectWorkflows(context.Context, string) ([]Workflow, error) {
+	wf, _ := s.GetWorkflowByName(context.Background(), "glimmung", "agent")
+	return []Workflow{*wf}, nil
+}
+
+func (s *fakeSignalDrainStore) CreateRun(_ context.Context, req CreateRunRequest) (CreatedRun, error) {
+	s.createdRun = true
+	return CreatedRun{
+		ID:            "run-2",
+		RunNumber:     2,
+		CycleNumber:   2,
+		RunCycle:      1,
+		RunDisplay:    "2.1",
+		CallbackToken: "tok-2",
+	}, nil
+}
+
+func (s *fakeSignalDrainStore) StartRunCycle(context.Context, StartRunCycleRequest) (int, error) {
+	return 0, nil
 }
 
 func (s *fakeSignalDrainStore) AcquireLease(context.Context, LeaseAcquireRequest) (Lease, error) {
-	return Lease{Project: "glimmung", Host: stringPtr("native-k8s"), State: "claimed", Metadata: map[string]any{"native_k8s": true}}, nil
+	one := 1
+	return Lease{Project: "glimmung", LeaseNumber: &one, Host: stringPtr("native-k8s"), State: "claimed", Metadata: map[string]any{"native_k8s": true, "native_slot_name": "slot-1"}}, nil
+}
+
+func (s *fakeSignalDrainStore) CancelLeaseByRef(context.Context, string, string) (CancelLeaseResult, error) {
+	return CancelLeaseResult{}, nil
 }
 
 func (s *fakeSignalDrainStore) AbortRunByID(context.Context, string, string, string) (AbortRunResult, error) {
@@ -224,10 +254,10 @@ func TestDrainSignalsDispatchesRequestChangesTriage(t *testing.T) {
 	if result.Processed != 1 || store.processedDecision != triageDispatch {
 		t.Fatalf("result=%#v decision=%q", result, store.processedDecision)
 	}
-	if !store.issueLockClaimed || !store.reopened {
-		t.Fatalf("issueLockClaimed=%v reopened=%v", store.issueLockClaimed, store.reopened)
+	if !store.issueLockClaimed || !store.createdRun {
+		t.Fatalf("issueLockClaimed=%v createdRun=%v", store.issueLockClaimed, store.createdRun)
 	}
-	if store.prLockReleased {
-		t.Fatal("PR lock should stay held until the triage run reaches terminal state")
+	if !store.prLockReleased {
+		t.Fatal("PR signal lock should release after creating the new queued/dispatched run")
 	}
 }

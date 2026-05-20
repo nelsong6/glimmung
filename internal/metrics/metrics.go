@@ -185,7 +185,7 @@ var (
 	leasesAcquiredTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "glimmung_leases_acquired_total",
-			Help: "Lease acquisitions, labelled by caller purpose (dispatch, advance, retry, resume, test_slot_checkout, signal_drain) and outcome (granted, conflict, error).",
+			Help: "Lease acquisitions, labelled by caller purpose (dispatch, test_slot_checkout) and outcome (granted, conflict, error).",
 		},
 		[]string{"purpose", "outcome"},
 	)

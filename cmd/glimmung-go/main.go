@@ -64,7 +64,8 @@ func main() {
 		log.Printf("slot-storage migration ok: %s", summary)
 	}
 	if store != nil {
-		go server.StartSignalDrainLoop(context.Background(), store, nativeLauncher, 15*time.Second, log.Printf)
+		server.StartSignalDrainReconciler(context.Background(), store, nativeLauncher, log.Printf)
+		server.StartRunQueueReconciler(context.Background(), store, nativeLauncher, log.Printf)
 	}
 	if store != nil {
 		if nativeMinter, ok := ghClient.(server.NativeGitHubTokenMinter); ok {
