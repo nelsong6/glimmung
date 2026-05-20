@@ -237,11 +237,12 @@ Minimal Tank-style config:
 }
 ```
 
-Defaults are intentionally aligned with `tank-operator`: chart path `k8s`,
-installer image `alpine/k8s:1.30.0`, and Helm value
-`testEnv.enabled=true`. Other projects can set `chart_path`, `installer_image`,
-`git_ref`, `values`, `set_string_values`, `sessions_namespace`, and
-`cluster_role_bindings` under `test_slot_helm`.
+Defaults are intentionally aligned with `tank-operator`: chart path `k8s`
+and installer image `alpine/k8s:1.30.0`. Activation reconciles the chart twice:
+first with `renderMode=warm`, then with `renderMode=hot`; both passes also set
+`testEnv.slotName` to the stable slot name. Other projects can set
+`chart_path`, `installer_image`, `git_ref`, `values`, `set_string_values`,
+`sessions_namespace`, and `cluster_role_bindings` under `test_slot_helm`.
 
 Any implementation path that treats a Helm-rendered app/proxy/session/tool
 runtime as part of an unleased warmed slot violates the lifecycle contract and
@@ -281,7 +282,7 @@ The command reads project metadata from `GLIMMUNG_BASE_URL` or
 `--contract-json` directly.
 
 Glimmung's own issue chart supports this in test slots. When
-`testEnv.enabled=true`, the workload runs `/app/glimmung-supervisor` as PID 1,
+`renderMode=hot`, the workload runs `/app/glimmung-supervisor` as PID 1,
 mounts `/var/run/glimmung-hot`, and restarts the child process on `SIGHUP`.
 Production installs keep the normal image command and do not enable restart
 behavior.

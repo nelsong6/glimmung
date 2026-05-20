@@ -1,18 +1,20 @@
+{{- if eq (include "glimmung-issue.renderHot" .) "true" }}
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ .Release.Name }}
+  name: {{ include "glimmung-issue.resourceName" . }}
   namespace: {{ .Release.Namespace }}
   labels:
     app.kubernetes.io/name: glimmung-issue
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/instance: {{ include "glimmung-issue.resourceName" . }}
     {{- if .Values.prNumber }}
     glimmung.io/pr: {{ .Values.prNumber | quote }}
     {{- end }}
 spec:
   selector:
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/instance: {{ include "glimmung-issue.resourceName" . }}
   ports:
     - name: http
       port: 80
       targetPort: http
+{{- end }}

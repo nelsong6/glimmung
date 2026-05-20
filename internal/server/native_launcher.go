@@ -24,6 +24,9 @@ import (
 const (
 	testSlotInstallerJobPrefix    = "glim-slot-apply"
 	testSlotInstallerSecretPrefix = "glim-slot-clone"
+	testSlotUninstallJobPrefix    = "glim-slot-uninstall"
+	testSlotRenderModeWarm        = "warm"
+	testSlotRenderModeHot         = "hot"
 )
 
 // NativeLauncher creates Kubernetes resources for native k8s_job phases.
@@ -90,6 +93,14 @@ func (l *KubernetesNativeLauncher) EnsureTestSlotPreliminaries(ctx context.Conte
 	if strings.TrimSpace(slotName) == "" {
 		return nil
 	}
+	return l.ensureTestSlotPreliminaryAccess(ctx, lease, project, strings.TrimSpace(slotName))
+}
+
+func (l *KubernetesNativeLauncher) ensureTestSlotPreliminaryAccess(ctx context.Context, lease Lease, project Project, slotName string) error {
+	slotName = strings.TrimSpace(slotName)
+	if slotName == "" {
+		return nil
+	}
 	if err := l.ensureNamespace(ctx, slotName, testSlotLabels(lease, slotName)); err != nil {
 		return err
 	}
@@ -118,7 +129,7 @@ func (l *KubernetesNativeLauncher) ActivateTestSlotRuntime(ctx context.Context, 
 	if slotName == "" {
 		return nil
 	}
-	if err := l.EnsureTestSlotPreliminaries(ctx, lease, project); err != nil {
+	if err := l.ensureTestSlotPreliminaryAccess(ctx, lease, project, slotName); err != nil {
 		return err
 	}
 	if config, ok := testSlotHelmConfig(project); ok {
@@ -128,20 +139,10 @@ func (l *KubernetesNativeLauncher) ActivateTestSlotRuntime(ctx context.Context, 
 		if minter == nil {
 			return fmt.Errorf("github token minter is required for test slot runtime activation")
 		}
-		sessionsNamespace := testSlotSessionsNamespaceForLease(lease, project, slotName)
-		substitutions := testSlotSubstitutions(lease, project, slotName, sessionsNamespace)
-		token, err := minter.InstallationToken(ctx)
-		if err != nil {
-			return fmt.Errorf("mint github token for test slot install: %w", err)
-		}
-		if err := l.ensureCloneTokenSecret(ctx, testSlotInstallerSecretName(lease), token, lease, slotName); err != nil {
+		if err := l.runTestSlotHelmReconcile(ctx, lease, project, minter, config, testSlotRenderModeWarm); err != nil {
 			return err
 		}
-		jobName := testSlotInstallerJobName(lease)
-		if err := l.createJob(ctx, testSlotInstallJobManifest(l.Settings, config, lease, project, substitutions)); err != nil {
-			return err
-		}
-		if err := l.waitForJobComplete(ctx, l.Settings.NativeRunnerNamespace, jobName, 5*time.Minute); err != nil {
+		if err := l.runTestSlotHelmReconcile(ctx, lease, project, minter, config, testSlotRenderModeHot); err != nil {
 			return err
 		}
 	}
@@ -168,8 +169,20 @@ func (l *KubernetesNativeLauncher) ReturnTestSlotRuntime(ctx context.Context, le
 	//    further K8s objects. Background propagation on the Job DELETE marks
 	//    its pods for GC; we poll until the GC catches up so the next steps
 	//    don't race the helm tail.
-	if err := l.waitForInstallerPodsTerminated(ctx, l.Settings.NativeRunnerNamespace, testSlotInstallerJobName(lease), 90*time.Second); err != nil {
+	if err := l.waitForInstallerPodsBySlotTerminated(ctx, l.Settings.NativeRunnerNamespace, slotName, 90*time.Second); err != nil {
 		return err
+	}
+	if config, ok := testSlotHelmConfig(project); ok {
+		if err := l.runTestSlotHelmUninstall(ctx, lease, project, config, testSlotRenderModeHot); err != nil {
+			return err
+		}
+		if err := l.deletePlaywrightResources(ctx, lease, slotName); err != nil {
+			return err
+		}
+		if err := l.deleteTestSlotRuntimeWorkloads(ctx, lease, project, slotName); err != nil {
+			return err
+		}
+		return nil
 	}
 	// 3. Delete the lease-scoped Playwright Deployment and Service. Cleanup
 	//    creates these via ensurePlaywrightForSlot during activation; the
@@ -232,8 +245,83 @@ func (l *KubernetesNativeLauncher) waitForInstallerPodsTerminated(ctx context.Co
 	}
 }
 
+func (l *KubernetesNativeLauncher) waitForInstallerPodsBySlotTerminated(ctx context.Context, namespace, slotName string, timeout time.Duration) error {
+	namespace = strings.TrimSpace(namespace)
+	slotName = strings.TrimSpace(slotName)
+	if namespace == "" || slotName == "" {
+		return nil
+	}
+	if timeout <= 0 {
+		timeout = 90 * time.Second
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	selector := "glimmung.romaine.life/native-slot-name=" + labelValue(slotName)
+	path := "/api/v1/namespaces/" + namespace + "/pods?labelSelector=" + url.QueryEscape(selector)
+	for {
+		status, list, err := l.request(ctx, http.MethodGet, path, nil)
+		if err != nil {
+			if status == http.StatusNotFound || status == http.StatusForbidden {
+				return nil
+			}
+			return err
+		}
+		if len(anySlice(list["items"])) == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("installer pods for slot %s/%s did not terminate within %s", namespace, slotName, timeout)
+		case <-ticker.C:
+		}
+	}
+}
+
 func (l *KubernetesNativeLauncher) CleanupTestSlotInstaller(ctx context.Context, lease Lease, _ Project) error {
 	return l.deleteTestSlotInstaller(ctx, lease)
+}
+
+func (l *KubernetesNativeLauncher) runTestSlotHelmReconcile(ctx context.Context, lease Lease, project Project, minter NativeGitHubTokenMinter, config testSlotHelmSettings, renderMode string) error {
+	slotName, _ := stringFromMap(lease.Metadata, "native_slot_name")
+	slotName = strings.TrimSpace(slotName)
+	if slotName == "" {
+		return nil
+	}
+	if minter == nil {
+		return fmt.Errorf("github token minter is required for test slot helm %s", renderMode)
+	}
+	sessionsNamespace := testSlotSessionsNamespaceForLease(lease, project, slotName)
+	substitutions := testSlotSubstitutions(lease, project, slotName, sessionsNamespace)
+	token, err := minter.InstallationToken(ctx)
+	if err != nil {
+		return fmt.Errorf("mint github token for test slot %s install: %w", renderMode, err)
+	}
+	secretName := testSlotHelmSecretName(lease, renderMode)
+	if err := l.ensureCloneTokenSecret(ctx, secretName, token, lease, slotName); err != nil {
+		return err
+	}
+	jobName := testSlotHelmJobName(lease, renderMode)
+	if err := l.createJob(ctx, testSlotInstallJobManifest(l.Settings, config, lease, project, substitutions, renderMode)); err != nil {
+		return err
+	}
+	return l.waitForJobComplete(ctx, l.Settings.NativeRunnerNamespace, jobName, 5*time.Minute)
+}
+
+func (l *KubernetesNativeLauncher) runTestSlotHelmUninstall(ctx context.Context, lease Lease, project Project, config testSlotHelmSettings, renderMode string) error {
+	slotName, _ := stringFromMap(lease.Metadata, "native_slot_name")
+	slotName = strings.TrimSpace(slotName)
+	if slotName == "" {
+		return nil
+	}
+	jobName := testSlotHelmUninstallJobName(lease, renderMode)
+	if err := l.createJob(ctx, testSlotUninstallJobManifest(l.Settings, config, lease, project, renderMode)); err != nil {
+		return err
+	}
+	return l.waitForJobComplete(ctx, l.Settings.NativeRunnerNamespace, jobName, 5*time.Minute)
 }
 
 func (l *KubernetesNativeLauncher) DeprovisionTestSlot(ctx context.Context, lease Lease, project Project) error {
@@ -297,6 +385,27 @@ func (l *KubernetesNativeLauncher) deleteTestSlotRuntimeResources(ctx context.Co
 		return err
 	}
 	return nil
+}
+
+func (l *KubernetesNativeLauncher) deleteTestSlotRuntimeWorkloads(ctx context.Context, lease Lease, project Project, slotName string) error {
+	namespaces := []string{slotName}
+	if sessionsNamespace := testSlotSessionsNamespaceForLease(lease, project, slotName); strings.TrimSpace(sessionsNamespace) != "" && sessionsNamespace != slotName {
+		namespaces = append(namespaces, sessionsNamespace)
+	}
+	for _, namespace := range namespaces {
+		for _, collectionPath := range []string{
+			"/apis/apps/v1/namespaces/" + namespace + "/deployments",
+			"/apis/apps/v1/namespaces/" + namespace + "/statefulsets",
+			"/apis/apps/v1/namespaces/" + namespace + "/daemonsets",
+			"/apis/batch/v1/namespaces/" + namespace + "/jobs",
+			"/api/v1/namespaces/" + namespace + "/pods",
+		} {
+			if err := l.deleteCollectionItems(ctx, collectionPath); err != nil {
+				return err
+			}
+		}
+	}
+	return l.waitForNoPodsInNamespaces(ctx, namespaces, 5*time.Minute)
 }
 
 func (l *KubernetesNativeLauncher) deleteCollectionItems(ctx context.Context, collectionPath string) error {
@@ -993,9 +1102,6 @@ func testSlotHelmConfig(project Project) (testSlotHelmSettings, bool) {
 		return testSlotHelmSettings{}, false
 	}
 	values := stringMapFromAnyMap(anyMap(raw["values"]))
-	if _, ok := values["testEnv.enabled"]; !ok {
-		values["testEnv.enabled"] = "true"
-	}
 	setStringValues := stringMapFromAnyMap(anyMap(firstAny(raw["set_string_values"], raw["setStringValues"])))
 	clusterRoleBindings := mapSliceFromAnySlice(anySlice(firstAny(raw["cluster_role_bindings"], raw["clusterRoleBindings"])))
 	if len(clusterRoleBindings) == 0 {
@@ -1094,19 +1200,45 @@ func testSlotInstallResourceName(prefix string, lease Lease) string {
 }
 
 func testSlotInstallerJobName(lease Lease) string {
-	return testSlotInstallResourceName(testSlotInstallerJobPrefix, lease)
+	return testSlotHelmJobName(lease, testSlotRenderModeHot)
 }
 
 func testSlotInstallerSecretName(lease Lease) string {
-	return testSlotInstallResourceName(testSlotInstallerSecretPrefix, lease)
+	return testSlotHelmSecretName(lease, testSlotRenderModeHot)
 }
 
-func testSlotInstallJobManifest(settings Settings, config testSlotHelmSettings, lease Lease, project Project, substitutions map[string]string) map[string]any {
+func testSlotHelmJobName(lease Lease, renderMode string) string {
+	return testSlotInstallResourceName(testSlotInstallerJobPrefix+"-"+renderMode, lease)
+}
+
+func testSlotHelmSecretName(lease Lease, renderMode string) string {
+	return testSlotInstallResourceName(testSlotInstallerSecretPrefix+"-"+renderMode, lease)
+}
+
+func testSlotHelmUninstallJobName(lease Lease, renderMode string) string {
+	return testSlotInstallResourceName(testSlotUninstallJobPrefix+"-"+renderMode, lease)
+}
+
+func testSlotHelmReleaseName(slotName, renderMode string) string {
+	slotName = strings.TrimSpace(slotName)
+	renderMode = firstNonEmpty(strings.TrimSpace(renderMode), testSlotRenderModeHot)
+	base := dnsLabel(slotName + "-" + renderMode)
+	if len(base) <= 63 {
+		return base
+	}
+	hash := sha256.Sum256([]byte(base))
+	return dnsLabel(slotName + "-" + hex.EncodeToString(hash[:])[:16])
+}
+
+func testSlotInstallJobManifest(settings Settings, config testSlotHelmSettings, lease Lease, project Project, substitutions map[string]string, renderMode string) map[string]any {
 	slotName, _ := stringFromMap(lease.Metadata, "native_slot_name")
-	jobName := testSlotInstallerJobName(lease)
-	secretName := testSlotInstallerSecretName(lease)
+	renderMode = firstNonEmpty(strings.TrimSpace(renderMode), testSlotRenderModeHot)
+	jobName := testSlotHelmJobName(lease, renderMode)
+	secretName := testSlotHelmSecretName(lease, renderMode)
 	labels := testSlotLabels(lease, slotName)
 	labels["glimmung.romaine.life/test-slot-installer"] = "true"
+	labels["glimmung.romaine.life/render-mode"] = labelValue(renderMode)
+	releaseName := testSlotHelmReleaseName(slotName, renderMode)
 	gitRef := strings.TrimSpace(config.GitRef)
 	cloneScript := "set -eu\n" +
 		"GIT_REF=" + shellQuote(gitRef) + "\n" +
@@ -1119,10 +1251,10 @@ func testSlotInstallJobManifest(settings Settings, config testSlotHelmSettings, 
 		"fi\n"
 	installScript := "set -eu\n" +
 		"cd /workspace\n" +
-		helmTemplateCommand(config, slotName, substitutions) + " | " + stripClusterScopedCommand() + " | kubectl apply -f -\n" +
-		"if kubectl -n " + shellQuote(slotName) + " get deployment -o name | grep -q .; then\n" +
-		"  kubectl -n " + shellQuote(slotName) + " wait --for=condition=available --timeout=180s deployment --all\n" +
-		"fi\n"
+		"if ! helm status " + shellQuote(releaseName) + " --namespace " + shellQuote(slotName) + " >/dev/null 2>&1; then\n" +
+		"  " + helmTemplateCommand(config, releaseName, slotName, substitutions, renderMode) + " | " + stripClusterScopedCommand() + " | kubectl delete --ignore-not-found=true -f -\n" +
+		"fi\n" +
+		helmUpgradeInstallCommand(config, releaseName, slotName, substitutions, renderMode) + "\n"
 	podSpec := map[string]any{
 		"serviceAccountName": settings.NativeRunnerServiceAccount,
 		"restartPolicy":      "Never",
@@ -1172,12 +1304,58 @@ func testSlotInstallJobManifest(settings Settings, config testSlotHelmSettings, 
 	}
 }
 
-func helmTemplateCommand(config testSlotHelmSettings, slotName string, substitutions map[string]string) string {
-	parts := []string{
-		"helm", "template", shellQuote(slotName), shellQuote(config.ChartPath),
-		"--namespace", shellQuote(slotName),
+func testSlotUninstallJobManifest(settings Settings, config testSlotHelmSettings, lease Lease, project Project, renderMode string) map[string]any {
+	slotName, _ := stringFromMap(lease.Metadata, "native_slot_name")
+	renderMode = firstNonEmpty(strings.TrimSpace(renderMode), testSlotRenderModeHot)
+	jobName := testSlotHelmUninstallJobName(lease, renderMode)
+	labels := testSlotLabels(lease, slotName)
+	labels["glimmung.romaine.life/test-slot-installer"] = "true"
+	labels["glimmung.romaine.life/render-mode"] = labelValue(renderMode)
+	releaseName := testSlotHelmReleaseName(slotName, renderMode)
+	uninstallScript := "set -eu\n" +
+		"if helm status " + shellQuote(releaseName) + " --namespace " + shellQuote(slotName) + " >/dev/null 2>&1; then\n" +
+		"  helm uninstall " + shellQuote(releaseName) + " --namespace " + shellQuote(slotName) + " --wait --timeout 180s\n" +
+		"fi\n"
+	podSpec := map[string]any{
+		"serviceAccountName": settings.NativeRunnerServiceAccount,
+		"restartPolicy":      "Never",
+		"containers": []any{map[string]any{
+			"name":    "uninstall",
+			"image":   firstNonEmpty(config.InstallerImage, defaultTestSlotInstallerImage),
+			"command": []string{"sh", "-c", uninstallScript},
+			"env": []any{
+				map[string]any{"name": "GLIM_SLOT_NAME", "value": slotName},
+				map[string]any{"name": "GLIM_PROJECT", "value": project.Name},
+				map[string]any{"name": "GLIM_RENDER_MODE", "value": renderMode},
+			},
+		}},
 	}
-	for key, value := range config.Values {
+	return map[string]any{
+		"apiVersion": "batch/v1",
+		"kind":       "Job",
+		"metadata": map[string]any{
+			"name":        jobName,
+			"namespace":   settings.NativeRunnerNamespace,
+			"labels":      labels,
+			"annotations": map[string]string{"glimmung.romaine.life/native-slot-name": slotName},
+		},
+		"spec": map[string]any{
+			"backoffLimit":            1,
+			"ttlSecondsAfterFinished": settings.NativeRunnerJobTTLSeconds,
+			"template": map[string]any{
+				"metadata": map[string]any{"labels": labels},
+				"spec":     podSpec,
+			},
+		},
+	}
+}
+
+func helmTemplateCommand(config testSlotHelmSettings, releaseName, namespace string, substitutions map[string]string, renderMode string) string {
+	parts := []string{
+		"helm", "template", shellQuote(releaseName), shellQuote(config.ChartPath),
+		"--namespace", shellQuote(namespace),
+	}
+	for key, value := range testSlotHelmValues(config, renderMode) {
 		parts = append(parts, "--set", shellQuote(key+"="+formatSubstitutions(value, substitutions)))
 	}
 	for key, value := range config.SetStringValues {
@@ -1186,9 +1364,34 @@ func helmTemplateCommand(config testSlotHelmSettings, slotName string, substitut
 	return strings.Join(parts, " ")
 }
 
+func helmUpgradeInstallCommand(config testSlotHelmSettings, releaseName, namespace string, substitutions map[string]string, renderMode string) string {
+	parts := []string{
+		"helm", "upgrade", "--install", shellQuote(releaseName), shellQuote(config.ChartPath),
+		"--namespace", shellQuote(namespace),
+		"--wait", "--wait-for-jobs", "--timeout", "180s",
+	}
+	for key, value := range testSlotHelmValues(config, renderMode) {
+		parts = append(parts, "--set", shellQuote(key+"="+formatSubstitutions(value, substitutions)))
+	}
+	for key, value := range config.SetStringValues {
+		parts = append(parts, "--set-string", shellQuote(key+"="+formatSubstitutions(value, substitutions)))
+	}
+	return strings.Join(parts, " ")
+}
+
+func testSlotHelmValues(config testSlotHelmSettings, renderMode string) map[string]string {
+	values := make(map[string]string, len(config.Values)+2)
+	for key, value := range config.Values {
+		values[key] = value
+	}
+	values["testEnv.slotName"] = "{slot_name}"
+	values["renderMode"] = renderMode
+	return values
+}
+
 func stripClusterScopedCommand() string {
-	awk := `awk 'BEGIN { doc=""; skip=0 } /^---[[:space:]]*$/ { if (doc != "" && skip == 0) printf "%s---\n", doc; doc=""; skip=0; next } { doc = doc $0 "\n"; if ($0 ~ /^kind:[[:space:]]*(ClusterRole|ClusterRoleBinding)[[:space:]]*$/) skip=1 } END { if (doc != "" && skip == 0) printf "%s", doc }'`
-	return "if command -v yq >/dev/null 2>&1; then yq 'select(.kind != \"ClusterRoleBinding\" and .kind != \"ClusterRole\")'; else " + awk + "; fi"
+	awk := `awk 'BEGIN { doc=""; skip=0 } /^---[[:space:]]*$/ { if (doc != "" && skip == 0) printf "%s---\n", doc; doc=""; skip=0; next } { doc = doc $0 "\n"; if ($0 ~ /^kind:[[:space:]]*(ClusterRole|ClusterRoleBinding|Namespace)[[:space:]]*$/) skip=1 } END { if (doc != "" && skip == 0) printf "%s", doc }'`
+	return "if command -v yq >/dev/null 2>&1; then yq 'select(.kind != \"ClusterRoleBinding\" and .kind != \"ClusterRole\" and .kind != \"Namespace\")'; else " + awk + "; fi"
 }
 
 func testSlotLabels(lease Lease, slotName string) map[string]string {
