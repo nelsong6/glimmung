@@ -779,10 +779,11 @@ function IssueControlPlaneSummary({
   const touchpoint = projectionTouchpoints.find((tp) => touchpointNeedsDecision(tp))
     ?? projectionTouchpoints[projectionTouchpoints.length - 1]
     ?? null;
+  const touchpointFallback = run && (run.state === "aborted" || run.state === "failed") ? "none" : "pending";
   const signals = projection?.signals ?? [];
   const pendingSignal = signals.find((signal) => signal.state === "pending" || signal.state === "processing") ?? null;
   const nextAction = projection?.next_action;
-  const phaseCounts = run ? countProjectionPhases(run) : { active: 0, succeeded: 0, failed: 0, pending: 0 };
+  const phaseSummary = run ? projectionPhaseSummary(run) : "no phases";
   const jobCount = run?.phases.reduce((sum, phase) => sum + phase.jobs.length, 0) ?? 0;
   const stepCount = run?.phases.reduce(
     (sum, phase) => sum + phase.jobs.reduce((jobSum, job) => jobSum + job.steps.length, 0),
@@ -842,11 +843,7 @@ function IssueControlPlaneSummary({
         </div>
         <div className="row">
           <span className="key">phase</span>
-          <span className="val mono">
-            {activePhase
-              ? `${activePhase.name} active`
-              : `${phaseCounts.succeeded}/${run.phases.length} done`}
-          </span>
+          <span className="val mono">{activePhase ? `${activePhase.name} active` : phaseSummary}</span>
         </div>
         <div className="row">
           <span className="key">evidence</span>
@@ -880,7 +877,7 @@ function IssueControlPlaneSummary({
                 <span className={`pill ${projectionStatePill(touchpoint.state)}`}>{touchpoint.state}</span>
               </>
             ) : (
-              <span className="dim">pending</span>
+              <span className="dim">{touchpointFallback}</span>
             )}
           </span>
         </div>
@@ -2052,8 +2049,8 @@ function RunsPane({
         {buttonLabel}
       </button>
       {dispatchState.kind === "result" && (
-        <span className={`pill ${dispatchState.state === "dispatched" ? "free" : "info"}`}>
-          {dispatchState.state}
+        <span className={`pill ${dispatchResultPill(dispatchState.state)}`}>
+          {dispatchResultLabel(dispatchState.state)}
         </span>
       )}
       {dispatchState.kind === "error" && (
@@ -2546,7 +2543,9 @@ function ProjectionRunMetaSummary({ run, repo }: { run: RunProjectionRun; repo: 
       </div>
       <div>
         <span className="key">phases</span>{" "}
-        <span className="mono">{counts.succeeded} done / {counts.active} active / {counts.failed} failed</span>
+        <span className="mono">
+          {counts.succeeded} done / {counts.active} active / {counts.failed} failed / {counts.skipped} skipped
+        </span>
       </div>
       <div>
         <span className="key">cost</span> <span className="mono">${run.cost_usd.toFixed(4)}</span>
@@ -3071,13 +3070,51 @@ function countProjectionPhases(run: RunProjectionRun) {
   return run.phases.reduce(
     (acc, phase) => {
       if (phase.state === "active" || phase.state === "dispatching") acc.active += 1;
-      else if (phase.state === "succeeded" || phase.state === "skipped") acc.succeeded += 1;
+      else if (phase.state === "succeeded") acc.succeeded += 1;
+      else if (phase.state === "skipped") acc.skipped += 1;
       else if (phase.state === "failed") acc.failed += 1;
       else acc.pending += 1;
       return acc;
     },
-    { active: 0, succeeded: 0, failed: 0, pending: 0 },
+    { active: 0, succeeded: 0, skipped: 0, failed: 0, pending: 0 },
   );
+}
+
+function projectionPhaseSummary(run: RunProjectionRun): string {
+  if (run.phases.length === 0) return "no phases";
+  const active = run.phases.find((phase) => phase.state === "active" || phase.state === "dispatching");
+  if (active) return `${active.name} ${active.state}`;
+  const failed = run.phases.filter((phase) => phase.state === "failed");
+  if (failed.length === 1) return `${failed[0].name} failed`;
+  if (failed.length > 1) return `${failed.length} failed`;
+  const counts = countProjectionPhases(run);
+  const parts: string[] = [];
+  if (counts.succeeded > 0) parts.push(`${counts.succeeded} done`);
+  if (counts.skipped > 0) parts.push(`${counts.skipped} skipped`);
+  if (counts.pending > 0) parts.push(`${counts.pending} not started`);
+  return parts.length > 0 ? parts.join(" / ") : `${run.phases.length} done`;
+}
+
+function dispatchResultLabel(state: string): string {
+  switch (state) {
+    case "dispatched":
+      return "dispatched";
+    case "no_capacity":
+      return "no capacity";
+    case "dispatch_failed":
+      return "dispatch failed";
+    case "queued":
+      return "queued";
+    default:
+      return state.replaceAll("_", " ");
+  }
+}
+
+function dispatchResultPill(state: string): string {
+  if (state === "dispatched") return "free";
+  if (state === "no_capacity" || state === "queued") return "pending";
+  if (state === "dispatch_failed") return "drain";
+  return "info";
 }
 
 function graphStatePill(state: string): string {
