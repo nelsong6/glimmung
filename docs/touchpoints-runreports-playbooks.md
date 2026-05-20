@@ -58,7 +58,7 @@ Issue <-> Touchpoint
 This is a strict one-to-one product invariant, not a pagination or v1
 implementation detail. An Issue never has multiple Touchpoints, and a
 Touchpoint should not be addressed as an independent child collection of an
-Issue. If work is retried, resumed, or rerun, the same Touchpoint updates to
+Issue. If work is recycled or rerun, the same Touchpoint updates to
 reflect the current decision surface.
 
 The Touchpoint is a live summary and navigation page for the Issue's current

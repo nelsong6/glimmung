@@ -27,7 +27,6 @@ type RunReportAttempt struct {
 	Decision           *string                   `json:"decision"`
 	CostUSD            *float64                  `json:"cost_usd"`
 	LogArchiveURL      *string                   `json:"log_archive_url"`
-	SkippedFromRunRef  *string                   `json:"skipped_from_run_ref"`
 	PhaseOutputs       map[string]string         `json:"phase_outputs"`
 	JobCompletions     []RunAttemptJobCompletion `json:"job_completions"`
 }
@@ -55,6 +54,11 @@ type RunReport struct {
 	EntrypointPhase     *string            `json:"entrypoint_phase"`
 	IsCycle             bool               `json:"is_cycle"`
 	CycleNumber         *int               `json:"cycle_number"`
+	RunCycleNumber      *int               `json:"run_cycle_number"`
+	WorkflowSchemaRef   string             `json:"workflow_schema_ref"`
+	QueueState          *string            `json:"queue_state"`
+	AdmissionError      *string            `json:"admission_error"`
+	SlotLeaseRef        *string            `json:"slot_lease_ref"`
 	Workflow            string             `json:"workflow"`
 	IssueRef            *string            `json:"issue_ref"`
 	IssueRepo           *string            `json:"issue_repo"`

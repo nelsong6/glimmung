@@ -25,6 +25,8 @@ type DispatchResult = {
   issue_ref?: string | null;
   issue_number?: number | null;
   run_number: number | null;
+  cycle_number?: number | null;
+  run_cycle_number?: number | null;
   run_ref?: string | null;
   host: string | null;
   workflow: string | null;
@@ -238,10 +240,10 @@ export function PortfolioView({
                     href={`/projects/${encodeURIComponent(projectFromActionKey(action.key))}/issues/${action.result.issue_number}/runs`}
                   >
                     issue {action.result.issue_number}
-                    {action.result.run_number ? ` / run ${action.result.run_number}` : ""}
+                    {action.result.cycle_number ? ` / cycle ${action.result.cycle_number}` : ""}
                   </a>
                 </>
-              ) : action.result.run_number ? `: run ${action.result.run_number}` : ""}
+              ) : action.result.cycle_number ? `: cycle ${action.result.cycle_number}` : ""}
             </div>
           )}
         </>

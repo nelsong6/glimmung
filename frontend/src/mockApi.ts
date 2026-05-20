@@ -316,6 +316,10 @@ export const mockRuns = [
     id: "run-glimmung-206-live",
     project: "glimmung",
     workflow: "issue-agent",
+    run_number: 1,
+    run_display_number: "1.1",
+    cycle_number: 1,
+    run_cycle_number: 1,
     issue_number: 206,
     title: "Display native run graph and step-level execution",
     state: "in_progress",
@@ -329,6 +333,10 @@ export const mockRuns = [
     id: "run-glimmung-217-review",
     project: "glimmung",
     workflow: "portfolio-agent",
+    run_number: 1,
+    run_display_number: "1.1",
+    cycle_number: 2,
+    run_cycle_number: 1,
     issue_number: 217,
     title: "Generate reusable design portfolio from an existing repo",
     state: "needs_review",
@@ -342,6 +350,10 @@ export const mockRuns = [
     id: "run-glimmung-184-passed",
     project: "glimmung",
     workflow: "issue-agent",
+    run_number: 1,
+    run_display_number: "1.1",
+    cycle_number: 3,
+    run_cycle_number: 1,
     issue_number: 184,
     title: "Wire native runner log archive links",
     state: "passed",
@@ -355,6 +367,10 @@ export const mockRuns = [
     id: "run-ambience-44-pending",
     project: "ambience",
     workflow: "preview-agent",
+    run_number: 1,
+    run_display_number: "1.1",
+    cycle_number: 1,
+    run_cycle_number: 1,
     issue_number: 44,
     title: "Mock checkout flow before wiring real payment data",
     state: "pending",
@@ -368,6 +384,10 @@ export const mockRuns = [
     id: "run-ambience-39-aborted",
     project: "ambience",
     workflow: "preview-agent",
+    run_number: 1,
+    run_display_number: "1.1",
+    cycle_number: 2,
+    run_cycle_number: 1,
     issue_number: 39,
     title: "Prototype inventory empty-state screens",
     state: "aborted",
@@ -527,7 +547,9 @@ const issueGraph = {
     runs: [{
       run_ref: "glimmung#206/runs/1",
       run_number: 1,
-      run_display_number: "1",
+      run_display_number: "1.1",
+      cycle_number: 1,
+      run_cycle_number: 1,
       workflow: "issue-agent",
       state: "in_progress",
       current_phase: "verify",
@@ -653,10 +675,10 @@ function handleMockRequest(url: URL, init?: RequestInit): Response {
   }
   if (path === "/v1/graph" && method === "GET") return json(filterGraph(url.searchParams.get("project")));
   if (path === "/v1/runs/dispatch" && method === "POST") {
-    return json({ state: "dispatched", lease: "claimed", issue_ref: "glimmung#206", issue_number: 206, run_number: 1, run_ref: "glimmung#206/runs/1", host: null, workflow: "issue-agent", detail: null });
+    return json({ state: "dispatched", lease: "claimed", issue_ref: "glimmung#206", issue_number: 206, run_number: 1, cycle_number: 1, run_cycle_number: 1, run_ref: "glimmung#206/runs/1.1", host: null, workflow: "issue-agent", detail: null });
   }
   if (path === "/v1/portfolio/elements/dispatch" && method === "POST") {
-    return json({ state: "dispatched", lease: "claimed", issue_ref: "glimmung#217", issue_number: 217, run_number: 1, run_ref: "glimmung#217/runs/1", host: null, workflow: "portfolio-agent", detail: null });
+    return json({ state: "dispatched", lease: "claimed", issue_ref: "glimmung#217", issue_number: 217, run_number: 1, cycle_number: 2, run_cycle_number: 1, run_ref: "glimmung#217/runs/1.1", host: null, workflow: "portfolio-agent", detail: null });
   }
   const playbookRunMatch = path.match(/^\/v1\/playbooks\/([^/]+)\/([^/]+)\/run$/);
   if (playbookRunMatch && method === "POST") {

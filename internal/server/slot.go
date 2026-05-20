@@ -221,6 +221,47 @@ func (s Slot) MarkProvisioned(now time.Time) (Slot, error) {
 	return s, nil
 }
 
+// MarkReserved records that a provisioned slot is assigned to a lease while
+// leaving the slot's lifecycle state as provisioned. The state still describes
+// the preliminary resources; ActiveLeaseRef is what removes the slot from the
+// available pool until env-prep activates runtime or cleanup releases it.
+func (s Slot) MarkReserved(now time.Time, leaseRef string) (Slot, error) {
+	if err := s.CanTransitionTo(SlotStateProvisioned); err != nil {
+		return s, err
+	}
+	if s.State != SlotStateProvisioned {
+		return s, fmt.Errorf("%w: %q -> reserved", ErrInvalidSlotTransition, s.State)
+	}
+	if s.ActiveLeaseRef != nil && *s.ActiveLeaseRef != "" && *s.ActiveLeaseRef != leaseRef {
+		return s, fmt.Errorf("%w: slot already reserved", ErrInvalidSlotTransition)
+	}
+	t := now.UTC()
+	leaseRefCopy := leaseRef
+	s.ActiveLeaseRef = &leaseRefCopy
+	s.UpdatedAt = t
+	s.Detail = nil
+	return s, nil
+}
+
+// MarkReservationReleased clears a provisioned-slot reservation that never
+// advanced to runtime activation. Runtime cleanup paths should use
+// MarkCleaning/MarkCleaned instead.
+func (s Slot) MarkReservationReleased(now time.Time, leaseRef string) (Slot, error) {
+	if err := s.CanTransitionTo(SlotStateProvisioned); err != nil {
+		return s, err
+	}
+	if s.State != SlotStateProvisioned {
+		return s, fmt.Errorf("%w: %q -> reservation release", ErrInvalidSlotTransition, s.State)
+	}
+	if s.ActiveLeaseRef != nil && *s.ActiveLeaseRef != "" && *s.ActiveLeaseRef != leaseRef {
+		return s, fmt.Errorf("%w: slot reserved by another lease", ErrInvalidSlotTransition)
+	}
+	t := now.UTC()
+	s.ActiveLeaseRef = nil
+	s.UpdatedAt = t
+	return s, nil
+}
+
 // MarkActivating transitions a provisioned slot to activating. Attaches
 // the lease ref so consumers reading the slot can resolve to its lease
 // without a separate cross-collection lookup at read time.

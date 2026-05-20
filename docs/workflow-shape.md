@@ -151,6 +151,13 @@ Cosmos workflow registrations are the runtime source of truth. The
 convenience for older desired-state flows, but dispatch reads the registered
 workflow document, not a consumer repository file.
 
+Workflow registrations are logical pointers. Updating a registration creates a
+new immutable workflow schema and moves the logical pointer forward. Existing
+runs and cycles keep referencing the schema they were created with. Historical
+schemas are retained; this rollout does not garbage-collect them. Deleting or
+deactivating a logical workflow must not delete schemas referenced by run
+history.
+
 ## Path-typed identity
 
 Entities are addressed by URL-shaped paths that match the HTTP
@@ -159,11 +166,13 @@ API surface:
 ```
 projects/<project>
 projects/<project>/workflows/<workflow>
+projects/<project>/workflow-schemas/<schema_ref>
 projects/<project>/workflows/<workflow>/phases/<phase>
-projects/<project>/runs/<run_id>
-projects/<project>/runs/<run_id>/attempts/<attempt_index>
-projects/<project>/runs/<run_id>/attempts/<attempt_index>/jobs/<job_id>
-projects/<project>/runs/<run_id>/attempts/<attempt_index>/jobs/<job_id>/steps/<slug>
+projects/<project>/runs/<run_number>
+projects/<project>/runs/<run_number>/cycles/<cycle_number>
+projects/<project>/runs/<run_number>/cycles/<cycle_number>/phases/<phase>
+projects/<project>/runs/<run_number>/cycles/<cycle_number>/phases/<phase>/jobs/<job_id>
+projects/<project>/runs/<run_number>/cycles/<cycle_number>/phases/<phase>/jobs/<job_id>/steps/<slug>
 ```
 
 Logs, MCP tool outputs, error messages, and notification surfaces
@@ -171,19 +180,27 @@ all emit these. Inside a known scope (e.g. inside one run's logs),
 the trailing path can be elided: `attempts/0/jobs/agent` is enough when the
 run is implicit.
 
-Runs are the durable execution records. Recycles, resumes, and
-request-changes loops create additional issue-scoped runs, not nested
-attempt entities. A run may carry lineage fields such as
-`parent_run_id`, `root_run_id`, `origin`, `entrypoint_phase`, and
-cycle display numbers (for example `1.1`, `1.2`) so the UI can
-group related runs without inventing an attempt layer. Within one run, the
-workflow is represented by phase state plus attempt/job/step execution records.
+Runs are user/reviewer intent records. Cycles are the durable execution
+ledger records. The issue history keeps a flat, monotonically increasing
+cycle number (`1`, `2`, `3`, ...), but each cycle also belongs to a run and
+has a run-local cycle ordinal. The compact display form is
+`<run>.<run_cycle>` such as `1.1`, `1.2`, `2.1`.
 
-Use **attempt** as an execution-scoped path segment or display counter when an
-executor or recycle policy needs to say "this is the second try of this run or
-phase." It is not a first-class issue-cycle entity: request-change loops,
-recycles, and resumes create issue-scoped runs instead of inserting an attempt
-entity between Issue and Run.
+Recycle policy creates a new cycle under the same run. Reviewer feedback,
+touchpoint changes, and a user pressing Run after terminal state create a
+new run with its first cycle. Manual mid-run restart is not part of the
+product HTTP surface; emergency surgery belongs outside the normal run
+workflow model.
+
+Within one run, only one cycle can be active at a time. Within one issue, only
+one run can be active at a time. A cycle stores the workflow schema ref it was
+created with; phase/job/step projection and retry/cleanup decisions use that
+schema ref, not whatever logical workflow registration is current later.
+
+Use **attempt** as an execution-scoped display counter for a concrete phase
+launch. It is not a first-class product entity. Recycle policy is represented
+by a new cycle, not by appending another product-level attempt to the prior
+cycle.
 
 Never store paths as canonical identifiers — compute at render
 time from the entity's slug + parent context. This avoids

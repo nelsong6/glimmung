@@ -115,6 +115,7 @@ func releaseLeaseByCallbackToken(store ReadStore, preparer TestSlotPreparer) htt
 		// purpose at acquire (see metrics package Help). Counter sum is
 		// authoritative.
 		metrics.RecordLeaseReleased("consumer_release", "completed")
+		wakeRunQueue("")
 		writeJSON(w, http.StatusOK, leaseToPublic(lease))
 	}
 }

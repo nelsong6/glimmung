@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
 type SignalDrainStore interface {
+	RunDispatchStore
 	ListPendingSignals(ctx context.Context, limit int) ([]QueuedSignal, error)
 	MarkSignalProcessing(ctx context.Context, signal QueuedSignal) (QueuedSignal, bool, error)
 	MarkSignalProcessed(ctx context.Context, signal QueuedSignal, decision string) (QueuedSignal, error)
@@ -18,12 +20,6 @@ type SignalDrainStore interface {
 	ClaimLock(ctx context.Context, scope, key, holderID string, ttlSeconds int, metadata map[string]any) error
 	ReleaseLock(ctx context.Context, scope, key, holderID string) bool
 	FindRunForPR(ctx context.Context, repo string, prNumber int) (RunReplayData, error)
-	GetWorkflowByName(ctx context.Context, project, name string) (*Workflow, error)
-	ClaimIssueLock(ctx context.Context, project string, issueNumber int, holderID string, ttlSeconds int) error
-	ReleaseIssueLock(ctx context.Context, project string, issueNumber int, holderID string)
-	ReopenRunForTriage(ctx context.Context, req TriageReopenRequest) (RunReplayData, int, error)
-	AcquireLease(ctx context.Context, req LeaseAcquireRequest) (Lease, error)
-	AbortRunByID(ctx context.Context, project, runID, reason string) (AbortRunResult, error)
 }
 
 type QueuedSignal struct {
@@ -35,16 +31,6 @@ type QueuedSignal struct {
 	Payload    map[string]any
 	State      string
 	EnqueuedAt time.Time
-}
-
-type TriageReopenRequest struct {
-	Project           string
-	RunID             string
-	PhaseName         string
-	PhaseKind         string
-	WorkflowFilename  string
-	IssueLockHolderID string
-	PRLockHolderID    string
 }
 
 type SignalDrainResult struct {
@@ -69,6 +55,8 @@ type triageDecisionResult struct {
 	Target   *PhaseSpec
 	Feedback string
 }
+
+var signalDrainWake atomic.Value // stores func()
 
 const (
 	triageDispatch              = "dispatch_triage"
@@ -147,7 +135,7 @@ func DrainSignals(ctx context.Context, store ReadStore, nativeLauncher NativeLau
 		signal = processed
 
 		if decision.Decision == triageDispatch {
-			if err := dispatchTriage(ctx, drainStore, nativeLauncher, signal, holderID, decision); err != nil {
+			if err := dispatchTriage(ctx, drainStore, nativeLauncher, signal, decision); err != nil {
 				_ = drainStore.MarkSignalFailed(ctx, signal, err.Error())
 				drainStore.ReleaseLock(ctx, scope, key, holderID)
 				result.Failed++
@@ -166,6 +154,46 @@ func DrainSignals(ctx context.Context, store ReadStore, nativeLauncher NativeLau
 		})
 	}
 	return result, nil
+}
+
+func StartSignalDrainReconciler(ctx context.Context, store ReadStore, nativeLauncher NativeLauncher, logf func(string, ...any)) {
+	if _, ok := store.(SignalDrainStore); !ok || store == nil || nativeLauncher == nil {
+		return
+	}
+	wakeCh := make(chan struct{}, 128)
+	signalDrainWake.Store(func() {
+		select {
+		case wakeCh <- struct{}{}:
+		default:
+		}
+	})
+	wakeSignalDrain()
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-wakeCh:
+				result, err := DrainSignals(ctx, store, nativeLauncher, defaultSignalDrainBatchSize)
+				if err != nil {
+					if logf != nil {
+						logf("signal drain failed: %v", err)
+					}
+					continue
+				}
+				if logf != nil && (result.Processed > 0 || result.Failed > 0) {
+					logf("signal drain processed=%d failed=%d skipped=%d", result.Processed, result.Failed, result.Skipped)
+				}
+			}
+		}
+	}()
+}
+
+func wakeSignalDrain() {
+	fn, ok := signalDrainWake.Load().(func())
+	if ok && fn != nil {
+		fn()
+	}
 }
 
 func signalLockScopeKey(signal QueuedSignal) (string, string) {
@@ -223,7 +251,6 @@ func decideTriageSignal(ctx context.Context, store SignalDrainStore, signal Queu
 	}
 	return triageDecisionResult{
 		Decision: triageDispatch,
-		HoldLock: true,
 		Run:      run,
 		Workflow: wf,
 		Target:   target,
@@ -274,108 +301,38 @@ func triageAbortExplanation(decision string, signal QueuedSignal, run RunReplayD
 	}
 }
 
-func dispatchTriage(ctx context.Context, store SignalDrainStore, nativeLauncher NativeLauncher, signal QueuedSignal, holderID string, decision triageDecisionResult) error {
+func dispatchTriage(ctx context.Context, store SignalDrainStore, nativeLauncher NativeLauncher, signal QueuedSignal, decision triageDecisionResult) error {
 	run := decision.Run
-	target := decision.Target
-	if target == nil || decision.Workflow == nil {
-		return errors.New("triage dispatch missing workflow target")
+	if decision.Workflow == nil {
+		return errors.New("triage dispatch missing workflow")
 	}
 	if nativeLauncher == nil {
 		return errors.New("no native launcher configured")
 	}
-	if err := store.ClaimIssueLock(ctx, run.Project, run.IssueNumber, holderID, defaultIssueLockTTLSeconds); err != nil {
-		return fmt.Errorf("claim triage issue lock: %w", err)
+	triggerSource := map[string]any{
+		"kind":             "pr_feedback",
+		"triage_signal_id": signal.ID,
+		"feedback":         decision.Feedback,
+		"previous_run_id":  run.ID,
+		"source":           signal.Source,
 	}
-
-	phaseKind := workflowPhaseKind(target.Kind)
-	if err := validateNativeWorkflowKind(phaseKind); err != nil {
-		store.ReleaseIssueLock(ctx, run.Project, run.IssueNumber, holderID)
-		return err
-	}
-	workflowFilename := target.WorkflowFilename
-	if workflowFilename == "" {
-		workflowFilename = fmt.Sprintf("%s:%s", phaseKind, target.Name)
-	}
-	reopened, attemptIndex, err := store.ReopenRunForTriage(ctx, TriageReopenRequest{
-		Project:           run.Project,
-		RunID:             run.ID,
-		PhaseName:         target.Name,
-		PhaseKind:         phaseKind,
-		WorkflowFilename:  workflowFilename,
-		IssueLockHolderID: holderID,
-		PRLockHolderID:    holderID,
+	result, problem := dispatchRun(ctx, store, nativeLauncher, DispatchRunRequest{
+		Project:       run.Project,
+		IssueNumber:   run.IssueNumber,
+		WorkflowName:  decision.Workflow.Name,
+		TriggerSource: triggerSource,
 	})
-	if err != nil {
-		store.ReleaseIssueLock(ctx, run.Project, run.IssueNumber, holderID)
-		return fmt.Errorf("reopen run for triage: %w", err)
+	if problem != nil {
+		return errors.New(problem.message)
 	}
-
-	wfName := decision.Workflow.Name
-	metadata := map[string]any{
-		"run_id":               reopened.ID,
-		"run_ref":              runRefFromData(reopened),
-		"phase_name":           target.Name,
-		"attempt_index":        strconv.Itoa(attemptIndex),
-		"issue_number":         strconv.Itoa(reopened.IssueNumber),
-		"issue_lock_holder_id": holderID,
-		"triage_signal_id":     signal.ID,
-		"feedback":             decision.Feedback,
-		"native_k8s":           true,
-	}
-	if reopened.CallbackToken != nil && *reopened.CallbackToken != "" {
-		metadata["run_callback_token"] = *reopened.CallbackToken
-	}
-	requirements := target.Requirements
-	if len(requirements) == 0 {
-		requirements = decision.Workflow.DefaultRequirements
-	}
-	lease, err := acquireLeaseInstrumented(ctx, LeasePurposeSignalDrain, LeaseAcquireRequest{
-		Project:      reopened.Project,
-		Workflow:     &wfName,
-		Requirements: requirements,
-		Metadata:     metadata,
-	}, store.AcquireLease)
-	if err != nil {
-		_, _ = store.AbortRunByID(ctx, reopened.Project, reopened.ID, "triage_lease_acquire_failed: "+err.Error())
-		return fmt.Errorf("acquire triage lease: %w", err)
-	}
-	if lease.State != "claimed" {
-		_, _ = store.AbortRunByID(ctx, reopened.Project, reopened.ID, "triage_dispatch_failed: native lease was not claimed")
-		return errors.New("native lease was not claimed")
-	}
-	if _, err := launchCommittedNativePhase(ctx, nativeLauncher, NativeLaunchRequest{
-		Lease:    lease,
-		Workflow: *decision.Workflow,
-		Phase:    *target,
-		Run:      runWithAttempt(reopened, attemptIndex, target.Name),
-	}); err != nil {
-		_, _ = store.AbortRunByID(ctx, reopened.Project, reopened.ID, "triage_dispatch_failed: "+err.Error())
-		return fmt.Errorf("native dispatch: %w", err)
-	}
-	return nil
-}
-
-func StartSignalDrainLoop(ctx context.Context, store ReadStore, nativeLauncher NativeLauncher, interval time.Duration, logf func(string, ...any)) {
-	if interval <= 0 {
-		interval = 15 * time.Second
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			result, err := DrainSignals(ctx, store, nativeLauncher, defaultSignalDrainBatchSize)
-			if err != nil {
-				if logf != nil {
-					logf("signal drain failed: %v", err)
-				}
-				continue
-			}
-			if logf != nil && (result.Processed > 0 || result.Failed > 0) {
-				logf("signal drain processed=%d failed=%d skipped=%d", result.Processed, result.Failed, result.Skipped)
-			}
+	switch result.State {
+	case "dispatched", "queued":
+		return nil
+	default:
+		detail := ""
+		if result.Detail != nil {
+			detail = ": " + *result.Detail
 		}
+		return fmt.Errorf("triage dispatch returned %s%s", result.State, detail)
 	}
 }

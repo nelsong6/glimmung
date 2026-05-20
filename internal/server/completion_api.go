@@ -43,11 +43,15 @@ type RunCompletionStore interface {
 	AbortRunByID(ctx context.Context, project, runID, reason string) (AbortRunResult, error)
 	ReadRunForReplay(ctx context.Context, project, runID string) (RunReplayData, error)
 	GetWorkflowByName(ctx context.Context, project, name string) (*Workflow, error)
+	GetWorkflowBySchemaRef(ctx context.Context, project, schemaRef string) (*Workflow, error)
 	StampRunCompletion(ctx context.Context, project, runID string, p CompletionPayload) (RunReplayData, error)
 	StampRunDecision(ctx context.Context, project, runID, decision string) error
 	SetRunTerminalState(ctx context.Context, project, runID, state string, abortReason *string) (AbortRunResult, error)
+	CreateRecycleCycle(ctx context.Context, req CreateRecycleCycleRequest) (CreatedRun, error)
 	AppendRunAttempt(ctx context.Context, project, runID, phase, phaseKind, workflowFilename string) (int, error)
-	AcquireLease(ctx context.Context, req LeaseAcquireRequest) (Lease, error)
+	StartRunCycle(ctx context.Context, req StartRunCycleRequest) (int, error)
+	ReadLeaseByRef(ctx context.Context, project, ref string) (Lease, error)
+	CancelLeaseByRef(ctx context.Context, project, ref string) (CancelLeaseResult, error)
 }
 
 type NativeJobCompletionStore interface {
@@ -208,15 +212,14 @@ func processRunCompletion(
 	// 2. Build the run ref for the response.
 	runRef := runRefFromData(run)
 
-	// 3. Read the workflow.
-	wf, err := store.GetWorkflowByName(ctx, run.Project, run.WorkflowName)
+	// 3. Read the immutable workflow schema this cycle was created with.
+	wf, err := workflowForRun(ctx, store, run)
 	if err != nil {
 		writeInternalError(w, r, err, "read workflow failed")
 		return nil
 	}
 	if wf == nil {
-		// Workflow was deleted. Abort the run.
-		reason := "workflow_registration_deleted"
+		reason := "workflow_schema_missing"
 		store.AbortRunByID(ctx, project, runID, reason) //nolint:errcheck
 		return &RunCallbackResult{RunRef: runRef, Decision: strPtr("abort_malformed")}
 	}
@@ -243,19 +246,7 @@ func processRunCompletion(
 	}
 
 	// 5. Build decision run and fire the engine.
-	decisionAttempts := make([]decision.Attempt, len(run.Attempts))
-	for i, a := range run.Attempts {
-		decisionAttempts[i] = decision.Attempt{
-			Phase:      a.Phase,
-			Conclusion: a.Conclusion,
-		}
-		if a.Verification != nil {
-			decisionAttempts[i].Verification = &decision.Verification{
-				Status:  decision.VerificationStatus(a.Verification.Status),
-				Reasons: a.Verification.Reasons,
-			}
-		}
-	}
+	decisionAttempts := decisionAttemptsForRun(run)
 	decisionRun := decision.Run{
 		Attempts:          decisionAttempts,
 		CumulativeCostUSD: run.CumulativeCostUSD,
@@ -349,6 +340,13 @@ func processRunCompletion(
 			PRLockReleased:    result.PRLockReleased,
 		}
 	}
+}
+
+func workflowForRun(ctx context.Context, store RunCompletionStore, run RunReplayData) (*Workflow, error) {
+	if run.WorkflowSchemaRef != "" {
+		return store.GetWorkflowBySchemaRef(ctx, run.Project, run.WorkflowSchemaRef)
+	}
+	return store.GetWorkflowByName(ctx, run.Project, run.WorkflowName)
 }
 
 func abortRunWithWorkflowCleanup(
@@ -623,37 +621,9 @@ func dispatchForwardPhase(
 	if err != nil {
 		return fmt.Errorf("append forward attempt: %w", err)
 	}
-	runRef := runRefFromData(run)
-	wfName := wf.Name
-	metadata := map[string]any{
-		"run_id":              run.ID,
-		"run_ref":             runRef,
-		"phase_name":          targetPhase.Name,
-		"attempt_index":       strconv.Itoa(newAttemptIdx),
-		"phase_inputs":        substituted,
-		"issue_ref":           publicids.IssueRef(run.Project, positiveIssueNumber(run.IssueNumber)),
-		"issue_number":        strconv.Itoa(run.IssueNumber),
-		"work_context_branch": fmt.Sprintf("issue-%d-run-unknown", run.IssueNumber),
-		"native_k8s":          true,
-	}
-	if run.CallbackToken != nil && *run.CallbackToken != "" {
-		metadata["run_callback_token"] = *run.CallbackToken
-	}
-	if run.IssueLockHolderID != nil && *run.IssueLockHolderID != "" {
-		metadata["issue_lock_holder_id"] = *run.IssueLockHolderID
-	}
-	requirements := targetPhase.Requirements
-	if len(requirements) == 0 {
-		requirements = wf.DefaultRequirements
-	}
-	lease, err := acquireLeaseInstrumented(ctx, LeasePurposeAdvance, LeaseAcquireRequest{
-		Project:      run.Project,
-		Workflow:     &wfName,
-		Requirements: requirements,
-		Metadata:     metadata,
-	}, store.AcquireLease)
+	lease, err := leaseForRunPhase(ctx, store, run, targetPhase.Name, newAttemptIdx, substituted)
 	if err != nil {
-		return fmt.Errorf("acquire lease for forward phase: %w", err)
+		return fmt.Errorf("read lease for forward phase: %w", err)
 	}
 	if lease.State != "claimed" {
 		return fmt.Errorf("native lease was not claimed")
@@ -687,6 +657,38 @@ func substituteCompletionPhaseInputs(phase PhaseSpec, run RunReplayData) (map[st
 	}, priorOutputs)
 }
 
+func leaseForRunPhase(ctx context.Context, store RunCompletionStore, run RunReplayData, phaseName string, attemptIndex int, phaseInputs map[string]string) (Lease, error) {
+	if run.SlotLeaseRef == nil || *run.SlotLeaseRef == "" {
+		return Lease{}, fmt.Errorf("run has no slot lease")
+	}
+	lease, err := store.ReadLeaseByRef(ctx, run.Project, *run.SlotLeaseRef)
+	if err != nil {
+		return Lease{}, err
+	}
+	metadata := mapOrEmpty(lease.Metadata)
+	metadata["run_id"] = run.ID
+	metadata["run_ref"] = runRefFromData(run)
+	metadata["phase_name"] = phaseName
+	metadata["attempt_index"] = strconv.Itoa(attemptIndex)
+	metadata["phase_inputs"] = phaseInputs
+	metadata["issue_ref"] = publicids.IssueRef(run.Project, positiveIssueNumber(run.IssueNumber))
+	metadata["issue_number"] = strconv.Itoa(run.IssueNumber)
+	display := "unknown"
+	if run.RunDisplayNumber != nil && *run.RunDisplayNumber != "" {
+		display = *run.RunDisplayNumber
+	}
+	metadata["work_context_branch"] = fmt.Sprintf("issue-%d-run-%s", run.IssueNumber, display)
+	metadata["native_k8s"] = true
+	if run.CallbackToken != nil && *run.CallbackToken != "" {
+		metadata["run_callback_token"] = *run.CallbackToken
+	}
+	if run.IssueLockHolderID != nil && *run.IssueLockHolderID != "" {
+		metadata["issue_lock_holder_id"] = *run.IssueLockHolderID
+	}
+	lease.Metadata = metadata
+	return lease, nil
+}
+
 // dispatchRetry appends a new attempt and launches the native retry phase.
 func dispatchRetry(
 	ctx context.Context,
@@ -706,7 +708,11 @@ func dispatchRetry(
 			if p.RecyclePolicy != nil {
 				target := p.RecyclePolicy.LandsAt
 				if target == "self" || target == "" {
-					target = failingPhase
+					if entry, ok := workflowEntryPhase(wf.Phases); ok {
+						target = entry.Name
+					} else {
+						target = failingPhase
+					}
 				}
 				for _, tp := range wf.Phases {
 					if tp.Name == target {
@@ -731,46 +737,55 @@ func dispatchRetry(
 	if workflowFilename == "" {
 		workflowFilename = fmt.Sprintf("%s:%s", phaseKind, targetPhase.Name)
 	}
-	newAttemptIdx, err := store.AppendRunAttempt(ctx, run.Project, run.ID, targetPhase.Name, phaseKind, workflowFilename)
+	recycle, err := store.CreateRecycleCycle(ctx, CreateRecycleCycleRequest{
+		Parent:            run,
+		WorkflowSchemaRef: wf.SchemaRef,
+		TargetPhaseName:   targetPhase.Name,
+		TriggerSource:     map[string]any{"kind": "recycle_policy", "recycled_from_run_id": run.ID, "failing_phase": failingPhase},
+	})
 	if err != nil {
-		return fmt.Errorf("append retry attempt: %w", err)
+		return fmt.Errorf("create recycle cycle: %w", err)
 	}
-
-	// Acquire a lease for the target phase.
-	wfName := wf.Name
-	metadata := map[string]any{
-		"run_id":              run.ID,
-		"run_ref":             runRefFromData(run),
-		"phase_name":          targetPhase.Name,
-		"attempt_index":       strconv.Itoa(newAttemptIdx),
-		"issue_ref":           publicids.IssueRef(run.Project, positiveIssueNumber(run.IssueNumber)),
-		"issue_number":        strconv.Itoa(run.IssueNumber),
-		"work_context_branch": fmt.Sprintf("issue-%d-run-unknown", run.IssueNumber),
-		"native_k8s":          true,
+	leaseRef := ""
+	if run.SlotLeaseRef != nil {
+		leaseRef = *run.SlotLeaseRef
 	}
-	if run.CallbackToken != nil && *run.CallbackToken != "" {
-		metadata["run_callback_token"] = *run.CallbackToken
-	}
-	if run.IssueLockHolderID != nil && *run.IssueLockHolderID != "" {
-		metadata["issue_lock_holder_id"] = *run.IssueLockHolderID
-	}
-	requirements := targetPhase.Requirements
-	if len(requirements) == 0 {
-		requirements = wf.DefaultRequirements
-	}
-	lease, err := acquireLeaseInstrumented(ctx, LeasePurposeRetry, LeaseAcquireRequest{
-		Project:      run.Project,
-		Workflow:     &wfName,
-		Requirements: requirements,
-		Metadata:     metadata,
-		Requester: LeaseRequesterInput{
-			Consumer: "run",
-			Kind:     "retry",
-			Ref:      publicids.RunRef(run.Project, positiveIssueNumber(run.IssueNumber), fmt.Sprintf("%d", run.IssueNumber)),
-		},
-	}, store.AcquireLease)
+	newAttemptIdx, err := store.StartRunCycle(ctx, StartRunCycleRequest{
+		Project:          run.Project,
+		RunID:            recycle.ID,
+		PhaseName:        targetPhase.Name,
+		PhaseKind:        phaseKind,
+		WorkflowFilename: workflowFilename,
+		SlotLeaseRef:     leaseRef,
+	})
 	if err != nil {
-		return fmt.Errorf("acquire lease for retry: %w", err)
+		return fmt.Errorf("start recycle cycle: %w", err)
+	}
+	recycleRun := RunReplayData{
+		ID:                recycle.ID,
+		Project:           run.Project,
+		WorkflowName:      run.WorkflowName,
+		WorkflowSchemaRef: wf.SchemaRef,
+		CumulativeCostUSD: run.CumulativeCostUSD,
+		Budget:            run.Budget,
+		IssueNumber:       run.IssueNumber,
+		RunNumber:         &recycle.RunNumber,
+		CycleNumber:       &recycle.CycleNumber,
+		RunCycleNumber:    &recycle.RunCycle,
+		RunDisplayNumber:  &recycle.RunDisplay,
+		IssueRepo:         run.IssueRepo,
+		CallbackToken:     &recycle.CallbackToken,
+		IssueLockHolderID: run.IssueLockHolderID,
+		SlotLeaseRef:      &leaseRef,
+		EntrypointPhase:   &targetPhase.Name,
+		Attempts: []RunAttemptData{{
+			AttemptIndex: newAttemptIdx,
+			Phase:        targetPhase.Name,
+		}},
+	}
+	lease, err := leaseForRunPhase(ctx, store, recycleRun, targetPhase.Name, newAttemptIdx, map[string]string{})
+	if err != nil {
+		return fmt.Errorf("read lease for retry: %w", err)
 	}
 	if lease.State != "claimed" {
 		return fmt.Errorf("native lease was not claimed")
@@ -779,7 +794,7 @@ func dispatchRetry(
 		Lease:    lease,
 		Workflow: *wf,
 		Phase:    *targetPhase,
-		Run:      runWithAttempt(run, newAttemptIdx, targetPhase.Name),
+		Run:      recycleRun,
 	})
 	if err != nil {
 		return fmt.Errorf("native dispatch: %w", err)

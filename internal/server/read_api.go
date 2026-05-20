@@ -46,6 +46,7 @@ type Workflow struct {
 	ID                  string         `json:"id"`
 	Project             string         `json:"project"`
 	Name                string         `json:"name"`
+	SchemaRef           string         `json:"schema_ref"`
 	Phases              []PhaseSpec    `json:"phases"`
 	PR                  PrPrimitive    `json:"pr"`
 	Budget              budget.Config  `json:"budget"`

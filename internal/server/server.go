@@ -294,7 +294,6 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	mux.Handle("POST /v1/test-slots/apply-hot-swap", requireAdmin(adminAuthenticator, http.HandlerFunc(applyTestSlotHotSwap(store, applyPerformer))))
 	mux.Handle("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/replay", requireAdmin(adminAuthenticator, http.HandlerFunc(replayRunDecisionByNumber(store))))
 	mux.Handle("POST /v1/runs/dispatch", requireAdmin(adminAuthenticator, http.HandlerFunc(dispatchRunHandler(store, nativeLauncher))))
-	mux.Handle("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/resume", requireAdmin(adminAuthenticator, http.HandlerFunc(resumeRunHandler(store, nativeLauncher))))
 	mux.HandleFunc("POST /v1/webhook/github", githubWebhook(settings))
 	if staticRoots(settings).enabled() {
 		mux.HandleFunc("GET /assets/", serveAsset(settings))

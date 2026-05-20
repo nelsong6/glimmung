@@ -387,7 +387,7 @@ func testEnvironmentsFromSnapshot(
 
 	claimedByProject := map[string]map[int]Lease{}
 	for _, lease := range active {
-		if !boolFromMap(lease.Metadata, "test_slot_checkout") {
+		if !boolFromMap(lease.Metadata, "test_slot_checkout") && !boolFromMap(lease.Metadata, "native_k8s") {
 			continue
 		}
 		slotIndex, ok := positiveIntFromMap(lease.Metadata, "native_slot_index")
@@ -501,7 +501,11 @@ func testEnvironmentsFromSnapshot(
 				value := leaseToPublicForState(settings, lease)
 				publicLease = &value
 				if state == "available" || state == "" || state == SlotStateProvisioned {
-					state = "claimed"
+					if boolFromMap(lease.Metadata, "test_slot_checkout") {
+						state = "claimed"
+					} else {
+						state = "reserved"
+					}
 				}
 				usable = state == SlotStateRunning || state == testSlotStateActive
 			}

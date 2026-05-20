@@ -34,6 +34,10 @@ func (s *fakeRunReplayStore) GetWorkflowByName(_ context.Context, _, _ string) (
 	return s.wf, nil
 }
 
+func (s *fakeRunReplayStore) GetWorkflowBySchemaRef(_ context.Context, _, _ string) (*Workflow, error) {
+	return s.wf, nil
+}
+
 func newReplayHandlerAdmin(store *fakeRunReplayStore) http.Handler {
 	return NewWithSyncClient(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil)
 }
@@ -201,6 +205,39 @@ func TestReplayRunDecision_AbortBudgetAttempts(t *testing.T) {
 	}
 	if result.AbortReason == nil {
 		t.Errorf("expected abort_reason to be set")
+	}
+}
+
+func TestReplayRunDecision_CycleOrdinalCountsRecycleAttempts(t *testing.T) {
+	store := &fakeRunReplayStore{}
+	store.runID = "run-abc"
+	store.run = minimalRun("implement")
+	store.run.RunCycleNumber = intPtr(3)
+	store.wf = singlePhaseWorkflow("implement", true)
+	h := newReplayHandlerAdmin(store)
+
+	body, _ := json.Marshal(RunReplayRequest{
+		SyntheticCompletion: SyntheticCompletion{
+			Conclusion:   "failure",
+			Verification: map[string]any{"status": "fail"},
+		},
+	})
+	req := httptest.NewRequest("POST", "/v1/projects/proj/issues/1/runs/r1/replay", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var result ReplayResult
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Decision != "abort_budget_attempts" {
+		t.Errorf("expected abort_budget_attempts, got %s", result.Decision)
+	}
+	if result.AttemptsInPhaseAfter != 3 {
+		t.Errorf("attempts_in_phase_after=%d, want 3", result.AttemptsInPhaseAfter)
 	}
 }
 

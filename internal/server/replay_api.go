@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/nelsong6/glimmung/internal/domain/budget"
 	"github.com/nelsong6/glimmung/internal/domain/decision"
@@ -15,6 +17,7 @@ import (
 type RunReplayStore interface {
 	ReadRunForReplay(ctx context.Context, project, runID string) (RunReplayData, error)
 	GetWorkflowByName(ctx context.Context, project, name string) (*Workflow, error)
+	GetWorkflowBySchemaRef(ctx context.Context, project, schemaRef string) (*Workflow, error)
 }
 
 // RunReplayData is the minimal run state required by the decision engine replay and completion handling.
@@ -22,17 +25,23 @@ type RunReplayData struct {
 	ID                string
 	Project           string
 	WorkflowName      string
+	WorkflowSchemaRef string
 	Attempts          []RunAttemptData
 	CumulativeCostUSD float64
 	Budget            budget.Config
 	IssueNumber       int
 	RunNumber         *int
+	CycleNumber       *int
+	RunCycleNumber    *int
 	RunDisplayNumber  *string
 	IssueRepo         string
 	CallbackToken     *string
 	IssueLockHolderID *string
 	PRNumber          *int
 	PRLockHolderID    *string
+	SlotLeaseRef      *string
+	EntrypointPhase   *string
+	TriggerSource     map[string]any
 }
 
 // RunAttemptData holds one attempt's decision-engine-relevant fields.
@@ -145,7 +154,7 @@ func replayRunDecisionByNumber(store ReadStore) http.HandlerFunc {
 			prEnabled = req.OverrideWorkflow.PR.Enabled
 			workflowSource = "override"
 		} else {
-			wf, err := replayStore.GetWorkflowByName(r.Context(), run.Project, run.WorkflowName)
+			wf, err := workflowForReplay(r.Context(), replayStore, run)
 			if err != nil {
 				writeInternalError(w, r, err, "read workflow failed")
 				return
@@ -159,7 +168,11 @@ func replayRunDecisionByNumber(store ReadStore) http.HandlerFunc {
 			decisionWorkflow = serverPhasesToDecisionWorkflow(serverPhases)
 			budgetTotal = wf.Budget.Total
 			prEnabled = wf.PR.Enabled
-			workflowSource = "registered"
+			if run.WorkflowSchemaRef != "" {
+				workflowSource = "schema"
+			} else {
+				workflowSource = "registered"
+			}
 		}
 
 		// Validate the latest attempt's phase exists on the workflow.
@@ -178,19 +191,7 @@ func replayRunDecisionByNumber(store ReadStore) http.HandlerFunc {
 		}
 
 		// Build decision.Attempt slice, overriding the last attempt with synthetic completion.
-		decisionAttempts := make([]decision.Attempt, len(run.Attempts))
-		for i, a := range run.Attempts {
-			decisionAttempts[i] = decision.Attempt{
-				Phase:      a.Phase,
-				Conclusion: a.Conclusion,
-			}
-			if a.Verification != nil {
-				decisionAttempts[i].Verification = &decision.Verification{
-					Status:  decision.VerificationStatus(a.Verification.Status),
-					Reasons: a.Verification.Reasons,
-				}
-			}
-		}
+		decisionAttempts := decisionAttemptsForRun(run)
 		last := &decisionAttempts[len(decisionAttempts)-1]
 		last.Conclusion = req.SyntheticCompletion.Conclusion
 		if req.SyntheticCompletion.Verification != nil {
@@ -272,6 +273,13 @@ func replayRunDecisionByNumber(store ReadStore) http.HandlerFunc {
 	}
 }
 
+func workflowForReplay(ctx context.Context, store RunReplayStore, run RunReplayData) (*Workflow, error) {
+	if run.WorkflowSchemaRef != "" {
+		return store.GetWorkflowBySchemaRef(ctx, run.Project, run.WorkflowSchemaRef)
+	}
+	return store.GetWorkflowByName(ctx, run.Project, run.WorkflowName)
+}
+
 func serverPhasesToDecisionWorkflow(phases []PhaseSpec) decision.Workflow {
 	dPhases := make([]decision.PhaseSpec, 0, len(phases))
 	for _, p := range phases {
@@ -291,6 +299,50 @@ func serverPhasesToDecisionWorkflow(phases []PhaseSpec) decision.Workflow {
 		})
 	}
 	return decision.Workflow{Phases: dPhases}
+}
+
+func decisionAttemptsForRun(run RunReplayData) []decision.Attempt {
+	attempts := make([]decision.Attempt, len(run.Attempts))
+	for i, a := range run.Attempts {
+		attempts[i] = decision.Attempt{
+			Phase:      a.Phase,
+			Conclusion: a.Conclusion,
+		}
+		if a.Verification != nil {
+			attempts[i].Verification = &decision.Verification{
+				Status:  decision.VerificationStatus(a.Verification.Status),
+				Reasons: a.Verification.Reasons,
+			}
+		}
+	}
+	cycleOrdinal := runCycleOrdinal(run)
+	if cycleOrdinal <= 1 || len(attempts) == 0 {
+		return attempts
+	}
+	currentPhase := attempts[len(attempts)-1].Phase
+	priorCycleAttempts := make([]decision.Attempt, 0, cycleOrdinal-1+len(attempts))
+	for i := 1; i < cycleOrdinal; i++ {
+		priorCycleAttempts = append(priorCycleAttempts, decision.Attempt{
+			Phase:      currentPhase,
+			Conclusion: "failure",
+		})
+	}
+	return append(priorCycleAttempts, attempts...)
+}
+
+func runCycleOrdinal(run RunReplayData) int {
+	if run.RunCycleNumber != nil && *run.RunCycleNumber > 0 {
+		return *run.RunCycleNumber
+	}
+	if run.RunDisplayNumber != nil {
+		parts := strings.Split(strings.TrimSpace(*run.RunDisplayNumber), ".")
+		if len(parts) == 2 {
+			if n, err := strconv.Atoi(parts[1]); err == nil && n > 0 {
+				return n
+			}
+		}
+	}
+	return 1
 }
 
 func replayAttemptsInPhase(attempts []decision.Attempt, phase string) int {

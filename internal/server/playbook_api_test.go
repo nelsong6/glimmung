@@ -262,11 +262,19 @@ func (s *fakePlayableStore) ClaimIssueLock(context.Context, string, int, string,
 func (s *fakePlayableStore) ReleaseIssueLock(context.Context, string, int, string) {}
 
 func (s *fakePlayableStore) CreateRun(context.Context, CreateRunRequest) (CreatedRun, error) {
-	return CreatedRun{ID: "run-1", RunNumber: 1, RunDisplay: "1", CallbackToken: "tok"}, nil
+	return CreatedRun{ID: "run-1", RunNumber: 1, CycleNumber: 1, RunCycle: 1, RunDisplay: "1.1", CallbackToken: "tok"}, nil
+}
+
+func (s *fakePlayableStore) StartRunCycle(context.Context, StartRunCycleRequest) (int, error) {
+	return 0, nil
 }
 
 func (s *fakePlayableStore) AcquireLease(context.Context, LeaseAcquireRequest) (Lease, error) {
 	return Lease{Project: "glimmung", Host: stringPtr("native-k8s"), State: "claimed", Metadata: map[string]any{"native_k8s": true}}, nil
+}
+
+func (s *fakePlayableStore) CancelLeaseByRef(context.Context, string, string) (CancelLeaseResult, error) {
+	return CancelLeaseResult{}, nil
 }
 
 func (s *fakePlayableStore) AbortRunByID(context.Context, string, string, string) (AbortRunResult, error) {
@@ -288,7 +296,7 @@ func TestRunPlaybookDispatchesReadyEntries(t *testing.T) {
 	if store.dispatchResult.CreatedIssueRef == nil || *store.dispatchResult.CreatedIssueRef != "glimmung#7" {
 		t.Fatalf("dispatch result=%#v", store.dispatchResult)
 	}
-	if store.dispatchResult.RunRef == nil || *store.dispatchResult.RunRef != "glimmung#7/runs/1" {
+	if store.dispatchResult.RunRef == nil || *store.dispatchResult.RunRef != "glimmung#7/runs/1.1" {
 		t.Fatalf("dispatch run ref=%#v", store.dispatchResult.RunRef)
 	}
 	if !strings.Contains(rec.Body.String(), `"state":"running"`) {

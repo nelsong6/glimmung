@@ -45,7 +45,6 @@ type fakeCompletionStore struct {
 
 	leaseResult Lease
 	leaseErr    error
-	leaseReq    LeaseAcquireRequest
 
 	nativeExpectedJobs []string
 	nativeCompletions  map[string]CompletionPayload
@@ -77,6 +76,10 @@ func (s *fakeCompletionStore) ReadRunForReplay(context.Context, string, string) 
 }
 
 func (s *fakeCompletionStore) GetWorkflowByName(context.Context, string, string) (*Workflow, error) {
+	return s.wf, s.wfErr
+}
+
+func (s *fakeCompletionStore) GetWorkflowBySchemaRef(context.Context, string, string) (*Workflow, error) {
 	return s.wf, s.wfErr
 }
 
@@ -121,9 +124,23 @@ func (s *fakeCompletionStore) AppendRunAttempt(_ context.Context, _, _, phase, p
 	return s.appendIdx, s.appendErr
 }
 
-func (s *fakeCompletionStore) AcquireLease(_ context.Context, req LeaseAcquireRequest) (Lease, error) {
-	s.leaseReq = req
+func (s *fakeCompletionStore) CreateRecycleCycle(context.Context, CreateRecycleCycleRequest) (CreatedRun, error) {
+	return CreatedRun{ID: "recycle-run", RunNumber: 1, CycleNumber: 2, RunCycle: 2, RunDisplay: "1.2", CallbackToken: "tok2"}, nil
+}
+
+func (s *fakeCompletionStore) StartRunCycle(_ context.Context, req StartRunCycleRequest) (int, error) {
+	s.appendPhase = req.PhaseName
+	s.appendKind = req.PhaseKind
+	s.appendFile = req.WorkflowFilename
+	return s.appendIdx, s.appendErr
+}
+
+func (s *fakeCompletionStore) ReadLeaseByRef(context.Context, string, string) (Lease, error) {
 	return s.leaseResult, s.leaseErr
+}
+
+func (s *fakeCompletionStore) CancelLeaseByRef(context.Context, string, string) (CancelLeaseResult, error) {
+	return CancelLeaseResult{}, nil
 }
 
 func (s *fakeCompletionStore) RecordNativeJobCompletion(_ context.Context, _, _ string, p CompletionPayload) (NativeJobCompletionResult, error) {
@@ -234,6 +251,7 @@ func singlePhaseWorkflowForCompletion(name string, verify bool) *Workflow {
 
 func runDataForCompletion(phase string) *RunReplayData {
 	callback := "run-token"
+	leaseRef := "proj/leases/proj-1/1"
 	return &RunReplayData{
 		ID:            "run-1",
 		Project:       "proj",
@@ -241,6 +259,7 @@ func runDataForCompletion(phase string) *RunReplayData {
 		IssueNumber:   7,
 		IssueRepo:     "owner/repo",
 		CallbackToken: &callback,
+		SlotLeaseRef:  &leaseRef,
 		Attempts: []RunAttemptData{
 			{AttemptIndex: 0, Phase: phase, Conclusion: "failure"},
 		},
@@ -356,12 +375,14 @@ func TestNativeRunCompletedByCallbackTokenAdvanceDispatchesNextPhase(t *testing.
 			Metadata:    map[string]any{"lease_callback_token": "lease-token", "native_k8s": true},
 		},
 	}
+	leaseRef := "proj/leases/proj-1/12"
 	store.run = &RunReplayData{
 		ID:           "r1",
 		Project:      "proj",
 		WorkflowName: "wf",
 		IssueNumber:  7,
 		IssueRepo:    "owner/repo",
+		SlotLeaseRef: &leaseRef,
 		Attempts:     []RunAttemptData{{AttemptIndex: 0, Phase: "env-prep", Conclusion: "failure"}},
 	}
 	store.wf = &Workflow{
@@ -398,12 +419,12 @@ func TestNativeRunCompletedByCallbackTokenAdvanceDispatchesNextPhase(t *testing.
 	if !launcher.called || launcher.req.Phase.Name != "agent-execute" {
 		t.Fatalf("native launch=%#v", launcher.req)
 	}
-	phaseInputs, ok := store.leaseReq.Metadata["phase_inputs"].(map[string]string)
+	phaseInputs, ok := launcher.req.Lease.Metadata["phase_inputs"].(map[string]string)
 	if !ok || phaseInputs["validation_url"] != "https://preview.example" {
-		t.Fatalf("phase_inputs=%#v", store.leaseReq.Metadata["phase_inputs"])
+		t.Fatalf("phase_inputs=%#v", launcher.req.Lease.Metadata["phase_inputs"])
 	}
-	if store.leaseReq.Metadata["native_k8s"] != true {
-		t.Fatalf("lease metadata=%#v", store.leaseReq.Metadata)
+	if launcher.req.Lease.Metadata["native_k8s"] != true {
+		t.Fatalf("lease metadata=%#v", launcher.req.Lease.Metadata)
 	}
 }
 
@@ -474,6 +495,22 @@ func TestNativeRunCompletedByCallbackTokenRetryRequiresNativeLauncher(t *testing
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	if got := readCallbackResult(t, rec).Decision; got == nil || *got != "abort_malformed" {
+		t.Fatalf("decision=%v", got)
+	}
+}
+
+func TestNativeRunCompletedByCallbackTokenCycleOrdinalCountsRecycleAttempts(t *testing.T) {
+	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
+	store.run = runDataForCompletion("impl")
+	store.run.RunCycleNumber = intPtr(3)
+	store.wf = singlePhaseWorkflowForCompletion("impl", true)
+	store.terminalResult = AbortRunResult{State: "aborted", RunRef: "proj#7/runs/1.3"}
+	rec := httptest.NewRecorder()
+	newCompletionHandler(store, nil).ServeHTTP(rec, nativeCompletionRequest("tok", completedJob("impl", "failure", map[string]any{"status": "fail"}, nil)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := readCallbackResult(t, rec).Decision; got == nil || *got != "abort_budget_attempts" {
 		t.Fatalf("decision=%v", got)
 	}
 }
