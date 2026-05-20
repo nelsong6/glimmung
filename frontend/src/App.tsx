@@ -275,6 +275,10 @@ export function App() {
           <Route path="summary" element={null} />
           <Route path="runs" element={null} />
           <Route path="runs/:runId" element={null} />
+          <Route path="runs/:runId/cycles/:cycleId" element={null} />
+          <Route path="runs/:runId/cycles/:cycleId/phases/:phaseId" element={null} />
+          <Route path="runs/:runId/cycles/:cycleId/phases/:phaseId/jobs/:jobId" element={null} />
+          <Route path="runs/:runId/cycles/:cycleId/phases/:phaseId/jobs/:jobId/steps/:stepId" element={null} />
           <Route path="workflow" element={null} />
           <Route path="workflow/:workflowRunId" element={null} />
           <Route path="touchpoint" element={null} />

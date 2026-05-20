@@ -119,6 +119,7 @@ type RunProjectionPhase struct {
 	Name      string                 `json:"name"`
 	Kind      string                 `json:"kind"`
 	State     string                 `json:"state"`
+	Reason    *string                `json:"reason,omitempty"`
 	Verify    bool                   `json:"verify"`
 	Always    bool                   `json:"always"`
 	DependsOn []string               `json:"depends_on"`
@@ -130,15 +131,18 @@ type RunProjectionJob struct {
 	ID          string              `json:"id"`
 	Name        *string             `json:"name,omitempty"`
 	State       string              `json:"state"`
+	Reason      *string             `json:"reason,omitempty"`
 	Conclusion  *string             `json:"conclusion,omitempty"`
 	CompletedAt *string             `json:"completed_at,omitempty"`
 	Steps       []RunProjectionStep `json:"steps"`
 }
 
 type RunProjectionStep struct {
-	Slug  string  `json:"slug"`
-	Title *string `json:"title,omitempty"`
-	State string  `json:"state"`
+	Slug     string  `json:"slug"`
+	Title    *string `json:"title,omitempty"`
+	State    string  `json:"state"`
+	Reason   *string `json:"reason,omitempty"`
+	ExitCode *int    `json:"exit_code,omitempty"`
 }
 
 type RunProjectionAttempt struct {
@@ -213,6 +217,79 @@ func issueGraphByNumber(store ReadStore) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, graph)
+	}
+}
+
+func runCycleGraphProjectionByNumber(store ReadStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		graphStore, ok := store.(GraphRuntimeStore)
+		if !ok || graphStore == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "graph store not configured")
+			return
+		}
+		issueNumber, err := strconv.Atoi(r.PathValue("issue_number"))
+		if err != nil || issueNumber < 1 {
+			writeProblem(w, http.StatusBadRequest, "issue_number must be a positive integer")
+			return
+		}
+		issue, err := graphStore.GetIssueDetailByNumber(r.Context(), r.PathValue("project"), issueNumber)
+		switch {
+		case errors.Is(err, ErrNotFound):
+			writeProblem(w, http.StatusNotFound, "issue not found")
+			return
+		case err != nil:
+			writeInternalError(w, r, err, "read issue failed")
+			return
+		}
+		if issue.Number == nil {
+			writeProblem(w, http.StatusNotFound, "issue not found")
+			return
+		}
+		runs, err := graphStore.ListProjectRuns(r.Context(), issue.Project, 500)
+		if err != nil {
+			writeInternalError(w, r, err, "list runs failed")
+			return
+		}
+		runs = issueGraphRuns(runs, issue.Project, *issue.Number, publicids.IssueRef(issue.Project, issue.Number))
+		selected, ok := selectRunCycleForProjection(runs, r.PathValue("run_number"), r.PathValue("cycle_number"))
+		if !ok {
+			writeProblem(w, http.StatusNotFound, "run cycle not found")
+			return
+		}
+		workflows, err := graphStore.ListWorkflows(r.Context())
+		if err != nil {
+			writeInternalError(w, r, err, "list workflows failed")
+			return
+		}
+		workflowsByKey := map[string]Workflow{}
+		for _, wf := range workflows {
+			workflowsByKey[wf.Project+"/"+wf.Name] = wf
+		}
+		addWorkflowSchemasForRuns(r.Context(), graphStore, []RunReport{selected}, workflowsByKey)
+		touchpoints, err := graphStore.ListTouchpoints(r.Context(), TouchpointListFilter{Project: issue.Project})
+		if err != nil {
+			writeInternalError(w, r, err, "list touchpoints failed")
+			return
+		}
+		touchpoints = issueGraphTouchpoints(touchpoints, publicids.IssueRef(issue.Project, issue.Number), *issue.Number, map[string]bool{selected.RunRef: true})
+		var signals []GraphSignal
+		if signalStore := optionalGraphSignalStore(store); signalStore != nil {
+			signals, err = signalStore.ListGraphSignals(r.Context(), GraphSignalFilter{})
+			if err != nil {
+				writeInternalError(w, r, err, "list graph signals failed")
+				return
+			}
+		}
+		projection := buildRunGraphProjection(publicids.IssueRef(issue.Project, issue.Number), []RunReport{selected}, workflowsByKey, touchpoints, signals)
+		if nativeStore, ok := store.(NativeRunStore); ok && nativeStore != nil && len(projection.Runs) == 1 && selected.ID != "" {
+			logs, err := nativeStore.ListNativeEventsByID(r.Context(), selected.Project, selected.ID, nil, nil, nil)
+			if err != nil && !errors.Is(err, ErrNotFound) {
+				writeInternalError(w, r, err, "list native events failed")
+				return
+			}
+			applyNativeEventsToProjectionRun(&projection.Runs[0], logs.Events)
+		}
+		writeJSON(w, http.StatusOK, projection)
 	}
 }
 
@@ -908,6 +985,43 @@ func workflowSchemaMapKey(project, schemaRef string) string {
 	return project + "/schema/" + schemaRef
 }
 
+func selectRunCycleForProjection(runs []RunReport, runSegment, cycleSegment string) (RunReport, bool) {
+	runSegment = strings.TrimSpace(runSegment)
+	cycleSegment = strings.TrimSpace(cycleSegment)
+	display := runSegment
+	if cycleSegment != "" && !strings.Contains(runSegment, ".") {
+		display = runSegment + "." + cycleSegment
+	}
+	for _, run := range runs {
+		if run.RunDisplayNumber != nil && strings.TrimSpace(*run.RunDisplayNumber) == display {
+			return run, true
+		}
+		if run.RunNumber != nil && run.RunCycleNumber != nil &&
+			strconv.Itoa(*run.RunNumber) == runSegment &&
+			strconv.Itoa(*run.RunCycleNumber) == cycleSegment {
+			return run, true
+		}
+	}
+	if cycleSegment == "" {
+		for _, run := range runs {
+			if run.RunDisplayNumber != nil && strings.TrimSpace(*run.RunDisplayNumber) == runSegment {
+				return run, true
+			}
+			if run.CycleNumber != nil && strconv.Itoa(*run.CycleNumber) == runSegment {
+				return run, true
+			}
+		}
+	}
+	for _, run := range runs {
+		if run.CycleNumber != nil && strconv.Itoa(*run.CycleNumber) == runSegment {
+			if cycleSegment == "" || run.RunCycleNumber == nil || strconv.Itoa(*run.RunCycleNumber) == cycleSegment {
+				return run, true
+			}
+		}
+	}
+	return RunReport{}, false
+}
+
 func runProjectionFromReport(run RunReport, workflow Workflow, touchpoints []TouchpointRow) RunProjectionRun {
 	attemptsCount := run.AttemptsCount
 	if attemptsCount == 0 {
@@ -939,25 +1053,31 @@ func runProjectionFromReport(run RunReport, workflow Workflow, touchpoints []Tou
 func runProjectionPhases(run RunReport, workflow Workflow) []RunProjectionPhase {
 	if len(workflow.Phases) > 0 {
 		phases := make([]RunProjectionPhase, 0, len(workflow.Phases))
+		terminalFailureSeen := false
 		for _, phase := range workflow.Phases {
 			attempts := attemptsForProjectionPhase(run.Attempts, phase.Name)
-			state := projectionPhaseState(phase.Name, run.CurrentPhase, attempts)
+			state := projectionPhaseState(run, phase.Name, attempts, terminalFailureSeen, phaseSkippedByEntrypoint(workflow.Phases, phase.Name, run.EntrypointPhase))
 			phases = append(phases, RunProjectionPhase{
 				Name:      phase.Name,
 				Kind:      workflowPhaseKind(phase.Kind),
 				State:     state,
+				Reason:    projectionPhaseReason(state, attempts),
 				Verify:    phase.Verify,
 				Always:    phase.Always,
 				DependsOn: sliceOrEmpty(phase.DependsOn),
 				Jobs:      runProjectionJobs(phase, state, attempts),
 				Attempts:  runProjectionAttempts(attempts),
 			})
+			if state == "failed" {
+				terminalFailureSeen = true
+			}
 		}
 		return phases
 	}
 
 	seen := map[string]bool{}
 	phases := make([]RunProjectionPhase, 0)
+	terminalFailureSeen := false
 	for _, attempt := range run.Attempts {
 		name := firstNonEmpty(attempt.Phase, "phase")
 		if seen[name] {
@@ -965,7 +1085,7 @@ func runProjectionPhases(run RunReport, workflow Workflow) []RunProjectionPhase 
 		}
 		seen[name] = true
 		attempts := attemptsForProjectionPhase(run.Attempts, name)
-		state := projectionPhaseState(name, run.CurrentPhase, attempts)
+		state := projectionPhaseState(run, name, attempts, terminalFailureSeen, false)
 		phase := PhaseSpec{
 			Name:             name,
 			Kind:             firstNonEmpty(attempt.PhaseKind, workflowKindNativeK8sJob),
@@ -975,9 +1095,13 @@ func runProjectionPhases(run RunReport, workflow Workflow) []RunProjectionPhase 
 			Name:     name,
 			Kind:     phase.Kind,
 			State:    state,
+			Reason:   projectionPhaseReason(state, attempts),
 			Jobs:     runProjectionJobs(phase, state, attempts),
 			Attempts: runProjectionAttempts(attempts),
 		})
+		if state == "failed" {
+			terminalFailureSeen = true
+		}
 	}
 	return phases
 }
@@ -993,16 +1117,19 @@ func attemptsForProjectionPhase(attempts []RunReportAttempt, phaseName string) [
 	return out
 }
 
-func projectionPhaseState(phaseName string, currentPhase *string, attempts []RunReportAttempt) string {
+func projectionPhaseState(run RunReport, phaseName string, attempts []RunReportAttempt, terminalFailureSeen bool, skippedByEntrypoint bool) string {
 	if len(attempts) == 0 {
-		if currentPhase != nil && *currentPhase == phaseName {
-			return "active"
+		if skippedByEntrypoint || (terminalFailureSeen && run.CompletedAt != nil) {
+			return "skipped"
+		}
+		if run.CurrentPhase != nil && *run.CurrentPhase == phaseName {
+			return "dispatching"
 		}
 		return "not_started"
 	}
 	latest := attempts[len(attempts)-1]
 	if latest.CompletedAt == nil {
-		return "active"
+		return "dispatching"
 	}
 	if latest.VerificationStatus != nil {
 		switch *latest.VerificationStatus {
@@ -1020,7 +1147,48 @@ func projectionPhaseState(phaseName string, currentPhase *string, attempts []Run
 			return "failed"
 		}
 	}
-	return "completed"
+	return "succeeded"
+}
+
+func phaseSkippedByEntrypoint(phases []PhaseSpec, phaseName string, entrypoint *string) bool {
+	if entrypoint == nil || *entrypoint == "" || *entrypoint == phaseName {
+		return false
+	}
+	for _, phase := range phases {
+		if phase.Name == phaseName {
+			return true
+		}
+		if phase.Name == *entrypoint {
+			return false
+		}
+	}
+	return false
+}
+
+func projectionPhaseReason(state string, attempts []RunReportAttempt) *string {
+	if state != "failed" || len(attempts) == 0 {
+		return nil
+	}
+	latest := attempts[len(attempts)-1]
+	if latest.VerificationStatus != nil {
+		switch *latest.VerificationStatus {
+		case "fail":
+			return stringPointerOrNil("verification_failed")
+		case "error":
+			return stringPointerOrNil("verification_error")
+		}
+	}
+	if latest.Conclusion != nil {
+		switch *latest.Conclusion {
+		case "cancelled":
+			return stringPointerOrNil("cancelled")
+		case "timed_out":
+			return stringPointerOrNil("timeout")
+		case "failure":
+			return stringPointerOrNil("job_failed")
+		}
+	}
+	return stringPointerOrNil("job_failed")
 }
 
 func runProjectionJobs(phase PhaseSpec, phaseState string, attempts []RunReportAttempt) []RunProjectionJob {
@@ -1037,12 +1205,13 @@ func runProjectionJobs(phase PhaseSpec, phaseState string, attempts []RunReportA
 			ID:          jobID,
 			Name:        stringPointerOrNil(jobID),
 			State:       state,
+			Reason:      projectionJobReason(state, jobCompletions[jobID]),
 			Conclusion:  conclusion,
 			CompletedAt: completedAt,
 			Steps: []RunProjectionStep{{
 				Slug:  "workflow-run",
 				Title: stringPointerOrNil("Workflow run"),
-				State: state,
+				State: projectionStepState(state),
 			}},
 		}}
 	}
@@ -1056,20 +1225,21 @@ func runProjectionJobs(phase PhaseSpec, phaseState string, attempts []RunReportA
 			steps = append(steps, RunProjectionStep{
 				Slug:  slug,
 				Title: step.Title,
-				State: state,
+				State: projectionStepState(state),
 			})
 		}
 		if len(steps) == 0 {
 			steps = append(steps, RunProjectionStep{
 				Slug:  "job",
 				Title: job.Name,
-				State: state,
+				State: projectionStepState(state),
 			})
 		}
 		jobs = append(jobs, RunProjectionJob{
 			ID:          jobID,
 			Name:        job.Name,
 			State:       state,
+			Reason:      projectionJobReason(state, jobCompletions[jobID]),
 			Conclusion:  conclusion,
 			CompletedAt: completedAt,
 			Steps:       steps,
@@ -1095,8 +1265,8 @@ func latestJobCompletionsByJob(attempts []RunReportAttempt) map[string]RunAttemp
 
 func projectionJobCompletionAttrs(completion RunAttemptJobCompletion, phaseState string, attempted bool) (string, *string, *string) {
 	if completion.JobID == "" {
-		if phaseState == "active" && !attempted {
-			return "pending", nil, nil
+		if !attempted && (phaseState == "dispatching" || phaseState == "active") {
+			return "not_started", nil, nil
 		}
 		return projectionJobState(phaseState), nil, nil
 	}
@@ -1115,33 +1285,66 @@ func projectionJobCompletionAttrs(completion RunAttemptJobCompletion, phaseState
 		return "succeeded", conclusion, completedAt
 	case "cancelled", "failure", "timed_out":
 		return "failed", conclusion, completedAt
+	case "skipped":
+		return "skipped", conclusion, completedAt
 	default:
-		return "completed", conclusion, completedAt
+		return "failed", conclusion, completedAt
 	}
 }
 
 func projectionJobState(phaseState string) string {
 	switch phaseState {
-	case "succeeded", "completed":
+	case "succeeded":
 		return "succeeded"
 	case "failed":
 		return "failed"
 	case "active":
 		return "active"
+	case "dispatching":
+		return "dispatching"
 	case "skipped":
 		return "skipped"
 	case "not_started":
 		return "not_started"
 	default:
-		return "pending"
+		return "failed"
 	}
 }
 
-func projectionStepState(phaseState string, attempted bool) string {
-	if !attempted {
+func projectionStepState(jobState string) string {
+	switch jobState {
+	case "succeeded", "failed", "skipped":
+		return jobState
+	default:
 		return "not_started"
 	}
-	return projectionJobState(phaseState)
+}
+
+func projectionJobReason(state string, completion RunAttemptJobCompletion) *string {
+	if state != "failed" {
+		return nil
+	}
+	if completion.JobID == "" {
+		return stringPointerOrNil("job_failed")
+	}
+	if completion.VerificationStatus != nil {
+		switch *completion.VerificationStatus {
+		case "fail":
+			return stringPointerOrNil("verification_failed")
+		case "error":
+			return stringPointerOrNil("verification_error")
+		}
+	}
+	switch completion.Conclusion {
+	case "cancelled":
+		return stringPointerOrNil("cancelled")
+	case "timed_out":
+		return stringPointerOrNil("timeout")
+	case "failure":
+		return stringPointerOrNil("step_failed")
+	default:
+		return stringPointerOrNil("job_failed")
+	}
 }
 
 func runProjectionAttempts(attempts []RunReportAttempt) []RunProjectionAttempt {
@@ -1169,7 +1372,7 @@ func runProjectionAttempts(attempts []RunReportAttempt) []RunProjectionAttempt {
 
 func projectionAttemptState(attempt RunReportAttempt) string {
 	if attempt.CompletedAt == nil {
-		return "active"
+		return "dispatching"
 	}
 	if attempt.VerificationStatus != nil {
 		switch *attempt.VerificationStatus {
@@ -1187,7 +1390,7 @@ func projectionAttemptState(attempt RunReportAttempt) string {
 			return "failed"
 		}
 	}
-	return "completed"
+	return "succeeded"
 }
 
 func runProjectionEvidence(run RunReport, touchpoints []TouchpointRow) []RunProjectionEvidence {
@@ -1233,6 +1436,94 @@ func runProjectionEvidence(run RunReport, touchpoints []TouchpointRow) []RunProj
 		}
 	}
 	return evidence
+}
+
+func applyNativeEventsToProjectionRun(run *RunProjectionRun, events []NativeRunLogEvent) {
+	if run == nil || len(events) == 0 {
+		return
+	}
+	for phaseIndex := range run.Phases {
+		phase := &run.Phases[phaseIndex]
+		if len(phase.Attempts) == 0 {
+			continue
+		}
+		latestAttempt := phase.Attempts[len(phase.Attempts)-1].AttemptIndex
+		phaseActive := false
+		phaseFailed := phase.State == "failed"
+		for jobIndex := range phase.Jobs {
+			job := &phase.Jobs[jobIndex]
+			jobEvents := nativeEventsForProjectionJob(events, latestAttempt, phase.Name, job.ID)
+			if len(jobEvents) == 0 {
+				continue
+			}
+			if job.State == "dispatching" || job.State == "not_started" {
+				job.State = "active"
+			}
+			stepBySlug := map[string]int{}
+			for stepIndex := range job.Steps {
+				stepBySlug[job.Steps[stepIndex].Slug] = stepIndex
+			}
+			for _, event := range jobEvents {
+				if event.StepSlug == "" || event.Event == "log" {
+					continue
+				}
+				stepIndex, ok := stepBySlug[event.StepSlug]
+				if !ok {
+					job.Steps = append(job.Steps, RunProjectionStep{Slug: event.StepSlug, Title: stringPointerOrNil(event.StepSlug), State: "not_started"})
+					stepIndex = len(job.Steps) - 1
+					stepBySlug[event.StepSlug] = stepIndex
+				}
+				step := &job.Steps[stepIndex]
+				switch event.Event {
+				case "step_started":
+					if step.State != "succeeded" && step.State != "failed" && step.State != "skipped" {
+						step.State = "active"
+					}
+				case "step_completed":
+					step.State = "succeeded"
+					step.ExitCode = event.ExitCode
+				case "step_skipped":
+					step.State = "skipped"
+				case "step_failed":
+					step.State = "failed"
+					step.ExitCode = event.ExitCode
+					step.Reason = stringPointerOrNil("exit_nonzero")
+					job.State = "failed"
+					job.Reason = stringPointerOrNil("step_failed")
+					phaseFailed = true
+				}
+			}
+			if job.State == "active" {
+				phaseActive = true
+			}
+		}
+		switch {
+		case phaseFailed:
+			phase.State = "failed"
+			if phase.Reason == nil {
+				phase.Reason = stringPointerOrNil("job_failed")
+			}
+		case phase.State == "dispatching" && phaseActive:
+			phase.State = "active"
+		}
+	}
+}
+
+func nativeEventsForProjectionJob(events []NativeRunLogEvent, attemptIndex int, phase, jobID string) []NativeRunLogEvent {
+	out := make([]NativeRunLogEvent, 0)
+	for _, event := range events {
+		if event.AttemptIndex != attemptIndex {
+			continue
+		}
+		if event.Phase != "" && event.Phase != phase {
+			continue
+		}
+		if event.JobID != jobID {
+			continue
+		}
+		out = append(out, event)
+	}
+	return out
 }
 
 func markdownEvidenceURLs(markdown string) []string {

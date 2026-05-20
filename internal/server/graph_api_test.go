@@ -14,6 +14,7 @@ type fakeGraphStore struct {
 	runs        []RunReport
 	touchpoints []TouchpointRow
 	signals     []GraphSignal
+	nativeLogs  NativeRunLogsResponse
 }
 
 func (s fakeGraphStore) ListIssues(context.Context, IssueListFilter) ([]IssueRow, error) {
@@ -85,6 +86,18 @@ func (s fakeGraphStore) EnsureTouchpoint(context.Context, TouchpointCreate) (Tou
 
 func (s fakeGraphStore) ListGraphSignals(context.Context, GraphSignalFilter) ([]GraphSignal, error) {
 	return s.signals, nil
+}
+
+func (s fakeGraphStore) GetNativeRunStatusByID(context.Context, string, string) (NativeRunStatusResponse, error) {
+	return NativeRunStatusResponse{}, ErrUnsupported
+}
+
+func (s fakeGraphStore) RecordNativeEventByID(context.Context, string, string, NativeRunEventRequest) (NativeRunEventResult, error) {
+	return NativeRunEventResult{}, ErrUnsupported
+}
+
+func (s fakeGraphStore) ListNativeEventsByID(context.Context, string, string, *int, *string, *int) (NativeRunLogsResponse, error) {
+	return s.nativeLogs, nil
 }
 
 func TestIssueGraphByNumberBuildsRunAttemptAndTouchpointNodes(t *testing.T) {
@@ -225,7 +238,7 @@ func TestIssueGraphByNumberBuildsRunAttemptAndTouchpointNodes(t *testing.T) {
 		t.Fatalf("env-prep job steps=%#v", envPhase.Jobs[0].Steps)
 	}
 	executePhase := assertProjectionPhase(t, graph.Projection.Runs[0], "agent-execute")
-	if executePhase.State != "active" {
+	if executePhase.State != "dispatching" {
 		t.Fatalf("agent-execute state=%q", executePhase.State)
 	}
 	assertProjectionEvidence(t, graph.Projection.Runs[0], "validation", "https://preview.example")
@@ -234,6 +247,99 @@ func TestIssueGraphByNumberBuildsRunAttemptAndTouchpointNodes(t *testing.T) {
 	assertProjectionEvidence(t, graph.Projection.Runs[0], "pull_request", "https://github.com/nelsong6/glimmung/pull/452")
 	if len(graph.Projection.Signals) != 1 || graph.Projection.Signals[0].Kind != "reject" {
 		t.Fatalf("projection signals=%#v", graph.Projection.Signals)
+	}
+}
+
+func TestRunCycleGraphProjectionUsesCanonicalStateAndNativeActivity(t *testing.T) {
+	issueNumber := 17
+	runNumber := 1
+	cycleNumber := 1
+	runCycle := 1
+	runDisplay := "1.1"
+	now := time.Date(2026, 5, 12, 18, 0, 0, 0, time.UTC)
+	runRef := "glimmung#17/runs/1.1"
+	store := fakeGraphStore{
+		fakeReadStore: fakeReadStore{workflows: []Workflow{{
+			Project: "glimmung",
+			Name:    "agent-run",
+			Phases: []PhaseSpec{
+				{
+					Name: "env-prep",
+					Kind: "k8s_job",
+					Jobs: []NativeJobSpec{{
+						ID:   "prepare",
+						Name: stringPtr("prepare env"),
+						Steps: []NativeStepSpec{{
+							Slug:  "checkout",
+							Title: stringPtr("checkout"),
+						}},
+					}},
+				},
+				{Name: "agent-execute", Kind: "k8s_job", DependsOn: []string{"env-prep"}, Jobs: []NativeJobSpec{{ID: "agent"}}},
+			},
+			PR: PrPrimitive{Enabled: true},
+		}}},
+		issue: IssueDetail{
+			Ref:     "glimmung#17",
+			Project: "glimmung",
+			Number:  &issueNumber,
+			Title:   "Port graph",
+			State:   "open",
+		},
+		runs: []RunReport{{
+			ID:                  "run-1",
+			Project:             "glimmung",
+			RunRef:              runRef,
+			RunNumber:           &runNumber,
+			CycleNumber:         &cycleNumber,
+			RunCycleNumber:      &runCycle,
+			RunDisplayNumber:    &runDisplay,
+			Workflow:            "agent-run",
+			IssueRef:            stringPtr("glimmung#17"),
+			IssueNumber:         &issueNumber,
+			State:               "in_progress",
+			CurrentPhase:        stringPtr("env-prep"),
+			CumulativeCostUSD:   0,
+			StartedAt:           now,
+			UpdatedAt:           now,
+			AttemptsCount:       1,
+			ValidationURL:       nil,
+			ScreenshotsMarkdown: nil,
+			Attempts: []RunReportAttempt{{
+				AttemptIndex:     0,
+				Phase:            "env-prep",
+				PhaseKind:        "k8s_job",
+				WorkflowFilename: "k8s_job:env-prep",
+				DispatchedAt:     now,
+			}},
+		}},
+		nativeLogs: NativeRunLogsResponse{Events: []NativeRunLogEvent{{
+			Project:      "glimmung",
+			RunRef:       runRef,
+			AttemptIndex: 0,
+			Phase:        "env-prep",
+			JobID:        "prepare",
+			Seq:          1,
+			Event:        "step_started",
+			StepSlug:     "checkout",
+			CreatedAt:    now.Format(time.RFC3339Nano),
+		}}},
+	}
+	handler := NewWithStore(Settings{}, store)
+
+	var projection RunGraphProjection
+	getJSON(t, handler, "/v1/projects/glimmung/issues/17/runs/1/cycles/1/graph", &projection)
+
+	if len(projection.Runs) != 1 {
+		t.Fatalf("projection runs=%#v", projection.Runs)
+	}
+	envPhase := assertProjectionPhase(t, projection.Runs[0], "env-prep")
+	if envPhase.State != "active" || envPhase.Jobs[0].State != "active" || envPhase.Jobs[0].Steps[0].State != "active" {
+		t.Fatalf("env-prep projection=%#v", envPhase)
+	}
+	executePhase := assertProjectionPhase(t, projection.Runs[0], "agent-execute")
+	if executePhase.State != "not_started" || executePhase.Jobs[0].State != "not_started" {
+		t.Fatalf("agent-execute projection=%#v", executePhase)
 	}
 }
 
