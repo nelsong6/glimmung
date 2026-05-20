@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  phaseGraphModelFromNames,
   runTopologyToPhaseGraphModel,
   workflowToPhaseGraphModel,
   type WorkflowGraphSource,
@@ -166,28 +165,6 @@ describe("runTopologyToPhaseGraphModel", () => {
         active: false,
         kind: "touchpoint_recycle",
       }],
-    });
-  });
-});
-
-describe("phaseGraphModelFromNames", () => {
-  it("links provided phase names in order", () => {
-    expect(phaseGraphModelFromNames(["plan", "implement", "verify"], { prEnabled: false })).toEqual({
-      phases: [
-        { name: "plan", kind: "phase", depends_on: [] },
-        { name: "implement", kind: "phase", depends_on: ["plan"] },
-        { name: "verify", kind: "phase", depends_on: ["implement"] },
-      ],
-      prEnabled: false,
-      recycleArrows: [],
-    });
-  });
-
-  it("preserves an empty phase list", () => {
-    expect(phaseGraphModelFromNames([])).toEqual({
-      phases: [],
-      prEnabled: true,
-      recycleArrows: [],
     });
   });
 });

@@ -20,9 +20,8 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { authedFetch } from "./auth";
-import { PhaseGraph, type PhaseGraphPhase, type RecycleArrow } from "./PhaseGraph";
+import { PhaseGraph, type PhaseGraphPhase } from "./PhaseGraph";
 import {
-  phaseGraphModelFromNames,
   runTopologyToPhaseGraphModel,
   type RunProjectionTopologySource,
   workflowToPhaseGraphModel,
@@ -220,13 +219,6 @@ type NativeRunEventsResponse = {
   job_id: string | null;
   events: NativeRunEvent[];
   archive_url: string | null;
-};
-
-type WorkflowGraphMeta = {
-  phases: string[];
-  default_entry: { target: string; active: boolean; kind: string } | null;
-  recycle_arrows: RecycleArrow[];
-  terminal: { kind: string; enabled: boolean };
 };
 
 type Workflow = {
@@ -1494,24 +1486,12 @@ function PipelineDag({
     return m;
   }, [phaseRollups]);
   const meta = run.metadata;
-  const workflowGraph = useMemo(
-    () => workflowGraphMeta(meta.workflow_graph),
-    [meta.workflow_graph],
-  );
-  const hasStoredWorkflowGraph = (workflowGraph?.phases.length ?? 0) > 0;
   // Workflow topology comes from the same adapter as the definition page.
   // Run attempts only paint state onto those phase slots.
   const graphModel = useMemo(() => {
     if (workflow) return workflowToPhaseGraphModel(workflow);
-    if (!hasStoredWorkflowGraph) return null;
-    return phaseGraphModelFromNames(
-      workflowGraph?.phases ?? [],
-      {
-        prEnabled: workflowGraph?.terminal.enabled ?? true,
-        recycleArrows: workflowGraph?.recycle_arrows ?? [],
-      },
-    );
-  }, [hasStoredWorkflowGraph, workflow, workflowGraph]);
+    return null;
+  }, [workflow]);
   const unavailableWorkflowName = stringOrNull(meta.workflow);
   if (!graphModel) {
     return (
@@ -1530,8 +1510,7 @@ function PipelineDag({
     );
   }
   const activeEntry = stringOrNull(meta.entrypoint_phase)
-    ?? workflowGraph?.default_entry?.target
-    ?? phaseRollups[0]?.phaseName
+    ?? graphModel.phases[0]?.name
     ?? null;
   const touchpointId = stringOrNull(meta.touchpoint_ref);
   const touchpointState = stringOrNull(meta.touchpoint_state);
@@ -3778,42 +3757,6 @@ function resolveRunWorkflow(workflows: Workflow[], project: string, run: GraphNo
 
 function isRecord(x: unknown): x is Record<string, unknown> {
   return typeof x === "object" && x !== null && !Array.isArray(x);
-}
-
-function workflowGraphMeta(x: unknown): WorkflowGraphMeta | null {
-  if (!isRecord(x)) return null;
-  const phases = Array.isArray(x.phases)
-    ? x.phases.filter((p): p is string => typeof p === "string")
-    : [];
-  const defaultEntry = isRecord(x.default_entry)
-    && typeof x.default_entry.target === "string"
-    ? {
-        target: x.default_entry.target,
-        active: Boolean(x.default_entry.active),
-        kind: String(x.default_entry.kind ?? "default"),
-      }
-    : null;
-  const terminal = isRecord(x.terminal)
-    ? {
-        kind: String(x.terminal.kind ?? "touchpoint"),
-        enabled: Boolean(x.terminal.enabled),
-      }
-    : { kind: "touchpoint", enabled: false };
-  const recycle_arrows = Array.isArray(x.recycle_arrows)
-    ? x.recycle_arrows.flatMap((raw): RecycleArrow[] => {
-        if (!isRecord(raw)) return [];
-        const kind = raw.kind === "touchpoint_recycle" ? "touchpoint_recycle" : "phase_recycle";
-        return [{
-          source: String(raw.source ?? ""),
-          target: String(raw.target ?? ""),
-          trigger: String(raw.trigger ?? ""),
-          max_attempts: numberOrNull(raw.max_attempts) ?? 0,
-          active: Boolean(raw.active),
-          kind,
-        }];
-      }).filter((a) => a.source && a.target)
-    : [];
-  return { phases, default_entry: defaultEntry, recycle_arrows, terminal };
 }
 
 function nativeAttemptJobs(x: unknown): NativeAttemptJob[] {

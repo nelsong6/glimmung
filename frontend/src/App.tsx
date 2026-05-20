@@ -1836,12 +1836,6 @@ function projectRunGraph(run: ProjectRun, workflow: Workflow | undefined, projec
       cycles_count: run.cycles,
       cumulative_cost_usd: run.cost_usd,
       entrypoint_phase: phaseNames[0] ?? run.current_phase,
-      workflow_graph: {
-        phases: phaseNames,
-        default_entry: { target: phaseNames[0] ?? run.current_phase, active: true, kind: "phase" },
-        recycle_arrows: graphModel?.recycleArrows ?? [],
-        terminal: { kind: "touchpoint", enabled: graphModel?.prEnabled ?? true },
-      },
     },
   };
   const attempts = phaseNames
@@ -1955,12 +1949,6 @@ function projectRunReportGraph(report: RunReport, workflow: Workflow | undefined
       pr_primitive_state: report.abort_reason?.startsWith("PR primitive:") ? "failed" : "pending",
       pr_primitive_error: report.abort_reason?.startsWith("PR primitive:") ? report.abort_reason : null,
       entrypoint_phase: uniquePhases[0] ?? report.current_phase,
-      workflow_graph: {
-        phases: uniquePhases,
-        default_entry: { target: uniquePhases[0] ?? report.current_phase ?? "phase", active: true, kind: "phase" },
-        recycle_arrows: graphModel?.recycleArrows ?? [],
-        terminal: { kind: "touchpoint", enabled: graphModel?.prEnabled ?? false },
-      },
     },
   };
   const attempts = report.attempts.map((attempt) => ({
