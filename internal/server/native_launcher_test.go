@@ -195,6 +195,64 @@ func TestReturnTestSlotRuntimeDeletesSteadyRuntimeResources(t *testing.T) {
 	}
 }
 
+func TestReturnTestSlotRuntimeUninstallsHelmRuntimeRelease(t *testing.T) {
+	tokenPath := tempTokenFile(t)
+	var paths []string
+	launcher := &KubernetesNativeLauncher{
+		Settings: Settings{
+			K8sAPIHost:                 "https://kube.test",
+			K8sSATokenPath:             tokenPath,
+			NativeRunnerNamespace:      "glimmung-runs",
+			NativeRunnerServiceAccount: "glimmung-native-runner",
+			NativeRunnerJobTTLSeconds:  3600,
+		},
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			paths = append(paths, req.Method+" "+req.URL.Path)
+			body := `{"items":[]}`
+			if req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/jobs/glim-slot-uninstall-hot-") {
+				body = `{"status":{"conditions":[{"type":"Complete","status":"True"}]}}`
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		})},
+	}
+	lease := Lease{
+		Project:     "tank-operator",
+		LeaseNumber: intPtr(2),
+		Metadata: map[string]any{
+			"native_slot_name":          "tank-operator-slot-1",
+			"native_slot_index":         "1",
+			"native_sessions_namespace": "tank-operator-slot-1-sessions",
+		},
+	}
+	project := Project{
+		Name:       "tank-operator",
+		GitHubRepo: "nelsong6/tank-operator",
+		Metadata:   map[string]any{"test_slot_helm": map[string]any{"enabled": true}},
+	}
+
+	if err := launcher.ReturnTestSlotRuntime(context.Background(), lease, project); err != nil {
+		t.Fatalf("ReturnTestSlotRuntime: %v", err)
+	}
+	for _, want := range []string{
+		"POST /apis/batch/v1/namespaces/glimmung-runs/jobs",
+		"GET /apis/batch/v1/namespaces/glimmung-runs/jobs/glim-slot-uninstall-hot-tank-operator-slot-1-2",
+		"DELETE /apis/apps/v1/namespaces/tank-operator-slot-1/deployments/slot-playwright",
+	} {
+		if !containsPath(paths, want) {
+			t.Fatalf("missing %s in paths=%#v", want, paths)
+		}
+	}
+	for _, path := range paths {
+		if strings.Contains(path, "/services/tank-operator") || strings.Contains(path, "/services/claude-api-proxy") || strings.Contains(path, "/services/codex-api-proxy") {
+			t.Fatalf("helm cleanup should not hand-delete runtime services, paths=%#v", paths)
+		}
+	}
+}
+
 func TestEnsureTestSlotPreliminariesDoesNotCreatePlaywrightRuntime(t *testing.T) {
 	tokenPath := tempTokenFile(t)
 	var paths []string
@@ -290,8 +348,13 @@ func TestActivateTestSlotRuntimeRunsHelmInstallerAfterLeaseAssignment(t *testing
 	if !containsPath(paths, "POST /apis/batch/v1/namespaces/glimmung-runs/jobs") {
 		t.Fatalf("activation should create Helm installer job, paths=%#v", paths)
 	}
-	if !containsPath(paths, "GET /apis/batch/v1/namespaces/glimmung-runs/jobs/glim-slot-apply-tank-operator-slot-2-12") {
-		t.Fatalf("activation should wait for Helm installer job completion, paths=%#v", paths)
+	for _, want := range []string{
+		"GET /apis/batch/v1/namespaces/glimmung-runs/jobs/glim-slot-apply-warm-tank-operator-slot-2-12",
+		"GET /apis/batch/v1/namespaces/glimmung-runs/jobs/glim-slot-apply-hot-tank-operator-slot-2-12",
+	} {
+		if !containsPath(paths, want) {
+			t.Fatalf("activation should wait for Helm installer job completion %s, paths=%#v", want, paths)
+		}
 	}
 	if containsPath(paths, "POST /apis/apps/v1/namespaces/tank-operator-slot-2/deployments") {
 		t.Fatalf("activation should delegate app runtime creation to installer job, paths=%#v", paths)
@@ -497,8 +560,8 @@ func TestTestSlotHelmConfigDefaultsTankChart(t *testing.T) {
 	if config.InstallerImage != "alpine/k8s:1.30.0" {
 		t.Fatalf("installer image=%q", config.InstallerImage)
 	}
-	if config.Values["testEnv.enabled"] != "true" {
-		t.Fatalf("test env value=%q", config.Values["testEnv.enabled"])
+	if _, ok := config.Values["testEnv.enabled"]; ok {
+		t.Fatalf("testEnv.enabled should not be injected into helm values")
 	}
 	if len(config.ClusterRoleBindings) != 2 {
 		t.Fatalf("cluster role binding templates=%d", len(config.ClusterRoleBindings))
@@ -535,8 +598,9 @@ func TestTestSlotInstallJobManifestRendersHelmApplyJob(t *testing.T) {
 		lease,
 		project,
 		testSlotSubstitutions(lease, project, "tank-operator-slot-2", "tank-operator-slot-2-sessions"),
+		testSlotRenderModeHot,
 	)
-	if manifest["metadata"].(map[string]any)["name"] != "glim-slot-apply-tank-operator-slot-2-12" {
+	if manifest["metadata"].(map[string]any)["name"] != "glim-slot-apply-hot-tank-operator-slot-2-12" {
 		t.Fatalf("job name=%q", manifest["metadata"].(map[string]any)["name"])
 	}
 	spec := manifest["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
@@ -549,11 +613,12 @@ func TestTestSlotInstallJobManifestRendersHelmApplyJob(t *testing.T) {
 	}
 	installScript := spec["containers"].([]any)[0].(map[string]any)["command"].([]string)[2]
 	for _, want := range []string{
-		"helm template 'tank-operator-slot-2' 'k8s'",
-		"--set 'testEnv.enabled=true'",
-		"ClusterRoleBinding",
-		"kubectl apply -f -",
-		"kubectl -n 'tank-operator-slot-2' wait --for=condition=available --timeout=180s deployment --all",
+		"helm template 'tank-operator-slot-2-hot' 'k8s'",
+		"helm upgrade --install 'tank-operator-slot-2-hot' 'k8s'",
+		"--set 'testEnv.slotName=tank-operator-slot-2'",
+		"--set 'renderMode=hot'",
+		"kubectl delete --ignore-not-found=true -f -",
+		"--wait --wait-for-jobs --timeout 180s",
 	} {
 		if !strings.Contains(installScript, want) {
 			t.Fatalf("install script missing %q: %s", want, installScript)

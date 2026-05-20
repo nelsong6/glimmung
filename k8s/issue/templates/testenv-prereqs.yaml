@@ -1,4 +1,4 @@
-{{- if .Values.testEnv.enabled }}
+{{- if and (eq (include "glimmung-issue.renderWarm" .) "true") (eq (include "glimmung-issue.isTestEnv" .) "true") }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:

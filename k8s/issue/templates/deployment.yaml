@@ -1,17 +1,15 @@
+{{- if eq (include "glimmung-issue.renderHot" .) "true" }}
 {{- if not .Values.image.tag -}}
 {{- fail "image.tag is required (the per-issue image tag built by az acr build)" -}}
-{{- end -}}
-{{- if not .Values.hostname -}}
-{{- fail "hostname is required (e.g. issue-12-RUNID-SHA.glimmung.dev.romaine.life)" -}}
 {{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Release.Name }}
+  name: {{ include "glimmung-issue.resourceName" . }}
   namespace: {{ .Release.Namespace }}
   labels:
     app.kubernetes.io/name: glimmung-issue
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/instance: {{ include "glimmung-issue.resourceName" . }}
     {{- if .Values.prNumber }}
     glimmung.io/pr: {{ .Values.prNumber | quote }}
     {{- end }}
@@ -19,7 +17,7 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/instance: {{ include "glimmung-issue.resourceName" . }}
   template:
     metadata:
       {{- if .Values.observability.scrapeAnnotations.enabled }}
@@ -30,11 +28,11 @@ spec:
       {{- end }}
       labels:
         app.kubernetes.io/name: glimmung-issue
-        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/instance: {{ include "glimmung-issue.resourceName" . }}
         azure.workload.identity/use: "true"
     spec:
       serviceAccountName: {{ .Values.serviceAccount }}
-      {{- if and .Values.testEnv.enabled .Values.hotSwapBackend.enabled }}
+      {{- if and (eq (include "glimmung-issue.isTestEnv" .) "true") .Values.hotSwapBackend.enabled }}
       securityContext:
         fsGroup: 1000
         fsGroupChangePolicy: OnRootMismatch
@@ -43,7 +41,7 @@ spec:
         - name: glimmung
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          {{- if and .Values.testEnv.enabled .Values.hotSwapBackend.enabled }}
+          {{- if and (eq (include "glimmung-issue.isTestEnv" .) "true") .Values.hotSwapBackend.enabled }}
           command:
             - /app/glimmung-supervisor
           {{- end }}
@@ -55,11 +53,11 @@ spec:
               value: {{ .Values.cosmos.endpoint | quote }}
             - name: COSMOS_DATABASE
               value: {{ .Values.cosmos.database | quote }}
-            {{- if .Values.testEnv.enabled }}
+            {{- if (eq (include "glimmung-issue.isTestEnv" .) "true") }}
             - name: CONTROL_PLANE_LOOPS_ENABLED
               value: "false"
             {{- end }}
-            {{- if and .Values.testEnv.enabled .Values.hotSwapBackend.enabled }}
+            {{- if and (eq (include "glimmung-issue.isTestEnv" .) "true") .Values.hotSwapBackend.enabled }}
             - name: GLIMMUNG_SUPERVISOR_CHILD
               value: {{ .Values.hotSwapBackend.childCommand | quote }}
             - name: GLIMMUNG_SUPERVISOR_HOT_ARTIFACT
@@ -67,7 +65,7 @@ spec:
             - name: GLIMMUNG_SUPERVISOR_RESTART_ENABLED
               value: "true"
             {{- end }}
-            {{- if and .Values.testEnv.enabled .Values.staticOverride.enabled }}
+            {{- if and (eq (include "glimmung-issue.isTestEnv" .) "true") .Values.staticOverride.enabled }}
             - name: GLIMMUNG_STATIC_OVERRIDE_DIR
               value: {{ .Values.staticOverride.mountPath | quote }}
             {{- end }}
@@ -76,13 +74,13 @@ spec:
                 name: {{ .Values.configMapName }}
             - secretRef:
                 name: {{ .Values.secretName }}
-          {{- if or (and .Values.testEnv.enabled .Values.staticOverride.enabled) (and .Values.testEnv.enabled .Values.hotSwapBackend.enabled) }}
+          {{- if or (and (eq (include "glimmung-issue.isTestEnv" .) "true") .Values.staticOverride.enabled) (and (eq (include "glimmung-issue.isTestEnv" .) "true") .Values.hotSwapBackend.enabled) }}
           volumeMounts:
-            {{- if and .Values.testEnv.enabled .Values.hotSwapBackend.enabled }}
+            {{- if and (eq (include "glimmung-issue.isTestEnv" .) "true") .Values.hotSwapBackend.enabled }}
             - name: hot-backend
               mountPath: {{ .Values.hotSwapBackend.mountPath | quote }}
             {{- end }}
-            {{- if and .Values.testEnv.enabled .Values.staticOverride.enabled }}
+            {{- if and (eq (include "glimmung-issue.isTestEnv" .) "true") .Values.staticOverride.enabled }}
             - name: static-override
               mountPath: {{ .Values.staticOverride.mountPath | quote }}
             {{- end }}
@@ -106,7 +104,7 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
-        {{- if and .Values.testEnv.enabled .Values.staticOverride.enabled }}
+        {{- if and (eq (include "glimmung-issue.isTestEnv" .) "true") .Values.staticOverride.enabled }}
         - name: {{ .Values.staticOverride.writerContainerName }}
           image: {{ .Values.staticOverride.writerImage | quote }}
           imagePullPolicy: {{ .Values.staticOverride.writerImagePullPolicy }}
@@ -120,14 +118,15 @@ spec:
             - name: static-override
               mountPath: {{ .Values.staticOverride.mountPath | quote }}
         {{- end }}
-      {{- if or (and .Values.testEnv.enabled .Values.staticOverride.enabled) (and .Values.testEnv.enabled .Values.hotSwapBackend.enabled) }}
+      {{- if or (and (eq (include "glimmung-issue.isTestEnv" .) "true") .Values.staticOverride.enabled) (and (eq (include "glimmung-issue.isTestEnv" .) "true") .Values.hotSwapBackend.enabled) }}
       volumes:
-        {{- if and .Values.testEnv.enabled .Values.hotSwapBackend.enabled }}
+        {{- if and (eq (include "glimmung-issue.isTestEnv" .) "true") .Values.hotSwapBackend.enabled }}
         - name: hot-backend
           emptyDir: {}
         {{- end }}
-        {{- if and .Values.testEnv.enabled .Values.staticOverride.enabled }}
+        {{- if and (eq (include "glimmung-issue.isTestEnv" .) "true") .Values.staticOverride.enabled }}
         - name: static-override
           emptyDir: {}
         {{- end }}
       {{- end }}
+{{- end }}
