@@ -111,8 +111,52 @@ type RunProjectionRun struct {
 	StartedAt         string                  `json:"started_at"`
 	UpdatedAt         string                  `json:"updated_at"`
 	CompletedAt       *string                 `json:"completed_at,omitempty"`
+	Topology          RunProjectionTopology   `json:"topology"`
 	Phases            []RunProjectionPhase    `json:"phases"`
 	Evidence          []RunProjectionEvidence `json:"evidence"`
+}
+
+type RunProjectionTopology struct {
+	Phases        []RunProjectionTopologyPhase `json:"phases"`
+	DefaultEntry  *RunProjectionDefaultEntry   `json:"default_entry"`
+	RecycleArrows []RunProjectionRecycle       `json:"recycle_arrows"`
+	Terminal      RunProjectionTerminal        `json:"terminal"`
+}
+
+type RunProjectionTopologyPhase struct {
+	Name                     string                     `json:"name"`
+	Kind                     string                     `json:"kind"`
+	Verify                   bool                       `json:"verify"`
+	Always                   bool                       `json:"always"`
+	EvidenceVerificationGate bool                       `json:"evidence_verification_gate"`
+	DependsOn                []string                   `json:"depends_on"`
+	Jobs                     []RunProjectionTopologyJob `json:"jobs"`
+}
+
+type RunProjectionTopologyJob struct {
+	ID    string  `json:"id"`
+	Name  *string `json:"name,omitempty"`
+	Image string  `json:"image,omitempty"`
+}
+
+type RunProjectionDefaultEntry struct {
+	Target string `json:"target"`
+	Active bool   `json:"active"`
+	Kind   string `json:"kind"`
+}
+
+type RunProjectionTerminal struct {
+	Kind    string `json:"kind"`
+	Enabled bool   `json:"enabled"`
+}
+
+type RunProjectionRecycle struct {
+	Source      string `json:"source"`
+	Target      string `json:"target"`
+	Trigger     string `json:"trigger"`
+	MaxAttempts int    `json:"max_attempts"`
+	Active      bool   `json:"active"`
+	Kind        string `json:"kind"`
 }
 
 type RunProjectionPhase struct {
@@ -831,55 +875,12 @@ func countAttemptGraphSteps(jobs []map[string]any) int {
 }
 
 func workflowGraphMetadata(workflow Workflow) map[string]any {
-	if workflow.Name == "" {
-		return map[string]any{
-			"phases":         []string{},
-			"default_entry":  nil,
-			"recycle_arrows": []map[string]any{},
-			"terminal":       map[string]any{"kind": "touchpoint", "enabled": false},
-		}
-	}
-	phaseNames := make([]string, 0, len(workflow.Phases))
-	arrows := make([]map[string]any, 0)
-	for _, phase := range workflow.Phases {
-		if phase.Name == "" {
-			continue
-		}
-		phaseNames = append(phaseNames, phase.Name)
-		if phase.RecyclePolicy != nil {
-			target := phase.RecyclePolicy.LandsAt
-			if target == "" || target == "self" {
-				target = phase.Name
-			}
-			arrows = append(arrows, map[string]any{
-				"source":       phase.Name,
-				"target":       target,
-				"trigger":      strings.Join(phase.RecyclePolicy.On, " / "),
-				"max_attempts": phase.RecyclePolicy.MaxAttempts,
-				"active":       false,
-				"kind":         "phase_recycle",
-			})
-		}
-	}
-	if workflow.PR.RecyclePolicy != nil {
-		arrows = append(arrows, map[string]any{
-			"source":       "touchpoint",
-			"target":       workflow.PR.RecyclePolicy.LandsAt,
-			"trigger":      strings.Join(workflow.PR.RecyclePolicy.On, " / "),
-			"max_attempts": workflow.PR.RecyclePolicy.MaxAttempts,
-			"active":       false,
-			"kind":         "touchpoint_recycle",
-		})
-	}
-	var defaultEntry any
-	if len(phaseNames) > 0 {
-		defaultEntry = map[string]any{"target": phaseNames[0], "active": true, "kind": "default"}
-	}
+	topology := workflowTopologyFromWorkflow(workflow)
 	return map[string]any{
-		"phases":         phaseNames,
-		"default_entry":  defaultEntry,
-		"recycle_arrows": arrows,
-		"terminal":       map[string]any{"kind": "touchpoint", "enabled": workflow.PR.Enabled},
+		"phases":         workflowTopologyPhaseNames(topology.Phases),
+		"default_entry":  topology.DefaultEntry,
+		"recycle_arrows": topology.RecycleArrows,
+		"terminal":       topology.Terminal,
 	}
 }
 
@@ -1046,9 +1047,84 @@ func runProjectionFromReport(run RunReport, workflow Workflow, touchpoints []Tou
 		StartedAt:         run.StartedAt.Format(time.RFC3339Nano),
 		UpdatedAt:         run.UpdatedAt.Format(time.RFC3339Nano),
 		CompletedAt:       timeStringPtr(run.CompletedAt),
+		Topology:          workflowTopologyFromWorkflow(workflow),
 		Phases:            runProjectionPhases(run, workflow),
 		Evidence:          runProjectionEvidence(run, touchpoints),
 	}
+}
+
+func workflowTopologyFromWorkflow(workflow Workflow) RunProjectionTopology {
+	topology := RunProjectionTopology{
+		Phases:        []RunProjectionTopologyPhase{},
+		RecycleArrows: []RunProjectionRecycle{},
+		Terminal:      RunProjectionTerminal{Kind: "touchpoint", Enabled: false},
+	}
+	if workflow.Name == "" {
+		return topology
+	}
+	for _, phase := range workflow.Phases {
+		if phase.Name == "" {
+			continue
+		}
+		topology.Phases = append(topology.Phases, RunProjectionTopologyPhase{
+			Name:                     phase.Name,
+			Kind:                     workflowPhaseKind(phase.Kind),
+			Verify:                   phase.Verify,
+			Always:                   phase.Always,
+			EvidenceVerificationGate: phase.EvidenceVerificationGate,
+			DependsOn:                sliceOrEmpty(phase.DependsOn),
+			Jobs:                     runProjectionTopologyJobs(phase),
+		})
+		if phase.RecyclePolicy != nil {
+			target := phase.RecyclePolicy.LandsAt
+			if target == "" || target == "self" {
+				target = phase.Name
+			}
+			topology.RecycleArrows = append(topology.RecycleArrows, RunProjectionRecycle{
+				Source:      phase.Name,
+				Target:      target,
+				Trigger:     strings.Join(phase.RecyclePolicy.On, " / "),
+				MaxAttempts: phase.RecyclePolicy.MaxAttempts,
+				Active:      false,
+				Kind:        "phase_recycle",
+			})
+		}
+	}
+	if len(topology.Phases) > 0 {
+		topology.DefaultEntry = &RunProjectionDefaultEntry{Target: topology.Phases[0].Name, Active: true, Kind: "default"}
+	}
+	if workflow.PR.RecyclePolicy != nil {
+		topology.RecycleArrows = append(topology.RecycleArrows, RunProjectionRecycle{
+			Source:      "touchpoint",
+			Target:      workflow.PR.RecyclePolicy.LandsAt,
+			Trigger:     strings.Join(workflow.PR.RecyclePolicy.On, " / "),
+			MaxAttempts: workflow.PR.RecyclePolicy.MaxAttempts,
+			Active:      false,
+			Kind:        "touchpoint_recycle",
+		})
+	}
+	topology.Terminal.Enabled = workflow.PR.Enabled
+	return topology
+}
+
+func runProjectionTopologyJobs(phase PhaseSpec) []RunProjectionTopologyJob {
+	jobs := make([]RunProjectionTopologyJob, 0, len(phase.Jobs))
+	for _, job := range phase.Jobs {
+		jobs = append(jobs, RunProjectionTopologyJob{
+			ID:    firstNonEmpty(job.ID, phase.Name),
+			Name:  job.Name,
+			Image: job.Image,
+		})
+	}
+	return jobs
+}
+
+func workflowTopologyPhaseNames(phases []RunProjectionTopologyPhase) []string {
+	names := make([]string, 0, len(phases))
+	for _, phase := range phases {
+		names = append(names, phase.Name)
+	}
+	return names
 }
 
 func runProjectionPhases(run RunReport, workflow Workflow) []RunProjectionPhase {

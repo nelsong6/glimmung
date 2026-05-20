@@ -559,6 +559,18 @@ const issueGraph = {
       started_at: ago(24),
       updated_at: ago(2),
       completed_at: null,
+      topology: {
+        phases: [
+          { name: "design", kind: "k8s_job", verify: false, always: false, depends_on: [], jobs: [{ id: "design", name: "design" }] },
+          { name: "implement", kind: "k8s_job", verify: false, always: false, depends_on: ["design"], jobs: [{ id: "implement", name: "implement" }] },
+          { name: "verify", kind: "k8s_job", verify: true, always: false, depends_on: ["implement"], jobs: [{ id: "verify-ui", name: "verify ui" }] },
+        ],
+        default_entry: { target: "design", active: true, kind: "default" },
+        recycle_arrows: [
+          { source: "verify", target: "implement", trigger: "reject", max_attempts: 2, active: true, kind: "phase_recycle" },
+        ],
+        terminal: { kind: "touchpoint", enabled: true },
+      },
       phases: [
         { name: "design", kind: "k8s_job", state: "succeeded", verify: false, always: false, depends_on: [], jobs: [{ id: "design", name: "design", state: "succeeded", steps: [{ slug: "read-docs", title: "read docs", state: "succeeded" }] }], attempts: [] },
         { name: "implement", kind: "k8s_job", state: "succeeded", verify: false, always: false, depends_on: ["design"], jobs: [{ id: "implement", name: "implement", state: "succeeded", steps: [{ slug: "build", title: "build", state: "succeeded" }] }], attempts: [] },

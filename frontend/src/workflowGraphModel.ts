@@ -28,6 +28,13 @@ export type WorkflowGraphModel = {
   recycleArrows: RecycleArrow[];
 };
 
+export type RunProjectionTopologySource = {
+  phases: PhaseGraphPhase[];
+  default_entry?: { target: string; active: boolean; kind: string } | null;
+  recycle_arrows: RecycleArrow[];
+  terminal: { kind?: string; enabled: boolean };
+};
+
 function phaseRecycleArrow(phase: WorkflowGraphPhase, active: boolean): RecycleArrow | null {
   if (!phase.recycle_policy) return null;
   return {
@@ -84,6 +91,22 @@ export function workflowToPhaseGraphModel(
         return arrow ? [arrow] : [];
       })(),
     ],
+  };
+}
+
+export function runTopologyToPhaseGraphModel(topology: RunProjectionTopologySource): WorkflowGraphModel {
+  return {
+    phases: topology.phases.map((phase) => ({
+      ...phase,
+      depends_on: phase.depends_on ?? [],
+      jobs: (phase.jobs ?? []).map((job) => ({
+        id: job.id,
+        name: job.name ?? job.id,
+        image: job.image,
+      })),
+    })),
+    prEnabled: topology.terminal.enabled,
+    recycleArrows: topology.recycle_arrows,
   };
 }
 

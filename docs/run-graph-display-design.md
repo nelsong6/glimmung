@@ -320,6 +320,13 @@ The projection is separate from storage and separate from any executor's
 native model. The execution UI renders from this projection, not from generic
 graph `nodes` / `edges` metadata.
 
+Each projected Run carries a `topology` object derived from the workflow
+schema referenced by that run or cycle. Execution fields such as phase, job,
+step state, logs, evidence, and cost are then painted onto that topology.
+Recycle/request-changes arrows belong to topology, not to execution status,
+so the run execution surface does not need a separate metadata fallback to
+discover them.
+
 It is fixture-friendly and can be rendered without standing up a real run.
 
 Projection concepts:
@@ -338,13 +345,30 @@ RunGraphProjection
 Run
   run_ref
   workflow
+  workflow_schema_ref
   state
   current_phase
   validation_url
   cost_usd
   attempts_count
+  topology
   phases[]
   evidence[]
+
+Topology
+  phases[]
+  default_entry
+  recycle_arrows[]
+  terminal
+
+TopologyPhase
+  name
+  kind
+  verify
+  always
+  evidence_verification_gate
+  depends_on[]
+  jobs[]
 
 PhaseNode
   name
@@ -372,6 +396,14 @@ StepNode
   state
   reason
   exit_code
+
+RecycleArrow
+  source
+  target
+  trigger
+  max_attempts
+  active
+  kind
 
 Signal
   target_type

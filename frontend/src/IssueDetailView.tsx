@@ -21,7 +21,12 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { authedFetch } from "./auth";
 import { PhaseGraph, type PhaseGraphPhase, type RecycleArrow } from "./PhaseGraph";
-import { phaseGraphModelFromNames, workflowToPhaseGraphModel } from "./workflowGraphModel";
+import {
+  phaseGraphModelFromNames,
+  runTopologyToPhaseGraphModel,
+  type RunProjectionTopologySource,
+  workflowToPhaseGraphModel,
+} from "./workflowGraphModel";
 import { resolveProjectWorkflow } from "./workflowLookup";
 
 type IssueDetail = {
@@ -114,8 +119,14 @@ type RunProjectionRun = {
   started_at: string;
   updated_at: string;
   completed_at?: string | null;
+  topology: RunProjectionTopology;
   phases: RunProjectionPhase[];
   evidence: RunProjectionEvidence[];
+};
+
+type RunProjectionTopology = RunProjectionTopologySource & {
+  default_entry: { target: string; active: boolean; kind: string } | null;
+  terminal: { kind: string; enabled: boolean };
 };
 
 type RunProjectionPhase = {
@@ -2388,30 +2399,42 @@ function ProjectionPipelineDag({
   onSelectNode: (selection: ProjectionSelection) => void;
   onOpenTouchpoint: () => void;
 }) {
-  const phases: PhaseGraphPhase[] = run.phases.map((phase) => ({
-    name: phase.name,
-    kind: phase.kind,
-    verify: phase.verify,
-    always: phase.always,
-    depends_on: phase.depends_on,
-    jobs: phase.jobs.map((job) => ({ id: job.id, name: job.name ?? job.id })),
-  }));
+  const executionPhaseByName = useMemo(() => {
+    const phasesByName = new Map<string, RunProjectionPhase>();
+    for (const phase of run.phases) phasesByName.set(phase.name, phase);
+    return phasesByName;
+  }, [run.phases]);
+  const graphModel = useMemo(() => runTopologyToPhaseGraphModel(run.topology), [run.topology]);
   const renderPhase = (graphPhase: PhaseGraphPhase) => {
-    const phase = run.phases.find((candidate) => candidate.name === graphPhase.name);
-    if (!phase) return null;
-    const jobs = phase.jobs.length > 0
-      ? phase.jobs
-      : [{ id: phase.name, name: phase.name, state: phase.state, steps: [] }];
+    const phase = executionPhaseByName.get(graphPhase.name);
+    const jobs = phase && phase.jobs.length > 0
+      ? phase.jobs.map((job) => ({
+          id: job.id,
+          name: job.name ?? job.id,
+          state: job.state,
+          reason: job.reason,
+          selection: { phase: phase.name, job: job.id, step: preferredProjectionStepSlug(job) },
+        }))
+      : (graphPhase.jobs && graphPhase.jobs.length > 0
+          ? graphPhase.jobs
+          : [{ id: graphPhase.name, name: graphPhase.name }]
+        ).map((job) => ({
+          id: job.id,
+          name: job.name ?? job.id,
+          state: phase?.state ?? "not_started",
+          reason: phase?.reason ?? null,
+          selection: { phase: graphPhase.name },
+        }));
     return (
       <>
         {jobs.map((job) => {
-          const key = `job:${phase.name}:${job.id}`;
+          const key = `job:${graphPhase.name}:${job.id}`;
           return (
             <button
               type="button"
               className={`dag-node dag-node-phase${selectedKey === key ? " selected" : ""}`}
               key={job.id}
-              onClick={() => onSelectNode({ phase: phase.name, job: job.id, step: preferredProjectionStepSlug(job) })}
+              onClick={() => onSelectNode(job.selection)}
               aria-pressed={selectedKey === key}
             >
               <div className="dag-job-head">
@@ -2441,12 +2464,13 @@ function ProjectionPipelineDag({
   return (
     <div className="dag-wrap">
       <PhaseGraph
-        phases={phases}
-        prEnabled={true}
+        phases={graphModel.phases}
         renderPhase={renderPhase}
         renderTouchpoint={renderTouchpoint}
         ariaLabel="run execution"
         entryPhaseName={run.current_phase ?? null}
+        prEnabled={graphModel.prEnabled}
+        recycleArrows={graphModel.recycleArrows}
       />
     </div>
   );
