@@ -656,7 +656,6 @@ func graphNodeFromRunReport(run RunReport, workflow Workflow) GraphNode {
 		"abort_reason":         run.AbortReason,
 		"cumulative_cost_usd":  run.CumulativeCostUSD,
 		"entrypoint_phase":     run.EntrypointPhase,
-		"workflow_graph":       workflowGraphMetadata(workflow),
 		"run_graph":            runGraphMetadata(run),
 	}
 	return GraphNode{
@@ -872,16 +871,6 @@ func countAttemptGraphSteps(jobs []map[string]any) int {
 		}
 	}
 	return total
-}
-
-func workflowGraphMetadata(workflow Workflow) map[string]any {
-	topology := workflowTopologyFromWorkflow(workflow)
-	return map[string]any{
-		"phases":         workflowTopologyPhaseNames(topology.Phases),
-		"default_entry":  topology.DefaultEntry,
-		"recycle_arrows": topology.RecycleArrows,
-		"terminal":       topology.Terminal,
-	}
 }
 
 func runGraphMetadata(run RunReport) map[string]any {
@@ -1117,14 +1106,6 @@ func runProjectionTopologyJobs(phase PhaseSpec) []RunProjectionTopologyJob {
 		})
 	}
 	return jobs
-}
-
-func workflowTopologyPhaseNames(phases []RunProjectionTopologyPhase) []string {
-	names := make([]string, 0, len(phases))
-	for _, phase := range phases {
-		names = append(names, phase.Name)
-	}
-	return names
 }
 
 func runProjectionPhases(run RunReport, workflow Workflow) []RunProjectionPhase {

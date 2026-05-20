@@ -205,6 +205,9 @@ func TestIssueGraphByNumberBuildsRunAttemptAndTouchpointNodes(t *testing.T) {
 	if runNode.Metadata["workflow"].(string) != "agent-run" {
 		t.Fatalf("run metadata=%#v", runNode.Metadata)
 	}
+	if _, ok := runNode.Metadata["workflow_graph"]; ok {
+		t.Fatalf("run metadata should not carry retired workflow_graph topology fallback: %#v", runNode.Metadata)
+	}
 	assertGraphNode(t, graph, "attempt:"+runRef+":0", "attempt")
 	attemptNode := assertGraphNode(t, graph, "attempt:"+runRef+":0", "attempt")
 	if got, ok := attemptNode.Metadata["jobs_count"].(float64); !ok || got != 1 {

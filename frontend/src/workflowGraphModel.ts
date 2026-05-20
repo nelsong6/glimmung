@@ -109,21 +109,3 @@ export function runTopologyToPhaseGraphModel(topology: RunProjectionTopologySour
     recycleArrows: topology.recycle_arrows,
   };
 }
-
-export function phaseGraphModelFromNames(
-  phaseNames: string[],
-  options: {
-    prEnabled?: boolean;
-    recycleArrows?: RecycleArrow[];
-  } = {},
-): WorkflowGraphModel {
-  return {
-    phases: phaseNames.map((name, index) => ({
-      name,
-      kind: "phase",
-      depends_on: index === 0 ? [] : [phaseNames[index - 1]],
-    })),
-    prEnabled: options.prEnabled ?? true,
-    recycleArrows: options.recycleArrows ?? [],
-  };
-}

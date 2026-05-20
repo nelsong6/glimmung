@@ -494,14 +494,6 @@ const issueGraph = {
         touchpoint_url: "https://github.com/nelsong6/glimmung/pull/218",
         pr_number: 218,
         pr_branch: "codex/native-run-graph",
-        workflow_graph: {
-          phases: ["design", "implement", "verify"],
-          default_entry: { target: "design", active: true, kind: "phase" },
-          recycle_arrows: [
-            { source: "verify", target: "implement", trigger: "reject", max_attempts: 2, active: true, kind: "phase_recycle" },
-          ],
-          terminal: { kind: "touchpoint", enabled: true },
-        },
       },
     },
     attempt("run-glimmung-206-live", 0, "design", "completed", ago(23), ago(18), "success", "pass", [

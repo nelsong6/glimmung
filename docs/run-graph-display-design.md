@@ -327,6 +327,11 @@ Recycle/request-changes arrows belong to topology, not to execution status,
 so the run execution surface does not need a separate metadata fallback to
 discover them.
 
+Generic run-node metadata such as a `workflow_graph` bag must not be used as
+an alternate topology source. If the execution projection lacks topology, the
+UI should show that the workflow definition is unavailable rather than
+reconstructing a partial graph from phase names.
+
 It is fixture-friendly and can be rendered without standing up a real run.
 
 Projection concepts:
