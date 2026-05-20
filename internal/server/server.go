@@ -19,31 +19,32 @@ const (
 )
 
 type Settings struct {
-	Port                           string
-	CosmosEndpoint                 string
-	CosmosDatabase                 string
-	K8sSAAllowlist                 string
-	K8sAPIHost                     string
-	K8sSATokenPath                 string
-	K8sCACertPath                  string
-	TankOperatorBaseURL            string
-	StaticDir                      string
-	StaticOverrideDir              string
-	ArtifactsStorageAccount        string
-	ArtifactsContainer             string
-	NativeRunnerNamespace          string
-	NativeRunnerServiceAccount     string
-	NativeRunnerNamespaceRole      string
-	NativeRunnerCallbackBaseURL    string
-	NativeRunnerJobTTLSeconds      int
-	NativeRunnerCodexSecret        string
-	NativeRunnerCodexMountPath     string
-	NativeRunnerPlaywrightEnabled  bool
-	NativeRunnerPlaywrightImage    string
-	NativeRunnerPlaywrightPort     string
-	NativeRunnerProjectConcurrency int
-	NativeRunnerGlobalConcurrency  int
-	NativeWorkloadIdentityIssuer   string
+	Port                               string
+	CosmosEndpoint                     string
+	CosmosDatabase                     string
+	K8sSAAllowlist                     string
+	K8sAPIHost                         string
+	K8sSATokenPath                     string
+	K8sCACertPath                      string
+	TankOperatorBaseURL                string
+	StaticDir                          string
+	StaticOverrideDir                  string
+	ArtifactsStorageAccount            string
+	ArtifactsContainer                 string
+	NativeRunnerNamespace              string
+	NativeRunnerServiceAccount         string
+	NativeRunnerNamespaceRole          string
+	NativeRunnerCallbackBaseURL        string
+	NativeRunnerJobTTLSeconds          int
+	NativeRunnerCodexSecret            string
+	NativeRunnerCodexMountPath         string
+	NativeRunnerPlaywrightEnabled      bool
+	NativeRunnerPlaywrightImage        string
+	NativeRunnerPlaywrightPort         string
+	NativeRunnerProjectConcurrency     int
+	NativeRunnerGlobalConcurrency      int
+	NativeRunnerDispatchTimeoutSeconds int
+	NativeWorkloadIdentityIssuer       string
 	// AuthRomaineLifeBaseURL is the base URL of the auth.romaine.life
 	// admin API used by ManagedOriginService. Empty disables the
 	// reconciler; only useful for local dev / smoke runs.
@@ -122,6 +123,10 @@ func SettingsFromEnv() Settings {
 		NativeRunnerGlobalConcurrency: envIntOrDefault(
 			"NATIVE_RUNNER_GLOBAL_CONCURRENCY",
 			5,
+		),
+		NativeRunnerDispatchTimeoutSeconds: envIntOrDefault(
+			"NATIVE_RUNNER_DISPATCH_TIMEOUT_SECONDS",
+			defaultRunDispatchTimeoutSeconds,
 		),
 		NativeWorkloadIdentityIssuer: os.Getenv("NATIVE_WORKLOAD_IDENTITY_ISSUER"),
 		AuthRomaineLifeBaseURL: envOrDefault(

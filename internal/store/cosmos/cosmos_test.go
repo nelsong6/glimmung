@@ -58,6 +58,135 @@ func TestSortNativeEventDocsOrdersInMemory(t *testing.T) {
 	}
 }
 
+func TestNativeEventAttemptIndexAcceptsExplicitOrMetadataValue(t *testing.T) {
+	explicit := 3
+	if got, ok := nativeEventAttemptIndex(server.NativeRunEventRequest{AttemptIndex: &explicit}); !ok || got != 3 {
+		t.Fatalf("explicit attempt index=(%d,%t), want (3,true)", got, ok)
+	}
+	if got, ok := nativeEventAttemptIndex(server.NativeRunEventRequest{Metadata: map[string]any{"attempt_index": "2"}}); !ok || got != 2 {
+		t.Fatalf("metadata attempt index=(%d,%t), want (2,true)", got, ok)
+	}
+	if _, ok := nativeEventAttemptIndex(server.NativeRunEventRequest{Metadata: map[string]any{"attempt_index": "bad"}}); ok {
+		t.Fatal("invalid metadata attempt_index should not be accepted")
+	}
+}
+
+func TestExecutionRawHelpersDriveCanonicalState(t *testing.T) {
+	now := "2026-05-20T12:00:00Z"
+	raw := map[string]any{
+		"phase_executions": []any{
+			map[string]any{
+				"name":       "env-prep",
+				"kind":       "k8s_job",
+				"state":      "not_started",
+				"created_at": now,
+				"jobs": []any{map[string]any{
+					"id":         "prepare",
+					"state":      "not_started",
+					"created_at": now,
+					"steps": []any{map[string]any{
+						"slug":       "checkout",
+						"state":      "not_started",
+						"created_at": now,
+					}},
+				}},
+			},
+			map[string]any{
+				"name":       "agent-execute",
+				"kind":       "k8s_job",
+				"state":      "not_started",
+				"created_at": now,
+				"jobs": []any{map[string]any{
+					"id":         "agent",
+					"state":      "not_started",
+					"created_at": now,
+					"steps": []any{map[string]any{
+						"slug":       "work",
+						"state":      "not_started",
+						"created_at": now,
+					}},
+				}},
+			},
+		},
+	}
+
+	markPhaseDispatchingRaw(raw, "env-prep", "k8s_job", now)
+	env := rawPhase(t, raw, "env-prep")
+	if got := stringValue(env["state"]); got != "dispatching" {
+		t.Fatalf("env state=%q", got)
+	}
+	if got := stringValue(rawJob(t, env, "prepare")["state"]); got != "dispatching" {
+		t.Fatalf("prepare state=%q", got)
+	}
+
+	applyNativeEventToExecutionsRaw(raw, attemptDoc{Phase: "env-prep"}, nativeEventDoc{
+		JobID:     "prepare",
+		Event:     "step_started",
+		StepSlug:  "checkout",
+		CreatedAt: now,
+	})
+	env = rawPhase(t, raw, "env-prep")
+	prepare := rawJob(t, env, "prepare")
+	if got := stringValue(env["state"]); got != "active" {
+		t.Fatalf("env state after event=%q", got)
+	}
+	if got := stringValue(rawStep(t, prepare, "checkout")["state"]); got != "active" {
+		t.Fatalf("checkout state=%q", got)
+	}
+
+	markJobCompletionInExecutionsRaw(raw, "env-prep", "prepare", "succeeded", "", now)
+	env = rawPhase(t, raw, "env-prep")
+	if got := stringValue(env["state"]); got != "succeeded" {
+		t.Fatalf("env state after completion=%q", got)
+	}
+
+	markPhaseDispatchingRaw(raw, "agent-execute", "k8s_job", now)
+	finalizeExecutionFailureRaw(raw, "dispatch_timeout", now)
+	execute := rawPhase(t, raw, "agent-execute")
+	if got := stringValue(execute["state"]); got != "failed" {
+		t.Fatalf("execute state after timeout=%q", got)
+	}
+	if got := stringValue(rawJob(t, execute, "agent")["reason"]); got != "dispatch_timeout" {
+		t.Fatalf("agent reason=%q", got)
+	}
+}
+
+func rawPhase(t *testing.T, raw map[string]any, name string) map[string]any {
+	t.Helper()
+	for _, value := range raw["phase_executions"].([]any) {
+		phase := value.(map[string]any)
+		if stringValue(phase["name"]) == name {
+			return phase
+		}
+	}
+	t.Fatalf("missing phase %s", name)
+	return nil
+}
+
+func rawJob(t *testing.T, phase map[string]any, id string) map[string]any {
+	t.Helper()
+	for _, value := range phase["jobs"].([]any) {
+		job := value.(map[string]any)
+		if stringValue(job["id"]) == id {
+			return job
+		}
+	}
+	t.Fatalf("missing job %s", id)
+	return nil
+}
+
+func rawStep(t *testing.T, job map[string]any, slug string) map[string]any {
+	t.Helper()
+	for _, value := range job["steps"].([]any) {
+		step := value.(map[string]any)
+		if stringValue(step["slug"]) == slug {
+			return step
+		}
+	}
+	t.Fatalf("missing step %s", slug)
+	return nil
+}
+
 func TestWorkflowFromDocConvertsNestedShape(t *testing.T) {
 	raw := []byte(`{
 		"id": "issue-agent",

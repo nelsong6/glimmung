@@ -158,6 +158,12 @@ schemas are retained; this rollout does not garbage-collect them. Deleting or
 deactivating a logical workflow must not delete schemas referenced by run
 history.
 
+Each cycle stores a durable execution ledger for the schema snapshot it was
+created with: phase records contain job records, and job records contain step
+records. The graph UI projects from this ledger first, then uses raw native
+events as live detail. This keeps state names and colors stable even when a
+native job has not emitted logs yet.
+
 ## Path-typed identity
 
 Entities are addressed by URL-shaped paths that match the HTTP
@@ -201,6 +207,11 @@ Use **attempt** as an execution-scoped display counter for a concrete phase
 launch. It is not a first-class product entity. Recycle policy is represented
 by a new cycle, not by appending another product-level attempt to the prior
 cycle.
+
+Manual run dispatch is admission-gated: if no test slot is available, the API
+returns `no_capacity` and does not create a run or cycle. Queueing remains an
+issue-level product workflow; queued cycles that already exist are admitted by
+the run-queue reconciler when capacity appears.
 
 Never store paths as canonical identifiers — compute at render
 time from the entity's slug + parent context. This avoids

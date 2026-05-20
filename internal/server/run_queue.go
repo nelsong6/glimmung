@@ -310,12 +310,13 @@ func admitRunCycle(
 	}
 	started := runWithAttempt(run, attemptIdx, initPhase.Name)
 	started.SlotLeaseRef = &leaseRef
-	if _, err := launchCommittedNativePhase(ctx, nativeLauncher, NativeLaunchRequest{
+	launched, err := launchCommittedNativePhase(ctx, nativeLauncher, NativeLaunchRequest{
 		Lease:    lease,
 		Workflow: *wf,
 		Phase:    initPhase,
 		Run:      started,
-	}); err != nil {
+	})
+	if err != nil {
 		if acquiredLease {
 			_, _ = store.CancelLeaseByRef(ctx, run.Project, leaseRef)
 		}
@@ -323,6 +324,7 @@ func admitRunCycle(
 		detail := fmt.Sprintf("native dispatch failed: %s", err)
 		return RunCycleAdmissionResult{State: "dispatch_failed", Detail: &detail}, nil
 	}
+	_ = recordLaunchedNativeJobs(ctx, store, started, initPhase, launched)
 	return RunCycleAdmissionResult{
 		State: "dispatched",
 		Lease: "claimed",

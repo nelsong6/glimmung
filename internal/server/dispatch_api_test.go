@@ -38,6 +38,7 @@ type fakeDispatchStore struct {
 	leaseResult Lease
 	leaseErr    error
 	leaseReq    *LeaseAcquireRequest
+	startReq    *StartRunCycleRequest
 
 	abortReason string
 }
@@ -100,12 +101,17 @@ func (s *fakeDispatchStore) CreateRun(_ context.Context, req CreateRunRequest) (
 	return CreatedRun{ID: "run-1", RunNumber: 1, CycleNumber: 1, RunCycle: 1, RunDisplay: "1.1", CallbackToken: "tok"}, nil
 }
 
-func (s *fakeDispatchStore) StartRunCycle(context.Context, StartRunCycleRequest) (int, error) {
+func (s *fakeDispatchStore) StartRunCycle(_ context.Context, req StartRunCycleRequest) (int, error) {
+	s.startReq = &req
 	return 0, nil
 }
 
 func (s *fakeDispatchStore) AcquireLease(_ context.Context, req LeaseAcquireRequest) (Lease, error) {
 	s.leaseReq = &req
+	return s.leaseResult, s.leaseErr
+}
+
+func (s *fakeDispatchStore) ReadLeaseByRef(context.Context, string, string) (Lease, error) {
 	return s.leaseResult, s.leaseErr
 }
 
@@ -285,6 +291,9 @@ func TestDispatchRunDispatchedNativeK8sJob(t *testing.T) {
 	if store.runReq == nil || store.runReq.InitialPhaseKind != "k8s_job" {
 		t.Fatalf("run request=%#v", store.runReq)
 	}
+	if store.runReq.SlotLeaseRef == "" || store.startReq == nil || store.startReq.SlotLeaseRef != store.runReq.SlotLeaseRef {
+		t.Fatalf("lease should be attached before run admission: run=%#v start=%#v", store.runReq, store.startReq)
+	}
 	if store.leaseReq == nil || store.leaseReq.Metadata["native_k8s"] != true {
 		t.Fatalf("lease request=%#v", store.leaseReq)
 	}
@@ -317,8 +326,14 @@ func TestDispatchRunNoCapacity(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if got := readDispatchResult(t, rec).State; got != "queued" {
+	if got := readDispatchResult(t, rec).State; got != "no_capacity" {
 		t.Fatalf("state=%q", got)
+	}
+	if store.runReq != nil || store.startReq != nil {
+		t.Fatalf("no-capacity dispatch should not create or start a run: run=%#v start=%#v", store.runReq, store.startReq)
+	}
+	if !store.lockReleased {
+		t.Fatal("expected issue lock release after no-capacity dispatch")
 	}
 }
 

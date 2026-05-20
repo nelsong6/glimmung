@@ -132,6 +132,7 @@ type RunProjectionJob struct {
 	Name        *string             `json:"name,omitempty"`
 	State       string              `json:"state"`
 	Reason      *string             `json:"reason,omitempty"`
+	K8sJobName  *string             `json:"k8s_job_name,omitempty"`
 	Conclusion  *string             `json:"conclusion,omitempty"`
 	CompletedAt *string             `json:"completed_at,omitempty"`
 	Steps       []RunProjectionStep `json:"steps"`
@@ -1051,6 +1052,9 @@ func runProjectionFromReport(run RunReport, workflow Workflow, touchpoints []Tou
 }
 
 func runProjectionPhases(run RunReport, workflow Workflow) []RunProjectionPhase {
+	if len(run.PhaseExecutions) > 0 {
+		return runProjectionPhasesFromExecutions(run, workflow)
+	}
 	if len(workflow.Phases) > 0 {
 		phases := make([]RunProjectionPhase, 0, len(workflow.Phases))
 		terminalFailureSeen := false
@@ -1104,6 +1108,73 @@ func runProjectionPhases(run RunReport, workflow Workflow) []RunProjectionPhase 
 		}
 	}
 	return phases
+}
+
+func runProjectionPhasesFromExecutions(run RunReport, workflow Workflow) []RunProjectionPhase {
+	phaseByName := map[string]PhaseSpec{}
+	for _, phase := range workflow.Phases {
+		phaseByName[phase.Name] = phase
+	}
+	phases := make([]RunProjectionPhase, 0, len(run.PhaseExecutions))
+	for _, execution := range run.PhaseExecutions {
+		spec := phaseByName[execution.Name]
+		kind := workflowPhaseKind(firstNonEmpty(execution.Kind, spec.Kind))
+		attempts := attemptsForProjectionPhase(run.Attempts, execution.Name)
+		phases = append(phases, RunProjectionPhase{
+			Name:      execution.Name,
+			Kind:      kind,
+			State:     projectionExecutionState(execution.State),
+			Reason:    execution.Reason,
+			Verify:    spec.Verify,
+			Always:    spec.Always,
+			DependsOn: sliceOrEmpty(spec.DependsOn),
+			Jobs:      runProjectionJobsFromExecutions(execution.Jobs, latestJobCompletionsByJob(attempts)),
+			Attempts:  runProjectionAttempts(attempts),
+		})
+	}
+	return phases
+}
+
+func runProjectionJobsFromExecutions(executions []RunJobExecution, completions map[string]RunAttemptJobCompletion) []RunProjectionJob {
+	jobs := make([]RunProjectionJob, 0, len(executions))
+	for _, execution := range executions {
+		completion := completions[execution.ID]
+		conclusion := stringPointerOrNil(completion.Conclusion)
+		completedAt := execution.CompletedAt
+		if completedAt == nil {
+			completedAt = timeStringPtr(completion.CompletedAt)
+		}
+		steps := make([]RunProjectionStep, 0, len(execution.Steps))
+		for _, step := range execution.Steps {
+			steps = append(steps, RunProjectionStep{
+				Slug:     firstNonEmpty(step.Slug, "step"),
+				Title:    step.Title,
+				State:    projectionExecutionState(step.State),
+				Reason:   step.Reason,
+				ExitCode: step.ExitCode,
+			})
+		}
+		jobs = append(jobs, RunProjectionJob{
+			ID:          firstNonEmpty(execution.ID, "job"),
+			Name:        execution.Name,
+			State:       projectionExecutionState(execution.State),
+			Reason:      execution.Reason,
+			K8sJobName:  execution.K8sJobName,
+			Conclusion:  conclusion,
+			CompletedAt: completedAt,
+			Steps:       steps,
+		})
+	}
+	return jobs
+}
+
+func projectionExecutionState(state string) string {
+	switch state {
+	case "not_started", "skipped", "dispatching", "active", "succeeded", "failed":
+		return state
+	default:
+		return "not_started"
+	}
 }
 
 func attemptsForProjectionPhase(attempts []RunReportAttempt, phaseName string) []RunReportAttempt {

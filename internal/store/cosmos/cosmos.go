@@ -1423,40 +1423,77 @@ type leaseDoc struct {
 }
 
 type runDoc struct {
-	ID                  string         `json:"id"`
-	Project             string         `json:"project"`
-	Workflow            string         `json:"workflow"`
-	WorkflowSchemaRef   string         `json:"workflow_schema_ref,omitempty"`
-	RunNumber           *int           `json:"run_number"`
-	RunCycleNumber      *int           `json:"run_cycle_number,omitempty"`
-	RunDisplayNumber    *string        `json:"run_display_number"`
-	ParentRunID         *string        `json:"parent_run_id"`
-	RootRunID           *string        `json:"root_run_id"`
-	OriginKind          *string        `json:"origin_kind"`
-	IsCycle             bool           `json:"is_cycle"`
-	CycleNumber         *int           `json:"cycle_number"`
-	IssueID             string         `json:"issue_id"`
-	IssueRepo           string         `json:"issue_repo"`
-	IssueNumber         int            `json:"issue_number"`
-	PRNumber            *int           `json:"pr_number"`
-	State               string         `json:"state"`
-	QueueState          *string        `json:"queue_state,omitempty"`
-	AdmissionError      *string        `json:"admission_error,omitempty"`
-	SlotLeaseRef        *string        `json:"slot_lease_ref,omitempty"`
-	Attempts            []attemptDoc   `json:"attempts"`
-	CumulativeCostUSD   float64        `json:"cumulative_cost_usd"`
-	Budget              *budgetDoc     `json:"budget,omitempty"`
-	ValidationURL       *string        `json:"validation_url"`
-	ScreenshotsMarkdown *string        `json:"screenshots_markdown"`
-	AbortReason         *string        `json:"abort_reason"`
-	EntrypointPhase     *string        `json:"entrypoint_phase,omitempty"`
-	TriggerSource       map[string]any `json:"trigger_source"`
-	CreatedAt           string         `json:"created_at"`
-	UpdatedAt           string         `json:"updated_at"`
+	ID                  string              `json:"id"`
+	Project             string              `json:"project"`
+	Workflow            string              `json:"workflow"`
+	WorkflowSchemaRef   string              `json:"workflow_schema_ref,omitempty"`
+	RunNumber           *int                `json:"run_number"`
+	RunCycleNumber      *int                `json:"run_cycle_number,omitempty"`
+	RunDisplayNumber    *string             `json:"run_display_number"`
+	ParentRunID         *string             `json:"parent_run_id"`
+	RootRunID           *string             `json:"root_run_id"`
+	OriginKind          *string             `json:"origin_kind"`
+	IsCycle             bool                `json:"is_cycle"`
+	CycleNumber         *int                `json:"cycle_number"`
+	IssueID             string              `json:"issue_id"`
+	IssueRepo           string              `json:"issue_repo"`
+	IssueNumber         int                 `json:"issue_number"`
+	PRNumber            *int                `json:"pr_number"`
+	State               string              `json:"state"`
+	QueueState          *string             `json:"queue_state,omitempty"`
+	AdmissionError      *string             `json:"admission_error,omitempty"`
+	SlotLeaseRef        *string             `json:"slot_lease_ref,omitempty"`
+	Attempts            []attemptDoc        `json:"attempts"`
+	PhaseExecutions     []phaseExecutionDoc `json:"phase_executions,omitempty"`
+	CumulativeCostUSD   float64             `json:"cumulative_cost_usd"`
+	Budget              *budgetDoc          `json:"budget,omitempty"`
+	ValidationURL       *string             `json:"validation_url"`
+	ScreenshotsMarkdown *string             `json:"screenshots_markdown"`
+	AbortReason         *string             `json:"abort_reason"`
+	EntrypointPhase     *string             `json:"entrypoint_phase,omitempty"`
+	TriggerSource       map[string]any      `json:"trigger_source"`
+	CreatedAt           string              `json:"created_at"`
+	UpdatedAt           string              `json:"updated_at"`
 	// Fields for mutation operations (populated from Cosmos documents as needed).
 	CallbackToken     *string `json:"callback_token,omitempty"`
 	IssueLockHolderID *string `json:"issue_lock_holder_id,omitempty"`
 	PRLockHolderID    *string `json:"pr_lock_holder_id,omitempty"`
+}
+
+type phaseExecutionDoc struct {
+	Name         string            `json:"name"`
+	Kind         string            `json:"kind"`
+	State        string            `json:"state"`
+	Reason       *string           `json:"reason,omitempty"`
+	CreatedAt    string            `json:"created_at"`
+	DispatchedAt *string           `json:"dispatched_at,omitempty"`
+	StartedAt    *string           `json:"started_at,omitempty"`
+	CompletedAt  *string           `json:"completed_at,omitempty"`
+	Jobs         []jobExecutionDoc `json:"jobs"`
+}
+
+type jobExecutionDoc struct {
+	ID           string             `json:"id"`
+	Name         *string            `json:"name,omitempty"`
+	State        string             `json:"state"`
+	Reason       *string            `json:"reason,omitempty"`
+	K8sJobName   *string            `json:"k8s_job_name,omitempty"`
+	CreatedAt    string             `json:"created_at"`
+	DispatchedAt *string            `json:"dispatched_at,omitempty"`
+	StartedAt    *string            `json:"started_at,omitempty"`
+	CompletedAt  *string            `json:"completed_at,omitempty"`
+	Steps        []stepExecutionDoc `json:"steps"`
+}
+
+type stepExecutionDoc struct {
+	Slug        string  `json:"slug"`
+	Title       *string `json:"title,omitempty"`
+	State       string  `json:"state"`
+	Reason      *string `json:"reason,omitempty"`
+	ExitCode    *int    `json:"exit_code,omitempty"`
+	CreatedAt   string  `json:"created_at"`
+	StartedAt   *string `json:"started_at,omitempty"`
+	CompletedAt *string `json:"completed_at,omitempty"`
 }
 
 type issueDoc struct {
@@ -1910,6 +1947,7 @@ func runReportFromDoc(doc runDoc, lineageByID map[string]string) server.RunRepor
 		State:               firstNonEmpty(doc.State, "in_progress"),
 		CurrentPhase:        currentPhase,
 		AttemptsCount:       len(doc.Attempts),
+		PhaseExecutions:     runPhaseExecutionsFromDocs(doc.PhaseExecutions),
 		CumulativeCostUSD:   doc.CumulativeCostUSD,
 		ValidationURL:       emptyStringNil(doc.ValidationURL),
 		ScreenshotsMarkdown: emptyStringNil(doc.ScreenshotsMarkdown),
@@ -1919,6 +1957,52 @@ func runReportFromDoc(doc runDoc, lineageByID map[string]string) server.RunRepor
 		UpdatedAt:           parseTimeOrNow(doc.UpdatedAt),
 		Attempts:            attempts,
 	}
+}
+
+func runPhaseExecutionsFromDocs(docs []phaseExecutionDoc) []server.RunPhaseExecution {
+	out := make([]server.RunPhaseExecution, 0, len(docs))
+	for _, doc := range docs {
+		jobs := make([]server.RunJobExecution, 0, len(doc.Jobs))
+		for _, job := range doc.Jobs {
+			steps := make([]server.RunStepExecution, 0, len(job.Steps))
+			for _, step := range job.Steps {
+				steps = append(steps, server.RunStepExecution{
+					Slug:        step.Slug,
+					Title:       emptyStringNil(step.Title),
+					State:       firstNonEmpty(step.State, "not_started"),
+					Reason:      emptyStringNil(step.Reason),
+					ExitCode:    step.ExitCode,
+					CreatedAt:   step.CreatedAt,
+					StartedAt:   emptyStringNil(step.StartedAt),
+					CompletedAt: emptyStringNil(step.CompletedAt),
+				})
+			}
+			jobs = append(jobs, server.RunJobExecution{
+				ID:           job.ID,
+				Name:         emptyStringNil(job.Name),
+				State:        firstNonEmpty(job.State, "not_started"),
+				Reason:       emptyStringNil(job.Reason),
+				K8sJobName:   emptyStringNil(job.K8sJobName),
+				CreatedAt:    job.CreatedAt,
+				DispatchedAt: emptyStringNil(job.DispatchedAt),
+				StartedAt:    emptyStringNil(job.StartedAt),
+				CompletedAt:  emptyStringNil(job.CompletedAt),
+				Steps:        steps,
+			})
+		}
+		out = append(out, server.RunPhaseExecution{
+			Name:         doc.Name,
+			Kind:         doc.Kind,
+			State:        firstNonEmpty(doc.State, "not_started"),
+			Reason:       emptyStringNil(doc.Reason),
+			CreatedAt:    doc.CreatedAt,
+			DispatchedAt: emptyStringNil(doc.DispatchedAt),
+			StartedAt:    emptyStringNil(doc.StartedAt),
+			CompletedAt:  emptyStringNil(doc.CompletedAt),
+			Jobs:         jobs,
+		})
+	}
+	return out
 }
 
 func runReportAttemptFromDoc(doc attemptDoc, lineageByID map[string]string) server.RunReportAttempt {
@@ -1977,6 +2061,99 @@ func runAttemptJobCompletionFromDoc(doc nativeJobCompletionDoc) server.RunAttemp
 		CostUSD:             doc.CostUSD,
 		PhaseOutputs:        mapStringOrEmpty(doc.PhaseOutputs),
 	}
+}
+
+func phaseExecutionDocsFromWorkflow(wf server.Workflow, createdAt string, entrypointPhase *string) []phaseExecutionDoc {
+	out := make([]phaseExecutionDoc, 0, len(wf.Phases))
+	beforeEntrypoint := strings.TrimSpace(stringOrEmpty(entrypointPhase)) != ""
+	for _, phase := range wf.Phases {
+		state := "not_started"
+		if beforeEntrypoint {
+			if phase.Name == strings.TrimSpace(stringOrEmpty(entrypointPhase)) {
+				beforeEntrypoint = false
+			} else {
+				state = "skipped"
+			}
+		}
+		jobs := make([]jobExecutionDoc, 0, len(phase.Jobs))
+		for _, job := range phase.Jobs {
+			jobID := strings.TrimSpace(job.ID)
+			if jobID == "" {
+				continue
+			}
+			steps := make([]stepExecutionDoc, 0, len(job.Steps))
+			for _, step := range job.Steps {
+				slug := strings.TrimSpace(step.Slug)
+				if slug == "" {
+					continue
+				}
+				steps = append(steps, stepExecutionDoc{
+					Slug:      slug,
+					Title:     emptyStringNil(step.Title),
+					State:     state,
+					CreatedAt: createdAt,
+				})
+			}
+			if len(steps) == 0 {
+				steps = append(steps, stepExecutionDoc{
+					Slug:      "job",
+					Title:     emptyStringNil(job.Name),
+					State:     state,
+					CreatedAt: createdAt,
+				})
+			}
+			jobs = append(jobs, jobExecutionDoc{
+				ID:        jobID,
+				Name:      emptyStringNil(job.Name),
+				State:     state,
+				CreatedAt: createdAt,
+				Steps:     steps,
+			})
+		}
+		if len(jobs) == 0 {
+			jobID := firstNonEmpty(phase.WorkflowFilename, phase.Name, "phase")
+			jobs = append(jobs, jobExecutionDoc{
+				ID:        jobID,
+				Name:      optionalNonEmptyStringPtr(jobID),
+				State:     state,
+				CreatedAt: createdAt,
+				Steps: []stepExecutionDoc{{
+					Slug:      "workflow-run",
+					Title:     optionalNonEmptyStringPtr("Workflow run"),
+					State:     state,
+					CreatedAt: createdAt,
+				}},
+			})
+		}
+		out = append(out, phaseExecutionDoc{
+			Name:      phase.Name,
+			Kind:      firstNonEmpty(phase.Kind, "k8s_job"),
+			State:     state,
+			CreatedAt: createdAt,
+			Jobs:      jobs,
+		})
+	}
+	return out
+}
+
+func (s *Store) workflowForRunExecution(ctx context.Context, project, workflowName, schemaRef string) (*server.Workflow, error) {
+	if strings.TrimSpace(schemaRef) != "" {
+		wf, err := s.GetWorkflowBySchemaRef(ctx, project, schemaRef)
+		if err != nil {
+			return nil, err
+		}
+		if wf != nil {
+			return wf, nil
+		}
+	}
+	wf, err := s.GetWorkflowByName(ctx, project, workflowName)
+	if err != nil {
+		return nil, err
+	}
+	if wf == nil {
+		return nil, server.ValidationError{Message: fmt.Sprintf("workflow %q is not registered", workflowName)}
+	}
+	return wf, nil
 }
 
 func runDisplayNumber(doc runDoc, fallback int) string {
@@ -5114,7 +5291,9 @@ func (s *Store) AbortRunByID(ctx context.Context, project, runID, reason string)
 	raw["state"] = "aborted"
 	raw["abort_reason"] = reason
 	delete(raw, "queue_state")
-	raw["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	raw["updated_at"] = now
+	finalizeExecutionFailureRaw(raw, canonicalExecutionFailureReason(reason), now)
 
 	payload, err := json.Marshal(raw)
 	if err != nil {
@@ -5248,6 +5427,20 @@ func (s *Store) RecordNativeEventByID(ctx context.Context, project, runID string
 		attemptIndex = latest.AttemptIndex
 		phase = latest.Phase
 	}
+	if requestedAttempt, ok := nativeEventAttemptIndex(req); ok {
+		found := false
+		for _, attempt := range doc.Attempts {
+			if attempt.AttemptIndex == requestedAttempt {
+				attemptIndex = requestedAttempt
+				phase = attempt.Phase
+				found = true
+				break
+			}
+		}
+		if !found {
+			return server.NativeRunEventResult{}, server.ValidationError{Message: fmt.Sprintf("attempt_index %d is not registered on run", requestedAttempt)}
+		}
+	}
 
 	// Build the idempotency key.
 	docID := fmt.Sprintf("%s::%04d::%s::%012d", runID, attemptIndex, req.JobID, req.Seq)
@@ -5286,10 +5479,19 @@ func (s *Store) RecordNativeEventByID(ctx context.Context, project, runID string
 	if _, err := s.runEvents.CreateItem(ctx, eventPK, payload, nil); err != nil {
 		// Idempotent: a 409 Conflict means the doc already exists.
 		if isCosmosStatus(err, http.StatusConflict) {
-			// Read back the existing doc to verify same payload; for now accept the replay.
+			existing, readErr := s.runEvents.ReadItem(ctx, eventPK, docID, nil)
+			if readErr != nil {
+				return server.NativeRunEventResult{}, readErr
+			}
+			if err := json.Unmarshal(existing.Value, &eventDoc); err != nil {
+				return server.NativeRunEventResult{}, err
+			}
 		} else {
 			return server.NativeRunEventResult{}, err
 		}
+	}
+	if err := s.applyNativeEventExecutionState(ctx, project, runID, eventDoc); err != nil {
+		return server.NativeRunEventResult{}, err
 	}
 
 	// Compute run_ref for the response.
@@ -5390,6 +5592,29 @@ func sortNativeEventDocs(eventDocs []nativeEventDoc) {
 	})
 }
 
+func nativeEventAttemptIndex(req server.NativeRunEventRequest) (int, bool) {
+	if req.AttemptIndex != nil {
+		return *req.AttemptIndex, true
+	}
+	if req.Metadata == nil {
+		return 0, false
+	}
+	switch value := req.Metadata["attempt_index"].(type) {
+	case int:
+		return value, true
+	case int64:
+		return int(value), true
+	case float64:
+		return int(value), true
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return 0, false
+}
+
 func stringOrEmpty(s *string) string {
 	if s == nil {
 		return ""
@@ -5482,6 +5707,8 @@ func (s *Store) RecordNativeJobCompletion(ctx context.Context, project, runID st
 		attempts[idx] = attemptMap
 		raw["attempts"] = attempts
 		raw["updated_at"] = newCompletion.CompletedAt
+		executionState, executionReason := nativeJobExecutionStateAndReason(newCompletion)
+		markJobCompletionInExecutionsRaw(raw, attempt.Phase, jobID, executionState, executionReason, newCompletion.CompletedAt)
 
 		payload, err := json.Marshal(raw)
 		if err != nil {
@@ -5559,12 +5786,509 @@ func nativeJobCompletionDocFromPayload(jobID string, p server.CompletionPayload,
 	}
 }
 
+func nativeJobExecutionStateAndReason(completion nativeJobCompletionDoc) (string, string) {
+	if completion.Verification != nil {
+		switch completion.Verification.Status {
+		case "pass":
+			return "succeeded", ""
+		case "fail":
+			return "failed", "verification_failed"
+		case "error":
+			return "failed", "verification_error"
+		}
+	}
+	switch completion.Conclusion {
+	case "success":
+		return "succeeded", ""
+	case "skipped":
+		return "skipped", ""
+	case "timed_out":
+		return "failed", "timeout"
+	case "cancelled":
+		return "failed", "cancelled"
+	default:
+		return "failed", "job_failed"
+	}
+}
+
 func cloneJobCompletions(values map[string]nativeJobCompletionDoc) map[string]nativeJobCompletionDoc {
 	out := make(map[string]nativeJobCompletionDoc, len(values))
 	for k, v := range values {
 		out[k] = v
 	}
 	return out
+}
+
+func (s *Store) mutateRunRaw(ctx context.Context, project, runID string, mutate func(runDoc, map[string]any) (bool, error)) error {
+	pk := azcosmos.NewPartitionKeyString(project)
+	const maxRetries = 5
+	for i := 0; i < maxRetries; i++ {
+		resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
+		if isCosmosStatus(err, http.StatusNotFound) {
+			return server.ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		var doc runDoc
+		if err := json.Unmarshal(resp.Value, &doc); err != nil {
+			return err
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(resp.Value, &raw); err != nil {
+			return err
+		}
+		changed, err := mutate(doc, raw)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			return nil
+		}
+		payload, err := json.Marshal(raw)
+		if err != nil {
+			return err
+		}
+		etag := azcore.ETag(resp.ETag)
+		if _, err := s.runs.ReplaceItem(ctx, pk, runID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
+			if isCosmosStatus(err, http.StatusPreconditionFailed) {
+				continue
+			}
+			return err
+		}
+		return nil
+	}
+	return fmt.Errorf("mutate run: too many etag conflicts")
+}
+
+func (s *Store) RecordNativeJobsDispatched(ctx context.Context, project, runID, phase string, jobs map[string]string) error {
+	if len(jobs) == 0 {
+		return nil
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	return s.mutateRunRaw(ctx, project, runID, func(_ runDoc, raw map[string]any) (bool, error) {
+		markPhaseJobsDispatchedRaw(raw, phase, jobs)
+		raw["updated_at"] = now
+		return true, nil
+	})
+}
+
+func (s *Store) applyNativeEventExecutionState(ctx context.Context, project, runID string, event nativeEventDoc) error {
+	return s.mutateRunRaw(ctx, project, runID, func(doc runDoc, raw map[string]any) (bool, error) {
+		var attempt attemptDoc
+		found := false
+		for _, candidate := range doc.Attempts {
+			if candidate.AttemptIndex == event.AttemptIndex {
+				attempt = candidate
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false, nil
+		}
+		applyNativeEventToExecutionsRaw(raw, attempt, event)
+		raw["updated_at"] = event.CreatedAt
+		return true, nil
+	})
+}
+
+func markPhaseDispatchingRaw(raw map[string]any, phaseName, phaseKind, now string) {
+	phases, ok := raw["phase_executions"].([]any)
+	if !ok {
+		phases = []any{}
+	}
+	found := false
+	for i, value := range phases {
+		phase, ok := value.(map[string]any)
+		if !ok || stringValue(phase["name"]) != phaseName {
+			continue
+		}
+		found = true
+		phase["state"] = "dispatching"
+		phase["dispatched_at"] = now
+		delete(phase, "reason")
+		jobs, _ := phase["jobs"].([]any)
+		for j, jobValue := range jobs {
+			job, ok := jobValue.(map[string]any)
+			if !ok {
+				continue
+			}
+			if state := stringValue(job["state"]); state == "" || state == "not_started" {
+				job["state"] = "dispatching"
+				job["dispatched_at"] = now
+				delete(job, "reason")
+			}
+			jobs[j] = job
+		}
+		phase["jobs"] = jobs
+		phases[i] = phase
+		break
+	}
+	if !found {
+		phases = append(phases, map[string]any{
+			"name":          phaseName,
+			"kind":          firstNonEmpty(phaseKind, "k8s_job"),
+			"state":         "dispatching",
+			"created_at":    now,
+			"dispatched_at": now,
+			"jobs": []any{map[string]any{
+				"id":            phaseName,
+				"name":          phaseName,
+				"state":         "dispatching",
+				"created_at":    now,
+				"dispatched_at": now,
+				"steps": []any{map[string]any{
+					"slug":       "workflow-run",
+					"title":      "Workflow run",
+					"state":      "not_started",
+					"created_at": now,
+				}},
+			}},
+		})
+	}
+	raw["phase_executions"] = phases
+}
+
+func markPhaseJobsDispatchedRaw(raw map[string]any, phaseName string, jobs map[string]string) {
+	if len(jobs) == 0 {
+		return
+	}
+	phases, ok := raw["phase_executions"].([]any)
+	if !ok {
+		return
+	}
+	for i, value := range phases {
+		phase, ok := value.(map[string]any)
+		if !ok || stringValue(phase["name"]) != phaseName {
+			continue
+		}
+		jobValues, _ := phase["jobs"].([]any)
+		for j, jobValue := range jobValues {
+			job, ok := jobValue.(map[string]any)
+			if !ok {
+				continue
+			}
+			if name := jobs[stringValue(job["id"])]; name != "" {
+				job["k8s_job_name"] = name
+			}
+			jobValues[j] = job
+		}
+		phase["jobs"] = jobValues
+		phases[i] = phase
+		break
+	}
+	raw["phase_executions"] = phases
+}
+
+func applyNativeEventToExecutionsRaw(raw map[string]any, attempt attemptDoc, event nativeEventDoc) {
+	phases, ok := raw["phase_executions"].([]any)
+	if !ok {
+		return
+	}
+	now := event.CreatedAt
+	for i, value := range phases {
+		phase, ok := value.(map[string]any)
+		if !ok || stringValue(phase["name"]) != attempt.Phase {
+			continue
+		}
+		if state := stringValue(phase["state"]); state == "dispatching" || state == "not_started" {
+			phase["state"] = "active"
+			phase["started_at"] = now
+			delete(phase, "reason")
+		}
+		jobs, _ := phase["jobs"].([]any)
+		for j, jobValue := range jobs {
+			job, ok := jobValue.(map[string]any)
+			if !ok || stringValue(job["id"]) != event.JobID {
+				continue
+			}
+			if state := stringValue(job["state"]); state == "dispatching" || state == "not_started" {
+				job["state"] = "active"
+				job["started_at"] = now
+				delete(job, "reason")
+			}
+			steps, _ := job["steps"].([]any)
+			for k, stepValue := range steps {
+				step, ok := stepValue.(map[string]any)
+				if !ok || event.StepSlug == "" || stringValue(step["slug"]) != event.StepSlug {
+					continue
+				}
+				switch event.Event {
+				case "step_started", "log":
+					if state := stringValue(step["state"]); state == "not_started" || state == "dispatching" || state == "" {
+						step["state"] = "active"
+						step["started_at"] = now
+						delete(step, "reason")
+					}
+				case "step_completed":
+					step["state"] = "succeeded"
+					step["completed_at"] = now
+					delete(step, "reason")
+					if event.ExitCode != nil {
+						step["exit_code"] = *event.ExitCode
+					}
+				case "step_skipped":
+					step["state"] = "skipped"
+					step["completed_at"] = now
+				case "step_failed":
+					step["state"] = "failed"
+					step["reason"] = "exit_nonzero"
+					step["completed_at"] = now
+					if event.ExitCode != nil {
+						step["exit_code"] = *event.ExitCode
+					}
+					job["state"] = "failed"
+					job["reason"] = "step_failed"
+					job["completed_at"] = now
+					phase["state"] = "failed"
+					phase["reason"] = "job_failed"
+					phase["completed_at"] = now
+				}
+				steps[k] = step
+				break
+			}
+			job["steps"] = steps
+			jobs[j] = job
+			break
+		}
+		phase["jobs"] = jobs
+		phases[i] = phase
+		break
+	}
+	raw["phase_executions"] = phases
+}
+
+func markJobCompletionInExecutionsRaw(raw map[string]any, phaseName, jobID, state, reason, completedAt string) {
+	phases, ok := raw["phase_executions"].([]any)
+	if !ok {
+		return
+	}
+	for i, value := range phases {
+		phase, ok := value.(map[string]any)
+		if !ok || stringValue(phase["name"]) != phaseName {
+			continue
+		}
+		jobs, _ := phase["jobs"].([]any)
+		allTerminal := len(jobs) > 0
+		anyFailed := false
+		for j, jobValue := range jobs {
+			job, ok := jobValue.(map[string]any)
+			if !ok {
+				continue
+			}
+			if stringValue(job["id"]) == jobID {
+				job["state"] = state
+				job["completed_at"] = completedAt
+				if reason != "" {
+					job["reason"] = reason
+				} else {
+					delete(job, "reason")
+				}
+				steps, _ := job["steps"].([]any)
+				for k, stepValue := range steps {
+					step, ok := stepValue.(map[string]any)
+					if !ok {
+						continue
+					}
+					if state == "succeeded" && (stringValue(step["state"]) == "active" || stringValue(step["state"]) == "not_started" || stringValue(step["state"]) == "") {
+						step["state"] = "succeeded"
+						step["completed_at"] = completedAt
+					}
+					if state == "failed" && (stringValue(step["state"]) == "active" || stringValue(step["state"]) == "dispatching") {
+						step["state"] = "failed"
+						step["reason"] = firstNonEmpty(reason, "job_failed")
+						step["completed_at"] = completedAt
+					}
+					steps[k] = step
+				}
+				job["steps"] = steps
+			}
+			jobState := stringValue(job["state"])
+			if jobState != "succeeded" && jobState != "failed" && jobState != "skipped" {
+				allTerminal = false
+			}
+			if jobState == "failed" {
+				anyFailed = true
+			}
+			jobs[j] = job
+		}
+		phase["jobs"] = jobs
+		if allTerminal {
+			phase["completed_at"] = completedAt
+			if anyFailed {
+				phase["state"] = "failed"
+				phase["reason"] = "job_failed"
+			} else {
+				phase["state"] = "succeeded"
+				delete(phase, "reason")
+			}
+		}
+		phases[i] = phase
+		break
+	}
+	raw["phase_executions"] = phases
+}
+
+func finalizeExecutionFailureRaw(raw map[string]any, failureReason, now string) {
+	phases, ok := raw["phase_executions"].([]any)
+	if !ok {
+		return
+	}
+	failedSeen := false
+	failedAny := false
+	for i, value := range phases {
+		phase, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		phaseState := stringValue(phase["state"])
+		if phaseState == "failed" {
+			failedSeen = true
+			failedAny = true
+		} else if phaseState == "dispatching" || phaseState == "active" {
+			phase["state"] = "failed"
+			phase["reason"] = failureReason
+			phase["completed_at"] = now
+			failedSeen = true
+			failedAny = true
+			jobs, _ := phase["jobs"].([]any)
+			for j, jobValue := range jobs {
+				job, ok := jobValue.(map[string]any)
+				if !ok {
+					continue
+				}
+				jobState := stringValue(job["state"])
+				if jobState == "dispatching" || jobState == "active" {
+					job["state"] = "failed"
+					job["reason"] = failureReason
+					job["completed_at"] = now
+				}
+				jobs[j] = job
+			}
+			phase["jobs"] = jobs
+		} else if failedSeen && phaseState == "not_started" {
+			phase["state"] = "skipped"
+			phase["completed_at"] = now
+			jobs, _ := phase["jobs"].([]any)
+			for j, jobValue := range jobs {
+				job, ok := jobValue.(map[string]any)
+				if !ok {
+					continue
+				}
+				if stringValue(job["state"]) == "not_started" {
+					job["state"] = "skipped"
+					job["completed_at"] = now
+					steps, _ := job["steps"].([]any)
+					for k, stepValue := range steps {
+						step, ok := stepValue.(map[string]any)
+						if !ok {
+							continue
+						}
+						if stringValue(step["state"]) == "not_started" {
+							step["state"] = "skipped"
+							step["completed_at"] = now
+						}
+						steps[k] = step
+					}
+					job["steps"] = steps
+				}
+				jobs[j] = job
+			}
+			phase["jobs"] = jobs
+		}
+		phases[i] = phase
+	}
+	if !failedAny {
+		for i, value := range phases {
+			phase, ok := value.(map[string]any)
+			if !ok || stringValue(phase["state"]) == "skipped" || stringValue(phase["state"]) == "succeeded" {
+				continue
+			}
+			phase["state"] = "failed"
+			phase["reason"] = failureReason
+			phase["completed_at"] = now
+			jobs, _ := phase["jobs"].([]any)
+			for j, jobValue := range jobs {
+				job, ok := jobValue.(map[string]any)
+				if !ok {
+					continue
+				}
+				if stringValue(job["state"]) == "not_started" || stringValue(job["state"]) == "" {
+					job["state"] = "failed"
+					job["reason"] = failureReason
+					job["completed_at"] = now
+				}
+				jobs[j] = job
+			}
+			phase["jobs"] = jobs
+			phases[i] = phase
+			failedAny = true
+			failedSeen = true
+			break
+		}
+	}
+	if failedSeen {
+		skipFollowing := false
+		for i, value := range phases {
+			phase, ok := value.(map[string]any)
+			if !ok {
+				continue
+			}
+			if skipFollowing && stringValue(phase["state"]) == "not_started" {
+				phase["state"] = "skipped"
+				phase["completed_at"] = now
+				jobs, _ := phase["jobs"].([]any)
+				for j, jobValue := range jobs {
+					job, ok := jobValue.(map[string]any)
+					if !ok {
+						continue
+					}
+					if stringValue(job["state"]) == "not_started" {
+						job["state"] = "skipped"
+						job["completed_at"] = now
+						steps, _ := job["steps"].([]any)
+						for k, stepValue := range steps {
+							step, ok := stepValue.(map[string]any)
+							if ok && stringValue(step["state"]) == "not_started" {
+								step["state"] = "skipped"
+								step["completed_at"] = now
+								steps[k] = step
+							}
+						}
+						job["steps"] = steps
+					}
+					jobs[j] = job
+				}
+				phase["jobs"] = jobs
+				phases[i] = phase
+			}
+			if stringValue(phase["state"]) == "failed" {
+				skipFollowing = true
+			}
+		}
+	}
+	raw["phase_executions"] = phases
+}
+
+func canonicalExecutionFailureReason(reason string) string {
+	reason = strings.ToLower(strings.TrimSpace(reason))
+	switch {
+	case strings.Contains(reason, "dispatch_timeout"):
+		return "dispatch_timeout"
+	case strings.Contains(reason, "timeout"), strings.Contains(reason, "timed_out"):
+		return "timeout"
+	case strings.Contains(reason, "cancel"):
+		return "cancelled"
+	case strings.Contains(reason, "native_dispatch_failed"):
+		return "dispatch_failed"
+	case strings.Contains(reason, "admission_failed"):
+		return "admission_failed"
+	case strings.Contains(reason, "verification"):
+		return "verification_failed"
+	default:
+		return "job_failed"
+	}
 }
 
 func sameNativeJobCompletion(a, b nativeJobCompletionDoc) bool {
@@ -5885,9 +6609,13 @@ func (s *Store) SetRunTerminalState(ctx context.Context, project, runID, state s
 	}
 	raw["state"] = state
 	delete(raw, "queue_state")
-	raw["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	raw["updated_at"] = now
 	if abortReason != nil {
 		raw["abort_reason"] = *abortReason
+	}
+	if state == "aborted" {
+		finalizeExecutionFailureRaw(raw, canonicalExecutionFailureReason(stringOrEmpty(abortReason)), now)
 	}
 	payload, err := json.Marshal(raw)
 	if err != nil {
@@ -5944,15 +6672,17 @@ func (s *Store) AppendRunAttempt(ctx context.Context, project, runID, phase, pha
 				}
 			}
 		}
+		now := time.Now().UTC().Format(time.RFC3339Nano)
 		newAttempt := map[string]any{
 			"attempt_index":     nextIdx,
 			"phase":             phase,
 			"phase_kind":        phaseKind,
 			"workflow_filename": workflowFilename,
-			"dispatched_at":     time.Now().UTC().Format(time.RFC3339Nano),
+			"dispatched_at":     now,
 		}
 		raw["attempts"] = append(attempts, newAttempt)
-		raw["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+		markPhaseDispatchingRaw(raw, phase, phaseKind, now)
+		raw["updated_at"] = now
 
 		payload, err := json.Marshal(raw)
 		if err != nil {
@@ -6013,6 +6743,7 @@ func (s *Store) StartRunCycle(ctx context.Context, req server.StartRunCycleReque
 		raw["queue_state"] = "admitted"
 		raw["slot_lease_ref"] = req.SlotLeaseRef
 		delete(raw, "admission_error")
+		markPhaseDispatchingRaw(raw, req.PhaseName, req.PhaseKind, now)
 		raw["updated_at"] = now
 
 		payload, err := json.Marshal(raw)
@@ -6201,6 +6932,10 @@ func (s *Store) CreateRun(ctx context.Context, req server.CreateRunRequest) (ser
 	runDisplay := fmt.Sprintf("%d.%d", runNumber, runCycle)
 	budgetDoc := &budgetDoc{Total: req.Budget.Total}
 	queueState := "queued"
+	wf, err := s.workflowForRunExecution(ctx, req.Project, req.Workflow, req.WorkflowSchemaRef)
+	if err != nil {
+		return server.CreatedRun{}, err
+	}
 
 	originKind := "dispatch"
 	if req.TriggerSource != nil {
@@ -6226,6 +6961,8 @@ func (s *Store) CreateRun(ctx context.Context, req server.CreateRunRequest) (ser
 		IssueNumber:       req.IssueNumber,
 		State:             "queued",
 		QueueState:        &queueState,
+		SlotLeaseRef:      optionalNonEmptyStringPtr(req.SlotLeaseRef),
+		PhaseExecutions:   phaseExecutionDocsFromWorkflow(*wf, now, nil),
 		Budget:            budgetDoc,
 		Attempts:          []attemptDoc{},
 		CumulativeCostUSD: 0.0,
@@ -6329,6 +7066,10 @@ func (s *Store) CreateRecycleCycle(ctx context.Context, req server.CreateRecycle
 		rootRunID = *parent.RootRunID
 	}
 	queueState := "queued"
+	wf, err := s.workflowForRunExecution(ctx, parent.Project, parent.Workflow, firstNonEmpty(req.WorkflowSchemaRef, parent.WorkflowSchemaRef))
+	if err != nil {
+		return server.CreatedRun{}, err
+	}
 	doc := runDoc{
 		ID:                runID,
 		Project:           parent.Project,
@@ -6350,6 +7091,7 @@ func (s *Store) CreateRecycleCycle(ctx context.Context, req server.CreateRecycle
 		QueueState:        &queueState,
 		SlotLeaseRef:      parent.SlotLeaseRef,
 		EntrypointPhase:   optionalNonEmptyStringPtr(req.TargetPhaseName),
+		PhaseExecutions:   phaseExecutionDocsFromWorkflow(*wf, now, optionalNonEmptyStringPtr(req.TargetPhaseName)),
 		Budget:            parent.Budget,
 		Attempts:          []attemptDoc{},
 		CumulativeCostUSD: parent.CumulativeCostUSD,
