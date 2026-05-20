@@ -47,6 +47,26 @@ const runProjection = {
     updated_at: "2026-05-20T17:24:09.696Z",
     completed_at: null,
     evidence: [],
+    topology: {
+      phases: [{
+        name: "env-prep",
+        kind: "k8s_job",
+        verify: false,
+        always: false,
+        depends_on: [],
+        jobs: [{ id: "env-prep", name: "Environment prep" }],
+      }],
+      default_entry: { target: "env-prep", active: true, kind: "default" },
+      terminal: { kind: "touchpoint", enabled: true },
+      recycle_arrows: [{
+        source: "touchpoint",
+        target: "env-prep",
+        trigger: "changes_requested",
+        max_attempts: 3,
+        active: false,
+        kind: "touchpoint_recycle",
+      }],
+    },
     phases: [{
       name: "env-prep",
       kind: "k8s_job",

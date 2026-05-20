@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   phaseGraphModelFromNames,
+  runTopologyToPhaseGraphModel,
   workflowToPhaseGraphModel,
   type WorkflowGraphSource,
 } from "./workflowGraphModel";
@@ -106,6 +107,69 @@ describe("workflowToPhaseGraphModel", () => {
   });
 });
 
+describe("runTopologyToPhaseGraphModel", () => {
+  it("uses run projection topology as the execution graph shape", () => {
+    expect(runTopologyToPhaseGraphModel({
+      phases: [
+        {
+          name: "env-prep",
+          kind: "k8s_job",
+          verify: false,
+          always: false,
+          depends_on: [],
+          jobs: [{ id: "prepare", name: "Prepare env" }],
+        },
+        {
+          name: "agent-execute",
+          kind: "k8s_job",
+          verify: true,
+          always: false,
+          depends_on: ["env-prep"],
+          jobs: [{ id: "agent", name: null, image: "agent:latest" }],
+        },
+      ],
+      default_entry: { target: "env-prep", active: true, kind: "default" },
+      terminal: { kind: "touchpoint", enabled: true },
+      recycle_arrows: [{
+        source: "touchpoint",
+        target: "env-prep",
+        trigger: "changes_requested",
+        max_attempts: 3,
+        active: false,
+        kind: "touchpoint_recycle",
+      }],
+    })).toEqual({
+      phases: [
+        {
+          name: "env-prep",
+          kind: "k8s_job",
+          verify: false,
+          always: false,
+          depends_on: [],
+          jobs: [{ id: "prepare", name: "Prepare env", image: undefined }],
+        },
+        {
+          name: "agent-execute",
+          kind: "k8s_job",
+          verify: true,
+          always: false,
+          depends_on: ["env-prep"],
+          jobs: [{ id: "agent", name: "agent", image: "agent:latest" }],
+        },
+      ],
+      prEnabled: true,
+      recycleArrows: [{
+        source: "touchpoint",
+        target: "env-prep",
+        trigger: "changes_requested",
+        max_attempts: 3,
+        active: false,
+        kind: "touchpoint_recycle",
+      }],
+    });
+  });
+});
+
 describe("phaseGraphModelFromNames", () => {
   it("links provided phase names in order", () => {
     expect(phaseGraphModelFromNames(["plan", "implement", "verify"], { prEnabled: false })).toEqual({
@@ -127,4 +191,3 @@ describe("phaseGraphModelFromNames", () => {
     });
   });
 });
-

@@ -275,7 +275,17 @@ func TestRunCycleGraphProjectionUsesCanonicalStateAndNativeActivity(t *testing.T
 						}},
 					}},
 				},
-				{Name: "agent-execute", Kind: "k8s_job", DependsOn: []string{"env-prep"}, Jobs: []NativeJobSpec{{ID: "agent"}}},
+				{
+					Name:      "agent-execute",
+					Kind:      "k8s_job",
+					DependsOn: []string{"env-prep"},
+					RecyclePolicy: &RecyclePolicy{
+						MaxAttempts: 3,
+						On:          []string{"verify_fail", "verify_malformed"},
+						LandsAt:     "self",
+					},
+					Jobs: []NativeJobSpec{{ID: "agent"}},
+				},
 			},
 			PR: PrPrimitive{Enabled: true},
 		}}},
@@ -332,6 +342,24 @@ func TestRunCycleGraphProjectionUsesCanonicalStateAndNativeActivity(t *testing.T
 
 	if len(projection.Runs) != 1 {
 		t.Fatalf("projection runs=%#v", projection.Runs)
+	}
+	if got := projection.Runs[0].Topology.RecycleArrows; len(got) != 1 ||
+		got[0].Source != "agent-execute" ||
+		got[0].Target != "agent-execute" ||
+		got[0].Kind != "phase_recycle" ||
+		got[0].Trigger != "verify_fail / verify_malformed" ||
+		got[0].MaxAttempts != 3 {
+		t.Fatalf("projection topology recycle arrows=%#v", got)
+	}
+	if got := projection.Runs[0].Topology.Phases; len(got) != 2 ||
+		got[0].Name != "env-prep" ||
+		got[1].Name != "agent-execute" ||
+		len(got[1].DependsOn) != 1 ||
+		got[1].DependsOn[0] != "env-prep" {
+		t.Fatalf("projection topology phases=%#v", got)
+	}
+	if got := projection.Runs[0].Topology.Terminal; got.Kind != "touchpoint" || !got.Enabled {
+		t.Fatalf("projection topology terminal=%#v", got)
 	}
 	envPhase := assertProjectionPhase(t, projection.Runs[0], "env-prep")
 	if envPhase.State != "active" || envPhase.Jobs[0].State != "active" || envPhase.Jobs[0].Steps[0].State != "active" {
