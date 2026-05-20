@@ -122,6 +122,7 @@ type RunProjectionPhase = {
   name: string;
   kind: string;
   state: string;
+  reason?: string | null;
   verify: boolean;
   always: boolean;
   depends_on: string[];
@@ -129,9 +130,10 @@ type RunProjectionPhase = {
     id: string;
     name?: string | null;
     state: string;
+    reason?: string | null;
     conclusion?: string | null;
     completed_at?: string | null;
-    steps: Array<{ slug: string; title?: string | null; state: string }>;
+    steps: Array<{ slug: string; title?: string | null; state: string; reason?: string | null; exit_code?: number | null }>;
   }>;
   attempts: Array<{
     attempt_index: number;
@@ -335,6 +337,10 @@ type IssueDetailRouteParams = {
   project?: string;
   issueNumber?: string;
   runId?: string;
+  cycleId?: string;
+  phaseId?: string;
+  jobId?: string;
+  stepId?: string;
   workflowRunId?: string;
 };
 
@@ -367,6 +373,7 @@ export function IssueDetailView() {
 
   const [detail, setDetail] = useState<IssueDetail | null>(null);
   const [graph, setGraph] = useState<IssueGraph | null>(null);
+  const [runProjection, setRunProjection] = useState<RunGraphProjection | null>(null);
   const [projectWorkflows, setProjectWorkflows] = useState<Workflow[]>([]);
 
   // Resolve the URL run-number slug to the internal graph node ID so RunViewer
@@ -432,6 +439,13 @@ export function IssueDetailView() {
   const graphUrl =
     target
       ? `/v1/issues/by-number/${encodeURIComponent(target.project)}/${target.issue_number}/graph`
+      : null;
+  const runGraphUrl =
+    target && params.runId && params.cycleId
+      ? `/v1/projects/${encodeURIComponent(target.project)}` +
+        `/issues/${target.issue_number}` +
+        `/runs/${encodeURIComponent(params.runId)}` +
+        `/cycles/${encodeURIComponent(params.cycleId)}/graph`
       : null;
   const heading =
     target
@@ -503,6 +517,23 @@ export function IssueDetailView() {
   }, [baseUrl, lastSeg, navigate, params.runId, params.workflowRunId, tab]);
 
   useEffect(() => {
+    if (!graph?.projection) return;
+    if (params.workflowRunId) {
+      const run = projectionRunByLegacySlug(graph.projection, params.workflowRunId);
+      if (run) {
+        navigate(projectionRunCyclePath(baseUrl, run), { replace: true });
+      }
+      return;
+    }
+    if (params.runId && !params.cycleId) {
+      const run = latestProjectionCycleForRun(graph.projection, params.runId);
+      if (run) {
+        navigate(projectionRunCyclePath(baseUrl, run), { replace: true });
+      }
+    }
+  }, [baseUrl, graph, navigate, params.cycleId, params.runId, params.workflowRunId]);
+
+  useEffect(() => {
     let cancelled = false;
     const load = async () => {
       if (!detailUrl) return;
@@ -510,6 +541,7 @@ export function IssueDetailView() {
       try {
         const requests: Promise<Response>[] = [fetch(detailUrl)];
         if (graphUrl) requests.push(fetch(graphUrl));
+        if (runGraphUrl) requests.push(fetch(runGraphUrl));
         const responses = await Promise.all(requests);
         const d = responses[0];
         if (!d.ok) throw new Error(`${detailUrl} -> ${d.status}`);
@@ -522,6 +554,13 @@ export function IssueDetailView() {
         } else {
           setGraph(null);
         }
+        if (runGraphUrl && responses[2]) {
+          const rg = responses[2];
+          if (!rg.ok) throw new Error(`${runGraphUrl} -> ${rg.status}`);
+          setRunProjection((await rg.json()) as RunGraphProjection);
+        } else {
+          setRunProjection(null);
+        }
       } catch (e) {
         if (!cancelled) setError(String(e));
       }
@@ -530,7 +569,7 @@ export function IssueDetailView() {
     return () => {
       cancelled = true;
     };
-  }, [detailUrl, graphUrl, refreshTick]);
+  }, [detailUrl, graphUrl, runGraphUrl, refreshTick]);
 
   useEffect(() => {
     const project = detail?.project;
@@ -635,6 +674,14 @@ export function IssueDetailView() {
                 onConfirmAbort={(runNumber) => void abortRun(runNumber)}
                 selectedRunId={selectedRunId}
                 onSelectRun={selectRun}
+                selectedRunProjection={runProjection?.runs[0] ?? null}
+                selectedRunRequested={Boolean(params.runId)}
+                selectedPhaseId={params.phaseId ?? null}
+                selectedJobId={params.jobId ?? null}
+                selectedStepId={params.stepId ?? null}
+                executionLoading={Boolean(runGraphUrl) && runProjection === null && !error}
+                onSelectProjectionRun={(run) => navigate(projectionRunCyclePath(baseUrl, run))}
+                onSelectProjectionNode={(run, selection) => navigate(projectionSelectionPath(baseUrl, run, selection))}
                 onViewRunWorkflow={selectWorkflowRun}
                 onDispatch={() => void dispatchRun()}
                 onOpenTouchpoint={() => setTab("touchpoint")}
@@ -1501,7 +1548,7 @@ function PipelineDag({
       phaseName: graphPhase.name,
       attempts: [],
       latest: run,
-      status: { cls: "info", text: "pending" },
+      status: { cls: "", text: "not started" },
       jobLabel: graphPhase.name,
     };
     const nativeJobs = nativeAttemptJobs(rollup.latest.metadata.jobs);
@@ -1637,8 +1684,8 @@ function phaseNodesForRun(graph: IssueGraph, run: GraphNode): PhaseRollup[] {
       phaseName: stringOrNull(run.metadata.workflow) ?? "phase",
       attempts: [],
       latest: run,
-      status: { cls: "info", text: "pending" },
-      jobLabel: "pending",
+      status: { cls: "pending", text: "dispatching" },
+      jobLabel: "dispatching",
     });
   }
   return out;
@@ -1663,7 +1710,7 @@ function phaseStatus(attempt: GraphNode): { cls: string; text: string } {
     if (verStatus === "error") return { cls: "drain", text: "error" };
     if (nativeFailed) return { cls: "drain", text: "failed" };
     if (nativeSucceeded) return { cls: "free", text: "pass" };
-    return { cls: "pending", text: "pending" };
+    return { cls: "pending", text: "dispatching" };
   }
   // Verification status is the authoritative verdict on a verify phase
   // and must beat the k8s conclusion. The job conclusion can be "success"
@@ -1923,6 +1970,14 @@ function RunsPane({
   onConfirmAbort,
   selectedRunId,
   onSelectRun,
+  selectedRunProjection,
+  selectedRunRequested,
+  selectedPhaseId,
+  selectedJobId,
+  selectedStepId,
+  executionLoading,
+  onSelectProjectionRun,
+  onSelectProjectionNode,
   onViewRunWorkflow,
   onDispatch,
   onOpenTouchpoint,
@@ -1942,6 +1997,14 @@ function RunsPane({
   onConfirmAbort: (runNumber: string) => void;
   selectedRunId: string | null;
   onSelectRun: (runId: string | null) => void;
+  selectedRunProjection: RunProjectionRun | null;
+  selectedRunRequested: boolean;
+  selectedPhaseId: string | null;
+  selectedJobId: string | null;
+  selectedStepId: string | null;
+  executionLoading: boolean;
+  onSelectProjectionRun: (run: RunProjectionRun) => void;
+  onSelectProjectionNode: (run: RunProjectionRun, selection: ProjectionSelection) => void;
   onViewRunWorkflow: (runId: string) => void;
   onDispatch: () => void;
   onOpenTouchpoint: () => void;
@@ -1965,10 +2028,11 @@ function RunsPane({
     : !isAdmin && !dispatching && !detail.issue_lock_held
     ? "Dispatching runs is restricted to admins. Ask an admin to promote your account at auth.romaine.life/admin."
     : undefined;
-  const activeRunNumber = (() => {
-    const node = graph ? findActiveRun(graph) : null;
-    return node ? runRouteSlugFromNode(node) : null;
-  })();
+  const activeRunNumber = projectionActiveRun(graph?.projection)?.run_display_number
+    ?? (() => {
+      const node = graph ? findActiveRun(graph) : null;
+      return node ? runRouteSlugFromNode(node) : null;
+    })();
   const aborting = abortState.kind === "aborting";
   const armed = abortState.kind === "armed";
   const cancelVisible = signedIn && isAdmin && activeRunNumber !== null;
@@ -2049,6 +2113,9 @@ function RunsPane({
   if (!graph) {
     return <div className="empty">Loading run history…</div>;
   }
+  const projectionRuns = (graph.projection?.runs ?? [])
+    .slice()
+    .sort((a, b) => (b.started_at ?? "").localeCompare(a.started_at ?? ""));
   const runs = graph.nodes
     .filter((n) => n.kind === "run")
     .slice()
@@ -2059,6 +2126,35 @@ function RunsPane({
         {newRunButton}
         <div className="empty">No runs yet.</div>
       </>
+    );
+  }
+  if (selectedRunRequested) {
+    if (executionLoading) {
+      return <div className="empty">Loading run graph…</div>;
+    }
+    if (!selectedRunProjection) {
+      return (
+        <>
+          <button type="button" className="link" onClick={() => onSelectRun(null)}>
+            ← runs
+          </button>
+          <div className="empty">Run graph was not found.</div>
+        </>
+      );
+    }
+    return (
+      <RunExecutionView
+        run={selectedRunProjection}
+        project={project}
+        issueNumber={detail.number}
+        repo={repo}
+        selectedPhaseId={selectedPhaseId}
+        selectedJobId={selectedJobId}
+        selectedStepId={selectedStepId}
+        onBackToRuns={() => onSelectRun(null)}
+        onSelectNode={(selection) => onSelectProjectionNode(selectedRunProjection, selection)}
+        onOpenTouchpoint={onOpenTouchpoint}
+      />
     );
   }
   if (selectedRunId) {
@@ -2095,7 +2191,50 @@ function RunsPane({
           </tr>
         </thead>
         <tbody>
-          {runs.map((r) => {
+          {(projectionRuns.length > 0 ? projectionRuns : []).map((r) => {
+            const path = projectionRunCyclePath("", r);
+            const cost = r.cost_usd;
+            return (
+              <tr key={r.run_ref}>
+                <td className="mono">
+                  <button
+                    type="button"
+                    className="link mono"
+                    title={r.run_ref}
+                    onClick={() => onSelectProjectionRun(r)}
+                  >
+                    {projectionRunLabel(r)}
+                  </button>
+                </td>
+                <td className="mono">{r.run_number ?? "—"}</td>
+                <td className="mono">{r.run_cycle_number ?? "—"}</td>
+                <td>
+                  <button
+                    type="button"
+                    className="link"
+                    onClick={() => onSelectProjectionRun(r)}
+                    title={`View ${path}`}
+                  >
+                    <span className={`pill ${runStatePill(r.state ?? "")}`}>{r.state ?? "—"}</span>
+                  </button>
+                </td>
+                <td className="mono dim">{r.started_at ? formatTime(r.started_at) : "—"}</td>
+                <td className="mono"><span className="dim">—</span></td>
+                <td className="mono">{Number.isFinite(cost) ? `$${cost.toFixed(4)}` : "—"}</td>
+                <td className="mono dim">—</td>
+                <td>
+                  <button
+                    type="button"
+                    className="link"
+                    onClick={() => onSelectProjectionRun(r)}
+                  >
+                    view
+                  </button>
+                </td>
+              </tr>
+            );
+          })}
+          {projectionRuns.length === 0 && runs.map((r) => {
             const id = runIdFromNode(r);
             const slug = issueRunSlug(graph, r);
             const meta = r.metadata;
@@ -2152,6 +2291,281 @@ function RunsPane({
       </table>
     </>
   );
+}
+
+type ProjectionSelection = {
+  phase?: string | null;
+  job?: string | null;
+  step?: string | null;
+};
+
+function RunExecutionView({
+  run,
+  project,
+  issueNumber,
+  repo,
+  selectedPhaseId,
+  selectedJobId,
+  selectedStepId,
+  onBackToRuns,
+  onSelectNode,
+  onOpenTouchpoint,
+}: {
+  run: RunProjectionRun;
+  project: string;
+  issueNumber: number | null;
+  repo: string | null;
+  selectedPhaseId: string | null;
+  selectedJobId: string | null;
+  selectedStepId: string | null;
+  onBackToRuns: () => void;
+  onSelectNode: (selection: ProjectionSelection) => void;
+  onOpenTouchpoint: () => void;
+}) {
+  const selectedPhase = selectedPhaseId
+    ? run.phases.find((phase) => phase.name === selectedPhaseId) ?? null
+    : null;
+  const selectedJob = selectedPhase && selectedJobId
+    ? selectedPhase.jobs.find((job) => job.id === selectedJobId) ?? null
+    : null;
+  const selectedStep = selectedJob && selectedStepId
+    ? selectedJob.steps.find((step) => step.slug === selectedStepId) ?? null
+    : null;
+  const selectedKey = selectedJob
+    ? `job:${selectedPhase?.name}:${selectedJob.id}`
+    : selectedPhase
+      ? `phase:${selectedPhase.name}`
+      : null;
+
+  return (
+    <>
+      <div className="run-section-header">
+        <button type="button" className="link" onClick={onBackToRuns}>
+          ← runs
+        </button>
+        <h2>{projectionRunLabel(run)} execution</h2>
+        <span className={`pill ${runStatePill(run.state)}`}>{run.state}</span>
+      </div>
+      <ProjectionPipelineDag
+        run={run}
+        selectedKey={selectedKey}
+        onSelectNode={onSelectNode}
+        onOpenTouchpoint={onOpenTouchpoint}
+      />
+      {selectedPhase ? (
+        <ProjectionInspector
+          run={run}
+          phase={selectedPhase}
+          job={selectedJob}
+          step={selectedStep}
+          project={project}
+          issueNumber={issueNumber}
+          repo={repo}
+          onClose={() => onSelectNode({})}
+        />
+      ) : (
+        <ProjectionRunMetaSummary run={run} repo={repo} />
+      )}
+    </>
+  );
+}
+
+function ProjectionPipelineDag({
+  run,
+  selectedKey,
+  onSelectNode,
+  onOpenTouchpoint,
+}: {
+  run: RunProjectionRun;
+  selectedKey: string | null;
+  onSelectNode: (selection: ProjectionSelection) => void;
+  onOpenTouchpoint: () => void;
+}) {
+  const phases: PhaseGraphPhase[] = run.phases.map((phase) => ({
+    name: phase.name,
+    kind: phase.kind,
+    verify: phase.verify,
+    always: phase.always,
+    depends_on: phase.depends_on,
+    jobs: phase.jobs.map((job) => ({ id: job.id, name: job.name ?? job.id })),
+  }));
+  const renderPhase = (graphPhase: PhaseGraphPhase) => {
+    const phase = run.phases.find((candidate) => candidate.name === graphPhase.name);
+    if (!phase) return null;
+    const jobs = phase.jobs.length > 0
+      ? phase.jobs
+      : [{ id: phase.name, name: phase.name, state: phase.state, steps: [] }];
+    return (
+      <>
+        {jobs.map((job) => {
+          const key = `job:${phase.name}:${job.id}`;
+          return (
+            <button
+              type="button"
+              className={`dag-node dag-node-phase${selectedKey === key ? " selected" : ""}`}
+              key={job.id}
+              onClick={() => onSelectNode({ phase: phase.name, job: job.id })}
+              aria-pressed={selectedKey === key}
+            >
+              <div className="dag-job-head">
+                <span className="dag-job-title">{job.name || job.id}</span>
+                <span className="dag-job-kicker">job</span>
+              </div>
+              <div className="dag-node-state">
+                <span className={`pill ${graphStatePill(job.state)}`}>{formatGraphState(job.state)}</span>
+              </div>
+              {job.reason && <div className="dag-node-meta dim mono">{job.reason}</div>}
+            </button>
+          );
+        })}
+      </>
+    );
+  };
+  const renderTouchpoint = () => (
+    <button
+      type="button"
+      className="dag-node dag-node-pr"
+      onClick={onOpenTouchpoint}
+    >
+      <div className="dag-node-label">touchpoint</div>
+      <div className="dag-node-state mono">PR</div>
+    </button>
+  );
+  return (
+    <div className="dag-wrap">
+      <PhaseGraph
+        phases={phases}
+        prEnabled={true}
+        renderPhase={renderPhase}
+        renderTouchpoint={renderTouchpoint}
+        ariaLabel="run execution"
+        entryPhaseName={run.current_phase ?? null}
+      />
+    </div>
+  );
+}
+
+function ProjectionInspector({
+  run,
+  phase,
+  job,
+  step,
+  project,
+  issueNumber,
+  repo,
+  onClose,
+}: {
+  run: RunProjectionRun;
+  phase: RunProjectionPhase;
+  job: RunProjectionPhase["jobs"][number] | null;
+  step: RunProjectionPhase["jobs"][number]["steps"][number] | null;
+  project: string;
+  issueNumber: number | null;
+  repo: string | null;
+  onClose: () => void;
+}) {
+  const latestAttempt = phase.attempts[phase.attempts.length - 1] ?? null;
+  const selectedJob = job ?? phase.jobs[0] ?? null;
+  const nativeJob = selectedJob ? projectionJobToNativeJob(selectedJob) : null;
+  const runNumber = run.run_display_number ?? (run.run_number ? `${run.run_number}.${run.run_cycle_number ?? 1}` : null);
+  return (
+    <div className="run-panel">
+      <div className="run-panel-header">
+        <div>
+          <strong>{selectedJob ? selectedJob.name || selectedJob.id : phase.name}</strong>
+          <span className={`pill ${graphStatePill(selectedJob?.state ?? phase.state)}`} style={{ marginLeft: "0.5rem" }}>
+            {formatGraphState(selectedJob?.state ?? phase.state)}
+          </span>
+          {selectedJob?.reason && <span className="dim mono" style={{ marginLeft: "0.5rem" }}>{selectedJob.reason}</span>}
+        </div>
+        <button type="button" className="link" onClick={onClose}>
+          close
+        </button>
+      </div>
+      <div className="run-panel-meta">
+        <div>
+          <span className="key">phase</span> <span className="mono">{phase.name}</span>
+        </div>
+        {selectedJob && (
+          <div>
+            <span className="key">job</span> <span className="mono">{selectedJob.id}</span>
+          </div>
+        )}
+        {step && (
+          <div>
+            <span className="key">step</span> <span className="mono">{step.slug}</span>
+          </div>
+        )}
+        {latestAttempt && (
+          <div>
+            <span className="key">attempt</span> <span className="mono">{latestAttempt.attempt_index}</span>
+          </div>
+        )}
+        {repo && (
+          <div>
+            <span className="key">repo</span> <span className="mono">{repo}</span>
+          </div>
+        )}
+      </div>
+      {selectedJob && nativeJob && latestAttempt && issueNumber !== null && runNumber ? (
+        <NativeJobInspector
+          project={project}
+          runId={run.run_ref}
+          issueNumber={issueNumber}
+          runNumber={runNumber}
+          attemptIndex={latestAttempt.attempt_index}
+          jobs={[nativeJob]}
+          archiveUrl={latestAttempt.log_archive_url ?? null}
+          live={selectedJob.state === "active" || selectedJob.state === "dispatching"}
+          selectedJobId={selectedJob.id}
+          selectedStepSlug={step?.slug ?? null}
+        />
+      ) : (
+        <div className="native-log-panel dim mono">No job logs are available for this selection.</div>
+      )}
+    </div>
+  );
+}
+
+function ProjectionRunMetaSummary({ run, repo }: { run: RunProjectionRun; repo: string | null }) {
+  const counts = countProjectionPhases(run);
+  return (
+    <div className="run-panel-meta" style={{ marginTop: "0.5rem" }}>
+      <div>
+        <span className="key">state</span>{" "}
+        <span className={`pill ${runStatePill(run.state)}`}>{run.state}</span>
+      </div>
+      <div>
+        <span className="key">workflow</span> <span className="mono">{run.workflow}</span>
+      </div>
+      <div>
+        <span className="key">phases</span>{" "}
+        <span className="mono">{counts.succeeded} done / {counts.active} active / {counts.failed} failed</span>
+      </div>
+      <div>
+        <span className="key">cost</span> <span className="mono">${run.cost_usd.toFixed(4)}</span>
+      </div>
+      {repo && (
+        <div>
+          <span className="key">repo</span> <span className="mono">{repo}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function projectionJobToNativeJob(job: RunProjectionPhase["jobs"][number]): NativeAttemptJob {
+  return {
+    job_id: job.id,
+    name: job.name,
+    state: job.state,
+    steps: job.steps.map((step) => ({
+      slug: step.slug,
+      title: step.title,
+      state: step.state,
+      exit_code: step.exit_code ?? null,
+    })),
+  };
 }
 
 function WorkflowPane({
@@ -2588,9 +3002,61 @@ function latestProjectionRun(projection: RunGraphProjection | undefined | null):
   return projection.runs[projection.runs.length - 1];
 }
 
+function projectionActiveRun(projection: RunGraphProjection | undefined | null): RunProjectionRun | null {
+  return projection?.runs.find((run) => runStateIsActive(run.state)) ?? null;
+}
+
+function projectionRunByLegacySlug(projection: RunGraphProjection, slug: string): RunProjectionRun | null {
+  return projection.runs.find((run) => {
+    const cycle = run.cycle_number !== null && run.cycle_number !== undefined ? String(run.cycle_number) : null;
+    return cycle === slug || run.run_display_number === slug || projectionRunNumberSegment(run) === slug;
+  }) ?? null;
+}
+
+function latestProjectionCycleForRun(projection: RunGraphProjection, runSegment: string): RunProjectionRun | null {
+  const matches = projection.runs
+    .filter((run) => projectionRunNumberSegment(run) === runSegment || run.run_display_number === runSegment)
+    .sort((a, b) => (b.run_cycle_number ?? 0) - (a.run_cycle_number ?? 0));
+  return matches[0] ?? projectionRunByLegacySlug(projection, runSegment);
+}
+
+function projectionRunNumberSegment(run: RunProjectionRun): string {
+  if (run.run_number !== null && run.run_number !== undefined) return String(run.run_number);
+  if (run.cycle_number !== null && run.cycle_number !== undefined) return String(run.cycle_number);
+  return encodeURIComponent(run.run_ref);
+}
+
+function projectionCycleSegment(run: RunProjectionRun): string {
+  if (run.run_cycle_number !== null && run.run_cycle_number !== undefined) return String(run.run_cycle_number);
+  if (run.run_display_number) {
+    const parts = run.run_display_number.split(".");
+    if (parts[1]) return parts[1];
+  }
+  return "1";
+}
+
+function projectionRunCyclePath(baseUrl: string, run: RunProjectionRun): string {
+  const prefix = baseUrl || "";
+  return `${prefix}/runs/${encodeURIComponent(projectionRunNumberSegment(run))}/cycles/${encodeURIComponent(projectionCycleSegment(run))}`;
+}
+
+function projectionSelectionPath(baseUrl: string, run: RunProjectionRun, selection: ProjectionSelection): string {
+  let path = projectionRunCyclePath(baseUrl, run);
+  if (selection.phase) {
+    path += `/phases/${encodeURIComponent(selection.phase)}`;
+  }
+  if (selection.phase && selection.job) {
+    path += `/jobs/${encodeURIComponent(selection.job)}`;
+  }
+  if (selection.phase && selection.job && selection.step) {
+    path += `/steps/${encodeURIComponent(selection.step)}`;
+  }
+  return path;
+}
+
 function projectionRunLabel(run: RunProjectionRun): string {
-  if (run.cycle_number !== null && run.cycle_number !== undefined) return `cycle ${run.cycle_number}`;
   if (run.run_display_number) return `cycle ${run.run_display_number}`;
+  if (run.cycle_number !== null && run.cycle_number !== undefined) return `cycle ${run.cycle_number}`;
   if (run.run_number !== null && run.run_number !== undefined) return `run ${run.run_number}`;
   return run.run_ref;
 }
@@ -2598,14 +3064,26 @@ function projectionRunLabel(run: RunProjectionRun): string {
 function countProjectionPhases(run: RunProjectionRun) {
   return run.phases.reduce(
     (acc, phase) => {
-      if (phase.state === "active") acc.active += 1;
-      else if (phase.state === "succeeded" || phase.state === "completed" || phase.state === "skipped") acc.succeeded += 1;
+      if (phase.state === "active" || phase.state === "dispatching") acc.active += 1;
+      else if (phase.state === "succeeded" || phase.state === "skipped") acc.succeeded += 1;
       else if (phase.state === "failed") acc.failed += 1;
       else acc.pending += 1;
       return acc;
     },
     { active: 0, succeeded: 0, failed: 0, pending: 0 },
   );
+}
+
+function graphStatePill(state: string): string {
+  if (state === "succeeded") return "free";
+  if (state === "active") return "busy";
+  if (state === "failed") return "drain";
+  if (state === "dispatching") return "pending";
+  return "";
+}
+
+function formatGraphState(state: string): string {
+  return state.replace(/_/g, " ");
 }
 
 function touchpointNeedsDecision(tp: RunProjectionTouchpoint): boolean {
@@ -2660,7 +3138,7 @@ function AttemptCard({
   const nativeSucceeded = nativeJobs.length > 0 && nativeJobs.every((j) => j.state === "succeeded" || j.state === "skipped");
 
   // Pre-start progression:
-  //   no completed_at + no active native step -> pending
+  //   no completed_at + no active native step -> dispatching
   //   active native step                      -> running
   //   completed_at or terminal native job     -> terminal
   // The native runner can leave completed_at unset if a callback failed;
@@ -2680,7 +3158,7 @@ function AttemptCard({
     : null;
 
   const statusPill = (() => {
-    if (dispatching) return { cls: "pending", text: "pending" };
+    if (dispatching) return { cls: "pending", text: "dispatching" };
     if (running) return { cls: "busy", text: "running" };
     if (verificationStatus === "pass") return { cls: "free", text: "pass" };
     if (verificationStatus === "fail") return { cls: "drain", text: "fail" };
@@ -2775,24 +3253,38 @@ function AttemptCard({
 function NativeJobInspector({
   project,
   runId,
+  issueNumber = null,
+  runNumber = null,
   attemptIndex,
   jobs,
   archiveUrl,
   live,
+  selectedJobId = null,
+  selectedStepSlug = null,
 }: {
   project: string;
   runId: string;
+  issueNumber?: number | null;
+  runNumber?: string | null;
   attemptIndex: number;
   jobs: NativeAttemptJob[];
   archiveUrl: string | null;
   live: boolean;
+  selectedJobId?: string | null;
+  selectedStepSlug?: string | null;
 }) {
   const [logs, setLogs] = useState<NativeRunEventsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const stepRefs = useMemo(() => nativeStepRefs(jobs), [jobs]);
+  const scopedJobs = useMemo(
+    () => selectedJobId ? jobs.filter((job) => job.job_id === selectedJobId) : jobs,
+    [jobs, selectedJobId],
+  );
+  const stepRefs = useMemo(() => nativeStepRefs(scopedJobs), [scopedJobs]);
   const defaultSelection = useMemo(
-    () => preferredNativeStepKey(stepRefs),
-    [stepRefs],
+    () => selectedStepSlug
+      ? stepRefs.find((step) => step.step.slug === selectedStepSlug)?.key ?? preferredNativeStepKey(stepRefs)
+      : preferredNativeStepKey(stepRefs),
+    [selectedStepSlug, stepRefs],
   );
   const [selectedKey, setSelectedKey] = useState<string | null>(defaultSelection);
   const selected = stepRefs.find((step) => step.key === selectedKey) ?? stepRefs[0] ?? null;
@@ -2802,14 +3294,17 @@ function NativeJobInspector({
     setLogs(null);
     setError(null);
     setSelectedKey(defaultSelection);
-    const base = nativeRunApiBase(project, runId);
+    const base = runNumber && issueNumber !== null
+      ? nativeRunApiBaseForNumber(project, issueNumber, runNumber)
+      : nativeRunApiBase(project, runId);
     if (!base) {
       setError("events unavailable for malformed run ref");
       return () => {
         cancelled = true;
       };
     }
-    const url = `${base}/events?attempt_index=${attemptIndex}&limit=200`;
+    const jobParam = selectedJobId ? `&job_id=${encodeURIComponent(selectedJobId)}` : "";
+    const url = `${base}/events?attempt_index=${attemptIndex}&limit=200${jobParam}`;
     const load = () => {
       fetch(url)
       .then(async (res) => {
@@ -2827,7 +3322,7 @@ function NativeJobInspector({
       cancelled = true;
       if (timer !== null) window.clearInterval(timer);
     };
-  }, [project, runId, attemptIndex, defaultSelection, live]);
+  }, [project, runId, issueNumber, runNumber, attemptIndex, defaultSelection, live, selectedJobId]);
 
   if (error) {
     return (
@@ -2896,7 +3391,7 @@ function NativeJobInspector({
                   <small>
                     {step.exit_code !== null && step.exit_code !== undefined
                       ? `exit ${step.exit_code}`
-                      : step.state || "not run"}
+                      : step.state ? formatGraphState(step.state) : "not run"}
                   </small>
                 </button>
               </Fragment>
@@ -2921,6 +3416,12 @@ function nativeRunApiBase(project: string, runRef: string): string | null {
       `/runs/${encodeURIComponent(parsed[2])}/native`;
   }
   return null;
+}
+
+function nativeRunApiBaseForNumber(project: string, issueNumber: number, runNumber: string): string {
+  return `/v1/projects/${encodeURIComponent(project)}` +
+    `/issues/${encodeURIComponent(issueNumber)}` +
+    `/runs/${encodeURIComponent(runNumber)}/native`;
 }
 
 function nativeStepRefs(jobs: NativeAttemptJob[]): Array<{
@@ -2953,7 +3454,7 @@ function preferredNativeStepKey(
   return (
     refs.find((ref) => ref.step.state === "active")?.key
     ?? refs.find((ref) => ref.step.state === "failed")?.key
-    ?? refs.find((ref) => ref.step.state === "pending")?.key
+    ?? refs.find((ref) => ref.step.state === "not_started")?.key
     ?? refs[0]?.key
     ?? null
   );
@@ -3261,7 +3762,7 @@ function nativeStatePill(state: string): string {
   if (state === "succeeded") return "free";
   if (state === "active") return "busy";
   if (state === "failed") return "drain";
-  if (state === "pending") return "pending";
+  if (state === "dispatching") return "pending";
   return "";
 }
 

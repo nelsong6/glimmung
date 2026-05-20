@@ -310,11 +310,15 @@ review."
 
 ## Projection Contract
 
-The canonical issue graph endpoint now embeds `RunGraphProjection` under
+The canonical issue graph endpoint embeds `RunGraphProjection` under
 `projection` on `GET /v1/issues/by-number/{project}/{issue_number}/graph`.
+The execution work surface uses the run-scoped projection endpoint:
+
+`GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/cycles/{cycle_number}/graph`
+
 The projection is separate from storage and separate from any executor's
-native model; the frontend should prefer it over rebuilding state from
-generic graph-node metadata.
+native model. The execution UI renders from this projection, not from generic
+graph `nodes` / `edges` metadata.
 
 It is fixture-friendly and can be rendered without standing up a real run.
 
@@ -345,6 +349,7 @@ Run
 PhaseNode
   name
   state
+  reason
   kind
   verify
   always
@@ -356,6 +361,7 @@ JobNode
   id
   name
   state
+  reason
   conclusion
   completed_at
   steps[]
@@ -364,6 +370,8 @@ StepNode
   slug
   title
   state
+  reason
+  exit_code
 
 Signal
   target_type
@@ -375,10 +383,16 @@ Signal
   feedback
 ```
 
-The projection normalizes native Kubernetes jobs, PR evidence, and touchpoint
-state into one display vocabulary. Native job completions are job-scoped in the
-run attempt record so the projection can show one sibling job as complete while
-the phase waits for the remaining jobs.
+The graph state vocabulary is closed: `not_started`, `skipped`, `dispatching`,
+`active`, `succeeded`, and `failed`. `pending` and vague terminal `completed`
+are not graph states. `reason` is required only for `failed`; otherwise it is
+null/absent. External native values are translated at ingestion/projection
+boundaries into this vocabulary, while raw Kubernetes or runner details belong
+in inspector/debug fields.
+
+Native job completions are job-scoped in the run attempt record so the
+projection can show one sibling job as complete while the phase waits for the
+remaining jobs.
 
 GitHub Check Runs are intentionally not part of this contract. Glimmung
 keeps run state canonical in the issue workspace and syndicates PR URLs as

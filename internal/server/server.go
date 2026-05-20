@@ -202,6 +202,10 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 		"GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/report",
 		getRunReportByNumber(store),
 	)
+	mux.HandleFunc(
+		"GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/cycles/{cycle_number}/graph",
+		runCycleGraphProjectionByNumber(store),
+	)
 	mux.HandleFunc("GET /v1/issues/by-number/{project}/{issue_number}", issueDetailByNumber(store))
 	mux.HandleFunc(
 		"GET /v1/issues/by-number/{project}/{issue_number}/graph",

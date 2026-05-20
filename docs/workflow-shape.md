@@ -168,11 +168,11 @@ projects/<project>
 projects/<project>/workflows/<workflow>
 projects/<project>/workflow-schemas/<schema_ref>
 projects/<project>/workflows/<workflow>/phases/<phase>
-projects/<project>/runs/<run_number>
-projects/<project>/runs/<run_number>/cycles/<cycle_number>
-projects/<project>/runs/<run_number>/cycles/<cycle_number>/phases/<phase>
-projects/<project>/runs/<run_number>/cycles/<cycle_number>/phases/<phase>/jobs/<job_id>
-projects/<project>/runs/<run_number>/cycles/<cycle_number>/phases/<phase>/jobs/<job_id>/steps/<slug>
+projects/<project>/issues/<issue_number>/runs/<run_number>
+projects/<project>/issues/<issue_number>/runs/<run_number>/cycles/<cycle_number>
+projects/<project>/issues/<issue_number>/runs/<run_number>/cycles/<cycle_number>/phases/<phase>
+projects/<project>/issues/<issue_number>/runs/<run_number>/cycles/<cycle_number>/phases/<phase>/jobs/<job_id>
+projects/<project>/issues/<issue_number>/runs/<run_number>/cycles/<cycle_number>/phases/<phase>/jobs/<job_id>/steps/<slug>
 ```
 
 Logs, MCP tool outputs, error messages, and notification surfaces

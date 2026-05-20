@@ -18,6 +18,7 @@ var expectedGoRoutes = []string{
 	"GET /v1/issues",
 	"GET /v1/projects/{project}/runs",
 	"GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/report",
+	"GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/cycles/{cycle_number}/graph",
 	"GET /v1/issues/by-number/{project}/{issue_number}",
 	"GET /v1/issues/by-number/{project}/{issue_number}/graph",
 	"GET /v1/graph",
