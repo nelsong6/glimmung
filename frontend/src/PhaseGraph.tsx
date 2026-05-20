@@ -304,6 +304,7 @@ export function PhaseGraph({
         x: idx * PHASE_X_GAP,
         y: PHASE_Y + (maxPhaseHeight - phaseHeight(idx, col)) / 2,
       },
+      style: { pointerEvents: "all" },
       draggable: false,
       selectable: false,
       data: {
@@ -325,6 +326,7 @@ export function PhaseGraph({
           x: columns.length * PHASE_X_GAP,
           y: PHASE_Y + (maxPhaseHeight - (nodeHeights.touchpoint ?? TOUCHPOINT_FALLBACK_HEIGHT)) / 2,
         },
+        style: { pointerEvents: "all" },
         draggable: false,
         selectable: false,
         data: { renderTouchpoint },
