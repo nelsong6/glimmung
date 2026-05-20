@@ -82,3 +82,52 @@ func TestExpireRunDispatchTimeoutsAbortsStaleDispatchingPhase(t *testing.T) {
 		t.Fatalf("aborted=%#v", store.aborted)
 	}
 }
+
+func TestExpireRunDispatchTimeoutsAbortsLegacyStaleAttempt(t *testing.T) {
+	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+	completedAt := now.Add(-time.Minute)
+	store := &fakeRunDispatchTimeoutStore{
+		projects: []Project{{ID: "glimmung"}},
+		runs: []RunReport{
+			{
+				ID:      "run-legacy-stale",
+				Project: "glimmung",
+				State:   "in_progress",
+				Attempts: []RunReportAttempt{{
+					Phase:        "env-prep",
+					DispatchedAt: now.Add(-11 * time.Minute),
+				}},
+			},
+			{
+				ID:      "run-legacy-recent",
+				Project: "glimmung",
+				State:   "in_progress",
+				Attempts: []RunReportAttempt{{
+					Phase:        "env-prep",
+					DispatchedAt: now.Add(-2 * time.Minute),
+				}},
+			},
+			{
+				ID:      "run-legacy-complete",
+				Project: "glimmung",
+				State:   "in_progress",
+				Attempts: []RunReportAttempt{{
+					Phase:        "env-prep",
+					DispatchedAt: now.Add(-11 * time.Minute),
+					CompletedAt:  &completedAt,
+				}},
+			},
+		},
+	}
+
+	expired, err := ExpireRunDispatchTimeouts(context.Background(), store, 10*time.Minute, now)
+	if err != nil {
+		t.Fatalf("ExpireRunDispatchTimeouts: %v", err)
+	}
+	if expired != 1 {
+		t.Fatalf("expired=%d, want 1", expired)
+	}
+	if len(store.aborted) != 1 || store.aborted[0] != "glimmung/run-legacy-stale/dispatch_timeout" {
+		t.Fatalf("aborted=%#v", store.aborted)
+	}
+}

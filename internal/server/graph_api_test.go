@@ -443,6 +443,73 @@ func TestRunCycleGraphProjectionUsesDurableExecutions(t *testing.T) {
 	}
 }
 
+func TestRunCycleGraphProjectionShowsLegacyAbortedDispatchTimeout(t *testing.T) {
+	issueNumber := 17
+	runNumber := 1
+	cycleNumber := 1
+	runCycle := 1
+	runDisplay := "1.1"
+	now := time.Date(2026, 5, 12, 18, 0, 0, 0, time.UTC)
+	runRef := "glimmung#17/runs/1.1"
+	store := fakeGraphStore{
+		fakeReadStore: fakeReadStore{workflows: []Workflow{{
+			Project: "glimmung",
+			Name:    "agent-run",
+			Phases: []PhaseSpec{
+				{Name: "env-prep", Kind: "k8s_job", Jobs: []NativeJobSpec{{ID: "prepare"}}},
+				{Name: "agent-execute", Kind: "k8s_job", DependsOn: []string{"env-prep"}, Jobs: []NativeJobSpec{{ID: "agent"}}},
+			},
+		}}},
+		issue: IssueDetail{
+			Ref:     "glimmung#17",
+			Project: "glimmung",
+			Number:  &issueNumber,
+			Title:   "Port graph",
+			State:   "open",
+		},
+		runs: []RunReport{{
+			ID:               "run-1",
+			Project:          "glimmung",
+			RunRef:           runRef,
+			RunNumber:        &runNumber,
+			CycleNumber:      &cycleNumber,
+			RunCycleNumber:   &runCycle,
+			RunDisplayNumber: &runDisplay,
+			Workflow:         "agent-run",
+			IssueRef:         stringPtr("glimmung#17"),
+			IssueNumber:      &issueNumber,
+			State:            "aborted",
+			CurrentPhase:     stringPtr("env-prep"),
+			AbortReason:      stringPtr("dispatch_timeout"),
+			StartedAt:        now,
+			UpdatedAt:        now,
+			Attempts: []RunReportAttempt{{
+				AttemptIndex:     0,
+				Phase:            "env-prep",
+				PhaseKind:        "k8s_job",
+				WorkflowFilename: "k8s_job:env-prep",
+				DispatchedAt:     now.Add(-11 * time.Minute),
+			}},
+		}},
+	}
+	handler := NewWithStore(Settings{}, store)
+
+	var projection RunGraphProjection
+	getJSON(t, handler, "/v1/projects/glimmung/issues/17/runs/1/cycles/1/graph", &projection)
+
+	envPhase := assertProjectionPhase(t, projection.Runs[0], "env-prep")
+	if envPhase.State != "failed" || envPhase.Reason == nil || *envPhase.Reason != "dispatch_timeout" {
+		t.Fatalf("env-prep projection=%#v", envPhase)
+	}
+	if envPhase.Jobs[0].State != "failed" || envPhase.Jobs[0].Reason == nil || *envPhase.Jobs[0].Reason != "dispatch_timeout" {
+		t.Fatalf("env-prep job projection=%#v", envPhase.Jobs[0])
+	}
+	executePhase := assertProjectionPhase(t, projection.Runs[0], "agent-execute")
+	if executePhase.State != "skipped" || executePhase.Jobs[0].State != "skipped" {
+		t.Fatalf("agent-execute projection=%#v", executePhase)
+	}
+}
+
 func TestSystemGraphUsesProjectFilter(t *testing.T) {
 	number := 17
 	now := time.Date(2026, 5, 12, 18, 0, 0, 0, time.UTC)

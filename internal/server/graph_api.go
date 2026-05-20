@@ -1061,15 +1061,16 @@ func runProjectionPhases(run RunReport, workflow Workflow) []RunProjectionPhase 
 		for _, phase := range workflow.Phases {
 			attempts := attemptsForProjectionPhase(run.Attempts, phase.Name)
 			state := projectionPhaseState(run, phase.Name, attempts, terminalFailureSeen, phaseSkippedByEntrypoint(workflow.Phases, phase.Name, run.EntrypointPhase))
+			reason := projectionPhaseReason(state, attempts, run.AbortReason)
 			phases = append(phases, RunProjectionPhase{
 				Name:      phase.Name,
 				Kind:      workflowPhaseKind(phase.Kind),
 				State:     state,
-				Reason:    projectionPhaseReason(state, attempts),
+				Reason:    reason,
 				Verify:    phase.Verify,
 				Always:    phase.Always,
 				DependsOn: sliceOrEmpty(phase.DependsOn),
-				Jobs:      runProjectionJobs(phase, state, attempts),
+				Jobs:      runProjectionJobs(phase, state, reason, attempts),
 				Attempts:  runProjectionAttempts(attempts),
 			})
 			if state == "failed" {
@@ -1090,6 +1091,7 @@ func runProjectionPhases(run RunReport, workflow Workflow) []RunProjectionPhase 
 		seen[name] = true
 		attempts := attemptsForProjectionPhase(run.Attempts, name)
 		state := projectionPhaseState(run, name, attempts, terminalFailureSeen, false)
+		reason := projectionPhaseReason(state, attempts, run.AbortReason)
 		phase := PhaseSpec{
 			Name:             name,
 			Kind:             firstNonEmpty(attempt.PhaseKind, workflowKindNativeK8sJob),
@@ -1099,8 +1101,8 @@ func runProjectionPhases(run RunReport, workflow Workflow) []RunProjectionPhase 
 			Name:     name,
 			Kind:     phase.Kind,
 			State:    state,
-			Reason:   projectionPhaseReason(state, attempts),
-			Jobs:     runProjectionJobs(phase, state, attempts),
+			Reason:   reason,
+			Jobs:     runProjectionJobs(phase, state, reason, attempts),
 			Attempts: runProjectionAttempts(attempts),
 		})
 		if state == "failed" {
@@ -1190,16 +1192,22 @@ func attemptsForProjectionPhase(attempts []RunReportAttempt, phaseName string) [
 
 func projectionPhaseState(run RunReport, phaseName string, attempts []RunReportAttempt, terminalFailureSeen bool, skippedByEntrypoint bool) string {
 	if len(attempts) == 0 {
-		if skippedByEntrypoint || (terminalFailureSeen && run.CompletedAt != nil) {
+		if skippedByEntrypoint || (terminalFailureSeen && projectionRunTerminal(run)) {
 			return "skipped"
 		}
 		if run.CurrentPhase != nil && *run.CurrentPhase == phaseName {
+			if projectionRunFailedTerminal(run) {
+				return "failed"
+			}
 			return "dispatching"
 		}
 		return "not_started"
 	}
 	latest := attempts[len(attempts)-1]
 	if latest.CompletedAt == nil {
+		if projectionRunFailedTerminal(run) {
+			return "failed"
+		}
 		return "dispatching"
 	}
 	if latest.VerificationStatus != nil {
@@ -1221,6 +1229,19 @@ func projectionPhaseState(run RunReport, phaseName string, attempts []RunReportA
 	return "succeeded"
 }
 
+func projectionRunTerminal(run RunReport) bool {
+	return run.State != "" && run.State != "in_progress"
+}
+
+func projectionRunFailedTerminal(run RunReport) bool {
+	switch run.State {
+	case "aborted", "recycled", "failed":
+		return true
+	default:
+		return false
+	}
+}
+
 func phaseSkippedByEntrypoint(phases []PhaseSpec, phaseName string, entrypoint *string) bool {
 	if entrypoint == nil || *entrypoint == "" || *entrypoint == phaseName {
 		return false
@@ -1236,9 +1257,12 @@ func phaseSkippedByEntrypoint(phases []PhaseSpec, phaseName string, entrypoint *
 	return false
 }
 
-func projectionPhaseReason(state string, attempts []RunReportAttempt) *string {
+func projectionPhaseReason(state string, attempts []RunReportAttempt, abortReason *string) *string {
 	if state != "failed" || len(attempts) == 0 {
 		return nil
+	}
+	if abortReason != nil && strings.TrimSpace(*abortReason) != "" {
+		return stringPointerOrNil(projectionFailureReason(*abortReason))
 	}
 	latest := attempts[len(attempts)-1]
 	if latest.VerificationStatus != nil {
@@ -1262,7 +1286,29 @@ func projectionPhaseReason(state string, attempts []RunReportAttempt) *string {
 	return stringPointerOrNil("job_failed")
 }
 
-func runProjectionJobs(phase PhaseSpec, phaseState string, attempts []RunReportAttempt) []RunProjectionJob {
+func projectionFailureReason(reason string) string {
+	normalized := strings.ToLower(strings.TrimSpace(reason))
+	switch {
+	case strings.Contains(normalized, "dispatch_timeout"):
+		return "dispatch_timeout"
+	case strings.Contains(normalized, "timeout"), strings.Contains(normalized, "timed_out"):
+		return "timeout"
+	case strings.Contains(normalized, "cancel"):
+		return "cancelled"
+	case strings.Contains(normalized, "native_dispatch_failed"):
+		return "dispatch_failed"
+	case strings.Contains(normalized, "admission_failed"):
+		return "admission_failed"
+	case strings.Contains(normalized, "verification"):
+		return "verification_failed"
+	case normalized != "":
+		return normalized
+	default:
+		return "job_failed"
+	}
+}
+
+func runProjectionJobs(phase PhaseSpec, phaseState string, phaseReason *string, attempts []RunReportAttempt) []RunProjectionJob {
 	jobCompletions := latestJobCompletionsByJob(attempts)
 	if len(phase.Jobs) == 0 {
 		jobID := firstNonEmpty(phase.WorkflowFilename, phase.Name, "phase")
@@ -1276,7 +1322,7 @@ func runProjectionJobs(phase PhaseSpec, phaseState string, attempts []RunReportA
 			ID:          jobID,
 			Name:        stringPointerOrNil(jobID),
 			State:       state,
-			Reason:      projectionJobReason(state, jobCompletions[jobID]),
+			Reason:      projectionJobReason(state, jobCompletions[jobID], phaseReason),
 			Conclusion:  conclusion,
 			CompletedAt: completedAt,
 			Steps: []RunProjectionStep{{
@@ -1310,7 +1356,7 @@ func runProjectionJobs(phase PhaseSpec, phaseState string, attempts []RunReportA
 			ID:          jobID,
 			Name:        job.Name,
 			State:       state,
-			Reason:      projectionJobReason(state, jobCompletions[jobID]),
+			Reason:      projectionJobReason(state, jobCompletions[jobID], phaseReason),
 			Conclusion:  conclusion,
 			CompletedAt: completedAt,
 			Steps:       steps,
@@ -1391,11 +1437,14 @@ func projectionStepState(jobState string) string {
 	}
 }
 
-func projectionJobReason(state string, completion RunAttemptJobCompletion) *string {
+func projectionJobReason(state string, completion RunAttemptJobCompletion, fallback *string) *string {
 	if state != "failed" {
 		return nil
 	}
 	if completion.JobID == "" {
+		if fallback != nil && *fallback != "" {
+			return fallback
+		}
 		return stringPointerOrNil("job_failed")
 	}
 	if completion.VerificationStatus != nil {
