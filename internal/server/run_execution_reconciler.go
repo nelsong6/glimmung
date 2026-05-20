@@ -89,6 +89,16 @@ func dispatchTimedOutPhase(run RunReport, timeout time.Duration, now time.Time) 
 			return phase.Name, true
 		}
 	}
+	if len(run.PhaseExecutions) > 0 || len(run.Attempts) == 0 {
+		return "", false
+	}
+	latest := run.Attempts[len(run.Attempts)-1]
+	if latest.CompletedAt != nil {
+		return "", false
+	}
+	if now.Sub(latest.DispatchedAt) >= timeout {
+		return firstNonEmpty(latest.Phase, "phase"), true
+	}
 	return "", false
 }
 
