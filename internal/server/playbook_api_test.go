@@ -270,7 +270,13 @@ func (s *fakePlayableStore) StartRunCycle(context.Context, StartRunCycleRequest)
 }
 
 func (s *fakePlayableStore) AcquireLease(context.Context, LeaseAcquireRequest) (Lease, error) {
-	return Lease{Project: "glimmung", Host: stringPtr("native-k8s"), State: "claimed", Metadata: map[string]any{"native_k8s": true}}, nil
+	one := 1
+	return Lease{Project: "glimmung", LeaseNumber: &one, Host: stringPtr("native-k8s"), State: "claimed", Metadata: map[string]any{"native_k8s": true, "native_slot_name": "slot-1"}}, nil
+}
+
+func (s *fakePlayableStore) ReadLeaseByRef(context.Context, string, string) (Lease, error) {
+	one := 1
+	return Lease{Project: "glimmung", LeaseNumber: &one, Host: stringPtr("native-k8s"), State: "claimed", Metadata: map[string]any{"native_k8s": true, "native_slot_name": "slot-1"}}, nil
 }
 
 func (s *fakePlayableStore) CancelLeaseByRef(context.Context, string, string) (CancelLeaseResult, error) {

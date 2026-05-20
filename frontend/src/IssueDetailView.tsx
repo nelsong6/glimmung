@@ -131,6 +131,7 @@ type RunProjectionPhase = {
     name?: string | null;
     state: string;
     reason?: string | null;
+    k8s_job_name?: string | null;
     conclusion?: string | null;
     completed_at?: string | null;
     steps: Array<{ slug: string; title?: string | null; state: string; reason?: string | null; exit_code?: number | null }>;
@@ -2489,6 +2490,11 @@ function ProjectionInspector({
         {selectedJob && (
           <div>
             <span className="key">job</span> <span className="mono">{selectedJob.id}</span>
+          </div>
+        )}
+        {selectedJob?.k8s_job_name && (
+          <div>
+            <span className="key">k8s</span> <span className="mono">{selectedJob.k8s_job_name}</span>
           </div>
         )}
         {step && (

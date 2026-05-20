@@ -219,6 +219,11 @@ func (s *fakeSignalDrainStore) AcquireLease(context.Context, LeaseAcquireRequest
 	return Lease{Project: "glimmung", LeaseNumber: &one, Host: stringPtr("native-k8s"), State: "claimed", Metadata: map[string]any{"native_k8s": true, "native_slot_name": "slot-1"}}, nil
 }
 
+func (s *fakeSignalDrainStore) ReadLeaseByRef(context.Context, string, string) (Lease, error) {
+	one := 1
+	return Lease{Project: "glimmung", LeaseNumber: &one, Host: stringPtr("native-k8s"), State: "claimed", Metadata: map[string]any{"native_k8s": true, "native_slot_name": "slot-1"}}, nil
+}
+
 func (s *fakeSignalDrainStore) CancelLeaseByRef(context.Context, string, string) (CancelLeaseResult, error) {
 	return CancelLeaseResult{}, nil
 }

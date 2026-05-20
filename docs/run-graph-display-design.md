@@ -390,6 +390,12 @@ null/absent. External native values are translated at ingestion/projection
 boundaries into this vocabulary, while raw Kubernetes or runner details belong
 in inspector/debug fields.
 
+Run cycles persist this vocabulary as phase/job/step execution records.
+Projection reads those records first so an unreported native job can still be
+clicked, inspected, and shown as `dispatching` or `failed` without relying on a
+best-effort log scrape. `dispatch_timeout` is a normal failed reason: it turns
+the affected phase/job red and skips later unstarted phases.
+
 Native job completions are job-scoped in the run attempt record so the
 projection can show one sibling job as complete while the phase waits for the
 remaining jobs.

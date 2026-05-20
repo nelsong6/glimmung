@@ -21,13 +21,14 @@ type NativeRunStore interface {
 
 // NativeRunEventRequest is the body for POST /native/events.
 type NativeRunEventRequest struct {
-	JobID    string         `json:"job_id"`
-	Seq      int            `json:"seq"`
-	Event    string         `json:"event"`
-	StepSlug *string        `json:"step_slug"`
-	Message  *string        `json:"message"`
-	ExitCode *int           `json:"exit_code"`
-	Metadata map[string]any `json:"metadata"`
+	JobID        string         `json:"job_id"`
+	Seq          int            `json:"seq"`
+	Event        string         `json:"event"`
+	AttemptIndex *int           `json:"attempt_index,omitempty"`
+	StepSlug     *string        `json:"step_slug"`
+	Message      *string        `json:"message"`
+	ExitCode     *int           `json:"exit_code"`
+	Metadata     map[string]any `json:"metadata"`
 }
 
 // NativeRunEventResult is the response for POST /native/events.
@@ -230,6 +231,11 @@ func postNativeEvent(w http.ResponseWriter, r *http.Request, store NativeRunStor
 	}
 	if errors.Is(err, ErrConflict) {
 		writeProblem(w, http.StatusConflict, "duplicate event with different payload")
+		return
+	}
+	var validationErr ValidationError
+	if errors.As(err, &validationErr) {
+		writeProblem(w, http.StatusBadRequest, validationErr.Message)
 		return
 	}
 	if err != nil {

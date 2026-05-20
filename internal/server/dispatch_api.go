@@ -52,6 +52,7 @@ type CreateRunRequest struct {
 	InitialPhaseKind        string
 	InitialWorkflowFilename string
 	IssueLockHolderID       string
+	SlotLeaseRef            string
 	TriggerSource           map[string]any
 }
 
@@ -92,6 +93,7 @@ type RunDispatchStore interface {
 	CreateRun(ctx context.Context, req CreateRunRequest) (CreatedRun, error)
 	StartRunCycle(ctx context.Context, req StartRunCycleRequest) (int, error)
 	AcquireLease(ctx context.Context, req LeaseAcquireRequest) (Lease, error)
+	ReadLeaseByRef(ctx context.Context, project, ref string) (Lease, error)
 	CancelLeaseByRef(ctx context.Context, project, ref string) (CancelLeaseResult, error)
 	AbortRunByID(ctx context.Context, project, runID, reason string) (AbortRunResult, error)
 }
@@ -241,9 +243,54 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, nativeLaun
 	if workflowFilename == "" {
 		workflowFilename = fmt.Sprintf("%s:%s", phaseKind, initPhase.Name)
 	}
+	issueNum := req.IssueNumber
+	issueRef := publicids.IssueRef(req.Project, &issueNum)
+	wfNameStr := wf.Name
 	triggerSource := req.TriggerSource
 	if triggerSource == nil {
 		triggerSource = map[string]any{"kind": "dispatch"}
+	}
+
+	requirements := initPhase.Requirements
+	if len(requirements) == 0 {
+		requirements = wf.DefaultRequirements
+	}
+	initialLease, err := acquireLeaseInstrumented(ctx, LeasePurposeDispatch, LeaseAcquireRequest{
+		Project:      req.Project,
+		Workflow:     &wf.Name,
+		Requirements: requirements,
+		Metadata: runCycleLeaseMetadata(RunReplayData{
+			Project:       req.Project,
+			WorkflowName:  wf.Name,
+			IssueNumber:   req.IssueNumber,
+			IssueRepo:     issueRepo,
+			TriggerSource: triggerSource,
+		}, issue, issueRepo, initPhase.Name, 0, nil),
+	}, dispatchStore.AcquireLease)
+	if err != nil {
+		dispatchStore.ReleaseIssueLock(ctx, req.Project, req.IssueNumber, holderID)
+		if errors.Is(err, ErrUnavailable) {
+			return PublicDispatchResult{
+				State:       "no_capacity",
+				IssueRef:    &issueRef,
+				IssueNumber: &issueNum,
+				Workflow:    &wfNameStr,
+				Detail:      stringPtr("no project test slot capacity available; run was not created"),
+			}, nil
+		}
+		return PublicDispatchResult{}, &dispatchProblem{status: http.StatusInternalServerError, message: "acquire test slot failed"}
+	}
+	initialLeaseRef := LeasePublicRefFromLease(initialLease)
+	if initialLease.State != "claimed" {
+		_, _ = dispatchStore.CancelLeaseByRef(ctx, req.Project, initialLeaseRef)
+		dispatchStore.ReleaseIssueLock(ctx, req.Project, req.IssueNumber, holderID)
+		return PublicDispatchResult{
+			State:       "dispatch_failed",
+			IssueRef:    &issueRef,
+			IssueNumber: &issueNum,
+			Workflow:    &wfNameStr,
+			Detail:      stringPtr("native lease was not claimed; run was not created"),
+		}, nil
 	}
 
 	run, err := dispatchStore.CreateRun(ctx, CreateRunRequest{
@@ -258,16 +305,16 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, nativeLaun
 		InitialPhaseKind:        phaseKind,
 		InitialWorkflowFilename: workflowFilename,
 		IssueLockHolderID:       holderID,
+		SlotLeaseRef:            initialLeaseRef,
 		TriggerSource:           triggerSource,
 	})
 	if err != nil {
+		_, _ = dispatchStore.CancelLeaseByRef(ctx, req.Project, initialLeaseRef)
 		dispatchStore.ReleaseIssueLock(ctx, req.Project, req.IssueNumber, holderID)
 		return PublicDispatchResult{}, &dispatchProblem{status: http.StatusInternalServerError, message: "create run failed"}
 	}
 	metrics.RecordRunCreated(wf.Name)
 
-	issueNum := req.IssueNumber
-	issueRef := publicids.IssueRef(req.Project, &issueNum)
 	runRef := publicids.RunRef(req.Project, &issueNum, run.RunDisplay)
 	runData := RunReplayData{
 		ID:                run.ID,
@@ -282,13 +329,17 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, nativeLaun
 		IssueRepo:         issueRepo,
 		CallbackToken:     &run.CallbackToken,
 		IssueLockHolderID: &holderID,
+		SlotLeaseRef:      &initialLeaseRef,
 		TriggerSource:     triggerSource,
 	}
 	admission, err := admitRunCycle(ctx, dispatchStore, nativeLauncher, runData, wf, issue, issueRepo, LeasePurposeDispatch)
 	if err != nil {
+		_, _ = dispatchStore.CancelLeaseByRef(ctx, req.Project, initialLeaseRef)
 		return PublicDispatchResult{}, &dispatchProblem{status: http.StatusInternalServerError, message: "admit run cycle failed"}
 	}
-	wfNameStr := wf.Name
+	if admission.State == "admission_failed" || admission.State == "dispatch_failed" {
+		_, _ = dispatchStore.CancelLeaseByRef(ctx, req.Project, initialLeaseRef)
+	}
 	return PublicDispatchResult{
 		State:       admission.State,
 		IssueRef:    &issueRef,

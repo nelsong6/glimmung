@@ -62,6 +62,7 @@ type NativeJobCompletionStore interface {
 type NativeRunCompletedRequest struct {
 	JobID               *string           `json:"job_id"`
 	Conclusion          string            `json:"conclusion"`
+	AttemptIndex        *int              `json:"attempt_index,omitempty"`
 	Verification        map[string]any    `json:"verification"`
 	ScreenshotsMarkdown *string           `json:"screenshots_markdown"`
 	SummaryMarkdown     *string           `json:"summary_markdown"`
@@ -160,6 +161,7 @@ func completionPayloadFromNative(req NativeRunCompletedRequest) CompletionPayloa
 	p := CompletionPayload{
 		JobID:               req.JobID,
 		Conclusion:          req.Conclusion,
+		AttemptIndex:        req.AttemptIndex,
 		SummaryMarkdown:     req.SummaryMarkdown,
 		ScreenshotsMarkdown: req.ScreenshotsMarkdown,
 		PhaseOutputs:        req.Outputs,
@@ -628,15 +630,17 @@ func dispatchForwardPhase(
 	if lease.State != "claimed" {
 		return fmt.Errorf("native lease was not claimed")
 	}
-	_, err = launchCommittedNativePhase(ctx, nativeLauncher, NativeLaunchRequest{
+	started := runWithAttempt(run, newAttemptIdx, targetPhase.Name)
+	launched, err := launchCommittedNativePhase(ctx, nativeLauncher, NativeLaunchRequest{
 		Lease:    lease,
 		Workflow: *wf,
 		Phase:    targetPhase,
-		Run:      runWithAttempt(run, newAttemptIdx, targetPhase.Name),
+		Run:      started,
 	})
 	if err != nil {
 		return fmt.Errorf("native dispatch: %w", err)
 	}
+	_ = recordLaunchedNativeJobs(ctx, store, started, targetPhase, launched)
 	return nil
 }
 
@@ -790,7 +794,7 @@ func dispatchRetry(
 	if lease.State != "claimed" {
 		return fmt.Errorf("native lease was not claimed")
 	}
-	_, err = launchCommittedNativePhase(ctx, nativeLauncher, NativeLaunchRequest{
+	launched, err := launchCommittedNativePhase(ctx, nativeLauncher, NativeLaunchRequest{
 		Lease:    lease,
 		Workflow: *wf,
 		Phase:    *targetPhase,
@@ -799,6 +803,7 @@ func dispatchRetry(
 	if err != nil {
 		return fmt.Errorf("native dispatch: %w", err)
 	}
+	_ = recordLaunchedNativeJobs(ctx, store, recycleRun, *targetPhase, launched)
 	return nil
 }
 

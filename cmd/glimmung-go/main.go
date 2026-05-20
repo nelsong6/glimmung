@@ -66,6 +66,7 @@ func main() {
 	if store != nil {
 		server.StartSignalDrainReconciler(context.Background(), store, nativeLauncher, log.Printf)
 		server.StartRunQueueReconciler(context.Background(), store, nativeLauncher, log.Printf)
+		server.StartRunDispatchTimeoutReconciler(context.Background(), settings, store, log.Printf)
 	}
 	if store != nil {
 		if nativeMinter, ok := ghClient.(server.NativeGitHubTokenMinter); ok {
