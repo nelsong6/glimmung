@@ -29,6 +29,7 @@ type AbortRunResult struct {
 	RunDisplayNumber  *string `json:"run_display_number"`
 	IssueLockReleased *bool   `json:"issue_lock_released"`
 	PRLockReleased    *bool   `json:"pr_lock_released"`
+	SlotLeaseReleased *bool   `json:"slot_lease_released"`
 }
 
 // RunCallbackResult is the response for run callback operations.

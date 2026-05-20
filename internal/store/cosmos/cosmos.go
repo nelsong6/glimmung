@@ -5251,7 +5251,8 @@ func (s *Store) ReadRunIDForCallbackToken(ctx context.Context, token string) (st
 	return doc.ID, doc.Project, ref, nil
 }
 
-// AbortRunByID marks a run as aborted, best-effort releases issue/PR locks.
+// AbortRunByID marks a run as aborted, best-effort releases issue/PR locks and
+// any run slot lease.
 func (s *Store) AbortRunByID(ctx context.Context, project, runID, reason string) (server.AbortRunResult, error) {
 	pk := azcosmos.NewPartitionKeyString(project)
 	resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
@@ -5275,11 +5276,13 @@ func (s *Store) AbortRunByID(ctx context.Context, project, runID, reason string)
 	runRef := publicids.RunRef(doc.Project, positiveIssueNumberPtr(doc.IssueNumber), runDisplayNumber(doc, numbers[doc.ID]))
 
 	if terminal {
+		slotLeaseReleased := s.releaseRunSlotLease(ctx, doc)
 		return server.AbortRunResult{
-			State:            "already_terminal",
-			RunRef:           runRef,
-			RunNumber:        doc.RunNumber,
-			RunDisplayNumber: doc.RunDisplayNumber,
+			State:             "already_terminal",
+			RunRef:            runRef,
+			RunNumber:         doc.RunNumber,
+			RunDisplayNumber:  doc.RunDisplayNumber,
+			SlotLeaseReleased: slotLeaseReleased,
 		}, nil
 	}
 
@@ -5314,6 +5317,7 @@ func (s *Store) AbortRunByID(ctx context.Context, project, runID, reason string)
 		released := s.releaseLock(ctx, "pr", fmt.Sprintf("%s#%d", doc.IssueRepo, *doc.PRNumber), *doc.PRLockHolderID)
 		prLockReleased = &released
 	}
+	slotLeaseReleased := s.releaseRunSlotLease(ctx, doc)
 
 	return server.AbortRunResult{
 		State:             "aborted",
@@ -5322,7 +5326,18 @@ func (s *Store) AbortRunByID(ctx context.Context, project, runID, reason string)
 		RunDisplayNumber:  doc.RunDisplayNumber,
 		IssueLockReleased: issueLockReleased,
 		PRLockReleased:    prLockReleased,
+		SlotLeaseReleased: slotLeaseReleased,
 	}, nil
+}
+
+func (s *Store) releaseRunSlotLease(ctx context.Context, doc runDoc) *bool {
+	ref := strings.TrimSpace(stringOrEmpty(doc.SlotLeaseRef))
+	if ref == "" {
+		return nil
+	}
+	_, err := s.CancelLeaseByRef(ctx, doc.Project, ref)
+	released := err == nil
+	return &released
 }
 
 // releaseLock releases a held lock by scope+key if held_by matches holderID. Returns true if released.
