@@ -58,12 +58,13 @@ type CreateRunRequest struct {
 
 // CreatedRun holds the identifiers returned after creating a run document.
 type CreatedRun struct {
-	ID            string
-	RunNumber     int
-	CycleNumber   int
-	RunCycle      int
-	RunDisplay    string
-	CallbackToken string
+	ID                   string
+	RunNumber            int
+	CycleNumber          int
+	RunCycle             int
+	RunDisplay           string
+	CallbackToken        string
+	CarryForwardAttempts []RunAttemptData
 }
 
 type StartRunCycleRequest struct {
@@ -76,10 +77,11 @@ type StartRunCycleRequest struct {
 }
 
 type CreateRecycleCycleRequest struct {
-	Parent            RunReplayData
-	WorkflowSchemaRef string
-	TargetPhaseName   string
-	TriggerSource     map[string]any
+	Parent               RunReplayData
+	WorkflowSchemaRef    string
+	TargetPhaseName      string
+	CarryForwardAttempts []RunAttemptData
+	TriggerSource        map[string]any
 }
 
 // RunDispatchStore provides all store operations needed by the dispatch handler.

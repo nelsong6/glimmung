@@ -191,6 +191,59 @@ func TestNativeJobManifestManagedJobUsesSharedRunnerEntrypoint(t *testing.T) {
 	}
 }
 
+func TestNativeJobManifestEvidenceGateUsesManagedRunner(t *testing.T) {
+	req := NativeLaunchRequest{
+		Lease:    Lease{Project: "ambience"},
+		Workflow: Workflow{Name: "default"},
+		Phase: PhaseSpec{
+			Name:                     "evidence-gate",
+			EvidenceVerificationGate: true,
+			Jobs: []NativeJobSpec{{
+				ID:      "legacy-gate",
+				Image:   "python:3.12-slim",
+				Command: []string{"python", "-c"},
+				Args:    []string{"exit(1)"},
+			}},
+		},
+		Run: RunReplayData{
+			ID:            "run-123",
+			Project:       "ambience",
+			CallbackToken: stringPtr("callback-token"),
+			Attempts:      []RunAttemptData{{AttemptIndex: 3, Phase: "evidence-gate"}},
+		},
+	}
+
+	manifest := nativeJobManifest(Settings{
+		NativeRunnerNamespace:       "glimmung-runs",
+		NativeRunnerServiceAccount:  "glimmung-native-runner",
+		NativeRunnerCallbackBaseURL: "http://glimmung.glimmung.svc.cluster.local",
+		NativeRunnerImage:           "romainecr.azurecr.io/glimmung-native-runner:test",
+		NativeRunnerEntrypoint:      "/app/glimmung-native-runner",
+		NativeRunnerCodexSecret:     "codex-credentials",
+		NativeRunnerCodexMountPath:  "/etc/codex-creds",
+	}, req, req.Phase.Jobs[0], "job", "secret", "attempt")
+
+	container := nativeManifestContainer(manifest)
+	if container["image"] != "romainecr.azurecr.io/glimmung-native-runner:test" {
+		t.Fatalf("image=%#v", container["image"])
+	}
+	command, ok := container["command"].([]string)
+	if !ok || len(command) != 1 || command[0] != "/app/glimmung-native-runner" {
+		t.Fatalf("command=%#v", container["command"])
+	}
+	if _, ok := container["args"]; ok {
+		t.Fatalf("evidence gate should not receive legacy args: %#v", container["args"])
+	}
+	env := nativeManifestEnv(manifest)
+	var got NativeJobSpec
+	if err := json.Unmarshal([]byte(env["GLIMMUNG_RUNNER_JOB_SPEC"]), &got); err != nil {
+		t.Fatalf("runner spec JSON: %v", err)
+	}
+	if got.ID != "legacy-gate" || !got.Managed || len(got.Steps) != 1 || got.Steps[0].Slug != EvidenceGateStepSlug {
+		t.Fatalf("runner spec=%#v", got)
+	}
+}
+
 func TestReturnTestSlotRuntimeDoesNotDeleteNamespaces(t *testing.T) {
 	tokenPath := tempTokenFile(t)
 	var paths []string

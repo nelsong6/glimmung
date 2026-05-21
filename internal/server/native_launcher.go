@@ -62,6 +62,7 @@ func NewKubernetesNativeLauncher(settings Settings) *KubernetesNativeLauncher {
 }
 
 func (l *KubernetesNativeLauncher) LaunchNativePhase(ctx context.Context, req NativeLaunchRequest) ([]string, error) {
+	req.Phase = CanonicalNativePhase(req.Phase)
 	if len(req.Phase.Jobs) == 0 {
 		return nil, fmt.Errorf("native phase %q has no jobs", req.Phase.Name)
 	}
@@ -937,6 +938,15 @@ func (l *KubernetesNativeLauncher) transport() http.RoundTripper {
 }
 
 func nativeJobManifest(settings Settings, req NativeLaunchRequest, job NativeJobSpec, jobName, secretName, attemptBase string) map[string]any {
+	req.Phase = CanonicalNativePhase(req.Phase)
+	if req.Phase.EvidenceVerificationGate {
+		for _, canonical := range req.Phase.Jobs {
+			if canonical.ID == job.ID {
+				job = canonical
+				break
+			}
+		}
+	}
 	labels := map[string]string{
 		"app.kubernetes.io/managed-by":       "glimmung",
 		"glimmung.romaine.life/native-job":   "true",

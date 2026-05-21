@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/nelsong6/glimmung/internal/domain/budget"
 	"github.com/nelsong6/glimmung/internal/domain/decision"
@@ -741,11 +742,17 @@ func dispatchRetry(
 	if workflowFilename == "" {
 		workflowFilename = fmt.Sprintf("%s:%s", phaseKind, targetPhase.Name)
 	}
+	carryForwardAttempts := retryCarryForwardAttempts(run, wf, targetPhase.Name)
+	phaseInputs, err := substituteCompletionPhaseInputs(*targetPhase, runWithAttempts(run, carryForwardAttempts))
+	if err != nil {
+		return fmt.Errorf("substitute retry phase inputs: %w", err)
+	}
 	recycle, err := store.CreateRecycleCycle(ctx, CreateRecycleCycleRequest{
-		Parent:            run,
-		WorkflowSchemaRef: wf.SchemaRef,
-		TargetPhaseName:   targetPhase.Name,
-		TriggerSource:     map[string]any{"kind": "recycle_policy", "recycled_from_run_id": run.ID, "failing_phase": failingPhase},
+		Parent:               run,
+		WorkflowSchemaRef:    wf.SchemaRef,
+		TargetPhaseName:      targetPhase.Name,
+		CarryForwardAttempts: carryForwardAttempts,
+		TriggerSource:        map[string]any{"kind": "recycle_policy", "recycled_from_run_id": run.ID, "failing_phase": failingPhase},
 	})
 	if err != nil {
 		return fmt.Errorf("create recycle cycle: %w", err)
@@ -782,12 +789,12 @@ func dispatchRetry(
 		IssueLockHolderID: run.IssueLockHolderID,
 		SlotLeaseRef:      &leaseRef,
 		EntrypointPhase:   &targetPhase.Name,
-		Attempts: []RunAttemptData{{
+		Attempts: append(append([]RunAttemptData{}, recycle.CarryForwardAttempts...), RunAttemptData{
 			AttemptIndex: newAttemptIdx,
 			Phase:        targetPhase.Name,
-		}},
+		}),
 	}
-	lease, err := leaseForRunPhase(ctx, store, recycleRun, targetPhase.Name, newAttemptIdx, map[string]string{})
+	lease, err := leaseForRunPhase(ctx, store, recycleRun, targetPhase.Name, newAttemptIdx, phaseInputs)
 	if err != nil {
 		return fmt.Errorf("read lease for retry: %w", err)
 	}
@@ -805,6 +812,53 @@ func dispatchRetry(
 	}
 	_ = recordLaunchedNativeJobs(ctx, store, recycleRun, *targetPhase, launched)
 	return nil
+}
+
+func retryCarryForwardAttempts(parent RunReplayData, wf *Workflow, targetPhase string) []RunAttemptData {
+	if wf == nil || strings.TrimSpace(targetPhase) == "" {
+		return nil
+	}
+	latestByPhase := map[string]RunAttemptData{}
+	for _, attempt := range parent.Attempts {
+		if !attempt.Completed && attempt.Decision == "" {
+			continue
+		}
+		latestByPhase[attempt.Phase] = attempt
+	}
+	carry := make([]RunAttemptData, 0)
+	for _, phase := range wf.Phases {
+		if phase.Name == targetPhase {
+			break
+		}
+		prior, ok := latestByPhase[phase.Name]
+		if !ok {
+			continue
+		}
+		carry = append(carry, RunAttemptData{
+			AttemptIndex: len(carry),
+			Phase:        phase.Name,
+			Conclusion:   "success",
+			Decision:     string(decision.Advance),
+			Completed:    true,
+			CarryForward: true,
+			PhaseOutputs: cloneStringMap(prior.PhaseOutputs),
+		})
+	}
+	return carry
+}
+
+func runWithAttempts(run RunReplayData, attempts []RunAttemptData) RunReplayData {
+	out := run
+	out.Attempts = append(append([]RunAttemptData{}, run.Attempts...), attempts...)
+	return out
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	out := make(map[string]string, len(values))
+	for k, v := range values {
+		out[k] = v
+	}
+	return out
 }
 
 func runWithAttempt(run RunReplayData, attemptIndex int, phase string) RunReplayData {
