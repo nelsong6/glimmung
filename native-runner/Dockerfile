@@ -77,6 +77,16 @@ RUN KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)" \
 
 RUN curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
+RUN mkdir -p -m 755 /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && printf 'deb [arch=%s signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\n' "$(dpkg --print-architecture)" \
+        >/etc/apt/sources.list.d/github-cli.list \
+    && apt-retry update \
+    && apt-retry install gh \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN npm install -g @openai/codex @anthropic-ai/claude-code \
     && mkdir -p /opt/glimmung-runner \
     && npm install --prefix /opt/glimmung-runner playwright \
