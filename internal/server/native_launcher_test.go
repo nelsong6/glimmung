@@ -96,6 +96,45 @@ func TestNativeJobManifestIncludesRunnerCallbackEnv(t *testing.T) {
 	}
 }
 
+func TestNativeJobManifestIncludesStringMapPhaseInputs(t *testing.T) {
+	req := NativeLaunchRequest{
+		Lease: Lease{
+			Project: "ambience",
+			State:   "claimed",
+			Metadata: map[string]any{
+				"phase_inputs": map[string]string{
+					"namespace":      "ambience-slot-1",
+					"validation_url": "https://ambience-slot-1.ambience.dev.romaine.life",
+				},
+			},
+		},
+		Workflow: Workflow{Name: "default"},
+		Phase:    PhaseSpec{Name: "llm-work"},
+		Run: RunReplayData{
+			ID:            "run-123",
+			Project:       "ambience",
+			CallbackToken: stringPtr("callback-token"),
+			Attempts:      []RunAttemptData{{AttemptIndex: 1, Phase: "llm-work"}},
+		},
+	}
+
+	manifest := nativeJobManifest(Settings{
+		NativeRunnerNamespace:       "glimmung-runs",
+		NativeRunnerServiceAccount:  "glimmung-native-runner",
+		NativeRunnerCallbackBaseURL: "http://glimmung.glimmung.svc.cluster.local",
+		NativeRunnerCodexSecret:     "codex-credentials",
+		NativeRunnerCodexMountPath:  "/etc/codex-creds",
+	}, req, NativeJobSpec{ID: "llm-test-plan", Image: "runner:latest"}, "job", "secret", "attempt")
+
+	env := nativeManifestEnv(manifest)
+	if env["GLIMMUNG_INPUT_NAMESPACE"] != "ambience-slot-1" {
+		t.Fatalf("namespace input env=%q", env["GLIMMUNG_INPUT_NAMESPACE"])
+	}
+	if env["GLIMMUNG_INPUT_VALIDATION_URL"] != "https://ambience-slot-1.ambience.dev.romaine.life" {
+		t.Fatalf("validation_url input env=%q", env["GLIMMUNG_INPUT_VALIDATION_URL"])
+	}
+}
+
 func TestNativeJobManifestManagedJobUsesSharedRunnerEntrypoint(t *testing.T) {
 	req := NativeLaunchRequest{
 		Lease:    Lease{Project: "ambience"},

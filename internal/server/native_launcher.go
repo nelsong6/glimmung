@@ -1740,5 +1740,12 @@ func anyMap(raw any) map[string]any {
 	if value, ok := raw.(map[string]any); ok {
 		return value
 	}
+	if value, ok := raw.(map[string]string); ok {
+		out := make(map[string]any, len(value))
+		for key, val := range value {
+			out[key] = val
+		}
+		return out
+	}
 	return map[string]any{}
 }
