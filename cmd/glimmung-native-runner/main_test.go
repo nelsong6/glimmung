@@ -76,7 +76,7 @@ func TestNativeRunnerExecutesStepsAndPublishesOutputs(t *testing.T) {
 				Steps: []stepSpec{{
 					Slug: "write-output",
 					Type: "run",
-					Run:  "printf 'preview_url=https://example.test\\n' >> \"$GLIMMUNG_OUTPUT_FILE\"",
+					Run:  "printf 'preview_url=https://example.test\\n' >> \"$GLIMMUNG_OUTPUT_FILE\"\nprintf '{\"summary_markdown\":\"done\",\"verification\":{\"status\":\"pass\"}}' > \"$GLIMMUNG_COMPLETION_FILE\"",
 				}},
 			},
 		},
@@ -89,6 +89,12 @@ func TestNativeRunnerExecutesStepsAndPublishesOutputs(t *testing.T) {
 	}
 	if completion.Conclusion != "success" || completion.Outputs["preview_url"] != "https://example.test" {
 		t.Fatalf("completion=%#v", completion)
+	}
+	if completion.SummaryMarkdown == nil || *completion.SummaryMarkdown != "done" {
+		t.Fatalf("summary=%#v", completion.SummaryMarkdown)
+	}
+	if completion.Verification["status"] != "pass" {
+		t.Fatalf("verification=%#v", completion.Verification)
 	}
 	if !sawEvent(events, "phase_output_set") || !sawEvent(events, "step_completed") {
 		t.Fatalf("events=%#v", events)

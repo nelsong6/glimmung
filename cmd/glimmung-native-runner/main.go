@@ -66,6 +66,7 @@ type nativeRunner struct {
 	client           *http.Client
 	seq              int
 	outputs          map[string]string
+	completion       completionMetadata
 	githubTokenCache *githubTokenResult
 	mu               sync.Mutex
 }
@@ -82,11 +83,19 @@ type nativeEventRequest struct {
 }
 
 type completedRequest struct {
-	JobID           string            `json:"job_id"`
-	Conclusion      string            `json:"conclusion"`
-	AttemptIndex    *int              `json:"attempt_index,omitempty"`
-	SummaryMarkdown *string           `json:"summary_markdown,omitempty"`
-	Outputs         map[string]string `json:"outputs"`
+	JobID               string            `json:"job_id"`
+	Conclusion          string            `json:"conclusion"`
+	AttemptIndex        *int              `json:"attempt_index,omitempty"`
+	Verification        map[string]any    `json:"verification,omitempty"`
+	ScreenshotsMarkdown *string           `json:"screenshots_markdown,omitempty"`
+	SummaryMarkdown     *string           `json:"summary_markdown,omitempty"`
+	Outputs             map[string]string `json:"outputs"`
+}
+
+type completionMetadata struct {
+	Verification        map[string]any `json:"verification"`
+	ScreenshotsMarkdown string         `json:"screenshots_markdown"`
+	SummaryMarkdown     string         `json:"summary_markdown"`
 }
 
 type githubTokenResult struct {
@@ -187,11 +196,16 @@ func (r *nativeRunner) runStep(ctx context.Context, step stepSpec) error {
 		return err
 	}
 	outputFile := filepath.Join(os.TempDir(), "glimmung-output-"+slug+".txt")
+	completionFile := filepath.Join(os.TempDir(), "glimmung-completion-"+slug+".json")
 	_ = os.Remove(outputFile)
-	exitCode, execErr := r.executeStep(ctx, step, outputFile)
+	_ = os.Remove(completionFile)
+	exitCode, execErr := r.executeStep(ctx, step, outputFile, completionFile)
 	outputs, outputErr := parseOutputFile(outputFile)
 	if outputErr == nil {
 		outputErr = r.publishOutputs(ctx, slug, outputs)
+	}
+	if completionErr := r.collectCompletionMetadata(completionFile); outputErr == nil && completionErr != nil {
+		outputErr = completionErr
 	}
 	if execErr != nil {
 		msg := fmt.Sprintf("step %s exited with code %d", slug, exitCode)
@@ -210,7 +224,7 @@ func (r *nativeRunner) runStep(ctx context.Context, step stepSpec) error {
 	return nil
 }
 
-func (r *nativeRunner) executeStep(ctx context.Context, step stepSpec, outputFile string) (int, error) {
+func (r *nativeRunner) executeStep(ctx context.Context, step stepSpec, outputFile, completionFile string) (int, error) {
 	workdir := firstNonEmpty(step.WorkingDirectory, r.cfg.Job.WorkingDirectory, r.cfg.Workspace)
 	if err := os.MkdirAll(workdir, 0o755); err != nil {
 		return 1, err
@@ -219,8 +233,10 @@ func (r *nativeRunner) executeStep(ctx context.Context, step stepSpec, outputFil
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = workdir
 	cmd.Env = mergedEnv(os.Environ(), r.cfg.Job.Env, step.Env, map[string]string{
-		"GLIMMUNG_OUTPUT_FILE": outputFile,
-		"GLIMMUNG_STEP_SLUG":   step.Slug,
+		"GLIMMUNG_MANAGED_RUNNER":  "1",
+		"GLIMMUNG_OUTPUT_FILE":     outputFile,
+		"GLIMMUNG_COMPLETION_FILE": completionFile,
+		"GLIMMUNG_STEP_SLUG":       step.Slug,
 	})
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -410,10 +426,46 @@ func (r *nativeRunner) complete(ctx context.Context, conclusion, summary string)
 		AttemptIndex: r.cfg.AttemptIndex,
 		Outputs:      r.outputs,
 	}
-	if strings.TrimSpace(summary) != "" {
+	if len(r.completion.Verification) > 0 {
+		req.Verification = r.completion.Verification
+	}
+	if strings.TrimSpace(r.completion.ScreenshotsMarkdown) != "" {
+		req.ScreenshotsMarkdown = &r.completion.ScreenshotsMarkdown
+	}
+	if strings.TrimSpace(r.completion.SummaryMarkdown) != "" {
+		req.SummaryMarkdown = &r.completion.SummaryMarkdown
+	} else if strings.TrimSpace(summary) != "" {
 		req.SummaryMarkdown = &summary
 	}
 	return r.postJSON(ctx, r.cfg.CompletedURL, req, nil)
+}
+
+func (r *nativeRunner) collectCompletionMetadata(path string) error {
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return nil
+	}
+	var metadata completionMetadata
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		return err
+	}
+	if len(metadata.Verification) > 0 {
+		r.completion.Verification = metadata.Verification
+	}
+	if strings.TrimSpace(metadata.ScreenshotsMarkdown) != "" {
+		r.completion.ScreenshotsMarkdown = metadata.ScreenshotsMarkdown
+	}
+	if strings.TrimSpace(metadata.SummaryMarkdown) != "" {
+		r.completion.SummaryMarkdown = metadata.SummaryMarkdown
+	}
+	return nil
 }
 
 func (r *nativeRunner) postJSON(ctx context.Context, url string, body any, out any) error {
