@@ -138,9 +138,11 @@ Two valid shapes for emitting a verdict at the testing boundary:
 
 The gate primitive is Glimmung-supplied: no project jobs, no consumer
 repository runner script. Glimmung owns the native gate image and command that
-reads `$VERIFICATION` and exits by status. Use the gate when you want
-enforcement to be its own visible box, its own recycle policy, or its own budget
-separately from the verifier.
+reads the substituted verification input and exits by status. Workflow
+registration canonicalizes an evidence gate into the managed Glimmung runner
+job, so a project cannot accidentally make the gate an uninstrumented arbitrary
+container. Use the gate when you want enforcement to be its own visible box, its
+own recycle policy, or its own budget separately from the verifier.
 
 ## Naming convention
 

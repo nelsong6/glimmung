@@ -165,6 +165,45 @@ func TestValidateWorkflowRegisterAcceptsManagedRunSteps(t *testing.T) {
 	}
 }
 
+func TestNormalizeWorkflowRegisterCanonicalizesEvidenceGate(t *testing.T) {
+	req := WorkflowRegister{
+		Project: "ambience",
+		Name:    "agent-run",
+		Phases: []PhaseSpec{
+			{Name: "prep", Jobs: []NativeJobSpec{{ID: "prep"}}},
+			{Name: "verify", Verify: true, DependsOn: []string{"prep"}, Jobs: []NativeJobSpec{{ID: "verify"}}},
+			{
+				Name:                     "gate",
+				EvidenceVerificationGate: true,
+				DependsOn:                []string{"verify"},
+				Jobs: []NativeJobSpec{{
+					ID:      "custom-gate",
+					Image:   "python:3.12-slim",
+					Command: []string{"python", "-c"},
+					Args:    []string{"exit(1)"},
+				}},
+			},
+			{Name: "cleanup", Always: true, DependsOn: []string{"gate"}, Jobs: []NativeJobSpec{{ID: "cleanup"}}},
+		},
+	}
+	normalizeWorkflowRegister(&req)
+
+	if err := ValidateWorkflowRegister(req); err != nil {
+		t.Fatalf("ValidateWorkflowRegister: %v", err)
+	}
+	gate := req.Phases[2]
+	if len(gate.Jobs) != 1 {
+		t.Fatalf("gate jobs=%#v", gate.Jobs)
+	}
+	job := gate.Jobs[0]
+	if job.ID != "custom-gate" || !job.Managed || job.Image != "" || len(job.Command) != 0 || len(job.Args) != 0 {
+		t.Fatalf("gate job=%#v", job)
+	}
+	if len(job.Steps) != 1 || job.Steps[0].Slug != EvidenceGateStepSlug || !strings.Contains(job.Steps[0].Run, "GLIMMUNG_INPUT_VERIFICATION") {
+		t.Fatalf("gate steps=%#v", job.Steps)
+	}
+}
+
 func TestValidateWorkflowRegisterRejectsInvalidManagedSteps(t *testing.T) {
 	base := func(job NativeJobSpec) WorkflowRegister {
 		return WorkflowRegister{

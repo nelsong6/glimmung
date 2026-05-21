@@ -181,6 +181,7 @@ func normalizeWorkflowRegisterWithDefaultKind(req *WorkflowRegister, defaultKind
 				}
 			}
 		}
+		req.Phases[i] = CanonicalNativePhase(req.Phases[i])
 	}
 }
 

@@ -105,6 +105,33 @@ func TestApplyNativePhaseOutputSetRawStoresAndRejectsDuplicateKeys(t *testing.T)
 	}
 }
 
+func TestCarryForwardAttemptDocsPreserveOutputsForRecycleEntry(t *testing.T) {
+	now := "2026-05-21T05:00:00Z"
+	docs := carryForwardAttemptDocs([]server.RunAttemptData{{
+		Phase:        "env-prep",
+		Conclusion:   "success",
+		Decision:     "advance",
+		Completed:    true,
+		CarryForward: true,
+		PhaseOutputs: map[string]string{"validation_url": "https://slot.example"},
+	}}, server.Workflow{Phases: []server.PhaseSpec{
+		{Name: "env-prep", Kind: "k8s_job"},
+		{Name: "llm-work", Kind: "k8s_job", DependsOn: []string{"env-prep"}},
+	}}, now)
+
+	if len(docs) != 1 {
+		t.Fatalf("docs=%#v", docs)
+	}
+	doc := docs[0]
+	if !doc.CarryForward || doc.AttemptIndex != 0 || doc.CompletedAt != now || doc.PhaseOutputs["validation_url"] != "https://slot.example" {
+		t.Fatalf("carry doc=%#v", doc)
+	}
+	roundTrip := carryForwardAttemptsFromDocs(docs)
+	if len(roundTrip) != 1 || !roundTrip[0].CarryForward || roundTrip[0].PhaseOutputs["validation_url"] != "https://slot.example" {
+		t.Fatalf("roundTrip=%#v", roundTrip)
+	}
+}
+
 func TestExecutionRawHelpersDriveCanonicalState(t *testing.T) {
 	now := "2026-05-20T12:00:00Z"
 	raw := map[string]any{

@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/nelsong6/glimmung/internal/domain/budget"
 )
 
 type fakeRunDispatchTimeoutStore struct {
@@ -71,7 +73,7 @@ func TestExpireRunDispatchTimeoutsAbortsStaleDispatchingPhase(t *testing.T) {
 		},
 	}
 
-	expired, err := ExpireRunDispatchTimeouts(context.Background(), store, 10*time.Minute, now)
+	expired, err := ExpireRunDispatchTimeouts(context.Background(), store, nil, 10*time.Minute, now)
 	if err != nil {
 		t.Fatalf("ExpireRunDispatchTimeouts: %v", err)
 	}
@@ -120,7 +122,7 @@ func TestExpireRunDispatchTimeoutsAbortsLegacyStaleAttempt(t *testing.T) {
 		},
 	}
 
-	expired, err := ExpireRunDispatchTimeouts(context.Background(), store, 10*time.Minute, now)
+	expired, err := ExpireRunDispatchTimeouts(context.Background(), store, nil, 10*time.Minute, now)
 	if err != nil {
 		t.Fatalf("ExpireRunDispatchTimeouts: %v", err)
 	}
@@ -129,5 +131,56 @@ func TestExpireRunDispatchTimeoutsAbortsLegacyStaleAttempt(t *testing.T) {
 	}
 	if len(store.aborted) != 1 || store.aborted[0] != "glimmung/run-legacy-stale/dispatch_timeout" {
 		t.Fatalf("aborted=%#v", store.aborted)
+	}
+}
+
+func TestCompleteDispatchTimedOutPhaseUsesCompletionPathForCleanup(t *testing.T) {
+	leaseRef := "proj/leases/proj-1/1"
+	store := &fakeCompletionStore{
+		tokenRunID:         "r1",
+		tokenProject:       "proj",
+		appendIdx:          1,
+		nativeExpectedJobs: []string{"env-prep"},
+		leaseResult:        Lease{Project: "proj", LeaseNumber: intPtr(1), State: "claimed", Metadata: map[string]any{}},
+	}
+	store.run = &RunReplayData{
+		ID:           "r1",
+		Project:      "proj",
+		WorkflowName: "wf",
+		IssueNumber:  7,
+		IssueRepo:    "owner/repo",
+		SlotLeaseRef: &leaseRef,
+		Attempts:     []RunAttemptData{{AttemptIndex: 0, Phase: "env-prep"}},
+	}
+	store.wf = &Workflow{
+		Project: "proj",
+		Name:    "wf",
+		Phases: []PhaseSpec{
+			{Name: "env-prep", Kind: "k8s_job", Jobs: []NativeJobSpec{{ID: "env-prep"}}},
+			{Name: "cleanup", Kind: "k8s_job", Always: true, DependsOn: []string{"env-prep"}, Jobs: []NativeJobSpec{{ID: "cleanup"}}},
+		},
+		Budget: budget.Config{Total: 25},
+	}
+	launcher := &fakeNativeLauncher{}
+	run := RunReport{
+		ID:      "r1",
+		Project: "proj",
+		State:   "in_progress",
+		PhaseExecutions: []RunPhaseExecution{{
+			Name:  "env-prep",
+			State: "dispatching",
+			Jobs:  []RunJobExecution{{ID: "env-prep", State: "dispatching"}},
+		}},
+	}
+
+	completed, err := completeDispatchTimedOutPhase(context.Background(), store, launcher, run, "env-prep", 10*time.Minute)
+	if err != nil {
+		t.Fatalf("completeDispatchTimedOutPhase: %v", err)
+	}
+	if !completed {
+		t.Fatal("timeout should have been completed through native completion")
+	}
+	if !launcher.called || launcher.req.Phase.Name != "cleanup" {
+		t.Fatalf("native launch=%#v", launcher.req)
 	}
 }

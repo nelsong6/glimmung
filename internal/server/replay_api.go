@@ -52,6 +52,7 @@ type RunAttemptData struct {
 	Verification *RunVerificationData
 	Decision     string
 	Completed    bool
+	CarryForward bool
 	PhaseOutputs map[string]string
 }
 

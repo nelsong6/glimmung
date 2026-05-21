@@ -1550,6 +1550,7 @@ type attemptDoc struct {
 	LogArchiveURL         *string                           `json:"log_archive_url"`
 	PhaseOutputs          map[string]string                 `json:"phase_outputs,omitempty"`
 	JobCompletions        map[string]nativeJobCompletionDoc `json:"job_completions,omitempty"`
+	CarryForward          bool                              `json:"carry_forward,omitempty"`
 	CancelRequestedAt     *string                           `json:"cancel_requested_at,omitempty"`
 	CancelReason          *string                           `json:"cancel_reason,omitempty"`
 	CapabilityTokenSHA256 *string                           `json:"capability_token_sha256,omitempty"`
@@ -2083,6 +2084,7 @@ func phaseExecutionDocsFromWorkflow(wf server.Workflow, createdAt string, entryp
 	out := make([]phaseExecutionDoc, 0, len(wf.Phases))
 	beforeEntrypoint := strings.TrimSpace(stringOrEmpty(entrypointPhase)) != ""
 	for _, phase := range wf.Phases {
+		phase = server.CanonicalNativePhase(phase)
 		state := "not_started"
 		if beforeEntrypoint {
 			if phase.Name == strings.TrimSpace(stringOrEmpty(entrypointPhase)) {
@@ -2296,6 +2298,7 @@ func (s *Store) createWorkflowSchemaIfMissing(ctx context.Context, pk azcosmos.P
 }
 
 func phaseDocFromSpec(phase server.PhaseSpec) phaseDoc {
+	phase = server.CanonicalNativePhase(phase)
 	jobs := make([]nativeJobDoc, 0, len(phase.Jobs))
 	for _, job := range phase.Jobs {
 		jobs = append(jobs, nativeJobDocFromSpec(job))
@@ -2413,6 +2416,7 @@ func normalizeWorkflowRegisterForProjectDoc(req *server.WorkflowRegister, projec
 		req.Phases[i].Outputs = sliceOrEmpty(req.Phases[i].Outputs)
 		req.Phases[i].DependsOn = sliceOrEmpty(req.Phases[i].DependsOn)
 		req.Phases[i].Jobs = sliceOrEmpty(req.Phases[i].Jobs)
+		req.Phases[i] = server.CanonicalNativePhase(req.Phases[i])
 	}
 }
 
@@ -5007,6 +5011,7 @@ func runReplayDataFromDoc(doc runDoc) server.RunReplayData {
 			Verification: verif,
 			Decision:     stringOrEmpty(a.Decision),
 			Completed:    a.CompletedAt != "",
+			CarryForward: a.CarryForward,
 			PhaseOutputs: stringMapOrEmpty(a.PhaseOutputs),
 		})
 	}
@@ -5870,7 +5875,7 @@ func (s *Store) RecordNativeJobCompletion(ctx context.Context, project, runID st
 			return server.NativeJobCompletionResult{}, server.ErrConflict
 		}
 
-		expectedJobIDs, err := s.expectedNativeJobIDs(ctx, project, doc.Workflow, attempt.Phase)
+		expectedJobIDs, err := s.expectedNativeJobIDs(ctx, project, doc.Workflow, doc.WorkflowSchemaRef, attempt.Phase)
 		if err != nil {
 			return server.NativeJobCompletionResult{}, err
 		}
@@ -5951,8 +5956,8 @@ func validateNativePhaseOutputKeys(jobID string, outputs map[string]string, comp
 	return nil
 }
 
-func (s *Store) expectedNativeJobIDs(ctx context.Context, project, workflowName, phaseName string) ([]string, error) {
-	wf, err := s.GetWorkflowByName(ctx, project, workflowName)
+func (s *Store) expectedNativeJobIDs(ctx context.Context, project, workflowName, schemaRef, phaseName string) ([]string, error) {
+	wf, err := s.workflowForRunExecution(ctx, project, workflowName, schemaRef)
 	if err != nil {
 		return nil, err
 	}
@@ -5963,6 +5968,7 @@ func (s *Store) expectedNativeJobIDs(ctx context.Context, project, workflowName,
 		if phase.Name != phaseName {
 			continue
 		}
+		phase = server.CanonicalNativePhase(phase)
 		if len(phase.Jobs) == 0 {
 			return nil, server.ValidationError{Message: fmt.Sprintf("phase %q has no registered jobs", phaseName)}
 		}
@@ -6294,7 +6300,7 @@ func markJobCompletionInExecutionsRaw(raw map[string]any, phaseName, jobID, stat
 						step["state"] = "succeeded"
 						step["completed_at"] = completedAt
 					}
-					if state == "failed" && (stringValue(step["state"]) == "active" || stringValue(step["state"]) == "dispatching") {
+					if state == "failed" && (stringValue(step["state"]) == "active" || stringValue(step["state"]) == "dispatching" || stringValue(step["state"]) == "not_started" || stringValue(step["state"]) == "") {
 						step["state"] = "failed"
 						step["reason"] = firstNonEmpty(reason, "job_failed")
 						step["completed_at"] = completedAt
@@ -6918,8 +6924,11 @@ func (s *Store) StartRunCycle(ctx context.Context, req server.StartRunCycleReque
 			return 0, server.ErrConflict
 		}
 		attempts, _ := raw["attempts"].([]any)
-		if len(attempts) > 0 {
-			return 0, server.ErrConflict
+		for _, rawAttempt := range attempts {
+			attemptMap, ok := rawAttempt.(map[string]any)
+			if !ok || !boolValue(attemptMap["carry_forward"]) || stringValue(attemptMap["completed_at"]) == "" {
+				return 0, server.ErrConflict
+			}
 		}
 		nextIdx := len(attempts)
 		if len(attempts) > 0 {
@@ -7181,13 +7190,67 @@ func (s *Store) CreateRun(ctx context.Context, req server.CreateRunRequest) (ser
 		return server.CreatedRun{}, fmt.Errorf("create run doc: %w", err)
 	}
 	return server.CreatedRun{
-		ID:            runID,
-		RunNumber:     runNumber,
-		CycleNumber:   cycleNumber,
-		RunCycle:      runCycle,
-		RunDisplay:    runDisplay,
-		CallbackToken: callbackToken,
+		ID:                   runID,
+		RunNumber:            runNumber,
+		CycleNumber:          cycleNumber,
+		RunCycle:             runCycle,
+		RunDisplay:           runDisplay,
+		CallbackToken:        callbackToken,
+		CarryForwardAttempts: carryForwardAttemptsFromDocs(doc.Attempts),
 	}, nil
+}
+
+func carryForwardAttemptDocs(attempts []server.RunAttemptData, wf server.Workflow, now string) []attemptDoc {
+	if len(attempts) == 0 {
+		return []attemptDoc{}
+	}
+	phaseByName := map[string]server.PhaseSpec{}
+	for _, phase := range wf.Phases {
+		phaseByName[phase.Name] = phase
+	}
+	out := make([]attemptDoc, 0, len(attempts))
+	for _, attempt := range attempts {
+		phase, ok := phaseByName[attempt.Phase]
+		if !ok {
+			continue
+		}
+		kind := firstNonEmpty(phase.Kind, "k8s_job")
+		workflowFilename := firstNonEmpty(phase.WorkflowFilename, fmt.Sprintf("%s:%s", kind, phase.Name))
+		conclusion := firstNonEmpty(attempt.Conclusion, "success")
+		decision := firstNonEmpty(attempt.Decision, "advance")
+		out = append(out, attemptDoc{
+			AttemptIndex:     len(out),
+			Phase:            phase.Name,
+			PhaseKind:        kind,
+			WorkflowFilename: workflowFilename,
+			DispatchedAt:     now,
+			CompletedAt:      now,
+			Conclusion:       &conclusion,
+			Decision:         &decision,
+			PhaseOutputs:     stringMapOrEmpty(attempt.PhaseOutputs),
+			CarryForward:     true,
+		})
+	}
+	return out
+}
+
+func carryForwardAttemptsFromDocs(docs []attemptDoc) []server.RunAttemptData {
+	out := make([]server.RunAttemptData, 0, len(docs))
+	for _, doc := range docs {
+		if !doc.CarryForward {
+			continue
+		}
+		out = append(out, server.RunAttemptData{
+			AttemptIndex: doc.AttemptIndex,
+			Phase:        doc.Phase,
+			Conclusion:   stringOrEmpty(doc.Conclusion),
+			Decision:     stringOrEmpty(doc.Decision),
+			Completed:    doc.CompletedAt != "",
+			CarryForward: true,
+			PhaseOutputs: stringMapOrEmpty(doc.PhaseOutputs),
+		})
+	}
+	return out
 }
 
 func (s *Store) CreateRecycleCycle(ctx context.Context, req server.CreateRecycleCycleRequest) (server.CreatedRun, error) {
@@ -7292,7 +7355,7 @@ func (s *Store) CreateRecycleCycle(ctx context.Context, req server.CreateRecycle
 		EntrypointPhase:   optionalNonEmptyStringPtr(req.TargetPhaseName),
 		PhaseExecutions:   phaseExecutionDocsFromWorkflow(*wf, now, optionalNonEmptyStringPtr(req.TargetPhaseName)),
 		Budget:            parent.Budget,
-		Attempts:          []attemptDoc{},
+		Attempts:          carryForwardAttemptDocs(req.CarryForwardAttempts, *wf, now),
 		CumulativeCostUSD: parent.CumulativeCostUSD,
 		TriggerSource:     req.TriggerSource,
 		CallbackToken:     &callbackToken,
@@ -7309,12 +7372,13 @@ func (s *Store) CreateRecycleCycle(ctx context.Context, req server.CreateRecycle
 		return server.CreatedRun{}, fmt.Errorf("create recycle cycle doc: %w", err)
 	}
 	return server.CreatedRun{
-		ID:            runID,
-		RunNumber:     runNumber,
-		CycleNumber:   cycleNumber,
-		RunCycle:      runCycle,
-		RunDisplay:    runDisplay,
-		CallbackToken: callbackToken,
+		ID:                   runID,
+		RunNumber:            runNumber,
+		CycleNumber:          cycleNumber,
+		RunCycle:             runCycle,
+		RunDisplay:           runDisplay,
+		CallbackToken:        callbackToken,
+		CarryForwardAttempts: carryForwardAttemptsFromDocs(doc.Attempts),
 	}, nil
 }
 
