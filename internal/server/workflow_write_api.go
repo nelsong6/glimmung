@@ -161,6 +161,26 @@ func normalizeWorkflowRegisterWithDefaultKind(req *WorkflowRegister, defaultKind
 		req.Phases[i].Outputs = sliceOrEmpty(req.Phases[i].Outputs)
 		req.Phases[i].DependsOn = sliceOrEmpty(req.Phases[i].DependsOn)
 		req.Phases[i].Jobs = sliceOrEmpty(req.Phases[i].Jobs)
+		for j := range req.Phases[i].Jobs {
+			job := &req.Phases[i].Jobs[j]
+			job.Command = sliceOrEmpty(job.Command)
+			job.Args = sliceOrEmpty(job.Args)
+			if job.Env == nil {
+				job.Env = map[string]string{}
+			}
+			job.Steps = sliceOrEmpty(job.Steps)
+			job.ExtraCheckouts = sliceOrEmpty(job.ExtraCheckouts)
+			for k := range job.Steps {
+				step := &job.Steps[k]
+				step.Type = strings.TrimSpace(step.Type)
+				if step.Type == "" && strings.TrimSpace(step.Run) != "" {
+					step.Type = "run"
+				}
+				if step.Env == nil {
+					step.Env = map[string]string{}
+				}
+			}
+		}
 	}
 }
 
@@ -227,6 +247,9 @@ func ValidateWorkflowRegister(req WorkflowRegister) error {
 					return ValidationError{Message: fmt.Sprintf("workflow %s phase %q job %q duplicates job[%d]", req.Name, name, jobID, prev)}
 				}
 				seenJobs[jobID] = j
+				if err := validateNativeJobSpec(req.Name, name, j, job); err != nil {
+					return err
+				}
 			}
 		}
 		if i == 0 {
@@ -260,6 +283,39 @@ func ValidateWorkflowRegister(req WorkflowRegister) error {
 	}
 	if err := phaserefs.Validate(phaseRefs); err != nil {
 		return ValidationError{Message: err.Error()}
+	}
+	return nil
+}
+
+func validateNativeJobSpec(workflowName, phaseName string, jobIndex int, job NativeJobSpec) error {
+	if job.Managed {
+		if len(job.Command) > 0 || len(job.Args) > 0 {
+			return ValidationError{Message: fmt.Sprintf("workflow %s phase %q job %q is managed and cannot declare command or args", workflowName, phaseName, job.ID)}
+		}
+	}
+	seenSteps := map[string]int{}
+	for i, step := range job.Steps {
+		slug := strings.TrimSpace(step.Slug)
+		if slug == "" {
+			return ValidationError{Message: fmt.Sprintf("workflow %s phase %q job %q step[%d] is missing slug", workflowName, phaseName, job.ID, i)}
+		}
+		if prev, ok := seenSteps[slug]; ok {
+			return ValidationError{Message: fmt.Sprintf("workflow %s phase %q job %q step %q duplicates step[%d]", workflowName, phaseName, job.ID, slug, prev)}
+		}
+		seenSteps[slug] = i
+		if !job.Managed {
+			continue
+		}
+		stepType := strings.TrimSpace(step.Type)
+		if stepType == "" {
+			stepType = "run"
+		}
+		if stepType != "run" {
+			return ValidationError{Message: fmt.Sprintf("workflow %s phase %q job %q step %q uses unsupported type %q", workflowName, phaseName, job.ID, slug, stepType)}
+		}
+		if strings.TrimSpace(step.Run) == "" {
+			return ValidationError{Message: fmt.Sprintf("workflow %s phase %q job %q step %q is missing run", workflowName, phaseName, job.ID, slug)}
+		}
 	}
 	return nil
 }

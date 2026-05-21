@@ -36,6 +36,8 @@ type Settings struct {
 	NativeRunnerNamespaceRole          string
 	NativeRunnerCallbackBaseURL        string
 	NativeRunnerJobTTLSeconds          int
+	NativeRunnerImage                  string
+	NativeRunnerEntrypoint             string
 	NativeRunnerCodexSecret            string
 	NativeRunnerCodexMountPath         string
 	NativeRunnerPlaywrightEnabled      bool
@@ -95,6 +97,14 @@ func SettingsFromEnv() Settings {
 		NativeRunnerJobTTLSeconds: envIntOrDefault(
 			"NATIVE_RUNNER_JOB_TTL_SECONDS",
 			259200,
+		),
+		NativeRunnerImage: envOrDefault(
+			"NATIVE_RUNNER_IMAGE",
+			"romainecr.azurecr.io/glimmung-native-runner:native-runner",
+		),
+		NativeRunnerEntrypoint: envOrDefault(
+			"NATIVE_RUNNER_ENTRYPOINT",
+			"/app/glimmung-native-runner",
 		),
 		NativeRunnerCodexSecret: envOrDefault(
 			"NATIVE_RUNNER_CODEX_CREDENTIALS_SECRET",

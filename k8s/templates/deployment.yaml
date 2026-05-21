@@ -46,6 +46,10 @@ spec:
               value: {{ .Values.nativeRunner.namespace | quote }}
             - name: NATIVE_RUNNER_SERVICE_ACCOUNT
               value: {{ .Values.nativeRunner.serviceAccount | quote }}
+            - name: NATIVE_RUNNER_IMAGE
+              value: {{ .Values.nativeRunner.image | quote }}
+            - name: NATIVE_RUNNER_ENTRYPOINT
+              value: {{ .Values.nativeRunner.entrypoint | quote }}
             - name: NATIVE_RUNNER_CALLBACK_BASE_URL
               value: {{ .Values.nativeRunner.callbackBaseUrl | quote }}
             - name: NATIVE_RUNNER_PROJECT_CONCURRENCY

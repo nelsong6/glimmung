@@ -428,6 +428,63 @@ func TestNativeRunCompletedByCallbackTokenAdvanceDispatchesNextPhase(t *testing.
 	}
 }
 
+func TestNativeRunCompletedByCallbackTokenFailureDispatchesCleanup(t *testing.T) {
+	leaseRef := "proj/leases/proj-1/1"
+	store := &fakeCompletionStore{
+		tokenRunID:   "r1",
+		tokenProject: "proj",
+		appendIdx:    1,
+		leaseResult:  Lease{Project: "proj", LeaseNumber: intPtr(1), State: "claimed", Metadata: map[string]any{}},
+	}
+	store.run = &RunReplayData{
+		ID:           "r1",
+		Project:      "proj",
+		WorkflowName: "wf",
+		IssueNumber:  7,
+		IssueRepo:    "owner/repo",
+		SlotLeaseRef: &leaseRef,
+		Attempts:     []RunAttemptData{{AttemptIndex: 0, Phase: "env-prep"}},
+	}
+	store.wf = &Workflow{
+		Project: "proj",
+		Name:    "wf",
+		Budget:  budget.Config{Total: 25},
+		Phases: []PhaseSpec{
+			{Name: "env-prep", Kind: "k8s_job", Jobs: []NativeJobSpec{{ID: "env-prep"}}},
+			{
+				Name:             "env-destroy",
+				Kind:             "k8s_job",
+				WorkflowFilename: "k8s_job:env-destroy",
+				Always:           true,
+				DependsOn:        []string{"env-prep"},
+				Jobs:             []NativeJobSpec{{ID: "env-destroy", Image: "runner:latest"}},
+			},
+		},
+	}
+	launcher := &fakeNativeLauncher{}
+	req := completedJob("env-prep", "failure", nil, nil)
+	summary := "contract failure"
+	req.SummaryMarkdown = &summary
+	rec := httptest.NewRecorder()
+	newCompletionHandler(store, launcher).ServeHTTP(rec, nativeCompletionRequest("tok", req))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	result := readCallbackResult(t, rec)
+	if result.Decision == nil || *result.Decision != "advance_phase" {
+		t.Fatalf("decision=%v", result.Decision)
+	}
+	if len(result.FailedJobIDs) != 1 || result.FailedJobIDs[0] != "env-prep" {
+		t.Fatalf("failed jobs=%v", result.FailedJobIDs)
+	}
+	if store.appendPhase != "env-destroy" || store.appendKind != "k8s_job" || store.appendFile != "k8s_job:env-destroy" {
+		t.Fatalf("append=(%q,%q,%q)", store.appendPhase, store.appendKind, store.appendFile)
+	}
+	if !launcher.called || launcher.req.Phase.Name != "env-destroy" {
+		t.Fatalf("native launch=%#v", launcher.req)
+	}
+}
+
 func TestAllReadyDispatchTargetsHandlesLinearPhasesAndTeardown(t *testing.T) {
 	wf := &Workflow{Phases: []PhaseSpec{
 		{Name: "prepare"},

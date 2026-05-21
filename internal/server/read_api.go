@@ -78,19 +78,35 @@ type RecyclePolicy struct {
 }
 
 type NativeJobSpec struct {
-	ID             string            `json:"id"`
-	Name           *string           `json:"name"`
-	Image          string            `json:"image"`
-	Command        []string          `json:"command"`
-	Args           []string          `json:"args"`
-	Env            map[string]string `json:"env"`
-	Steps          []NativeStepSpec  `json:"steps"`
-	TimeoutSeconds *int              `json:"timeout_seconds"`
+	ID               string               `json:"id"`
+	Name             *string              `json:"name"`
+	Image            string               `json:"image"`
+	Command          []string             `json:"command"`
+	Args             []string             `json:"args"`
+	Env              map[string]string    `json:"env"`
+	Steps            []NativeStepSpec     `json:"steps"`
+	TimeoutSeconds   *int                 `json:"timeout_seconds"`
+	Managed          bool                 `json:"managed,omitempty"`
+	Checkout         *NativeCheckoutSpec  `json:"checkout,omitempty"`
+	ExtraCheckouts   []NativeCheckoutSpec `json:"extra_checkouts,omitempty"`
+	WorkingDirectory string               `json:"working_directory,omitempty"`
+	Shell            string               `json:"shell,omitempty"`
 }
 
 type NativeStepSpec struct {
-	Slug  string  `json:"slug"`
-	Title *string `json:"title"`
+	Slug             string            `json:"slug"`
+	Title            *string           `json:"title"`
+	Type             string            `json:"type,omitempty"`
+	Run              string            `json:"run,omitempty"`
+	Shell            string            `json:"shell,omitempty"`
+	WorkingDirectory string            `json:"working_directory,omitempty"`
+	Env              map[string]string `json:"env,omitempty"`
+}
+
+type NativeCheckoutSpec struct {
+	Repo string `json:"repo,omitempty"`
+	Ref  string `json:"ref,omitempty"`
+	Path string `json:"path,omitempty"`
 }
 
 type PrPrimitive struct {

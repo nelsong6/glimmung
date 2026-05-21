@@ -78,6 +78,9 @@ The native completion contract is enforced at
 include `job_id`. Glimmung records each job completion independently, returns a
 `wait_jobs` response while sibling jobs are still pending, and runs the phase
 decision path only on the transition where the final registered job completes.
+This is the only native terminal callback. Failed jobs report through the same
+endpoint with a non-`success` `conclusion`; the retired `/native/failed`
+callback must not be reintroduced or required by runner images.
 
 Because jobs in a phase are strictly parallel, **a job can never
 depend on the output of another job in the same phase**. If
@@ -99,8 +102,17 @@ Two valid shapes for emitting a verdict at the testing boundary:
   verify: true
   jobs:
     - id: testing
-      command: ["/bin/bash", "/opt/.../run-testing.sh"]
-      # script writes verification.json AND exits non-zero
+      managed: true
+      checkout:
+        ref: main
+      working_directory: /workspace/ambience
+      steps:
+        - slug: tests
+          type: run
+          run: |
+            npm test
+            printf 'verification=pass\n' >> "$GLIMMUNG_OUTPUT_FILE"
+      # step writes phase outputs AND exits non-zero
       # if status != "pass". The phase itself renders red.
 ```
 
@@ -150,6 +162,10 @@ Cosmos workflow registrations are the runtime source of truth. The
 `.glimmung/workflows/<name>.yaml` upstream endpoints remain an import/sync
 convenience for older desired-state flows, but dispatch reads the registered
 workflow document, not a consumer repository file.
+The native runner direction is documented in
+[`project-native-runner-architecture.md`](project-native-runner-architecture.md):
+Glimmung owns the runner contract and project workflows use inline step
+commands rather than repo-owned callback plumbing.
 
 Workflow registrations are logical pointers. Updating a registration creates a
 new immutable workflow schema and moves the logical pointer forward. Existing

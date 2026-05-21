@@ -954,17 +954,19 @@ func nativeJobManifest(settings Settings, req NativeLaunchRequest, job NativeJob
 	podLabels["azure.workload.identity/use"] = "true"
 	container := map[string]any{
 		"name":  dnsLabel(job.ID),
-		"image": job.Image,
+		"image": nativeJobImage(settings, job),
 		"env":   nativeJobEnv(settings, req, job, secretName),
 		"volumeMounts": []any{
 			map[string]any{"name": "glimmung-attempt-token", "mountPath": "/var/run/glimmung", "readOnly": true},
 			map[string]any{"name": "codex-credentials", "mountPath": settings.NativeRunnerCodexMountPath, "readOnly": true},
 		},
 	}
-	if len(job.Command) > 0 {
+	if job.Managed {
+		container["command"] = []string{nativeRunnerEntrypoint(settings)}
+	} else if len(job.Command) > 0 {
 		container["command"] = job.Command
 	}
-	if len(job.Args) > 0 {
+	if !job.Managed && len(job.Args) > 0 {
 		container["args"] = job.Args
 	}
 	podSpec := map[string]any{
@@ -996,6 +998,13 @@ func nativeJobManifest(settings Settings, req NativeLaunchRequest, job NativeJob
 			},
 		},
 	}
+}
+
+func nativeJobImage(settings Settings, job NativeJobSpec) string {
+	if job.Managed {
+		return firstNonEmpty(job.Image, settings.NativeRunnerImage)
+	}
+	return job.Image
 }
 
 func nativeJobEnv(settings Settings, req NativeLaunchRequest, job NativeJobSpec, secretName string) []map[string]any {
@@ -1049,6 +1058,9 @@ func nativeJobEnv(settings Settings, req NativeLaunchRequest, job NativeJobSpec,
 			env = appendLiteralEnv(env, seen, "PW_TEST_CONNECT_WS_ENDPOINT", endpoint)
 		}
 	}
+	if job.Managed {
+		env = appendLiteralEnv(env, seen, "GLIMMUNG_RUNNER_JOB_SPEC", nativeRunnerJobSpecJSON(job))
+	}
 	jobEnvNames := make([]string, 0, len(job.Env))
 	for name := range job.Env {
 		jobEnvNames = append(jobEnvNames, name)
@@ -1058,6 +1070,18 @@ func nativeJobEnv(settings Settings, req NativeLaunchRequest, job NativeJobSpec,
 		env = appendLiteralEnv(env, seen, name, job.Env[name])
 	}
 	return env
+}
+
+func nativeRunnerEntrypoint(settings Settings) string {
+	return firstNonEmpty(settings.NativeRunnerEntrypoint, "/app/glimmung-native-runner")
+}
+
+func nativeRunnerJobSpecJSON(job NativeJobSpec) string {
+	payload, err := json.Marshal(job)
+	if err != nil {
+		return "{}"
+	}
+	return string(payload)
 }
 
 func envNameSet(env []map[string]any) map[string]bool {
