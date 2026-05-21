@@ -345,7 +345,8 @@ Cosmos operations in [`internal/store/cosmos`](internal/store/cosmos). It:
    `/v1/run-callbacks/{callback_token}/native/completed`. Native completion is
    job-scoped: every callback must
    include `job_id`, and the Go decision engine only advances the phase after
-   every registered job in that phase has completed.
+   every registered job in that phase has completed. Job failure uses the same
+   endpoint with a non-`success` `conclusion`; `/native/failed` is retired.
 
 Issue-lock TTL is 4h. Terminal Run transitions release issue/PR locks through
 the Go store; leases still have their own TTL/callback lifecycle.

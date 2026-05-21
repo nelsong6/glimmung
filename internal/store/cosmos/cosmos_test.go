@@ -71,6 +71,40 @@ func TestNativeEventAttemptIndexAcceptsExplicitOrMetadataValue(t *testing.T) {
 	}
 }
 
+func TestApplyNativePhaseOutputSetRawStoresAndRejectsDuplicateKeys(t *testing.T) {
+	raw := map[string]any{
+		"attempts": []any{
+			map[string]any{
+				"attempt_index": float64(2),
+				"phase":         "env-prep",
+			},
+		},
+	}
+	attempt := attemptDoc{AttemptIndex: 2, Phase: "env-prep"}
+	event := nativeEventDoc{
+		Event:    "phase_output_set",
+		StepSlug: "publish",
+		Metadata: map[string]any{
+			"key":   "validation_url",
+			"value": "https://preview.example",
+		},
+	}
+
+	if err := applyNativePhaseOutputSetRaw(raw, attempt, event); err != nil {
+		t.Fatalf("applyNativePhaseOutputSetRaw: %v", err)
+	}
+	attempts := raw["attempts"].([]any)
+	outputs := attempts[0].(map[string]any)["phase_outputs"].(map[string]any)
+	if outputs["validation_url"] != "https://preview.example" {
+		t.Fatalf("outputs=%#v", outputs)
+	}
+
+	err := applyNativePhaseOutputSetRaw(raw, attempt, event)
+	if err == nil || !strings.Contains(err.Error(), "already set") {
+		t.Fatalf("duplicate error=%v", err)
+	}
+}
+
 func TestExecutionRawHelpersDriveCanonicalState(t *testing.T) {
 	now := "2026-05-20T12:00:00Z"
 	raw := map[string]any{

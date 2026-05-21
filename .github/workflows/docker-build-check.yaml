@@ -37,6 +37,12 @@ jobs:
             cache-ref: romainecr.azurecr.io/glimmung-slot-playwright-build-cache:slot-playwright
             image-repo: glimmung-slot-playwright
             fingerprint-paths: slot-playwright/Dockerfile
+          - name: native-runner
+            file: native-runner/Dockerfile
+            context: .
+            cache-ref: romainecr.azurecr.io/glimmung-native-runner-build-cache:native-runner
+            image-repo: glimmung-native-runner
+            fingerprint-paths: native-runner/Dockerfile go.mod go.sum cmd internal
     steps:
       - name: Checkout
         uses: actions/checkout@v4

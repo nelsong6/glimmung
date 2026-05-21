@@ -138,6 +138,82 @@ func TestRegisterWorkflowAcceptsParallelJobsInsideStrictPhase(t *testing.T) {
 	}
 }
 
+func TestValidateWorkflowRegisterAcceptsManagedRunSteps(t *testing.T) {
+	req := WorkflowRegister{
+		Name: "agent-run",
+		Phases: []PhaseSpec{
+			{Name: "prep", Jobs: []NativeJobSpec{{
+				ID:      "prep",
+				Image:   "runner:latest",
+				Managed: true,
+				Steps: []NativeStepSpec{{
+					Slug: "checkout",
+					Run:  "echo ready",
+				}},
+			}}},
+			{Name: "verify", Verify: true, DependsOn: []string{"prep"}},
+			{Name: "cleanup", Always: true, DependsOn: []string{"verify"}},
+		},
+	}
+	normalizeWorkflowRegister(&req)
+
+	if err := ValidateWorkflowRegister(req); err != nil {
+		t.Fatalf("ValidateWorkflowRegister: %v", err)
+	}
+	if got := req.Phases[0].Jobs[0].Steps[0].Type; got != "run" {
+		t.Fatalf("managed run step type=%q, want run", got)
+	}
+}
+
+func TestValidateWorkflowRegisterRejectsInvalidManagedSteps(t *testing.T) {
+	base := func(job NativeJobSpec) WorkflowRegister {
+		return WorkflowRegister{
+			Name: "agent-run",
+			Phases: []PhaseSpec{
+				{Name: "prep", Jobs: []NativeJobSpec{job}},
+				{Name: "verify", Verify: true, DependsOn: []string{"prep"}},
+				{Name: "cleanup", Always: true, DependsOn: []string{"verify"}},
+			},
+		}
+	}
+	tests := []struct {
+		name string
+		job  NativeJobSpec
+		want string
+	}{
+		{
+			name: "command",
+			job:  NativeJobSpec{ID: "prep", Image: "runner:latest", Managed: true, Command: []string{"bash"}, Steps: []NativeStepSpec{{Slug: "s", Run: "echo ok"}}},
+			want: "cannot declare command or args",
+		},
+		{
+			name: "missing run",
+			job:  NativeJobSpec{ID: "prep", Image: "runner:latest", Managed: true, Steps: []NativeStepSpec{{Slug: "s"}}},
+			want: "is missing run",
+		},
+		{
+			name: "duplicate step",
+			job:  NativeJobSpec{ID: "prep", Image: "runner:latest", Managed: true, Steps: []NativeStepSpec{{Slug: "s", Run: "echo one"}, {Slug: "s", Run: "echo two"}}},
+			want: "duplicates step",
+		},
+		{
+			name: "unsupported type",
+			job:  NativeJobSpec{ID: "prep", Image: "runner:latest", Managed: true, Steps: []NativeStepSpec{{Slug: "s", Type: "agent", Run: "codex"}}},
+			want: "unsupported type",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := base(tt.job)
+			normalizeWorkflowRegister(&req)
+			err := ValidateWorkflowRegister(req)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("ValidateWorkflowRegister error=%v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestRegisterWorkflowRejectsNonNativeKind(t *testing.T) {
 	store := &fakeWorkflowWriteStore{fakeReadStore: fakeReadStore{projects: []Project{{
 		ID:       "glimmung",

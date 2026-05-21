@@ -1612,19 +1612,35 @@ type recyclePolicyDoc struct {
 }
 
 type nativeJobDoc struct {
-	ID             string            `json:"id"`
-	Name           *string           `json:"name"`
-	Image          string            `json:"image"`
-	Command        []string          `json:"command"`
-	Args           []string          `json:"args"`
-	Env            map[string]string `json:"env"`
-	Steps          []nativeStepDoc   `json:"steps"`
-	TimeoutSeconds *int              `json:"timeoutSeconds"`
+	ID               string              `json:"id"`
+	Name             *string             `json:"name"`
+	Image            string              `json:"image"`
+	Command          []string            `json:"command"`
+	Args             []string            `json:"args"`
+	Env              map[string]string   `json:"env"`
+	Steps            []nativeStepDoc     `json:"steps"`
+	TimeoutSeconds   *int                `json:"timeoutSeconds"`
+	Managed          bool                `json:"managed,omitempty"`
+	Checkout         *nativeCheckoutDoc  `json:"checkout,omitempty"`
+	ExtraCheckouts   []nativeCheckoutDoc `json:"extraCheckouts,omitempty"`
+	WorkingDirectory string              `json:"workingDirectory,omitempty"`
+	Shell            string              `json:"shell,omitempty"`
 }
 
 type nativeStepDoc struct {
-	Slug  string  `json:"slug"`
-	Title *string `json:"title"`
+	Slug             string            `json:"slug"`
+	Title            *string           `json:"title"`
+	Type             string            `json:"type,omitempty"`
+	Run              string            `json:"run,omitempty"`
+	Shell            string            `json:"shell,omitempty"`
+	WorkingDirectory string            `json:"workingDirectory,omitempty"`
+	Env              map[string]string `json:"env,omitempty"`
+}
+
+type nativeCheckoutDoc struct {
+	Repo string `json:"repo,omitempty"`
+	Ref  string `json:"ref,omitempty"`
+	Path string `json:"path,omitempty"`
 }
 
 type prDoc struct {
@@ -2304,17 +2320,50 @@ func phaseDocFromSpec(phase server.PhaseSpec) phaseDoc {
 func nativeJobDocFromSpec(job server.NativeJobSpec) nativeJobDoc {
 	steps := make([]nativeStepDoc, 0, len(job.Steps))
 	for _, step := range job.Steps {
-		steps = append(steps, nativeStepDoc{Slug: step.Slug, Title: step.Title})
+		steps = append(steps, nativeStepDoc{
+			Slug:             step.Slug,
+			Title:            step.Title,
+			Type:             step.Type,
+			Run:              step.Run,
+			Shell:            step.Shell,
+			WorkingDirectory: step.WorkingDirectory,
+			Env:              stringMapOrEmpty(step.Env),
+		})
+	}
+	extraCheckouts := make([]nativeCheckoutDoc, 0, len(job.ExtraCheckouts))
+	for _, checkout := range job.ExtraCheckouts {
+		extraCheckouts = append(extraCheckouts, nativeCheckoutDocFromSpec(checkout))
 	}
 	return nativeJobDoc{
-		ID:             job.ID,
-		Name:           job.Name,
-		Image:          job.Image,
-		Command:        sliceOrEmpty(job.Command),
-		Args:           sliceOrEmpty(job.Args),
-		Env:            stringMapOrEmpty(job.Env),
-		Steps:          steps,
-		TimeoutSeconds: job.TimeoutSeconds,
+		ID:               job.ID,
+		Name:             job.Name,
+		Image:            job.Image,
+		Command:          sliceOrEmpty(job.Command),
+		Args:             sliceOrEmpty(job.Args),
+		Env:              stringMapOrEmpty(job.Env),
+		Steps:            steps,
+		TimeoutSeconds:   job.TimeoutSeconds,
+		Managed:          job.Managed,
+		Checkout:         nativeCheckoutDocPtrFromSpec(job.Checkout),
+		ExtraCheckouts:   extraCheckouts,
+		WorkingDirectory: job.WorkingDirectory,
+		Shell:            job.Shell,
+	}
+}
+
+func nativeCheckoutDocPtrFromSpec(checkout *server.NativeCheckoutSpec) *nativeCheckoutDoc {
+	if checkout == nil {
+		return nil
+	}
+	doc := nativeCheckoutDocFromSpec(*checkout)
+	return &doc
+}
+
+func nativeCheckoutDocFromSpec(checkout server.NativeCheckoutSpec) nativeCheckoutDoc {
+	return nativeCheckoutDoc{
+		Repo: checkout.Repo,
+		Ref:  checkout.Ref,
+		Path: checkout.Path,
 	}
 }
 
@@ -2480,17 +2529,50 @@ func phaseFromDoc(doc phaseDoc) server.PhaseSpec {
 func jobFromDoc(doc nativeJobDoc) server.NativeJobSpec {
 	steps := make([]server.NativeStepSpec, 0, len(doc.Steps))
 	for _, step := range doc.Steps {
-		steps = append(steps, server.NativeStepSpec{Slug: step.Slug, Title: step.Title})
+		steps = append(steps, server.NativeStepSpec{
+			Slug:             step.Slug,
+			Title:            step.Title,
+			Type:             step.Type,
+			Run:              step.Run,
+			Shell:            step.Shell,
+			WorkingDirectory: step.WorkingDirectory,
+			Env:              stringMapOrEmpty(step.Env),
+		})
+	}
+	extraCheckouts := make([]server.NativeCheckoutSpec, 0, len(doc.ExtraCheckouts))
+	for _, checkout := range doc.ExtraCheckouts {
+		extraCheckouts = append(extraCheckouts, nativeCheckoutFromDoc(checkout))
 	}
 	return server.NativeJobSpec{
-		ID:             doc.ID,
-		Name:           doc.Name,
-		Image:          doc.Image,
-		Command:        sliceOrEmpty(doc.Command),
-		Args:           sliceOrEmpty(doc.Args),
-		Env:            stringMapOrEmpty(doc.Env),
-		Steps:          steps,
-		TimeoutSeconds: doc.TimeoutSeconds,
+		ID:               doc.ID,
+		Name:             doc.Name,
+		Image:            doc.Image,
+		Command:          sliceOrEmpty(doc.Command),
+		Args:             sliceOrEmpty(doc.Args),
+		Env:              stringMapOrEmpty(doc.Env),
+		Steps:            steps,
+		TimeoutSeconds:   doc.TimeoutSeconds,
+		Managed:          doc.Managed,
+		Checkout:         nativeCheckoutPtrFromDoc(doc.Checkout),
+		ExtraCheckouts:   extraCheckouts,
+		WorkingDirectory: doc.WorkingDirectory,
+		Shell:            doc.Shell,
+	}
+}
+
+func nativeCheckoutPtrFromDoc(doc *nativeCheckoutDoc) *server.NativeCheckoutSpec {
+	if doc == nil {
+		return nil
+	}
+	checkout := nativeCheckoutFromDoc(*doc)
+	return &checkout
+}
+
+func nativeCheckoutFromDoc(doc nativeCheckoutDoc) server.NativeCheckoutSpec {
+	return server.NativeCheckoutSpec{
+		Repo: doc.Repo,
+		Ref:  doc.Ref,
+		Path: doc.Path,
 	}
 }
 
@@ -5491,6 +5573,7 @@ func (s *Store) RecordNativeEventByID(ctx context.Context, project, runID string
 	}
 
 	eventPK := azcosmos.NewPartitionKeyString(project)
+	created := true
 	if _, err := s.runEvents.CreateItem(ctx, eventPK, payload, nil); err != nil {
 		// Idempotent: a 409 Conflict means the doc already exists.
 		if isCosmosStatus(err, http.StatusConflict) {
@@ -5498,15 +5581,22 @@ func (s *Store) RecordNativeEventByID(ctx context.Context, project, runID string
 			if readErr != nil {
 				return server.NativeRunEventResult{}, readErr
 			}
-			if err := json.Unmarshal(existing.Value, &eventDoc); err != nil {
+			var existingDoc nativeEventDoc
+			if err := json.Unmarshal(existing.Value, &existingDoc); err != nil {
 				return server.NativeRunEventResult{}, err
 			}
+			if !sameNativeEventDoc(existingDoc, eventDoc) {
+				return server.NativeRunEventResult{}, server.ErrConflict
+			}
+			created = false
 		} else {
 			return server.NativeRunEventResult{}, err
 		}
 	}
-	if err := s.applyNativeEventExecutionState(ctx, project, runID, eventDoc); err != nil {
-		return server.NativeRunEventResult{}, err
+	if created {
+		if err := s.applyNativeEventExecutionState(ctx, project, runID, eventDoc); err != nil {
+			return server.NativeRunEventResult{}, err
+		}
 	}
 
 	// Compute run_ref for the response.
@@ -5520,6 +5610,99 @@ func (s *Store) RecordNativeEventByID(ctx context.Context, project, runID string
 		Seq:      req.Seq,
 		Accepted: true,
 	}, nil
+}
+
+func sameNativeEventDoc(left, right nativeEventDoc) bool {
+	if left.Project != right.Project ||
+		left.RunID != right.RunID ||
+		left.AttemptIndex != right.AttemptIndex ||
+		left.Phase != right.Phase ||
+		left.JobID != right.JobID ||
+		left.Seq != right.Seq ||
+		left.Event != right.Event ||
+		left.StepSlug != right.StepSlug ||
+		left.Message != right.Message {
+		return false
+	}
+	if (left.ExitCode == nil) != (right.ExitCode == nil) {
+		return false
+	}
+	if left.ExitCode != nil && *left.ExitCode != *right.ExitCode {
+		return false
+	}
+	return reflect.DeepEqual(mapOrEmpty(left.Metadata), mapOrEmpty(right.Metadata))
+}
+
+func (s *Store) applyNativeEventExecutionState(ctx context.Context, project, runID string, event nativeEventDoc) error {
+	return s.mutateRunRaw(ctx, project, runID, func(doc runDoc, raw map[string]any) (bool, error) {
+		var attempt attemptDoc
+		found := false
+		for _, candidate := range doc.Attempts {
+			if candidate.AttemptIndex == event.AttemptIndex {
+				attempt = candidate
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false, nil
+		}
+		applyNativeEventToExecutionsRaw(raw, attempt, event)
+		if event.Event == "phase_output_set" {
+			if err := applyNativePhaseOutputSetRaw(raw, attempt, event); err != nil {
+				return false, err
+			}
+		}
+		raw["updated_at"] = event.CreatedAt
+		return true, nil
+	})
+}
+
+func applyNativePhaseOutputSetRaw(raw map[string]any, attempt attemptDoc, event nativeEventDoc) error {
+	key := strings.TrimSpace(stringValue(event.Metadata["key"]))
+	if key == "" {
+		return server.ValidationError{Message: "phase_output_set event requires metadata.key"}
+	}
+	value := stringValue(event.Metadata["value"])
+	attempts, _ := raw["attempts"].([]any)
+	for i, rawAttempt := range attempts {
+		attemptMap, ok := rawAttempt.(map[string]any)
+		if !ok {
+			continue
+		}
+		if attemptIndexFromRaw(attemptMap) != attempt.AttemptIndex {
+			continue
+		}
+		outputs, _ := attemptMap["phase_outputs"].(map[string]any)
+		if outputs == nil {
+			outputs = map[string]any{}
+		}
+		if _, exists := outputs[key]; exists {
+			return server.ValidationError{Message: fmt.Sprintf("phase output %q was already set for attempt %d", key, attempt.AttemptIndex)}
+		}
+		outputs[key] = value
+		attemptMap["phase_outputs"] = outputs
+		attempts[i] = attemptMap
+		raw["attempts"] = attempts
+		return nil
+	}
+	return nil
+}
+
+func attemptIndexFromRaw(attempt map[string]any) int {
+	switch value := attempt["attempt_index"].(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	case json.Number:
+		parsed, _ := value.Int64()
+		return int(parsed)
+	default:
+		return 0
+	}
 }
 
 // ListNativeEventsByID returns ordered native events for a run.
@@ -5716,6 +5899,9 @@ func (s *Store) RecordNativeJobCompletion(ctx context.Context, project, runID st
 			}
 			return nativeJobCompletionResult(run, expectedJobIDs, completions, attempt.CompletedAt != "" || allExpectedJobsCompleted(expectedJobIDs, completions), false), nil
 		}
+		if err := validateNativePhaseOutputKeys(jobID, newCompletion.PhaseOutputs, completions); err != nil {
+			return server.NativeJobCompletionResult{}, err
+		}
 
 		completions[jobID] = newCompletion
 		attemptMap["job_completions"] = completions
@@ -5745,6 +5931,24 @@ func (s *Store) RecordNativeJobCompletion(ctx context.Context, project, runID st
 		return nativeJobCompletionResult(run, expectedJobIDs, completions, phaseComplete, phaseComplete), nil
 	}
 	return server.NativeJobCompletionResult{}, fmt.Errorf("record native job completion: too many etag conflicts")
+}
+
+func validateNativePhaseOutputKeys(jobID string, outputs map[string]string, completions map[string]nativeJobCompletionDoc) error {
+	if len(outputs) == 0 {
+		return nil
+	}
+	for key := range outputs {
+		trimmed := strings.TrimSpace(key)
+		if trimmed == "" {
+			return server.ValidationError{Message: fmt.Sprintf("job %q declared an empty phase output key", jobID)}
+		}
+		for existingJobID, completion := range completions {
+			if _, exists := completion.PhaseOutputs[trimmed]; exists {
+				return server.ValidationError{Message: fmt.Sprintf("phase output %q already set by job %q", trimmed, existingJobID)}
+			}
+		}
+	}
+	return nil
 }
 
 func (s *Store) expectedNativeJobIDs(ctx context.Context, project, workflowName, phaseName string) ([]string, error) {
@@ -5884,26 +6088,6 @@ func (s *Store) RecordNativeJobsDispatched(ctx context.Context, project, runID, 
 	return s.mutateRunRaw(ctx, project, runID, func(_ runDoc, raw map[string]any) (bool, error) {
 		markPhaseJobsDispatchedRaw(raw, phase, jobs)
 		raw["updated_at"] = now
-		return true, nil
-	})
-}
-
-func (s *Store) applyNativeEventExecutionState(ctx context.Context, project, runID string, event nativeEventDoc) error {
-	return s.mutateRunRaw(ctx, project, runID, func(doc runDoc, raw map[string]any) (bool, error) {
-		var attempt attemptDoc
-		found := false
-		for _, candidate := range doc.Attempts {
-			if candidate.AttemptIndex == event.AttemptIndex {
-				attempt = candidate
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false, nil
-		}
-		applyNativeEventToExecutionsRaw(raw, attempt, event)
-		raw["updated_at"] = event.CreatedAt
 		return true, nil
 	})
 }

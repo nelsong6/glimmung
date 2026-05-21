@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -92,6 +93,62 @@ func TestNativeJobManifestIncludesRunnerCallbackEnv(t *testing.T) {
 	}
 	if env["PLAYWRIGHT_WS_ENDPOINT"] != "ws://slot-playwright.tank-operator-slot-1.svc.cluster.local:3000" {
 		t.Fatalf("Playwright endpoint=%q", env["PLAYWRIGHT_WS_ENDPOINT"])
+	}
+}
+
+func TestNativeJobManifestManagedJobUsesSharedRunnerEntrypoint(t *testing.T) {
+	req := NativeLaunchRequest{
+		Lease:    Lease{Project: "ambience"},
+		Workflow: Workflow{Name: "agent-run"},
+		Phase:    PhaseSpec{Name: "env-prep"},
+		Run: RunReplayData{
+			ID:            "run-123",
+			Project:       "ambience",
+			CallbackToken: stringPtr("callback-token"),
+			Attempts:      []RunAttemptData{{AttemptIndex: 1, Phase: "env-prep"}},
+		},
+	}
+	job := NativeJobSpec{
+		ID:               "prepare",
+		Managed:          true,
+		WorkingDirectory: "/workspace/ambience",
+		Steps: []NativeStepSpec{{
+			Slug: "unit",
+			Run:  "go test ./...",
+		}},
+	}
+
+	manifest := nativeJobManifest(Settings{
+		NativeRunnerNamespace:       "glimmung-runs",
+		NativeRunnerServiceAccount:  "glimmung-native-runner",
+		NativeRunnerCallbackBaseURL: "http://glimmung.glimmung.svc.cluster.local",
+		NativeRunnerImage:           "romainecr.azurecr.io/glimmung-native-runner:test",
+		NativeRunnerEntrypoint:      "/runner/glimmung-native-runner",
+		NativeRunnerCodexSecret:     "codex-credentials",
+		NativeRunnerCodexMountPath:  "/etc/codex-creds",
+	}, req, job, "job", "secret", "attempt")
+
+	container := nativeManifestContainer(manifest)
+	command, ok := container["command"].([]string)
+	if !ok || len(command) != 1 || command[0] != "/runner/glimmung-native-runner" {
+		t.Fatalf("command=%#v", container["command"])
+	}
+	if container["image"] != "romainecr.azurecr.io/glimmung-native-runner:test" {
+		t.Fatalf("image=%#v", container["image"])
+	}
+	if _, ok := container["args"]; ok {
+		t.Fatalf("managed runner should not receive legacy args: %#v", container["args"])
+	}
+	env := nativeManifestEnv(manifest)
+	var got NativeJobSpec
+	if err := json.Unmarshal([]byte(env["GLIMMUNG_RUNNER_JOB_SPEC"]), &got); err != nil {
+		t.Fatalf("runner spec JSON: %v", err)
+	}
+	if !got.Managed || got.ID != "prepare" || got.WorkingDirectory != "/workspace/ambience" {
+		t.Fatalf("runner spec=%#v", got)
+	}
+	if len(got.Steps) != 1 || got.Steps[0].Run != "go test ./..." {
+		t.Fatalf("runner steps=%#v", got.Steps)
 	}
 }
 
@@ -704,11 +761,7 @@ func runtimeListResponse(path string, deleted map[string]bool) string {
 }
 
 func nativeManifestEnv(manifest map[string]any) map[string]string {
-	spec := manifest["spec"].(map[string]any)
-	template := spec["template"].(map[string]any)
-	podSpec := template["spec"].(map[string]any)
-	containers := podSpec["containers"].([]any)
-	container := containers[0].(map[string]any)
+	container := nativeManifestContainer(manifest)
 	envRows := container["env"].([]map[string]any)
 	env := map[string]string{}
 	for _, row := range envRows {
@@ -717,4 +770,12 @@ func nativeManifestEnv(manifest map[string]any) map[string]string {
 		}
 	}
 	return env
+}
+
+func nativeManifestContainer(manifest map[string]any) map[string]any {
+	spec := manifest["spec"].(map[string]any)
+	template := spec["template"].(map[string]any)
+	podSpec := template["spec"].(map[string]any)
+	containers := podSpec["containers"].([]any)
+	return containers[0].(map[string]any)
 }

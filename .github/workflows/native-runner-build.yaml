@@ -1,0 +1,149 @@
+name: build native-runner
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'cmd/glimmung-native-runner/**'
+      - 'native-runner/Dockerfile'
+      - 'go.mod'
+      - 'go.sum'
+      - 'internal/**'
+      - '.github/workflows/native-runner-build.yaml'
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: "Git ref or commit SHA to build. Leave blank to build the dispatch revision."
+        required: false
+        type: string
+
+permissions:
+  id-token: write
+  contents: write
+
+concurrency:
+  group: native-runner-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      REGISTRY: romainecr.azurecr.io
+      IMAGE: glimmung-native-runner
+      VERSION_TAG: native-runner
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve requested ref
+        env:
+          INPUT_REF: ${{ inputs.git_ref }}
+        run: |
+          set -euo pipefail
+
+          git fetch --force --tags origin '+refs/heads/*:refs/remotes/origin/*'
+
+          target_ref="${INPUT_REF:-$GITHUB_SHA}"
+          if full_sha="$(git rev-parse --verify "${target_ref}^{commit}" 2>/dev/null)"; then
+            :
+          elif git show-ref --verify --quiet "refs/remotes/origin/${target_ref}"; then
+            full_sha="$(git rev-parse "refs/remotes/origin/${target_ref}^{commit}")"
+          elif git show-ref --verify --quiet "refs/tags/${target_ref}"; then
+            full_sha="$(git rev-parse "refs/tags/${target_ref}^{commit}")"
+          else
+            echo "::error::Unable to resolve git_ref '${target_ref}' to a commit."
+            exit 1
+          fi
+
+          git checkout --detach "$full_sha"
+          echo "Resolved ${target_ref} -> ${full_sha}"
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.ARM_CLIENT_ID }}
+          tenant-id: ${{ vars.ARM_TENANT_ID }}
+          subscription-id: ${{ vars.ARM_SUBSCRIPTION_ID }}
+
+      - name: ACR login
+        run: az acr login --name romainecr
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Compute image fingerprint
+        id: fingerprint
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="$(scripts/image-fingerprint.sh \
+            --image native-runner \
+            --dockerfile native-runner/Dockerfile \
+            --context . \
+            --paths 'native-runner/Dockerfile go.mod go.sum cmd/glimmung-native-runner internal')"
+          printf '%s\n' "${output}"
+          alias_tag="$(printf '%s\n' "${output}" | awk -F= '$1 == "proof_tag" { print $2 }')"
+          echo "fingerprint=$(printf '%s\n' "${output}" | awk -F= '$1 == "fingerprint" { print $2 }')" >> "${GITHUB_OUTPUT}"
+          echo "proof_tag=${alias_tag}" >> "${GITHUB_OUTPUT}"
+          echo "ALIAS_TAG=${alias_tag}" >> "$GITHUB_ENV"
+
+      - name: Check existing image
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          if az acr repository show-tags \
+              --name romainecr \
+              --repository "${IMAGE}" \
+              --query "[?@=='${ALIAS_TAG}'] | [0]" \
+              --output tsv | grep -qx "${ALIAS_TAG}"; then
+            echo "exists=true" >>"${GITHUB_OUTPUT}"
+            echo "Found reusable image ${REGISTRY}/${IMAGE}:${ALIAS_TAG}"
+          else
+            echo "exists=false" >>"${GITHUB_OUTPUT}"
+            echo "No reusable image found for native-runner fingerprint ${{ steps.fingerprint.outputs.fingerprint }}"
+          fi
+
+      - name: Build and push image
+        if: steps.image.outputs.exists != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: native-runner/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ env.ALIAS_TAG }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ env.VERSION_TAG }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE }}-build-cache:native-runner
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE }}-build-cache:native-runner,mode=max
+
+      - name: Bump chart native runner image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          image="${REGISTRY}/${IMAGE}:${ALIAS_TAG}"
+          bump() {
+            sed -i -E "/^nativeRunner:/,/^artifacts:/ s|^(  image: ).*$|\1${image}|" k8s/values.yaml
+          }
+          bump
+          if git diff --quiet k8s/values.yaml; then
+            echo "no tag change"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add k8s/values.yaml
+          git commit -m "chart: bump native runner image to fingerprint ${ALIAS_TAG} [skip ci]"
+          for i in 1 2 3; do
+            if git push origin HEAD:main; then exit 0; fi
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git checkout --theirs k8s/values.yaml
+              bump
+              git add k8s/values.yaml
+              git rebase --continue || git rebase --skip
+            fi
+          done
+          git push origin HEAD:main
