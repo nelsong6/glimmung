@@ -224,6 +224,7 @@ type Snapshot = {
 
 type TestLeaseDefaults = {
   global_ttl_seconds: number;
+  hot_swap_min_ttl_seconds?: number;
 };
 
 type Connection = "live" | "stale" | "dead";
@@ -251,6 +252,7 @@ type LayoutContext = {
 
 const ALL: Selection = { kind: "all" };
 const testSlotBuiltInDefaultTTLSeconds = 3600;
+const testSlotBuiltInHotSwapMinTTLSeconds = 1800;
 
 export function App() {
   // Routes-only — Layout owns the SSE/auth state and provides it via Outlet
@@ -2721,22 +2723,57 @@ function TestLeaseDefaultTTLSettings({
   isAdmin: boolean;
 }) {
   const globalTTL = snapshotGlobalTestLeaseDefaultTTL(snap);
+  const globalHotSwapMinTTL = snapshotGlobalTestLeaseHotSwapMinTTL(snap);
   return (
     <section className="test-lease-defaults" aria-label="test lease defaults">
       <TestLeaseDefaultTTLControl
         label="global default TTL"
+        endpoint="/v1/test-slots/default-ttl"
+        idBase="test-lease-default"
         valueSeconds={globalTTL}
         effectiveSeconds={globalTTL}
+        builtInSeconds={testSlotBuiltInDefaultTTLSeconds}
+        builtInResetLabel="use built-in"
+        signedIn={signedIn}
+        isAdmin={isAdmin}
+      />
+      <TestLeaseDefaultTTLControl
+        label="global hot-swap min TTL"
+        endpoint="/v1/test-slots/hot-swap-min-ttl"
+        idBase="test-lease-hot-swap-min"
+        valueSeconds={globalHotSwapMinTTL}
+        effectiveSeconds={globalHotSwapMinTTL}
+        builtInSeconds={testSlotBuiltInHotSwapMinTTLSeconds}
+        builtInResetLabel="use built-in"
         signedIn={signedIn}
         isAdmin={isAdmin}
       />
       {project && (
         <TestLeaseDefaultTTLControl
           label="project default TTL"
+          endpoint="/v1/test-slots/default-ttl"
+          idBase="test-lease-default"
           project={project}
           valueSeconds={projectTestLeaseDefaultTTLSeconds(project)}
           effectiveSeconds={projectTestLeaseDefaultTTLSeconds(project) ?? globalTTL}
           inheritedSeconds={globalTTL}
+          builtInSeconds={testSlotBuiltInDefaultTTLSeconds}
+          projectResetLabel="use global"
+          signedIn={signedIn}
+          isAdmin={isAdmin}
+        />
+      )}
+      {project && (
+        <TestLeaseDefaultTTLControl
+          label="project hot-swap min TTL"
+          endpoint="/v1/test-slots/hot-swap-min-ttl"
+          idBase="test-lease-hot-swap-min"
+          project={project}
+          valueSeconds={projectTestLeaseHotSwapMinTTLSeconds(project)}
+          effectiveSeconds={projectTestLeaseHotSwapMinTTLSeconds(project) ?? globalHotSwapMinTTL}
+          inheritedSeconds={globalHotSwapMinTTL}
+          builtInSeconds={testSlotBuiltInHotSwapMinTTLSeconds}
+          projectResetLabel="use global"
           signedIn={signedIn}
           isAdmin={isAdmin}
         />
@@ -2747,18 +2784,28 @@ function TestLeaseDefaultTTLSettings({
 
 function TestLeaseDefaultTTLControl({
   label,
+  endpoint,
+  idBase,
   project,
   valueSeconds,
   effectiveSeconds,
   inheritedSeconds,
+  builtInSeconds,
+  builtInResetLabel = "use built-in",
+  projectResetLabel = "use global",
   signedIn,
   isAdmin,
 }: {
   label: string;
+  endpoint: string;
+  idBase: string;
   project?: Project;
   valueSeconds: number | null;
   effectiveSeconds: number;
   inheritedSeconds?: number;
+  builtInSeconds: number;
+  builtInResetLabel?: string;
+  projectResetLabel?: string;
   signedIn: boolean;
   isAdmin: boolean;
 }) {
@@ -2771,7 +2818,8 @@ function TestLeaseDefaultTTLControl({
   const canSave = signedIn && isAdmin;
   const isProject = Boolean(project);
   const hasProjectOverride = isProject && configuredSeconds !== null && configuredSeconds !== undefined;
-  const isGlobalResettable = !isProject && configuredSeconds !== testSlotBuiltInDefaultTTLSeconds;
+  const isGlobalResettable = !isProject && configuredSeconds !== builtInSeconds;
+  const inputID = `${idBase}-${project?.name ?? "global"}`;
 
   useEffect(() => {
     if (!saving) {
@@ -2795,7 +2843,7 @@ function TestLeaseDefaultTTLControl({
     setSaving(true);
     setError(null);
     try {
-      const response = await authedFetch("/v1/test-slots/default-ttl", {
+      const response = await authedFetch(endpoint, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2821,7 +2869,7 @@ function TestLeaseDefaultTTLControl({
     setSaving(true);
     setError(null);
     try {
-      const response = await authedFetch("/v1/test-slots/default-ttl", {
+      const response = await authedFetch(endpoint, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2834,7 +2882,7 @@ function TestLeaseDefaultTTLControl({
         setError(`${response.status} ${text || response.statusText}`);
         return;
       }
-      setLocalValueSeconds(project ? null : testSlotBuiltInDefaultTTLSeconds);
+      setLocalValueSeconds(project ? null : builtInSeconds);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -2844,13 +2892,13 @@ function TestLeaseDefaultTTLControl({
 
   return (
     <form className="test-lease-default" onSubmit={submit}>
-      <label htmlFor={`test-lease-default-${project?.name ?? "global"}`}>{label}</label>
+      <label htmlFor={inputID}>{label}</label>
       <strong className="mono">{formatTTL(displaySeconds)}</strong>
       {isProject && !hasProjectOverride && (
         <span className="mono dim">inherits {formatTTL(inheritedSeconds ?? effectiveSeconds)}</span>
       )}
       <input
-        id={`test-lease-default-${project?.name ?? "global"}`}
+        id={inputID}
         type="number"
         min={1}
         step={1}
@@ -2864,7 +2912,7 @@ function TestLeaseDefaultTTLControl({
       </button>
       {(hasProjectOverride || isGlobalResettable) && (
         <button type="button" className="link" onClick={reset} disabled={!canSave || saving}>
-          {isProject ? "use global" : "use built-in"}
+          {isProject ? projectResetLabel : builtInResetLabel}
         </button>
       )}
       {!canSave && <span className="dim mono">admin sign-in required</span>}
@@ -3398,8 +3446,25 @@ function snapshotGlobalTestLeaseDefaultTTL(snap: Snapshot): number {
     : testSlotBuiltInDefaultTTLSeconds;
 }
 
+function snapshotGlobalTestLeaseHotSwapMinTTL(snap: Snapshot): number {
+  const ttl = snap.test_lease_defaults?.hot_swap_min_ttl_seconds;
+  return typeof ttl === "number" && Number.isFinite(ttl) && ttl > 0
+    ? ttl
+    : testSlotBuiltInHotSwapMinTTLSeconds;
+}
+
 function projectTestLeaseDefaultTTLSeconds(project: Project): number | null {
   const raw = project.metadata?.test_lease_default_ttl_seconds ?? project.metadata?.testLeaseDefaultTTLSeconds;
+  if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) return raw;
+  if (typeof raw === "string" && raw.trim()) {
+    const parsed = Number.parseInt(raw, 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return null;
+}
+
+function projectTestLeaseHotSwapMinTTLSeconds(project: Project): number | null {
+  const raw = project.metadata?.test_lease_hot_swap_min_ttl_seconds ?? project.metadata?.testLeaseHotSwapMinTTLSeconds;
   if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) return raw;
   if (typeof raw === "string" && raw.trim()) {
     const parsed = Number.parseInt(raw, 10);

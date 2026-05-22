@@ -31,11 +31,83 @@ type TestSlotHotSwapHistoryEntry struct {
 }
 
 type TestSlotHotSwapHistoryResult struct {
-	Lease string                      `json:"lease"`
-	Entry TestSlotHotSwapHistoryEntry `json:"entry"`
+	Lease               string                         `json:"lease"`
+	Entry               TestSlotHotSwapHistoryEntry    `json:"entry"`
+	LeaseExtension      *TestSlotHotSwapLeaseExtension `json:"lease_extension,omitempty"`
+	LeaseExtensionError string                         `json:"lease_extension_error,omitempty"`
 }
 
-func appendTestSlotHotSwapHistory(store ReadStore) http.HandlerFunc {
+type TestSlotHotSwapLeaseExtension struct {
+	Extended            bool `json:"extended"`
+	PreviousTTLSeconds  int  `json:"previous_ttl_seconds"`
+	TTLSeconds          int  `json:"ttl_seconds"`
+	MinRemainingSeconds int  `json:"min_remaining_seconds"`
+}
+
+func ensureHotSwapLeaseMinimumByProjectName(ctx context.Context, store ReadStore, preparer TestSlotPreparer, projectName string, lease Lease) (*TestSlotHotSwapLeaseExtension, error) {
+	project, ok := projectByName(ctx, store, projectName)
+	if !ok {
+		project = Project{Name: projectName}
+	}
+	return ensureHotSwapLeaseMinimum(ctx, store, preparer, project, lease)
+}
+
+func ensureHotSwapLeaseMinimum(ctx context.Context, store ReadStore, preparer TestSlotPreparer, project Project, lease Lease) (*TestSlotHotSwapLeaseExtension, error) {
+	if lease.State != "claimed" || !boolFromMap(lease.Metadata, "test_slot_checkout") {
+		return nil, nil
+	}
+	minSeconds := hotSwapMinTTLForTestLease(ctx, store, project)
+	if minSeconds <= 0 {
+		return nil, nil
+	}
+	nextTTLSeconds, shouldExtend := hotSwapMinimumTTLSeconds(lease, time.Now().UTC(), minSeconds)
+	extension := &TestSlotHotSwapLeaseExtension{
+		Extended:            shouldExtend,
+		PreviousTTLSeconds:  lease.TTLSeconds,
+		TTLSeconds:          lease.TTLSeconds,
+		MinRemainingSeconds: minSeconds,
+	}
+	if !shouldExtend {
+		return extension, nil
+	}
+	updater, ok := store.(LeaseTTLUpdater)
+	if !ok || updater == nil {
+		return nil, errors.New("lease TTL updater not configured")
+	}
+	updated, err := updater.UpdateLeaseTTLByRef(ctx, lease.Project, LeasePublicRefFromLease(lease), nextTTLSeconds)
+	if err != nil {
+		return nil, err
+	}
+	rearmUpdatedLeaseTimer(ctx, store, preparer, updated)
+	extension.Extended = true
+	extension.TTLSeconds = updated.TTLSeconds
+	return extension, nil
+}
+
+func hotSwapMinimumTTLSeconds(lease Lease, now time.Time, minRemainingSeconds int) (int, bool) {
+	if minRemainingSeconds <= 0 {
+		return lease.TTLSeconds, false
+	}
+	started := lease.RequestedAt
+	if lease.AssignedAt != nil {
+		started = *lease.AssignedAt
+	}
+	if started.IsZero() {
+		started = now
+	}
+	currentExpiresAt := started.Add(time.Duration(lease.TTLSeconds) * time.Second)
+	minExpiresAt := now.Add(time.Duration(minRemainingSeconds) * time.Second)
+	if !currentExpiresAt.Before(minExpiresAt) {
+		return lease.TTLSeconds, false
+	}
+	nextTTL := int((minExpiresAt.Sub(started) + time.Second - time.Nanosecond) / time.Second)
+	if nextTTL <= lease.TTLSeconds {
+		return lease.TTLSeconds, false
+	}
+	return nextTTL, true
+}
+
+func appendTestSlotHotSwapHistory(store ReadStore, preparer TestSlotPreparer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		writer, ok := store.(TestSlotHotSwapHistoryStore)
 		stateStore, hasState := store.(StateStore)
@@ -85,6 +157,15 @@ func appendTestSlotHotSwapHistory(store ReadStore) http.HandlerFunc {
 			writeInternalError(w, r, err, "append test-slot hot-swap history failed")
 			return
 		}
-		writeJSON(w, http.StatusOK, TestSlotHotSwapHistoryResult{Lease: LeasePublicRefFromLease(lease), Entry: entry})
+		extension, err := ensureHotSwapLeaseMinimumByProjectName(r.Context(), store, preparer, req.Project, lease)
+		if err != nil {
+			writeJSON(w, http.StatusOK, TestSlotHotSwapHistoryResult{
+				Lease:               LeasePublicRefFromLease(lease),
+				Entry:               entry,
+				LeaseExtensionError: err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, TestSlotHotSwapHistoryResult{Lease: LeasePublicRefFromLease(lease), Entry: entry, LeaseExtension: extension})
 	}
 }

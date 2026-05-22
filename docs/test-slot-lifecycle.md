@@ -188,6 +188,7 @@ lifecycle transition responds to an explicit event:
 |---|---|---|
 | count changed | `PATCH /v1/projects/{project}/test-environments/count` | handler writes the new count, seeds missing slot docs as `unseeded`, deletes slot docs above the new count, fires per-slot provisioning goroutines for any in `unseeded`, returns immediately |
 | default TTL changed | `PATCH /v1/test-slots/default-ttl` | updates the global generated test-slot lease TTL, or a project's override; future checkouts use the new default unless they pass `ttl_seconds` explicitly |
+| hot-swap minimum TTL changed | `PATCH /v1/test-slots/hot-swap-min-ttl` | updates the global minimum lease duration after a hot-swap, or a project's override; hot-swap recording extends shorter active leases to this remaining duration |
 | checkout | `POST /v1/test-slots/checkout` | acquires lease, arms a `time.AfterFunc` for `assigned_at + ttl_seconds`, starts activation goroutine |
 | TTL changed | `PATCH /v1/leases/ttl` | updates the claimed lease document and re-arms this replica's timer from the durable deadline |
 | extend | `POST /v1/test-slots/extend` | validates Tank-session ownership, adds `extend_seconds` to the claimed lease TTL, and uses the durable TTL update path |
@@ -204,6 +205,12 @@ global `test_lease_defaults.global_ttl_seconds`, then the built-in one-hour
 fallback. The `/v1/state` snapshot includes the global default, and project
 metadata carries any project override so the Test leases UI can edit both
 scopes without a separate read path.
+
+After a test-slot hot-swap, Glimmung also ensures the active lease has at
+least the configured hot-swap minimum TTL remaining. That value resolves from
+project `metadata.test_lease_hot_swap_min_ttl_seconds`, global
+`test_lease_defaults.hot_swap_min_ttl_seconds`, then the built-in 30-minute
+fallback.
 
 The TTL timer is the design choice that lets the lifecycle stay event-driven
 without losing auto-expiry. Polling the lease list every N seconds to ask

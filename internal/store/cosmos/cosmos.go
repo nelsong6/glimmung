@@ -331,7 +331,10 @@ func (s *Store) ReadTestLeaseDefaults(ctx context.Context) (server.TestLeaseDefa
 	if err := json.Unmarshal(read.Value, &doc); err != nil {
 		return server.TestLeaseDefaults{}, err
 	}
-	return server.TestLeaseDefaults{GlobalTTLSeconds: doc.GlobalTTLSeconds}, nil
+	return server.TestLeaseDefaults{
+		GlobalTTLSeconds:     doc.GlobalTTLSeconds,
+		HotSwapMinTTLSeconds: doc.HotSwapMinTTLSeconds,
+	}, nil
 }
 
 func (s *Store) SetGlobalTestLeaseDefaultTTL(ctx context.Context, ttlSeconds *int) (server.TestLeaseDefaults, error) {
@@ -372,7 +375,54 @@ func (s *Store) SetGlobalTestLeaseDefaultTTL(ctx context.Context, ttlSeconds *in
 	if _, err := s.projects.UpsertItem(ctx, pk, payload, nil); err != nil {
 		return server.TestLeaseDefaults{}, err
 	}
-	return server.TestLeaseDefaults{GlobalTTLSeconds: doc.GlobalTTLSeconds}, nil
+	return server.TestLeaseDefaults{
+		GlobalTTLSeconds:     doc.GlobalTTLSeconds,
+		HotSwapMinTTLSeconds: doc.HotSwapMinTTLSeconds,
+	}, nil
+}
+
+func (s *Store) SetGlobalTestLeaseHotSwapMinTTL(ctx context.Context, ttlSeconds *int) (server.TestLeaseDefaults, error) {
+	if ttlSeconds != nil && *ttlSeconds <= 0 {
+		return server.TestLeaseDefaults{}, server.ValidationError{Message: "ttl_seconds must be positive"}
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	doc := testLeaseDefaultsDoc{
+		ID:        testLeaseDefaultsDocID,
+		Kind:      testLeaseDefaultsDocKind,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	pk := azcosmos.NewPartitionKeyString(testLeaseDefaultsDocID)
+	read, err := s.projects.ReadItem(ctx, pk, testLeaseDefaultsDocID, nil)
+	if err == nil {
+		if err := json.Unmarshal(read.Value, &doc); err != nil {
+			return server.TestLeaseDefaults{}, err
+		}
+		doc.ID = testLeaseDefaultsDocID
+		doc.Kind = testLeaseDefaultsDocKind
+		if doc.CreatedAt == "" {
+			doc.CreatedAt = now
+		}
+		doc.UpdatedAt = now
+	} else if !isCosmosStatus(err, http.StatusNotFound) {
+		return server.TestLeaseDefaults{}, err
+	}
+	if ttlSeconds == nil {
+		doc.HotSwapMinTTLSeconds = 0
+	} else {
+		doc.HotSwapMinTTLSeconds = *ttlSeconds
+	}
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return server.TestLeaseDefaults{}, err
+	}
+	if _, err := s.projects.UpsertItem(ctx, pk, payload, nil); err != nil {
+		return server.TestLeaseDefaults{}, err
+	}
+	return server.TestLeaseDefaults{
+		GlobalTTLSeconds:     doc.GlobalTTLSeconds,
+		HotSwapMinTTLSeconds: doc.HotSwapMinTTLSeconds,
+	}, nil
 }
 
 func (s *Store) SetProjectTestLeaseDefaultTTL(ctx context.Context, project string, ttlSeconds *int) (server.Project, error) {
@@ -401,6 +451,45 @@ func (s *Store) SetProjectTestLeaseDefaultTTL(ctx context.Context, project strin
 		delete(metadata, "test_lease_default_ttl_seconds")
 	} else {
 		metadata["test_lease_default_ttl_seconds"] = *ttlSeconds
+	}
+	doc["metadata"] = metadata
+
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		return server.Project{}, err
+	}
+	if _, err := s.projects.ReplaceItem(ctx, partitionKey, project, payload, nil); err != nil {
+		return server.Project{}, err
+	}
+	return projectFromMap(doc)
+}
+
+func (s *Store) SetProjectTestLeaseHotSwapMinTTL(ctx context.Context, project string, ttlSeconds *int) (server.Project, error) {
+	if ttlSeconds != nil && *ttlSeconds <= 0 {
+		return server.Project{}, server.ValidationError{Message: "ttl_seconds must be positive"}
+	}
+	partitionKey := azcosmos.NewPartitionKeyString(project)
+	read, err := s.projects.ReadItem(ctx, partitionKey, project, nil)
+	if err != nil {
+		if isCosmosStatus(err, http.StatusNotFound) {
+			return server.Project{}, server.ErrNotFound
+		}
+		return server.Project{}, err
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(read.Value, &doc); err != nil {
+		return server.Project{}, err
+	}
+	metadata, _ := doc["metadata"].(map[string]any)
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	delete(metadata, "testLeaseHotSwapMinTTLSeconds")
+	if ttlSeconds == nil {
+		delete(metadata, "test_lease_hot_swap_min_ttl_seconds")
+	} else {
+		metadata["test_lease_hot_swap_min_ttl_seconds"] = *ttlSeconds
 	}
 	doc["metadata"] = metadata
 
@@ -1382,11 +1471,12 @@ type projectWriteDoc struct {
 }
 
 type testLeaseDefaultsDoc struct {
-	ID               string `json:"id"`
-	Kind             string `json:"kind"`
-	GlobalTTLSeconds int    `json:"globalTTLSeconds,omitempty"`
-	CreatedAt        string `json:"createdAt"`
-	UpdatedAt        string `json:"updatedAt"`
+	ID                   string `json:"id"`
+	Kind                 string `json:"kind"`
+	GlobalTTLSeconds     int    `json:"globalTTLSeconds,omitempty"`
+	HotSwapMinTTLSeconds int    `json:"hotSwapMinTTLSeconds,omitempty"`
+	CreatedAt            string `json:"createdAt"`
+	UpdatedAt            string `json:"updatedAt"`
 }
 
 type workflowDoc struct {

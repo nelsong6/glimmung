@@ -212,6 +212,7 @@ export const mockSnapshot = {
   ],
   test_lease_defaults: {
     global_ttl_seconds: 3600,
+    hot_swap_min_ttl_seconds: 1800,
   },
   projects: [
     {
@@ -850,7 +851,12 @@ function handleMockRequest(url: URL, init?: RequestInit): Response {
   if (path === "/v1/test-slots/default-ttl" && method === "PATCH") {
     const body = parseMockBody(init?.body);
     const ttl = typeof body.ttl_seconds === "number" && body.ttl_seconds > 0 ? body.ttl_seconds : mockSnapshot.test_lease_defaults.global_ttl_seconds;
-    return json({ defaults: { global_ttl_seconds: body.reset ? 3600 : ttl } });
+    return json({ defaults: { ...mockSnapshot.test_lease_defaults, global_ttl_seconds: body.reset ? 3600 : ttl } });
+  }
+  if (path === "/v1/test-slots/hot-swap-min-ttl" && method === "PATCH") {
+    const body = parseMockBody(init?.body);
+    const ttl = typeof body.ttl_seconds === "number" && body.ttl_seconds > 0 ? body.ttl_seconds : mockSnapshot.test_lease_defaults.hot_swap_min_ttl_seconds;
+    return json({ defaults: { ...mockSnapshot.test_lease_defaults, hot_swap_min_ttl_seconds: body.reset ? 1800 : ttl } });
   }
   if (path === "/v1/signals" && method === "POST") return json({ ref: `signal:mock:${Date.now()}`, state: "pending" });
   if (["/v1/projects", "/v1/workflows", "/v1/issues"].includes(path) && method === "POST") {

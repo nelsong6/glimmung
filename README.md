@@ -134,6 +134,7 @@ surface.
 | POST   | `/v1/leases/cancel`               | Cancel a lease by public ref. Admin-auth guarded. |
 | PATCH  | `/v1/leases/ttl`                  | Update a claimed lease TTL by public ref. Admin-auth guarded. |
 | PATCH  | `/v1/test-slots/default-ttl`      | Set or reset the default TTL for generated test-slot leases globally or for one project. Admin-auth guarded. |
+| PATCH  | `/v1/test-slots/hot-swap-min-ttl` | Set or reset the minimum remaining TTL applied after a test-slot hot-swap globally or for one project. Admin-auth guarded. |
 | GET    | `/v1/state`                       | Snapshot: projects, workflows, active leases, test environments, and waiting test-slot requests. |
 | GET    | `/v1/events`                      | Server-Sent Events stream — yields `{event: "state", data: <snapshot>}` every 2s. |
 | GET    | `/v1/config`                      | Public — `{entra_client_id, authority}` for SPA MSAL bootstrap. |
