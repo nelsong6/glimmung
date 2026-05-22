@@ -1803,4 +1803,10 @@ func TestAppendTestSlotHotSwapHistoryResolvesSlotLease(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"lease":"tank-slot-1"`) || !strings.Contains(rec.Body.String(), `"status":"ok"`) {
 		t.Fatalf("body=%s", rec.Body.String())
 	}
+	if store.updatedRef != "tank-slot-1" || store.updatedTTL != testSlotHotSwapMinTTLAfterHotSwapDefaultSeconds {
+		t.Fatalf("lease TTL update = ref %q ttl %d, want tank-slot-1 ttl %d", store.updatedRef, store.updatedTTL, testSlotHotSwapMinTTLAfterHotSwapDefaultSeconds)
+	}
+	if !strings.Contains(rec.Body.String(), `"lease_extension"`) {
+		t.Fatalf("body=%s, want lease_extension", rec.Body.String())
+	}
 }

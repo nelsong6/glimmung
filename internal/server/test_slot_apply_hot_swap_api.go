@@ -38,9 +38,10 @@ type TestSlotApplyHotSwapRequest struct {
 }
 
 type TestSlotApplyHotSwapResult struct {
-	Lease string                      `json:"lease"`
-	Apply ApplyHotSwapResult          `json:"apply"`
-	Entry TestSlotHotSwapHistoryEntry `json:"history_entry"`
+	Lease          string                         `json:"lease"`
+	Apply          ApplyHotSwapResult             `json:"apply"`
+	Entry          TestSlotHotSwapHistoryEntry    `json:"history_entry"`
+	LeaseExtension *TestSlotHotSwapLeaseExtension `json:"lease_extension,omitempty"`
 }
 
 // applyTestSlotHotSwap is the developer-driven build-and-swap endpoint.
@@ -59,12 +60,14 @@ type TestSlotApplyHotSwapResult struct {
 //  5. Endpoint dispatches a build-and-swap Job via ops.ApplyHotSwap,
 //     blocks on completion.
 //  6. Endpoint appends a hot-swap history entry (success or failure).
-//  7. Endpoint returns the structured result.
+//  7. Endpoint extends the lease when it has less than the configured
+//     hot-swap minimum TTL remaining.
+//  8. Endpoint returns the structured result.
 //
 // Hot-swap history is appended on EVERY outcome — durable state lives
 // in the system, not in the request body. A caller that disconnects
 // mid-request can re-query the lease history to see the result.
-func applyTestSlotHotSwap(store ReadStore, performer applyHotSwapPerformer) http.HandlerFunc {
+func applyTestSlotHotSwap(store ReadStore, preparer TestSlotPreparer, performer applyHotSwapPerformer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		writer, ok := store.(TestSlotHotSwapHistoryStore)
 		stateStore, hasState := store.(StateStore)
@@ -227,13 +230,21 @@ func applyTestSlotHotSwap(store ReadStore, performer applyHotSwapPerformer) http
 			Timings:     applyResult.Timings,
 			CreatedAt:   time.Now().UTC(),
 		}
-		if _, histErr := writer.AppendTestSlotHotSwapHistory(ctx, req.Project, leaseRef, entry); histErr != nil {
+		leaseWithHistory, histErr := writer.AppendTestSlotHotSwapHistory(ctx, req.Project, leaseRef, entry)
+		if histErr != nil {
 			// History write failed — log the apply outcome in the body
 			// even so. The history failure isn't load-bearing for the
 			// caller (they still get the result); it is load-bearing
 			// for later operators inspecting the lease. We return 200
 			// with the apply result either way.
 			diagnostics["history_write_error"] = histErr.Error()
+		} else {
+			lease = leaseWithHistory
+		}
+
+		leaseExtension, extendErr := ensureHotSwapLeaseMinimum(ctx, store, preparer, project, lease)
+		if extendErr != nil {
+			diagnostics["lease_extension_error"] = extendErr.Error()
 		}
 
 		if applyErr != nil {
@@ -241,16 +252,18 @@ func applyTestSlotHotSwap(store ReadStore, performer applyHotSwapPerformer) http
 			// the caller (MCP tool wrapper) can present the failure
 			// cleanly. The Outcome field encodes the failure mode.
 			writeJSON(w, http.StatusOK, TestSlotApplyHotSwapResult{
-				Lease: leaseRef,
-				Apply: applyResult,
-				Entry: entry,
+				Lease:          leaseRef,
+				Apply:          applyResult,
+				Entry:          entry,
+				LeaseExtension: leaseExtension,
 			})
 			return
 		}
 		writeJSON(w, http.StatusOK, TestSlotApplyHotSwapResult{
-			Lease: leaseRef,
-			Apply: applyResult,
-			Entry: entry,
+			Lease:          leaseRef,
+			Apply:          applyResult,
+			Entry:          entry,
+			LeaseExtension: leaseExtension,
 		})
 	}
 }

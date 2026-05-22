@@ -123,7 +123,9 @@ the cap; the underlying Job runs to its own deadline.
 6. Collects build + swap logs (last 4000 chars each).
 7. Appends a hot-swap history entry to the lease — **always**, success
    or failure. Durable state in the system, not in the response.
-8. Returns a structured result.
+8. Extends the lease when it has less than the configured hot-swap
+   minimum TTL remaining.
+9. Returns a structured result.
 
 ### What's deliberately out of scope (v1)
 

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nelsong6/glimmung/internal/auth"
 )
@@ -80,7 +81,7 @@ func TestApplyTestSlotHotSwapHappyPathResolves(t *testing.T) {
 		}, nil
 	}
 
-	handler := http.HandlerFunc(applyTestSlotHotSwap(store, performer))
+	handler := http.HandlerFunc(applyTestSlotHotSwap(store, nil, performer))
 	body := `{"project":"tank-operator","slot_name":"tank-operator-slot-1","artifact_kind":"agent_runner","git_ref":"feat/durable-stop-request"}`
 	req := authedApplyRequest(t, body)
 	rec := httptest.NewRecorder()
@@ -141,7 +142,7 @@ func TestApplyTestSlotHotSwapCodexRunnerResolves(t *testing.T) {
 		}, nil
 	}
 
-	handler := http.HandlerFunc(applyTestSlotHotSwap(store, performer))
+	handler := http.HandlerFunc(applyTestSlotHotSwap(store, nil, performer))
 	body := `{"project":"tank-operator","slot_name":"tank-operator-slot-1","artifact_kind":"codex_runner","git_ref":"feat/codex"}`
 	req := authedApplyRequest(t, body)
 	rec := httptest.NewRecorder()
@@ -176,7 +177,7 @@ func TestApplyTestSlotHotSwapRecordsFailureHistory(t *testing.T) {
 		}, errors.New("apply failed")
 	}
 
-	handler := http.HandlerFunc(applyTestSlotHotSwap(store, performer))
+	handler := http.HandlerFunc(applyTestSlotHotSwap(store, nil, performer))
 	body := `{"project":"tank-operator","slot_index":1,"artifact_kind":"agent_runner","git_ref":"feat/x"}`
 	req := authedApplyRequest(t, body)
 	rec := httptest.NewRecorder()
@@ -192,6 +193,64 @@ func TestApplyTestSlotHotSwapRecordsFailureHistory(t *testing.T) {
 	}
 }
 
+func TestApplyTestSlotHotSwapExtendsLeaseToConfiguredMinimum(t *testing.T) {
+	store := newApplyHotSwapStore(t)
+	store.projects[0].Metadata[testLeaseProjectHotSwapMinTTLSecondsKey] = 2700
+	started := time.Now().UTC().Add(-55 * time.Minute)
+	store.leases[0].RequestedAt = started
+	store.leases[0].TTLSeconds = 3600
+
+	performer := func(_ context.Context, opts ApplyHotSwapOptions) (ApplyHotSwapResult, error) {
+		return ApplyHotSwapResult{
+			ArtifactKind: opts.ArtifactKind,
+			GitRef:       opts.GitRef,
+			Outcome:      "persisted",
+			Timings:      map[string]string{},
+		}, nil
+	}
+
+	handler := http.HandlerFunc(applyTestSlotHotSwap(store, nil, performer))
+	body := `{"project":"tank-operator","slot_name":"tank-operator-slot-1","artifact_kind":"agent_runner","git_ref":"feat/x"}`
+	req := authedApplyRequest(t, body)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if store.updatedRef != "tank-operator-slot-1" {
+		t.Fatalf("updatedRef = %q, want tank-operator-slot-1", store.updatedRef)
+	}
+	if store.updatedTTL <= 3600 {
+		t.Fatalf("updatedTTL = %d, want extension beyond original 3600", store.updatedTTL)
+	}
+	minExpected := int(time.Since(started).Seconds()) + 2700
+	if store.updatedTTL < minExpected {
+		t.Fatalf("updatedTTL = %d, want at least %d", store.updatedTTL, minExpected)
+	}
+	var result TestSlotApplyHotSwapResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode: %v body=%s", err, rec.Body.String())
+	}
+	if result.LeaseExtension == nil || !result.LeaseExtension.Extended {
+		t.Fatalf("lease extension missing or not marked extended: %#v", result.LeaseExtension)
+	}
+}
+
+func TestHotSwapMinimumTTLSecondsKeepsLongLease(t *testing.T) {
+	started := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
+	lease := Lease{RequestedAt: started, TTLSeconds: 7200}
+	now := started.Add(30 * time.Minute)
+
+	next, ok := hotSwapMinimumTTLSeconds(lease, now, 1800)
+	if ok {
+		t.Fatalf("shouldExtend = true, want false")
+	}
+	if next != 7200 {
+		t.Fatalf("next TTL = %d, want original 7200", next)
+	}
+}
+
 // TestApplyTestSlotHotSwapClampsTimeout pins the request-timeout clamping:
 // caller asks for 9999s, server clamps to applyHotSwapTimeoutMax (600s).
 func TestApplyTestSlotHotSwapClampsTimeout(t *testing.T) {
@@ -202,7 +261,7 @@ func TestApplyTestSlotHotSwapClampsTimeout(t *testing.T) {
 		return ApplyHotSwapResult{Outcome: "persisted", Timings: map[string]string{}}, nil
 	}
 
-	handler := http.HandlerFunc(applyTestSlotHotSwap(store, performer))
+	handler := http.HandlerFunc(applyTestSlotHotSwap(store, nil, performer))
 	body := `{"project":"tank-operator","slot_name":"tank-operator-slot-1","artifact_kind":"agent_runner","git_ref":"feat/x","timeout_seconds":9999}`
 	req := authedApplyRequest(t, body)
 	rec := httptest.NewRecorder()
@@ -237,7 +296,7 @@ func TestApplyTestSlotHotSwapRejectsBackendWithoutBuilderImage(t *testing.T) {
 		return ApplyHotSwapResult{}, nil
 	}
 
-	handler := http.HandlerFunc(applyTestSlotHotSwap(store, performer))
+	handler := http.HandlerFunc(applyTestSlotHotSwap(store, nil, performer))
 	body := `{"project":"tank-operator","slot_name":"tank-operator-slot-1","artifact_kind":"backend","git_ref":"feat/x"}`
 	req := authedApplyRequest(t, body)
 	rec := httptest.NewRecorder()
@@ -258,7 +317,7 @@ func TestApplyTestSlotHotSwapRejectsMissingFields(t *testing.T) {
 	performer := func(_ context.Context, _ ApplyHotSwapOptions) (ApplyHotSwapResult, error) {
 		return ApplyHotSwapResult{}, nil
 	}
-	handler := http.HandlerFunc(applyTestSlotHotSwap(store, performer))
+	handler := http.HandlerFunc(applyTestSlotHotSwap(store, nil, performer))
 
 	bodies := []string{
 		`{"slot_name":"tank-operator-slot-1","artifact_kind":"agent_runner","git_ref":"x"}`,  // missing project

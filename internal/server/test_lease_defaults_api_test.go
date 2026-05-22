@@ -57,6 +57,54 @@ func TestUpdateProjectTestLeaseDefaultTTL(t *testing.T) {
 	}
 }
 
+func TestUpdateGlobalTestLeaseHotSwapMinTTL(t *testing.T) {
+	store := &fakeLeaseStore{}
+	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPatch, "/v1/test-slots/hot-swap-min-ttl", strings.NewReader(`{"ttl_seconds":2700}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.defaults.HotSwapMinTTLSeconds != 2700 {
+		t.Fatalf("global hot-swap min TTL=%d, want 2700", store.defaults.HotSwapMinTTLSeconds)
+	}
+	if !strings.Contains(rec.Body.String(), `"hot_swap_min_ttl_seconds":2700`) {
+		t.Fatalf("response=%s, want hot_swap_min_ttl_seconds", rec.Body.String())
+	}
+}
+
+func TestUpdateProjectTestLeaseHotSwapMinTTL(t *testing.T) {
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:       "tank-operator",
+			Name:     "tank-operator",
+			Metadata: map[string]any{},
+		}}},
+		defaults: TestLeaseDefaults{GlobalTTLSeconds: 3600, HotSwapMinTTLSeconds: 1800},
+	}
+	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPatch, "/v1/test-slots/hot-swap-min-ttl", strings.NewReader(`{"project":"tank-operator","ttl_seconds":5400}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	got, ok := store.projects[0].Metadata[testLeaseProjectHotSwapMinTTLSecondsKey].(int)
+	if !ok || got != 5400 {
+		t.Fatalf("project hot-swap min TTL=%#v, want 5400", store.projects[0].Metadata[testLeaseProjectHotSwapMinTTLSecondsKey])
+	}
+	if !strings.Contains(rec.Body.String(), `"test_lease_hot_swap_min_ttl_seconds":5400`) {
+		t.Fatalf("response=%s, want project metadata", rec.Body.String())
+	}
+}
+
 func TestResetProjectTestLeaseDefaultTTL(t *testing.T) {
 	store := &fakeLeaseStore{
 		fakeReadStore: fakeReadStore{projects: []Project{{
@@ -80,6 +128,32 @@ func TestResetProjectTestLeaseDefaultTTL(t *testing.T) {
 	}
 	if _, ok := store.projects[0].Metadata[testLeaseProjectDefaultTTLSecondsKey]; ok {
 		t.Fatalf("project default was not cleared: %#v", store.projects[0].Metadata)
+	}
+}
+
+func TestResetProjectTestLeaseHotSwapMinTTL(t *testing.T) {
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "tank-operator",
+			Name: "tank-operator",
+			Metadata: map[string]any{
+				testLeaseProjectHotSwapMinTTLSecondsKey: 5400,
+			},
+		}}},
+		defaults: TestLeaseDefaults{GlobalTTLSeconds: 3600, HotSwapMinTTLSeconds: 1800},
+	}
+	handler := newHandler(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPatch, "/v1/test-slots/hot-swap-min-ttl", strings.NewReader(`{"project":"tank-operator","reset":true}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, ok := store.projects[0].Metadata[testLeaseProjectHotSwapMinTTLSecondsKey]; ok {
+		t.Fatalf("project hot-swap min TTL was not cleared: %#v", store.projects[0].Metadata)
 	}
 }
 
