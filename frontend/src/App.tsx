@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { Link, Navigate, NavLink, Outlet, Route, Routes, useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { AdminPanel } from "./AdminPanel";
 import { IssueDetailView, RunViewer, type AbortState, type DispatchState, type IssueGraph } from "./IssueDetailView";
@@ -27,6 +27,7 @@ type Lease = {
   assigned_at: string | null;
   released_at: string | null;
   ttl_seconds: number;
+  playwright_ws_endpoint?: string | null;
 };
 
 type LeaseKind = "test" | "agent";
@@ -45,6 +46,22 @@ type TestSlotRequest = {
   ttl_seconds: number;
 };
 
+type TestSlotReturnHistoryEntry = {
+  event: string;
+  created_at: string;
+  project: string;
+  slot_index?: number | null;
+  slot_name?: string | null;
+  lease_ref: string;
+  lease_number?: number | null;
+  lease_requester?: string | null;
+  caller_pod_ip?: string | null;
+  caller_session_id?: string | null;
+  source: string;
+  reason?: string | null;
+  cleanup_started: boolean;
+};
+
 type TestEnvironment = {
   project: string;
   slot_index: number;
@@ -52,7 +69,7 @@ type TestEnvironment = {
   // "" means no durable slot status record exists yet (count was bumped and
   // the reconciler has not yet seeded this slot). It is not synonymous with
   // "warming" — warming means preliminary reconciliation is actually running.
-  state: "" | "available" | "warming" | "activating" | "active" | "cleaning" | "claimed" | "error";
+  state: "" | "available" | "warming" | "activating" | "active" | "cleaning" | "claimed" | "reserved" | "error";
   usable?: boolean;
   detail?: string | null;
   updated_at?: string | null;
@@ -67,6 +84,8 @@ type TestEnvironment = {
   cleanup_started_at?: string | null;
   cleanup_completed_at?: string | null;
   cleanup_error?: string | null;
+  test_slot_return_history?: TestSlotReturnHistoryEntry[];
+  playwright_ws_endpoint?: string | null;
   lease: Lease | null;
   waiting_requests: TestSlotRequest[];
 };
@@ -261,6 +280,7 @@ export function App() {
         <Route path="projects/:project" element={<ProjectRoute />} />
         <Route path="projects/:project/leases" element={<ProjectLeaseRedirectRoute />} />
         <Route path="projects/:project/leases/test" element={<ProjectLeaseRoute kind="test" />} />
+        <Route path="projects/:project/leases/test/slots/:slotId" element={<ProjectTestEnvironmentDetailRoute />} />
         <Route path="projects/:project/leases/test/:leaseId" element={<ProjectLeaseDetailRoute kind="test" />} />
         <Route path="projects/:project/leases/agent" element={<ProjectLeaseRoute kind="agent" />} />
         <Route path="projects/:project/leases/agent/:leaseId" element={<ProjectLeaseDetailRoute kind="agent" />} />
@@ -576,7 +596,11 @@ function buildBreadcrumbs(pathname: string): Breadcrumb[] {
         label: leaseKind,
         to: `/projects/${encodeURIComponent(parts[1] ?? "")}/leases/${parts[3] ?? "test"}`,
       });
-      if (parts[4]) crumbs.push({ label: `Lease ${parts[4]}` });
+      if (parts[4] === "slots") {
+        if (parts[5]) crumbs.push({ label: `Slot ${parts[5]}` });
+      } else if (parts[4]) {
+        crumbs.push({ label: `Lease ${parts[4]}` });
+      }
     } else if (parts[2] === "workflows") {
       crumbs.push({ label: "Workflows", to: `/projects/${encodeURIComponent(parts[1] ?? "")}/workflows` });
       if (parts[3]) crumbs.push({ label: parts[3] });
@@ -650,6 +674,18 @@ function ProjectLeaseRoute({ kind }: { kind: LeaseKind }) {
   const params = useParams<{ project?: string }>();
   const ctx = useOutletContext<LayoutContext>();
   return <LeaseIndexView {...ctx} kind={kind} projectName={decodeURIComponent(params.project ?? "")} />;
+}
+
+function ProjectTestEnvironmentDetailRoute() {
+  const params = useParams<{ project?: string; slotId?: string }>();
+  const ctx = useOutletContext<LayoutContext>();
+  return (
+    <TestEnvironmentDetailView
+      {...ctx}
+      projectName={decodeURIComponent(params.project ?? "")}
+      slotId={decodeURIComponent(params.slotId ?? "")}
+    />
+  );
 }
 
 function ProjectLeaseRedirectRoute() {
@@ -2427,12 +2463,13 @@ function TestEnvironmentIndexView({
               const detailTo = env.lease
                 ? `/projects/${encodeURIComponent(env.project)}/leases/test/${encodeURIComponent(leaseRouteId(env.lease))}`
                 : null;
+              const slotTo = testEnvironmentDetailPath(env);
               return (
                 <tr key={`${env.project}:${env.slot_index}`}>
                   {!projectName && (
                     <td><Link className="link" to={`/projects/${encodeURIComponent(env.project)}`}>{env.project}</Link></td>
                   )}
-                  <td className="mono">{env.slot_name}</td>
+                  <td className="mono"><Link className="link mono" to={slotTo}>{env.slot_name}</Link></td>
                   <td><span className={`pill ${testEnvironmentPillClass(env.state)}`} title={env.detail ?? testEnvironmentStateLabel(env.state)}>{testEnvironmentStateLabel(env.state)}</span></td>
                   <td className="mono dim" title={testEnvironmentWorkTitle(env)}>{testEnvironmentWorkLabel(env)}</td>
                   <td className="mono dim">
@@ -2456,6 +2493,219 @@ function TestEnvironmentIndexView({
         </table>
       )}
     </div>
+  );
+}
+
+type DetailRow = {
+  key: string;
+  value: ReactNode;
+  title?: string;
+};
+
+function DetailRows({ rows }: { rows: DetailRow[] }) {
+  return (
+    <div className="project-info">
+      {rows.map((row) => (
+        <div className="row" key={row.key}>
+          <span className="key">{row.key}</span>
+          <span className="val mono" title={row.title}>{row.value}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function TestEnvironmentDetailView({
+  snap,
+  signedIn,
+  isAdmin,
+  projectName,
+  slotId,
+}: LayoutContext & { projectName: string; slotId: string }) {
+  if (snap === null) return <div className="empty">Connecting…</div>;
+
+  const project = snap.projects.find((p) => p.name === projectName);
+  if (!project) {
+    return <div className="empty">Project {projectName || "(missing)"} was not found.</div>;
+  }
+
+  const env = (snap.test_environments ?? [])
+    .filter((candidate) => candidate.project === projectName)
+    .find((candidate) => testEnvironmentIdMatches(candidate, slotId));
+  if (!env) {
+    return <div className="empty">Slot {slotId || "(missing)"} was not found.</div>;
+  }
+
+  const waitingRequests = env.waiting_requests ?? [];
+  const history = env.test_slot_return_history ?? [];
+  const lease = env.lease;
+  const workLabel = testEnvironmentWorkLabel(env);
+  const leaseDetailTo = lease
+    ? `/projects/${encodeURIComponent(lease.project)}/leases/test/${encodeURIComponent(leaseRouteId(lease))}`
+    : null;
+  const requester = lease ? leaseRequester(lease) : null;
+
+  return (
+    <div className="project-workspace">
+      <section className="project-hero">
+        <div className="project-hero-main">
+          <div className="project-kicker mono">project / {env.project} / slot {env.slot_index}</div>
+          <h2>{env.slot_name}</h2>
+          <div className="project-repo mono">test environment slot</div>
+        </div>
+        <div className="project-facts">
+          <div className="project-fact"><span>state</span><strong>{testEnvironmentStateLabel(env.state)}</strong></div>
+          <div className="project-fact"><span>usable</span><strong>{env.usable ? "yes" : "no"}</strong></div>
+          <div className="project-fact"><span>waiting</span><strong>{waitingRequests.length}</strong></div>
+          <div className="project-fact"><span>lease</span><strong>{lease ? "active" : "none"}</strong></div>
+        </div>
+      </section>
+
+      <section className="project-focus test-env-focus">
+        <div>
+          <span className="key">work</span>
+          <strong className="mono" title={testEnvironmentWorkTitle(env)}>{workLabel}</strong>
+        </div>
+        <div>
+          <span className="key">detail</span>
+          <span className="mono">{env.detail ?? "-"}</span>
+        </div>
+        <div>
+          <span className="key">playwright</span>
+          <span className="mono">{env.playwright_ws_endpoint ? "ready" : "-"}</span>
+        </div>
+      </section>
+
+      <h2>Slot</h2>
+      <DetailRows rows={testEnvironmentDetailRows(env)} />
+
+      <h2>Lifecycle</h2>
+      <DetailRows rows={testEnvironmentLifecycleRows(env)} />
+
+      <h2>Lease</h2>
+      {lease ? (
+        <>
+          <div className="project-info">
+            {leaseDetailTo && (
+              <div className="row">
+                <span className="key">detail</span>
+                <span className="val mono"><Link className="link mono" to={leaseDetailTo}>{leaseDisplayName(lease)}</Link></span>
+              </div>
+            )}
+            {leaseDetailRows(lease).map((row) => (
+              <div className="row" key={row.key}>
+                <span className="key">{row.key}</span>
+                <span className="val mono">{row.value}</span>
+              </div>
+            ))}
+            {requester && (
+              <div className="row">
+                <span className="key">requester</span>
+                <span className="val mono" title={requester.title}>{requester.label}</span>
+              </div>
+            )}
+            <div className="row">
+              <span className="key">purpose</span>
+              <span className="val mono">{leasePurpose(lease)}</span>
+            </div>
+            <div className="row">
+              <span className="key">playwright</span>
+              <span className="val mono">{lease.playwright_ws_endpoint ?? "-"}</span>
+            </div>
+          </div>
+          <div className="lease-detail-actions">
+            <LeaseTTLAction lease={lease} signedIn={signedIn} isAdmin={isAdmin} />
+            {signedIn && <LeaseCancelAction lease={lease} />}
+          </div>
+
+          <h2>Requirements</h2>
+          <pre className="json-block">{formatJson(lease.requirements)}</pre>
+
+          <h2>Consumer metadata</h2>
+          <pre className="json-block">{formatJson(sanitizeLeaseMetadata(lease.metadata ?? {}))}</pre>
+        </>
+      ) : (
+        <div className="empty">No active lease on this slot.</div>
+      )}
+
+      <h2>Waiting requests ({waitingRequests.length})</h2>
+      <TestSlotRequestTable requests={waitingRequests} />
+
+      <h2>History ({history.length})</h2>
+      <TestSlotHistoryTable history={history} />
+
+      <h2>Raw slot snapshot</h2>
+      <pre className="json-block">{formatJson(sanitizeLeaseMetadata(env))}</pre>
+    </div>
+  );
+}
+
+function TestSlotRequestTable({ requests }: { requests: TestSlotRequest[] }) {
+  if (requests.length === 0) {
+    return <div className="empty">No waiting requests for this slot.</div>;
+  }
+
+  return (
+    <table>
+      <thead>
+        <tr>
+          <th>Request</th>
+          <th>Workflow</th>
+          <th>State</th>
+          <th>Requester</th>
+          <th>Requested</th>
+          <th>TTL</th>
+        </tr>
+      </thead>
+      <tbody>
+        {requests.map((request) => {
+          const requester = testSlotRequestRequester(request);
+          return (
+            <tr key={request.ref}>
+              <td className="mono dim">{request.ref}</td>
+              <td className="mono dim">{request.workflow}</td>
+              <td><span className={`pill ${testSlotRequestPillClass(request.state)}`}>{request.state}</span></td>
+              <td className="mono dim" title={requester.title}>{requester.label}</td>
+              <td className="mono dim" title={formatDateTime(request.requested_at)}>{relTime(request.requested_at)}</td>
+              <td className="mono dim">{formatTTL(request.ttl_seconds)}</td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+function TestSlotHistoryTable({ history }: { history: TestSlotReturnHistoryEntry[] }) {
+  if (history.length === 0) {
+    return <div className="empty">No slot history yet.</div>;
+  }
+
+  return (
+    <table>
+      <thead>
+        <tr>
+          <th>Event</th>
+          <th>Created</th>
+          <th>Lease</th>
+          <th>Source</th>
+          <th>Cleanup</th>
+          <th>Reason</th>
+        </tr>
+      </thead>
+      <tbody>
+        {history.map((entry, index) => (
+          <tr key={`${entry.created_at}:${entry.lease_ref}:${entry.event}:${index}`}>
+            <td><span className={`pill ${slotHistoryPillClass(entry)}`}>{entry.event || "event"}</span></td>
+            <td className="mono dim" title={formatDateTime(entry.created_at)}>{relTime(entry.created_at)}</td>
+            <td className="mono dim">{entry.lease_ref || "-"}</td>
+            <td className="mono dim">{entry.source || "-"}</td>
+            <td className="mono dim">{entry.cleanup_started ? "started" : "-"}</td>
+            <td className="lease-purpose" title={entry.reason ?? "-"}>{entry.reason ?? "-"}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 
@@ -2981,6 +3231,7 @@ function testEnvironmentPillClass(state: TestEnvironment["state"]): "free" | "bu
       return "free";
     case "active":
     case "claimed":
+    case "reserved":
       return "busy";
     case "error":
       return "drain";
@@ -3033,11 +3284,98 @@ function testEnvironmentWorkTitle(env: TestEnvironment): string {
   return parts.length > 0 ? parts.join(" | ") : env.detail ?? env.state;
 }
 
+function testEnvironmentDetailPath(env: TestEnvironment): string {
+  return `/projects/${encodeURIComponent(env.project)}/leases/test/slots/${encodeURIComponent(String(env.slot_index))}`;
+}
+
+function testEnvironmentIdMatches(env: TestEnvironment, slotId: string): boolean {
+  return String(env.slot_index) === slotId
+    || env.slot_name === slotId
+    || encodeURIComponent(env.slot_name) === slotId;
+}
+
+function testEnvironmentDetailRows(env: TestEnvironment): DetailRow[] {
+  return [
+    { key: "project", value: env.project },
+    { key: "slot index", value: String(env.slot_index) },
+    { key: "slot name", value: env.slot_name },
+    { key: "state", value: testEnvironmentStateLabel(env.state), title: env.detail ?? undefined },
+    { key: "usable", value: env.usable ? "yes" : "no" },
+    { key: "updated", value: detailTime(env.updated_at ?? null), title: formatDateTime(env.updated_at ?? null) },
+    { key: "ready", value: detailTime(env.ready_at ?? null), title: formatDateTime(env.ready_at ?? null) },
+    { key: "detail", value: env.detail ?? "-" },
+    { key: "playwright ws", value: env.playwright_ws_endpoint ?? "-" },
+  ];
+}
+
+function testEnvironmentLifecycleRows(env: TestEnvironment): DetailRow[] {
+  return [
+    { key: "work", value: testEnvironmentWorkLabel(env), title: testEnvironmentWorkTitle(env) },
+    { key: "activation attempt", value: env.activation_attempt ? String(env.activation_attempt) : "-" },
+    { key: "activation state", value: env.activation_state ?? "-" },
+    { key: "activation job", value: env.activation_job_name ?? "-" },
+    { key: "activation started", value: detailTime(env.activation_started_at ?? null), title: formatDateTime(env.activation_started_at ?? null) },
+    { key: "activation completed", value: detailTime(env.activation_completed_at ?? null), title: formatDateTime(env.activation_completed_at ?? null) },
+    { key: "activation error", value: env.activation_error ?? "-" },
+    { key: "cleanup state", value: env.cleanup_state ?? "-" },
+    { key: "cleanup started", value: detailTime(env.cleanup_started_at ?? null), title: formatDateTime(env.cleanup_started_at ?? null) },
+    { key: "cleanup completed", value: detailTime(env.cleanup_completed_at ?? null), title: formatDateTime(env.cleanup_completed_at ?? null) },
+    { key: "cleanup error", value: env.cleanup_error ?? "-" },
+  ];
+}
+
 function compactWorkLabel(kind: string, state?: string | null, startedAt?: string | null, attempt?: number | null): string {
   const suffix = attempt ? ` #${attempt}` : "";
   if (state) return `${kind}${suffix} ${state}`;
   if (startedAt) return `${kind}${suffix} running`;
   return `${kind}${suffix}`;
+}
+
+function testSlotRequestRequester(request: TestSlotRequest): { label: string; title: string } {
+  if (isRecord(request.requester)) {
+    const ref = valueLabel(request.requester.ref);
+    const label = ref || valueLabel(request.requester.label) || valueLabel(request.requester.consumer);
+    const detail = [request.requester.consumer, request.requester.kind, request.requester.ref]
+      .map(valueLabel)
+      .filter(Boolean)
+      .join(" / ");
+    if (label) return { label, title: detail || label };
+  }
+  const metadata = request.metadata ?? {};
+  const requester = metadata.requester;
+  if (isRecord(requester)) {
+    const ref = valueLabel(requester.ref);
+    const label = ref || valueLabel(requester.label) || valueLabel(requester.consumer);
+    const detail = [requester.consumer, requester.kind, requester.ref]
+      .map(valueLabel)
+      .filter(Boolean)
+      .join(" / ");
+    if (label) return { label, title: detail || label };
+  }
+  const requesterRef = valueLabel(metadata.requester_ref) || valueLabel(metadata.requesterRef);
+  if (requesterRef) return { label: requesterRef, title: requesterRef };
+  return { label: "-", title: "No requester recorded on this request" };
+}
+
+function testSlotRequestPillClass(state: TestSlotRequest["state"]): "free" | "busy" | "drain" | "info" {
+  switch (state) {
+    case "waiting":
+      return "busy";
+    case "fulfilled":
+      return "free";
+    case "cancelled":
+      return "drain";
+    default:
+      return "info";
+  }
+}
+
+function slotHistoryPillClass(entry: TestSlotReturnHistoryEntry): "free" | "busy" | "drain" | "info" {
+  const event = entry.event.toLowerCase();
+  if (event.includes("error") || event.includes("fail")) return "drain";
+  if (entry.cleanup_started) return "busy";
+  if (event === "return" || event.includes("complete")) return "free";
+  return "info";
 }
 
 function projectTestEnvironmentCount(project: Project, fallback: number): number {
@@ -3218,6 +3556,11 @@ function formatJson(value: unknown): string {
 
 function formatDateTime(iso: string | null): string {
   return iso ? new Date(iso).toLocaleString() : "-";
+}
+
+function detailTime(iso: string | null): string {
+  if (!iso) return "-";
+  return `${relTime(iso)} (${formatDateTime(iso)})`;
 }
 
 function ttlMinutesFromSeconds(seconds: number): number {
