@@ -1521,6 +1521,7 @@ h2 .inline-action,
 .project-info .val.mono {
   font-family: var(--font-mono);
   color: #d4d4d4;
+  overflow-wrap: anywhere;
 }
 .issue-control-plane {
   display: grid;
@@ -1709,6 +1710,24 @@ h2 .inline-action,
   display: block;
   margin-top: 3px;
   color: var(--fg);
+}
+.test-env-focus {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.test-env-focus .mono {
+  overflow-wrap: anywhere;
+}
+.lease-detail-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: -6px 0 2px;
+}
+@media (max-width: 760px) {
+  .test-env-focus {
+    grid-template-columns: 1fr;
+  }
 }
 .home-links {
   display: grid;
