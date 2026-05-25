@@ -37,7 +37,6 @@ type Store struct {
 	slots                    *azcosmos.ContainerClient
 	slotHistory              *azcosmos.ContainerClient
 	nativeProjectConcurrency int
-	nativeGlobalConcurrency  int
 }
 
 const workflowSchemaKind = "workflow_schema"
@@ -116,7 +115,6 @@ func NewFromSettings(settings server.Settings) (*Store, error) {
 		slots:                    slots,
 		slotHistory:              slotHistory,
 		nativeProjectConcurrency: settings.NativeRunnerProjectConcurrency,
-		nativeGlobalConcurrency:  settings.NativeRunnerGlobalConcurrency,
 	}, nil
 }
 
@@ -4406,48 +4404,26 @@ func (s *Store) reserveNativeSlotForLease(ctx context.Context, lease server.Leas
 }
 
 func (s *Store) availableNativeSlot(ctx context.Context, project string) (*int, error) {
-	// Global view of every claimed native-k8s lease across all projects:
-	// the function caps both per-project and global concurrency, so it
-	// has to see leases from every project. No ORDER BY, so a gateway
-	// cross-partition scan is fine. If this query starts dominating
-	// dispatch latency, the right fix is a per-slot summary doc, not
-	// fan-out — see docs/cosmos-partition-strategy.md.
+	// Native slot checkout is project-local: a project's configured slot
+	// count and per-project concurrency cap decide whether that project can
+	// lease another slot. Claimed slots in other projects must not block this
+	// project, so keep the query on the requested project's partition.
 	var docs []leaseDoc
-	if err := crossPartitionQuery(
+	if err := singlePartitionQuery(
 		ctx,
 		s.leases,
-		"SELECT * FROM c WHERE c.state = @state AND c.metadata.native_k8s = true",
-		[]azcosmos.QueryParameter{{Name: "@state", Value: "claimed"}},
+		azcosmos.NewPartitionKeyString(project),
+		"SELECT * FROM c WHERE c.project = @project AND c.state = @state AND c.metadata.native_k8s = true",
+		[]azcosmos.QueryParameter{
+			{Name: "@project", Value: project},
+			{Name: "@state", Value: "claimed"},
+		},
 		&docs,
 	); err != nil {
 		return nil, err
 	}
 	readySlots := s.nativeReadySlots(ctx, project)
-	globalCap := s.nativeGlobalCap()
-	if len(docs) >= globalCap {
-		return nil, nil
-	}
-	projectCap := s.nativeProjectCap()
-	used := map[int]bool{}
-	projectActive := 0
-	for _, doc := range docs {
-		if doc.Project != project {
-			continue
-		}
-		projectActive++
-		if slot := nativeSlotIndex(doc.Metadata); slot != nil {
-			used[*slot] = true
-		}
-	}
-	if projectActive >= projectCap || projectActive >= len(readySlots) {
-		return nil, nil
-	}
-	for _, slot := range readySlots {
-		if !used[slot] {
-			return &slot, nil
-		}
-	}
-	return nil, nil
+	return selectAvailableNativeSlot(project, readySlots, docs, s.nativeProjectCap()), nil
 }
 
 // nativeReadySlots returns the slot indices that are currently in the
@@ -4506,11 +4482,28 @@ func selectReadySlotIndices(slots []server.Slot, count int) []int {
 	return out
 }
 
-func (s *Store) nativeGlobalCap() int {
-	if s.nativeGlobalConcurrency > 0 {
-		return s.nativeGlobalConcurrency
+func selectAvailableNativeSlot(project string, readySlots []int, claimed []leaseDoc, projectCap int) *int {
+	used := map[int]bool{}
+	projectActive := 0
+	for _, doc := range claimed {
+		if doc.Project != project {
+			continue
+		}
+		projectActive++
+		if slot := nativeSlotIndex(doc.Metadata); slot != nil {
+			used[*slot] = true
+		}
 	}
-	return 5
+	if projectActive >= projectCap || projectActive >= len(readySlots) {
+		return nil
+	}
+	for _, slot := range readySlots {
+		if !used[slot] {
+			selected := slot
+			return &selected
+		}
+	}
+	return nil
 }
 
 func (s *Store) nativeProjectCap() int {

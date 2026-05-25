@@ -20,7 +20,6 @@ nativeRunner:
   entrypoint: /app/glimmung-native-runner
   callbackBaseUrl: http://glimmung.glimmung.svc.cluster.local
   projectConcurrency: 5
-  globalConcurrency: 5
   jobTtlSeconds: 259200
   namespaceRole: cluster-admin
   standbyDns:

@@ -54,8 +54,6 @@ spec:
               value: {{ .Values.nativeRunner.callbackBaseUrl | quote }}
             - name: NATIVE_RUNNER_PROJECT_CONCURRENCY
               value: {{ .Values.nativeRunner.projectConcurrency | quote }}
-            - name: NATIVE_RUNNER_GLOBAL_CONCURRENCY
-              value: {{ .Values.nativeRunner.globalConcurrency | quote }}
             - name: NATIVE_RUNNER_JOB_TTL_SECONDS
               value: {{ .Values.nativeRunner.jobTtlSeconds | quote }}
             - name: NATIVE_RUNNER_NAMESPACE_ROLE

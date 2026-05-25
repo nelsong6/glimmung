@@ -382,10 +382,12 @@ Runtime pod auth via the `infra-shared-identity` workload identity, which has `C
 
 ## Lock semantics
 
-Native lease acquisition is slot-backed. The allocator reads active native
-leases, checks project and global concurrency, selects the first ready
-unclaimed test slot, and writes one claimed lease document. If capacity is not
-available, callers get `no_capacity`; executor work is not launched.
+Native lease acquisition is slot-backed and project-local. The allocator reads
+the requested project's active native leases, checks that project against its
+configured slot count and project concurrency, selects the first ready unclaimed
+test slot, and writes one claimed lease document. Leases held by other projects
+do not consume this project's test-slot capacity. If capacity is not available,
+callers get `no_capacity`; executor work is not launched.
 
 Release paths:
 - **Fast**: workflow's own release step (if it has one).

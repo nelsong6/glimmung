@@ -2,6 +2,7 @@ package cosmos
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -86,6 +87,82 @@ func TestSelectReadySlotIndices(t *testing.T) {
 				if got[i] != tc.want[i] {
 					t.Fatalf("got %v, want %v", got, tc.want)
 				}
+			}
+		})
+	}
+}
+
+func TestSelectAvailableNativeSlotUsesProjectLocalClaims(t *testing.T) {
+	t.Parallel()
+	claimed := func(project string, slot int) leaseDoc {
+		return leaseDoc{
+			Project:  project,
+			State:    "claimed",
+			Metadata: map[string]any{"native_slot_index": strconv.Itoa(slot)},
+		}
+	}
+	cases := []struct {
+		name       string
+		ready      []int
+		claimed    []leaseDoc
+		projectCap int
+		want       *int
+	}{
+		{
+			name:       "first ready slot when project has no claims",
+			ready:      []int{1, 2},
+			projectCap: 5,
+			want:       intPtr(1),
+		},
+		{
+			name:       "skips claimed slot",
+			ready:      []int{1, 2, 3},
+			claimed:    []leaseDoc{claimed("ambience", 1)},
+			projectCap: 5,
+			want:       intPtr(2),
+		},
+		{
+			name:       "project cap blocks project only",
+			ready:      []int{1, 2, 3},
+			claimed:    []leaseDoc{claimed("ambience", 1), claimed("ambience", 2)},
+			projectCap: 2,
+			want:       nil,
+		},
+		{
+			name:       "all ready slots already claimed",
+			ready:      []int{1, 2},
+			claimed:    []leaseDoc{claimed("ambience", 1), claimed("ambience", 2)},
+			projectCap: 5,
+			want:       nil,
+		},
+		{
+			name:  "cross-project claims do not consume capacity",
+			ready: []int{1, 2},
+			claimed: []leaseDoc{
+				claimed("tank-operator", 1),
+				claimed("tank-operator", 2),
+				claimed("tank-operator", 3),
+			},
+			projectCap: 2,
+			want:       intPtr(1),
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := selectAvailableNativeSlot("ambience", tc.ready, tc.claimed, tc.projectCap)
+			if tc.want == nil {
+				if got != nil {
+					t.Fatalf("got %v, want nil", *got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatalf("got nil, want %v", *tc.want)
+			}
+			if *got != *tc.want {
+				t.Fatalf("got %v, want %v", *got, *tc.want)
 			}
 		})
 	}

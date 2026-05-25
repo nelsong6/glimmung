@@ -44,7 +44,6 @@ type Settings struct {
 	NativeRunnerPlaywrightImage        string
 	NativeRunnerPlaywrightPort         string
 	NativeRunnerProjectConcurrency     int
-	NativeRunnerGlobalConcurrency      int
 	NativeRunnerDispatchTimeoutSeconds int
 	NativeWorkloadIdentityIssuer       string
 	// AuthRomaineLifeBaseURL is the base URL of the auth.romaine.life
@@ -128,10 +127,6 @@ func SettingsFromEnv() Settings {
 		),
 		NativeRunnerProjectConcurrency: envIntOrDefault(
 			"NATIVE_RUNNER_PROJECT_CONCURRENCY",
-			5,
-		),
-		NativeRunnerGlobalConcurrency: envIntOrDefault(
-			"NATIVE_RUNNER_GLOBAL_CONCURRENCY",
 			5,
 		),
 		NativeRunnerDispatchTimeoutSeconds: envIntOrDefault(
