@@ -52,6 +52,8 @@ type IssueActionStatus =
   | { kind: "discarding"; key: string }
   | { kind: "error"; key: string; message: string };
 
+type IssueListState = "open" | "closed" | "all";
+
 export function IssuesView({
   signedIn,
   projectFilter,
@@ -60,6 +62,7 @@ export function IssuesView({
   maxRows = null,
   showProjectColumn = true,
   needsAttentionOnly = false,
+  allowStateFilter = false,
 }: {
   signedIn: boolean;
   projectFilter: string | null;
@@ -68,11 +71,13 @@ export function IssuesView({
   maxRows?: number | null;
   showProjectColumn?: boolean;
   needsAttentionOnly?: boolean;
+  allowStateFilter?: boolean;
 }) {
   const navigate = useNavigate();
   const [rows, setRows] = useState<IssueRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [issueState, setIssueState] = useState<IssueListState>("open");
   const [dispatchStatus, setDispatchStatus] = useState<DispatchStatus>({ kind: "idle" });
   const [issueActionStatus, setIssueActionStatus] = useState<IssueActionStatus>({ kind: "idle" });
 
@@ -84,6 +89,7 @@ export function IssuesView({
       if (projectFilter) params.set("project", projectFilter);
       if (workflowFilter) params.set("workflow", workflowFilter);
       if (needsAttentionOnly) params.set("needs_attention", "true");
+      if (allowStateFilter && issueState !== "open") params.set("state", issueState);
       const url = params.size > 0 ? `/v1/issues?${params.toString()}` : "/v1/issues";
       const r = await fetch(url);
       if (!r.ok) throw new Error(`${url} -> ${r.status}`);
@@ -99,7 +105,7 @@ export function IssuesView({
   useEffect(() => {
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [signedIn, projectFilter, workflowFilter, needsAttentionOnly]);
+  }, [signedIn, projectFilter, workflowFilter, needsAttentionOnly, allowStateFilter, issueState]);
 
   const dispatch = async (row: IssueRow) => {
     if (row.number === null) return;
@@ -165,6 +171,7 @@ export function IssuesView({
   const displayRows = maxRows !== null && visibleRows
     ? visibleRows.slice(0, maxRows)
     : visibleRows;
+  const emptyCopy = emptyIssueListCopy(needsAttentionOnly, projectFilter, issueState);
 
   return (
     <>
@@ -182,19 +189,26 @@ export function IssuesView({
           {loading ? "refreshing…" : "refresh"}
         </button>
       </h2>
+      {allowStateFilter && (
+        <div className="issue-state-filter" role="group" aria-label="issue state">
+          {(["open", "closed", "all"] as IssueListState[]).map((state) => (
+            <button
+              key={state}
+              type="button"
+              className={issueState === state ? "selected" : undefined}
+              aria-pressed={issueState === state}
+              onClick={() => setIssueState(state)}
+            >
+              {state}
+            </button>
+          ))}
+        </div>
+      )}
       {error && <div className="empty error">{error}</div>}
       {visibleRows === null && !error ? (
         <div className="empty">{loading ? "Loading…" : ""}</div>
       ) : visibleRows && visibleRows.length === 0 ? (
-        <div className="empty">
-          {needsAttentionOnly
-            ? projectFilter
-              ? `No issues need attention for ${projectFilter}.`
-              : "No issues need attention across registered repos."
-            : projectFilter
-            ? `No open issues for ${projectFilter}.`
-            : "No open issues across registered repos."}
-        </div>
+        <div className="empty">{emptyCopy}</div>
       ) : displayRows ? (
         <table>
           <thead>
@@ -240,53 +254,59 @@ export function IssuesView({
                     {renderLastRun(row)}
                   </td>
                   <td>
-                    <button
-                      type="button"
-                      className="link"
-                      onClick={() => void dispatch(row)}
-                      disabled={
-                        row.issue_lock_held
-                        || !signedIn
-                        || (status?.kind === "dispatching")
-                      }
-                    >
-                      {row.issue_lock_held
-                        ? "in flight"
-                        : !signedIn
-                        ? "sign in"
-                        : status?.kind === "dispatching"
-                        ? "dispatching…"
-                        : "dispatch"}
-                    </button>
-                    <button
-                      type="button"
-                      className="link"
-                      onClick={() => void discard(row)}
-                      disabled={
-                        row.issue_lock_held
-                        || !signedIn
-                        || (issueActionStatus.kind === "discarding" && issueActionStatus.key === key)
-                      }
-                      style={{ marginLeft: "0.75rem" }}
-                    >
-                      {issueActionStatus.kind === "discarding" && issueActionStatus.key === key
-                        ? "discarding…"
-                        : "discard"}
-                    </button>
-                    {status?.kind === "result" && (
-                      <span className={`pill ${pillClass(status.result.state)}`} style={{ marginLeft: "0.5rem" }}>
-                        {status.result.state}
-                      </span>
-                    )}
-                    {status?.kind === "error" && (
-                      <span className="pill drain" style={{ marginLeft: "0.5rem" }} title={status.message}>
-                        error
-                      </span>
-                    )}
-                    {issueActionStatus.kind === "error" && issueActionStatus.key === key && (
-                      <span className="pill drain" style={{ marginLeft: "0.5rem" }} title={issueActionStatus.message}>
-                        error
-                      </span>
+                    {row.state === "open" ? (
+                      <>
+                        <button
+                          type="button"
+                          className="link"
+                          onClick={() => void dispatch(row)}
+                          disabled={
+                            row.issue_lock_held
+                            || !signedIn
+                            || (status?.kind === "dispatching")
+                          }
+                        >
+                          {row.issue_lock_held
+                            ? "in flight"
+                            : !signedIn
+                            ? "sign in"
+                            : status?.kind === "dispatching"
+                            ? "dispatching…"
+                            : "dispatch"}
+                        </button>
+                        <button
+                          type="button"
+                          className="link"
+                          onClick={() => void discard(row)}
+                          disabled={
+                            row.issue_lock_held
+                            || !signedIn
+                            || (issueActionStatus.kind === "discarding" && issueActionStatus.key === key)
+                          }
+                          style={{ marginLeft: "0.75rem" }}
+                        >
+                          {issueActionStatus.kind === "discarding" && issueActionStatus.key === key
+                            ? "discarding…"
+                            : "discard"}
+                        </button>
+                        {status?.kind === "result" && (
+                          <span className={`pill ${pillClass(status.result.state)}`} style={{ marginLeft: "0.5rem" }}>
+                            {status.result.state}
+                          </span>
+                        )}
+                        {status?.kind === "error" && (
+                          <span className="pill drain" style={{ marginLeft: "0.5rem" }} title={status.message}>
+                            error
+                          </span>
+                        )}
+                        {issueActionStatus.kind === "error" && issueActionStatus.key === key && (
+                          <span className="pill drain" style={{ marginLeft: "0.5rem" }} title={issueActionStatus.message}>
+                            error
+                          </span>
+                        )}
+                      </>
+                    ) : (
+                      <span className="pill info">{row.state}</span>
                     )}
                   </td>
                 </tr>
@@ -321,6 +341,13 @@ function AttentionReason({ row }: { row: IssueRow }) {
 }
 
 function attentionReason(row: IssueRow): { label: string; detail: string | null; kind: string } {
+  if (row.state !== "open") {
+    return {
+      label: row.state,
+      detail: row.last_run_state ? `last run ${row.last_run_state}` : null,
+      kind: "info",
+    };
+  }
   if (row.issue_lock_held) {
     return {
       label: "run in flight",
@@ -376,4 +403,16 @@ function pillClass(state: string): string {
   if (state === "pending") return "pending";
   if (state === "already_running") return "busy";
   return "drain";
+}
+
+function emptyIssueListCopy(needsAttentionOnly: boolean, projectFilter: string | null, state: IssueListState): string {
+  if (needsAttentionOnly) {
+    return projectFilter
+      ? `No issues need attention for ${projectFilter}.`
+      : "No issues need attention across registered repos.";
+  }
+  const scope = projectFilter ? ` for ${projectFilter}` : " across registered repos";
+  if (state === "closed") return `No closed issues${scope}.`;
+  if (state === "all") return `No issues${scope}.`;
+  return `No open issues${scope}.`;
 }

@@ -1377,7 +1377,13 @@ function ProjectIssuesView({
           new issue
         </Link>
       </div>
-      <IssuesView signedIn={signedIn} projectFilter={project.name} showProjectColumn={false} />
+      <IssuesView
+        signedIn={signedIn}
+        projectFilter={project.name}
+        headingLabel="Issues"
+        showProjectColumn={false}
+        allowStateFilter
+      />
     </div>
   );
 }

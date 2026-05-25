@@ -337,6 +337,7 @@ export const mockSnapshot = {
 const mockIssues = [
   {
     id: "issue-glimmung-206",
+    ref: "glimmung#206",
     project: "glimmung",
     workflow: "issue-agent",
     repo: null,
@@ -346,6 +347,7 @@ const mockIssues = [
     labels: ["design-system", "run-graph", "issue-agent"],
     html_url: null,
     last_run_id: "run-glimmung-206-live",
+    last_run_ref: "glimmung#206/runs/1.1",
     last_run_number: 1,
     last_run_state: "in_progress",
     last_run_abort_reason: null,
@@ -353,6 +355,7 @@ const mockIssues = [
   },
   {
     id: "issue-glimmung-217",
+    ref: "glimmung#217",
     project: "glimmung",
     workflow: "portfolio-agent",
     repo: null,
@@ -362,13 +365,33 @@ const mockIssues = [
     labels: ["portfolio", "needs-design"],
     html_url: null,
     last_run_id: "run-glimmung-217-review",
+    last_run_ref: "glimmung#217/runs/2.1",
     last_run_number: 2,
     last_run_state: "review_required",
     last_run_abort_reason: null,
     issue_lock_held: false,
   },
   {
+    id: "issue-glimmung-198",
+    ref: "glimmung#198",
+    project: "glimmung",
+    workflow: "issue-agent",
+    repo: null,
+    number: 198,
+    title: "Archive completed issue list rows",
+    state: "closed",
+    labels: ["dashboard"],
+    html_url: null,
+    last_run_id: "run-glimmung-198-passed",
+    last_run_ref: "glimmung#198/runs/1.1",
+    last_run_number: 1,
+    last_run_state: "passed",
+    last_run_abort_reason: null,
+    issue_lock_held: false,
+  },
+  {
     id: "issue-ambience-44",
+    ref: "ambience#44",
     project: "ambience",
     workflow: "checkout-agent",
     repo: null,
@@ -378,9 +401,28 @@ const mockIssues = [
     labels: ["preview", "frontend"],
     html_url: null,
     last_run_id: null,
+    last_run_ref: null,
     last_run_number: null,
     last_run_state: null,
     last_run_abort_reason: null,
+    issue_lock_held: false,
+  },
+  {
+    id: "issue-ambience-172",
+    ref: "ambience#172",
+    project: "ambience",
+    workflow: "default",
+    repo: null,
+    number: 172,
+    title: "Effect: Distant storm at sea horizon",
+    state: "closed",
+    labels: ["ambient-effects"],
+    html_url: null,
+    last_run_id: "run-ambience-172-aborted",
+    last_run_ref: "ambience#172/runs/14.3",
+    last_run_number: 14,
+    last_run_state: "aborted",
+    last_run_abort_reason: "aborted_via_admin_api",
     issue_lock_held: false,
   },
 ];
@@ -806,9 +848,11 @@ function handleMockRequest(url: URL, init?: RequestInit): Response {
   if (path === "/v1/issues" && method === "GET") {
     const project = url.searchParams.get("project");
     const workflow = url.searchParams.get("workflow");
+    const state = url.searchParams.get("state") ?? "open";
     return json(mockIssues.filter((issue) => (
       (!project || issue.project === project)
       && (!workflow || issue.workflow === workflow)
+      && (state === "all" || issue.state === state)
     )));
   }
   if (path === "/v1/touchpoints" && method === "GET") {
