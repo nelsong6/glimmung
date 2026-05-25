@@ -142,6 +142,25 @@ func main() {
 			log.Printf("run-events migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
 		}()
 
+		// Stage 2d: pg.ProjectsStore foundation. Idempotent Migrate
+		// copies cosmos.projects (per-project docs + the singleton
+		// settings doc) into pg's `projects` + `test_lease_defaults`
+		// tables. Foundation-only this stage — no cosmos.Store method
+		// delegation yet (Stage 2e). Production reads/writes still go
+		// to cosmos until then.
+		pgProjects := pgstore.NewProjectsStore(pgPool)
+		_ = pgProjects // referenced by the goroutine below; no consumer in 2d.
+		go func() {
+			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			copied, skipped, err := pgProjects.Migrate(migCtx, store)
+			if err != nil {
+				log.Printf("projects migration cosmos->pg failed: %v (re-run by restarting pod; Migrate is idempotent)", err)
+				return
+			}
+			log.Printf("projects migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
+		}()
+
 		rt = &runtimeStore{Store: store, LocksStore: pgLocks}
 	} else {
 		log.Printf("runtime store disabled: cosmos store and postgres pool both required (store=%v pgPool=%v)", store != nil, pgPool != nil)
