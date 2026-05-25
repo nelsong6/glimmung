@@ -252,6 +252,18 @@ var schemaMigrations = []string{
 		ON issue_comments (project, issue_number, created_at)`,
 
 	// ------------------------------------------------------------------
+	// issue_counters — per-project next-issue-number allocator. Replaces
+	// the cosmos __counter:issue-number:<project> document. next_number
+	// stores the value to allocate on the NEXT CreateIssue call; on each
+	// allocation the row is incremented and the prior value is returned.
+	// First write seeds from MAX(number) + 1 of existing rows.
+	// ------------------------------------------------------------------
+	`CREATE TABLE IF NOT EXISTS issue_counters (
+		project           text PRIMARY KEY,
+		next_number       int NOT NULL
+	)`,
+
+	// ------------------------------------------------------------------
 	// playbooks — Cosmos partition by `/project`. Operator-authored
 	// batches of issue specs.
 	// ------------------------------------------------------------------

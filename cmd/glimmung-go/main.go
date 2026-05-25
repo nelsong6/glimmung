@@ -178,10 +178,11 @@ func main() {
 			log.Printf("workflows migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
 		}()
 
-		// Stage 2h foundation: pg.IssuesStore. Migrate copies cosmos
-		// issues + comments into pg. Cutover is a follow-up stage.
+		// Stage 2h foundation + Stage 2-issues cutover.
+		// pg.IssuesStore now serves all issue R/W; Migrate keeps copying
+		// historical cosmos rows on every boot (idempotent).
 		pgIssues := pgstore.NewIssuesStore(pgPool)
-		_ = pgIssues
+		store.SetPGIssues(pgIssues)
 		go func() {
 			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 			defer cancel()
