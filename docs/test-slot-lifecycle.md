@@ -118,6 +118,11 @@ environment. The request may identify the project and requester, but it must
 not choose the slot. Glimmung chooses an available slot and returns the assigned
 slot name, URL, and lease reference.
 
+Checkout capacity is project-local. A project's configured slot count and
+per-project checkout concurrency decide whether it can receive another native
+lease. Claimed native leases in other projects must not block checkout for this
+project.
+
 Runtime materialization belongs after slot assignment. If the checkout response
 claims the lease is usable, the required runtime resources for that lease must
 have been created and reached readiness.

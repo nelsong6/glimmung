@@ -744,20 +744,13 @@ func TestCancelLeaseCandidateRankPrefersActiveLease(t *testing.T) {
 	}
 }
 
-func TestNativeConcurrencyCapsDefaultAndOverride(t *testing.T) {
+func TestNativeProjectConcurrencyCapDefaultAndOverride(t *testing.T) {
 	store := &Store{}
-	if got := store.nativeGlobalCap(); got != 5 {
-		t.Fatalf("global cap=%d, want 5", got)
-	}
 	if got := store.nativeProjectCap(); got != 5 {
 		t.Fatalf("project cap=%d, want 5", got)
 	}
 
-	store.nativeGlobalConcurrency = 7
 	store.nativeProjectConcurrency = 2
-	if got := store.nativeGlobalCap(); got != 7 {
-		t.Fatalf("global cap override=%d, want 7", got)
-	}
 	if got := store.nativeProjectCap(); got != 2 {
 		t.Fatalf("project cap override=%d, want 2", got)
 	}
