@@ -24,11 +24,12 @@ type ChangeClassification struct {
 }
 
 type Contract struct {
-	Enabled     bool                `json:"enabled"`
-	Static      StaticContract      `json:"static"`
-	Backend     BackendContract     `json:"backend"`
-	AgentRunner AgentRunnerContract `json:"agent_runner"`
-	CodexRunner AgentRunnerContract `json:"codex_runner"`
+	Enabled            bool                       `json:"enabled"`
+	Static             StaticContract             `json:"static"`
+	Backend            BackendContract            `json:"backend"`
+	FidelityClassifier FidelityClassifierContract `json:"fidelity_classifier"`
+	AgentRunner        AgentRunnerContract        `json:"agent_runner"`
+	CodexRunner        AgentRunnerContract        `json:"codex_runner"`
 }
 
 type StaticContract struct {
@@ -54,6 +55,15 @@ type BackendContract struct {
 	RestartCommand   []string `json:"restart_command"`
 	// BuilderImage: see StaticContract.BuilderImage.
 	BuilderImage string `json:"builder_image,omitempty"`
+}
+
+// FidelityClassifierContract lets a project declare a repo-local command that
+// decides whether a requested hot-swap is faithful for the validation target.
+// This is deliberately project-owned: Tank's session-pod/runtime split has
+// constraints that generic webapp hot-swap does not.
+type FidelityClassifierContract struct {
+	Enabled bool   `json:"enabled"`
+	Command string `json:"command"`
 }
 
 // AgentRunnerContract describes the test-slot hot-swap shape for a
@@ -175,6 +185,11 @@ func (c Contract) Validate() error {
 		// not required here. The apply endpoint will reject a build-required
 		// static swap at request time if builder_image is unset.
 		_ = c.Static.BuilderImage
+	}
+	if c.FidelityClassifier.Enabled {
+		if strings.TrimSpace(c.FidelityClassifier.Command) == "" {
+			return errors.New("test_slot_hot_swap.fidelity_classifier.command is required")
+		}
 	}
 	if err := validateRunnerContract("agent_runner", c.AgentRunner); err != nil {
 		return err

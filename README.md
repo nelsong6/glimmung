@@ -263,10 +263,11 @@ from the session checkout, copy the compiled artifact into the selected pod as
 optionally poll the configured health path.
 
 The developer-driven path is `POST /v1/test-slots/apply-hot-swap` (MCP tool
-`apply_test_slot_hot_swap`). It takes a `git_ref` and dispatches a one-off
-Kubernetes Job that clones, builds, kubectl-streams the artifact into the
-target pod, sends the configured restart signal, and records hot-swap history
-on the lease. Sync UX, 120s default timeout, 600s hard cap. See
+`apply_test_slot_hot_swap`). It takes a `git_ref`, artifact kind, and validation
+target, then dispatches a one-off Kubernetes Job that clones, runs any
+project-owned fidelity classifier, builds, kubectl-streams the artifact into
+the target pod, sends the configured restart signal, and records hot-swap
+history on the lease. Sync UX, 120s default timeout, 600s hard cap. See
 [`docs/test-slot-hot-swap.md`](docs/test-slot-hot-swap.md) for the workflow
 contract and the migration from the manual kubectl pattern.
 
@@ -310,6 +311,10 @@ Glimmung dogfood metadata:
       "artifact": "/tmp/glimmung",
       "target": "/var/run/glimmung-hot/glimmung",
       "health_path": "/healthz"
+    },
+    "fidelity_classifier": {
+      "enabled": false,
+      "command": ""
     }
   }
 }

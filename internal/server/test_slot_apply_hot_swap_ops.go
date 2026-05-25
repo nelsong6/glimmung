@@ -27,6 +27,7 @@ type ApplyHotSwapOptions struct {
 	GitRef             string
 	RepoURL            string
 	TargetNamespace    string
+	ValidationTarget   string
 	JobNamespace       string
 	SwapContainerImage string
 	ServiceAccount     string
@@ -36,15 +37,16 @@ type ApplyHotSwapOptions struct {
 
 // ApplyHotSwapResult is the structured outcome returned to the caller.
 type ApplyHotSwapResult struct {
-	JobName       string            `json:"job_name"`
-	JobNamespace  string            `json:"job_namespace"`
-	ArtifactKind  string            `json:"artifact_kind"`
-	GitRef        string            `json:"git_ref"`
-	Outcome       string            `json:"outcome"` // persisted | build_failed | swap_failed | timeout
-	BuildLogsTail string            `json:"build_logs_tail,omitempty"`
-	SwapLogsTail  string            `json:"swap_logs_tail,omitempty"`
-	Error         string            `json:"error,omitempty"`
-	Timings       map[string]string `json:"timings"`
+	JobName          string            `json:"job_name"`
+	JobNamespace     string            `json:"job_namespace"`
+	ArtifactKind     string            `json:"artifact_kind"`
+	GitRef           string            `json:"git_ref"`
+	ValidationTarget string            `json:"validation_target,omitempty"`
+	Outcome          string            `json:"outcome"` // persisted | build_failed | swap_failed | timeout
+	BuildLogsTail    string            `json:"build_logs_tail,omitempty"`
+	SwapLogsTail     string            `json:"swap_logs_tail,omitempty"`
+	Error            string            `json:"error,omitempty"`
+	Timings          map[string]string `json:"timings"`
 }
 
 // k8sJobClient is the surface ApplyHotSwap needs from the k8s API.
@@ -77,11 +79,12 @@ type k8sJobClient interface {
 func ApplyHotSwap(ctx context.Context, k8s k8sJobClient, opts ApplyHotSwapOptions) (result ApplyHotSwapResult, err error) {
 	start := time.Now()
 	result = ApplyHotSwapResult{
-		ArtifactKind: opts.ArtifactKind,
-		GitRef:       opts.GitRef,
-		JobNamespace: opts.JobNamespace,
-		Outcome:      "swap_failed",
-		Timings:      map[string]string{},
+		ArtifactKind:     opts.ArtifactKind,
+		GitRef:           opts.GitRef,
+		JobNamespace:     opts.JobNamespace,
+		ValidationTarget: opts.ValidationTarget,
+		Outcome:          "swap_failed",
+		Timings:          map[string]string{},
 	}
 	// Wires the deferral named in scripts/check-apply-test-slot-hot-swap-migration.mjs:
 	// every terminal outcome (persisted | build_failed | swap_failed | timeout)
@@ -114,6 +117,10 @@ func ApplyHotSwap(ctx context.Context, k8s k8sJobClient, opts ApplyHotSwapOption
 	if opts.Timeout <= 0 {
 		opts.Timeout = 2 * time.Minute
 	}
+	if strings.TrimSpace(opts.ValidationTarget) == "" {
+		opts.ValidationTarget = "existing_session"
+		result.ValidationTarget = opts.ValidationTarget
+	}
 	if opts.JobNamespace == "" {
 		// glimmung-runs is where the glimmung pod's SA has Job/create
 		// RBAC (via the glimmung-native-launcher Role). The glimmung
@@ -122,6 +129,7 @@ func ApplyHotSwap(ctx context.Context, k8s k8sJobClient, opts ApplyHotSwapOption
 		// orchestrator deployment, not for dispatched workloads.
 		opts.JobNamespace = "glimmung-runs"
 	}
+	result.JobNamespace = opts.JobNamespace
 	if opts.ServiceAccount == "" {
 		// glimmung-native-runner is the SA for dispatched workloads in
 		// glimmung-runs. The apply-hot-swap Job's swap container runs
@@ -165,12 +173,14 @@ func ApplyHotSwap(ctx context.Context, k8s k8sJobClient, opts ApplyHotSwapOption
 		RepoURL:            opts.RepoURL,
 		BuilderImage:       runner.BuilderImage,
 		BuildCommand:       runner.BuildCommand,
+		FidelityCommand:    opts.Contract.FidelityClassifier.Command,
 		SwapContainerImage: opts.SwapContainerImage,
 		Source:             runner.Source,
 		Target:             runner.Target,
 		TargetNamespace:    opts.TargetNamespace,
 		TargetPodSelector:  runner.PodSelector,
 		TargetContainer:    runner.Container,
+		ValidationTarget:   opts.ValidationTarget,
 		RestartSignal:      runner.Restart,
 	})
 
@@ -245,20 +255,27 @@ type applyHotSwapJobInputs struct {
 	RepoURL            string
 	BuilderImage       string
 	BuildCommand       string
+	FidelityCommand    string
 	SwapContainerImage string
 	Source             string
 	Target             string
 	TargetNamespace    string
 	TargetPodSelector  string
 	TargetContainer    string
+	ValidationTarget   string
 	RestartSignal      string
 }
 
 func renderApplyHotSwapJobSpec(in applyHotSwapJobInputs) map[string]any {
+	validationTarget := strings.TrimSpace(in.ValidationTarget)
+	if validationTarget == "" {
+		validationTarget = "existing_session"
+	}
 	labels := map[string]any{
-		"app.kubernetes.io/name":          "glimmung-apply-hot-swap",
-		"glimmung.io/project":             in.Project,
-		"glimmung.io/apply-hot-swap-kind": in.ArtifactKind,
+		"app.kubernetes.io/name":                 "glimmung-apply-hot-swap",
+		"glimmung.io/project":                    in.Project,
+		"glimmung.io/apply-hot-swap-kind":        in.ArtifactKind,
+		"glimmung.io/hot-swap-validation-target": validationTarget,
 	}
 	buildScript := buildScriptFor(in)
 	swapScript := swapScriptFor(in)
@@ -276,6 +293,8 @@ func renderApplyHotSwapJobSpec(in applyHotSwapJobInputs) map[string]any {
 				"env": []any{
 					map[string]any{"name": "GIT_REF", "value": in.GitRef},
 					map[string]any{"name": "REPO_URL", "value": in.RepoURL},
+					map[string]any{"name": "GLIMMUNG_HOT_SWAP_ARTIFACT_KIND", "value": in.ArtifactKind},
+					map[string]any{"name": "GLIMMUNG_HOT_SWAP_VALIDATION_TARGET", "value": in.ValidationTarget},
 				},
 				"volumeMounts": []any{
 					map[string]any{"name": "work", "mountPath": "/work"},
@@ -326,7 +345,7 @@ func buildScriptFor(in applyHotSwapJobInputs) string {
 	// concern onto every contract author, the build prelude detects the
 	// package manager and installs git if missing. Costs ~5s on first run
 	// per builder image; not worth optimizing past that for v1.
-	return strings.Join([]string{
+	lines := []string{
 		"set -e",
 		"set -x",
 		// Best-effort git install if missing. Handles alpine (apk),
@@ -342,10 +361,19 @@ func buildScriptFor(in applyHotSwapJobInputs) string {
 		`fi`,
 		`git clone --depth=1 --branch "$GIT_REF" "$REPO_URL" /work/repo`,
 		`cd /work/repo`,
+	}
+	if strings.TrimSpace(in.FidelityCommand) != "" {
+		lines = append(lines,
+			`echo "running hot-swap fidelity classifier for ${GLIMMUNG_HOT_SWAP_VALIDATION_TARGET:-existing_session}"`,
+			`sh -c `+shellQuote(strings.TrimSpace(in.FidelityCommand)+` --artifact-kind "$GLIMMUNG_HOT_SWAP_ARTIFACT_KIND" --validation-target "$GLIMMUNG_HOT_SWAP_VALIDATION_TARGET" --enforce`),
+		)
+	}
+	lines = append(lines,
 		in.BuildCommand,
-		`cp -R "/work/repo/` + in.Source + `" /work/source`,
+		`cp -R "/work/repo/`+in.Source+`" /work/source`,
 		`ls -la /work/source | head`,
-	}, "\n")
+	)
+	return strings.Join(lines, "\n")
 }
 
 func swapScriptFor(in applyHotSwapJobInputs) string {

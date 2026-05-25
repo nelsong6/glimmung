@@ -19,6 +19,10 @@ func TestFromMetadataValidatesContract(t *testing.T) {
 				"target":        "/var/run/app-hot/app",
 				"health_path":   "/healthz",
 			},
+			"fidelity_classifier": map[string]any{
+				"enabled": true,
+				"command": "node scripts/classify-tank-test-fidelity.mjs",
+			},
 		},
 	})
 	if err != nil {
@@ -27,10 +31,26 @@ func TestFromMetadataValidatesContract(t *testing.T) {
 	if !ok || !contract.Enabled || !contract.Static.Enabled || !contract.Backend.Enabled {
 		t.Fatalf("contract=%#v ok=%v", contract, ok)
 	}
+	if contract.FidelityClassifier.Command != "node scripts/classify-tank-test-fidelity.mjs" {
+		t.Fatalf("fidelity classifier command = %q", contract.FidelityClassifier.Command)
+	}
 }
 
 func TestValidateRejectsIncompleteBackend(t *testing.T) {
 	err := Contract{Enabled: true, Backend: BackendContract{Enabled: true, Target: "/app"}}.Validate()
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestValidateRejectsFidelityClassifierWithoutCommand(t *testing.T) {
+	err := Contract{
+		Enabled: true,
+		Static:  StaticContract{Enabled: true, Source: "frontend/dist", Target: "/static"},
+		FidelityClassifier: FidelityClassifierContract{
+			Enabled: true,
+		},
+	}.Validate()
 	if err == nil {
 		t.Fatal("expected validation error")
 	}

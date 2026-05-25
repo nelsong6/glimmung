@@ -38,6 +38,11 @@ sub-contracts; a project enables whichever ones it needs.
       "builder_image": "golang:1.26-alpine"
     },
 
+    "fidelity_classifier": {
+      "enabled": true,
+      "command": "node scripts/classify-tank-test-fidelity.mjs"
+    },
+
     "agent_runner": {
       "enabled": true,
       "source": "agent-runner/dist",
@@ -77,6 +82,19 @@ kinds, so a missing image is unambiguous misconfiguration. For `backend`,
 contracts predate the field) but **required at request time** when the
 apply endpoint is invoked with `artifact_kind=backend`.
 
+### `fidelity_classifier`
+
+Projects with runtime-specific hot-swap limits can declare a repo-local
+classifier. Glimmung runs this command in the cloned repo before the build
+command and appends `--artifact-kind`, `--validation-target`, and `--enforce`.
+The command decides whether the requested hot-swap is faithful for targets like
+`existing_session`, `new_session`, or `full_runtime`.
+
+When this block is enabled, callers must pass `validation_target`. This is a
+project-owned guard, not a generic webapp heuristic: for example, Tank's runner
+hot-swap updates already-running session pods, while newly created session pods
+boot runner code from the branch image.
+
 ## The endpoint
 
 `POST /v1/test-slots/apply-hot-swap` (admin-authenticated).
@@ -87,6 +105,7 @@ apply endpoint is invoked with `artifact_kind=backend`.
   "slot_name": "tank-operator-slot-1",
   "artifact_kind": "agent_runner",
   "git_ref": "feat/durable-stop-request",
+  "validation_target": "existing_session",
   "timeout_seconds": 120
 }
 ```
@@ -114,8 +133,9 @@ the cap; the underlying Job runs to its own deadline.
    request-time `builder_image` is present.
 4. Dispatches a one-off Kubernetes Job:
    - **Init container** uses `contract.<kind>.builder_image`. Clones
-     the repo at `git_ref`, runs `contract.<kind>.build_command`,
-     leaves the resulting source dir at `/work/source`.
+     the repo at `git_ref`, runs the optional `fidelity_classifier`
+     command, runs `contract.<kind>.build_command`, leaves the resulting
+     source dir at `/work/source`.
    - **Main container** uses a kubectl-only image. Reads `/work/source`,
      tar-streams its contents into `contract.<kind>.target` inside the
      target pod, sends `contract.<kind>.restart` to PID 1.
