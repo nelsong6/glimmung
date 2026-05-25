@@ -21,6 +21,18 @@ import (
 	pgstore "github.com/nelsong6/glimmung/internal/store/pg"
 )
 
+// runtimeStore is the combined store passed to the HTTP server and the
+// background reconcilers. It embeds the cosmos-backed store (which holds
+// every method that hasn't been migrated yet) AND the Postgres-backed
+// LocksStore (which serves all lock operations as of Stage 2b). Go field
+// promotion gives the wrapper the union of both method sets — no manual
+// forwarding. Successive sub-stages will add more pg.* embeds; Stage 2i
+// removes the cosmos embed entirely.
+type runtimeStore struct {
+	*cosmosstore.Store
+	*pgstore.LocksStore
+}
+
 func main() {
 	settings := server.SettingsFromEnv()
 	store, err := cosmosstore.NewFromSettings(settings)
@@ -71,10 +83,41 @@ func main() {
 	} else {
 		log.Printf("postgres pool disabled: POSTGRES_HOST/POSTGRES_DATABASE/POSTGRES_USER not all set")
 	}
-	// Stage 2a: pgPool is held but unused. Stages 2b onward will start
-	// passing it into per-interface stores. Mark with _ to keep the
-	// compiler happy until then.
-	_ = pgPool
+	// Stage 2b: construct the Postgres LocksStore, run the one-shot
+	// idempotent migration that copies every cosmos lock document into
+	// the pg `locks` table, inject the LocksStore into cosmos.Store so
+	// its lock-reading methods (ListIssues / ListTouchpoints /
+	// GetIssueDetailByNumber / touchpoint detail) read from pg, and
+	// build the combined runtime store the reconcilers consume.
+	//
+	// `rt` is the only argument every consumer (server.New*, reconcilers,
+	// recovery sweep) should receive going forward. Passing the raw
+	// cosmos.Store would re-introduce the (now-deleted) cosmos lock
+	// methods to the interface fulfillment check and would fail to
+	// compile against any interface that includes ClaimLock etc.
+	var rt *runtimeStore
+	if store != nil && pgPool != nil {
+		pgLocks := pgstore.NewLocksStore(pgPool)
+		migCtx, migCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		copied, skipped, lockMigErr := pgLocks.Migrate(migCtx, store)
+		migCancel()
+		if lockMigErr != nil {
+			// Don't block startup on migration failure — the user's
+			// explicit choice in docs/postgres-migration.md is a full
+			// copy of existing data, but a transient cosmos read error
+			// shouldn't keep the pod from serving traffic on the new
+			// (empty) pg locks table. The pod logs the failure, and
+			// the operator can re-trigger the migration by deleting
+			// the pod (Migrate is idempotent).
+			log.Printf("lock migration cosmos->pg failed: %v (proceeding with pg locks; re-run by restarting pod)", lockMigErr)
+		} else {
+			log.Printf("lock migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
+		}
+		store.SetPGLocks(pgLocks)
+		rt = &runtimeStore{Store: store, LocksStore: pgLocks}
+	} else {
+		log.Printf("runtime store disabled: cosmos store and postgres pool both required (store=%v pgPool=%v)", store != nil, pgPool != nil)
+	}
 
 	artifacts, err := artifactstore.NewFromSettings(settings)
 	if err != nil {
@@ -115,12 +158,16 @@ func main() {
 		}
 		log.Printf("slot-storage migration ok: %s", summary)
 	}
-	if store != nil {
-		server.StartSignalDrainReconciler(context.Background(), store, nativeLauncher, log.Printf)
-		server.StartRunQueueReconciler(context.Background(), store, nativeLauncher, log.Printf)
-		server.StartRunDispatchTimeoutReconciler(context.Background(), settings, store, nativeLauncher, log.Printf)
+	// Background reconcilers consume the combined runtime store (rt) so
+	// they get both the cosmos-backed durable methods AND the pg-backed
+	// lock methods. cosmos.Store alone no longer satisfies these
+	// interfaces (Stage 2b deleted its lock methods).
+	if rt != nil {
+		server.StartSignalDrainReconciler(context.Background(), rt, nativeLauncher, log.Printf)
+		server.StartRunQueueReconciler(context.Background(), rt, nativeLauncher, log.Printf)
+		server.StartRunDispatchTimeoutReconciler(context.Background(), settings, rt, nativeLauncher, log.Printf)
 	}
-	if store != nil {
+	if rt != nil {
 		if nativeMinter, ok := ghClient.(server.NativeGitHubTokenMinter); ok {
 			// One-shot recovery sweep at startup: re-arm per-lease TTL
 			// timers, resume in-flight warming/activating/cleaning work, and
@@ -128,14 +175,14 @@ func main() {
 			// yet. After this returns, the test-slot lifecycle is purely
 			// event-driven — HTTP handlers and per-lease AfterFunc timers,
 			// no polling loop.
-			go server.RecoverInFlightTestSlots(context.Background(), store, nativeLauncher, nativeMinter, log.Printf)
+			go server.RecoverInFlightTestSlots(context.Background(), rt, nativeLauncher, nativeMinter, log.Printf)
 		}
 	}
 	addr := ":" + settings.Port
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           server.NewWithReconcilers(settings, store, authenticator, ghClient, workloadIdentities, managedOrigins, nativeLauncher, artifacts),
+		Handler:           server.NewWithReconcilers(settings, rt, authenticator, ghClient, workloadIdentities, managedOrigins, nativeLauncher, artifacts),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
