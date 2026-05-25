@@ -142,14 +142,15 @@ func main() {
 			log.Printf("run-events migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
 		}()
 
-		// Stage 2d: pg.ProjectsStore foundation. Idempotent Migrate
-		// copies cosmos.projects (per-project docs + the singleton
-		// settings doc) into pg's `projects` + `test_lease_defaults`
-		// tables. Foundation-only this stage — no cosmos.Store method
-		// delegation yet (Stage 2e). Production reads/writes still go
-		// to cosmos until then.
+		// Stage 2e: pg.ProjectsStore now serves every project read/write
+		// on cosmos.Store via delegation. SetPGProjects wires the field
+		// before the HTTP server starts so handlers find a populated
+		// store. Migrate runs in the background to ensure cosmos
+		// `projects` content is fully copied to pg (idempotent — Stage
+		// 2d already populated it; subsequent restarts re-run as
+		// safety).
 		pgProjects := pgstore.NewProjectsStore(pgPool)
-		_ = pgProjects // referenced by the goroutine below; no consumer in 2d.
+		store.SetPGProjects(pgProjects)
 		go func() {
 			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 			defer cancel()

@@ -8,33 +8,6 @@ import (
 	"github.com/nelsong6/glimmung/internal/server"
 )
 
-func TestProjectFromDocConvertsCamelCaseFields(t *testing.T) {
-	raw := []byte(`{
-		"id": "ambience",
-		"name": "ambience",
-		"githubRepo": "nelsong6/ambience",
-		"argocdApp": "ambience",
-		"metadata": {"tier": "app"},
-		"createdAt": "2026-05-11T03:00:00Z"
-	}`)
-	var doc projectDoc
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		t.Fatalf("decode doc: %v", err)
-	}
-
-	project := projectFromDoc(doc)
-
-	if project.GitHubRepo != "nelsong6/ambience" {
-		t.Fatalf("GitHubRepo=%q", project.GitHubRepo)
-	}
-	if project.Metadata["tier"] != "app" {
-		t.Fatalf("metadata=%#v", project.Metadata)
-	}
-	if project.CreatedAt.IsZero() {
-		t.Fatal("CreatedAt should be populated")
-	}
-}
-
 func TestNativeEventAttemptIndexAcceptsExplicitOrMetadataValue(t *testing.T) {
 	explicit := 3
 	if got, ok := nativeEventAttemptIndex(server.NativeRunEventRequest{AttemptIndex: &explicit}); !ok || got != 3 {
@@ -370,24 +343,19 @@ func TestNormalizeWorkflowRegisterForProjectDefaultsToK8sJob(t *testing.T) {
 			{Name: "cleanup", Always: true, DependsOn: []string{"test"}},
 		},
 	}
-	project := projectDoc{
-		Name:     "glimmung",
-		Metadata: map[string]any{"app_type": "native_web_app"},
-	}
-
-	normalizeWorkflowRegisterForProjectDoc(&req, project)
+	normalizeWorkflowRegister(&req)
 
 	for _, phase := range req.Phases {
 		if phase.Kind != "k8s_job" {
 			t.Fatalf("phase %q kind=%q, want k8s_job", phase.Name, phase.Kind)
 		}
 	}
-	if err := validateWorkflowForProject(project, req); err != nil {
-		t.Fatalf("validateWorkflowForProject: %v", err)
+	if err := validateWorkflowRegister(req); err != nil {
+		t.Fatalf("validateWorkflowRegister: %v", err)
 	}
 }
 
-func TestValidateWorkflowForProjectRejectsNonNativeKind(t *testing.T) {
+func TestValidateWorkflowRegisterRejectsNonNativeKind(t *testing.T) {
 	req := server.WorkflowRegister{
 		Project: "glimmung",
 		Name:    "agent-run",
@@ -397,13 +365,9 @@ func TestValidateWorkflowForProjectRejectsNonNativeKind(t *testing.T) {
 			{Name: "cleanup", Kind: "k8s_job", Always: true, DependsOn: []string{"test"}},
 		},
 	}
-	project := projectDoc{
-		Name:     "glimmung",
-		Metadata: map[string]any{"app_type": "native_web_app"},
-	}
 
-	if err := validateWorkflowForProject(project, req); err == nil {
-		t.Fatal("validateWorkflowForProject succeeded, want error")
+	if err := validateWorkflowRegister(req); err == nil {
+		t.Fatal("validateWorkflowRegister succeeded, want error")
 	}
 }
 

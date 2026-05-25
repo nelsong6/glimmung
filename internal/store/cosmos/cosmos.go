@@ -59,6 +59,13 @@ type Store struct {
 	// is retained only so ListAllRunEventDocsForMigration can feed the
 	// one-shot Migrate copy. Stage 2i deletes both.
 	pgRunEvents *pgstore.RunEventsStore
+
+	// pgProjects is the Postgres-backed projects store (Stage 2e).
+	// All project read/write methods on cosmos.Store delegate to this
+	// field; the internal readProjectDoc helper is gone. The cosmos
+	// `projects` container client is retained only for
+	// ListAllProjectDocsForMigration. Stage 2i deletes both.
+	pgProjects *pgstore.ProjectsStore
 }
 
 // SetPGLocks injects the Postgres-backed lock store. Called once at
@@ -76,6 +83,38 @@ func (s *Store) SetPGLocks(locks *pgstore.LocksStore) {
 // ListNativeEventsByID reads through it.
 func (s *Store) SetPGRunEvents(runEvents *pgstore.RunEventsStore) {
 	s.pgRunEvents = runEvents
+}
+
+// SetPGProjects injects the Postgres-backed projects store. All
+// project read/write methods on cosmos.Store route through this field
+// once set. Called by main.go at startup after pg.ProjectsStore is
+// constructed.
+func (s *Store) SetPGProjects(projects *pgstore.ProjectsStore) {
+	s.pgProjects = projects
+}
+
+// projectFromRecord converts a pg.ProjectRecord to the server-package
+// Project type the delegation methods return. ID == Name because the
+// cosmos doc id was always the project name.
+func projectFromRecord(rec pgstore.ProjectRecord) server.Project {
+	return server.Project{
+		ID:         rec.Name,
+		Name:       rec.Name,
+		GitHubRepo: rec.GitHubRepo,
+		ArgoCDApp:  rec.ArgoCDApp,
+		Metadata:   mapOrEmpty(rec.Metadata),
+		CreatedAt:  rec.CreatedAt.UTC(),
+	}
+}
+
+// testLeaseDefaultsFromRow converts a pg.TestLeaseDefaultsRow to the
+// server-package TestLeaseDefaults type. Used by ReadTestLeaseDefaults
+// and the SetGlobal* delegations.
+func testLeaseDefaultsFromRow(row pgstore.TestLeaseDefaultsRow) server.TestLeaseDefaults {
+	return server.TestLeaseDefaults{
+		GlobalTTLSeconds:     row.GlobalTTLSeconds,
+		HotSwapMinTTLSeconds: row.HotSwapMinTTLSeconds,
+	}
 }
 
 // ListAllProjectDocsForMigration reads every doc in the cosmos
@@ -232,481 +271,167 @@ func NewFromSettings(settings server.Settings) (*Store, error) {
 }
 
 func (s *Store) ListProjects(ctx context.Context) ([]server.Project, error) {
-	var docs []projectDoc
-	if err := crossPartitionQuery(ctx, s.projects, "SELECT * FROM c WHERE NOT IS_DEFINED(c.kind) OR c.kind = 'project'", nil, &docs); err != nil {
+	records, err := s.pgProjects.List(ctx)
+	if err != nil {
 		return nil, err
 	}
-	rows := make([]server.Project, 0, len(docs))
-	for _, doc := range docs {
-		rows = append(rows, projectFromDoc(doc))
+	rows := make([]server.Project, 0, len(records))
+	for _, rec := range records {
+		rows = append(rows, projectFromRecord(rec))
 	}
 	return rows, nil
 }
 
-// listProjectNames returns the partition-key values for every registered
-// project, suitable for fanOutByProject. Cosmos lists projects in any
-// order; the slice ordering is not contractual.
 func (s *Store) listProjectNames(ctx context.Context) ([]string, error) {
-	var docs []projectDoc
-	if err := crossPartitionQuery(ctx, s.projects, "SELECT c.id FROM c WHERE NOT IS_DEFINED(c.kind) OR c.kind = 'project'", nil, &docs); err != nil {
-		return nil, err
-	}
-	names := make([]string, 0, len(docs))
-	for _, doc := range docs {
-		if doc.ID != "" {
-			names = append(names, doc.ID)
-		}
-	}
-	return names, nil
+	return s.pgProjects.ListNames(ctx)
 }
 
 func (s *Store) UpsertProject(ctx context.Context, req server.ProjectRegister) (server.Project, error) {
-	doc := projectWriteDoc{
-		ID:         req.Name,
+	rec, err := s.pgProjects.Upsert(ctx, pgstore.ProjectRegister{
 		Name:       req.Name,
 		GitHubRepo: req.GitHubRepo,
-		Metadata:   mapOrEmpty(req.Metadata),
-		CreatedAt:  time.Now().UTC().Format(time.RFC3339Nano),
-	}
-	partitionKey := azcosmos.NewPartitionKeyString(req.Name)
-	existing, err := s.projects.ReadItem(ctx, partitionKey, req.Name, nil)
-	if err == nil {
-		var existingDoc projectDoc
-		if err := json.Unmarshal(existing.Value, &existingDoc); err == nil && existingDoc.CreatedAt != "" {
-			doc.CreatedAt = existingDoc.CreatedAt
-		}
-		payload, err := json.Marshal(doc)
-		if err != nil {
-			return server.Project{}, err
-		}
-		if _, err := s.projects.ReplaceItem(ctx, partitionKey, req.Name, payload, nil); err != nil {
-			return server.Project{}, err
-		}
-		return projectFromDoc(projectDoc{
-			ID:         doc.ID,
-			Name:       doc.Name,
-			GitHubRepo: doc.GitHubRepo,
-			Metadata:   doc.Metadata,
-			CreatedAt:  doc.CreatedAt,
-		}), nil
-	}
-	if !isCosmosStatus(err, http.StatusNotFound) {
-		return server.Project{}, err
-	}
-
-	payload, err := json.Marshal(doc)
+		Metadata:   req.Metadata,
+	})
 	if err != nil {
 		return server.Project{}, err
 	}
-	if _, err := s.projects.CreateItem(ctx, partitionKey, payload, nil); err != nil {
-		return server.Project{}, err
-	}
-	return projectFromDoc(projectDoc{
-		ID:         doc.ID,
-		Name:       doc.Name,
-		GitHubRepo: doc.GitHubRepo,
-		Metadata:   doc.Metadata,
-		CreatedAt:  doc.CreatedAt,
-	}), nil
+	return projectFromRecord(rec), nil
 }
 
 func (s *Store) SetProjectTestEnvironmentCount(ctx context.Context, project string, count int) (server.Project, error) {
-	partitionKey := azcosmos.NewPartitionKeyString(project)
-	read, err := s.projects.ReadItem(ctx, partitionKey, project, nil)
-	if err != nil {
-		if isCosmosStatus(err, http.StatusNotFound) {
-			return server.Project{}, server.ErrNotFound
-		}
-		return server.Project{}, err
+	rec, err := s.pgProjects.SetTestEnvironmentCount(ctx, project, count)
+	if errors.Is(err, pgstore.ErrProjectNotFound) {
+		return server.Project{}, server.ErrNotFound
 	}
-
-	var doc map[string]any
-	if err := json.Unmarshal(read.Value, &doc); err != nil {
-		return server.Project{}, err
-	}
-	metadata, _ := doc["metadata"].(map[string]any)
-	if metadata == nil {
-		metadata = map[string]any{}
-	}
-	standbyDNS, _ := metadata["native_standby_dns"].(map[string]any)
-	if standbyDNS == nil {
-		standbyDNS = map[string]any{}
-	}
-	standbyDNS["count"] = count
-	// The legacy `slots` embedded array is the durable source of slot
-	// state on pre-#518 projects; the boot migration strips it once and
-	// PATCH-count must not write it back. Slot state lives in the
-	// `slots` Cosmos collection, owned by the SlotStore. Decreasing the
-	// count is handled by the orchestrator's PATCH handler deleting the
-	// affected slot rows via SlotStore.DeleteSlot.
-	delete(standbyDNS, "slots")
-	metadata["native_standby_dns"] = standbyDNS
-	if workloadIdentity, ok := metadata["native_standby_workload_identity"].(map[string]any); ok {
-		workloadIdentity["count"] = count
-		metadata["native_standby_workload_identity"] = workloadIdentity
-	}
-	doc["metadata"] = metadata
-
-	payload, err := json.Marshal(doc)
 	if err != nil {
 		return server.Project{}, err
 	}
-	if _, err := s.projects.ReplaceItem(ctx, partitionKey, project, payload, nil); err != nil {
-		return server.Project{}, err
-	}
-	return projectFromMap(doc)
+	return projectFromRecord(rec), nil
 }
 
 func (s *Store) SetProjectNativeWorkloadIdentityStatus(ctx context.Context, project string, status server.NativeWorkloadIdentityStatus) (server.Project, error) {
-	partitionKey := azcosmos.NewPartitionKeyString(project)
-	read, err := s.projects.ReadItem(ctx, partitionKey, project, nil)
-	if err != nil {
-		if isCosmosStatus(err, http.StatusNotFound) {
-			return server.Project{}, server.ErrNotFound
-		}
-		return server.Project{}, err
+	rec, err := s.pgProjects.SetNativeWorkloadIdentityStatus(ctx, project, status)
+	if errors.Is(err, pgstore.ErrProjectNotFound) {
+		return server.Project{}, server.ErrNotFound
 	}
-
-	var doc map[string]any
-	if err := json.Unmarshal(read.Value, &doc); err != nil {
-		return server.Project{}, err
-	}
-	metadata, _ := doc["metadata"].(map[string]any)
-	if metadata == nil {
-		metadata = map[string]any{}
-	}
-	metadata["native_standby_workload_identity_status"] = status
-	doc["metadata"] = metadata
-
-	payload, err := json.Marshal(doc)
 	if err != nil {
 		return server.Project{}, err
 	}
-	if _, err := s.projects.ReplaceItem(ctx, partitionKey, project, payload, nil); err != nil {
-		return server.Project{}, err
-	}
-	return projectFromMap(doc)
+	return projectFromRecord(rec), nil
 }
 
-// SetProjectManagedAuthOriginStatus persists the result of the
-// glimmung-owned auth.romaine.life origin reconciler on the project's
-// metadata under `managed_auth_origins_status`. Mirrors
-// SetProjectNativeWorkloadIdentityStatus exactly. See
+// SetProjectManagedAuthOriginStatus persists the auth.romaine.life
+// origin reconciler result. Delegates to pg.ProjectsStore. See
 // nelsong6/glimmung#142 stage 2.
 func (s *Store) SetProjectManagedAuthOriginStatus(ctx context.Context, project string, status server.ManagedAuthOriginStatus) (server.Project, error) {
-	partitionKey := azcosmos.NewPartitionKeyString(project)
-	read, err := s.projects.ReadItem(ctx, partitionKey, project, nil)
-	if err != nil {
-		if isCosmosStatus(err, http.StatusNotFound) {
-			return server.Project{}, server.ErrNotFound
-		}
-		return server.Project{}, err
+	rec, err := s.pgProjects.SetManagedAuthOriginStatus(ctx, project, status)
+	if errors.Is(err, pgstore.ErrProjectNotFound) {
+		return server.Project{}, server.ErrNotFound
 	}
-
-	var doc map[string]any
-	if err := json.Unmarshal(read.Value, &doc); err != nil {
-		return server.Project{}, err
-	}
-	metadata, _ := doc["metadata"].(map[string]any)
-	if metadata == nil {
-		metadata = map[string]any{}
-	}
-	metadata["managed_auth_origins_status"] = status
-	doc["metadata"] = metadata
-
-	payload, err := json.Marshal(doc)
 	if err != nil {
 		return server.Project{}, err
 	}
-	if _, err := s.projects.ReplaceItem(ctx, partitionKey, project, payload, nil); err != nil {
-		return server.Project{}, err
-	}
-	return projectFromMap(doc)
+	return projectFromRecord(rec), nil
 }
 
 const (
-	testLeaseDefaultsDocID   = "__glimmung_test_lease_defaults"
+	// testLeaseDefaultsDocKind is the cosmos doc-kind value the
+	// migration source uses to identify the singleton settings row in
+	// the legacy `projects` container. Kept only so
+	// ListAllProjectDocsForMigration can recognize it during the
+	// one-shot copy; Stage 2i deletes both the constant and the
+	// container client.
 	testLeaseDefaultsDocKind = "test_lease_defaults"
 )
 
 func (s *Store) ReadTestLeaseDefaults(ctx context.Context) (server.TestLeaseDefaults, error) {
-	pk := azcosmos.NewPartitionKeyString(testLeaseDefaultsDocID)
-	read, err := s.projects.ReadItem(ctx, pk, testLeaseDefaultsDocID, nil)
+	row, err := s.pgProjects.ReadTestLeaseDefaults(ctx)
+	if errors.Is(err, pgstore.ErrProjectNotFound) {
+		return server.TestLeaseDefaults{}, server.ErrNotFound
+	}
 	if err != nil {
-		if isCosmosStatus(err, http.StatusNotFound) {
-			return server.TestLeaseDefaults{}, server.ErrNotFound
-		}
 		return server.TestLeaseDefaults{}, err
 	}
-	var doc testLeaseDefaultsDoc
-	if err := json.Unmarshal(read.Value, &doc); err != nil {
-		return server.TestLeaseDefaults{}, err
-	}
-	return server.TestLeaseDefaults{
-		GlobalTTLSeconds:     doc.GlobalTTLSeconds,
-		HotSwapMinTTLSeconds: doc.HotSwapMinTTLSeconds,
-	}, nil
+	return testLeaseDefaultsFromRow(row), nil
 }
 
 func (s *Store) SetGlobalTestLeaseDefaultTTL(ctx context.Context, ttlSeconds *int) (server.TestLeaseDefaults, error) {
 	if ttlSeconds != nil && *ttlSeconds <= 0 {
 		return server.TestLeaseDefaults{}, server.ValidationError{Message: "ttl_seconds must be positive"}
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	doc := testLeaseDefaultsDoc{
-		ID:        testLeaseDefaultsDocID,
-		Kind:      testLeaseDefaultsDocKind,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	pk := azcosmos.NewPartitionKeyString(testLeaseDefaultsDocID)
-	read, err := s.projects.ReadItem(ctx, pk, testLeaseDefaultsDocID, nil)
-	if err == nil {
-		if err := json.Unmarshal(read.Value, &doc); err != nil {
-			return server.TestLeaseDefaults{}, err
-		}
-		doc.ID = testLeaseDefaultsDocID
-		doc.Kind = testLeaseDefaultsDocKind
-		if doc.CreatedAt == "" {
-			doc.CreatedAt = now
-		}
-		doc.UpdatedAt = now
-	} else if !isCosmosStatus(err, http.StatusNotFound) {
-		return server.TestLeaseDefaults{}, err
-	}
-	if ttlSeconds == nil {
-		doc.GlobalTTLSeconds = 0
-	} else {
-		doc.GlobalTTLSeconds = *ttlSeconds
-	}
-	payload, err := json.Marshal(doc)
+	row, err := s.pgProjects.SetGlobalTestLeaseDefaultTTL(ctx, ttlSeconds)
 	if err != nil {
 		return server.TestLeaseDefaults{}, err
 	}
-	if _, err := s.projects.UpsertItem(ctx, pk, payload, nil); err != nil {
-		return server.TestLeaseDefaults{}, err
-	}
-	return server.TestLeaseDefaults{
-		GlobalTTLSeconds:     doc.GlobalTTLSeconds,
-		HotSwapMinTTLSeconds: doc.HotSwapMinTTLSeconds,
-	}, nil
+	return testLeaseDefaultsFromRow(row), nil
 }
 
 func (s *Store) SetGlobalTestLeaseHotSwapMinTTL(ctx context.Context, ttlSeconds *int) (server.TestLeaseDefaults, error) {
 	if ttlSeconds != nil && *ttlSeconds <= 0 {
 		return server.TestLeaseDefaults{}, server.ValidationError{Message: "ttl_seconds must be positive"}
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	doc := testLeaseDefaultsDoc{
-		ID:        testLeaseDefaultsDocID,
-		Kind:      testLeaseDefaultsDocKind,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	pk := azcosmos.NewPartitionKeyString(testLeaseDefaultsDocID)
-	read, err := s.projects.ReadItem(ctx, pk, testLeaseDefaultsDocID, nil)
-	if err == nil {
-		if err := json.Unmarshal(read.Value, &doc); err != nil {
-			return server.TestLeaseDefaults{}, err
-		}
-		doc.ID = testLeaseDefaultsDocID
-		doc.Kind = testLeaseDefaultsDocKind
-		if doc.CreatedAt == "" {
-			doc.CreatedAt = now
-		}
-		doc.UpdatedAt = now
-	} else if !isCosmosStatus(err, http.StatusNotFound) {
-		return server.TestLeaseDefaults{}, err
-	}
-	if ttlSeconds == nil {
-		doc.HotSwapMinTTLSeconds = 0
-	} else {
-		doc.HotSwapMinTTLSeconds = *ttlSeconds
-	}
-	payload, err := json.Marshal(doc)
+	row, err := s.pgProjects.SetGlobalTestLeaseHotSwapMinTTL(ctx, ttlSeconds)
 	if err != nil {
 		return server.TestLeaseDefaults{}, err
 	}
-	if _, err := s.projects.UpsertItem(ctx, pk, payload, nil); err != nil {
-		return server.TestLeaseDefaults{}, err
-	}
-	return server.TestLeaseDefaults{
-		GlobalTTLSeconds:     doc.GlobalTTLSeconds,
-		HotSwapMinTTLSeconds: doc.HotSwapMinTTLSeconds,
-	}, nil
+	return testLeaseDefaultsFromRow(row), nil
 }
 
 func (s *Store) SetProjectTestLeaseDefaultTTL(ctx context.Context, project string, ttlSeconds *int) (server.Project, error) {
 	if ttlSeconds != nil && *ttlSeconds <= 0 {
 		return server.Project{}, server.ValidationError{Message: "ttl_seconds must be positive"}
 	}
-	partitionKey := azcosmos.NewPartitionKeyString(project)
-	read, err := s.projects.ReadItem(ctx, partitionKey, project, nil)
-	if err != nil {
-		if isCosmosStatus(err, http.StatusNotFound) {
-			return server.Project{}, server.ErrNotFound
-		}
-		return server.Project{}, err
+	rec, err := s.pgProjects.SetTestLeaseDefaultTTL(ctx, project, ttlSeconds)
+	if errors.Is(err, pgstore.ErrProjectNotFound) {
+		return server.Project{}, server.ErrNotFound
 	}
-
-	var doc map[string]any
-	if err := json.Unmarshal(read.Value, &doc); err != nil {
-		return server.Project{}, err
-	}
-	metadata, _ := doc["metadata"].(map[string]any)
-	if metadata == nil {
-		metadata = map[string]any{}
-	}
-	delete(metadata, "testLeaseDefaultTTLSeconds")
-	if ttlSeconds == nil {
-		delete(metadata, "test_lease_default_ttl_seconds")
-	} else {
-		metadata["test_lease_default_ttl_seconds"] = *ttlSeconds
-	}
-	doc["metadata"] = metadata
-
-	payload, err := json.Marshal(doc)
 	if err != nil {
 		return server.Project{}, err
 	}
-	if _, err := s.projects.ReplaceItem(ctx, partitionKey, project, payload, nil); err != nil {
-		return server.Project{}, err
-	}
-	return projectFromMap(doc)
+	return projectFromRecord(rec), nil
 }
 
 func (s *Store) SetProjectTestLeaseHotSwapMinTTL(ctx context.Context, project string, ttlSeconds *int) (server.Project, error) {
 	if ttlSeconds != nil && *ttlSeconds <= 0 {
 		return server.Project{}, server.ValidationError{Message: "ttl_seconds must be positive"}
 	}
-	partitionKey := azcosmos.NewPartitionKeyString(project)
-	read, err := s.projects.ReadItem(ctx, partitionKey, project, nil)
-	if err != nil {
-		if isCosmosStatus(err, http.StatusNotFound) {
-			return server.Project{}, server.ErrNotFound
-		}
-		return server.Project{}, err
+	rec, err := s.pgProjects.SetTestLeaseHotSwapMinTTL(ctx, project, ttlSeconds)
+	if errors.Is(err, pgstore.ErrProjectNotFound) {
+		return server.Project{}, server.ErrNotFound
 	}
-
-	var doc map[string]any
-	if err := json.Unmarshal(read.Value, &doc); err != nil {
-		return server.Project{}, err
-	}
-	metadata, _ := doc["metadata"].(map[string]any)
-	if metadata == nil {
-		metadata = map[string]any{}
-	}
-	delete(metadata, "testLeaseHotSwapMinTTLSeconds")
-	if ttlSeconds == nil {
-		delete(metadata, "test_lease_hot_swap_min_ttl_seconds")
-	} else {
-		metadata["test_lease_hot_swap_min_ttl_seconds"] = *ttlSeconds
-	}
-	doc["metadata"] = metadata
-
-	payload, err := json.Marshal(doc)
 	if err != nil {
 		return server.Project{}, err
 	}
-	if _, err := s.projects.ReplaceItem(ctx, partitionKey, project, payload, nil); err != nil {
-		return server.Project{}, err
-	}
-	return projectFromMap(doc)
+	return projectFromRecord(rec), nil
 }
 
 // StripProjectTestEnvironmentSlotsArray removes the legacy
 // `metadata.native_standby_dns.slots[]` array from a project doc.
-// Called by the one-shot slot-storage-rework migration after slot data
-// has been copied to the new `slots` collection.
-//
-// Idempotent: if the array is already absent, the call is a no-op
-// (still does the read-modify-write so the project doc's updated_at
-// advances, which is harmless).
+// Called by the one-shot slot-storage-rework migration in
+// internal/server/slot_migration.go. Idempotent.
 func (s *Store) StripProjectTestEnvironmentSlotsArray(ctx context.Context, project string) error {
-	partitionKey := azcosmos.NewPartitionKeyString(project)
-	read, err := s.projects.ReadItem(ctx, partitionKey, project, nil)
-	if err != nil {
-		if isCosmosStatus(err, http.StatusNotFound) {
-			return server.ErrNotFound
-		}
-		return err
+	err := s.pgProjects.StripLegacySlotsArray(ctx, project)
+	if errors.Is(err, pgstore.ErrProjectNotFound) {
+		return server.ErrNotFound
 	}
-	var doc map[string]any
-	if err := json.Unmarshal(read.Value, &doc); err != nil {
-		return err
-	}
-	metadata, _ := doc["metadata"].(map[string]any)
-	if metadata == nil {
-		return nil
-	}
-	standbyDNS, _ := metadata["native_standby_dns"].(map[string]any)
-	if standbyDNS == nil {
-		return nil
-	}
-	if _, present := standbyDNS["slots"]; !present {
-		return nil
-	}
-	delete(standbyDNS, "slots")
-	metadata["native_standby_dns"] = standbyDNS
-	doc["metadata"] = metadata
-	payload, err := json.Marshal(doc)
-	if err != nil {
-		return err
-	}
-	if _, err := s.projects.ReplaceItem(ctx, partitionKey, project, payload, nil); err != nil {
-		return err
-	}
-	return nil
+	return err
 }
 
-// SetProjectTestEnvironmentSlotStatus and its IfMatch sibling were
-// retired with the slot-storage rework. Slot status now lives in the
-// `slots` collection; writes go through Store.UpdateIfMatch.
-
-// ReadProject performs a Cosmos point read for one project doc, returning
-// the captured resource etag on the Project so callers can do etag-conditional
-// writes. Use this (rather than ListProjects) when you intend to race for an
-// optimistic-concurrency claim — list queries don't expose per-row etags.
+// ReadProject returns the project record. Used by the dispatch/clone
+// paths and operator queries. The etag field that the cosmos
+// implementation captured for optimistic-concurrency writes is no
+// longer meaningful — Postgres uses row-level locking inside
+// pg.ProjectsStore — but the field is preserved as empty so consumers
+// that call WithETag still compile.
 func (s *Store) ReadProject(ctx context.Context, project string) (server.Project, error) {
-	partitionKey := azcosmos.NewPartitionKeyString(project)
-	read, err := s.projects.ReadItem(ctx, partitionKey, project, nil)
-	if err != nil {
-		if isCosmosStatus(err, http.StatusNotFound) {
-			return server.Project{}, server.ErrNotFound
-		}
-		return server.Project{}, err
+	rec, err := s.pgProjects.Read(ctx, project)
+	if errors.Is(err, pgstore.ErrProjectNotFound) {
+		return server.Project{}, server.ErrNotFound
 	}
-	var doc map[string]any
-	if err := json.Unmarshal(read.Value, &doc); err != nil {
-		return server.Project{}, err
-	}
-	p, err := projectFromMap(doc)
 	if err != nil {
 		return server.Project{}, err
 	}
-	return p.WithETag(string(read.ETag)), nil
-}
-
-// The legacy slot-status writers that produced
-// project.metadata.native_standby_dns.slots entries have been removed.
-// Slot state lives in the `slots` Cosmos collection, written
-// exclusively through SlotStore.UpdateIfMatch. The boot migration in
-// internal/server/slot_migration.go strips the embedded array; this
-// PATCH-count handler no longer rewrites it.
-
-func (s *Store) readProjectDoc(ctx context.Context, project string) (projectDoc, error) {
-	read, err := s.projects.ReadItem(ctx, azcosmos.NewPartitionKeyString(project), project, nil)
-	if err != nil {
-		if isCosmosStatus(err, http.StatusNotFound) {
-			return projectDoc{}, server.ErrNotFound
-		}
-		return projectDoc{}, err
-	}
-	var doc projectDoc
-	if err := json.Unmarshal(read.Value, &doc); err != nil {
-		return projectDoc{}, err
-	}
-	return doc, nil
+	return projectFromRecord(rec), nil
 }
 
 func (s *Store) ListWorkflows(ctx context.Context) ([]server.Workflow, error) {
@@ -725,15 +450,14 @@ func (s *Store) ListWorkflows(ctx context.Context) ([]server.Workflow, error) {
 }
 
 func (s *Store) UpsertWorkflow(ctx context.Context, req server.WorkflowRegister) (server.Workflow, error) {
-	projectDoc, err := s.readProjectDoc(ctx, req.Project)
-	if errors.Is(err, server.ErrNotFound) {
-		return server.Workflow{}, server.ValidationError{Message: "project " + req.Project + " does not exist; register it first"}
-	}
-	if err != nil {
+	if _, err := s.pgProjects.Read(ctx, req.Project); err != nil {
+		if errors.Is(err, pgstore.ErrProjectNotFound) {
+			return server.Workflow{}, server.ValidationError{Message: "project " + req.Project + " does not exist; register it first"}
+		}
 		return server.Workflow{}, err
 	}
-	normalizeWorkflowRegisterForProjectDoc(&req, projectDoc)
-	if err := validateWorkflowForProject(projectDoc, req); err != nil {
+	normalizeWorkflowRegister(&req)
+	if err := validateWorkflowRegister(req); err != nil {
 		return server.Workflow{}, err
 	}
 
@@ -1526,34 +1250,6 @@ func (s *Store) readLeaseDocByCallbackToken(ctx context.Context, token string) (
 // See docs/cosmos-partition-strategy.md and the migration guard at
 // scripts/check-cosmos-queries.sh.
 
-type projectDoc struct {
-	ID         string         `json:"id"`
-	Kind       string         `json:"kind,omitempty"`
-	Name       string         `json:"name"`
-	GitHubRepo string         `json:"githubRepo"`
-	ArgoCDApp  string         `json:"argocdApp"`
-	Metadata   map[string]any `json:"metadata"`
-	CreatedAt  string         `json:"createdAt"`
-}
-
-type projectWriteDoc struct {
-	ID         string         `json:"id"`
-	Kind       string         `json:"kind,omitempty"`
-	Name       string         `json:"name"`
-	GitHubRepo string         `json:"githubRepo"`
-	Metadata   map[string]any `json:"metadata"`
-	CreatedAt  string         `json:"createdAt"`
-}
-
-type testLeaseDefaultsDoc struct {
-	ID                   string `json:"id"`
-	Kind                 string `json:"kind"`
-	GlobalTTLSeconds     int    `json:"globalTTLSeconds,omitempty"`
-	HotSwapMinTTLSeconds int    `json:"hotSwapMinTTLSeconds,omitempty"`
-	CreatedAt            string `json:"createdAt"`
-	UpdatedAt            string `json:"updatedAt"`
-}
-
 type workflowDoc struct {
 	ID                  string         `json:"id"`
 	Kind                string         `json:"kind,omitempty"`
@@ -1816,29 +1512,6 @@ type prDoc struct {
 
 type budgetDoc struct {
 	Total float64 `json:"total"`
-}
-
-func projectFromDoc(doc projectDoc) server.Project {
-	return server.Project{
-		ID:         firstNonEmpty(doc.ID, doc.Name),
-		Name:       doc.Name,
-		GitHubRepo: doc.GitHubRepo,
-		ArgoCDApp:  doc.ArgoCDApp,
-		Metadata:   mapOrEmpty(doc.Metadata),
-		CreatedAt:  parseTimeOrNow(doc.CreatedAt),
-	}
-}
-
-func projectFromMap(doc map[string]any) (server.Project, error) {
-	payload, err := json.Marshal(doc)
-	if err != nil {
-		return server.Project{}, err
-	}
-	var typed projectDoc
-	if err := json.Unmarshal(payload, &typed); err != nil {
-		return server.Project{}, err
-	}
-	return projectFromDoc(typed), nil
 }
 
 func workflowFromDoc(doc workflowDoc) server.Workflow {
@@ -2562,11 +2235,11 @@ func workflowFromMap(doc map[string]any) (server.Workflow, error) {
 	return workflowFromDoc(typed), nil
 }
 
-func validateWorkflowForProject(project projectDoc, req server.WorkflowRegister) error {
+func validateWorkflowRegister(req server.WorkflowRegister) error {
 	return server.ValidateWorkflowRegister(req)
 }
 
-func normalizeWorkflowRegisterForProjectDoc(req *server.WorkflowRegister, project projectDoc) {
+func normalizeWorkflowRegister(req *server.WorkflowRegister) {
 	for i := range req.Phases {
 		req.Phases[i].Kind = strings.TrimSpace(req.Phases[i].Kind)
 		if req.Phases[i].Kind == "" {
@@ -2583,21 +2256,6 @@ func normalizeWorkflowRegisterForProjectDoc(req *server.WorkflowRegister, projec
 		req.Phases[i].Jobs = sliceOrEmpty(req.Phases[i].Jobs)
 		req.Phases[i] = server.CanonicalNativePhase(req.Phases[i])
 	}
-}
-
-func projectRequiresNativeWorkflows(project projectDoc) bool {
-	metadata := project.Metadata
-	if boolValue(metadata["native_webapp"]) || boolValue(metadata["nativeWebapp"]) {
-		return true
-	}
-	appKind := firstNonEmpty(
-		stringValue(metadata["app_kind"]),
-		stringValue(metadata["appKind"]),
-		stringValue(metadata["app_type"]),
-		stringValue(metadata["appType"]),
-		stringValue(metadata["kind"]),
-	)
-	return isNativeWebappKind(appKind)
 }
 
 func isNativeWebappKind(kind string) bool {
@@ -3490,7 +3148,7 @@ func (s *Store) GetPlaybook(ctx context.Context, project, ref string) (server.Pl
 
 func (s *Store) CreatePlaybook(ctx context.Context, req server.PlaybookCreate) (server.PlaybookPublic, error) {
 	// Verify project exists.
-	if _, err := s.readProjectDoc(ctx, req.Project); err != nil {
+	if _, err := s.pgProjects.Read(ctx, req.Project); err != nil {
 		return server.PlaybookPublic{}, server.ErrNotFound
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -4494,11 +4152,11 @@ func (s *Store) availableNativeSlot(ctx context.Context, project string) (*int, 
 // project metadata still bounds the result so a stale slot doc cannot
 // extend capacity past the declared scale.
 func (s *Store) nativeReadySlots(ctx context.Context, project string) []int {
-	doc, err := s.readProjectDoc(ctx, project)
+	rec, err := s.pgProjects.Read(ctx, project)
 	if err != nil {
 		return nil
 	}
-	standby, ok := doc.Metadata["native_standby_dns"].(map[string]any)
+	standby, ok := rec.Metadata["native_standby_dns"].(map[string]any)
 	if !ok {
 		return nil
 	}
@@ -4563,9 +4221,9 @@ func (s *Store) nativeProjectCap() int {
 }
 
 func (s *Store) nativeSlotPrefix(ctx context.Context, project string) string {
-	doc, err := s.readProjectDoc(ctx, project)
+	rec, err := s.pgProjects.Read(ctx, project)
 	if err == nil {
-		if standby, ok := doc.Metadata["native_standby_dns"].(map[string]any); ok {
+		if standby, ok := rec.Metadata["native_standby_dns"].(map[string]any); ok {
 			if prefix, ok := standby["slot_prefix"].(string); ok && strings.TrimSpace(prefix) != "" {
 				return strings.Trim(strings.TrimSpace(prefix), ".")
 			}
@@ -7053,16 +6711,13 @@ func (s *Store) StartRunCycle(ctx context.Context, req server.StartRunCycleReque
 // RunDispatchStore implementation
 // ---------------------------------------------------------------------------
 
-// ReadProjectGitHubRepo returns the githubRepo field for a registered project.
+// ReadProjectGitHubRepo returns the github_repo field for a registered project.
 func (s *Store) ReadProjectGitHubRepo(ctx context.Context, project string) (string, error) {
-	doc, err := s.readProjectDoc(ctx, project)
-	if errors.Is(err, server.ErrNotFound) {
+	repo, err := s.pgProjects.ReadGitHubRepo(ctx, project)
+	if errors.Is(err, pgstore.ErrProjectNotFound) {
 		return "", server.ErrNotFound
 	}
-	if err != nil {
-		return "", err
-	}
-	return doc.GitHubRepo, nil
+	return repo, err
 }
 
 // ReadIssueForDispatch returns the minimal issue data needed to build dispatch metadata.
