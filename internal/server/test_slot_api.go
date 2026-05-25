@@ -846,10 +846,16 @@ func activateTestSlotRuntime(parent context.Context, store ReadStore, preparer T
 	_, _ = setLeaseSlotActivationFinished(context.Background(), store, project, lease, "error", err)
 
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	if cleanupErr := preparer.ReturnTestSlotRuntime(cleanupCtx, lease, project); cleanupErr != nil && logf != nil {
-		logf("test-slot activation cleanup failed project=%s lease=%s: %v", lease.Project, LeasePublicRefFromLease(lease), cleanupErr)
-	}
+	cleanupErr := preparer.ReturnTestSlotRuntime(cleanupCtx, lease, project)
 	cleanupCancel()
+	if cleanupErr != nil {
+		if logf != nil {
+			logf("test-slot activation cleanup failed project=%s lease=%s: %v", lease.Project, LeasePublicRefFromLease(lease), cleanupErr)
+		}
+		_, _ = setLeaseSlotCleanupFinished(context.Background(), store, project, lease, "error", cleanupErr)
+	} else if _, statusErr := setLeaseSlotCleanupFinished(context.Background(), store, project, lease, testSlotStateReady, nil); statusErr != nil && logf != nil {
+		logf("record test-slot activation cleanup success failed project=%s lease=%s: %v", lease.Project, LeasePublicRefFromLease(lease), statusErr)
+	}
 
 	if leaseStore, ok := store.(LeaseCanceller); ok && leaseStore != nil {
 		// Activation failed; the timer we armed at checkout is no longer
@@ -1274,12 +1280,21 @@ func RecoverInFlightTestSlots(ctx context.Context, store ReadStore, preparer Tes
 						continue
 					}
 					switch slot.State {
+					case SlotStateActivating, SlotStateRunning:
+						// The lease is no longer claimed, but the slot still
+						// advertises leased/runtime state. This can happen
+						// after a release path or storage migration dies
+						// between tearing down Kubernetes resources and
+						// marking the slot provisioned again. Treat it like
+						// orphaned runtime and run idempotent cleanup.
 					case SlotStateCleaning:
-						// fall through
+						// Cleanup already started before the lease disappeared.
 					case SlotStateError:
-						if slot.CleanupError == nil {
-							continue
-						}
+						// Any stale error with no claimed lease should not
+						// strand capacity. Cleanup errors are retries of a
+						// known failed cleanup; activation-only errors are
+						// recovered by rerunning idempotent teardown and
+						// clearing the lease ref if teardown succeeds.
 					default:
 						continue
 					}

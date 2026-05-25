@@ -653,6 +653,92 @@ func TestRecoverInFlightTestSlotsCleansSlotWithoutLease(t *testing.T) {
 	}
 }
 
+func TestRecoverInFlightTestSlotsCleansRunningSlotWithoutLease(t *testing.T) {
+	// A released lease can leave the slot row behind in running state if
+	// the process dies after runtime teardown but before recording the
+	// final provisioned state. Startup should treat that as orphaned
+	// runtime and converge the slot back to ready without trying to
+	// cancel a lease that no longer exists.
+	now := time.Now().UTC()
+	stale := now.Add(-2 * recoveryMinAge)
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "recover",
+			Name: "recover",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"slot_prefix": "recover-slot",
+				"record_base": "recover.dev.romaine.life",
+				"count":       float64(1),
+				"slots": []any{
+					map[string]any{
+						"slot_index":       float64(1),
+						"slot_name":        "recover-slot-1",
+						"state":            testSlotStateActive,
+						"active_lease_ref": "recover-slot-1",
+						"updated_at":       stale.Format(time.RFC3339Nano),
+					},
+				},
+			}},
+		}}},
+		leases: []Lease{},
+	}
+	preparer := &fakeTestSlotPreparer{}
+
+	RecoverInFlightTestSlots(context.Background(), store, preparer, nil, nil)
+	waitForSlotStatus(t, store, testSlotStateReady)
+	if !preparer.returned {
+		t.Fatal("expected orphaned running slot cleanup to call ReturnTestSlotRuntime")
+	}
+	if store.cancelledRef != "" {
+		t.Fatalf("cancelledRef=%q, want empty", store.cancelledRef)
+	}
+}
+
+func TestRecoverInFlightTestSlotsCleansActivationErrorWithoutLease(t *testing.T) {
+	// Activation failure records error before running teardown. If the
+	// lease is already gone, startup should not leave the slot blocked by
+	// an activation-only error and stale active_lease_ref.
+	now := time.Now().UTC()
+	stale := now.Add(-2 * recoveryMinAge)
+	detail := "runtime installer failed"
+	leaseRef := "recover-slot-1"
+	store := &fakeLeaseStore{
+		fakeReadStore: fakeReadStore{projects: []Project{{
+			ID:   "recover",
+			Name: "recover",
+			Metadata: map[string]any{"native_standby_dns": map[string]any{
+				"slot_prefix": "recover-slot",
+				"record_base": "recover.dev.romaine.life",
+				"count":       float64(1),
+			}},
+		}}},
+		slots: map[string]Slot{
+			SlotDocID("recover", 1): {
+				Project:             "recover",
+				SlotIndex:           1,
+				SlotName:            "recover-slot-1",
+				State:               SlotStateError,
+				UpdatedAt:           stale,
+				ActiveLeaseRef:      &leaseRef,
+				ActivationStartedAt: &stale,
+				ActivationError:     &detail,
+				Detail:              &detail,
+			},
+		},
+		leases: []Lease{},
+	}
+	preparer := &fakeTestSlotPreparer{}
+
+	RecoverInFlightTestSlots(context.Background(), store, preparer, nil, nil)
+	waitForSlotStatus(t, store, testSlotStateReady)
+	if !preparer.returned {
+		t.Fatal("expected orphaned activation-error slot cleanup to call ReturnTestSlotRuntime")
+	}
+	if store.cancelledRef != "" {
+		t.Fatalf("cancelledRef=%q, want empty", store.cancelledRef)
+	}
+}
+
 func TestLeaseExpiryTimerFiresCleanup(t *testing.T) {
 	// Arm a timer with a 0 TTL so it fires immediately. The cleanup pathway
 	// must record the lease-expiry source and start the cleanup goroutine —
@@ -1303,18 +1389,31 @@ func TestAsyncCheckoutFailureMarksErrorAndReleasesLease(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("background activation did not finish")
 	}
-	waitForSlotStatus(t, store, "error")
 	select {
 	case <-preparer.returnDone:
 	case <-time.After(time.Second):
 		t.Fatal("failed activation cleanup did not finish")
 	}
-	finalStatus := store.slotStatuses[len(store.slotStatuses)-1]
-	if finalStatus.ActivationState == nil || *finalStatus.ActivationState != "error" {
-		t.Fatalf("activation state=%v, want error", finalStatus.ActivationState)
+	waitForSlotStatus(t, store, testSlotStateReady)
+	var sawActivationError bool
+	var sawErrorStatus bool
+	for _, status := range store.snapshotSlotStatuses() {
+		if status.State == "error" {
+			sawErrorStatus = true
+		}
+		if status.ActivationState == nil || *status.ActivationState != "error" {
+			continue
+		}
+		if status.ActivationError == nil || !strings.Contains(*status.ActivationError, "render/apply failed") {
+			t.Fatalf("activation error=%v, want render/apply failed", status.ActivationError)
+		}
+		sawActivationError = true
 	}
-	if finalStatus.ActivationError == nil || !strings.Contains(*finalStatus.ActivationError, "render/apply failed") {
-		t.Fatalf("activation error=%v, want render/apply failed", finalStatus.ActivationError)
+	if !sawActivationError {
+		t.Fatal("expected activation error status before cleanup convergence")
+	}
+	if !sawErrorStatus {
+		t.Fatal("expected error status before cleanup convergence")
 	}
 	waitForFailedActivationCleanup(t, store, preparer)
 	if store.cancelledRef != "tank-slot-1" {
