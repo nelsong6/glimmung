@@ -33,7 +33,7 @@ nativeRunner:
     enabled: true
     secretName: codex-credentials
     mountPath: /etc/codex-creds
-    storeName: romaine-kv
+    storeName: ng6-glimmung
     storeKind: ClusterSecretStore
     refreshInterval: 1h
     kvKey: codex-credentials
@@ -126,8 +126,10 @@ wildcardCertificate:
 # mcp-github / diagrams). Created by Nelson via the GitHub UI; the four
 # `glimmung-github-*` KV secrets are set by hand.
 externalSecret:
-  storeName: romaine-kv
+  createStore: true
+  storeName: ng6-glimmung
   storeKind: ClusterSecretStore
+  vaultUrl: https://ng6-glimmung.vault.azure.net/
   refreshInterval: 1h
   secretName: glimmung-secrets
   keys:
