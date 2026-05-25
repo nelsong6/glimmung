@@ -162,6 +162,22 @@ func main() {
 			log.Printf("projects migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
 		}()
 
+		// Stage 2f foundation: pg.WorkflowsStore. Migrate copies cosmos
+		// workflows + workflow_schemas into the matching pg tables.
+		// Cutover (cosmos delegations) lands in Stage 2g.
+		pgWorkflows := pgstore.NewWorkflowsStore(pgPool)
+		_ = pgWorkflows
+		go func() {
+			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			copied, skipped, err := pgWorkflows.Migrate(migCtx, store)
+			if err != nil {
+				log.Printf("workflows migration cosmos->pg failed: %v (re-run by restarting pod; Migrate is idempotent)", err)
+				return
+			}
+			log.Printf("workflows migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
+		}()
+
 		rt = &runtimeStore{Store: store, LocksStore: pgLocks}
 	} else {
 		log.Printf("runtime store disabled: cosmos store and postgres pool both required (store=%v pgPool=%v)", store != nil, pgPool != nil)
