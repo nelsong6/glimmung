@@ -146,6 +146,19 @@ var schemaMigrations = []string{
 	`ALTER TABLE run_events ADD COLUMN IF NOT EXISTS exit_code int`,
 	`ALTER TABLE run_events ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}'::jsonb`,
 
+	// Stage 2d additions: github_repo and created_at columns surfaced
+	// from project payload jsonb for indexed lookups; test_lease_defaults
+	// table for the global TTL settings the cosmos store kept inside the
+	// `projects` container as a sentinel doc.
+	`ALTER TABLE projects ADD COLUMN IF NOT EXISTS github_repo text NOT NULL DEFAULT ''`,
+	`CREATE TABLE IF NOT EXISTS test_lease_defaults (
+		id                          text PRIMARY KEY,
+		global_ttl_seconds          int NOT NULL DEFAULT 0,
+		hot_swap_min_ttl_seconds    int NOT NULL DEFAULT 0,
+		created_at                  timestamptz NOT NULL DEFAULT now(),
+		updated_at                  timestamptz NOT NULL DEFAULT now()
+	)`,
+
 	// ------------------------------------------------------------------
 	// locks — replaces the Cosmos id-uniqueness primitive. Acquire uses
 	// the atomic "INSERT ... ON CONFLICT DO UPDATE WHERE state='released'

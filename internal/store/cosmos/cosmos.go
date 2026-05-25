@@ -78,6 +78,80 @@ func (s *Store) SetPGRunEvents(runEvents *pgstore.RunEventsStore) {
 	s.pgRunEvents = runEvents
 }
 
+// ListAllProjectDocsForMigration reads every doc in the cosmos
+// `projects` container and splits it into per-project rows + the
+// optional singleton settings row. Consumed by
+// pg.ProjectsStore.Migrate at startup. Stage 2d ships this as
+// foundation-only — pg.ProjectsStore is populated but cosmos.Store's
+// project methods still serve all reads/writes. Stage 2e wires the
+// cutover (cosmos methods delegate to pg) and Stage 2i deletes this
+// method along with the cosmos `projects` container client.
+func (s *Store) ListAllProjectDocsForMigration(ctx context.Context) ([]pgstore.ProjectRow, *pgstore.TestLeaseDefaultsRow, error) {
+	if s == nil || s.projects == nil {
+		return nil, nil, nil
+	}
+	var raw []map[string]any
+	if err := crossPartitionQuery(ctx, s.projects, "SELECT * FROM c", nil, &raw); err != nil {
+		return nil, nil, err
+	}
+	out := make([]pgstore.ProjectRow, 0, len(raw))
+	var defaults *pgstore.TestLeaseDefaultsRow
+	for _, doc := range raw {
+		kind, _ := doc["kind"].(string)
+		if kind == testLeaseDefaultsDocKind {
+			row := pgstore.TestLeaseDefaultsRow{}
+			if v, ok := doc["globalTTLSeconds"].(float64); ok {
+				row.GlobalTTLSeconds = int(v)
+			}
+			if v, ok := doc["hotSwapMinTTLSeconds"].(float64); ok {
+				row.HotSwapMinTTLSeconds = int(v)
+			}
+			if v, ok := doc["createdAt"].(string); ok {
+				if t := parseOptionalTime(v); t != nil {
+					row.CreatedAt = *t
+				}
+			}
+			if v, ok := doc["updatedAt"].(string); ok {
+				if t := parseOptionalTime(v); t != nil {
+					row.UpdatedAt = *t
+				}
+			}
+			defaults = &row
+			continue
+		}
+		// Per-project row. Cosmos doc id == project name.
+		name, _ := doc["id"].(string)
+		if name == "" {
+			if n, ok := doc["name"].(string); ok {
+				name = n
+			}
+		}
+		if name == "" {
+			continue
+		}
+		row := pgstore.ProjectRow{
+			Name:     name,
+			Metadata: map[string]any{},
+		}
+		if v, ok := doc["githubRepo"].(string); ok {
+			row.GitHubRepo = v
+		}
+		if v, ok := doc["argocdApp"].(string); ok {
+			row.ArgoCDApp = v
+		}
+		if v, ok := doc["metadata"].(map[string]any); ok {
+			row.Metadata = v
+		}
+		if v, ok := doc["createdAt"].(string); ok {
+			if t := parseOptionalTime(v); t != nil {
+				row.CreatedAt = *t
+			}
+		}
+		out = append(out, row)
+	}
+	return out, defaults, nil
+}
+
 const workflowSchemaKind = "workflow_schema"
 
 func NewFromSettings(settings server.Settings) (*Store, error) {
