@@ -72,6 +72,11 @@ type Store struct {
 	// The cosmos `workflows` container client is retained only for
 	// ListAllWorkflowDocsForMigration. Stage 2i deletes both.
 	pgWorkflows *pgstore.WorkflowsStore
+
+	// pgPortfolios is the Postgres-backed portfolios store (Stage 2m
+	// cutover). ListPortfolioElements / UpsertPortfolioElement /
+	// PatchPortfolioElement delegate here.
+	pgPortfolios *pgstore.PortfoliosStore
 }
 
 // SetPGLocks injects the Postgres-backed lock store. Called once at
@@ -104,6 +109,23 @@ func (s *Store) SetPGProjects(projects *pgstore.ProjectsStore) {
 // field once set.
 func (s *Store) SetPGWorkflows(workflows *pgstore.WorkflowsStore) {
 	s.pgWorkflows = workflows
+}
+
+// SetPGPortfolios injects the Postgres-backed portfolios store.
+func (s *Store) SetPGPortfolios(portfolios *pgstore.PortfoliosStore) {
+	s.pgPortfolios = portfolios
+}
+
+// portfolioElementDocFromPayload deserializes a pg portfolio row's
+// payload back into the cosmos doc shape, then converts it to the
+// server-facing public shape. Used by ListPortfolioElements /
+// UpsertPortfolioElement / PatchPortfolioElement.
+func portfolioElementDocFromPayload(payload []byte) (portfolioElementDoc, error) {
+	var doc portfolioElementDoc
+	if err := json.Unmarshal(payload, &doc); err != nil {
+		return portfolioElementDoc{}, err
+	}
+	return doc, nil
 }
 
 // ListAllSlotDocsForMigration reads cosmos slots + slot_history
@@ -3791,49 +3813,16 @@ func (s *Store) resolveRunRefToID(ctx context.Context, project string, ref *stri
 }
 
 func (s *Store) ListPortfolioElements(ctx context.Context, filter server.PortfolioListFilter) ([]server.PortfolioElementPublic, error) {
-	// issues container is partitioned by /project. Single-partition
-	// when filter.Project is set, fan-out otherwise.
-	var docs []portfolioElementDoc
-	if filter.Project != "" {
-		predicates := []string{"c.kind = @kind", "c.project = @project"}
-		params := []azcosmos.QueryParameter{
-			{Name: "@kind", Value: "portfolio_element"},
-			{Name: "@project", Value: filter.Project},
-		}
-		if filter.Status != "" {
-			predicates = append(predicates, "c.status = @status")
-			params = append(params, azcosmos.QueryParameter{Name: "@status", Value: filter.Status})
-		}
-		query := "SELECT * FROM c WHERE " + strings.Join(predicates, " AND ") + " ORDER BY c.updated_at DESC"
-		if err := singlePartitionQuery(ctx, s.issues,
-			azcosmos.NewPartitionKeyString(filter.Project),
-			query, params, &docs); err != nil {
-			return nil, err
-		}
-	} else {
-		projects, err := s.listProjectNames(ctx)
+	rows, err := s.pgPortfolios.List(ctx, filter.Project, filter.Status, filter.Limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]server.PortfolioElementPublic, 0, len(rows))
+	for _, row := range rows {
+		doc, err := portfolioElementDocFromPayload(row.Payload)
 		if err != nil {
 			return nil, err
 		}
-		predicates := []string{"c.kind = @kind", "c.project = @project"}
-		params := []azcosmos.QueryParameter{{Name: "@kind", Value: "portfolio_element"}}
-		if filter.Status != "" {
-			predicates = append(predicates, "c.status = @status")
-			params = append(params, azcosmos.QueryParameter{Name: "@status", Value: filter.Status})
-		}
-		query := "SELECT * FROM c WHERE " + strings.Join(predicates, " AND ")
-		if err := fanOutByProject(ctx, s.issues, projects, query, params, &docs); err != nil {
-			return nil, err
-		}
-		sort.SliceStable(docs, func(i, j int) bool {
-			return docs[i].UpdatedAt > docs[j].UpdatedAt
-		})
-	}
-	if filter.Limit != nil && *filter.Limit < len(docs) {
-		docs = docs[:*filter.Limit]
-	}
-	out := make([]server.PortfolioElementPublic, 0, len(docs))
-	for _, doc := range docs {
 		runRef := s.resolveLastTouchedRunRef(ctx, doc.Project, doc.LastTouchedRunID)
 		out = append(out, portfolioElementDocToPublic(doc, runRef))
 	}
@@ -3845,21 +3834,9 @@ func (s *Store) UpsertPortfolioElement(ctx context.Context, req server.Portfolio
 	if err != nil {
 		return server.PortfolioElementPublic{}, err
 	}
-	docID := portfolioElementDocID(req.Project, req.Route, req.ElementID)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	createdAt := now
-	pk := azcosmos.NewPartitionKeyString(req.Project)
-	existing, readErr := s.issues.ReadItem(ctx, pk, docID, nil)
-	if readErr == nil {
-		var existDoc map[string]any
-		if json.Unmarshal(existing.Value, &existDoc) == nil {
-			if ca, ok := existDoc["created_at"].(string); ok && ca != "" {
-				createdAt = ca
-			}
-		}
-	}
 	doc := portfolioElementDoc{
-		ID:               docID,
+		ID:               portfolioElementDocID(req.Project, req.Route, req.ElementID),
 		Kind:             "portfolio_element",
 		Project:          req.Project,
 		Route:            req.Route,
@@ -3871,81 +3848,101 @@ func (s *Store) UpsertPortfolioElement(ctx context.Context, req server.Portfolio
 		Notes:            req.Notes,
 		LastTouchedRunID: runID,
 		Metadata:         mapOrEmpty(req.Metadata),
-		CreatedAt:        createdAt,
+		CreatedAt:        now,
 		UpdatedAt:        now,
 	}
-	data, err := json.Marshal(doc)
+	payload, err := json.Marshal(doc)
 	if err != nil {
 		return server.PortfolioElementPublic{}, err
 	}
-	if _, err := s.issues.UpsertItem(ctx, pk, data, nil); err != nil {
+	row, err := s.pgPortfolios.Upsert(ctx, pgstore.PortfolioRow{
+		Project:   req.Project,
+		Route:     req.Route,
+		ElementID: req.ElementID,
+		Payload:   payload,
+	})
+	if err != nil {
+		return server.PortfolioElementPublic{}, err
+	}
+	finalDoc, err := portfolioElementDocFromPayload(row.Payload)
+	if err != nil {
+		return server.PortfolioElementPublic{}, err
+	}
+	runRef := s.resolveLastTouchedRunRef(ctx, finalDoc.Project, finalDoc.LastTouchedRunID)
+	return portfolioElementDocToPublic(finalDoc, runRef), nil
+}
+
+func (s *Store) PatchPortfolioElement(ctx context.Context, project, ref string, req server.PortfolioElementPatch) (server.PortfolioElementPublic, error) {
+	// The portfolio ref encodes (route, element_id). The server-side
+	// helper that parses it lives in publicids; we re-derive here by
+	// scanning project rows for a matching ref, then patch by
+	// (project, route, element_id).
+	rows, err := s.pgPortfolios.List(ctx, project, "", nil)
+	if err != nil {
+		return server.PortfolioElementPublic{}, err
+	}
+	var targetRoute, targetElementID string
+	for _, row := range rows {
+		if server.PortfolioElementRef(row.Route, row.ElementID) == ref {
+			targetRoute = row.Route
+			targetElementID = row.ElementID
+			break
+		}
+	}
+	if targetRoute == "" {
+		return server.PortfolioElementPublic{}, server.ErrNotFound
+	}
+
+	// Resolve the run ref outside the mutator so the error path is clean.
+	var newRunID *string
+	if req.LastTouchedRunRef != nil {
+		newRunID, err = s.resolveRunRefToID(ctx, project, req.LastTouchedRunRef)
+		if err != nil {
+			return server.PortfolioElementPublic{}, err
+		}
+	}
+
+	row, err := s.pgPortfolios.PatchPayload(ctx, project, targetRoute, targetElementID, func(payload map[string]any) error {
+		if req.Title != nil {
+			payload["title"] = *req.Title
+		}
+		if req.ScreenshotURL != nil {
+			payload["screenshot_url"] = *req.ScreenshotURL
+		}
+		if req.PreviewURL != nil {
+			payload["preview_url"] = *req.PreviewURL
+		}
+		if req.Status != nil {
+			payload["status"] = *req.Status
+		}
+		if req.Notes != nil {
+			payload["notes"] = *req.Notes
+		}
+		if req.Metadata != nil {
+			payload["metadata"] = *req.Metadata
+		}
+		if req.LastTouchedRunRef != nil {
+			if newRunID == nil {
+				delete(payload, "last_touched_run_id")
+			} else {
+				payload["last_touched_run_id"] = *newRunID
+			}
+		}
+		payload["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+		return nil
+	})
+	if errors.Is(err, pgstore.ErrPortfolioNotFound) {
+		return server.PortfolioElementPublic{}, server.ErrNotFound
+	}
+	if err != nil {
+		return server.PortfolioElementPublic{}, err
+	}
+	doc, err := portfolioElementDocFromPayload(row.Payload)
+	if err != nil {
 		return server.PortfolioElementPublic{}, err
 	}
 	runRef := s.resolveLastTouchedRunRef(ctx, doc.Project, doc.LastTouchedRunID)
 	return portfolioElementDocToPublic(doc, runRef), nil
-}
-
-func (s *Store) PatchPortfolioElement(ctx context.Context, project, ref string, req server.PortfolioElementPatch) (server.PortfolioElementPublic, error) {
-	// Resolve ref -> doc ID by scanning project's portfolio elements.
-	var docs []portfolioElementDoc
-	if err := singlePartitionQuery(ctx, s.issues,
-		azcosmos.NewPartitionKeyString(project),
-		"SELECT * FROM c WHERE c.kind = @kind AND c.project = @project",
-		[]azcosmos.QueryParameter{
-			{Name: "@kind", Value: "portfolio_element"},
-			{Name: "@project", Value: project},
-		},
-		&docs,
-	); err != nil {
-		return server.PortfolioElementPublic{}, err
-	}
-	var target *portfolioElementDoc
-	for i := range docs {
-		if server.PortfolioElementRef(docs[i].Route, docs[i].ElementID) == ref {
-			target = &docs[i]
-			break
-		}
-	}
-	if target == nil {
-		return server.PortfolioElementPublic{}, server.ErrNotFound
-	}
-
-	if req.Title != nil {
-		target.Title = *req.Title
-	}
-	if req.ScreenshotURL != nil {
-		target.ScreenshotURL = req.ScreenshotURL
-	}
-	if req.PreviewURL != nil {
-		target.PreviewURL = req.PreviewURL
-	}
-	if req.Status != nil {
-		target.Status = *req.Status
-	}
-	if req.Notes != nil {
-		target.Notes = req.Notes
-	}
-	if req.Metadata != nil {
-		target.Metadata = *req.Metadata
-	}
-	if req.LastTouchedRunRef != nil {
-		runID, err := s.resolveRunRefToID(ctx, project, req.LastTouchedRunRef)
-		if err != nil {
-			return server.PortfolioElementPublic{}, err
-		}
-		target.LastTouchedRunID = runID
-	}
-	target.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	data, err := json.Marshal(*target)
-	if err != nil {
-		return server.PortfolioElementPublic{}, err
-	}
-	pk := azcosmos.NewPartitionKeyString(project)
-	if _, err := s.issues.ReplaceItem(ctx, pk, target.ID, data, nil); err != nil {
-		return server.PortfolioElementPublic{}, server.ErrNotFound
-	}
-	runRef := s.resolveLastTouchedRunRef(ctx, target.Project, target.LastTouchedRunID)
-	return portfolioElementDocToPublic(*target, runRef), nil
 }
 
 // â”€â”€ Playbook gate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
