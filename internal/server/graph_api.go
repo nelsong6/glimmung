@@ -1740,6 +1740,12 @@ func applyNativeEventsToProjectionRun(run *RunProjectionRun, events []NativeRunL
 			if len(jobEvents) == 0 {
 				continue
 			}
+			observedStepSlug := map[string]bool{}
+			for _, event := range jobEvents {
+				if event.StepSlug != "" {
+					observedStepSlug[event.StepSlug] = true
+				}
+			}
 			if job.State == "dispatching" || job.State == "not_started" {
 				job.State = "active"
 			}
@@ -1780,6 +1786,7 @@ func applyNativeEventsToProjectionRun(run *RunProjectionRun, events []NativeRunL
 			if job.State == "active" {
 				phaseActive = true
 			}
+			resetUnobservedFailedSteps(job, observedStepSlug)
 		}
 		switch {
 		case phaseFailed:
@@ -1790,6 +1797,27 @@ func applyNativeEventsToProjectionRun(run *RunProjectionRun, events []NativeRunL
 		case phase.State == "dispatching" && phaseActive:
 			phase.State = "active"
 		}
+	}
+}
+
+func resetUnobservedFailedSteps(job *RunProjectionJob, observedStepSlug map[string]bool) {
+	if job == nil || len(observedStepSlug) == 0 {
+		return
+	}
+	for stepIndex := range job.Steps {
+		step := &job.Steps[stepIndex]
+		if observedStepSlug[step.Slug] {
+			continue
+		}
+		if step.State != "failed" {
+			continue
+		}
+		if step.Reason != nil && *step.Reason != "job_failed" {
+			continue
+		}
+		step.State = "not_started"
+		step.Reason = nil
+		step.ExitCode = nil
 	}
 }
 
