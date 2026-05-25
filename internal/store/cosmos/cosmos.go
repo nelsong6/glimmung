@@ -93,6 +93,73 @@ func (s *Store) SetPGProjects(projects *pgstore.ProjectsStore) {
 	s.pgProjects = projects
 }
 
+// ListAllWorkflowDocsForMigration reads every doc in the cosmos
+// `workflows` container and splits it into workflow rows + workflow-
+// schema rows by the embedded `kind` discriminator. Consumed by
+// pg.WorkflowsStore.Migrate at startup. Stage 2g cuts the public
+// workflow methods over to pg; Stage 2i deletes this method along
+// with the cosmos `workflows` container client.
+func (s *Store) ListAllWorkflowDocsForMigration(ctx context.Context) ([]pgstore.WorkflowRow, []pgstore.WorkflowSchemaRow, error) {
+	if s == nil || s.workflows == nil {
+		return nil, nil, nil
+	}
+	var raw []map[string]any
+	if err := crossPartitionQuery(ctx, s.workflows, "SELECT * FROM c", nil, &raw); err != nil {
+		return nil, nil, err
+	}
+	workflows := make([]pgstore.WorkflowRow, 0, len(raw))
+	schemas := make([]pgstore.WorkflowSchemaRow, 0)
+	for _, doc := range raw {
+		project, _ := doc["project"].(string)
+		name, _ := doc["name"].(string)
+		schemaRef, _ := doc["schema_ref"].(string)
+		kind, _ := doc["kind"].(string)
+		id, _ := doc["id"].(string)
+		var createdAt time.Time
+		if v, ok := doc["createdAt"].(string); ok {
+			if t := parseOptionalTime(v); t != nil {
+				createdAt = *t
+			}
+		}
+		payload, err := json.Marshal(doc)
+		if err != nil {
+			return nil, nil, fmt.Errorf("workflows migrate: marshal %s/%s: %w", project, name, err)
+		}
+		if kind == workflowSchemaKind || strings.HasPrefix(id, "schema:") {
+			// workflow_schema row. schema_ref might be empty in the
+			// doc body; the id encodes "schema:<name>:<schemaRef>".
+			if schemaRef == "" && strings.HasPrefix(id, "schema:") {
+				parts := strings.SplitN(id, ":", 3)
+				if len(parts) == 3 {
+					schemaRef = parts[2]
+				}
+			}
+			if schemaRef == "" || project == "" {
+				continue
+			}
+			schemas = append(schemas, pgstore.WorkflowSchemaRow{
+				Project:   project,
+				SchemaRef: schemaRef,
+				Payload:   payload,
+				CreatedAt: createdAt,
+			})
+			continue
+		}
+		if project == "" || name == "" {
+			continue
+		}
+		workflows = append(workflows, pgstore.WorkflowRow{
+			Project:   project,
+			Name:      name,
+			SchemaRef: schemaRef,
+			Payload:   payload,
+			CreatedAt: createdAt,
+			UpdatedAt: createdAt,
+		})
+	}
+	return workflows, schemas, nil
+}
+
 // projectFromRecord converts a pg.ProjectRecord to the server-package
 // Project type the delegation methods return. ID == Name because the
 // cosmos doc id was always the project name.
