@@ -106,6 +106,88 @@ func (s *Store) SetPGWorkflows(workflows *pgstore.WorkflowsStore) {
 	s.pgWorkflows = workflows
 }
 
+// ListAllSlotDocsForMigration reads cosmos slots + slot_history
+// containers for pg.SlotsStore.Migrate.
+func (s *Store) ListAllSlotDocsForMigration(ctx context.Context) ([]pgstore.SlotRow, []pgstore.SlotHistoryRow, error) {
+	if s == nil || s.slots == nil {
+		return nil, nil, nil
+	}
+	var slotDocs []slotDoc
+	if err := crossPartitionQuery(ctx, s.slots, "SELECT * FROM c", nil, &slotDocs); err != nil {
+		return nil, nil, err
+	}
+	slots := make([]pgstore.SlotRow, 0, len(slotDocs))
+	for _, doc := range slotDocs {
+		payload, err := json.Marshal(doc)
+		if err != nil {
+			return nil, nil, err
+		}
+		slots = append(slots, pgstore.SlotRow{
+			Project:   doc.Project,
+			SlotIndex: doc.SlotIndex,
+			Payload:   payload,
+		})
+	}
+	var historyDocs []slotHistoryDoc
+	if s.slotHistory != nil {
+		if err := crossPartitionQuery(ctx, s.slotHistory, "SELECT * FROM c", nil, &historyDocs); err != nil {
+			return nil, nil, err
+		}
+	}
+	history := make([]pgstore.SlotHistoryRow, 0, len(historyDocs))
+	for _, doc := range historyDocs {
+		payload, err := json.Marshal(doc)
+		if err != nil {
+			return nil, nil, err
+		}
+		slotIdx := 0
+		if doc.SlotIndex != nil {
+			slotIdx = *doc.SlotIndex
+		}
+		history = append(history, pgstore.SlotHistoryRow{
+			ID:        doc.ID,
+			Project:   doc.Project,
+			SlotIndex: slotIdx,
+			Payload:   payload,
+			CreatedAt: doc.CreatedAt,
+		})
+	}
+	return slots, history, nil
+}
+
+// ListAllSignalDocsForMigration reads cosmos signals container for
+// pg.SignalsStore.Migrate.
+func (s *Store) ListAllSignalDocsForMigration(ctx context.Context) ([]pgstore.SignalRow, error) {
+	if s == nil || s.signals == nil {
+		return nil, nil
+	}
+	var docs []signalDoc
+	if err := crossPartitionQuery(ctx, s.signals, "SELECT * FROM c", nil, &docs); err != nil {
+		return nil, err
+	}
+	out := make([]pgstore.SignalRow, 0, len(docs))
+	for _, doc := range docs {
+		payload, err := json.Marshal(doc)
+		if err != nil {
+			return nil, err
+		}
+		var processedAt *time.Time
+		if doc.ProcessedAt != nil {
+			if t := parseOptionalTime(*doc.ProcessedAt); t != nil {
+				processedAt = t
+			}
+		}
+		out = append(out, pgstore.SignalRow{
+			ID:          doc.ID,
+			TargetRepo:  doc.TargetRepo,
+			Payload:     payload,
+			CreatedAt:   parseTimeOrZero(doc.EnqueuedAt),
+			ProcessedAt: processedAt,
+		})
+	}
+	return out, nil
+}
+
 // ListAllIssueDocsForMigration reads every cosmos issue doc and
 // splits it into the per-issue row + per-comment rows that
 // pg.IssuesStore.Migrate consumes. Consumed once at startup; Stage 2i

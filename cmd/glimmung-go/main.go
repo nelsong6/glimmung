@@ -193,6 +193,33 @@ func main() {
 			log.Printf("issues migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
 		}()
 
+		// Stage 2i foundations: pg.SlotsStore + pg.SignalsStore.
+		pgSlots := pgstore.NewSlotsStore(pgPool)
+		_ = pgSlots
+		go func() {
+			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			copied, skipped, err := pgSlots.Migrate(migCtx, store)
+			if err != nil {
+				log.Printf("slots migration cosmos->pg failed: %v (re-run by restarting pod; Migrate is idempotent)", err)
+				return
+			}
+			log.Printf("slots migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
+		}()
+
+		pgSignals := pgstore.NewSignalsStore(pgPool)
+		_ = pgSignals
+		go func() {
+			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			copied, skipped, err := pgSignals.Migrate(migCtx, store)
+			if err != nil {
+				log.Printf("signals migration cosmos->pg failed: %v (re-run by restarting pod; Migrate is idempotent)", err)
+				return
+			}
+			log.Printf("signals migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
+		}()
+
 		rt = &runtimeStore{Store: store, LocksStore: pgLocks}
 	} else {
 		log.Printf("runtime store disabled: cosmos store and postgres pool both required (store=%v pgPool=%v)", store != nil, pgPool != nil)
