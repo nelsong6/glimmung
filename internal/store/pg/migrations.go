@@ -175,6 +175,16 @@ var schemaMigrations = []string{
 	`CREATE INDEX IF NOT EXISTS portfolios_by_project_updated
 		ON portfolios (project, updated_at DESC)`,
 
+	// Stage 2j-fix: clean up 627 mis-typed rows that landed in
+	// `reports` because the buggy ListAllReportDocsForMigration read
+	// from the cosmos reports container (which actually holds
+	// touchpoints, not reports). Filter by `repo` field presence —
+	// touchpointDoc carries a `repo` field; legitimate report docs
+	// (which don't exist yet anywhere) wouldn't. After this DELETE
+	// the fixed ListAllTouchpointDocsForMigration populates
+	// `touchpoints` correctly on the next idempotent migration run.
+	`DELETE FROM reports WHERE payload ? 'repo'`,
+
 	// ------------------------------------------------------------------
 	// locks — replaces the Cosmos id-uniqueness primitive. Acquire uses
 	// the atomic "INSERT ... ON CONFLICT DO UPDATE WHERE state='released'
