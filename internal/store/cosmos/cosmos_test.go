@@ -212,6 +212,48 @@ func TestExecutionRawHelpersDriveCanonicalState(t *testing.T) {
 	}
 }
 
+func TestJobCompletionFailurePreservesUnstartedSteps(t *testing.T) {
+	now := "2026-05-25T04:26:41Z"
+	raw := map[string]any{
+		"phase_executions": []any{
+			map[string]any{
+				"name":  "env-prep",
+				"kind":  "k8s_job",
+				"state": "active",
+				"jobs": []any{map[string]any{
+					"id":    "env-prep",
+					"state": "active",
+					"steps": []any{
+						map[string]any{"slug": "check-validation-env", "state": "active"},
+						map[string]any{"slug": "emit-env-outputs", "state": "not_started"},
+					},
+				}},
+			},
+		},
+	}
+
+	markJobCompletionInExecutionsRaw(raw, "env-prep", "env-prep", "failed", "step_failed", now)
+
+	job := rawJob(t, rawPhase(t, raw, "env-prep"), "env-prep")
+	check := rawStep(t, job, "check-validation-env")
+	if got := stringValue(check["state"]); got != "failed" {
+		t.Fatalf("check-validation-env state=%q", got)
+	}
+	if got := stringValue(check["reason"]); got != "step_failed" {
+		t.Fatalf("check-validation-env reason=%q", got)
+	}
+	emit := rawStep(t, job, "emit-env-outputs")
+	if got := stringValue(emit["state"]); got != "not_started" {
+		t.Fatalf("emit-env-outputs state=%q", got)
+	}
+	if _, ok := emit["reason"]; ok {
+		t.Fatalf("emit-env-outputs should not have failure reason: %#v", emit)
+	}
+	if _, ok := emit["completed_at"]; ok {
+		t.Fatalf("emit-env-outputs should not be completed: %#v", emit)
+	}
+}
+
 func rawPhase(t *testing.T, raw map[string]any, name string) map[string]any {
 	t.Helper()
 	for _, value := range raw["phase_executions"].([]any) {

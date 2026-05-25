@@ -574,6 +574,52 @@ func TestRunCycleGraphProjectionKeepsPendingWorkflowJobsWithDurableExecutions(t 
 	}
 }
 
+func TestApplyNativeEventsResetsUnobservedFailedSteps(t *testing.T) {
+	exitCode := 1
+	stepFailed := "step_failed"
+	exitNonzero := "exit_nonzero"
+	jobFailed := "job_failed"
+	run := RunProjectionRun{
+		Phases: []RunProjectionPhase{{
+			Name: "env-prep",
+			Kind: "k8s_job",
+			Attempts: []RunProjectionAttempt{{
+				AttemptIndex: 0,
+				Phase:        "env-prep",
+				PhaseKind:    "k8s_job",
+			}},
+			Jobs: []RunProjectionJob{{
+				ID:     "env-prep",
+				State:  "failed",
+				Reason: &stepFailed,
+				Steps: []RunProjectionStep{
+					{Slug: "check-validation-env", State: "failed", Reason: &exitNonzero, ExitCode: &exitCode},
+					{Slug: "emit-env-outputs", State: "failed", Reason: &jobFailed},
+				},
+			}},
+		}},
+	}
+	events := []NativeRunLogEvent{{
+		AttemptIndex: 0,
+		Phase:        "env-prep",
+		JobID:        "env-prep",
+		Seq:          173,
+		Event:        "step_failed",
+		StepSlug:     "check-validation-env",
+		ExitCode:     &exitCode,
+	}}
+
+	applyNativeEventsToProjectionRun(&run, events)
+
+	steps := run.Phases[0].Jobs[0].Steps
+	if steps[0].State != "failed" || steps[0].Reason == nil || *steps[0].Reason != "exit_nonzero" {
+		t.Fatalf("check-validation-env step=%#v", steps[0])
+	}
+	if steps[1].State != "not_started" || steps[1].Reason != nil || steps[1].ExitCode != nil {
+		t.Fatalf("emit-env-outputs step=%#v", steps[1])
+	}
+}
+
 func TestRunCycleGraphProjectionShowsLegacyAbortedDispatchTimeout(t *testing.T) {
 	issueNumber := 17
 	runNumber := 1

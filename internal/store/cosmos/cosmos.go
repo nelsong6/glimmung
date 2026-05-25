@@ -6390,7 +6390,7 @@ func markJobCompletionInExecutionsRaw(raw map[string]any, phaseName, jobID, stat
 						step["state"] = "succeeded"
 						step["completed_at"] = completedAt
 					}
-					if state == "failed" && (stringValue(step["state"]) == "active" || stringValue(step["state"]) == "dispatching" || stringValue(step["state"]) == "not_started" || stringValue(step["state"]) == "") {
+					if state == "failed" && (stringValue(step["state"]) == "active" || stringValue(step["state"]) == "dispatching") {
 						step["state"] = "failed"
 						step["reason"] = firstNonEmpty(reason, "job_failed")
 						step["completed_at"] = completedAt
