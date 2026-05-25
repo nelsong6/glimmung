@@ -162,11 +162,11 @@ func main() {
 			log.Printf("projects migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
 		}()
 
-		// Stage 2f foundation: pg.WorkflowsStore. Migrate copies cosmos
-		// workflows + workflow_schemas into the matching pg tables.
-		// Cutover (cosmos delegations) lands in Stage 2g.
+		// Stage 2g: pg.WorkflowsStore now serves every workflow R/W on
+		// cosmos.Store via delegation. SetPGWorkflows wires the field
+		// before the HTTP server starts.
 		pgWorkflows := pgstore.NewWorkflowsStore(pgPool)
-		_ = pgWorkflows
+		store.SetPGWorkflows(pgWorkflows)
 		go func() {
 			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 			defer cancel()

@@ -66,6 +66,12 @@ type Store struct {
 	// `projects` container client is retained only for
 	// ListAllProjectDocsForMigration. Stage 2i deletes both.
 	pgProjects *pgstore.ProjectsStore
+
+	// pgWorkflows is the Postgres-backed workflows store (Stage 2g).
+	// All workflow read/write methods on cosmos.Store delegate here.
+	// The cosmos `workflows` container client is retained only for
+	// ListAllWorkflowDocsForMigration. Stage 2i deletes both.
+	pgWorkflows *pgstore.WorkflowsStore
 }
 
 // SetPGLocks injects the Postgres-backed lock store. Called once at
@@ -91,6 +97,24 @@ func (s *Store) SetPGRunEvents(runEvents *pgstore.RunEventsStore) {
 // constructed.
 func (s *Store) SetPGProjects(projects *pgstore.ProjectsStore) {
 	s.pgProjects = projects
+}
+
+// SetPGWorkflows injects the Postgres-backed workflows store. All
+// workflow read/write methods on cosmos.Store route through this
+// field once set.
+func (s *Store) SetPGWorkflows(workflows *pgstore.WorkflowsStore) {
+	s.pgWorkflows = workflows
+}
+
+// workflowFromPayload unmarshals a pg workflow payload (raw JSON of
+// the cosmos workflowDoc shape) and converts it to the server-package
+// Workflow type via the existing workflowFromDoc helper.
+func workflowFromPayload(payload []byte) (server.Workflow, error) {
+	var doc workflowDoc
+	if err := json.Unmarshal(payload, &doc); err != nil {
+		return server.Workflow{}, err
+	}
+	return workflowFromDoc(doc), nil
 }
 
 // ListAllWorkflowDocsForMigration reads every doc in the cosmos
@@ -502,18 +526,19 @@ func (s *Store) ReadProject(ctx context.Context, project string) (server.Project
 }
 
 func (s *Store) ListWorkflows(ctx context.Context) ([]server.Workflow, error) {
-	var docs []workflowDoc
-	if err := crossPartitionQuery(ctx, s.workflows, "SELECT * FROM c", nil, &docs); err != nil {
+	rows, err := s.pgWorkflows.List(ctx)
+	if err != nil {
 		return nil, err
 	}
-	rows := make([]server.Workflow, 0, len(docs))
-	for _, doc := range docs {
-		if isWorkflowSchemaDoc(doc) {
-			continue
+	out := make([]server.Workflow, 0, len(rows))
+	for _, row := range rows {
+		w, err := workflowFromPayload(row.Payload)
+		if err != nil {
+			return nil, err
 		}
-		rows = append(rows, workflowFromDoc(doc))
+		out = append(out, w)
 	}
-	return rows, nil
+	return out, nil
 }
 
 func (s *Store) UpsertWorkflow(ctx context.Context, req server.WorkflowRegister) (server.Workflow, error) {
@@ -533,69 +558,58 @@ func (s *Store) UpsertWorkflow(ctx context.Context, req server.WorkflowRegister)
 	doc.Kind = "workflow"
 	doc.SchemaRef = workflowSchemaRef(doc)
 	schemaDoc := workflowSchemaDocFromWorkflow(doc)
-	pk := azcosmos.NewPartitionKeyString(req.Project)
-	if err := s.createWorkflowSchemaIfMissing(ctx, pk, schemaDoc); err != nil {
-		return server.Workflow{}, err
-	}
-	existing, err := s.workflows.ReadItem(ctx, pk, req.Name, nil)
-	if err == nil {
-		var existingDoc workflowDoc
-		if err := json.Unmarshal(existing.Value, &existingDoc); err == nil && existingDoc.CreatedAt != "" {
-			doc.CreatedAt = existingDoc.CreatedAt
-		}
-		payload, err := json.Marshal(doc)
-		if err != nil {
-			return server.Workflow{}, err
-		}
-		if _, err := s.workflows.ReplaceItem(ctx, pk, req.Name, payload, nil); err != nil {
-			return server.Workflow{}, err
-		}
-		return workflowFromDoc(doc), nil
-	}
-	if !isCosmosStatus(err, http.StatusNotFound) {
-		return server.Workflow{}, err
-	}
 
-	payload, err := json.Marshal(doc)
+	workflowPayload, err := json.Marshal(doc)
 	if err != nil {
 		return server.Workflow{}, err
 	}
-	if _, err := s.workflows.CreateItem(ctx, pk, payload, nil); err != nil {
+	schemaPayload, err := json.Marshal(schemaDoc)
+	if err != nil {
 		return server.Workflow{}, err
 	}
-	return workflowFromDoc(doc), nil
+	row, err := s.pgWorkflows.Upsert(ctx,
+		pgstore.WorkflowRow{
+			Project:   req.Project,
+			Name:      req.Name,
+			SchemaRef: doc.SchemaRef,
+			Payload:   workflowPayload,
+		},
+		pgstore.WorkflowSchemaRow{
+			Project:   req.Project,
+			SchemaRef: doc.SchemaRef,
+			Payload:   schemaPayload,
+		},
+	)
+	if err != nil {
+		return server.Workflow{}, err
+	}
+	return workflowFromPayload(row.Payload)
 }
 
 func (s *Store) DeleteWorkflow(ctx context.Context, project string, name string) (server.Workflow, error) {
-	pk := azcosmos.NewPartitionKeyString(project)
-	read, err := s.workflows.ReadItem(ctx, pk, name, nil)
-	if isCosmosStatus(err, http.StatusNotFound) {
+	row, err := s.pgWorkflows.Delete(ctx, project, name)
+	if errors.Is(err, pgstore.ErrWorkflowNotFound) {
 		return server.Workflow{}, server.ErrNotFound
 	}
 	if err != nil {
 		return server.Workflow{}, err
 	}
-	var doc workflowDoc
-	if err := json.Unmarshal(read.Value, &doc); err != nil {
-		return server.Workflow{}, err
-	}
-	if _, err := s.workflows.DeleteItem(ctx, pk, name, nil); err != nil {
-		return server.Workflow{}, err
-	}
-	return workflowFromDoc(doc), nil
+	return workflowFromPayload(row.Payload)
 }
 
 func (s *Store) PatchWorkflow(ctx context.Context, project string, name string, req server.WorkflowPatchRequest) (server.Workflow, error) {
-	pk := azcosmos.NewPartitionKeyString(project)
-	read, err := s.workflows.ReadItem(ctx, pk, name, nil)
-	if isCosmosStatus(err, http.StatusNotFound) {
+	// Read the existing workflow, convert to a Register, apply patch,
+	// then run through UpsertWorkflow so the schema_ref recomputation
+	// stays in one place.
+	row, err := s.pgWorkflows.GetByName(ctx, project, name)
+	if errors.Is(err, pgstore.ErrWorkflowNotFound) {
 		return server.Workflow{}, server.ErrNotFound
 	}
 	if err != nil {
 		return server.Workflow{}, err
 	}
 	var doc workflowDoc
-	if err := json.Unmarshal(read.Value, &doc); err != nil {
+	if err := json.Unmarshal(row.Payload, &doc); err != nil {
 		return server.Workflow{}, err
 	}
 	reg := workflowRegisterFromDoc(doc)
@@ -2189,17 +2203,6 @@ func workflowSchemaDocFromWorkflow(doc workflowDoc) workflowDoc {
 
 func isWorkflowSchemaDoc(doc workflowDoc) bool {
 	return doc.Kind == workflowSchemaKind || strings.HasPrefix(doc.ID, "schema:")
-}
-
-func (s *Store) createWorkflowSchemaIfMissing(ctx context.Context, pk azcosmos.PartitionKey, doc workflowDoc) error {
-	payload, err := json.Marshal(doc)
-	if err != nil {
-		return err
-	}
-	if _, err := s.workflows.CreateItem(ctx, pk, payload, nil); err != nil && !isCosmosStatus(err, http.StatusConflict) {
-		return err
-	}
-	return nil
 }
 
 func phaseDocFromSpec(phase server.PhaseSpec) phaseDoc {
@@ -4756,19 +4759,17 @@ func floatVal(v any) float64 {
 // ---------------------------------------------------------------------------
 
 func (s *Store) GetWorkflowByName(ctx context.Context, project, name string) (*server.Workflow, error) {
-	pk := azcosmos.NewPartitionKeyString(project)
-	read, err := s.workflows.ReadItem(ctx, pk, name, nil)
-	if isCosmosStatus(err, http.StatusNotFound) {
+	row, err := s.pgWorkflows.GetByName(ctx, project, name)
+	if errors.Is(err, pgstore.ErrWorkflowNotFound) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	var doc workflowDoc
-	if err := json.Unmarshal(read.Value, &doc); err != nil {
+	w, err := workflowFromPayload(row.Payload)
+	if err != nil {
 		return nil, err
 	}
-	w := workflowFromDoc(doc)
 	return &w, nil
 }
 
@@ -4776,31 +4777,18 @@ func (s *Store) GetWorkflowBySchemaRef(ctx context.Context, project, schemaRef s
 	if strings.TrimSpace(schemaRef) == "" {
 		return nil, nil
 	}
-	var docs []workflowDoc
-	if err := singlePartitionQuery(
-		ctx,
-		s.workflows,
-		azcosmos.NewPartitionKeyString(project),
-		"SELECT * FROM c WHERE c.project = @p AND c.schema_ref = @schema_ref",
-		[]azcosmos.QueryParameter{
-			{Name: "@p", Value: project},
-			{Name: "@schema_ref", Value: schemaRef},
-		},
-		&docs,
-	); err != nil {
+	row, err := s.pgWorkflows.GetSchemaByRef(ctx, project, schemaRef)
+	if errors.Is(err, pgstore.ErrWorkflowNotFound) {
+		return nil, nil
+	}
+	if err != nil {
 		return nil, err
 	}
-	for _, doc := range docs {
-		if isWorkflowSchemaDoc(doc) {
-			w := workflowFromDoc(doc)
-			return &w, nil
-		}
+	w, err := workflowFromPayload(row.Payload)
+	if err != nil {
+		return nil, err
 	}
-	if len(docs) > 0 {
-		w := workflowFromDoc(docs[0])
-		return &w, nil
-	}
-	return nil, nil
+	return &w, nil
 }
 
 // ReadRunForReplay reads a run document and returns the minimal fields
@@ -6810,25 +6798,19 @@ func (s *Store) ReadIssueForDispatch(ctx context.Context, project string, issueN
 
 // ListProjectWorkflows returns all workflows registered for a project.
 func (s *Store) ListProjectWorkflows(ctx context.Context, project string) ([]server.Workflow, error) {
-	var docs []workflowDoc
-	if err := singlePartitionQuery(
-		ctx,
-		s.workflows,
-		azcosmos.NewPartitionKeyString(project),
-		"SELECT * FROM c WHERE c.project = @p",
-		[]azcosmos.QueryParameter{{Name: "@p", Value: project}},
-		&docs,
-	); err != nil {
+	rows, err := s.pgWorkflows.ListByProject(ctx, project)
+	if err != nil {
 		return nil, err
 	}
-	rows := make([]server.Workflow, 0, len(docs))
-	for _, doc := range docs {
-		if isWorkflowSchemaDoc(doc) {
-			continue
+	out := make([]server.Workflow, 0, len(rows))
+	for _, row := range rows {
+		w, err := workflowFromPayload(row.Payload)
+		if err != nil {
+			return nil, err
 		}
-		rows = append(rows, workflowFromDoc(doc))
+		out = append(out, w)
 	}
-	return rows, nil
+	return out, nil
 }
 
 // CreateRun creates a queued first cycle for a new issue run. The caller must
