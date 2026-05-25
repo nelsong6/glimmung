@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"reflect"
 	"sort"
 	"strconv"
@@ -111,6 +110,12 @@ type Store struct {
 	// 2-touchpoints cutover). All touchpoint R/W on cosmos.Store
 	// delegates here.
 	pgTouchpoints *pgstore.TouchpointsStore
+
+	// pgLeases is the Postgres-backed leases store (Stage 2-leases
+	// cutover). All lease R/W on cosmos.Store delegates here. The
+	// next-lease-number counter moves to a per-project pg row with
+	// an atomic seed+increment transaction.
+	pgLeases *pgstore.LeasesStore
 }
 
 // SetPGLocks injects the Postgres-backed lock store. Called once at
@@ -178,6 +183,22 @@ func (s *Store) SetPGRuns(runs *pgstore.RunsStore) {
 // SetPGTouchpoints injects the Postgres-backed touchpoints store.
 func (s *Store) SetPGTouchpoints(touchpoints *pgstore.TouchpointsStore) {
 	s.pgTouchpoints = touchpoints
+}
+
+// SetPGLeases injects the Postgres-backed leases store.
+func (s *Store) SetPGLeases(leases *pgstore.LeasesStore) {
+	s.pgLeases = leases
+}
+
+// leaseDocFromPayload decodes a pg lease payload into the cosmos
+// leaseDoc shape so the existing leaseFromDoc / listedLeaseFromDoc /
+// selectLeaseDocByPublicRef helpers continue to work.
+func leaseDocFromPayload(payload []byte) (leaseDoc, error) {
+	var doc leaseDoc
+	if err := json.Unmarshal(payload, &doc); err != nil {
+		return leaseDoc{}, err
+	}
+	return doc, nil
 }
 
 // touchpointDocFromPayload decodes a pg touchpoint payload into the
@@ -1136,12 +1157,16 @@ func (s *Store) PatchWorkflow(ctx context.Context, project string, name string, 
 }
 
 func (s *Store) ListLeases(ctx context.Context) ([]server.Lease, error) {
-	var docs []leaseDoc
-	if err := crossPartitionQuery(ctx, s.leases, "SELECT * FROM c", nil, &docs); err != nil {
+	pgRows, err := s.pgLeases.ListAll(ctx)
+	if err != nil {
 		return nil, err
 	}
-	rows := make([]server.Lease, 0, len(docs))
-	for _, doc := range docs {
+	rows := make([]server.Lease, 0, len(pgRows))
+	for _, row := range pgRows {
+		doc, derr := leaseDocFromPayload(row.Payload)
+		if derr != nil {
+			return nil, derr
+		}
 		lease, ok := listedLeaseFromDoc(doc)
 		if !ok {
 			continue
@@ -1187,17 +1212,23 @@ func (s *Store) ReleaseLeaseByCallbackToken(ctx context.Context, token string) (
 	}
 
 	now := time.Now().UTC()
-	doc.State = "released"
-	doc.ReleasedAt = now.Format(time.RFC3339Nano)
-	payload, err := json.Marshal(doc)
+	releasedAt := now.Format(time.RFC3339Nano)
+	patched, err := s.pgLeases.PatchPayload(ctx, doc.Project, doc.ID, func(payload map[string]any) error {
+		payload["state"] = "released"
+		payload["released_at"] = releasedAt
+		return nil
+	})
+	if errors.Is(err, pgstore.ErrLeaseNotFound) {
+		return server.Lease{}, server.ErrNotFound
+	}
 	if err != nil {
 		return server.Lease{}, err
 	}
-	partitionKey := azcosmos.NewPartitionKeyString(doc.Project)
-	if _, err := s.leases.ReplaceItem(ctx, partitionKey, doc.ID, payload, nil); err != nil {
+	updated, err := leaseDocFromPayload(patched.Payload)
+	if err != nil {
 		return server.Lease{}, err
 	}
-	lease := leaseFromDoc(doc)
+	lease := leaseFromDoc(updated)
 	if boolValue(lease.Metadata["native_k8s"]) && !boolValue(lease.Metadata["test_slot_checkout"]) {
 		_ = s.releaseNativeSlotReservation(ctx, lease, now)
 	}
@@ -1778,23 +1809,14 @@ func (s *Store) issueRunDocs(ctx context.Context, project string, issueNumber in
 }
 
 func (s *Store) readLeaseDocByCallbackToken(ctx context.Context, token string) (leaseDoc, error) {
-	var docs []leaseDoc
-	if err := crossPartitionQuery(
-		ctx,
-		s.leases,
-		"SELECT * FROM c WHERE c.metadata.lease_callback_token = @token",
-		[]azcosmos.QueryParameter{{Name: "@token", Value: token}},
-		&docs,
-	); err != nil {
-		return leaseDoc{}, err
-	}
-	if len(docs) == 0 {
+	row, err := s.pgLeases.GetByCallbackToken(ctx, token)
+	if errors.Is(err, pgstore.ErrLeaseNotFound) {
 		return leaseDoc{}, server.ErrNotFound
 	}
-	if len(docs) > 1 {
-		return leaseDoc{}, server.ErrConflict
+	if err != nil {
+		return leaseDoc{}, err
 	}
-	return docs[0], nil
+	return leaseDocFromPayload(row.Payload)
 }
 
 // Cosmos query primitives live in query.go. The legacy queryAll /
@@ -4538,7 +4560,18 @@ func (s *Store) acquireNativeLease(ctx context.Context, req server.LeaseAcquireR
 	if err != nil {
 		return server.Lease{}, err
 	}
-	if _, err := s.leases.CreateItem(ctx, azcosmos.NewPartitionKeyString(req.Project), payload, nil); err != nil {
+	var leaseExpires *time.Time
+	if doc.TTLSeconds > 0 {
+		exp := now.Add(time.Duration(doc.TTLSeconds) * time.Second)
+		leaseExpires = &exp
+	}
+	if _, err := s.pgLeases.Create(ctx, pgstore.LeaseRow{
+		ID:            leaseID,
+		Project:       req.Project,
+		CallbackToken: callbackToken,
+		Payload:       payload,
+		ExpiresAt:     leaseExpires,
+	}); err != nil {
 		return server.Lease{}, fmt.Errorf("create native lease doc: %w", err)
 	}
 	lease := leaseFromDoc(doc)
@@ -4577,21 +4610,20 @@ func (s *Store) reserveNativeSlotForLease(ctx context.Context, lease server.Leas
 func (s *Store) availableNativeSlot(ctx context.Context, project string) (*int, error) {
 	// Native slot checkout is project-local: a project's configured slot
 	// count and per-project concurrency cap decide whether that project can
-	// lease another slot. Claimed slots in other projects must not block this
-	// project, so keep the query on the requested project's partition.
-	var docs []leaseDoc
-	if err := singlePartitionQuery(
-		ctx,
-		s.leases,
-		azcosmos.NewPartitionKeyString(project),
-		"SELECT * FROM c WHERE c.project = @project AND c.state = @state AND c.metadata.native_k8s = true",
-		[]azcosmos.QueryParameter{
-			{Name: "@project", Value: project},
-			{Name: "@state", Value: "claimed"},
-		},
-		&docs,
-	); err != nil {
+	// lease another slot. pg.LeasesStore.ListClaimedNative returns the
+	// claimed native-k8s leases for this project; selectAvailableNativeSlot
+	// then computes the first ready slot not currently held.
+	pgRows, err := s.pgLeases.ListClaimedNative(ctx, project)
+	if err != nil {
 		return nil, err
+	}
+	docs := make([]leaseDoc, 0, len(pgRows))
+	for _, row := range pgRows {
+		doc, derr := leaseDocFromPayload(row.Payload)
+		if derr != nil {
+			return nil, derr
+		}
+		docs = append(docs, doc)
 	}
 	readySlots := s.nativeReadySlots(ctx, project)
 	return selectAvailableNativeSlot(project, readySlots, docs, s.nativeProjectCap()), nil
@@ -4700,15 +4732,8 @@ func (s *Store) nativeSlotPrefix(ctx context.Context, project string) string {
 }
 
 func (s *Store) CancelLeaseByRef(ctx context.Context, project, ref string) (server.CancelLeaseResult, error) {
-	// Find the lease doc by iterating all leases for the project.
-	var docs []leaseDoc
-	if err := singlePartitionQuery(
-		ctx, s.leases,
-		azcosmos.NewPartitionKeyString(project),
-		"SELECT * FROM c WHERE c.project = @p",
-		[]azcosmos.QueryParameter{{Name: "@p", Value: project}},
-		&docs,
-	); err != nil {
+	docs, err := s.listLeaseDocsForProject(ctx, project)
+	if err != nil {
 		return server.CancelLeaseResult{}, fmt.Errorf("query leases: %w", err)
 	}
 	found := selectLeaseDocByPublicRef(docs, ref)
@@ -4725,17 +4750,23 @@ func (s *Store) CancelLeaseByRef(ctx context.Context, project, ref string) (serv
 		}, nil
 	}
 
-	found.State = "released"
-	found.ReleasedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	payload, err := json.Marshal(found)
+	releasedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	patched, err := s.pgLeases.PatchPayload(ctx, project, found.ID, func(payload map[string]any) error {
+		payload["state"] = "released"
+		payload["released_at"] = releasedAt
+		return nil
+	})
+	if errors.Is(err, pgstore.ErrLeaseNotFound) {
+		return server.CancelLeaseResult{}, server.ErrNotFound
+	}
+	if err != nil {
+		return server.CancelLeaseResult{}, fmt.Errorf("release lease: %w", err)
+	}
+	updated, err := leaseDocFromPayload(patched.Payload)
 	if err != nil {
 		return server.CancelLeaseResult{}, err
 	}
-	leasePK := azcosmos.NewPartitionKeyString(project)
-	if _, err := s.leases.ReplaceItem(ctx, leasePK, found.ID, payload, nil); err != nil {
-		return server.CancelLeaseResult{}, fmt.Errorf("release lease: %w", err)
-	}
-	lease := leaseFromDoc(*found)
+	lease := leaseFromDoc(updated)
 	if boolValue(lease.Metadata["native_k8s"]) && !boolValue(lease.Metadata["test_slot_checkout"]) {
 		_ = s.releaseNativeSlotReservation(ctx, lease, time.Now().UTC())
 	}
@@ -4743,6 +4774,25 @@ func (s *Store) CancelLeaseByRef(ctx context.Context, project, ref string) (serv
 		State:    "no_active_run",
 		LeaseRef: publicRef,
 	}, nil
+}
+
+// listLeaseDocsForProject is a small helper used by ref-based methods
+// that scan all leases in a project to find the one matching a public
+// ref. Pulls the rows from pg + decodes payload into leaseDoc.
+func (s *Store) listLeaseDocsForProject(ctx context.Context, project string) ([]leaseDoc, error) {
+	rows, err := s.pgLeases.List(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]leaseDoc, 0, len(rows))
+	for _, row := range rows {
+		doc, derr := leaseDocFromPayload(row.Payload)
+		if derr != nil {
+			return nil, derr
+		}
+		out = append(out, doc)
+	}
+	return out, nil
 }
 
 func (s *Store) releaseNativeSlotReservation(ctx context.Context, lease server.Lease, now time.Time) error {
@@ -4765,14 +4815,8 @@ func (s *Store) releaseNativeSlotReservation(ctx context.Context, lease server.L
 }
 
 func (s *Store) ReadLeaseByRef(ctx context.Context, project, ref string) (server.Lease, error) {
-	var docs []leaseDoc
-	if err := singlePartitionQuery(
-		ctx, s.leases,
-		azcosmos.NewPartitionKeyString(project),
-		"SELECT * FROM c WHERE c.project = @p",
-		[]azcosmos.QueryParameter{{Name: "@p", Value: project}},
-		&docs,
-	); err != nil {
+	docs, err := s.listLeaseDocsForProject(ctx, project)
+	if err != nil {
 		return server.Lease{}, fmt.Errorf("query leases: %w", err)
 	}
 	found := selectLeaseDocByPublicRef(docs, ref)
@@ -4790,51 +4834,35 @@ func (s *Store) UpdateLeaseTTLByRef(ctx context.Context, project, ref string, tt
 	if err != nil {
 		return server.Lease{}, err
 	}
-	pk := azcosmos.NewPartitionKeyString(project)
-	for attempt := 0; attempt < maxLeaseConflictRetries; attempt++ {
-		read, err := s.leases.ReadItem(ctx, pk, docID, nil)
-		if err != nil {
-			if isCosmosStatus(err, http.StatusNotFound) {
-				return server.Lease{}, server.ErrNotFound
-			}
-			return server.Lease{}, fmt.Errorf("read lease: %w", err)
+	var notClaimed bool
+	patched, err := s.pgLeases.PatchPayload(ctx, project, docID, func(payload map[string]any) error {
+		state, _ := payload["state"].(string)
+		if state != "claimed" {
+			notClaimed = true
+			return errAbortPatch
 		}
-		var doc leaseDoc
-		if err := json.Unmarshal(read.Value, &doc); err != nil {
-			return server.Lease{}, err
-		}
-		if doc.Project != project {
-			return server.Lease{}, server.ErrNotFound
-		}
-		if doc.State != "claimed" {
-			return server.Lease{}, server.ErrConflict
-		}
-		doc.TTLSeconds = ttlSeconds
-		payload, err := json.Marshal(doc)
-		if err != nil {
-			return server.Lease{}, err
-		}
-		etag := azcore.ETag(read.ETag)
-		if _, err := s.leases.ReplaceItem(ctx, pk, doc.ID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
-			if isCosmosStatus(err, http.StatusPreconditionFailed) {
-				continue
-			}
-			return server.Lease{}, fmt.Errorf("update lease TTL: %w", err)
-		}
-		return leaseFromDoc(doc), nil
+		payload["ttl_seconds"] = ttlSeconds
+		return nil
+	})
+	if notClaimed {
+		return server.Lease{}, server.ErrConflict
 	}
-	return server.Lease{}, fmt.Errorf("update lease TTL: too many etag conflicts")
+	if errors.Is(err, pgstore.ErrLeaseNotFound) {
+		return server.Lease{}, server.ErrNotFound
+	}
+	if err != nil {
+		return server.Lease{}, fmt.Errorf("update lease TTL: %w", err)
+	}
+	doc, err := leaseDocFromPayload(patched.Payload)
+	if err != nil {
+		return server.Lease{}, err
+	}
+	return leaseFromDoc(doc), nil
 }
 
 func (s *Store) leaseDocIDByPublicRef(ctx context.Context, project, ref string) (string, error) {
-	var docs []leaseDoc
-	if err := singlePartitionQuery(
-		ctx, s.leases,
-		azcosmos.NewPartitionKeyString(project),
-		"SELECT * FROM c WHERE c.project = @p",
-		[]azcosmos.QueryParameter{{Name: "@p", Value: project}},
-		&docs,
-	); err != nil {
+	docs, err := s.listLeaseDocsForProject(ctx, project)
+	if err != nil {
 		return "", fmt.Errorf("query leases: %w", err)
 	}
 	found := selectLeaseDocByPublicRef(docs, ref)
@@ -4845,45 +4873,47 @@ func (s *Store) leaseDocIDByPublicRef(ctx context.Context, project, ref string) 
 }
 
 func (s *Store) AppendTestSlotHotSwapHistory(ctx context.Context, project, ref string, entry server.TestSlotHotSwapHistoryEntry) (server.Lease, error) {
-	var docs []leaseDoc
-	if err := singlePartitionQuery(
-		ctx, s.leases,
-		azcosmos.NewPartitionKeyString(project),
-		"SELECT * FROM c WHERE c.project = @p",
-		[]azcosmos.QueryParameter{{Name: "@p", Value: project}},
-		&docs,
-	); err != nil {
+	docs, err := s.listLeaseDocsForProject(ctx, project)
+	if err != nil {
 		return server.Lease{}, fmt.Errorf("query leases: %w", err)
 	}
 	found := selectLeaseDocByPublicRef(docs, ref)
 	if found == nil {
 		return server.Lease{}, server.ErrNotFound
 	}
-	if found.Metadata == nil {
-		found.Metadata = map[string]any{}
-	}
-	history := anySliceValue(found.Metadata["test_slot_hot_swap_history"])
-	payload, err := json.Marshal(entry)
+	entryBytes, err := json.Marshal(entry)
 	if err != nil {
 		return server.Lease{}, err
 	}
 	var entryMap map[string]any
-	if err := json.Unmarshal(payload, &entryMap); err != nil {
+	if err := json.Unmarshal(entryBytes, &entryMap); err != nil {
 		return server.Lease{}, err
 	}
-	history = append(history, entryMap)
-	if len(history) > 20 {
-		history = history[len(history)-20:]
+	patched, err := s.pgLeases.PatchPayload(ctx, project, found.ID, func(payload map[string]any) error {
+		metadata, _ := payload["metadata"].(map[string]any)
+		if metadata == nil {
+			metadata = map[string]any{}
+			payload["metadata"] = metadata
+		}
+		history := anySliceValue(metadata["test_slot_hot_swap_history"])
+		history = append(history, entryMap)
+		if len(history) > 20 {
+			history = history[len(history)-20:]
+		}
+		metadata["test_slot_hot_swap_history"] = history
+		return nil
+	})
+	if errors.Is(err, pgstore.ErrLeaseNotFound) {
+		return server.Lease{}, server.ErrNotFound
 	}
-	found.Metadata["test_slot_hot_swap_history"] = history
-	payload, err = json.Marshal(found)
+	if err != nil {
+		return server.Lease{}, fmt.Errorf("append hot-swap history: %w", err)
+	}
+	doc, err := leaseDocFromPayload(patched.Payload)
 	if err != nil {
 		return server.Lease{}, err
 	}
-	if _, err := s.leases.ReplaceItem(ctx, azcosmos.NewPartitionKeyString(project), found.ID, payload, nil); err != nil {
-		return server.Lease{}, fmt.Errorf("append hot-swap history: %w", err)
-	}
-	return leaseFromDoc(*found), nil
+	return leaseFromDoc(doc), nil
 }
 
 func anySliceValue(raw any) []any {
@@ -4922,95 +4952,11 @@ func cancelLeaseCandidateRank(doc leaseDoc) int {
 	}
 }
 
+// nextLeaseNumber delegates to pgLeases, which seeds the counter
+// from MAX(payload->>'leaseNumber')+1 on first call per-project and
+// atomically increments on every subsequent call inside a tx.
 func (s *Store) nextLeaseNumber(ctx context.Context, project string) (int, error) {
-	counterID := leaseCounterPrefix + project
-	pk := azcosmos.NewPartitionKeyString(project)
-	for attempt := 0; attempt < maxLeaseConflictRetries; attempt++ {
-		read, err := s.leases.ReadItem(ctx, pk, counterID, nil)
-		if isCosmosStatus(err, http.StatusNotFound) {
-			// Seed the counter from the highest existing lease number.
-			highest, err := s.highestLeaseNumber(ctx, project)
-			if err != nil {
-				return 0, err
-			}
-			first := highest + 1
-			now := time.Now().UTC().Format(time.RFC3339Nano)
-			doc := map[string]any{
-				"id":              counterID,
-				"project":         project,
-				"kind":            "lease_number_counter",
-				"lastAllocated":   first,
-				"nextLeaseNumber": first + 1,
-				"created_at":      now,
-				"updated_at":      now,
-			}
-			payload, _ := json.Marshal(doc)
-			if _, err := s.leases.CreateItem(ctx, pk, payload, nil); err != nil {
-				if isCosmosStatus(err, http.StatusConflict) {
-					continue // lost the seed race, retry
-				}
-				return 0, fmt.Errorf("seed lease counter: %w", err)
-			}
-			return first, nil
-		}
-		if err != nil {
-			return 0, fmt.Errorf("read lease counter: %w", err)
-		}
-		var doc map[string]any
-		if err := json.Unmarshal(read.Value, &doc); err != nil {
-			return 0, err
-		}
-		currentNext := int(floatVal(doc["nextLeaseNumber"]))
-		if currentNext < 1 {
-			currentNext = 1
-		}
-		updated := cloneMap(doc)
-		delete(updated, "_etag")
-		delete(updated, "_rid")
-		delete(updated, "_self")
-		delete(updated, "_attachments")
-		delete(updated, "_ts")
-		updated["nextLeaseNumber"] = currentNext + 1
-		updated["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
-		payload, _ := json.Marshal(updated)
-		etagStr, _ := doc["_etag"].(string)
-		etagVal := azcore.ETag(etagStr)
-		opts := &azcosmos.ItemOptions{IfMatchEtag: &etagVal}
-		if _, err := s.leases.ReplaceItem(ctx, pk, counterID, payload, opts); err != nil {
-			if isCosmosStatus(err, http.StatusPreconditionFailed) {
-				continue
-			}
-			return 0, fmt.Errorf("increment lease counter: %w", err)
-		}
-		return currentNext, nil
-	}
-	return 0, fmt.Errorf("lease counter conflict after %d retries", maxLeaseConflictRetries)
-}
-
-func (s *Store) highestLeaseNumber(ctx context.Context, project string) (int, error) {
-	var docs []struct {
-		LeaseNumber *float64 `json:"leaseNumber"`
-	}
-	if err := singlePartitionQuery(
-		ctx, s.leases,
-		azcosmos.NewPartitionKeyString(project),
-		"SELECT c.leaseNumber FROM c WHERE c.project = @p",
-		[]azcosmos.QueryParameter{{Name: "@p", Value: project}},
-		&docs,
-	); err != nil {
-		return 0, err
-	}
-	highest := 0
-	for _, doc := range docs {
-		if doc.LeaseNumber == nil {
-			continue
-		}
-		n := int(*doc.LeaseNumber)
-		if n > highest {
-			highest = n
-		}
-	}
-	return highest, nil
+	return s.pgLeases.AllocateNextNumber(ctx, project)
 }
 
 func buildLeaseMetadata(req server.LeaseAcquireRequest) map[string]any {

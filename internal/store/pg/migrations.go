@@ -264,6 +264,18 @@ var schemaMigrations = []string{
 	)`,
 
 	// ------------------------------------------------------------------
+	// lease_counters — per-project next-lease-number allocator. Same
+	// shape as issue_counters; replaces the cosmos
+	// __counter:lease-number:<project> document with its ETag retry
+	// loop. Seeded from MAX(payload->>'leaseNumber'::int) + 1 across
+	// existing leases on first call per-project.
+	// ------------------------------------------------------------------
+	`CREATE TABLE IF NOT EXISTS lease_counters (
+		project           text PRIMARY KEY,
+		next_number       int NOT NULL
+	)`,
+
+	// ------------------------------------------------------------------
 	// playbooks — Cosmos partition by `/project`. Operator-authored
 	// batches of issue specs.
 	// ------------------------------------------------------------------

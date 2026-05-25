@@ -289,7 +289,7 @@ func main() {
 		}()
 
 		pgLeases := pgstore.NewLeasesStore(pgPool)
-		_ = pgLeases
+		store.SetPGLeases(pgLeases)
 		go func() {
 			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 			defer cancel()
