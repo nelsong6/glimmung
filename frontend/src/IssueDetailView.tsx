@@ -2312,7 +2312,7 @@ function RunExecutionView({
 }) {
   const inspectorRef = useRef<HTMLDivElement | null>(null);
   const selectedPhase = selectedPhaseId
-    ? run.phases.find((phase) => phase.name === selectedPhaseId) ?? null
+    ? projectionPhaseForSelection(run, selectedPhaseId)
     : null;
   const selectedJob = selectedPhase && selectedJobId
     ? selectedPhase.jobs.find((job) => job.id === selectedJobId) ?? null
@@ -2321,7 +2321,7 @@ function RunExecutionView({
     ? selectedJob.steps.find((step) => step.slug === selectedStepId) ?? null
     : null;
   const selectedKey = selectedJob
-    ? `job:${selectedPhase?.name}:${selectedJob.id}`
+    ? `job:${selectedPhaseId}:${selectedJob.id}`
     : selectedPhase
       ? `phase:${selectedPhase.name}`
       : null;
@@ -2402,7 +2402,7 @@ function ProjectionPipelineDag({
           name: job.name ?? job.id,
           state: phase?.state ?? "not_started",
           reason: phase?.reason ?? null,
-          selection: { phase: graphPhase.name },
+          selection: { phase: graphPhase.name, job: job.id, step: "job" },
         }));
     return (
       <>
@@ -2464,6 +2464,35 @@ function preferredProjectionStepSlug(job: RunProjectionPhase["jobs"][number]): s
     ?? job.steps[0]?.slug
     ?? null
   );
+}
+
+function projectionPhaseForSelection(run: RunProjectionRun, phaseName: string): RunProjectionPhase | null {
+  const projected = run.phases.find((phase) => phase.name === phaseName);
+  if (projected) return projected;
+  const topologyPhase = run.topology.phases.find((phase) => phase.name === phaseName);
+  if (!topologyPhase) return null;
+  const jobs = topologyPhase.jobs && topologyPhase.jobs.length > 0
+    ? topologyPhase.jobs
+    : [{ id: topologyPhase.name, name: topologyPhase.name }];
+  return {
+    name: topologyPhase.name,
+    kind: topologyPhase.kind,
+    state: "not_started",
+    verify: topologyPhase.verify ?? false,
+    always: topologyPhase.always ?? false,
+    depends_on: topologyPhase.depends_on ?? [],
+    jobs: jobs.map((job) => ({
+      id: job.id,
+      name: job.name ?? job.id,
+      state: "not_started",
+      steps: [{
+        slug: "job",
+        title: job.name ?? job.id,
+        state: "not_started",
+      }],
+    })),
+    attempts: [],
+  };
 }
 
 function ProjectionInspector({
@@ -2533,19 +2562,26 @@ function ProjectionInspector({
           </div>
         )}
       </div>
-      {selectedJob && nativeJob && latestAttempt && issueNumber !== null && runNumber ? (
-        <NativeJobInspector
-          project={project}
-          runId={run.run_ref}
-          issueNumber={issueNumber}
-          runNumber={runNumber}
-          attemptIndex={latestAttempt.attempt_index}
-          jobs={[nativeJob]}
-          archiveUrl={latestAttempt.log_archive_url ?? null}
-          live={selectedJob.state === "active" || selectedJob.state === "dispatching"}
-          selectedJobId={selectedJob.id}
-          selectedStepSlug={step?.slug ?? null}
-        />
+      {selectedJob && nativeJob ? (
+        latestAttempt && issueNumber !== null && runNumber ? (
+          <NativeJobInspector
+            project={project}
+            runId={run.run_ref}
+            issueNumber={issueNumber}
+            runNumber={runNumber}
+            attemptIndex={latestAttempt.attempt_index}
+            jobs={[nativeJob]}
+            archiveUrl={latestAttempt.log_archive_url ?? null}
+            live={selectedJob.state === "active" || selectedJob.state === "dispatching"}
+            selectedJobId={selectedJob.id}
+            selectedStepSlug={step?.slug ?? null}
+          />
+        ) : (
+          <PlannedNativeJobInspector
+            job={nativeJob}
+            selectedStepSlug={step?.slug ?? null}
+          />
+        )
       ) : (
         <div className="native-log-panel dim mono">No job logs are available for this selection.</div>
       )}
@@ -3468,6 +3504,80 @@ function NativeJobInspector({
           {selected
             ? nativeTerminalText(selected.job, selected.step, selectedEvents)
             : nativeTerminalText(null, null, events)}
+        </pre>
+      </div>
+    </div>
+  );
+}
+
+function PlannedNativeJobInspector({
+  job,
+  selectedStepSlug = null,
+}: {
+  job: NativeAttemptJob;
+  selectedStepSlug?: string | null;
+}) {
+  const stepRefs = useMemo(() => nativeStepRefs([job]), [job]);
+  const defaultSelection = useMemo(
+    () => selectedStepSlug
+      ? stepRefs.find((step) => step.step.slug === selectedStepSlug)?.key ?? preferredNativeStepKey(stepRefs)
+      : preferredNativeStepKey(stepRefs),
+    [selectedStepSlug, stepRefs],
+  );
+  const [selectedKey, setSelectedKey] = useState<string | null>(defaultSelection);
+  const selected = stepRefs.find((step) => step.key === selectedKey) ?? stepRefs[0] ?? null;
+
+  useEffect(() => {
+    setSelectedKey(defaultSelection);
+  }, [defaultSelection]);
+
+  return (
+    <div className="native-inspector">
+      <div className="native-inspector-head">
+        <div>
+          <span className="key">native job inspector</span>
+          <span className="mono dim">planned</span>
+        </div>
+      </div>
+      <div className="step-log-layout native-step-log-layout">
+        <aside className="step-list" aria-label="native job steps">
+          {stepRefs.length === 0 ? (
+            <div className="native-step-empty mono dim">no native steps declared</div>
+          ) : (
+            stepRefs.map(({ key, job: refJob, step }, index) => (
+              <Fragment key={key}>
+                {(index === 0 || stepRefs[index - 1]?.job.job_id !== refJob.job_id) && (
+                  <div className="native-job-label">
+                    <span className="mono">{refJob.name || refJob.job_id}</span>
+                    <span className={`pill ${nativeStatePill(refJob.state ?? "")}`}>
+                      {refJob.state || "not run"}
+                    </span>
+                  </div>
+                )}
+                <button
+                  type="button"
+                  className={`step-row ${nativeStepRowClass(step.state ?? "")}${key === selected?.key ? " selected" : ""}`}
+                  onClick={() => setSelectedKey(key)}
+                >
+                  <span>{nativeStepGlyph(step.state ?? "")}</span>
+                  <strong>
+                    {step.title || step.slug}
+                    {nativeStepIsLlm(step) && <span className="native-step-llm">llm</span>}
+                  </strong>
+                  <small>
+                    {step.exit_code !== null && step.exit_code !== undefined
+                      ? `exit ${step.exit_code}`
+                      : step.state ? formatGraphState(step.state) : "not run"}
+                  </small>
+                </button>
+              </Fragment>
+            ))
+          )}
+        </aside>
+        <pre className="step-terminal native-step-terminal">
+          {selected
+            ? nativeTerminalText(selected.job, selected.step, [])
+            : nativeTerminalText(null, null, [])}
         </pre>
       </div>
     </div>

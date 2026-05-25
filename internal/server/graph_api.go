@@ -1174,24 +1174,131 @@ func runProjectionPhasesFromExecutions(run RunReport, workflow Workflow) []RunPr
 	for _, phase := range workflow.Phases {
 		phaseByName[phase.Name] = phase
 	}
+	executionByName := map[string]RunPhaseExecution{}
+	executionOrder := make([]string, 0, len(run.PhaseExecutions))
+	for _, execution := range run.PhaseExecutions {
+		name := firstNonEmpty(execution.Name, "phase")
+		if _, ok := executionByName[name]; !ok {
+			executionOrder = append(executionOrder, name)
+		}
+		executionByName[name] = execution
+	}
+	if len(workflow.Phases) > 0 {
+		phases := make([]RunProjectionPhase, 0, len(workflow.Phases)+len(run.PhaseExecutions))
+		emitted := map[string]bool{}
+		terminalFailureSeen := false
+		for _, spec := range workflow.Phases {
+			if spec.Name == "" {
+				continue
+			}
+			attempts := attemptsForProjectionPhase(run.Attempts, spec.Name)
+			if execution, ok := executionByName[spec.Name]; ok {
+				phase := projectionPhaseFromExecution(execution, spec, attempts)
+				phases = append(phases, phase)
+				emitted[spec.Name] = true
+				if phase.State == "failed" {
+					terminalFailureSeen = true
+				}
+				continue
+			}
+			state := projectionPhaseState(run, spec.Name, attempts, terminalFailureSeen, phaseSkippedByEntrypoint(workflow.Phases, spec.Name, run.EntrypointPhase))
+			reason := projectionPhaseReason(state, attempts, run.AbortReason)
+			phases = append(phases, RunProjectionPhase{
+				Name:      spec.Name,
+				Kind:      workflowPhaseKind(spec.Kind),
+				State:     state,
+				Reason:    reason,
+				Verify:    spec.Verify,
+				Always:    spec.Always,
+				DependsOn: sliceOrEmpty(spec.DependsOn),
+				Jobs:      runProjectionJobs(spec, state, reason, attempts),
+				Attempts:  runProjectionAttempts(attempts),
+			})
+			if state == "failed" {
+				terminalFailureSeen = true
+			}
+		}
+		for _, name := range executionOrder {
+			if emitted[name] {
+				continue
+			}
+			execution := executionByName[name]
+			spec := phaseByName[name]
+			phases = append(phases, projectionPhaseFromExecution(execution, spec, attemptsForProjectionPhase(run.Attempts, name)))
+		}
+		return phases
+	}
+
 	phases := make([]RunProjectionPhase, 0, len(run.PhaseExecutions))
 	for _, execution := range run.PhaseExecutions {
 		spec := phaseByName[execution.Name]
-		kind := workflowPhaseKind(firstNonEmpty(execution.Kind, spec.Kind))
 		attempts := attemptsForProjectionPhase(run.Attempts, execution.Name)
-		phases = append(phases, RunProjectionPhase{
-			Name:      execution.Name,
-			Kind:      kind,
-			State:     projectionExecutionState(execution.State),
-			Reason:    execution.Reason,
-			Verify:    spec.Verify,
-			Always:    spec.Always,
-			DependsOn: sliceOrEmpty(spec.DependsOn),
-			Jobs:      runProjectionJobsFromExecutions(execution.Jobs, latestJobCompletionsByJob(attempts)),
-			Attempts:  runProjectionAttempts(attempts),
-		})
+		phases = append(phases, projectionPhaseFromExecution(execution, spec, attempts))
 	}
 	return phases
+}
+
+func projectionPhaseFromExecution(execution RunPhaseExecution, spec PhaseSpec, attempts []RunReportAttempt) RunProjectionPhase {
+	name := firstNonEmpty(execution.Name, spec.Name, "phase")
+	kind := workflowPhaseKind(firstNonEmpty(execution.Kind, spec.Kind))
+	state := projectionExecutionState(execution.State)
+	return RunProjectionPhase{
+		Name:      name,
+		Kind:      kind,
+		State:     state,
+		Reason:    execution.Reason,
+		Verify:    spec.Verify,
+		Always:    spec.Always,
+		DependsOn: sliceOrEmpty(spec.DependsOn),
+		Jobs:      runProjectionJobsForExecution(execution, spec, state, execution.Reason, attempts),
+		Attempts:  runProjectionAttempts(attempts),
+	}
+}
+
+func runProjectionJobsForExecution(
+	execution RunPhaseExecution,
+	spec PhaseSpec,
+	phaseState string,
+	phaseReason *string,
+	attempts []RunReportAttempt,
+) []RunProjectionJob {
+	executionJobs := runProjectionJobsFromExecutions(execution.Jobs, latestJobCompletionsByJob(attempts))
+	if len(spec.Jobs) == 0 {
+		return executionJobs
+	}
+	plannedJobs := runProjectionJobs(spec, phaseState, phaseReason, nil)
+	if len(executionJobs) == 0 {
+		return plannedJobs
+	}
+	executedByID := make(map[string]RunProjectionJob, len(executionJobs))
+	for _, job := range executionJobs {
+		executedByID[job.ID] = job
+	}
+	plannedByID := make(map[string]RunProjectionJob, len(plannedJobs))
+	for _, job := range plannedJobs {
+		plannedByID[job.ID] = job
+	}
+	out := make([]RunProjectionJob, 0, len(plannedJobs)+len(executionJobs))
+	emitted := map[string]bool{}
+	for _, jobSpec := range spec.Jobs {
+		jobID := firstNonEmpty(jobSpec.ID, "job")
+		if job, ok := executedByID[jobID]; ok {
+			out = append(out, job)
+			emitted[jobID] = true
+			continue
+		}
+		if job, ok := plannedByID[jobID]; ok {
+			out = append(out, job)
+			emitted[jobID] = true
+		}
+	}
+	for _, job := range executionJobs {
+		if emitted[job.ID] {
+			continue
+		}
+		out = append(out, job)
+	}
+	return out
 }
 
 func runProjectionJobsFromExecutions(executions []RunJobExecution, completions map[string]RunAttemptJobCompletion) []RunProjectionJob {

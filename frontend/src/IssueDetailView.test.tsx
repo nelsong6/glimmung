@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Outlet, Route, Routes, useLocation } from "react-router-dom";
@@ -55,6 +55,13 @@ const runProjection = {
         always: false,
         depends_on: [],
         jobs: [{ id: "env-prep", name: "Environment prep" }],
+      }, {
+        name: "agent-execute",
+        kind: "k8s_job",
+        verify: false,
+        always: false,
+        depends_on: ["env-prep"],
+        jobs: [{ id: "agent", name: "Run agent" }],
       }],
       default_entry: { target: "env-prep", active: true, kind: "default" },
       terminal: { kind: "touchpoint", enabled: true },
@@ -94,6 +101,23 @@ const runProjection = {
         evidence_refs: [],
         job_completions: [],
       }],
+    }, {
+      name: "agent-execute",
+      kind: "k8s_job",
+      state: "not_started",
+      verify: false,
+      always: false,
+      depends_on: ["env-prep"],
+      jobs: [{
+        id: "agent",
+        name: "Run agent",
+        state: "not_started",
+        steps: [
+          { slug: "checkout", title: "Checkout workspace", state: "not_started" },
+          { slug: "run-agent", title: "Run agent", state: "not_started" },
+        ],
+      }],
+      attempts: [],
     }],
   }],
 };
@@ -155,6 +179,7 @@ const nativeEvents = {
 };
 
 afterEach(() => {
+  cleanup();
   vi.restoreAllMocks();
 });
 
@@ -189,6 +214,39 @@ describe("IssueDetailView run execution graph", () => {
     });
     expect(await screen.findByText("native job inspector")).toBeInTheDocument();
     expect(await screen.findByText(/cloning repo/)).toBeInTheDocument();
+  });
+
+  it("opens planned steps for a job before any attempt has started", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string"
+          ? new URL(input, "https://glimmung.test")
+          : input instanceof URL
+            ? input
+            : new URL(input.url);
+      if (url.pathname === "/v1/issues/by-number/ambience/172") return json(issueDetail);
+      if (url.pathname === "/v1/issues/by-number/ambience/172/graph") return json(issueGraph);
+      if (url.pathname === "/v1/projects/ambience/issues/172/runs/7/cycles/1/graph") return json(runProjection);
+      if (url.pathname === "/v1/workflows") return json([]);
+      throw new Error(`unhandled fetch ${url.pathname}`);
+    }));
+
+    renderIssueDetail("/projects/ambience/issues/172/runs/7/cycles/1");
+
+    const jobLabel = await screen.findByText("Run agent", { selector: ".dag-job-title" });
+    const jobButton = jobLabel.closest("button");
+    if (!jobButton) throw new Error("missing graph job button");
+    await userEvent.click(jobButton);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("path")).toHaveTextContent(
+        "/projects/ambience/issues/172/runs/7/cycles/1/phases/agent-execute/jobs/agent/steps/checkout",
+      );
+    });
+    expect(await screen.findByText("native job inspector")).toBeInTheDocument();
+    expect(screen.getByText("planned")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Checkout workspace/ })).toBeInTheDocument();
+    expect(screen.getByText(/No hot native events recorded/)).toBeInTheDocument();
   });
 });
 
