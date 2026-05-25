@@ -51,7 +51,7 @@ hotSwapBackend:
 config: {}
 
 externalSecret:
-  storeName: romaine-kv
+  storeName: ng6-glimmung
   storeKind: ClusterSecretStore
   refreshInterval: 1h
   keys:
