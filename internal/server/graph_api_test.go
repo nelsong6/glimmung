@@ -474,6 +474,106 @@ func TestRunCycleGraphProjectionUsesDurableExecutions(t *testing.T) {
 	}
 }
 
+func TestRunCycleGraphProjectionKeepsPendingWorkflowJobsWithDurableExecutions(t *testing.T) {
+	issueNumber := 17
+	runNumber := 1
+	cycleNumber := 1
+	runCycle := 1
+	runDisplay := "1.1"
+	now := time.Date(2026, 5, 12, 18, 0, 0, 0, time.UTC)
+	runRef := "glimmung#17/runs/1.1"
+	store := fakeGraphStore{
+		fakeReadStore: fakeReadStore{workflows: []Workflow{{
+			Project: "glimmung",
+			Name:    "agent-run",
+			Phases: []PhaseSpec{
+				{
+					Name: "env-prep",
+					Kind: "k8s_job",
+					Jobs: []NativeJobSpec{{
+						ID: "prepare",
+						Steps: []NativeStepSpec{{
+							Slug:  "checkout",
+							Title: stringPtr("Checkout"),
+						}},
+					}},
+				},
+				{
+					Name:      "agent-execute",
+					Kind:      "k8s_job",
+					DependsOn: []string{"env-prep"},
+					Jobs: []NativeJobSpec{{
+						ID:   "agent",
+						Name: stringPtr("Run agent"),
+						Steps: []NativeStepSpec{{
+							Slug:  "run-agent",
+							Title: stringPtr("Run agent"),
+						}},
+					}},
+				},
+			},
+		}}},
+		issue: IssueDetail{
+			Ref:     "glimmung#17",
+			Project: "glimmung",
+			Number:  &issueNumber,
+			Title:   "Port graph",
+			State:   "open",
+		},
+		runs: []RunReport{{
+			ID:               "run-1",
+			Project:          "glimmung",
+			RunRef:           runRef,
+			RunNumber:        &runNumber,
+			CycleNumber:      &cycleNumber,
+			RunCycleNumber:   &runCycle,
+			RunDisplayNumber: &runDisplay,
+			Workflow:         "agent-run",
+			IssueRef:         stringPtr("glimmung#17"),
+			IssueNumber:      &issueNumber,
+			State:            "in_progress",
+			CurrentPhase:     stringPtr("env-prep"),
+			StartedAt:        now,
+			UpdatedAt:        now,
+			PhaseExecutions: []RunPhaseExecution{{
+				Name:      "env-prep",
+				Kind:      "k8s_job",
+				State:     "active",
+				CreatedAt: now.Format(time.RFC3339Nano),
+				Jobs: []RunJobExecution{{
+					ID:        "prepare",
+					State:     "active",
+					CreatedAt: now.Format(time.RFC3339Nano),
+					Steps: []RunStepExecution{{
+						Slug:      "checkout",
+						Title:     stringPtr("Checkout"),
+						State:     "active",
+						CreatedAt: now.Format(time.RFC3339Nano),
+					}},
+				}},
+			}},
+		}},
+	}
+	handler := NewWithStore(Settings{}, store)
+
+	var projection RunGraphProjection
+	getJSON(t, handler, "/v1/projects/glimmung/issues/17/runs/1/cycles/1/graph", &projection)
+
+	envPhase := assertProjectionPhase(t, projection.Runs[0], "env-prep")
+	if envPhase.State != "active" || envPhase.Jobs[0].Steps[0].State != "active" {
+		t.Fatalf("env-prep projection=%#v", envPhase)
+	}
+	executePhase := assertProjectionPhase(t, projection.Runs[0], "agent-execute")
+	if executePhase.State != "not_started" || len(executePhase.Jobs) != 1 || executePhase.Jobs[0].State != "not_started" {
+		t.Fatalf("agent-execute projection=%#v", executePhase)
+	}
+	if len(executePhase.Jobs[0].Steps) != 1 ||
+		executePhase.Jobs[0].Steps[0].Slug != "run-agent" ||
+		executePhase.Jobs[0].Steps[0].State != "not_started" {
+		t.Fatalf("agent-execute steps=%#v", executePhase.Jobs[0].Steps)
+	}
+}
+
 func TestRunCycleGraphProjectionShowsLegacyAbortedDispatchTimeout(t *testing.T) {
 	issueNumber := 17
 	runNumber := 1
