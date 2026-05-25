@@ -274,13 +274,18 @@ func (s *ProjectsStore) mutateProject(ctx context.Context, name string, mutate f
 	if err != nil {
 		return ProjectRecord{}, fmt.Errorf("projects: update mutated: %w", err)
 	}
-	defer rows.Close()
 	if !rows.Next() {
+		rows.Close()
 		return ProjectRecord{}, fmt.Errorf("projects: update returned no row")
 	}
 	rec, err := scanProjectRow(rows)
 	if err != nil {
+		rows.Close()
 		return ProjectRecord{}, err
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return ProjectRecord{}, fmt.Errorf("projects: update mutated rows: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return ProjectRecord{}, fmt.Errorf("projects: commit mutate: %w", err)
