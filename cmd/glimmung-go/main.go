@@ -178,6 +178,21 @@ func main() {
 			log.Printf("workflows migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
 		}()
 
+		// Stage 2h foundation: pg.IssuesStore. Migrate copies cosmos
+		// issues + comments into pg. Cutover is a follow-up stage.
+		pgIssues := pgstore.NewIssuesStore(pgPool)
+		_ = pgIssues
+		go func() {
+			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			copied, skipped, err := pgIssues.Migrate(migCtx, store)
+			if err != nil {
+				log.Printf("issues migration cosmos->pg failed: %v (re-run by restarting pod; Migrate is idempotent)", err)
+				return
+			}
+			log.Printf("issues migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
+		}()
+
 		rt = &runtimeStore{Store: store, LocksStore: pgLocks}
 	} else {
 		log.Printf("runtime store disabled: cosmos store and postgres pool both required (store=%v pgPool=%v)", store != nil, pgPool != nil)

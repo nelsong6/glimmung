@@ -106,6 +106,72 @@ func (s *Store) SetPGWorkflows(workflows *pgstore.WorkflowsStore) {
 	s.pgWorkflows = workflows
 }
 
+// ListAllIssueDocsForMigration reads every cosmos issue doc and
+// splits it into the per-issue row + per-comment rows that
+// pg.IssuesStore.Migrate consumes. Consumed once at startup; Stage 2i
+// (or wherever issues cut over) deletes this method along with the
+// cosmos `issues` container client.
+func (s *Store) ListAllIssueDocsForMigration(ctx context.Context) ([]pgstore.IssueRow, []pgstore.IssueCommentRow, error) {
+	if s == nil || s.issues == nil {
+		return nil, nil, nil
+	}
+	var docs []issueDoc
+	if err := crossPartitionQuery(ctx, s.issues, "SELECT * FROM c", nil, &docs); err != nil {
+		return nil, nil, err
+	}
+	issues := make([]pgstore.IssueRow, 0, len(docs))
+	comments := make([]pgstore.IssueCommentRow, 0)
+	for _, doc := range docs {
+		// Strip comments before marshaling the issue payload; comments
+		// have their own table.
+		stripped := doc
+		stripped.Comments = nil
+		payload, err := encodeIssueDocPayload(stripped)
+		if err != nil {
+			return nil, nil, err
+		}
+		var archived *time.Time
+		if doc.ClosedAt != nil {
+			if t := parseOptionalTime(*doc.ClosedAt); t != nil {
+				archived = t
+			}
+		}
+		created := parseTimeOrZero(doc.CreatedAt)
+		updated := parseTimeOrZero(doc.UpdatedAt)
+		issues = append(issues, pgstore.IssueRow{
+			Project:    doc.Project,
+			Number:     doc.Number,
+			Payload:    payload,
+			ArchivedAt: archived,
+			CreatedAt:  created,
+			UpdatedAt:  updated,
+		})
+		for _, c := range doc.Comments {
+			cPayload, err := encodeIssueCommentPayload(c)
+			if err != nil {
+				return nil, nil, err
+			}
+			comments = append(comments, pgstore.IssueCommentRow{
+				ID:          c.ID,
+				Project:     doc.Project,
+				IssueNumber: doc.Number,
+				Payload:     cPayload,
+				CreatedAt:   parseTimeOrZero(c.CreatedAt),
+				UpdatedAt:   parseTimeOrZero(c.UpdatedAt),
+			})
+		}
+	}
+	return issues, comments, nil
+}
+
+func encodeIssueDocPayload(doc issueDoc) ([]byte, error) {
+	return json.Marshal(doc)
+}
+
+func encodeIssueCommentPayload(c issueCommentDoc) ([]byte, error) {
+	return json.Marshal(c)
+}
+
 // workflowFromPayload unmarshals a pg workflow payload (raw JSON of
 // the cosmos workflowDoc shape) and converts it to the server-package
 // Workflow type via the existing workflowFromDoc helper.
