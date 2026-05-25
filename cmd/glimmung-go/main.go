@@ -248,7 +248,7 @@ func main() {
 		}()
 
 		pgPortfolios := pgstore.NewPortfoliosStore(pgPool)
-		_ = pgPortfolios
+		store.SetPGPortfolios(pgPortfolios)
 		go func() {
 			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 			defer cancel()
