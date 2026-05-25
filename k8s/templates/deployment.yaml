@@ -42,6 +42,12 @@ spec:
               value: {{ .Values.cosmos.endpoint | quote }}
             - name: COSMOS_DATABASE
               value: {{ .Values.cosmos.database | quote }}
+            # POSTGRES_HOST and POSTGRES_DATABASE come from the
+            # glimmung-secrets K8s Secret materialized by ExternalSecret
+            # (see envFrom below). POSTGRES_USER is a literal in
+            # values.yaml because the UAMI name isn't a secret.
+            - name: POSTGRES_USER
+              value: {{ .Values.postgres.user | quote }}
             - name: NATIVE_RUNNER_NAMESPACE
               value: {{ .Values.nativeRunner.namespace | quote }}
             - name: NATIVE_RUNNER_SERVICE_ACCOUNT

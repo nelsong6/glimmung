@@ -10,12 +10,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+
 	"github.com/nelsong6/glimmung/internal/auth"
 	azureclient "github.com/nelsong6/glimmung/internal/azure"
 	githubclient "github.com/nelsong6/glimmung/internal/github"
 	"github.com/nelsong6/glimmung/internal/server"
 	artifactstore "github.com/nelsong6/glimmung/internal/store/artifacts"
 	cosmosstore "github.com/nelsong6/glimmung/internal/store/cosmos"
+	pgstore "github.com/nelsong6/glimmung/internal/store/pg"
 )
 
 func main() {
@@ -24,6 +27,55 @@ func main() {
 	if err != nil {
 		log.Printf("cosmos read store disabled: %v", err)
 	}
+	// Stage 2a foundation: construct the Postgres pool and apply schema
+	// migrations. No internal/server/ consumer reads from this pool yet —
+	// the runtime still uses the cosmos store above. Stages 2b through 2h
+	// cut interface clusters over one at a time; 2i deletes the cosmos
+	// store entirely. See docs/postgres-migration.md.
+	//
+	// Skipping pool construction when POSTGRES_HOST is unset preserves
+	// local-dev ergonomics (no Postgres dependency until you set the env
+	// var) and matches tank-operator's pgstore degraded-stub pattern.
+	var pgPool *pgstore.Pool
+	if settings.PostgresHost != "" && settings.PostgresDatabase != "" && settings.PostgresUsername != "" {
+		cred, credErr := azidentity.NewDefaultAzureCredential(nil)
+		if credErr != nil {
+			log.Printf("postgres pool disabled: build default credential: %v", credErr)
+		} else {
+			poolCtx, poolCancel := context.WithTimeout(context.Background(), 20*time.Second)
+			pool, poolErr := pgstore.NewPool(poolCtx, pgstore.Config{
+				Host:       settings.PostgresHost,
+				Database:   settings.PostgresDatabase,
+				Username:   settings.PostgresUsername,
+				Credential: cred,
+				// QueryMetrics intentionally nil for Stage 2a — the
+				// tracer becomes a no-op until 2b wires up the
+				// Prometheus collector in internal/metrics.
+			})
+			poolCancel()
+			if poolErr != nil {
+				log.Printf("postgres pool disabled: %v", poolErr)
+			} else {
+				migCtx, migCancel := context.WithTimeout(context.Background(), 60*time.Second)
+				if migErr := pgstore.RunMigrations(migCtx, pool); migErr != nil {
+					log.Printf("postgres migrations failed: %v", migErr)
+					pool.Close()
+				} else {
+					log.Printf("postgres pool ready (host=%s database=%s user=%s), schema migrations applied",
+						settings.PostgresHost, settings.PostgresDatabase, settings.PostgresUsername)
+					pgPool = pool
+				}
+				migCancel()
+			}
+		}
+	} else {
+		log.Printf("postgres pool disabled: POSTGRES_HOST/POSTGRES_DATABASE/POSTGRES_USER not all set")
+	}
+	// Stage 2a: pgPool is held but unused. Stages 2b onward will start
+	// passing it into per-interface stores. Mark with _ to keep the
+	// compiler happy until then.
+	_ = pgPool
+
 	artifacts, err := artifactstore.NewFromSettings(settings)
 	if err != nil {
 		log.Printf("artifact store disabled: %v", err)
