@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/nelsong6/glimmung/internal/domain/budget"
@@ -36,6 +37,8 @@ type fakeCompletionStore struct {
 
 	terminalResult AbortRunResult
 	terminalErr    error
+	terminalState  string
+	terminalReason *string
 
 	appendIdx   int
 	appendErr   error
@@ -113,7 +116,9 @@ func (s *fakeCompletionStore) StampRunDecision(context.Context, string, string, 
 	return s.decisionErr
 }
 
-func (s *fakeCompletionStore) SetRunTerminalState(context.Context, string, string, string, *string) (AbortRunResult, error) {
+func (s *fakeCompletionStore) SetRunTerminalState(_ context.Context, _, _ string, state string, abortReason *string) (AbortRunResult, error) {
+	s.terminalState = state
+	s.terminalReason = abortReason
 	return s.terminalResult, s.terminalErr
 }
 
@@ -494,6 +499,59 @@ func TestNativeRunCompletedByCallbackTokenFailureDispatchesCleanup(t *testing.T)
 	}
 	if !launcher.called || launcher.req.Phase.Name != "env-destroy" {
 		t.Fatalf("native launch=%#v", launcher.req)
+	}
+}
+
+func TestNativeRunCompletedByCallbackTokenCleanupAfterAbortKeepsRunAborted(t *testing.T) {
+	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
+	store.run = &RunReplayData{
+		ID:           "r1",
+		Project:      "proj",
+		WorkflowName: "wf",
+		IssueNumber:  7,
+		IssueRepo:    "owner/repo",
+		Attempts: []RunAttemptData{
+			{
+				AttemptIndex: 0,
+				Phase:        "env-prep",
+				Conclusion:   "failure",
+				Decision:     string(decision.AbortMalformed),
+				Completed:    true,
+			},
+			{AttemptIndex: 1, Phase: "env-destroy"},
+		},
+	}
+	store.wf = &Workflow{
+		Project: "proj",
+		Name:    "wf",
+		PR:      PrPrimitive{Enabled: true},
+		Budget:  budget.Config{Total: 25},
+		Phases: []PhaseSpec{
+			{Name: "env-prep", Kind: "k8s_job", Jobs: []NativeJobSpec{{ID: "env-prep"}}},
+			{
+				Name:      "env-destroy",
+				Kind:      "k8s_job",
+				Always:    true,
+				DependsOn: []string{"env-prep"},
+				Jobs:      []NativeJobSpec{{ID: "env-destroy"}},
+			},
+		},
+	}
+	store.terminalResult = AbortRunResult{State: "aborted", RunRef: "proj#7/runs/1"}
+
+	rec := httptest.NewRecorder()
+	newCompletionHandler(store, nil).ServeHTTP(rec, nativeCompletionRequest("tok", completedJob("env-destroy", "success", nil, nil)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := readCallbackResult(t, rec).Decision; got == nil || *got != "advance" {
+		t.Fatalf("decision=%v", got)
+	}
+	if store.terminalState != "aborted" {
+		t.Fatalf("terminal state=%q, want aborted", store.terminalState)
+	}
+	if store.terminalReason == nil || !strings.Contains(*store.terminalReason, "verification.json") {
+		t.Fatalf("terminal reason=%v", store.terminalReason)
 	}
 }
 
