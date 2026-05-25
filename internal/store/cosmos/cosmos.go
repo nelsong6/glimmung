@@ -253,67 +253,29 @@ func (s *Store) ListAllPlaybookDocsForMigration(ctx context.Context) ([]pgstore.
 	return out, nil
 }
 
-// ListAllReportDocsForMigration reads cosmos reports container,
-// filtering out portfolio_element kind docs (those go to pg.portfolios
-// via ListAllPortfolioDocsForMigration).
+// ListAllReportDocsForMigration returns nothing. Stage 2j shipped this
+// reading from `s.reports`, but that container actually holds
+// touchpoints (no dedicated "reports" docs exist in cosmos — run
+// reports are derived views over the runs container). The 627 rows
+// Stage 2j wrongly inserted into pg.reports are cleared by a one-time
+// migration step in pg/migrations.go. The method is kept rather than
+// deleted so the goroutine call site in main.go still compiles;
+// returning empty makes future Migrate runs no-ops. Stage 2i / final
+// cleanup deletes this method along with the cosmos container client.
 func (s *Store) ListAllReportDocsForMigration(ctx context.Context) ([]pgstore.ReportRow, error) {
-	if s == nil || s.reports == nil {
-		return nil, nil
-	}
-	var raw []map[string]any
-	if err := crossPartitionQuery(ctx, s.reports, "SELECT * FROM c", nil, &raw); err != nil {
-		return nil, err
-	}
-	out := make([]pgstore.ReportRow, 0, len(raw))
-	for _, doc := range raw {
-		if kind, _ := doc["kind"].(string); kind == "portfolio_element" {
-			continue
-		}
-		id, _ := doc["id"].(string)
-		project, _ := doc["project"].(string)
-		if id == "" || project == "" {
-			continue
-		}
-		var issueNumber *int
-		if v, ok := doc["issue_number"].(float64); ok {
-			n := int(v)
-			issueNumber = &n
-		}
-		var createdAt, updatedAt time.Time
-		if v, ok := doc["created_at"].(string); ok {
-			if t := parseOptionalTime(v); t != nil {
-				createdAt = *t
-			}
-		}
-		if v, ok := doc["updated_at"].(string); ok {
-			if t := parseOptionalTime(v); t != nil {
-				updatedAt = *t
-			}
-		}
-		payload, err := json.Marshal(doc)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, pgstore.ReportRow{
-			ID:          id,
-			Project:     project,
-			IssueNumber: issueNumber,
-			Payload:     payload,
-			CreatedAt:   createdAt,
-			UpdatedAt:   updatedAt,
-		})
-	}
-	return out, nil
+	return nil, nil
 }
 
-// ListAllPortfolioDocsForMigration reads cosmos reports container for
-// kind='portfolio_element' docs.
+// ListAllPortfolioDocsForMigration reads cosmos issues container for
+// kind='portfolio_element' docs (Stage 2j shipped this reading from
+// `s.reports` which was wrong — portfolios cohabit the issues
+// container, partitioned by /project, with kind='portfolio_element').
 func (s *Store) ListAllPortfolioDocsForMigration(ctx context.Context) ([]pgstore.PortfolioRow, error) {
-	if s == nil || s.reports == nil {
+	if s == nil || s.issues == nil {
 		return nil, nil
 	}
 	var docs []portfolioElementDoc
-	if err := crossPartitionQuery(ctx, s.reports, "SELECT * FROM c WHERE c.kind = @kind",
+	if err := crossPartitionQuery(ctx, s.issues, "SELECT * FROM c WHERE c.kind = @kind",
 		[]azcosmos.QueryParameter{{Name: "@kind", Value: "portfolio_element"}}, &docs); err != nil {
 		return nil, err
 	}
@@ -335,15 +297,18 @@ func (s *Store) ListAllPortfolioDocsForMigration(ctx context.Context) ([]pgstore
 	return out, nil
 }
 
-// ListAllTouchpointDocsForMigration reads cosmos touchpoint docs
-// (which live in the reports container as well — kind='touchpoint').
+// ListAllTouchpointDocsForMigration reads cosmos touchpoint docs. They
+// live in `s.reports` (the reports container is in practice the
+// touchpoints container — the historical naming is misleading). Stage
+// 2j shipped this with a kind='touchpoint' filter, but touchpointDoc
+// has no Kind field so the filter matched nothing. Fix: no filter;
+// every doc in s.reports IS a touchpoint.
 func (s *Store) ListAllTouchpointDocsForMigration(ctx context.Context) ([]pgstore.TouchpointRow, error) {
 	if s == nil || s.reports == nil {
 		return nil, nil
 	}
 	var docs []touchpointDoc
-	if err := crossPartitionQuery(ctx, s.reports, "SELECT * FROM c WHERE c.kind = @kind",
-		[]azcosmos.QueryParameter{{Name: "@kind", Value: "touchpoint"}}, &docs); err != nil {
+	if err := crossPartitionQuery(ctx, s.reports, "SELECT * FROM c", nil, &docs); err != nil {
 		return nil, err
 	}
 	out := make([]pgstore.TouchpointRow, 0, len(docs))
