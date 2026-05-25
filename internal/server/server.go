@@ -22,6 +22,13 @@ type Settings struct {
 	Port                               string
 	CosmosEndpoint                     string
 	CosmosDatabase                     string
+	// Postgres settings — present in Stage 2a but no consumer reads them
+	// yet; the pool gets constructed in cmd/glimmung-go/main.go and
+	// RunMigrations applies the schema. Per-table cutovers (2b onward)
+	// will wire callers to the pg package.
+	PostgresHost     string
+	PostgresDatabase string
+	PostgresUsername string
 	K8sSAAllowlist                     string
 	K8sAPIHost                         string
 	K8sSATokenPath                     string
@@ -65,6 +72,9 @@ func SettingsFromEnv() Settings {
 		Port:                envOrDefault("PORT", defaultPort),
 		CosmosEndpoint:      os.Getenv("COSMOS_ENDPOINT"),
 		CosmosDatabase:      os.Getenv("COSMOS_DATABASE"),
+		PostgresHost:        os.Getenv("POSTGRES_HOST"),
+		PostgresDatabase:    os.Getenv("POSTGRES_DATABASE"),
+		PostgresUsername:    os.Getenv("POSTGRES_USER"),
 		K8sSAAllowlist:      os.Getenv("K8S_SA_ALLOWLIST"),
 		K8sAPIHost:          envOrDefault("K8S_API_HOST", "https://kubernetes.default.svc"),
 		K8sSATokenPath:      envOrDefault("K8S_SA_TOKEN_PATH", "/var/run/secrets/kubernetes.io/serviceaccount/token"),

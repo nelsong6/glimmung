@@ -140,6 +140,22 @@ externalSecret:
       kvKey: glimmung-github-app-private-key
     - envVar: GITHUB_WEBHOOK_SECRET
       kvKey: glimmung-github-webhook-secret
+    # Postgres connection — host and database name published by
+    # tofu/postgres.tf at Stage 1. The break-glass admin password
+    # (`glimmung-pg-admin-password` in KV) is deliberately NOT
+    # materialized here; the pod authenticates via workload identity,
+    # not a static password.
+    - envVar: POSTGRES_HOST
+      kvKey: glimmung-pg-host
+    - envVar: POSTGRES_DATABASE
+      kvKey: glimmung-pg-database
+
+# Postgres workload-identity user. This is the name of the UAMI
+# (azurerm_user_assigned_identity.glimmung_dedicated) registered as
+# AAD admin on glimmung-pg by tofu/postgres.tf. Not a secret — the
+# AAD token mints from the federated credential, not from this name.
+postgres:
+  user: glimmung-identity
 
 # Prometheus instrumentation. Glimmung always serves /metrics on the
 # existing app port (alongside /healthz); the toggles below only control
