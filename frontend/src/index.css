@@ -1473,6 +1473,44 @@ h2 .inline-action,
   font-size: 0.75rem;
   padding: 2px 6px;
 }
+
+.issue-state-filter {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+  margin: -4px 0 14px;
+}
+.issue-state-filter button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 14px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 400;
+  letter-spacing: 0.06em;
+  text-transform: lowercase;
+  margin-bottom: -1px;
+}
+.issue-state-filter button:hover {
+  background: var(--surface-hover);
+  color: var(--fg);
+}
+.issue-state-filter button,
+.issue-state-filter button:hover,
+.issue-state-filter button:focus,
+.issue-state-filter button:focus-visible {
+  text-decoration: none;
+}
+.issue-state-filter button.selected {
+  color: var(--state-success-fg);
+  border-bottom-color: var(--state-success-fg);
+}
 .portfolio-review-actions {
   display: flex;
   flex-wrap: wrap;
