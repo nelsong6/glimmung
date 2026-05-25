@@ -155,6 +155,78 @@ func (s *Store) ListAllSlotDocsForMigration(ctx context.Context) ([]pgstore.Slot
 	return slots, history, nil
 }
 
+// ListAllRunDocsForMigration reads cosmos runs container.
+func (s *Store) ListAllRunDocsForMigration(ctx context.Context) ([]pgstore.RunRow, error) {
+	if s == nil || s.runs == nil {
+		return nil, nil
+	}
+	var docs []runDoc
+	if err := crossPartitionQuery(ctx, s.runs, "SELECT * FROM c", nil, &docs); err != nil {
+		return nil, err
+	}
+	out := make([]pgstore.RunRow, 0, len(docs))
+	for _, doc := range docs {
+		payload, err := json.Marshal(doc)
+		if err != nil {
+			return nil, err
+		}
+		var issueNum *int
+		if doc.IssueNumber > 0 {
+			n := doc.IssueNumber
+			issueNum = &n
+		}
+		out = append(out, pgstore.RunRow{
+			ID:          doc.ID,
+			Project:     doc.Project,
+			IssueNumber: issueNum,
+			Payload:     payload,
+			CreatedAt:   parseTimeOrZero(doc.CreatedAt),
+			UpdatedAt:   parseTimeOrZero(doc.UpdatedAt),
+		})
+	}
+	return out, nil
+}
+
+// ListAllLeaseDocsForMigration reads cosmos leases container.
+func (s *Store) ListAllLeaseDocsForMigration(ctx context.Context) ([]pgstore.LeaseRow, error) {
+	if s == nil || s.leases == nil {
+		return nil, nil
+	}
+	var docs []leaseDoc
+	if err := crossPartitionQuery(ctx, s.leases, "SELECT * FROM c", nil, &docs); err != nil {
+		return nil, err
+	}
+	out := make([]pgstore.LeaseRow, 0, len(docs))
+	for _, doc := range docs {
+		payload, err := json.Marshal(doc)
+		if err != nil {
+			return nil, err
+		}
+		token := ""
+		if doc.Metadata != nil {
+			if v, ok := doc.Metadata["lease_callback_token"].(string); ok {
+				token = v
+			}
+		}
+		var expiresAt *time.Time
+		if doc.AssignedAt != "" && doc.TTLSeconds > 0 {
+			if t := parseOptionalTime(doc.AssignedAt); t != nil {
+				exp := t.Add(time.Duration(doc.TTLSeconds) * time.Second)
+				expiresAt = &exp
+			}
+		}
+		out = append(out, pgstore.LeaseRow{
+			ID:            doc.ID,
+			Project:       doc.Project,
+			CallbackToken: token,
+			Payload:       payload,
+			CreatedAt:     parseTimeOrZero(doc.RequestedAt),
+			ExpiresAt:     expiresAt,
+		})
+	}
+	return out, nil
+}
+
 // ListAllPlaybookDocsForMigration reads cosmos playbooks container.
 func (s *Store) ListAllPlaybookDocsForMigration(ctx context.Context) ([]pgstore.PlaybookRow, error) {
 	if s == nil || s.playbooks == nil {

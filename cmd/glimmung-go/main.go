@@ -273,6 +273,33 @@ func main() {
 			log.Printf("touchpoints migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
 		}()
 
+		// Stage 2k foundations: runs + leases.
+		pgRuns := pgstore.NewRunsStore(pgPool)
+		_ = pgRuns
+		go func() {
+			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			copied, skipped, err := pgRuns.Migrate(migCtx, store)
+			if err != nil {
+				log.Printf("runs migration cosmos->pg failed: %v", err)
+				return
+			}
+			log.Printf("runs migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
+		}()
+
+		pgLeases := pgstore.NewLeasesStore(pgPool)
+		_ = pgLeases
+		go func() {
+			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			copied, skipped, err := pgLeases.Migrate(migCtx, store)
+			if err != nil {
+				log.Printf("leases migration cosmos->pg failed: %v", err)
+				return
+			}
+			log.Printf("leases migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
+		}()
+
 		rt = &runtimeStore{Store: store, LocksStore: pgLocks}
 	} else {
 		log.Printf("runtime store disabled: cosmos store and postgres pool both required (store=%v pgPool=%v)", store != nil, pgPool != nil)
