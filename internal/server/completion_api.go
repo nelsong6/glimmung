@@ -292,6 +292,27 @@ func processRunCompletion(
 		if hasInFlightAttempts(run) {
 			return &RunCallbackResult{RunRef: runRef, Decision: &verdictStr}
 		}
+		// Always-run cleanup can finish successfully after a primary phase abort;
+		// it must not convert that earlier abort into a reviewable success.
+		if abortDecision, ok := latestNonAlwaysAbortDecision(wf.Phases, run); ok {
+			explanation, _ := decision.AbortExplanation(decisionRun, decisionWorkflow, abortDecision)
+			var abortReason *string
+			if explanation != "" {
+				abortReason = &explanation
+			}
+			result, err := store.SetRunTerminalState(ctx, project, runID, "aborted", abortReason)
+			if err != nil {
+				writeInternalError(w, r, err, "mark run aborted failed")
+				return nil
+			}
+			advancePlaybooksForTerminalRun(ctx, store, nativeLauncher, project, runID)
+			return &RunCallbackResult{
+				RunRef:            runRef,
+				Decision:          &verdictStr,
+				IssueLockReleased: result.IssueLockReleased,
+				PRLockReleased:    result.PRLockReleased,
+			}
+		}
 		// Mark run passed (or review_required if PR primitive enabled).
 		state := "passed"
 		if wf.PR.Enabled {
@@ -529,16 +550,22 @@ func attemptedPhases(run RunReplayData) map[string]bool {
 }
 
 func runHasNonAlwaysAbort(phases []PhaseSpec, run RunReplayData) bool {
-	for _, attempt := range run.Attempts {
+	_, ok := latestNonAlwaysAbortDecision(phases, run)
+	return ok
+}
+
+func latestNonAlwaysAbortDecision(phases []PhaseSpec, run RunReplayData) (decision.RunDecision, bool) {
+	for i := len(run.Attempts) - 1; i >= 0; i-- {
+		attempt := run.Attempts[i]
 		phase := phaseSpecByName(phases, attempt.Phase)
 		if phase != nil && phase.Always {
 			continue
 		}
 		if isAbortDecision(attempt.Decision) {
-			return true
+			return decision.RunDecision(attempt.Decision), true
 		}
 	}
-	return false
+	return "", false
 }
 
 func hasInFlightAttempts(run RunReplayData) bool {
