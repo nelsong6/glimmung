@@ -56,15 +56,20 @@ func TestApplyHotSwapHappyPathDispatchesJob(t *testing.T) {
 		swapLogs:   "swap ok",
 	}
 	result, err := ApplyHotSwap(context.Background(), k8s, ApplyHotSwapOptions{
-		Project:         "tank-operator",
-		ArtifactKind:    "agent_runner",
-		GitRef:          "feat/x",
-		RepoURL:         "https://github.com/nelsong6/tank-operator.git",
-		TargetNamespace: "tank-operator-slot-1-sessions",
-		JobNamespace:    "glimmung",
-		Timeout:         30 * time.Second,
+		Project:          "tank-operator",
+		ArtifactKind:     "agent_runner",
+		GitRef:           "feat/x",
+		RepoURL:          "https://github.com/nelsong6/tank-operator.git",
+		TargetNamespace:  "tank-operator-slot-1-sessions",
+		ValidationTarget: "new_session",
+		JobNamespace:     "glimmung",
+		Timeout:          30 * time.Second,
 		Contract: hotswap.Contract{
 			Enabled: true,
+			FidelityClassifier: hotswap.FidelityClassifierContract{
+				Enabled: true,
+				Command: "node scripts/classify-tank-test-fidelity.mjs",
+			},
 			AgentRunner: hotswap.AgentRunnerContract{
 				Enabled:      true,
 				Source:       "agent-runner/dist",
@@ -83,6 +88,9 @@ func TestApplyHotSwapHappyPathDispatchesJob(t *testing.T) {
 	if result.Outcome != "persisted" {
 		t.Fatalf("outcome = %q, want persisted", result.Outcome)
 	}
+	if result.ValidationTarget != "new_session" {
+		t.Fatalf("validation target = %q, want new_session", result.ValidationTarget)
+	}
 	if len(k8s.appliedJobs) != 1 {
 		t.Fatalf("applied jobs = %d, want 1", len(k8s.appliedJobs))
 	}
@@ -91,9 +99,13 @@ func TestApplyHotSwapHappyPathDispatchesJob(t *testing.T) {
 	jobJSON, _ := json.Marshal(k8s.appliedJobs[0])
 	s := string(jobJSON)
 	checks := []string{
-		`"image":"node:20-alpine"`,                   // builder_image
-		"npm run build",                              // build command
-		`"image":"alpine/k8s:1.31.13"`,               // default swap container
+		`"image":"node:20-alpine"`,     // builder_image
+		"npm run build",                // build command
+		`"image":"alpine/k8s:1.31.13"`, // default swap container
+		`"glimmung.io/hot-swap-validation-target":"new_session"`,
+		"node scripts/classify-tank-test-fidelity.mjs",
+		"--validation-target",
+		"--enforce",
 		"kubectl -n 'tank-operator-slot-1-sessions'", // namespace into kubectl
 		"tank-operator/session-id",                   // pod selector
 		"tar c -C /work/source",                      // tar-stream

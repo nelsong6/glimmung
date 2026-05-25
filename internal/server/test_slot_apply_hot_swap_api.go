@@ -29,12 +29,13 @@ const applyHotSwapTimeoutMax = 600 * time.Second
 type applyHotSwapPerformer func(ctx context.Context, opts ApplyHotSwapOptions) (ApplyHotSwapResult, error)
 
 type TestSlotApplyHotSwapRequest struct {
-	Project        string  `json:"project"`
-	SlotIndex      *int    `json:"slot_index,omitempty"`
-	SlotName       *string `json:"slot_name,omitempty"`
-	ArtifactKind   string  `json:"artifact_kind"`
-	GitRef         string  `json:"git_ref"`
-	TimeoutSeconds *int    `json:"timeout_seconds,omitempty"`
+	Project          string  `json:"project"`
+	SlotIndex        *int    `json:"slot_index,omitempty"`
+	SlotName         *string `json:"slot_name,omitempty"`
+	ArtifactKind     string  `json:"artifact_kind"`
+	GitRef           string  `json:"git_ref"`
+	ValidationTarget string  `json:"validation_target,omitempty"`
+	TimeoutSeconds   *int    `json:"timeout_seconds,omitempty"`
 }
 
 type TestSlotApplyHotSwapResult struct {
@@ -52,7 +53,7 @@ type TestSlotApplyHotSwapResult struct {
 //
 // Caller flow:
 //
-//  1. POST { project, slot_index|slot_name, artifact_kind, git_ref, timeout_seconds }
+//  1. POST { project, slot_index|slot_name, artifact_kind, git_ref, validation_target, timeout_seconds }
 //  2. Endpoint resolves the active test-slot lease for project+slot.
 //  3. Endpoint reads the project's hot-swap contract from metadata.
 //  4. Endpoint validates artifact_kind is supported (v1: agent_runner or codex_runner)
@@ -83,6 +84,7 @@ func applyTestSlotHotSwap(store ReadStore, preparer TestSlotPreparer, performer 
 		req.Project = strings.TrimSpace(req.Project)
 		req.ArtifactKind = strings.TrimSpace(req.ArtifactKind)
 		req.GitRef = strings.TrimSpace(req.GitRef)
+		req.ValidationTarget = strings.TrimSpace(req.ValidationTarget)
 		if req.Project == "" {
 			writeProblem(w, http.StatusBadRequest, "project required")
 			return
@@ -161,6 +163,17 @@ func applyTestSlotHotSwap(store ReadStore, preparer TestSlotPreparer, performer 
 			writeProblem(w, http.StatusUnprocessableEntity, "project has no enabled test_slot_hot_swap contract")
 			return
 		}
+		if contract.FidelityClassifier.Enabled {
+			if req.ValidationTarget == "" {
+				writeProblem(w, http.StatusUnprocessableEntity, "validation_target required when test_slot_hot_swap.fidelity_classifier is enabled")
+				return
+			}
+		}
+		validationTarget, err := normalizeHotSwapValidationTarget(req.ValidationTarget)
+		if err != nil {
+			writeProblem(w, http.StatusBadRequest, err.Error())
+			return
+		}
 
 		// Backend builder_image is optional at Validate time (existing
 		// registered contracts predate the field), so the apply endpoint
@@ -198,13 +211,14 @@ func applyTestSlotHotSwap(store ReadStore, preparer TestSlotPreparer, performer 
 
 		ctx := r.Context()
 		applyResult, applyErr := performer(ctx, ApplyHotSwapOptions{
-			Project:         req.Project,
-			ArtifactKind:    req.ArtifactKind,
-			GitRef:          req.GitRef,
-			RepoURL:         repoURL,
-			TargetNamespace: targetNamespace,
-			Contract:        contract,
-			Timeout:         timeout,
+			Project:          req.Project,
+			ArtifactKind:     req.ArtifactKind,
+			GitRef:           req.GitRef,
+			RepoURL:          repoURL,
+			TargetNamespace:  targetNamespace,
+			ValidationTarget: validationTarget,
+			Contract:         contract,
+			Timeout:          timeout,
 		})
 
 		// Record hot-swap history on EVERY outcome. The history entry's
@@ -214,10 +228,11 @@ func applyTestSlotHotSwap(store ReadStore, preparer TestSlotPreparer, performer 
 		if status == "" {
 			status = "swap_failed"
 		}
-		summary := fmt.Sprintf("apply_hot_swap kind=%s git_ref=%s outcome=%s", req.ArtifactKind, req.GitRef, status)
+		summary := fmt.Sprintf("apply_hot_swap kind=%s git_ref=%s validation_target=%s outcome=%s", req.ArtifactKind, req.GitRef, validationTarget, status)
 		diagnostics := map[string]any{
-			"build_logs_tail": applyResult.BuildLogsTail,
-			"swap_logs_tail":  applyResult.SwapLogsTail,
+			"build_logs_tail":   applyResult.BuildLogsTail,
+			"swap_logs_tail":    applyResult.SwapLogsTail,
+			"validation_target": validationTarget,
 		}
 		if applyResult.Error != "" {
 			diagnostics["error"] = applyResult.Error
@@ -265,5 +280,20 @@ func applyTestSlotHotSwap(store ReadStore, preparer TestSlotPreparer, performer 
 			Entry:          entry,
 			LeaseExtension: leaseExtension,
 		})
+	}
+}
+
+func normalizeHotSwapValidationTarget(value string) (string, error) {
+	switch strings.TrimSpace(value) {
+	case "":
+		return "existing_session", nil
+	case "existing_pod", "existing_pods", "existing_session", "existing_sessions":
+		return "existing_session", nil
+	case "new_session", "future_session", "future_sessions":
+		return "new_session", nil
+	case "full_runtime", "branch_image":
+		return "full_runtime", nil
+	default:
+		return "", fmt.Errorf("validation_target %q is not supported (use existing_session, new_session, or full_runtime)", strings.TrimSpace(value))
 	}
 }

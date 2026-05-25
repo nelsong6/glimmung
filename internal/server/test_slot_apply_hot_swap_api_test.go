@@ -24,6 +24,10 @@ func newApplyHotSwapStore(t *testing.T) *fakeLeaseStore {
 					Metadata: map[string]any{
 						"test_slot_hot_swap": map[string]any{
 							"enabled": true,
+							"fidelity_classifier": map[string]any{
+								"enabled": true,
+								"command": "node scripts/classify-tank-test-fidelity.mjs",
+							},
 							"agent_runner": map[string]any{
 								"enabled":       true,
 								"source":        "agent-runner/dist",
@@ -82,7 +86,7 @@ func TestApplyTestSlotHotSwapHappyPathResolves(t *testing.T) {
 	}
 
 	handler := http.HandlerFunc(applyTestSlotHotSwap(store, nil, performer))
-	body := `{"project":"tank-operator","slot_name":"tank-operator-slot-1","artifact_kind":"agent_runner","git_ref":"feat/durable-stop-request"}`
+	body := `{"project":"tank-operator","slot_name":"tank-operator-slot-1","artifact_kind":"agent_runner","git_ref":"feat/durable-stop-request","validation_target":"existing_session"}`
 	req := authedApplyRequest(t, body)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -108,6 +112,9 @@ func TestApplyTestSlotHotSwapHappyPathResolves(t *testing.T) {
 	}
 	if seen.GitRef != "feat/durable-stop-request" {
 		t.Fatalf("performer GitRef = %q", seen.GitRef)
+	}
+	if seen.ValidationTarget != "existing_session" {
+		t.Fatalf("performer ValidationTarget = %q, want existing_session", seen.ValidationTarget)
 	}
 	// Target namespace derived from slot_name convention
 	if seen.TargetNamespace != "tank-operator-slot-1-sessions" {
@@ -143,7 +150,7 @@ func TestApplyTestSlotHotSwapCodexRunnerResolves(t *testing.T) {
 	}
 
 	handler := http.HandlerFunc(applyTestSlotHotSwap(store, nil, performer))
-	body := `{"project":"tank-operator","slot_name":"tank-operator-slot-1","artifact_kind":"codex_runner","git_ref":"feat/codex"}`
+	body := `{"project":"tank-operator","slot_name":"tank-operator-slot-1","artifact_kind":"codex_runner","git_ref":"feat/codex","validation_target":"new_session"}`
 	req := authedApplyRequest(t, body)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -153,6 +160,9 @@ func TestApplyTestSlotHotSwapCodexRunnerResolves(t *testing.T) {
 	}
 	if seen.ArtifactKind != "codex_runner" {
 		t.Fatalf("performer ArtifactKind = %q", seen.ArtifactKind)
+	}
+	if seen.ValidationTarget != "new_session" {
+		t.Fatalf("performer ValidationTarget = %q, want new_session", seen.ValidationTarget)
 	}
 	if seen.Contract.CodexRunner.Container != "codex-runner" {
 		t.Fatalf("codex runner contract not flowed correctly: %#v", seen.Contract.CodexRunner)
@@ -178,7 +188,7 @@ func TestApplyTestSlotHotSwapRecordsFailureHistory(t *testing.T) {
 	}
 
 	handler := http.HandlerFunc(applyTestSlotHotSwap(store, nil, performer))
-	body := `{"project":"tank-operator","slot_index":1,"artifact_kind":"agent_runner","git_ref":"feat/x"}`
+	body := `{"project":"tank-operator","slot_index":1,"artifact_kind":"agent_runner","git_ref":"feat/x","validation_target":"existing_session"}`
 	req := authedApplyRequest(t, body)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -210,7 +220,7 @@ func TestApplyTestSlotHotSwapExtendsLeaseToConfiguredMinimum(t *testing.T) {
 	}
 
 	handler := http.HandlerFunc(applyTestSlotHotSwap(store, nil, performer))
-	body := `{"project":"tank-operator","slot_name":"tank-operator-slot-1","artifact_kind":"agent_runner","git_ref":"feat/x"}`
+	body := `{"project":"tank-operator","slot_name":"tank-operator-slot-1","artifact_kind":"agent_runner","git_ref":"feat/x","validation_target":"existing_session"}`
 	req := authedApplyRequest(t, body)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -262,7 +272,7 @@ func TestApplyTestSlotHotSwapClampsTimeout(t *testing.T) {
 	}
 
 	handler := http.HandlerFunc(applyTestSlotHotSwap(store, nil, performer))
-	body := `{"project":"tank-operator","slot_name":"tank-operator-slot-1","artifact_kind":"agent_runner","git_ref":"feat/x","timeout_seconds":9999}`
+	body := `{"project":"tank-operator","slot_name":"tank-operator-slot-1","artifact_kind":"agent_runner","git_ref":"feat/x","validation_target":"existing_session","timeout_seconds":9999}`
 	req := authedApplyRequest(t, body)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -297,7 +307,7 @@ func TestApplyTestSlotHotSwapRejectsBackendWithoutBuilderImage(t *testing.T) {
 	}
 
 	handler := http.HandlerFunc(applyTestSlotHotSwap(store, nil, performer))
-	body := `{"project":"tank-operator","slot_name":"tank-operator-slot-1","artifact_kind":"backend","git_ref":"feat/x"}`
+	body := `{"project":"tank-operator","slot_name":"tank-operator-slot-1","artifact_kind":"backend","git_ref":"feat/x","validation_target":"existing_session"}`
 	req := authedApplyRequest(t, body)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -307,6 +317,48 @@ func TestApplyTestSlotHotSwapRejectsBackendWithoutBuilderImage(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "builder_image") {
 		t.Fatalf("response should name builder_image; got %s", rec.Body.String())
+	}
+}
+
+func TestApplyTestSlotHotSwapRequiresValidationTargetForClassifier(t *testing.T) {
+	store := newApplyHotSwapStore(t)
+	performer := func(_ context.Context, _ ApplyHotSwapOptions) (ApplyHotSwapResult, error) {
+		t.Fatal("performer should not be invoked when validation target is missing")
+		return ApplyHotSwapResult{}, nil
+	}
+
+	handler := http.HandlerFunc(applyTestSlotHotSwap(store, nil, performer))
+	body := `{"project":"tank-operator","slot_name":"tank-operator-slot-1","artifact_kind":"agent_runner","git_ref":"feat/x"}`
+	req := authedApplyRequest(t, body)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "validation_target") {
+		t.Fatalf("response should name validation_target; got %s", rec.Body.String())
+	}
+}
+
+func TestApplyTestSlotHotSwapRejectsUnsupportedValidationTarget(t *testing.T) {
+	store := newApplyHotSwapStore(t)
+	performer := func(_ context.Context, _ ApplyHotSwapOptions) (ApplyHotSwapResult, error) {
+		t.Fatal("performer should not be invoked when validation target is invalid")
+		return ApplyHotSwapResult{}, nil
+	}
+
+	handler := http.HandlerFunc(applyTestSlotHotSwap(store, nil, performer))
+	body := `{"project":"tank-operator","slot_name":"tank-operator-slot-1","artifact_kind":"agent_runner","git_ref":"feat/x","validation_target":"maybe"}`
+	req := authedApplyRequest(t, body)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "validation_target") {
+		t.Fatalf("response should name validation_target; got %s", rec.Body.String())
 	}
 }
 
