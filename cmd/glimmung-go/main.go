@@ -262,7 +262,7 @@ func main() {
 		}()
 
 		pgTouchpoints := pgstore.NewTouchpointsStore(pgPool)
-		_ = pgTouchpoints
+		store.SetPGTouchpoints(pgTouchpoints)
 		go func() {
 			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 			defer cancel()

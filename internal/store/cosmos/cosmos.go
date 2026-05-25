@@ -106,6 +106,11 @@ type Store struct {
 	// SELECT FOR UPDATE inside a transaction, removing the ETag retry
 	// loop that the cosmos mutateRunRaw helper carried.
 	pgRuns *pgstore.RunsStore
+
+	// pgTouchpoints is the Postgres-backed touchpoints store (Stage
+	// 2-touchpoints cutover). All touchpoint R/W on cosmos.Store
+	// delegates here.
+	pgTouchpoints *pgstore.TouchpointsStore
 }
 
 // SetPGLocks injects the Postgres-backed lock store. Called once at
@@ -168,6 +173,22 @@ func (s *Store) SetPGSlots(slots *pgstore.SlotsStore) {
 // SetPGRuns injects the Postgres-backed runs store.
 func (s *Store) SetPGRuns(runs *pgstore.RunsStore) {
 	s.pgRuns = runs
+}
+
+// SetPGTouchpoints injects the Postgres-backed touchpoints store.
+func (s *Store) SetPGTouchpoints(touchpoints *pgstore.TouchpointsStore) {
+	s.pgTouchpoints = touchpoints
+}
+
+// touchpointDocFromPayload decodes a pg touchpoint payload into the
+// cosmos touchpointDoc shape so the existing builder helpers continue
+// to work.
+func touchpointDocFromPayload(payload []byte) (touchpointDoc, error) {
+	var doc touchpointDoc
+	if err := json.Unmarshal(payload, &doc); err != nil {
+		return touchpointDoc{}, err
+	}
+	return doc, nil
 }
 
 // runDocFromPGRow unmarshals a pg runs row's payload into the cosmos
@@ -3043,71 +3064,31 @@ type touchpointDoc struct {
 }
 
 func (s *Store) ListTouchpoints(ctx context.Context, filter server.TouchpointListFilter) ([]server.TouchpointRow, error) {
-	// The reports container is partitioned by /project. When the caller
-	// scopes to one project, this is a single-partition query and ORDER
-	// BY works locally. When the caller asks for the cross-project index
-	// (the touchpoints landing view), the Go SDK cannot fan out an
-	// ORDER BY query for us — we fan out per project here and merge in
-	// Go. See docs/cosmos-partition-strategy.md.
-	var touchpointDocs []touchpointDoc
-
-	if filter.Project != "" {
-		// Single-partition path: include ORDER BY so Cosmos sorts within
-		// the partition; merge is unnecessary.
-		predicates := []string{"c.project = @project"}
-		params := []azcosmos.QueryParameter{{Name: "@project", Value: filter.Project}}
-		if filter.Repo != "" {
-			predicates = append(predicates, "c.repo = @repo")
-			params = append(params, azcosmos.QueryParameter{Name: "@repo", Value: filter.Repo})
-		}
-		if filter.State != "" {
-			predicates = append(predicates, "c.state = @state")
-			params = append(params, azcosmos.QueryParameter{Name: "@state", Value: filter.State})
-		}
-		query := "SELECT * FROM c WHERE " + strings.Join(predicates, " AND ") + " ORDER BY c.updated_at DESC"
-		if err := singlePartitionQuery(
-			ctx,
-			s.reports,
-			azcosmos.NewPartitionKeyString(filter.Project),
-			query,
-			params,
-			&touchpointDocs,
-		); err != nil {
-			return nil, err
-		}
-	} else {
-		// Cross-project fan-out: query each project partition in turn,
-		// then sort the merged result in Go.
-		projects, err := s.listProjectNames(ctx)
-		if err != nil {
-			return nil, err
-		}
-		predicates := []string{"c.project = @project"}
-		var params []azcosmos.QueryParameter
-		if filter.Repo != "" {
-			predicates = append(predicates, "c.repo = @repo")
-			params = append(params, azcosmos.QueryParameter{Name: "@repo", Value: filter.Repo})
-		}
-		if filter.State != "" {
-			predicates = append(predicates, "c.state = @state")
-			params = append(params, azcosmos.QueryParameter{Name: "@state", Value: filter.State})
-		}
-		query := "SELECT * FROM c WHERE " + strings.Join(predicates, " AND ")
-		if err := fanOutByProject(ctx, s.reports, projects, query, params, &touchpointDocs); err != nil {
-			return nil, err
-		}
-		sort.SliceStable(touchpointDocs, func(i, j int) bool {
-			return touchpointDocs[i].UpdatedAt > touchpointDocs[j].UpdatedAt
-		})
+	// pg.TouchpointsStore.List handles both the single-project and
+	// cross-project cases via a single SELECT — the cosmos
+	// single-partition vs cross-partition split collapses to one
+	// query path against the unified touchpoints table.
+	limit := 0
+	if filter.Limit != nil {
+		limit = *filter.Limit
 	}
+	pgRows, err := s.pgTouchpoints.List(ctx, filter.Project, filter.Repo, filter.State, 0)
+	if err != nil {
+		return nil, err
+	}
+	touchpointDocs := make([]touchpointDoc, 0, len(pgRows))
+	for _, row := range pgRows {
+		doc, derr := touchpointDocFromPayload(row.Payload)
+		if derr != nil {
+			return nil, derr
+		}
+		touchpointDocs = append(touchpointDocs, doc)
+	}
+	_ = limit
 
 	// Enrich with issue and run data.
 	issueDocs, _ := s.listIssueDocs(ctx)
 	runDocs, _ := s.listRunDocs(ctx)
-	// PR lock read moved from cosmos.locks container to pg.LocksStore in
-	// Stage 2b. ListHeldByScope("pr") returns only currently-held +
-	// unexpired locks; convert to the map[key]bool shape the existing
-	// touchpoint row builder expects.
 	heldPRLocks, _ := s.pgLocks.ListHeldByScope(ctx, "pr")
 	prLockByKey := make(map[string]bool, len(heldPRLocks))
 	for key := range heldPRLocks {
@@ -3118,15 +3099,15 @@ func (s *Store) ListTouchpoints(ctx context.Context, filter server.TouchpointLis
 	runRefByID, runByLinkedIssueID, runByRepoPR := buildRunIndexes(runDocs)
 
 	now := time.Now().UTC()
-	rows := make([]server.TouchpointRow, 0, len(touchpointDocs))
+	out := make([]server.TouchpointRow, 0, len(touchpointDocs))
 	for _, doc := range touchpointDocs {
 		row := touchpointRowFromDoc(doc, issueRefByID, issueNumberByID, runRefByID, runByLinkedIssueID, runByRepoPR, prLockByKey, now)
-		rows = append(rows, row)
+		out = append(out, row)
 	}
-	if filter.Limit != nil && *filter.Limit < len(rows) {
-		rows = rows[:*filter.Limit]
+	if filter.Limit != nil && *filter.Limit < len(out) {
+		out = out[:*filter.Limit]
 	}
-	return rows, nil
+	return out, nil
 }
 
 func (s *Store) GetTouchpointForIssue(ctx context.Context, project string, issueNumber int) (server.TouchpointDetail, error) {
@@ -3134,27 +3115,22 @@ func (s *Store) GetTouchpointForIssue(ctx context.Context, project string, issue
 	if err != nil {
 		return server.TouchpointDetail{}, server.ErrNotFound
 	}
-	// Find touchpoint by linked_issue_id.
-	var docs []touchpointDoc
-	if err := singlePartitionQuery(ctx, s.reports,
-		azcosmos.NewPartitionKeyString(project),
-		"SELECT * FROM c WHERE c.project = @project AND c.linked_issue_id = @iid ORDER BY c.updated_at DESC",
-		[]azcosmos.QueryParameter{
-			{Name: "@project", Value: project},
-			{Name: "@iid", Value: issueDoc.ID},
-		},
-		&docs,
-	); err != nil {
-		return server.TouchpointDetail{}, err
-	}
-	if len(docs) == 0 {
+	row, err := s.pgTouchpoints.FindByLinkedIssueID(ctx, project, issueDoc.ID)
+	if errors.Is(err, pgstore.ErrTouchpointNotFound) {
 		return server.TouchpointDetail{}, server.ErrNotFound
 	}
-	return s.buildTouchpointDetail(ctx, docs[0])
+	if err != nil {
+		return server.TouchpointDetail{}, err
+	}
+	doc, err := touchpointDocFromPayload(row.Payload)
+	if err != nil {
+		return server.TouchpointDetail{}, err
+	}
+	return s.buildTouchpointDetail(ctx, doc)
 }
 
 func (s *Store) EnsureTouchpoint(ctx context.Context, req server.TouchpointCreate) (server.TouchpointDetail, error) {
-	// Resolve linked_issue_id by ref if provided.
+	// Resolve linked refs.
 	var linkedIssueID *string
 	if req.LinkedIssueRef != "" {
 		linkedIssueID = s.resolveIssueIDByRef(ctx, req.Project, req.LinkedIssueRef)
@@ -3164,62 +3140,72 @@ func (s *Store) EnsureTouchpoint(ctx context.Context, req server.TouchpointCreat
 		linkedRunID = s.resolveRunIDByRef(ctx, req.Project, req.LinkedRunRef)
 	}
 
-	// If we have a linked issue, check for an existing touchpoint for that issue.
+	// 1) If we have a linked issue, check for an existing touchpoint
+	//    for that issue and patch linkages if provided.
 	if linkedIssueID != nil {
-		var docs []touchpointDoc
-		_ = singlePartitionQuery(ctx, s.reports,
-			azcosmos.NewPartitionKeyString(req.Project),
-			"SELECT * FROM c WHERE c.project = @project AND c.linked_issue_id = @iid ORDER BY c.updated_at DESC",
-			[]azcosmos.QueryParameter{
-				{Name: "@project", Value: req.Project},
-				{Name: "@iid", Value: *linkedIssueID},
-			},
-			&docs,
-		)
-		if len(docs) > 0 {
-			doc := docs[0]
-			// Patch linkages if caller is providing them.
+		row, err := s.pgTouchpoints.FindByLinkedIssueID(ctx, req.Project, *linkedIssueID)
+		if err == nil {
+			doc, derr := touchpointDocFromPayload(row.Payload)
+			if derr != nil {
+				return server.TouchpointDetail{}, derr
+			}
 			if linkedRunID != nil && (doc.LinkedRunID == nil || *doc.LinkedRunID != *linkedRunID) {
-				doc.LinkedRunID = linkedRunID
-				doc.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-				_ = s.replaceTouchpointDoc(ctx, doc)
+				patched, perr := s.pgTouchpoints.PatchPayload(ctx, doc.Project, doc.Number, func(payload map[string]any) error {
+					payload["linked_run_id"] = *linkedRunID
+					payload["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+					return nil
+				})
+				if perr == nil {
+					if updated, uerr := touchpointDocFromPayload(patched.Payload); uerr == nil {
+						doc = updated
+					}
+				}
 			}
 			return s.buildTouchpointDetail(ctx, doc)
 		}
 	}
 
-	// Fall back to (repo, number) idempotency key. PRs are unique per
-	// repo so this lookup is by design cross-project; touchpoint detail
-	// uniqueness is enforced at write time by the (repo, number) key.
-	var existingDocs []touchpointDoc
-	_ = crossPartitionQuery(ctx, s.reports,
-		"SELECT * FROM c WHERE c.repo = @repo AND c.number = @num",
-		[]azcosmos.QueryParameter{
-			{Name: "@repo", Value: req.Repo},
-			{Name: "@num", Value: req.Number},
-		},
-		&existingDocs,
-	)
-	if len(existingDocs) > 0 {
-		doc := existingDocs[0]
-		// Attach linkages if not already set.
+	// 2) Fall back to (repo, number) idempotency key. Cosmos used a
+	//    cross-partition scan; pg.TouchpointsStore.FindByRepoNumber
+	//    does the same lookup against the unified table.
+	if row, err := s.pgTouchpoints.FindByRepoNumber(ctx, req.Repo, req.Number); err == nil {
+		doc, derr := touchpointDocFromPayload(row.Payload)
+		if derr != nil {
+			return server.TouchpointDetail{}, derr
+		}
 		updated := false
 		if linkedIssueID != nil && doc.LinkedIssueID == nil {
-			doc.LinkedIssueID = linkedIssueID
 			updated = true
 		}
 		if linkedRunID != nil && (doc.LinkedRunID == nil || *doc.LinkedRunID != *linkedRunID) {
-			doc.LinkedRunID = linkedRunID
 			updated = true
 		}
 		if updated {
-			doc.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-			_ = s.replaceTouchpointDoc(ctx, doc)
+			patched, perr := s.pgTouchpoints.PatchPayload(ctx, doc.Project, doc.Number, func(payload map[string]any) error {
+				if linkedIssueID != nil {
+					if _, ok := payload["linked_issue_id"].(string); !ok || payload["linked_issue_id"] == nil {
+						payload["linked_issue_id"] = *linkedIssueID
+					}
+				}
+				if linkedRunID != nil {
+					current, _ := payload["linked_run_id"].(string)
+					if current != *linkedRunID {
+						payload["linked_run_id"] = *linkedRunID
+					}
+				}
+				payload["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+				return nil
+			})
+			if perr == nil {
+				if updatedDoc, uerr := touchpointDocFromPayload(patched.Payload); uerr == nil {
+					doc = updatedDoc
+				}
+			}
 		}
 		return s.buildTouchpointDetail(ctx, doc)
 	}
 
-	// Create a new touchpoint.
+	// 3) Create a new touchpoint.
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	doc := touchpointDoc{
 		ID:            uuid.New().String(),
@@ -3242,8 +3228,11 @@ func (s *Store) EnsureTouchpoint(ctx context.Context, req server.TouchpointCreat
 	if err != nil {
 		return server.TouchpointDetail{}, err
 	}
-	partitionKey := azcosmos.NewPartitionKeyString(req.Project)
-	if _, err := s.reports.CreateItem(ctx, partitionKey, payload, nil); err != nil {
+	if _, err := s.pgTouchpoints.Create(ctx, pgstore.TouchpointRow{
+		Project:     req.Project,
+		IssueNumber: req.Number,
+		Payload:     payload,
+	}); err != nil {
 		return server.TouchpointDetail{}, err
 	}
 	return s.buildTouchpointDetail(ctx, doc)
@@ -3358,12 +3347,28 @@ func (s *Store) buildTouchpointDetail(ctx context.Context, doc touchpointDoc) (s
 }
 
 func (s *Store) replaceTouchpointDoc(ctx context.Context, doc touchpointDoc) error {
+	// Whole-doc replace, used by callers (currently none after the
+	// EnsureTouchpoint refactor) that build the new touchpointDoc
+	// shape externally. We honor the legacy semantics by routing
+	// through pgTouchpoints.PatchPayload — set every top-level key
+	// in the mutator, preserving created_at on the row.
 	payload, err := json.Marshal(doc)
 	if err != nil {
 		return err
 	}
-	partitionKey := azcosmos.NewPartitionKeyString(doc.Project)
-	_, err = s.reports.ReplaceItem(ctx, partitionKey, doc.ID, payload, nil)
+	_, err = s.pgTouchpoints.PatchPayload(ctx, doc.Project, doc.Number, func(p map[string]any) error {
+		var fresh map[string]any
+		if err := json.Unmarshal(payload, &fresh); err != nil {
+			return err
+		}
+		for k, v := range fresh {
+			p[k] = v
+		}
+		return nil
+	})
+	if errors.Is(err, pgstore.ErrTouchpointNotFound) {
+		return server.ErrNotFound
+	}
 	return err
 }
 
