@@ -48,6 +48,17 @@ jobs:
       - name: Guard against cosmos-side lock methods reintroduction
         run: node scripts/check-removed-cosmos-locks.mjs
 
+  check-removed-cosmos-run-events:
+    name: Removed cosmos run_events writes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Guard against cosmos-side run_events methods reintroduction
+        run: node scripts/check-removed-cosmos-run-events.mjs
+
   check-handler-5xx-migration:
     name: Handler 5xx observability contract
     runs-on: ubuntu-latest

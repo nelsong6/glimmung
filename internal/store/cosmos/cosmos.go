@@ -50,6 +50,15 @@ type Store struct {
 	// deletes both this field and the cosmos lock container client
 	// entirely.
 	pgLocks *pgstore.LocksStore
+
+	// pgRunEvents is the Postgres-backed run-events store. Injected
+	// via SetPGRunEvents (Stage 2c). RecordNativeEventByID and
+	// ListNativeEventsByID delegate event storage to this field;
+	// cosmos.Store no longer writes to or reads from its `runEvents`
+	// container for those operations. The `runEvents` container client
+	// is retained only so ListAllRunEventDocsForMigration can feed the
+	// one-shot Migrate copy. Stage 2i deletes both.
+	pgRunEvents *pgstore.RunEventsStore
 }
 
 // SetPGLocks injects the Postgres-backed lock store. Called once at
@@ -59,6 +68,14 @@ type Store struct {
 // through s.pgLocks once this is set.
 func (s *Store) SetPGLocks(locks *pgstore.LocksStore) {
 	s.pgLocks = locks
+}
+
+// SetPGRunEvents injects the Postgres-backed run-events store. Called
+// once at startup by cmd/glimmung-go/main.go after pg.RunEventsStore is
+// constructed. RecordNativeEventByID writes go to pg via this field;
+// ListNativeEventsByID reads through it.
+func (s *Store) SetPGRunEvents(runEvents *pgstore.RunEventsStore) {
+	s.pgRunEvents = runEvents
 }
 
 const workflowSchemaKind = "workflow_schema"
@@ -5560,6 +5577,13 @@ func (s *Store) RecordNativeEventByID(ctx context.Context, project, runID string
 		message = *req.Message
 	}
 
+	// Stage 2c: write the event to pg via pgRunEvents instead of the
+	// cosmos `runEvents` container. The cosmos-shaped nativeEventDoc is
+	// kept for the in-process applyNativeEventExecutionState call below
+	// (which mutates the runs document — runs is still in cosmos until
+	// Stage 2e). Idempotency semantics match the cosmos contract: the
+	// same PK with the same payload is accepted silently; the same PK
+	// with a different payload returns ErrConflict.
 	eventDoc := nativeEventDoc{
 		ID:           docID,
 		Project:      project,
@@ -5575,32 +5599,25 @@ func (s *Store) RecordNativeEventByID(ctx context.Context, project, runID string
 		Metadata:     mapOrEmpty(req.Metadata),
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339Nano),
 	}
-
-	payload, err := json.Marshal(eventDoc)
+	created, err := s.pgRunEvents.Insert(ctx, pgstore.RunEventRow{
+		RunID:        runID,
+		AttemptIndex: attemptIndex,
+		JobID:        req.JobID,
+		Seq:          req.Seq,
+		Project:      project,
+		Event:        req.Event,
+		Phase:        phase,
+		StepSlug:     stepSlug,
+		Message:      message,
+		ExitCode:     req.ExitCode,
+		Metadata:     mapOrEmpty(req.Metadata),
+		CreatedAt:    parseTimeOrZero(eventDoc.CreatedAt),
+	})
 	if err != nil {
-		return server.NativeRunEventResult{}, err
-	}
-
-	eventPK := azcosmos.NewPartitionKeyString(project)
-	created := true
-	if _, err := s.runEvents.CreateItem(ctx, eventPK, payload, nil); err != nil {
-		// Idempotent: a 409 Conflict means the doc already exists.
-		if isCosmosStatus(err, http.StatusConflict) {
-			existing, readErr := s.runEvents.ReadItem(ctx, eventPK, docID, nil)
-			if readErr != nil {
-				return server.NativeRunEventResult{}, readErr
-			}
-			var existingDoc nativeEventDoc
-			if err := json.Unmarshal(existing.Value, &existingDoc); err != nil {
-				return server.NativeRunEventResult{}, err
-			}
-			if !sameNativeEventDoc(existingDoc, eventDoc) {
-				return server.NativeRunEventResult{}, server.ErrConflict
-			}
-			created = false
-		} else {
-			return server.NativeRunEventResult{}, err
+		if errors.Is(err, pgstore.ErrRunEventConflict) {
+			return server.NativeRunEventResult{}, server.ErrConflict
 		}
+		return server.NativeRunEventResult{}, err
 	}
 	if created {
 		if err := s.applyNativeEventExecutionState(ctx, project, runID, eventDoc); err != nil {
@@ -5621,25 +5638,37 @@ func (s *Store) RecordNativeEventByID(ctx context.Context, project, runID string
 	}, nil
 }
 
-func sameNativeEventDoc(left, right nativeEventDoc) bool {
-	if left.Project != right.Project ||
-		left.RunID != right.RunID ||
-		left.AttemptIndex != right.AttemptIndex ||
-		left.Phase != right.Phase ||
-		left.JobID != right.JobID ||
-		left.Seq != right.Seq ||
-		left.Event != right.Event ||
-		left.StepSlug != right.StepSlug ||
-		left.Message != right.Message {
-		return false
+// ListAllRunEventDocsForMigration reads every native-event document in
+// the cosmos `run_events` container and returns it in the shape
+// pg.RunEventsStore.Migrate consumes. Runs once per pod start (Insert
+// is idempotent via ON CONFLICT DO NOTHING). Stage 2i removes this
+// method along with the cosmos runEvents container client.
+func (s *Store) ListAllRunEventDocsForMigration(ctx context.Context) ([]pgstore.RunEventRow, error) {
+	if s == nil || s.runEvents == nil {
+		return nil, nil
 	}
-	if (left.ExitCode == nil) != (right.ExitCode == nil) {
-		return false
+	var docs []nativeEventDoc
+	if err := crossPartitionQuery(ctx, s.runEvents, "SELECT * FROM c", nil, &docs); err != nil {
+		return nil, err
 	}
-	if left.ExitCode != nil && *left.ExitCode != *right.ExitCode {
-		return false
+	out := make([]pgstore.RunEventRow, 0, len(docs))
+	for _, doc := range docs {
+		out = append(out, pgstore.RunEventRow{
+			RunID:        doc.RunID,
+			AttemptIndex: doc.AttemptIndex,
+			JobID:        doc.JobID,
+			Seq:          doc.Seq,
+			Project:      doc.Project,
+			Event:        doc.Event,
+			Phase:        doc.Phase,
+			StepSlug:     doc.StepSlug,
+			Message:      doc.Message,
+			ExitCode:     doc.ExitCode,
+			Metadata:     mapOrEmpty(doc.Metadata),
+			CreatedAt:    parseTimeOrZero(doc.CreatedAt),
+		})
 	}
-	return reflect.DeepEqual(mapOrEmpty(left.Metadata), mapOrEmpty(right.Metadata))
+	return out, nil
 }
 
 func (s *Store) applyNativeEventExecutionState(ctx context.Context, project, runID string, event nativeEventDoc) error {
@@ -5730,34 +5759,22 @@ func (s *Store) ListNativeEventsByID(ctx context.Context, project, runID string,
 		return server.NativeRunLogsResponse{}, err
 	}
 
-	query := "SELECT * FROM c WHERE c.run_id = @run_id"
-	params := []azcosmos.QueryParameter{{Name: "@run_id", Value: runID}}
-	if attemptIndex != nil {
-		query += " AND c.attempt_index = @attempt_index"
-		params = append(params, azcosmos.QueryParameter{Name: "@attempt_index", Value: *attemptIndex})
-	}
-	if jobID != nil {
-		query += " AND c.job_id = @job_id"
-		params = append(params, azcosmos.QueryParameter{Name: "@job_id", Value: *jobID})
-	}
-	var eventDocs []nativeEventDoc
-	if err := singlePartitionQuery(ctx, s.runEvents,
-		azcosmos.NewPartitionKeyString(project),
-		query, params, &eventDocs); err != nil {
+	// Stage 2c: read events from pg instead of the cosmos `runEvents`
+	// container. pg.RunEventsStore.List returns rows in the canonical
+	// sort order (attempt_index, job_id, seq, created_at) so no
+	// post-sort is needed. Optional attemptIndex/jobID/limit are
+	// pushed down to SQL.
+	rows, err := s.pgRunEvents.List(ctx, runID, attemptIndex, jobID, limit)
+	if err != nil {
 		return server.NativeRunLogsResponse{}, err
-	}
-	sortNativeEventDocs(eventDocs)
-
-	if limit != nil && *limit > 0 && len(eventDocs) > *limit {
-		eventDocs = eventDocs[:*limit]
 	}
 
 	siblings, _ := s.issueRunDocs(ctx, project, doc.IssueNumber)
 	numbers := runNumberMap(siblings)
 	runRef := publicids.RunRef(doc.Project, positiveIssueNumberPtr(doc.IssueNumber), runDisplayNumber(doc, numbers[doc.ID]))
 
-	events := make([]server.NativeRunLogEvent, 0, len(eventDocs))
-	for _, e := range eventDocs {
+	events := make([]server.NativeRunLogEvent, 0, len(rows))
+	for _, e := range rows {
 		events = append(events, server.NativeRunLogEvent{
 			Project:      project,
 			RunRef:       runRef,
@@ -5770,7 +5787,7 @@ func (s *Store) ListNativeEventsByID(ctx context.Context, project, runID string,
 			Message:      e.Message,
 			ExitCode:     e.ExitCode,
 			Metadata:     mapOrEmpty(e.Metadata),
-			CreatedAt:    e.CreatedAt,
+			CreatedAt:    e.CreatedAt.UTC().Format(time.RFC3339Nano),
 		})
 	}
 
@@ -5781,22 +5798,6 @@ func (s *Store) ListNativeEventsByID(ctx context.Context, project, runID string,
 		JobID:        jobID,
 		Events:       events,
 	}, nil
-}
-
-func sortNativeEventDocs(eventDocs []nativeEventDoc) {
-	sort.SliceStable(eventDocs, func(i, j int) bool {
-		left, right := eventDocs[i], eventDocs[j]
-		if left.AttemptIndex != right.AttemptIndex {
-			return left.AttemptIndex < right.AttemptIndex
-		}
-		if left.JobID != right.JobID {
-			return left.JobID < right.JobID
-		}
-		if left.Seq != right.Seq {
-			return left.Seq < right.Seq
-		}
-		return left.CreatedAt < right.CreatedAt
-	})
 }
 
 func nativeEventAttemptIndex(req server.NativeRunEventRequest) (int, bool) {
