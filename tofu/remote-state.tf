@@ -3,7 +3,8 @@
 
 locals {
   infra = {
-    resource_group_name = "infra"
+    resource_group_name   = "infra"
+    shared_key_vault_name = "romaine-kv"
   }
 }
 
@@ -32,7 +33,12 @@ locals {
   aks_oidc_issuer_url = data.terraform_remote_state.infra_bootstrap.outputs.aks_oidc_issuer_url
 }
 
-data "azurerm_key_vault" "main" {
-  name                = var.key_vault_name
+data "azurerm_key_vault" "shared" {
+  name                = local.infra.shared_key_vault_name
+  resource_group_name = local.infra.resource_group_name
+}
+
+data "azurerm_user_assigned_identity" "external_secrets" {
+  name                = "infra-shared-identity"
   resource_group_name = local.infra.resource_group_name
 }
