@@ -222,7 +222,7 @@ func main() {
 
 		// Stage 2j foundations: playbooks + reports + portfolios + touchpoints.
 		pgPlaybooks := pgstore.NewPlaybooksStore(pgPool)
-		_ = pgPlaybooks
+		store.SetPGPlaybooks(pgPlaybooks)
 		go func() {
 			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 			defer cancel()

@@ -77,6 +77,11 @@ type Store struct {
 	// cutover). ListPortfolioElements / UpsertPortfolioElement /
 	// PatchPortfolioElement delegate here.
 	pgPortfolios *pgstore.PortfoliosStore
+
+	// pgPlaybooks is the Postgres-backed playbooks store (Stage 2n
+	// cutover). ListPlaybooks / GetPlaybook / CreatePlaybook /
+	// PatchPlaybookEntryGate delegate here.
+	pgPlaybooks *pgstore.PlaybooksStore
 }
 
 // SetPGLocks injects the Postgres-backed lock store. Called once at
@@ -114,6 +119,22 @@ func (s *Store) SetPGWorkflows(workflows *pgstore.WorkflowsStore) {
 // SetPGPortfolios injects the Postgres-backed portfolios store.
 func (s *Store) SetPGPortfolios(portfolios *pgstore.PortfoliosStore) {
 	s.pgPortfolios = portfolios
+}
+
+// SetPGPlaybooks injects the Postgres-backed playbooks store.
+func (s *Store) SetPGPlaybooks(playbooks *pgstore.PlaybooksStore) {
+	s.pgPlaybooks = playbooks
+}
+
+// playbookDocFromPayload deserializes a pg playbook row's payload back
+// into the cosmos playbookDoc shape so the existing playbookToPublic
+// helper can convert it to server.PlaybookPublic.
+func playbookDocFromPayload(payload []byte) (playbookDoc, error) {
+	var doc playbookDoc
+	if err := json.Unmarshal(payload, &doc); err != nil {
+		return playbookDoc{}, err
+	}
+	return doc, nil
 }
 
 // portfolioElementDocFromPayload deserializes a pg portfolio row's
@@ -3495,63 +3516,31 @@ type playbookDoc struct {
 }
 
 func (s *Store) ListPlaybooks(ctx context.Context, filter server.PlaybookListFilter) ([]server.PlaybookPublic, error) {
-	// playbooks container is partitioned by /project. Single-partition
-	// when filter.Project is set, fan out otherwise. See
-	// docs/cosmos-partition-strategy.md.
-	var docs []playbookDoc
-	if filter.Project != "" {
-		predicates := []string{"c.project = @project"}
-		params := []azcosmos.QueryParameter{{Name: "@project", Value: filter.Project}}
-		if filter.State != "" {
-			predicates = append(predicates, "c.state = @state")
-			params = append(params, azcosmos.QueryParameter{Name: "@state", Value: filter.State})
-		}
-		query := "SELECT * FROM c WHERE " + strings.Join(predicates, " AND ") + " ORDER BY c.created_at DESC"
-		if err := singlePartitionQuery(ctx, s.playbooks,
-			azcosmos.NewPartitionKeyString(filter.Project),
-			query, params, &docs); err != nil {
-			return nil, err
-		}
-	} else {
-		projects, err := s.listProjectNames(ctx)
+	rows, err := s.pgPlaybooks.List(ctx, filter.Project, filter.State, filter.Limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]server.PlaybookPublic, 0, len(rows))
+	for _, row := range rows {
+		doc, err := playbookDocFromPayload(row.Payload)
 		if err != nil {
 			return nil, err
 		}
-		predicates := []string{"c.project = @project"}
-		var params []azcosmos.QueryParameter
-		if filter.State != "" {
-			predicates = append(predicates, "c.state = @state")
-			params = append(params, azcosmos.QueryParameter{Name: "@state", Value: filter.State})
-		}
-		query := "SELECT * FROM c WHERE " + strings.Join(predicates, " AND ")
-		if err := fanOutByProject(ctx, s.playbooks, projects, query, params, &docs); err != nil {
-			return nil, err
-		}
-		sort.SliceStable(docs, func(i, j int) bool {
-			return docs[i].CreatedAt > docs[j].CreatedAt
-		})
-	}
-	if filter.Limit != nil && *filter.Limit < len(docs) {
-		docs = docs[:*filter.Limit]
-	}
-	out := make([]server.PlaybookPublic, 0, len(docs))
-	for _, doc := range docs {
 		out = append(out, s.playbookToPublic(ctx, doc))
 	}
 	return out, nil
 }
 
 func (s *Store) GetPlaybook(ctx context.Context, project, ref string) (server.PlaybookPublic, error) {
-	var docs []playbookDoc
-	if err := singlePartitionQuery(ctx, s.playbooks,
-		azcosmos.NewPartitionKeyString(project),
-		"SELECT * FROM c WHERE c.project = @project ORDER BY c.created_at DESC",
-		[]azcosmos.QueryParameter{{Name: "@project", Value: project}},
-		&docs,
-	); err != nil {
+	rows, err := s.pgPlaybooks.List(ctx, project, "", nil)
+	if err != nil {
 		return server.PlaybookPublic{}, err
 	}
-	for _, doc := range docs {
+	for _, row := range rows {
+		doc, err := playbookDocFromPayload(row.Payload)
+		if err != nil {
+			return server.PlaybookPublic{}, err
+		}
 		if playbookPublicRef(doc) == ref {
 			return s.playbookToPublic(ctx, doc), nil
 		}
@@ -3600,7 +3589,11 @@ func (s *Store) CreatePlaybook(ctx context.Context, req server.PlaybookCreate) (
 	if err != nil {
 		return server.PlaybookPublic{}, err
 	}
-	if _, err := s.playbooks.CreateItem(ctx, azcosmos.NewPartitionKeyString(req.Project), payload, nil); err != nil {
+	if _, err := s.pgPlaybooks.Create(ctx, pgstore.PlaybookRow{
+		Project: req.Project,
+		Name:    doc.ID,
+		Payload: payload,
+	}); err != nil {
 		return server.PlaybookPublic{}, err
 	}
 	return s.playbookToPublic(ctx, doc), nil
@@ -3948,50 +3941,69 @@ func (s *Store) PatchPortfolioElement(ctx context.Context, project, ref string, 
 // â”€â”€ Playbook gate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 func (s *Store) PatchPlaybookEntryGate(ctx context.Context, project, ref, entryID string, manualGate bool) (server.PlaybookPublic, error) {
-	var docs []playbookDoc
-	if err := singlePartitionQuery(ctx, s.playbooks,
-		azcosmos.NewPartitionKeyString(project),
-		"SELECT * FROM c WHERE c.project = @project ORDER BY c.created_at DESC",
-		[]azcosmos.QueryParameter{{Name: "@project", Value: project}},
-		&docs,
-	); err != nil {
-		return server.PlaybookPublic{}, err
-	}
-	var target *playbookDoc
-	for i := range docs {
-		if playbookPublicRef(docs[i]) == ref {
-			target = &docs[i]
-			break
-		}
-	}
-	if target == nil {
-		return server.PlaybookPublic{}, server.ErrNotFound
-	}
-	found := false
-	for i := range target.Entries {
-		if target.Entries[i].ID == entryID {
-			target.Entries[i].ManualGate = manualGate
-			if target.Entries[i].Metadata == nil {
-				target.Entries[i].Metadata = map[string]any{}
-			}
-			target.Entries[i].Metadata["manual_gate_updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
-			found = true
-			break
-		}
-	}
-	if !found {
-		return server.PlaybookPublic{}, server.ErrNotFound
-	}
-	target.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	data, err := json.Marshal(*target)
+	// Resolve the playbook name (= doc.ID) by ref. Playbook public refs
+	// are derived from doc metadata, not the row's primary key, so we
+	// scan the project's playbooks to find the matching row name.
+	rows, err := s.pgPlaybooks.List(ctx, project, "", nil)
 	if err != nil {
 		return server.PlaybookPublic{}, err
 	}
-	pk := azcosmos.NewPartitionKeyString(project)
-	if _, err := s.playbooks.ReplaceItem(ctx, pk, target.ID, data, nil); err != nil {
-		return server.PlaybookPublic{}, fmt.Errorf("replace playbook: %w", err)
+	var name string
+	for _, row := range rows {
+		doc, err := playbookDocFromPayload(row.Payload)
+		if err != nil {
+			return server.PlaybookPublic{}, err
+		}
+		if playbookPublicRef(doc) == ref {
+			name = row.Name
+			break
+		}
 	}
-	return s.playbookToPublic(ctx, *target), nil
+	if name == "" {
+		return server.PlaybookPublic{}, server.ErrNotFound
+	}
+	patched, err := s.pgPlaybooks.PatchPayload(ctx, project, name, func(payload map[string]any) error {
+		entries, ok := payload["entries"].([]any)
+		if !ok {
+			return server.ErrNotFound
+		}
+		found := false
+		for _, raw := range entries {
+			entry, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			id, _ := entry["id"].(string)
+			if id != entryID {
+				continue
+			}
+			entry["manual_gate"] = manualGate
+			md, _ := entry["metadata"].(map[string]any)
+			if md == nil {
+				md = map[string]any{}
+				entry["metadata"] = md
+			}
+			md["manual_gate_updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+			found = true
+			break
+		}
+		if !found {
+			return server.ErrNotFound
+		}
+		payload["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+		return nil
+	})
+	if errors.Is(err, pgstore.ErrPlaybookNotFound) {
+		return server.PlaybookPublic{}, server.ErrNotFound
+	}
+	if err != nil {
+		return server.PlaybookPublic{}, err
+	}
+	doc, err := playbookDocFromPayload(patched.Payload)
+	if err != nil {
+		return server.PlaybookPublic{}, err
+	}
+	return s.playbookToPublic(ctx, doc), nil
 }
 
 func (s *Store) AdvancePlaybook(ctx context.Context, project, ref string, dispatch server.PlaybookEntryDispatcher) (server.PlaybookPublic, error) {
