@@ -3,17 +3,18 @@ package cosmos
 import (
 	"context"
 	"encoding/json"
-	"sort"
 	"strings"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/data/azcosmos"
 	"github.com/google/uuid"
+
+	pgstore "github.com/nelsong6/glimmung/internal/store/pg"
 
 	"github.com/nelsong6/glimmung/internal/server"
 )
 
-// slotHistoryDoc is the on-the-wire shape for one entry in the
-// `slot_history` collection. The entry's own ID is the Cosmos document id.
+// slotHistoryDoc is the on-the-wire shape for one slot_history entry.
+// Retained as the unmarshal target so the prior payload shape (the
+// server.SlotHistoryEntry) round-trips through pg's jsonb column.
 type slotHistoryDoc struct {
 	server.SlotHistoryEntry
 }
@@ -30,44 +31,35 @@ func (s *Store) AppendSlotHistory(ctx context.Context, entry server.SlotHistoryE
 	if err != nil {
 		return server.SlotHistoryEntry{}, err
 	}
-	pk := azcosmos.NewPartitionKeyString(entry.Project)
-	if _, err := s.slotHistory.CreateItem(ctx, pk, payload, nil); err != nil {
+	slotIdx := 0
+	if entry.SlotIndex != nil {
+		slotIdx = *entry.SlotIndex
+	}
+	if _, err := s.pgSlots.AppendHistory(ctx, pgstore.SlotHistoryRow{
+		ID:        entry.ID,
+		Project:   entry.Project,
+		SlotIndex: slotIdx,
+		Payload:   payload,
+	}); err != nil {
 		return server.SlotHistoryEntry{}, err
 	}
 	return entry, nil
 }
 
 // ListSlotHistory returns entries for the given project ordered by
-// created_at ascending. If slotIndex is non-nil, filters to entries for
-// that slot index. Single-partition query.
+// created_at ascending. If slotIndex is non-nil, filters to entries
+// for that slot index.
 func (s *Store) ListSlotHistory(ctx context.Context, project string, slotIndex *int) ([]server.SlotHistoryEntry, error) {
-	pk := azcosmos.NewPartitionKeyString(project)
-	query := "SELECT * FROM c WHERE c.project = @project"
-	params := []azcosmos.QueryParameter{{Name: "@project", Value: project}}
-	if slotIndex != nil {
-		query += " AND c.slot_index = @slotIndex"
-		params = append(params, azcosmos.QueryParameter{Name: "@slotIndex", Value: *slotIndex})
+	rows, err := s.pgSlots.ListHistory(ctx, project, slotIndex)
+	if err != nil {
+		return nil, err
 	}
-	pager := s.slotHistory.NewQueryItemsPager(query, pk, &azcosmos.QueryOptions{QueryParameters: params})
-	var docs []slotHistoryDoc
-	for pager.More() {
-		page, err := pager.NextPage(ctx)
-		if err != nil {
+	out := make([]server.SlotHistoryEntry, 0, len(rows))
+	for _, row := range rows {
+		var doc slotHistoryDoc
+		if err := json.Unmarshal(row.Payload, &doc); err != nil {
 			return nil, err
 		}
-		for _, item := range page.Items {
-			var doc slotHistoryDoc
-			if err := json.Unmarshal(item, &doc); err != nil {
-				return nil, err
-			}
-			docs = append(docs, doc)
-		}
-	}
-	sort.SliceStable(docs, func(i, j int) bool {
-		return docs[i].SlotHistoryEntry.CreatedAt.Before(docs[j].SlotHistoryEntry.CreatedAt)
-	})
-	out := make([]server.SlotHistoryEntry, 0, len(docs))
-	for _, doc := range docs {
 		out = append(out, doc.SlotHistoryEntry)
 	}
 	return out, nil
