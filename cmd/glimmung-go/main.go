@@ -208,7 +208,7 @@ func main() {
 		}()
 
 		pgSignals := pgstore.NewSignalsStore(pgPool)
-		_ = pgSignals
+		store.SetPGSignals(pgSignals)
 		go func() {
 			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 			defer cancel()
