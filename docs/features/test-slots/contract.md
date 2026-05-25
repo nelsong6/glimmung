@@ -36,6 +36,9 @@ running, cleaning, and available explicit.
 
 - Queue-size changes seed or delete slot docs and fire per-slot provisioning
   work without blocking on runtime activation.
+- Admin repair revalidates one configured, unleased slot by rerunning
+  preliminary reconciliation and the warm Helm pass only; it must reject active
+  leases and runtime cleanup states.
 - Checkout records a lease before activation and returns either ready runtime
   state or an explicit asynchronous activating state.
 - Activation materializes lease-scoped runtime and waits for required runtime
@@ -53,6 +56,8 @@ running, cleaning, and available explicit.
 
 - Process start resumes in-flight provisioning, activation, cleaning, and TTL
   timers from durable state.
+- Admin repair may retry preliminary-resource errors, but cleanup-error slots
+  remain on the runtime cleanup path.
 - Activation failure records error state and releases or cleans up the lease
   through the lifecycle path.
 - Cleanup failure leaves the slot unavailable with visible error state rather

@@ -36,6 +36,7 @@ type NativeLauncher interface {
 
 type TestSlotPreparer interface {
 	EnsureTestSlotPreliminaries(ctx context.Context, lease Lease, project Project) error
+	RepairTestSlotPreliminaries(ctx context.Context, lease Lease, project Project, minter NativeGitHubTokenMinter) error
 	ActivateTestSlotRuntime(ctx context.Context, lease Lease, project Project, minter NativeGitHubTokenMinter) error
 	ReturnTestSlotRuntime(ctx context.Context, lease Lease, project Project) error
 	DeprovisionTestSlot(ctx context.Context, lease Lease, project Project) error
@@ -95,6 +96,29 @@ func (l *KubernetesNativeLauncher) EnsureTestSlotPreliminaries(ctx context.Conte
 		return nil
 	}
 	return l.ensureTestSlotPreliminaryAccess(ctx, lease, project, strings.TrimSpace(slotName))
+}
+
+func (l *KubernetesNativeLauncher) RepairTestSlotPreliminaries(ctx context.Context, lease Lease, project Project, minter NativeGitHubTokenMinter) error {
+	slotName, _ := stringFromMap(lease.Metadata, "native_slot_name")
+	slotName = strings.TrimSpace(slotName)
+	if slotName == "" {
+		return nil
+	}
+	if err := l.ensureTestSlotPreliminaryAccess(ctx, lease, project, slotName); err != nil {
+		return err
+	}
+	if config, ok := testSlotHelmConfig(project); ok {
+		if strings.TrimSpace(project.GitHubRepo) == "" {
+			return fmt.Errorf("github_repo is required for test slot warm repair")
+		}
+		if minter == nil {
+			return fmt.Errorf("github token minter is required for test slot warm repair")
+		}
+		if err := l.runTestSlotHelmReconcile(ctx, lease, project, minter, config, testSlotRenderModeWarm); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (l *KubernetesNativeLauncher) ensureTestSlotPreliminaryAccess(ctx context.Context, lease Lease, project Project, slotName string) error {

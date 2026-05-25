@@ -25,7 +25,10 @@ type fakeTestSlotPreparer struct {
 	project               Project
 	deprovisioned         []string
 	deprovisionedSessions []string
+	repaired              bool
+	repairedSlots         []string
 	preliminariesErr      error
+	repairErr             error
 	activateErr           error
 	returnErr             error
 	activateStarted       chan struct{}
@@ -54,6 +57,15 @@ func (p *fakeTestSlotPreparer) EnsureTestSlotPreliminaries(_ context.Context, _ 
 	p.preliminaries = true
 	p.project = project
 	return p.preliminariesErr
+}
+
+func (p *fakeTestSlotPreparer) RepairTestSlotPreliminaries(_ context.Context, lease Lease, project Project, _ NativeGitHubTokenMinter) error {
+	p.repaired = true
+	p.project = project
+	if slotName, _ := stringFromMap(lease.Metadata, "native_slot_name"); strings.TrimSpace(slotName) != "" {
+		p.repairedSlots = append(p.repairedSlots, strings.TrimSpace(slotName))
+	}
+	return p.repairErr
 }
 
 func (p *fakeTestSlotPreparer) ActivateTestSlotRuntime(ctx context.Context, _ Lease, project Project, _ NativeGitHubTokenMinter) error {

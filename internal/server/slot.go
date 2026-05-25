@@ -22,7 +22,7 @@ const (
 	SlotStateActivating   = "activating"   // a lease has been claimed; runtime is being installed
 	SlotStateRunning      = "running"      // claimed + runtime is up and serving
 	SlotStateCleaning     = "cleaning"     // lease released; runtime is being torn down
-	SlotStateError        = "error"        // terminal; recoverable only by decreasing then re-increasing count
+	SlotStateError        = "error"        // terminal failure for the last lifecycle operation; repair/cleanup retry may re-enter work
 )
 
 // SlotStates is the canonical ordered list of valid slot states. Used by
@@ -111,7 +111,8 @@ var validSlotTransitions = map[string]map[string]bool{
 		SlotStateError:       true,
 	},
 	SlotStateProvisioned: {
-		SlotStateActivating: true,
+		SlotStateActivating:   true,
+		SlotStateProvisioning: true,
 	},
 	SlotStateActivating: {
 		SlotStateRunning:  true,
@@ -141,7 +142,8 @@ var validSlotTransitions = map[string]map[string]bool{
 		// look at. A genuinely stuck slot (cleanup retry also fails) is still
 		// recovered by decreasing then re-increasing count; that path remains
 		// the last resort.
-		SlotStateCleaning: true,
+		SlotStateCleaning:     true,
+		SlotStateProvisioning: true,
 	},
 }
 
@@ -185,11 +187,12 @@ func NewUnseededSlot(project string, slotIndex int, slotName string, now time.Ti
 	}
 }
 
-// MarkProvisioning transitions an unseeded slot to provisioning. Caller
+// MarkProvisioning transitions a slot to provisioning. Caller
 // should invoke this from a SlotStore.UpdateIfMatch mutator so the write
-// is etag-conditional. Returns ErrInvalidSlotTransition if the slot isn't
-// in `unseeded` or `provisioning` (same-state re-fire is allowed for
-// recovery-sweep re-entry).
+// is etag-conditional. The normal path is `unseeded` -> `provisioning`.
+// Admin repair can also move an unleased `provisioned` or preliminary-error
+// slot back through `provisioning` to revalidate preliminary resources.
+// Returns ErrInvalidSlotTransition if the transition is not allowed.
 func (s Slot) MarkProvisioning(now time.Time) (Slot, error) {
 	if err := s.CanTransitionTo(SlotStateProvisioning); err != nil {
 		return s, err
@@ -197,6 +200,7 @@ func (s Slot) MarkProvisioning(now time.Time) (Slot, error) {
 	s.State = SlotStateProvisioning
 	s.UpdatedAt = now.UTC()
 	s.Detail = nil
+	s.ProvisionedAt = nil
 	return s, nil
 }
 

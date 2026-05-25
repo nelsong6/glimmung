@@ -38,6 +38,7 @@ var expectedGoRoutes = []string{
 	"PATCH /v1/issues/by-number/{project}/{issue_number}/comments/{comment_id}",
 	"DELETE /v1/issues/by-number/{project}/{issue_number}/comments/{comment_id}",
 	"PATCH /v1/projects/{project}/test-environments/count",
+	"POST /v1/projects/{project}/test-environments/{slot_name}/repair",
 	"GET /v1/workflows",
 	"POST /v1/workflows",
 	"PATCH /v1/workflows/{project}/{name}",

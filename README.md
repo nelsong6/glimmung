@@ -154,7 +154,7 @@ surface.
 | POST   | `/v1/test-slots/checkout`          | Lease an available test slot chosen by Glimmung; runtime activation may continue asynchronously. |
 | POST   | `/v1/test-slots/return`            | Return a test-slot lease; runtime cleanup may continue asynchronously before the slot is available again. |
 | POST   | `/v1/test-slots/extend`            | Extend a claimed test-slot lease TTL without tearing down the leased runtime. |
-| POST   | `/v1/projects/{project}/test-environments/{slot_name}/repair` | Admin repair for error or stale lifecycle slot states without changing queue size. |
+| POST   | `/v1/projects/{project}/test-environments/{slot_name}/repair` | Admin repair for one configured, unleased slot. Re-runs preliminary reconciliation and the warm Helm pass without changing queue size or activating runtime. |
 | POST   | `/v1/workflows`                   | Register/upsert a workflow under a project. |
 | GET    | `/v1/workflows`                   | List workflows. |
 | POST   | `/v1/playbooks`                   | Create a draft Playbook for a coordinated batch of issue specs. |

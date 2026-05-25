@@ -264,6 +264,10 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 		"PATCH /v1/projects/{project}/test-environments/count",
 		requireAdmin(adminAuthenticator, http.HandlerFunc(scaleProjectTestEnvironments(store, workloadIdentities, managedOrigins, testSlotPreparer, nativeTokenMinter))),
 	)
+	mux.Handle(
+		"POST /v1/projects/{project}/test-environments/{slot_name}/repair",
+		requireAdmin(adminAuthenticator, http.HandlerFunc(repairProjectTestEnvironment(store, testSlotPreparer, nativeTokenMinter))),
+	)
 	mux.HandleFunc("GET /v1/workflows", listWorkflows(store))
 	mux.Handle("POST /v1/workflows", requireAdmin(adminAuthenticator, http.HandlerFunc(registerWorkflow(store))))
 	mux.Handle("PATCH /v1/workflows/{project}/{name}", requireAdmin(adminAuthenticator, http.HandlerFunc(patchWorkflow(store))))
