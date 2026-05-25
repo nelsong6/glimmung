@@ -194,9 +194,9 @@ func main() {
 			log.Printf("issues migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
 		}()
 
-		// Stage 2i foundations: pg.SlotsStore + pg.SignalsStore.
+		// Stage 2i foundation + Stage 2-slots cutover.
 		pgSlots := pgstore.NewSlotsStore(pgPool)
-		_ = pgSlots
+		store.SetPGSlots(pgSlots)
 		go func() {
 			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 			defer cancel()

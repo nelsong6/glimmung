@@ -94,6 +94,12 @@ type Store struct {
 	// here once set. The pg layer splits cosmos's embedded comments
 	// into a separate issue_comments table.
 	pgIssues *pgstore.IssuesStore
+
+	// pgSlots is the Postgres-backed slots + slot_history store
+	// (Stage 2-slots cutover). All slot R/W on cosmos.Store delegates
+	// here. CAS uses updated_at as the version (substituted for the
+	// prior Cosmos ETag).
+	pgSlots *pgstore.SlotsStore
 }
 
 // SetPGLocks injects the Postgres-backed lock store. Called once at
@@ -146,6 +152,11 @@ func (s *Store) SetPGSignals(signals *pgstore.SignalsStore) {
 // SetPGIssues injects the Postgres-backed issues store.
 func (s *Store) SetPGIssues(issues *pgstore.IssuesStore) {
 	s.pgIssues = issues
+}
+
+// SetPGSlots injects the Postgres-backed slots store.
+func (s *Store) SetPGSlots(slots *pgstore.SlotsStore) {
+	s.pgSlots = slots
 }
 
 // issueDocFromPGRow assembles the cosmos-shaped issueDoc from a pg
