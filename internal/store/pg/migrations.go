@@ -135,6 +135,16 @@ var schemaMigrations = []string{
 		ON run_events (project, created_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS run_events_ordered
 		ON run_events (run_id, attempt_index, seq)`,
+	// Stage 2c column additions for the rich nativeEventDoc shape
+	// previously held in Cosmos JSON. Decomposing into typed columns
+	// instead of jsonb so the `event` filter, `phase` rendering, and
+	// per-job `step_slug` queries can use real indexes if/when they
+	// grow. Per-pod startup applies these idempotently.
+	`ALTER TABLE run_events ADD COLUMN IF NOT EXISTS phase text NOT NULL DEFAULT ''`,
+	`ALTER TABLE run_events ADD COLUMN IF NOT EXISTS step_slug text NOT NULL DEFAULT ''`,
+	`ALTER TABLE run_events ADD COLUMN IF NOT EXISTS message text NOT NULL DEFAULT ''`,
+	`ALTER TABLE run_events ADD COLUMN IF NOT EXISTS exit_code int`,
+	`ALTER TABLE run_events ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}'::jsonb`,
 
 	// ------------------------------------------------------------------
 	// locks — replaces the Cosmos id-uniqueness primitive. Acquire uses

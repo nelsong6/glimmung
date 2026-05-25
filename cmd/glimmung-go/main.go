@@ -114,6 +114,23 @@ func main() {
 			log.Printf("lock migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
 		}
 		store.SetPGLocks(pgLocks)
+
+		// Stage 2c: pg.RunEventsStore + idempotent Migrate copy. Same
+		// shape as the lock migration above. After SetPGRunEvents,
+		// cosmos.Store.RecordNativeEventByID writes events to pg via
+		// pgRunEvents instead of the cosmos `run_events` container, and
+		// ListNativeEventsByID reads from pg.
+		pgRunEvents := pgstore.NewRunEventsStore(pgPool)
+		runEvMigCtx, runEvMigCancel := context.WithTimeout(context.Background(), 120*time.Second)
+		reCopied, reSkipped, reMigErr := pgRunEvents.Migrate(runEvMigCtx, store)
+		runEvMigCancel()
+		if reMigErr != nil {
+			log.Printf("run-events migration cosmos->pg failed: %v (proceeding with whatever migrated; re-run by restarting pod)", reMigErr)
+		} else {
+			log.Printf("run-events migration cosmos->pg: copied=%d skipped=%d", reCopied, reSkipped)
+		}
+		store.SetPGRunEvents(pgRunEvents)
+
 		rt = &runtimeStore{Store: store, LocksStore: pgLocks}
 	} else {
 		log.Printf("runtime store disabled: cosmos store and postgres pool both required (store=%v pgPool=%v)", store != nil, pgPool != nil)
