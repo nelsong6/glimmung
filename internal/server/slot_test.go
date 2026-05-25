@@ -64,6 +64,7 @@ var allValidTransitions = []struct{ from, to string }{
 	{SlotStateProvisioning, SlotStateProvisioned},
 	{SlotStateProvisioning, SlotStateError},
 	{SlotStateProvisioned, SlotStateActivating},
+	{SlotStateProvisioned, SlotStateProvisioning},
 	{SlotStateActivating, SlotStateRunning},
 	{SlotStateActivating, SlotStateCleaning},
 	{SlotStateActivating, SlotStateError},
@@ -72,6 +73,7 @@ var allValidTransitions = []struct{ from, to string }{
 	{SlotStateCleaning, SlotStateProvisioned},
 	{SlotStateCleaning, SlotStateError},
 	{SlotStateError, SlotStateCleaning},
+	{SlotStateError, SlotStateProvisioning},
 }
 
 func TestCanTransitionToAcceptsValidTransitions(t *testing.T) {
@@ -129,21 +131,20 @@ func TestCanTransitionToRejectsUnknownFromState(t *testing.T) {
 	}
 }
 
-func TestErrorAllowsCleaningRetry(t *testing.T) {
-	// error→cleaning is the recovery-retry transition: a prior cleanup
-	// attempt failed, and a fresh trigger (returnTestSlot, callback
-	// release, TTL timer, or startup recovery) is asking for another
-	// attempt. K8s ops are idempotent so retry either converges or
-	// re-errors with new diagnostic context. Any OTHER forward
-	// transition from error stays rejected — recovery from a stuck
-	// error-after-retry slot is operator-driven via decrease-then-
-	// increase count, not a state-machine path.
+func TestErrorAllowsCleanupAndPreliminaryRepairRetries(t *testing.T) {
+	// error→cleaning is the recovery-retry transition for failed cleanup.
+	// error→provisioning is the admin repair transition for an unleased
+	// preliminary-resource failure. The repair handler rejects cleanup-error
+	// slots before taking that transition, so it cannot bypass runtime cleanup.
 	s := Slot{State: SlotStateError}
 	if err := s.CanTransitionTo(SlotStateCleaning); err != nil {
 		t.Errorf("transition error -> cleaning must be allowed for retry: %v", err)
 	}
+	if err := s.CanTransitionTo(SlotStateProvisioning); err != nil {
+		t.Errorf("transition error -> provisioning must be allowed for preliminary repair: %v", err)
+	}
 	for _, to := range SlotStates {
-		if to == SlotStateError || to == SlotStateCleaning {
+		if to == SlotStateError || to == SlotStateCleaning || to == SlotStateProvisioning {
 			continue
 		}
 		if err := s.CanTransitionTo(to); err == nil {
@@ -155,6 +156,8 @@ func TestErrorAllowsCleaningRetry(t *testing.T) {
 func TestMarkProvisioning(t *testing.T) {
 	s := NewUnseededSlot("p", 1, "p-slot-1", fixedTime.Add(-time.Hour))
 	s.Detail = strPtr("residue")
+	provisionedAt := fixedTime.Add(-30 * time.Minute)
+	s.ProvisionedAt = &provisionedAt
 	got, err := s.MarkProvisioning(fixedTime)
 	if err != nil {
 		t.Fatalf("MarkProvisioning err=%v", err)
@@ -167,6 +170,9 @@ func TestMarkProvisioning(t *testing.T) {
 	}
 	if got.Detail != nil {
 		t.Fatalf("Detail=%v, want nil after transition", got.Detail)
+	}
+	if got.ProvisionedAt != nil {
+		t.Fatalf("ProvisionedAt=%v, want nil after re-entering provisioning", got.ProvisionedAt)
 	}
 }
 

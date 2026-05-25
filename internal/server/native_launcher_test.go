@@ -449,6 +449,65 @@ func TestEnsureTestSlotPreliminariesDoesNotCreatePlaywrightRuntime(t *testing.T)
 	}
 }
 
+func TestRepairTestSlotPreliminariesRunsWarmHelmOnly(t *testing.T) {
+	tokenPath := tempTokenFile(t)
+	var paths []string
+	launcher := &KubernetesNativeLauncher{
+		Settings: Settings{
+			K8sAPIHost:                 "https://kube.test",
+			K8sSATokenPath:             tokenPath,
+			NativeRunnerNamespace:      "glimmung-runs",
+			NativeRunnerServiceAccount: "glimmung-native-runner",
+			NativeRunnerNamespaceRole:  "cluster-admin",
+			NativeRunnerJobTTLSeconds:  3600,
+		},
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			paths = append(paths, req.Method+" "+req.URL.Path)
+			body := `{}`
+			if req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/jobs/glim-slot-apply-warm-") {
+				body = `{"status":{"conditions":[{"type":"Complete","status":"True"}]}}`
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		})},
+	}
+	lease := Lease{
+		Project: "tank-operator",
+		State:   "warming",
+		Metadata: map[string]any{
+			"native_slot_name":          "tank-operator-slot-2",
+			"native_slot_index":         "2",
+			"native_sessions_namespace": "tank-operator-slot-2-sessions",
+		},
+	}
+	project := Project{
+		Name:       "tank-operator",
+		GitHubRepo: "nelsong6/tank-operator",
+		Metadata:   map[string]any{"test_slot_helm": map[string]any{"enabled": true}},
+	}
+
+	if err := launcher.RepairTestSlotPreliminaries(context.Background(), lease, project, fakeNativeGitHubTokenMinter{token: "ghs_test"}); err != nil {
+		t.Fatalf("RepairTestSlotPreliminaries: %v", err)
+	}
+	if !containsPath(paths, "POST /apis/batch/v1/namespaces/glimmung-runs/jobs") {
+		t.Fatalf("repair should create Helm installer job, paths=%#v", paths)
+	}
+	if !containsPath(paths, "GET /apis/batch/v1/namespaces/glimmung-runs/jobs/glim-slot-apply-warm-tank-operator-slot-2-0") {
+		t.Fatalf("repair should wait for warm Helm job completion, paths=%#v", paths)
+	}
+	for _, path := range paths {
+		if strings.Contains(path, "glim-slot-apply-hot-") {
+			t.Fatalf("repair must not run hot Helm pass, paths=%#v", paths)
+		}
+		if strings.Contains(path, "/deployments/slot-playwright") || strings.Contains(path, "/services/slot-playwright") {
+			t.Fatalf("repair must not create Playwright runtime, paths=%#v", paths)
+		}
+	}
+}
+
 func TestActivateTestSlotRuntimeRunsHelmInstallerAfterLeaseAssignment(t *testing.T) {
 	tokenPath := tempTokenFile(t)
 	var paths []string

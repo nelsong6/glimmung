@@ -82,8 +82,34 @@ servers, or validation jobs as part of making a slot available.
 Decreasing the count is the destructive capacity path. It deletes preliminary
 resources for slots above the new count after ensuring no active lease still
 owns those slots. This is the only destructive scale path — there is no
-separate "repair" or "reset" surface that can damage capacity outside the
+separate "repair" or "reset" surface that can delete capacity outside the
 queue-size handler.
+
+### Preliminary Repair
+
+`POST /v1/projects/{project}/test-environments/{slot_name}/repair` is an
+admin revalidation path for one configured slot. It is deliberately
+non-destructive:
+
+1. The slot name must be inside the project's current `1..count` configured
+   capacity.
+2. No claimed test-slot lease may reference the slot.
+3. The handler marks the slot `provisioning` with per-row CAS, then runs
+   preliminary reconciliation.
+4. If the project has `metadata.test_slot_helm.enabled=true`, repair also
+   reconciles the project chart with `renderMode=warm` only.
+5. On success the slot returns to `provisioned`; on failure it returns to
+   `error` with the failure detail.
+
+Repair may re-enter `provisioning` from `unseeded`, stale `provisioning`,
+`provisioned`, or a preliminary-resource `error`. It rejects `activating`,
+`running`, `cleaning`, any slot with an active lease reference, and any
+`error` carrying `cleanup_error`; those states belong to the runtime cleanup
+path, not preliminary repair.
+
+This path must not create long-running runtime resources. In particular it
+must not install the `renderMode=hot` Helm release, create Playwright runtime,
+or run validation jobs.
 
 ### Checkout
 
@@ -187,6 +213,7 @@ lifecycle transition responds to an explicit event:
 | Event | Trigger | Effect |
 |---|---|---|
 | count changed | `PATCH /v1/projects/{project}/test-environments/count` | handler writes the new count, seeds missing slot docs as `unseeded`, deletes slot docs above the new count, fires per-slot provisioning goroutines for any in `unseeded`, returns immediately |
+| preliminary repair requested | `POST /v1/projects/{project}/test-environments/{slot_name}/repair` | validates the named slot is configured and unleased, marks it `provisioning`, reruns preliminary reconciliation plus the warm Helm pass, then marks it `provisioned` or `error` |
 | default TTL changed | `PATCH /v1/test-slots/default-ttl` | updates the global generated test-slot lease TTL, or a project's override; future checkouts use the new default unless they pass `ttl_seconds` explicitly |
 | hot-swap minimum TTL changed | `PATCH /v1/test-slots/hot-swap-min-ttl` | updates the global minimum lease duration after a hot-swap, or a project's override; hot-swap recording extends shorter active leases to this remaining duration |
 | checkout | `POST /v1/test-slots/checkout` | acquires lease, arms a `time.AfterFunc` for `assigned_at + ttl_seconds`, starts activation goroutine |
@@ -374,8 +401,9 @@ A `PodDisruptionBudget` (`maxUnavailable: 1`) explicitly documents that
 the single replica is always evictable — node drains never block on
 glimmung, and the correctness story handles the brief unavailability.
 
-There is no admin "repair" endpoint, no periodic reconciler, no scheduled
-sweep. A genuinely stuck slot is a code bug to fix, not a button to press.
+There is no periodic reconciler and no scheduled sweep. Admin repair is an
+explicit, one-slot revalidation action for configured unleased capacity; it is
+not a reset button and cannot bypass runtime cleanup.
 
 ## Resource Classification
 
@@ -476,7 +504,7 @@ been superseded, the producer clears it.
 
 The slot system is not complete until all of these are true:
 
-- Queue size increase warms only preliminary resources.
+- Queue size increase and preliminary repair create only preliminary resources.
 - Queue size decrease is the only destructive capacity path and refuses to
   remove any slot still owned by an active lease.
 - Checkout is allocator-owned. Callers cannot select a slot through request
@@ -497,9 +525,10 @@ The slot system is not complete until all of these are true:
   retry via a follow-up `returnTestSlot` against an error slot is also
   supported and goes through the same `error → cleaning` state-machine
   transition; the API-level retry exists so a flaky cleanup doesn't
-  require a process restart. There is no admin repair endpoint; the
-  last-resort capacity-removal path for a genuinely stuck error slot
-  (cleanup retry also failed) remains decreasing queue size.
+  require a process restart. Preliminary-resource errors without
+  `cleanup_error` may be retried through the admin repair endpoint, which
+  goes through `error → provisioning`. The last-resort capacity-removal
+  path for a genuinely stuck cleanup-error slot remains decreasing queue size.
 - Missing slot docs are seeded by the PATCH-count handler when the count
   changes and by the startup recovery sweep. There is no background
   job that re-checks count vs the `slots` collection between those two
