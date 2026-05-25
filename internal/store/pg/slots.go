@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -35,9 +37,9 @@ type SlotMigrationSource interface {
 }
 
 var (
-	ErrSlotNotFound            = errors.New("slot not found")
-	ErrSlotPreconditionFailed  = errors.New("slot precondition failed")
-	ErrSlotAlreadyExists       = errors.New("slot already exists")
+	ErrSlotNotFound           = errors.New("slot not found")
+	ErrSlotPreconditionFailed = errors.New("slot precondition failed")
+	ErrSlotAlreadyExists      = errors.New("slot already exists")
 )
 
 func NewSlotsStore(pool *pgxpool.Pool) *SlotsStore {
@@ -258,9 +260,10 @@ func (s *SlotsStore) Migrate(ctx context.Context, source SlotMigrationSource) (c
 		ON CONFLICT (id) DO NOTHING
 	`
 	for _, row := range history {
-		tag, execErr := s.pool.Exec(ctx, insertHistorySQL, row.ID, row.Project, row.SlotIndex, row.Payload, nullableTime(row.CreatedAt))
+		historyID := normalizedSlotHistoryID(row)
+		tag, execErr := s.pool.Exec(ctx, insertHistorySQL, historyID, row.Project, row.SlotIndex, row.Payload, nullableTime(row.CreatedAt))
 		if execErr != nil {
-			return copied, skipped, fmt.Errorf("slots: migrate history %s: %w", row.ID, execErr)
+			return copied, skipped, fmt.Errorf("slots: migrate history %s: %w", historyID, execErr)
 		}
 		if tag.RowsAffected() == 1 {
 			copied++
@@ -269,4 +272,20 @@ func (s *SlotsStore) Migrate(ctx context.Context, source SlotMigrationSource) (c
 		}
 	}
 	return copied, skipped, nil
+}
+
+func normalizedSlotHistoryID(row SlotHistoryRow) string {
+	clean := strings.TrimSpace(row.ID)
+	if _, err := uuid.Parse(clean); err == nil {
+		return clean
+	}
+	seed := fmt.Sprintf(
+		"glimmung:slot_history:%s:%d:%s:%s:%s",
+		row.Project,
+		row.SlotIndex,
+		clean,
+		row.CreatedAt.UTC().Format(time.RFC3339Nano),
+		string(row.Payload),
+	)
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte(seed)).String()
 }
