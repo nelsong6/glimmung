@@ -35,6 +35,20 @@ complete architecture, hardening, observability, and migration cleanup are
 already understood. If the complete solution must be split across PRs, write
 the full plan first and keep every stage coherent by itself.
 
+## Feature contracts
+
+Read [docs/features/README.md](docs/features/README.md) and the relevant
+feature contract before substantial work on a contracted surface. The policy
+docs set the repo-wide quality bar; the feature contracts translate that bar
+into reviewable invariants for Glimmung's issue/run loop, workflow execution,
+test slots, dashboard, review surfaces, auth/API/MCP surface, and
+observability.
+
+Pull requests must include a `Feature Contracts` section, check every affected
+contract or `None`, and name concrete evidence. Evidence can be a test, route
+inventory check, browser observation, run report, metric/log citation, workflow
+registration rejection, or other proof that the touched invariant still holds.
+
 ## The four levers
 
 Every feature glimmung adds is one or more of:

@@ -98,6 +98,10 @@ plus the Vite dashboard.
 
 ## Contribution checklist
 
+Read [Feature Contracts](docs/features/README.md) before substantial work. A PR
+that touches a contracted surface should name the affected contract and include
+evidence that the invariant still holds.
+
 When adding or changing a human/operator-facing HTTP endpoint, update the
 matching surface in the same PR:
 
