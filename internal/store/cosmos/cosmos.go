@@ -88,6 +88,12 @@ type Store struct {
 	// MarkSignalProcessing / MarkSignalProcessed / MarkSignalFailed
 	// delegate here.
 	pgSignals *pgstore.SignalsStore
+
+	// pgIssues is the Postgres-backed issues + issue_comments store
+	// (Stage 2-issues cutover). All issue R/W on cosmos.Store delegates
+	// here once set. The pg layer splits cosmos's embedded comments
+	// into a separate issue_comments table.
+	pgIssues *pgstore.IssuesStore
 }
 
 // SetPGLocks injects the Postgres-backed lock store. Called once at
@@ -135,6 +141,55 @@ func (s *Store) SetPGPlaybooks(playbooks *pgstore.PlaybooksStore) {
 // SetPGSignals injects the Postgres-backed signals store.
 func (s *Store) SetPGSignals(signals *pgstore.SignalsStore) {
 	s.pgSignals = signals
+}
+
+// SetPGIssues injects the Postgres-backed issues store.
+func (s *Store) SetPGIssues(issues *pgstore.IssuesStore) {
+	s.pgIssues = issues
+}
+
+// issueDocFromPGRow assembles the cosmos-shaped issueDoc from a pg
+// issues row plus the per-issue comment rows. Comments are stripped
+// when migrating into pg and live in issue_comments; the public
+// helpers (issueRowFromDoc, issueDetailFromDoc, ...) still want a
+// single doc with comments inlined, so we read both tables here.
+func (s *Store) issueDocFromPGRow(ctx context.Context, row pgstore.IssueRow) (issueDoc, error) {
+	var doc issueDoc
+	if err := json.Unmarshal(row.Payload, &doc); err != nil {
+		return issueDoc{}, err
+	}
+	// archived_at column drives the partial index but doc.ClosedAt is
+	// still the canonical source; both are kept in sync by PatchPayload.
+	comments, err := s.pgIssues.ListComments(ctx, row.Project, row.Number)
+	if err != nil {
+		return issueDoc{}, err
+	}
+	doc.Comments = make([]issueCommentDoc, 0, len(comments))
+	for _, c := range comments {
+		var cd issueCommentDoc
+		if err := json.Unmarshal(c.Payload, &cd); err != nil {
+			return issueDoc{}, err
+		}
+		doc.Comments = append(doc.Comments, cd)
+	}
+	return doc, nil
+}
+
+// issueDocsFromPGRows builds a slice of issueDocs from pg rows,
+// fetching all comments in one extra query per issue. Used by list
+// paths that need to render comment counts or full details. Callers
+// that don't need comments can use a simpler path that just
+// unmarshals row.Payload.
+func (s *Store) issueDocsFromPGRows(ctx context.Context, rows []pgstore.IssueRow) ([]issueDoc, error) {
+	out := make([]issueDoc, 0, len(rows))
+	for _, row := range rows {
+		doc, err := s.issueDocFromPGRow(ctx, row)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, doc)
+	}
+	return out, nil
 }
 
 // signalDocFromPayload deserializes a pg signal row's payload back into
@@ -1235,131 +1290,59 @@ func (s *Store) GetIssueDetailByNumber(ctx context.Context, project string, numb
 }
 
 func (s *Store) ArchiveIssueByNumber(ctx context.Context, req server.IssueArchive) (server.IssueDetail, error) {
-	doc, err := s.readIssueByNumber(ctx, req.Project, req.Number)
-	if err != nil {
-		return server.IssueDetail{}, err
-	}
+	// Audit-trail comment first so its created_at sorts before the
+	// state change in the issues.updated_at history.
 	note := capitalize(req.Action)
 	if reason := strings.TrimSpace(req.Reason); reason != "" {
 		note = note + ": " + reason
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	doc.Comments = append(doc.Comments, issueCommentDoc{
+	commentDoc := issueCommentDoc{
 		ID:        uuid.NewString(),
 		Author:    req.Author,
 		Body:      note,
 		CreatedAt: now,
 		UpdatedAt: now,
-	})
-	doc.UpdatedAt = now
-	if doc.State == "open" || doc.State == "" {
-		doc.State = "closed"
-		doc.ClosedAt = &now
 	}
-	payload, err := json.Marshal(doc)
+	commentPayload, err := json.Marshal(commentDoc)
 	if err != nil {
 		return server.IssueDetail{}, err
 	}
-	if _, err := s.issues.ReplaceItem(ctx, azcosmos.NewPartitionKeyString(doc.Project), doc.ID, payload, nil); err != nil {
+	if _, err := s.pgIssues.CreateComment(ctx, pgstore.IssueCommentRow{
+		ID:          commentDoc.ID,
+		Project:     req.Project,
+		IssueNumber: req.Number,
+		Payload:     commentPayload,
+	}); err != nil {
+		if errors.Is(err, pgstore.ErrIssueNotFound) {
+			return server.IssueDetail{}, server.ErrNotFound
+		}
 		return server.IssueDetail{}, err
 	}
-	return s.GetIssueDetailByNumber(ctx, doc.Project, doc.Number)
+	if _, err := s.pgIssues.PatchPayload(ctx, req.Project, req.Number, func(payload map[string]any) error {
+		state, _ := payload["state"].(string)
+		if state == "open" || state == "" {
+			payload["state"] = "closed"
+			payload["closed_at"] = now
+		}
+		payload["updated_at"] = now
+		return nil
+	}); err != nil {
+		if errors.Is(err, pgstore.ErrIssueNotFound) {
+			return server.IssueDetail{}, server.ErrNotFound
+		}
+		return server.IssueDetail{}, err
+	}
+	return s.GetIssueDetailByNumber(ctx, req.Project, req.Number)
 }
 
-const issueCounterPrefix = "__counter:issue-number:"
 const canonicalIssuePredicate = "IS_DEFINED(c.number) AND c.number > 0 AND (c.state = 'open' OR c.state = 'closed')"
 
-type issueNumberCounterDoc struct {
-	ID              string `json:"id"`
-	Project         string `json:"project"`
-	Kind            string `json:"kind"`
-	NextIssueNumber int    `json:"next_issue_number"`
-	CreatedAt       string `json:"created_at"`
-	UpdatedAt       string `json:"updated_at"`
-}
-
+// nextIssueNumber delegates to pgIssues, which seeds from
+// MAX(issues.number)+1 on first call per-project and atomically
+// increments on every subsequent call inside a transaction.
 func (s *Store) nextIssueNumber(ctx context.Context, project string) (int, error) {
-	counterID := issueCounterPrefix + project
-	pk := azcosmos.NewPartitionKeyString(project)
-	for range 3 {
-		resp, err := s.issues.ReadItem(ctx, pk, counterID, nil)
-		if isCosmosStatus(err, http.StatusNotFound) {
-			// seed from highest existing number
-			highest, seedErr := s.highestIssueNumber(ctx, project)
-			if seedErr != nil {
-				return 0, seedErr
-			}
-			now := time.Now().UTC().Format(time.RFC3339Nano)
-			seed := issueNumberCounterDoc{
-				ID:              counterID,
-				Project:         project,
-				Kind:            "issue_number_counter",
-				NextIssueNumber: highest + 2,
-				CreatedAt:       now,
-				UpdatedAt:       now,
-			}
-			payload, marshalErr := json.Marshal(seed)
-			if marshalErr != nil {
-				return 0, marshalErr
-			}
-			_, createErr := s.issues.CreateItem(ctx, pk, payload, nil)
-			if isCosmosStatus(createErr, http.StatusConflict) {
-				continue
-			}
-			if createErr != nil {
-				return 0, createErr
-			}
-			return highest + 1, nil
-		}
-		if err != nil {
-			return 0, err
-		}
-		var counter issueNumberCounterDoc
-		if unmarshalErr := json.Unmarshal(resp.Value, &counter); unmarshalErr != nil {
-			return 0, unmarshalErr
-		}
-		allocated := counter.NextIssueNumber - 1
-		if allocated < 1 {
-			allocated = 1
-		}
-		counter.NextIssueNumber = allocated + 2
-		counter.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-		payload, marshalErr := json.Marshal(counter)
-		if marshalErr != nil {
-			return 0, marshalErr
-		}
-		etag := resp.ETag
-		_, replErr := s.issues.ReplaceItem(ctx, pk, counterID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag})
-		if isCosmosStatus(replErr, http.StatusPreconditionFailed) {
-			continue
-		}
-		if replErr != nil {
-			return 0, replErr
-		}
-		return allocated + 1, nil
-	}
-	return 0, errors.New("issue number counter conflict after retries")
-}
-
-func (s *Store) highestIssueNumber(ctx context.Context, project string) (int, error) {
-	var docs []issueDoc
-	if err := singlePartitionQuery(
-		ctx,
-		s.issues,
-		azcosmos.NewPartitionKeyString(project),
-		"SELECT * FROM c WHERE c.project = @project AND "+canonicalIssuePredicate,
-		[]azcosmos.QueryParameter{{Name: "@project", Value: project}},
-		&docs,
-	); err != nil {
-		return 0, err
-	}
-	highest := 0
-	for _, d := range docs {
-		if d.Number > highest {
-			highest = d.Number
-		}
-	}
-	return highest, nil
+	return s.pgIssues.AllocateNextNumber(ctx, project)
 }
 
 func (s *Store) CreateIssue(ctx context.Context, req server.IssueCreate) (server.IssueDetail, error) {
@@ -1383,66 +1366,84 @@ func (s *Store) CreateIssue(ctx context.Context, req server.IssueCreate) (server
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	payload, err := json.Marshal(doc)
+	// Comments live in their own table; strip before marshaling payload.
+	stripped := doc
+	stripped.Comments = nil
+	payload, err := json.Marshal(stripped)
 	if err != nil {
 		return server.IssueDetail{}, err
 	}
-	if _, err := s.issues.CreateItem(ctx, azcosmos.NewPartitionKeyString(req.Project), payload, nil); err != nil {
+	if _, err := s.pgIssues.Create(ctx, pgstore.IssueRow{
+		Project: req.Project,
+		Number:  number,
+		Payload: payload,
+	}); err != nil {
 		return server.IssueDetail{}, err
 	}
 	return s.GetIssueDetailByNumber(ctx, req.Project, number)
 }
 
 func (s *Store) PatchIssueByNumber(ctx context.Context, req server.IssuePatch) (server.IssueDetail, error) {
-	doc, err := s.readIssueByNumber(ctx, req.Project, req.Number)
-	if err != nil {
-		return server.IssueDetail{}, err
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if req.Title != nil {
-		doc.Title = *req.Title
-	}
-	if req.Body != nil {
-		doc.Body = *req.Body
-	}
-	if req.Labels != nil {
-		doc.Labels = *req.Labels
-	}
+	// Validate state value before opening the patch tx so we don't
+	// abort mid-transaction with a ValidationError.
 	if req.State != nil {
-		target := strings.ToLower(*req.State)
-		switch target {
-		case "closed":
-			if doc.State != "closed" {
-				doc.State = "closed"
-				doc.ClosedAt = &now
-			}
-		case "open":
-			if doc.State == "closed" {
-				doc.State = "open"
-				doc.ClosedAt = nil
-			}
+		switch strings.ToLower(*req.State) {
+		case "closed", "open":
 		default:
 			return server.IssueDetail{}, server.ValidationError{Message: "state must be 'open' or 'closed'"}
 		}
 	}
-	doc.UpdatedAt = now
-	payload, err := json.Marshal(doc)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := s.pgIssues.PatchPayload(ctx, req.Project, req.Number, func(payload map[string]any) error {
+		if req.Title != nil {
+			payload["title"] = *req.Title
+		}
+		if req.Body != nil {
+			payload["body"] = *req.Body
+		}
+		if req.Labels != nil {
+			payload["labels"] = *req.Labels
+		}
+		if req.State != nil {
+			target := strings.ToLower(*req.State)
+			current, _ := payload["state"].(string)
+			switch target {
+			case "closed":
+				if current != "closed" {
+					payload["state"] = "closed"
+					payload["closed_at"] = now
+				}
+			case "open":
+				if current == "closed" {
+					payload["state"] = "open"
+					delete(payload, "closed_at")
+				}
+			}
+		}
+		payload["updated_at"] = now
+		return nil
+	})
+	if errors.Is(err, pgstore.ErrIssueNotFound) {
+		return server.IssueDetail{}, server.ErrNotFound
+	}
 	if err != nil {
 		return server.IssueDetail{}, err
 	}
-	if _, err := s.issues.ReplaceItem(ctx, azcosmos.NewPartitionKeyString(doc.Project), doc.ID, payload, nil); err != nil {
-		return server.IssueDetail{}, err
-	}
-	return s.GetIssueDetailByNumber(ctx, doc.Project, doc.Number)
+	return s.GetIssueDetailByNumber(ctx, req.Project, req.Number)
 }
 
 func (s *Store) AddIssueComment(ctx context.Context, req server.IssueCommentAdd) (server.IssueComment, error) {
-	doc, err := s.readIssueByNumber(ctx, req.Project, req.Number)
-	if err != nil {
-		return server.IssueComment{}, err
-	}
 	if strings.TrimSpace(req.Body) == "" {
 		return server.IssueComment{}, server.ValidationError{Message: "body required"}
+	}
+	// Verify the parent issue exists; CreateComment doesn't enforce
+	// referential integrity at the FK level (issue_comments has no FK
+	// to issues — we keep them in sync at the application layer).
+	if _, err := s.pgIssues.GetByNumber(ctx, req.Project, req.Number); err != nil {
+		if errors.Is(err, pgstore.ErrIssueNotFound) {
+			return server.IssueComment{}, server.ErrNotFound
+		}
+		return server.IssueComment{}, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	comment := issueCommentDoc{
@@ -1452,13 +1453,16 @@ func (s *Store) AddIssueComment(ctx context.Context, req server.IssueCommentAdd)
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	doc.Comments = append(doc.Comments, comment)
-	doc.UpdatedAt = now
-	payload, err := json.Marshal(doc)
+	commentPayload, err := json.Marshal(comment)
 	if err != nil {
 		return server.IssueComment{}, err
 	}
-	if _, err := s.issues.ReplaceItem(ctx, azcosmos.NewPartitionKeyString(doc.Project), doc.ID, payload, nil); err != nil {
+	if _, err := s.pgIssues.CreateComment(ctx, pgstore.IssueCommentRow{
+		ID:          comment.ID,
+		Project:     req.Project,
+		IssueNumber: req.Number,
+		Payload:     commentPayload,
+	}); err != nil {
 		return server.IssueComment{}, err
 	}
 	t, _ := time.Parse(time.RFC3339Nano, comment.CreatedAt)
@@ -1472,101 +1476,103 @@ func (s *Store) AddIssueComment(ctx context.Context, req server.IssueCommentAdd)
 }
 
 func (s *Store) UpdateIssueComment(ctx context.Context, req server.IssueCommentUpdate) (server.IssueComment, error) {
-	doc, err := s.readIssueByNumber(ctx, req.Project, req.Number)
-	if err != nil {
-		return server.IssueComment{}, err
-	}
 	if strings.TrimSpace(req.Body) == "" {
 		return server.IssueComment{}, server.ValidationError{Message: "body required"}
 	}
-	idx := -1
-	for i, c := range doc.Comments {
-		if c.ID == req.CommentID {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
+	// Pre-check author so we don't open a tx and roll back.
+	existing, err := s.pgIssues.GetComment(ctx, req.CommentID)
+	if errors.Is(err, pgstore.ErrIssueNotFound) {
 		return server.IssueComment{}, server.ErrNotFound
 	}
-	if doc.Comments[idx].Author != req.Author {
-		return server.IssueComment{}, server.ErrForbidden
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	doc.Comments[idx].Body = req.Body
-	doc.Comments[idx].UpdatedAt = now
-	doc.UpdatedAt = now
-	payload, err := json.Marshal(doc)
 	if err != nil {
 		return server.IssueComment{}, err
 	}
-	if _, err := s.issues.ReplaceItem(ctx, azcosmos.NewPartitionKeyString(doc.Project), doc.ID, payload, nil); err != nil {
+	if existing.Project != req.Project || existing.IssueNumber != req.Number {
+		// Comment does not belong to this issue.
+		return server.IssueComment{}, server.ErrNotFound
+	}
+	var existingDoc issueCommentDoc
+	if err := json.Unmarshal(existing.Payload, &existingDoc); err != nil {
 		return server.IssueComment{}, err
 	}
-	createdAt, _ := time.Parse(time.RFC3339Nano, doc.Comments[idx].CreatedAt)
-	updatedAt, _ := time.Parse(time.RFC3339Nano, now)
+	if existingDoc.Author != req.Author {
+		return server.IssueComment{}, server.ErrForbidden
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	patched, err := s.pgIssues.PatchComment(ctx, req.CommentID, func(payload map[string]any) error {
+		payload["body"] = req.Body
+		payload["updated_at"] = now
+		return nil
+	})
+	if errors.Is(err, pgstore.ErrIssueNotFound) {
+		return server.IssueComment{}, server.ErrNotFound
+	}
+	if err != nil {
+		return server.IssueComment{}, err
+	}
+	var patchedDoc issueCommentDoc
+	if err := json.Unmarshal(patched.Payload, &patchedDoc); err != nil {
+		return server.IssueComment{}, err
+	}
+	createdAt, _ := time.Parse(time.RFC3339Nano, patchedDoc.CreatedAt)
+	updatedAt, _ := time.Parse(time.RFC3339Nano, patchedDoc.UpdatedAt)
 	return server.IssueComment{
-		ID:        doc.Comments[idx].ID,
-		Author:    doc.Comments[idx].Author,
-		Body:      doc.Comments[idx].Body,
+		ID:        patchedDoc.ID,
+		Author:    patchedDoc.Author,
+		Body:      patchedDoc.Body,
 		CreatedAt: createdAt,
 		UpdatedAt: updatedAt,
 	}, nil
 }
 
 func (s *Store) DeleteIssueComment(ctx context.Context, req server.IssueCommentDelete) (server.IssueDetail, error) {
-	doc, err := s.readIssueByNumber(ctx, req.Project, req.Number)
-	if err != nil {
-		return server.IssueDetail{}, err
-	}
-	found := false
-	filtered := doc.Comments[:0]
-	for _, c := range doc.Comments {
-		if c.ID == req.CommentID {
-			found = true
-			continue
-		}
-		filtered = append(filtered, c)
-	}
-	if !found {
+	// Verify scope so a caller can't delete a comment by id from the
+	// wrong issue. Match the prior cosmos semantics (which scanned the
+	// parent doc's embedded comments and 404'd on miss).
+	existing, err := s.pgIssues.GetComment(ctx, req.CommentID)
+	if errors.Is(err, pgstore.ErrIssueNotFound) {
 		return server.IssueDetail{}, server.ErrNotFound
 	}
-	doc.Comments = filtered
-	doc.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	payload, err := json.Marshal(doc)
 	if err != nil {
 		return server.IssueDetail{}, err
 	}
-	if _, err := s.issues.ReplaceItem(ctx, azcosmos.NewPartitionKeyString(doc.Project), doc.ID, payload, nil); err != nil {
+	if existing.Project != req.Project || existing.IssueNumber != req.Number {
+		return server.IssueDetail{}, server.ErrNotFound
+	}
+	if err := s.pgIssues.DeleteComment(ctx, req.CommentID); err != nil {
+		if errors.Is(err, pgstore.ErrIssueNotFound) {
+			return server.IssueDetail{}, server.ErrNotFound
+		}
 		return server.IssueDetail{}, err
 	}
-	return s.GetIssueDetailByNumber(ctx, doc.Project, doc.Number)
+	return s.GetIssueDetailByNumber(ctx, req.Project, req.Number)
 }
 
 func (s *Store) readIssueByNumber(ctx context.Context, project string, number int) (issueDoc, error) {
-	var docs []issueDoc
-	if err := singlePartitionQuery(
-		ctx,
-		s.issues,
-		azcosmos.NewPartitionKeyString(project),
-		"SELECT * FROM c WHERE c.project = @project AND c.number = @number AND "+canonicalIssuePredicate,
-		[]azcosmos.QueryParameter{
-			{Name: "@project", Value: project},
-			{Name: "@number", Value: number},
-		},
-		&docs,
-	); err != nil {
-		return issueDoc{}, err
-	}
-	if len(docs) == 0 {
+	row, err := s.pgIssues.GetByNumber(ctx, project, number)
+	if errors.Is(err, pgstore.ErrIssueNotFound) {
 		return issueDoc{}, server.ErrNotFound
 	}
-	return docs[0], nil
+	if err != nil {
+		return issueDoc{}, err
+	}
+	doc, err := s.issueDocFromPGRow(ctx, row)
+	if err != nil {
+		return issueDoc{}, err
+	}
+	if !isCanonicalIssueDoc(doc) {
+		return issueDoc{}, server.ErrNotFound
+	}
+	return doc, nil
 }
 
 func (s *Store) listIssueDocs(ctx context.Context) ([]issueDoc, error) {
-	var docs []issueDoc
-	if err := crossPartitionQuery(ctx, s.issues, "SELECT * FROM c WHERE "+canonicalIssuePredicate, nil, &docs); err != nil {
+	rows, err := s.pgIssues.List(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	docs, err := s.issueDocsFromPGRows(ctx, rows)
+	if err != nil {
 		return nil, err
 	}
 	return canonicalIssueDocs(docs), nil
@@ -3222,28 +3228,22 @@ func (s *Store) buildTouchpointDetail(ctx context.Context, doc touchpointDoc) (s
 		}
 	}
 
-	// Look up linked issue. Issues are partitioned by /project; the
-	// linked issue lives in the touchpoint's project.
+	// Look up linked issue by its cosmos UUID (payload->>'id' in pg).
+	// The (project, number) primary key is preferred but the
+	// touchpoint doc still carries the legacy id reference.
 	var linkedIssueRef *string
 	var linkedIssueNumber *int
 	var linkedIssueTitle *string
 	if doc.LinkedIssueID != nil && *doc.LinkedIssueID != "" {
-		var issueDocs []issueDoc
-		_ = singlePartitionQuery(ctx, s.issues,
-			azcosmos.NewPartitionKeyString(doc.Project),
-			"SELECT * FROM c WHERE c.project = @project AND c.id = @id AND "+canonicalIssuePredicate,
-			[]azcosmos.QueryParameter{
-				{Name: "@project", Value: doc.Project},
-				{Name: "@id", Value: *doc.LinkedIssueID},
-			},
-			&issueDocs,
-		)
-		if len(issueDocs) > 0 {
-			issue := issueDocs[0]
-			ref := publicids.IssueRef(issue.Project, &issue.Number)
-			linkedIssueRef = &ref
-			linkedIssueNumber = &issue.Number
-			linkedIssueTitle = &issue.Title
+		row, err := s.pgIssues.GetByPayloadID(ctx, doc.Project, *doc.LinkedIssueID)
+		if err == nil {
+			issue, derr := s.issueDocFromPGRow(ctx, row)
+			if derr == nil && isCanonicalIssueDoc(issue) {
+				ref := publicids.IssueRef(issue.Project, &issue.Number)
+				linkedIssueRef = &ref
+				linkedIssueNumber = &issue.Number
+				linkedIssueTitle = &issue.Title
+			}
 		}
 	}
 
@@ -3640,22 +3640,18 @@ func (s *Store) playbookToPublic(ctx context.Context, doc playbookDoc) server.Pl
 		if e.RunRef != nil && *e.RunRef != "" {
 			pub.RunRef = e.RunRef
 		}
-		// Resolve created_issue_ref from created_issue_id. The created
-		// issue lives in the playbook's project (issues partition key
-		// is /project).
+		// Resolve created_issue_ref from created_issue_id (the legacy
+		// cosmos UUID). Issues now live in pg, keyed by (project,
+		// number); GetByPayloadID returns the same row by its
+		// payload->>'id' field.
 		if e.CreatedIssueID != nil && *e.CreatedIssueID != "" {
-			var issueDocs []issueDoc
-			if err := singlePartitionQuery(ctx, s.issues,
-				azcosmos.NewPartitionKeyString(doc.Project),
-				"SELECT * FROM c WHERE c.project = @project AND c.id = @id AND "+canonicalIssuePredicate,
-				[]azcosmos.QueryParameter{
-					{Name: "@project", Value: doc.Project},
-					{Name: "@id", Value: *e.CreatedIssueID},
-				},
-				&issueDocs,
-			); err == nil && len(issueDocs) > 0 {
-				ref := publicids.IssueRef(issueDocs[0].Project, &issueDocs[0].Number)
-				pub.CreatedIssueRef = &ref
+			row, err := s.pgIssues.GetByPayloadID(ctx, doc.Project, *e.CreatedIssueID)
+			if err == nil {
+				issue, derr := s.issueDocFromPGRow(ctx, row)
+				if derr == nil && isCanonicalIssueDoc(issue) {
+					ref := publicids.IssueRef(issue.Project, &issue.Number)
+					pub.CreatedIssueRef = &ref
+				}
 			}
 		}
 		if e.RunID != nil && *e.RunID != "" {
