@@ -274,9 +274,9 @@ func main() {
 			log.Printf("touchpoints migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
 		}()
 
-		// Stage 2k foundations: runs + leases.
+		// Stage 2k foundation + Stage 2-runs cutover.
 		pgRuns := pgstore.NewRunsStore(pgPool)
-		_ = pgRuns
+		store.SetPGRuns(pgRuns)
 		go func() {
 			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 			defer cancel()
