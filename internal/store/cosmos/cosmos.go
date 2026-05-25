@@ -100,6 +100,12 @@ type Store struct {
 	// here. CAS uses updated_at as the version (substituted for the
 	// prior Cosmos ETag).
 	pgSlots *pgstore.SlotsStore
+
+	// pgRuns is the Postgres-backed runs store (Stage 2-runs cutover).
+	// All run R/W on cosmos.Store delegates here. PatchPayload runs
+	// SELECT FOR UPDATE inside a transaction, removing the ETag retry
+	// loop that the cosmos mutateRunRaw helper carried.
+	pgRuns *pgstore.RunsStore
 }
 
 // SetPGLocks injects the Postgres-backed lock store. Called once at
@@ -157,6 +163,40 @@ func (s *Store) SetPGIssues(issues *pgstore.IssuesStore) {
 // SetPGSlots injects the Postgres-backed slots store.
 func (s *Store) SetPGSlots(slots *pgstore.SlotsStore) {
 	s.pgSlots = slots
+}
+
+// SetPGRuns injects the Postgres-backed runs store.
+func (s *Store) SetPGRuns(runs *pgstore.RunsStore) {
+	s.pgRuns = runs
+}
+
+// runDocFromPGRow unmarshals a pg runs row's payload into the cosmos
+// runDoc shape. The pg layer stores the original cosmos doc payload
+// verbatim, so this is a pure JSON decode.
+func runDocFromPGRow(row pgstore.RunRow) (runDoc, error) {
+	var doc runDoc
+	if err := json.Unmarshal(row.Payload, &doc); err != nil {
+		return runDoc{}, fmt.Errorf("run unmarshal: %w", err)
+	}
+	return doc, nil
+}
+
+// readRunDoc fetches a run by (project, runID) from pg and returns
+// the unmarshaled runDoc plus its raw payload bytes (the caller may
+// need to unmarshal into map[string]any for raw patches).
+func (s *Store) readRunDoc(ctx context.Context, project, runID string) (runDoc, []byte, error) {
+	row, err := s.pgRuns.Get(ctx, project, runID)
+	if errors.Is(err, pgstore.ErrRunNotFound) {
+		return runDoc{}, nil, server.ErrNotFound
+	}
+	if err != nil {
+		return runDoc{}, nil, err
+	}
+	doc, err := runDocFromPGRow(row)
+	if err != nil {
+		return runDoc{}, nil, err
+	}
+	return doc, row.Payload, nil
 }
 
 // issueDocFromPGRow assembles the cosmos-shaped issueDoc from a pg
@@ -1144,19 +1184,17 @@ func (s *Store) ReleaseLeaseByCallbackToken(ctx context.Context, token string) (
 }
 
 func (s *Store) ListProjectRuns(ctx context.Context, project string, limit int) ([]server.RunReport, error) {
-	var docs []runDoc
-	if err := singlePartitionQuery(
-		ctx,
-		s.runs,
-		azcosmos.NewPartitionKeyString(project),
-		"SELECT * FROM c WHERE c.project = @project ORDER BY c.updated_at DESC",
-		[]azcosmos.QueryParameter{{Name: "@project", Value: project}},
-		&docs,
-	); err != nil {
+	rows, err := s.pgRuns.List(ctx, project, limit)
+	if err != nil {
 		return nil, err
 	}
-	if limit < len(docs) {
-		docs = docs[:limit]
+	docs := make([]runDoc, 0, len(rows))
+	for _, row := range rows {
+		doc, derr := runDocFromPGRow(row)
+		if derr != nil {
+			return nil, derr
+		}
+		docs = append(docs, doc)
 	}
 	return runReportsFromDocs(docs), nil
 }
@@ -1608,9 +1646,17 @@ func isCanonicalIssueDoc(doc issueDoc) bool {
 }
 
 func (s *Store) listRunDocs(ctx context.Context) ([]runDoc, error) {
-	var docs []runDoc
-	if err := crossPartitionQuery(ctx, s.runs, "SELECT * FROM c", nil, &docs); err != nil {
+	rows, err := s.pgRuns.ListAll(ctx)
+	if err != nil {
 		return nil, err
+	}
+	docs := make([]runDoc, 0, len(rows))
+	for _, row := range rows {
+		doc, err := runDocFromPGRow(row)
+		if err != nil {
+			return nil, err
+		}
+		docs = append(docs, doc)
 	}
 	return docs, nil
 }
@@ -1654,20 +1700,22 @@ func (s *Store) ListAllLockDocsForMigration(ctx context.Context) ([]pgstore.Lock
 }
 
 func (s *Store) latestRunForIssue(ctx context.Context, issue issueDoc) (*runDoc, []runDoc, error) {
+	// Try issue_id (payload->>'issue_id') first; fall back to
+	// (project, issue_number) which is indexed.
 	var docs []runDoc
 	if issue.ID != "" {
-		if err := singlePartitionQuery(
-			ctx,
-			s.runs,
-			azcosmos.NewPartitionKeyString(issue.Project),
-			"SELECT * FROM c WHERE c.project = @project AND c.issue_id = @issue_id",
-			[]azcosmos.QueryParameter{
-				{Name: "@project", Value: issue.Project},
-				{Name: "@issue_id", Value: issue.ID},
-			},
-			&docs,
-		); err != nil {
+		all, err := s.pgRuns.List(ctx, issue.Project, 0)
+		if err != nil {
 			return nil, nil, err
+		}
+		for _, row := range all {
+			doc, err := runDocFromPGRow(row)
+			if err != nil {
+				return nil, nil, err
+			}
+			if doc.IssueID == issue.ID {
+				docs = append(docs, doc)
+			}
 		}
 	}
 	if len(docs) == 0 {
@@ -1688,20 +1736,20 @@ func (s *Store) latestRunForIssue(ctx context.Context, issue issueDoc) (*runDoc,
 }
 
 func (s *Store) issueRunDocs(ctx context.Context, project string, issueNumber int) ([]runDoc, error) {
-	var docs []runDoc
-	if err := singlePartitionQuery(
-		ctx,
-		s.runs,
-		azcosmos.NewPartitionKeyString(project),
-		"SELECT * FROM c WHERE c.project = @project AND c.issue_number = @issue_number ORDER BY c.created_at ASC",
-		[]azcosmos.QueryParameter{
-			{Name: "@project", Value: project},
-			{Name: "@issue_number", Value: issueNumber},
-		},
-		&docs,
-	); err != nil {
+	rows, err := s.pgRuns.ListByIssue(ctx, project, issueNumber)
+	if err != nil {
 		return nil, err
 	}
+	docs := make([]runDoc, 0, len(rows))
+	for _, row := range rows {
+		doc, derr := runDocFromPGRow(row)
+		if derr != nil {
+			return nil, derr
+		}
+		docs = append(docs, doc)
+	}
+	// Defensive re-sort: pg ordering is created_at ASC, but the
+	// payload's own CreatedAt may differ on legacy migrated rows.
 	sort.SliceStable(docs, func(i, j int) bool {
 		return docs[i].CreatedAt < docs[j].CreatedAt
 	})
@@ -3202,40 +3250,40 @@ func (s *Store) EnsureTouchpoint(ctx context.Context, req server.TouchpointCreat
 }
 
 func (s *Store) buildTouchpointDetail(ctx context.Context, doc touchpointDoc) (server.TouchpointDetail, error) {
-	// Look up linked run. Runs are partitioned by /project; touchpoints
-	// and their linked runs share a project, so scope the lookups
-	// accordingly. doc.Project is the partition key.
+	// Look up linked run by id (the cosmos doc id). Touchpoints and
+	// their linked runs share a project.
 	var run *runDoc
 	if doc.LinkedRunID != nil && *doc.LinkedRunID != "" {
-		var runDocs []runDoc
-		if err := singlePartitionQuery(ctx, s.runs,
-			azcosmos.NewPartitionKeyString(doc.Project),
-			"SELECT * FROM c WHERE c.project = @project AND c.id = @id",
-			[]azcosmos.QueryParameter{
-				{Name: "@project", Value: doc.Project},
-				{Name: "@id", Value: *doc.LinkedRunID},
-			},
-			&runDocs,
-		); err == nil && len(runDocs) > 0 {
-			run = &runDocs[0]
+		runRow, err := s.pgRuns.Get(ctx, doc.Project, *doc.LinkedRunID)
+		if err == nil {
+			rd, derr := runDocFromPGRow(runRow)
+			if derr == nil {
+				run = &rd
+			}
 		}
 	}
 	if run == nil {
 		// Fall back to latest run by (repo, pr_number) scoped to this
-		// touchpoint's project — runs for the touchpoint's PR live in
-		// the same project as the touchpoint itself.
-		var runDocs []runDoc
-		if err := singlePartitionQuery(ctx, s.runs,
-			azcosmos.NewPartitionKeyString(doc.Project),
-			"SELECT * FROM c WHERE c.project = @project AND c.issue_repo = @repo AND c.pr_number = @num ORDER BY c.created_at DESC",
-			[]azcosmos.QueryParameter{
-				{Name: "@project", Value: doc.Project},
-				{Name: "@repo", Value: doc.Repo},
-				{Name: "@num", Value: doc.Number},
-			},
-			&runDocs,
-		); err == nil && len(runDocs) > 0 {
-			run = &runDocs[0]
+		// project. Cosmos cross-partition query is replaced by an in-
+		// memory filter over project runs ordered by created_at DESC.
+		rows, err := s.pgRuns.List(ctx, doc.Project, 0)
+		if err == nil {
+			for _, row := range rows {
+				rd, derr := runDocFromPGRow(row)
+				if derr != nil {
+					continue
+				}
+				if rd.IssueRepo != doc.Repo {
+					continue
+				}
+				if rd.PRNumber == nil || *rd.PRNumber != doc.Number {
+					continue
+				}
+				if run == nil || rd.CreatedAt > run.CreatedAt {
+					tmp := rd
+					run = &tmp
+				}
+			}
 		}
 	}
 
@@ -3807,13 +3855,8 @@ func (s *Store) resolveLastTouchedRunRef(ctx context.Context, project string, ru
 	if runID == nil || *runID == "" {
 		return nil
 	}
-	pk := azcosmos.NewPartitionKeyString(project)
-	resp, err := s.runs.ReadItem(ctx, pk, *runID, nil)
+	doc, _, err := s.readRunDoc(ctx, project, *runID)
 	if err != nil {
-		return nil
-	}
-	var doc runDoc
-	if err := json.Unmarshal(resp.Value, &doc); err != nil {
 		return nil
 	}
 	docs, _ := s.issueRunDocs(ctx, project, doc.IssueNumber)
@@ -4249,29 +4292,16 @@ func (s *Store) playbookEntryRun(ctx context.Context, project string, entry play
 	if runID == "" {
 		return runDoc{}, false
 	}
-	pk := azcosmos.NewPartitionKeyString(project)
-	resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
+	doc, _, err := s.readRunDoc(ctx, project, runID)
 	if err != nil {
-		return runDoc{}, false
-	}
-	var doc runDoc
-	if err := json.Unmarshal(resp.Value, &doc); err != nil {
 		return runDoc{}, false
 	}
 	return doc, true
 }
 
 func (s *Store) runRefByID(ctx context.Context, project, runID string) (string, error) {
-	pk := azcosmos.NewPartitionKeyString(project)
-	resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
-	if isCosmosStatus(err, http.StatusNotFound) {
-		return "", server.ErrNotFound
-	}
+	doc, _, err := s.readRunDoc(ctx, project, runID)
 	if err != nil {
-		return "", err
-	}
-	var doc runDoc
-	if err := json.Unmarshal(resp.Value, &doc); err != nil {
 		return "", err
 	}
 	siblings, _ := s.issueRunDocs(ctx, project, doc.IssueNumber)
@@ -5153,37 +5183,31 @@ func (s *Store) GetWorkflowBySchemaRef(ctx context.Context, project, schemaRef s
 // ReadRunForReplay reads a run document and returns the minimal fields
 // needed by the replay decision engine.
 func (s *Store) ReadRunForReplay(ctx context.Context, project, runID string) (server.RunReplayData, error) {
-	pk := azcosmos.NewPartitionKeyString(project)
-	resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
-	if isCosmosStatus(err, http.StatusNotFound) {
-		return server.RunReplayData{}, server.ErrNotFound
-	}
+	doc, _, err := s.readRunDoc(ctx, project, runID)
 	if err != nil {
-		return server.RunReplayData{}, err
-	}
-	var doc runDoc
-	if err := json.Unmarshal(resp.Value, &doc); err != nil {
 		return server.RunReplayData{}, err
 	}
 	return runReplayDataFromDoc(doc), nil
 }
 
 func (s *Store) ListQueuedRunCycles(ctx context.Context, project string, limit int) ([]server.RunReplayData, error) {
-	var docs []runDoc
-	if err := singlePartitionQuery(
-		ctx,
-		s.runs,
-		azcosmos.NewPartitionKeyString(project),
-		"SELECT * FROM c WHERE c.project = @p AND c.state = @state AND c.queue_state = @queue_state ORDER BY c.created_at ASC",
-		[]azcosmos.QueryParameter{
-			{Name: "@p", Value: project},
-			{Name: "@state", Value: "queued"},
-			{Name: "@queue_state", Value: "queued"},
-		},
-		&docs,
-	); err != nil {
+	rows, err := s.pgRuns.List(ctx, project, 0)
+	if err != nil {
 		return nil, err
 	}
+	docs := make([]runDoc, 0, len(rows))
+	for _, row := range rows {
+		doc, derr := runDocFromPGRow(row)
+		if derr != nil {
+			return nil, derr
+		}
+		if doc.State != "queued" || stringOrEmpty(doc.QueueState) != "queued" {
+			continue
+		}
+		docs = append(docs, doc)
+	}
+	// Cosmos query ordered by created_at ASC; preserve that.
+	sort.SliceStable(docs, func(i, j int) bool { return docs[i].CreatedAt < docs[j].CreatedAt })
 	if limit > 0 && len(docs) > limit {
 		docs = docs[:limit]
 	}
@@ -5452,34 +5476,18 @@ func queuedSignalFromDoc(doc signalDoc) server.QueuedSignal {
 }
 
 func (s *Store) FindRunForPR(ctx context.Context, repo string, prNumber int) (server.RunReplayData, error) {
-	// Caller knows only (repo, pr_number); the runs container is
-	// partitioned by /project so we fan out across every project
-	// partition, then pick the most-recent doc by updated_at in Go.
-	// The per-partition queries omit ORDER BY (which would force the
-	// Go SDK down the unsupported query-plan path); ordering is
-	// applied after the merge.
-	projects, err := s.listProjectNames(ctx)
+	// pg.RunsStore.FindByPR returns the most-recently-updated row
+	// across all projects via payload->>'issue_repo' + payload->>'pr_number'.
+	// The cross-project fan-out cosmos required is collapsed into a
+	// single SELECT against the runs table.
+	row, err := s.pgRuns.FindByPR(ctx, repo, prNumber)
+	if errors.Is(err, pgstore.ErrRunNotFound) {
+		return server.RunReplayData{}, server.ErrNotFound
+	}
 	if err != nil {
 		return server.RunReplayData{}, err
 	}
-	var docs []runDoc
-	if err := fanOutByProject(ctx, s.runs, projects,
-		"SELECT * FROM c WHERE c.project = @project AND c.issue_repo = @repo AND c.pr_number = @pr",
-		[]azcosmos.QueryParameter{
-			{Name: "@repo", Value: repo},
-			{Name: "@pr", Value: prNumber},
-		},
-		&docs,
-	); err != nil {
-		return server.RunReplayData{}, err
-	}
-	if len(docs) == 0 {
-		return server.RunReplayData{}, server.ErrNotFound
-	}
-	sort.SliceStable(docs, func(i, j int) bool {
-		return docs[i].UpdatedAt > docs[j].UpdatedAt
-	})
-	return s.ReadRunForReplay(ctx, docs[0].Project, docs[0].ID)
+	return s.ReadRunForReplay(ctx, row.Project, row.ID)
 }
 
 // ---- RunMutationStore implementation ----
@@ -5507,39 +5515,41 @@ func (s *Store) ReadRunIDForNumber(ctx context.Context, project string, issueNum
 
 // ReadRunIDForCallbackToken resolves a run callback token to (runID, project, runRef).
 func (s *Store) ReadRunIDForCallbackToken(ctx context.Context, token string) (string, string, string, error) {
-	var docs []runDoc
-	if err := crossPartitionQuery(
-		ctx, s.runs,
-		"SELECT * FROM c WHERE c.callback_token = @token",
-		[]azcosmos.QueryParameter{{Name: "@token", Value: token}},
-		&docs,
-	); err != nil {
+	// Scan all runs in pg and match by payload->>'callback_token'.
+	// Cosmos used a cross-partition query for the same lookup; the
+	// expected runs row count is small (active runs across all
+	// projects) so a full scan is acceptable here. If this becomes a
+	// hot path, add a partial index on (payload->>'callback_token')
+	// with WHERE the value is non-empty.
+	rows, err := s.pgRuns.ListAll(ctx)
+	if err != nil {
 		return "", "", "", err
 	}
-	if len(docs) == 0 {
+	var found *runDoc
+	for _, row := range rows {
+		doc, derr := runDocFromPGRow(row)
+		if derr != nil {
+			return "", "", "", derr
+		}
+		if stringOrEmpty(doc.CallbackToken) == token {
+			found = &doc
+			break
+		}
+	}
+	if found == nil {
 		return "", "", "", server.ErrNotFound
 	}
-	doc := docs[0]
-	sibling, _ := s.issueRunDocs(ctx, doc.Project, doc.IssueNumber)
+	sibling, _ := s.issueRunDocs(ctx, found.Project, found.IssueNumber)
 	numbers := runNumberMap(sibling)
-	ref := publicids.RunRef(doc.Project, positiveIssueNumberPtr(doc.IssueNumber), runDisplayNumber(doc, numbers[doc.ID]))
-	return doc.ID, doc.Project, ref, nil
+	ref := publicids.RunRef(found.Project, positiveIssueNumberPtr(found.IssueNumber), runDisplayNumber(*found, numbers[found.ID]))
+	return found.ID, found.Project, ref, nil
 }
 
 // AbortRunByID marks a run as aborted, best-effort releases issue/PR locks and
 // any run slot lease.
 func (s *Store) AbortRunByID(ctx context.Context, project, runID, reason string) (server.AbortRunResult, error) {
-	pk := azcosmos.NewPartitionKeyString(project)
-	resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
-	if isCosmosStatus(err, http.StatusNotFound) {
-		return server.AbortRunResult{}, server.ErrNotFound
-	}
+	doc, _, err := s.readRunDoc(ctx, project, runID)
 	if err != nil {
-		return server.AbortRunResult{}, err
-	}
-
-	var doc runDoc
-	if err := json.Unmarshal(resp.Value, &doc); err != nil {
 		return server.AbortRunResult{}, err
 	}
 
@@ -5561,24 +5571,20 @@ func (s *Store) AbortRunByID(ctx context.Context, project, runID, reason string)
 		}, nil
 	}
 
-	// Patch the run doc to aborted state.
-	var raw map[string]any
-	if err := json.Unmarshal(resp.Value, &raw); err != nil {
-		return server.AbortRunResult{}, err
-	}
-	raw["state"] = "aborted"
-	raw["abort_reason"] = reason
-	delete(raw, "queue_state")
+	// Patch the run doc to aborted state inside a SELECT FOR UPDATE
+	// transaction — replaces the previous ETag retry loop.
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	raw["updated_at"] = now
-	finalizeExecutionFailureRaw(raw, canonicalExecutionFailureReason(reason), now)
-
-	payload, err := json.Marshal(raw)
-	if err != nil {
-		return server.AbortRunResult{}, err
-	}
-	etag := azcore.ETag(resp.ETag)
-	if _, err := s.runs.ReplaceItem(ctx, pk, runID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
+	if _, err := s.pgRuns.PatchPayload(ctx, project, runID, func(raw map[string]any) error {
+		raw["state"] = "aborted"
+		raw["abort_reason"] = reason
+		delete(raw, "queue_state")
+		raw["updated_at"] = now
+		finalizeExecutionFailureRaw(raw, canonicalExecutionFailureReason(reason), now)
+		return nil
+	}); err != nil {
+		if errors.Is(err, pgstore.ErrRunNotFound) {
+			return server.AbortRunResult{}, server.ErrNotFound
+		}
 		return server.AbortRunResult{}, err
 	}
 
@@ -5619,17 +5625,8 @@ func (s *Store) releaseRunSlotLease(ctx context.Context, doc runDoc) *bool {
 
 // GetNativeRunStatusByID returns the native run status for the latest in-progress k8s_job attempt.
 func (s *Store) GetNativeRunStatusByID(ctx context.Context, project, runID string) (server.NativeRunStatusResponse, error) {
-	pk := azcosmos.NewPartitionKeyString(project)
-	resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
-	if isCosmosStatus(err, http.StatusNotFound) {
-		return server.NativeRunStatusResponse{}, server.ErrNotFound
-	}
+	doc, _, err := s.readRunDoc(ctx, project, runID)
 	if err != nil {
-		return server.NativeRunStatusResponse{}, err
-	}
-
-	var doc runDoc
-	if err := json.Unmarshal(resp.Value, &doc); err != nil {
 		return server.NativeRunStatusResponse{}, err
 	}
 
@@ -5659,17 +5656,8 @@ func (s *Store) GetNativeRunStatusByID(ctx context.Context, project, runID strin
 // RecordNativeEventByID writes one idempotent native event for the run's latest in-progress attempt.
 func (s *Store) RecordNativeEventByID(ctx context.Context, project, runID string, req server.NativeRunEventRequest) (server.NativeRunEventResult, error) {
 	// Read run to get the latest attempt index + phase.
-	pk := azcosmos.NewPartitionKeyString(project)
-	resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
-	if isCosmosStatus(err, http.StatusNotFound) {
-		return server.NativeRunEventResult{}, server.ErrNotFound
-	}
+	doc, _, err := s.readRunDoc(ctx, project, runID)
 	if err != nil {
-		return server.NativeRunEventResult{}, err
-	}
-
-	var doc runDoc
-	if err := json.Unmarshal(resp.Value, &doc); err != nil {
 		return server.NativeRunEventResult{}, err
 	}
 
@@ -5876,16 +5864,8 @@ func attemptIndexFromRaw(attempt map[string]any) int {
 // ListNativeEventsByID returns ordered native events for a run.
 func (s *Store) ListNativeEventsByID(ctx context.Context, project, runID string, attemptIndex *int, jobID *string, limit *int) (server.NativeRunLogsResponse, error) {
 	// Validate that the run exists first.
-	pk := azcosmos.NewPartitionKeyString(project)
-	resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
-	if isCosmosStatus(err, http.StatusNotFound) {
-		return server.NativeRunLogsResponse{}, server.ErrNotFound
-	}
+	doc, _, err := s.readRunDoc(ctx, project, runID)
 	if err != nil {
-		return server.NativeRunLogsResponse{}, err
-	}
-	var doc runDoc
-	if err := json.Unmarshal(resp.Value, &doc); err != nil {
 		return server.NativeRunLogsResponse{}, err
 	}
 
@@ -5973,76 +5953,80 @@ func (s *Store) RecordNativeJobCompletion(ctx context.Context, project, runID st
 		return server.NativeJobCompletionResult{}, server.ValidationError{Message: "job_id required"}
 	}
 
-	pk := azcosmos.NewPartitionKeyString(project)
-	const maxRetries = 5
-	for i := 0; i < maxRetries; i++ {
-		resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
-		if isCosmosStatus(err, http.StatusNotFound) {
-			return server.NativeJobCompletionResult{}, server.ErrNotFound
+	// pg's SELECT FOR UPDATE inside PatchPayload replaces the cosmos
+	// ETag retry loop. Early-return paths (already terminal /
+	// duplicate idempotent completion) are emitted as sentinel
+	// errors from the mutator and translated outside.
+	var (
+		completedIdempotent      bool
+		duplicateCompletion      bool
+		earlyExpectedJobIDs      []string
+		earlyCompletions         map[string]nativeJobCompletionDoc
+		writtenCompletions       map[string]nativeJobCompletionDoc
+		writtenExpectedJobIDs    []string
+		validationErr            error
+		conflictMsg              error
+	)
+	_, err := s.pgRuns.PatchPayload(ctx, project, runID, func(raw map[string]any) error {
+		// Re-marshal to get a runDoc for typed access.
+		bytes, mErr := json.Marshal(raw)
+		if mErr != nil {
+			return mErr
 		}
-		if err != nil {
-			return server.NativeJobCompletionResult{}, err
-		}
-
 		var doc runDoc
-		if err := json.Unmarshal(resp.Value, &doc); err != nil {
-			return server.NativeJobCompletionResult{}, err
-		}
-		var raw map[string]any
-		if err := json.Unmarshal(resp.Value, &raw); err != nil {
-			return server.NativeJobCompletionResult{}, err
+		if uErr := json.Unmarshal(bytes, &doc); uErr != nil {
+			return uErr
 		}
 		attempts, _ := raw["attempts"].([]any)
 		if len(doc.Attempts) == 0 || len(attempts) == 0 {
-			return server.NativeJobCompletionResult{}, server.ErrConflict
+			conflictMsg = server.ErrConflict
+			return errAbortPatch
 		}
-
 		idx := len(doc.Attempts) - 1
 		if p.AttemptIndex != nil && *p.AttemptIndex >= 0 && *p.AttemptIndex < len(doc.Attempts) {
 			idx = *p.AttemptIndex
 		}
 		attemptMap, ok := attempts[idx].(map[string]any)
 		if !ok {
-			return server.NativeJobCompletionResult{}, fmt.Errorf("invalid attempt at index %d", idx)
+			validationErr = fmt.Errorf("invalid attempt at index %d", idx)
+			return errAbortPatch
 		}
 		attempt := doc.Attempts[idx]
 		if attempt.PhaseKind != "k8s_job" {
-			return server.NativeJobCompletionResult{}, server.ErrConflict
+			conflictMsg = server.ErrConflict
+			return errAbortPatch
 		}
-
-		expectedJobIDs, err := s.expectedNativeJobIDs(ctx, project, doc.Workflow, doc.WorkflowSchemaRef, attempt.Phase)
-		if err != nil {
-			return server.NativeJobCompletionResult{}, err
+		expectedJobIDs, eErr := s.expectedNativeJobIDs(ctx, project, doc.Workflow, doc.WorkflowSchemaRef, attempt.Phase)
+		if eErr != nil {
+			validationErr = eErr
+			return errAbortPatch
 		}
 		if !containsString(expectedJobIDs, jobID) {
-			return server.NativeJobCompletionResult{}, server.ValidationError{
-				Message: fmt.Sprintf("job_id %q is not registered on phase %q", jobID, attempt.Phase),
-			}
+			validationErr = server.ValidationError{Message: fmt.Sprintf("job_id %q is not registered on phase %q", jobID, attempt.Phase)}
+			return errAbortPatch
 		}
-
 		completions := cloneJobCompletions(attempt.JobCompletions)
 		if attempt.CompletedAt != "" {
-			run, err := s.ReadRunForReplay(ctx, project, runID)
-			if err != nil {
-				return server.NativeJobCompletionResult{}, err
-			}
-			return nativeJobCompletionResult(run, expectedJobIDs, completions, true, false), nil
+			completedIdempotent = true
+			earlyExpectedJobIDs = expectedJobIDs
+			earlyCompletions = completions
+			return errAbortPatch
 		}
 		newCompletion := nativeJobCompletionDocFromPayload(jobID, p, time.Now().UTC().Format(time.RFC3339Nano))
 		if existing, exists := completions[jobID]; exists {
 			if !sameNativeJobCompletion(existing, newCompletion) {
-				return server.NativeJobCompletionResult{}, server.ErrConflict
+				conflictMsg = server.ErrConflict
+				return errAbortPatch
 			}
-			run, err := s.ReadRunForReplay(ctx, project, runID)
-			if err != nil {
-				return server.NativeJobCompletionResult{}, err
-			}
-			return nativeJobCompletionResult(run, expectedJobIDs, completions, attempt.CompletedAt != "" || allExpectedJobsCompleted(expectedJobIDs, completions), false), nil
+			duplicateCompletion = true
+			earlyExpectedJobIDs = expectedJobIDs
+			earlyCompletions = completions
+			return errAbortPatch
 		}
-		if err := validateNativePhaseOutputKeys(jobID, newCompletion.PhaseOutputs, completions); err != nil {
-			return server.NativeJobCompletionResult{}, err
+		if vErr := validateNativePhaseOutputKeys(jobID, newCompletion.PhaseOutputs, completions); vErr != nil {
+			validationErr = vErr
+			return errAbortPatch
 		}
-
 		completions[jobID] = newCompletion
 		attemptMap["job_completions"] = completions
 		attempts[idx] = attemptMap
@@ -6050,28 +6034,42 @@ func (s *Store) RecordNativeJobCompletion(ctx context.Context, project, runID st
 		raw["updated_at"] = newCompletion.CompletedAt
 		executionState, executionReason := nativeJobExecutionStateAndReason(newCompletion)
 		markJobCompletionInExecutionsRaw(raw, attempt.Phase, jobID, executionState, executionReason, newCompletion.CompletedAt)
-
-		payload, err := json.Marshal(raw)
-		if err != nil {
-			return server.NativeJobCompletionResult{}, err
-		}
-		etag := azcore.ETag(resp.ETag)
-		if _, err := s.runs.ReplaceItem(ctx, pk, runID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
-			if isCosmosStatus(err, http.StatusPreconditionFailed) {
-				continue
-			}
-			return server.NativeJobCompletionResult{}, err
-		}
-
+		writtenCompletions = completions
+		writtenExpectedJobIDs = expectedJobIDs
+		return nil
+	})
+	if conflictMsg != nil {
+		return server.NativeJobCompletionResult{}, conflictMsg
+	}
+	if validationErr != nil {
+		return server.NativeJobCompletionResult{}, validationErr
+	}
+	if completedIdempotent || duplicateCompletion {
 		run, err := s.ReadRunForReplay(ctx, project, runID)
 		if err != nil {
 			return server.NativeJobCompletionResult{}, err
 		}
-		phaseComplete := allExpectedJobsCompleted(expectedJobIDs, completions)
-		return nativeJobCompletionResult(run, expectedJobIDs, completions, phaseComplete, phaseComplete), nil
+		phaseComplete := completedIdempotent || allExpectedJobsCompleted(earlyExpectedJobIDs, earlyCompletions)
+		return nativeJobCompletionResult(run, earlyExpectedJobIDs, earlyCompletions, phaseComplete, false), nil
 	}
-	return server.NativeJobCompletionResult{}, fmt.Errorf("record native job completion: too many etag conflicts")
+	if errors.Is(err, pgstore.ErrRunNotFound) {
+		return server.NativeJobCompletionResult{}, server.ErrNotFound
+	}
+	if err != nil {
+		return server.NativeJobCompletionResult{}, err
+	}
+	run, err := s.ReadRunForReplay(ctx, project, runID)
+	if err != nil {
+		return server.NativeJobCompletionResult{}, err
+	}
+	phaseComplete := allExpectedJobsCompleted(writtenExpectedJobIDs, writtenCompletions)
+	return nativeJobCompletionResult(run, writtenExpectedJobIDs, writtenCompletions, phaseComplete, phaseComplete), nil
 }
+
+// errAbortPatch is returned by mutators that want to short-circuit
+// pgRuns.PatchPayload without committing — the caller then inspects
+// captured sentinels to decide the outer return value.
+var errAbortPatch = errors.New("abort patch")
 
 func validateNativePhaseOutputKeys(jobID string, outputs map[string]string, completions map[string]nativeJobCompletionDoc) error {
 	if len(outputs) == 0 {
@@ -6180,46 +6178,46 @@ func cloneJobCompletions(values map[string]nativeJobCompletionDoc) map[string]na
 }
 
 func (s *Store) mutateRunRaw(ctx context.Context, project, runID string, mutate func(runDoc, map[string]any) (bool, error)) error {
-	pk := azcosmos.NewPartitionKeyString(project)
-	const maxRetries = 5
-	for i := 0; i < maxRetries; i++ {
-		resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
-		if isCosmosStatus(err, http.StatusNotFound) {
-			return server.ErrNotFound
-		}
-		if err != nil {
-			return err
+	// SELECT FOR UPDATE inside PatchPayload's tx replaces the cosmos
+	// ETag retry loop — concurrent writers serialize on the row lock
+	// instead of conflicting on ETag. The mutator still receives both
+	// the typed runDoc and the raw map[string]any so existing call
+	// sites continue to work unchanged.
+	var noChange bool
+	_, err := s.pgRuns.PatchPayload(ctx, project, runID, func(raw map[string]any) error {
+		// Re-marshal the raw map to bytes so we can unmarshal it into
+		// the typed runDoc for the caller. Avoids a separate query.
+		bytes, mErr := json.Marshal(raw)
+		if mErr != nil {
+			return mErr
 		}
 		var doc runDoc
-		if err := json.Unmarshal(resp.Value, &doc); err != nil {
-			return err
+		if uErr := json.Unmarshal(bytes, &doc); uErr != nil {
+			return uErr
 		}
-		var raw map[string]any
-		if err := json.Unmarshal(resp.Value, &raw); err != nil {
-			return err
-		}
-		changed, err := mutate(doc, raw)
-		if err != nil {
-			return err
+		changed, mErr := mutate(doc, raw)
+		if mErr != nil {
+			return mErr
 		}
 		if !changed {
-			return nil
-		}
-		payload, err := json.Marshal(raw)
-		if err != nil {
-			return err
-		}
-		etag := azcore.ETag(resp.ETag)
-		if _, err := s.runs.ReplaceItem(ctx, pk, runID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
-			if isCosmosStatus(err, http.StatusPreconditionFailed) {
-				continue
-			}
-			return err
+			noChange = true
+			return errMutateNoChange
 		}
 		return nil
+	})
+	if noChange {
+		return nil
 	}
-	return fmt.Errorf("mutate run: too many etag conflicts")
+	if errors.Is(err, pgstore.ErrRunNotFound) {
+		return server.ErrNotFound
+	}
+	return err
 }
+
+// errMutateNoChange is the sentinel used by mutateRunRaw to abort
+// the patch transaction when the mutator reports "nothing changed".
+// PatchPayload rolls the tx back; the outer call returns nil.
+var errMutateNoChange = errors.New("run mutate: no change")
 
 func (s *Store) RecordNativeJobsDispatched(ctx context.Context, project, runID, phase string, jobs map[string]string) error {
 	if len(jobs) == 0 {
@@ -6804,34 +6802,22 @@ func containsString(values []string, target string) bool {
 // StampRunCompletion records completion data on the latest (or specified) attempt and
 // increments the run's cumulative_cost_usd. Returns the updated run data.
 func (s *Store) StampRunCompletion(ctx context.Context, project, runID string, p server.CompletionPayload) (server.RunReplayData, error) {
-	pk := azcosmos.NewPartitionKeyString(project)
-	const maxRetries = 5
-	for i := 0; i < maxRetries; i++ {
-		resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
-		if isCosmosStatus(err, http.StatusNotFound) {
-			return server.RunReplayData{}, server.ErrNotFound
-		}
-		if err != nil {
-			return server.RunReplayData{}, err
-		}
-		var raw map[string]any
-		if err := json.Unmarshal(resp.Value, &raw); err != nil {
-			return server.RunReplayData{}, err
-		}
+	var noAttempts, invalidIdx bool
+	_, err := s.pgRuns.PatchPayload(ctx, project, runID, func(raw map[string]any) error {
 		attempts, _ := raw["attempts"].([]any)
 		if len(attempts) == 0 {
-			return server.RunReplayData{}, fmt.Errorf("run has no attempts")
+			noAttempts = true
+			return errAbortPatch
 		}
-
 		idx := len(attempts) - 1
 		if p.AttemptIndex != nil && *p.AttemptIndex >= 0 && *p.AttemptIndex < len(attempts) {
 			idx = *p.AttemptIndex
 		}
 		attempt, ok := attempts[idx].(map[string]any)
 		if !ok {
-			return server.RunReplayData{}, fmt.Errorf("invalid attempt at index %d", idx)
+			invalidIdx = true
+			return errAbortPatch
 		}
-
 		now := time.Now().UTC().Format(time.RFC3339Nano)
 		attempt["completed_at"] = now
 		attempt["conclusion"] = p.Conclusion
@@ -6851,91 +6837,63 @@ func (s *Store) StampRunCompletion(ctx context.Context, project, runID string, p
 		attempt["cost_usd"] = p.CostUSD
 		attempts[idx] = attempt
 		raw["attempts"] = attempts
-
-		// Increment cumulative cost.
 		prior, _ := raw["cumulative_cost_usd"].(float64)
 		raw["cumulative_cost_usd"] = prior + p.CostUSD
 		raw["updated_at"] = now
-		// First-arrival wins for screenshots_markdown.
 		if p.ScreenshotsMarkdown != nil && (raw["screenshots_markdown"] == nil || raw["screenshots_markdown"] == "") {
 			raw["screenshots_markdown"] = *p.ScreenshotsMarkdown
 		}
-
-		payload, err := json.Marshal(raw)
-		if err != nil {
-			return server.RunReplayData{}, err
-		}
-		etag := azcore.ETag(resp.ETag)
-		if _, err := s.runs.ReplaceItem(ctx, pk, runID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
-			if isCosmosStatus(err, http.StatusPreconditionFailed) {
-				continue
-			}
-			return server.RunReplayData{}, err
-		}
-		// Re-read to return the updated RunReplayData.
-		return s.ReadRunForReplay(ctx, project, runID)
+		return nil
+	})
+	if noAttempts {
+		return server.RunReplayData{}, fmt.Errorf("run has no attempts")
 	}
-	return server.RunReplayData{}, fmt.Errorf("stamp run completion: too many etag conflicts")
+	if invalidIdx {
+		return server.RunReplayData{}, fmt.Errorf("invalid attempt index")
+	}
+	if errors.Is(err, pgstore.ErrRunNotFound) {
+		return server.RunReplayData{}, server.ErrNotFound
+	}
+	if err != nil {
+		return server.RunReplayData{}, err
+	}
+	return s.ReadRunForReplay(ctx, project, runID)
 }
 
 // StampRunDecision stamps the decision string on the latest attempt of a run.
 func (s *Store) StampRunDecision(ctx context.Context, project, runID, decision string) error {
-	pk := azcosmos.NewPartitionKeyString(project)
-	const maxRetries = 5
-	for i := 0; i < maxRetries; i++ {
-		resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
-		if isCosmosStatus(err, http.StatusNotFound) {
-			return server.ErrNotFound
-		}
-		if err != nil {
-			return err
-		}
-		var raw map[string]any
-		if err := json.Unmarshal(resp.Value, &raw); err != nil {
-			return err
-		}
+	var skipNoAttempts bool
+	_, err := s.pgRuns.PatchPayload(ctx, project, runID, func(raw map[string]any) error {
 		attempts, _ := raw["attempts"].([]any)
 		if len(attempts) == 0 {
-			return nil
+			skipNoAttempts = true
+			return errAbortPatch
 		}
 		attempt, ok := attempts[len(attempts)-1].(map[string]any)
 		if !ok {
-			return nil
+			skipNoAttempts = true
+			return errAbortPatch
 		}
 		attempt["decision"] = decision
 		attempts[len(attempts)-1] = attempt
 		raw["attempts"] = attempts
 		raw["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
-
-		payload, err := json.Marshal(raw)
-		if err != nil {
-			return err
-		}
-		etag := azcore.ETag(resp.ETag)
-		if _, err := s.runs.ReplaceItem(ctx, pk, runID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
-			if isCosmosStatus(err, http.StatusPreconditionFailed) {
-				continue
-			}
-			return err
-		}
+		return nil
+	})
+	if skipNoAttempts {
 		return nil
 	}
-	return fmt.Errorf("stamp run decision: too many etag conflicts")
+	if errors.Is(err, pgstore.ErrRunNotFound) {
+		return server.ErrNotFound
+	}
+	return err
 }
 
 // SetRunTerminalState sets the run's state (passed, review_required, or aborted) and
 // best-effort releases issue/PR locks. Mirrors AbortRunByID but for non-abort terminal states.
 func (s *Store) SetRunTerminalState(ctx context.Context, project, runID, state string, abortReason *string) (server.AbortRunResult, error) {
-	pk := azcosmos.NewPartitionKeyString(project)
-	resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
-	if isCosmosStatus(err, http.StatusNotFound) {
-		return server.AbortRunResult{}, server.ErrNotFound
-	}
+	doc, _, err := s.readRunDoc(ctx, project, runID)
 	if err != nil {
-		return server.AbortRunResult{}, err
-	}
-	var doc runDoc
-	if err := json.Unmarshal(resp.Value, &doc); err != nil {
 		return server.AbortRunResult{}, err
 	}
 
@@ -6943,26 +6901,22 @@ func (s *Store) SetRunTerminalState(ctx context.Context, project, runID, state s
 	numbers := runNumberMap(siblings)
 	runRef := publicids.RunRef(doc.Project, positiveIssueNumberPtr(doc.IssueNumber), runDisplayNumber(doc, numbers[doc.ID]))
 
-	var raw map[string]any
-	if err := json.Unmarshal(resp.Value, &raw); err != nil {
-		return server.AbortRunResult{}, err
-	}
-	raw["state"] = state
-	delete(raw, "queue_state")
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	raw["updated_at"] = now
-	if abortReason != nil {
-		raw["abort_reason"] = *abortReason
-	}
-	if state == "aborted" {
-		finalizeExecutionFailureRaw(raw, canonicalExecutionFailureReason(stringOrEmpty(abortReason)), now)
-	}
-	payload, err := json.Marshal(raw)
-	if err != nil {
-		return server.AbortRunResult{}, err
-	}
-	etag := azcore.ETag(resp.ETag)
-	if _, err := s.runs.ReplaceItem(ctx, pk, runID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
+	if _, err := s.pgRuns.PatchPayload(ctx, project, runID, func(raw map[string]any) error {
+		raw["state"] = state
+		delete(raw, "queue_state")
+		raw["updated_at"] = now
+		if abortReason != nil {
+			raw["abort_reason"] = *abortReason
+		}
+		if state == "aborted" {
+			finalizeExecutionFailureRaw(raw, canonicalExecutionFailureReason(stringOrEmpty(abortReason)), now)
+		}
+		return nil
+	}); err != nil {
+		if errors.Is(err, pgstore.ErrRunNotFound) {
+			return server.AbortRunResult{}, server.ErrNotFound
+		}
 		return server.AbortRunResult{}, err
 	}
 
@@ -6989,22 +6943,10 @@ func (s *Store) SetRunTerminalState(ctx context.Context, project, runID, state s
 // AppendRunAttempt appends a new PhaseAttempt to an in-progress run before retry dispatch.
 // Returns the new attempt's index.
 func (s *Store) AppendRunAttempt(ctx context.Context, project, runID, phase, phaseKind, workflowFilename string) (int, error) {
-	pk := azcosmos.NewPartitionKeyString(project)
-	const maxRetries = 5
-	for i := 0; i < maxRetries; i++ {
-		resp, err := s.runs.ReadItem(ctx, pk, runID, nil)
-		if isCosmosStatus(err, http.StatusNotFound) {
-			return 0, server.ErrNotFound
-		}
-		if err != nil {
-			return 0, err
-		}
-		var raw map[string]any
-		if err := json.Unmarshal(resp.Value, &raw); err != nil {
-			return 0, err
-		}
+	var nextIdx int
+	_, err := s.pgRuns.PatchPayload(ctx, project, runID, func(raw map[string]any) error {
 		attempts, _ := raw["attempts"].([]any)
-		nextIdx := len(attempts)
+		nextIdx = len(attempts)
 		if len(attempts) > 0 {
 			if last, ok := attempts[len(attempts)-1].(map[string]any); ok {
 				if ai, ok := last["attempt_index"].(float64); ok {
@@ -7023,49 +6965,34 @@ func (s *Store) AppendRunAttempt(ctx context.Context, project, runID, phase, pha
 		raw["attempts"] = append(attempts, newAttempt)
 		markPhaseDispatchingRaw(raw, phase, phaseKind, now)
 		raw["updated_at"] = now
-
-		payload, err := json.Marshal(raw)
-		if err != nil {
-			return 0, err
-		}
-		etag := azcore.ETag(resp.ETag)
-		if _, err := s.runs.ReplaceItem(ctx, pk, runID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
-			if isCosmosStatus(err, http.StatusPreconditionFailed) {
-				continue
-			}
-			return 0, err
-		}
-		return nextIdx, nil
+		return nil
+	})
+	if errors.Is(err, pgstore.ErrRunNotFound) {
+		return 0, server.ErrNotFound
 	}
-	return 0, fmt.Errorf("append run attempt: too many etag conflicts")
+	if err != nil {
+		return 0, err
+	}
+	return nextIdx, nil
 }
 
 func (s *Store) StartRunCycle(ctx context.Context, req server.StartRunCycleRequest) (int, error) {
-	pk := azcosmos.NewPartitionKeyString(req.Project)
-	const maxRetries = 5
-	for i := 0; i < maxRetries; i++ {
-		resp, err := s.runs.ReadItem(ctx, pk, req.RunID, nil)
-		if isCosmosStatus(err, http.StatusNotFound) {
-			return 0, server.ErrNotFound
-		}
-		if err != nil {
-			return 0, err
-		}
-		var raw map[string]any
-		if err := json.Unmarshal(resp.Value, &raw); err != nil {
-			return 0, err
-		}
+	var nextIdx int
+	var conflictReason error
+	_, err := s.pgRuns.PatchPayload(ctx, req.Project, req.RunID, func(raw map[string]any) error {
 		if stringValue(raw["state"]) != "queued" {
-			return 0, server.ErrConflict
+			conflictReason = server.ErrConflict
+			return errAbortPatch
 		}
 		attempts, _ := raw["attempts"].([]any)
 		for _, rawAttempt := range attempts {
 			attemptMap, ok := rawAttempt.(map[string]any)
 			if !ok || !boolValue(attemptMap["carry_forward"]) || stringValue(attemptMap["completed_at"]) == "" {
-				return 0, server.ErrConflict
+				conflictReason = server.ErrConflict
+				return errAbortPatch
 			}
 		}
-		nextIdx := len(attempts)
+		nextIdx = len(attempts)
 		if len(attempts) > 0 {
 			if last, ok := attempts[len(attempts)-1].(map[string]any); ok {
 				if ai, ok := last["attempt_index"].(float64); ok {
@@ -7088,21 +7015,18 @@ func (s *Store) StartRunCycle(ctx context.Context, req server.StartRunCycleReque
 		delete(raw, "admission_error")
 		markPhaseDispatchingRaw(raw, req.PhaseName, req.PhaseKind, now)
 		raw["updated_at"] = now
-
-		payload, err := json.Marshal(raw)
-		if err != nil {
-			return 0, err
-		}
-		etag := azcore.ETag(resp.ETag)
-		if _, err := s.runs.ReplaceItem(ctx, pk, req.RunID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); err != nil {
-			if isCosmosStatus(err, http.StatusPreconditionFailed) {
-				continue
-			}
-			return 0, err
-		}
-		return nextIdx, nil
+		return nil
+	})
+	if conflictReason != nil {
+		return 0, conflictReason
 	}
-	return 0, fmt.Errorf("start run cycle: too many etag conflicts")
+	if errors.Is(err, pgstore.ErrRunNotFound) {
+		return 0, server.ErrNotFound
+	}
+	if err != nil {
+		return 0, err
+	}
+	return nextIdx, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -7232,8 +7156,13 @@ func (s *Store) CreateRun(ctx context.Context, req server.CreateRunRequest) (ser
 	if err != nil {
 		return server.CreatedRun{}, err
 	}
-	pk := azcosmos.NewPartitionKeyString(req.Project)
-	if _, err := s.runs.CreateItem(ctx, pk, payload, nil); err != nil {
+	issueNum := req.IssueNumber
+	if _, err := s.pgRuns.Create(ctx, pgstore.RunRow{
+		ID:          runID,
+		Project:     req.Project,
+		IssueNumber: &issueNum,
+		Payload:     payload,
+	}); err != nil {
 		return server.CreatedRun{}, fmt.Errorf("create run doc: %w", err)
 	}
 	return server.CreatedRun{
@@ -7301,16 +7230,8 @@ func carryForwardAttemptsFromDocs(docs []attemptDoc) []server.RunAttemptData {
 }
 
 func (s *Store) CreateRecycleCycle(ctx context.Context, req server.CreateRecycleCycleRequest) (server.CreatedRun, error) {
-	pk := azcosmos.NewPartitionKeyString(req.Parent.Project)
-	parentResp, err := s.runs.ReadItem(ctx, pk, req.Parent.ID, nil)
-	if isCosmosStatus(err, http.StatusNotFound) {
-		return server.CreatedRun{}, server.ErrNotFound
-	}
+	parent, _, err := s.readRunDoc(ctx, req.Parent.Project, req.Parent.ID)
 	if err != nil {
-		return server.CreatedRun{}, err
-	}
-	var parent runDoc
-	if err := json.Unmarshal(parentResp.Value, &parent); err != nil {
 		return server.CreatedRun{}, err
 	}
 	if parent.SlotLeaseRef == nil || *parent.SlotLeaseRef == "" {
@@ -7349,16 +7270,18 @@ func (s *Store) CreateRecycleCycle(ctx context.Context, req server.CreateRecycle
 	}
 	runDisplay := fmt.Sprintf("%d.%d", runNumber, runCycle)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	recycledState := "recycled"
-	parent.State = recycledState
-	parent.QueueState = nil
-	parent.UpdatedAt = now
-	parentPayload, err := json.Marshal(parent)
-	if err != nil {
-		return server.CreatedRun{}, err
-	}
-	parentETag := azcore.ETag(parentResp.ETag)
-	if _, err := s.runs.ReplaceItem(ctx, pk, parent.ID, parentPayload, &azcosmos.ItemOptions{IfMatchEtag: &parentETag}); err != nil {
+	// Mark parent recycled via pgRuns.PatchPayload — atomically holds
+	// a row lock so a concurrent reader sees either the pre-recycle
+	// or the recycled doc, not a torn write.
+	if _, err := s.pgRuns.PatchPayload(ctx, parent.Project, parent.ID, func(raw map[string]any) error {
+		raw["state"] = "recycled"
+		delete(raw, "queue_state")
+		raw["updated_at"] = now
+		return nil
+	}); err != nil {
+		if errors.Is(err, pgstore.ErrRunNotFound) {
+			return server.CreatedRun{}, server.ErrNotFound
+		}
 		return server.CreatedRun{}, err
 	}
 
@@ -7415,7 +7338,13 @@ func (s *Store) CreateRecycleCycle(ctx context.Context, req server.CreateRecycle
 	if err != nil {
 		return server.CreatedRun{}, err
 	}
-	if _, err := s.runs.CreateItem(ctx, pk, payload, nil); err != nil {
+	issueNum := parent.IssueNumber
+	if _, err := s.pgRuns.Create(ctx, pgstore.RunRow{
+		ID:          runID,
+		Project:     parent.Project,
+		IssueNumber: &issueNum,
+		Payload:     payload,
+	}); err != nil {
 		return server.CreatedRun{}, fmt.Errorf("create recycle cycle doc: %w", err)
 	}
 	return server.CreatedRun{
