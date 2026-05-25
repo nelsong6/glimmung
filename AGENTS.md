@@ -3,6 +3,8 @@
 Read `CLAUDE.md` for the project architecture and design-system guidance.
 Read `docs/quality-timeframes.md` before planning substantial work.
 Read `docs/migration-policy.md` before any migration or cleanup work.
+Read `docs/features/README.md` and the relevant feature contract before
+substantial work on a contracted surface.
 
 ## Migration Policy
 
