@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -197,6 +198,9 @@ func (l *KubernetesNativeLauncher) ReturnTestSlotRuntime(ctx context.Context, le
 	if err := l.waitForInstallerPodsBySlotTerminated(ctx, l.Settings.NativeRunnerNamespace, slotName, 90*time.Second); err != nil {
 		return err
 	}
+	if err := l.retireTankSessionScope(ctx, lease, project, slotName); err != nil {
+		return err
+	}
 	if config, ok := testSlotHelmConfig(project); ok {
 		if err := l.runTestSlotHelmUninstall(ctx, lease, project, config, testSlotRenderModeHot); err != nil {
 			return err
@@ -226,6 +230,124 @@ func (l *KubernetesNativeLauncher) ReturnTestSlotRuntime(ctx context.Context, le
 		return err
 	}
 	return nil
+}
+
+type tankScopeRetireExchangeResponse struct {
+	Token string `json:"token"`
+}
+
+func (l *KubernetesNativeLauncher) tankSessionScopeRetireAuthorization(ctx context.Context) (string, error) {
+	if authorization := tankSessionScopeRetireAuth(ctx); authorization != "" {
+		return authorization, nil
+	}
+	token, err := l.exchangeAuthRomaineServiceToken(ctx)
+	if err != nil {
+		return "", err
+	}
+	return "Bearer " + token, nil
+}
+
+func (l *KubernetesNativeLauncher) exchangeAuthRomaineServiceToken(ctx context.Context) (string, error) {
+	baseURL := strings.TrimRight(strings.TrimSpace(l.Settings.AuthRomaineLifeBaseURL), "/")
+	if baseURL == "" {
+		return "", fmt.Errorf("auth.romaine.life base URL not configured for Tank session-scope retire")
+	}
+	tokenPath := strings.TrimSpace(l.Settings.AuthRomaineLifeTokenPath)
+	if tokenPath == "" {
+		return "", fmt.Errorf("auth.romaine.life token path not configured for Tank session-scope retire")
+	}
+	data, err := os.ReadFile(tokenPath)
+	if err != nil {
+		return "", fmt.Errorf("read auth.romaine.life service account token: %w", err)
+	}
+	saToken := strings.TrimSpace(string(data))
+	if saToken == "" {
+		return "", fmt.Errorf("auth.romaine.life service account token is empty")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/auth/exchange/k8s", strings.NewReader("{}"))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+saToken)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+
+	client := l.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 15 * time.Second}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("auth.romaine.life service exchange: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("auth.romaine.life service exchange returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	var decoded tankScopeRetireExchangeResponse
+	if err := json.Unmarshal(respBody, &decoded); err != nil {
+		return "", fmt.Errorf("decode auth.romaine.life service exchange response: %w", err)
+	}
+	token := strings.TrimSpace(decoded.Token)
+	if token == "" {
+		return "", fmt.Errorf("auth.romaine.life service exchange response missing token")
+	}
+	return token, nil
+}
+
+func (l *KubernetesNativeLauncher) retireTankSessionScope(ctx context.Context, lease Lease, project Project, slotName string) error {
+	if !isTankOperatorProject(project) {
+		return nil
+	}
+	slotName = strings.TrimSpace(slotName)
+	if slotName == "" {
+		return nil
+	}
+	baseURL := strings.TrimRight(strings.TrimSpace(l.Settings.TankOperatorBaseURL), "/")
+	if baseURL == "" {
+		return nil
+	}
+	authorization, err := l.tankSessionScopeRetireAuthorization(ctx)
+	if err != nil {
+		return err
+	}
+	body := map[string]any{
+		"source":    "glimmung.test_slot_return",
+		"project":   project.Name,
+		"slot_name": slotName,
+		"lease_ref": LeasePublicRefFromLease(lease),
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/internal/session-scopes/"+url.PathEscape(slotName)+"/retire", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", authorization)
+	req.Header.Set("Content-Type", "application/json")
+	client := l.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 15 * time.Second}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("retire tank session scope %s: %w", slotName, err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("retire tank session scope %s returned %d: %s", slotName, resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	return nil
+}
+
+func isTankOperatorProject(project Project) bool {
+	return strings.EqualFold(strings.TrimSpace(project.Name), "tank-operator") ||
+		strings.EqualFold(strings.TrimSpace(project.GitHubRepo), "nelsong6/tank-operator")
 }
 
 // waitForInstallerPodsTerminated polls for the helm-install pod(s) spawned

@@ -402,6 +402,160 @@ func TestReturnTestSlotRuntimeUninstallsHelmRuntimeRelease(t *testing.T) {
 	}
 }
 
+func TestReturnTestSlotRuntimeRetiresTankSessionScopeBeforeHelmUninstall(t *testing.T) {
+	tokenPath := tempTokenFile(t)
+	var paths []string
+	var tankAuth string
+	launcher := &KubernetesNativeLauncher{
+		Settings: Settings{
+			K8sAPIHost:                 "https://kube.test",
+			K8sSATokenPath:             tokenPath,
+			TankOperatorBaseURL:        "https://tank.internal",
+			NativeRunnerNamespace:      "glimmung-runs",
+			NativeRunnerServiceAccount: "glimmung-native-runner",
+			NativeRunnerJobTTLSeconds:  3600,
+		},
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			paths = append(paths, req.Method+" "+req.URL.Host+req.URL.Path)
+			if req.URL.Host == "tank.internal" {
+				tankAuth = req.Header.Get("Authorization")
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"status":"ok","retired_count":2}`)),
+				}, nil
+			}
+			body := `{"items":[]}`
+			if req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/jobs/glim-slot-uninstall-hot-") {
+				body = `{"status":{"conditions":[{"type":"Complete","status":"True"}]}}`
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		})},
+	}
+	lease := Lease{
+		Project:     "tank-operator",
+		LeaseNumber: intPtr(2),
+		Metadata: map[string]any{
+			"native_slot_name":          "tank-operator-slot-1",
+			"native_slot_index":         "1",
+			"native_sessions_namespace": "tank-operator-slot-1-sessions",
+		},
+	}
+	project := Project{
+		Name:       "tank-operator",
+		GitHubRepo: "nelsong6/tank-operator",
+		Metadata:   map[string]any{"test_slot_helm": map[string]any{"enabled": true}},
+	}
+	ctx := contextWithTankSessionScopeRetireAuth(context.Background(), "Bearer caller-jwt")
+
+	if err := launcher.ReturnTestSlotRuntime(ctx, lease, project); err != nil {
+		t.Fatalf("ReturnTestSlotRuntime: %v", err)
+	}
+	retirePath := "POST tank.internal/api/internal/session-scopes/tank-operator-slot-1/retire"
+	uninstallPath := "POST kube.test/apis/batch/v1/namespaces/glimmung-runs/jobs"
+	retireIdx := indexPath(paths, retirePath)
+	uninstallIdx := indexPath(paths, uninstallPath)
+	if retireIdx < 0 {
+		t.Fatalf("missing Tank retire call %s in paths=%#v", retirePath, paths)
+	}
+	if uninstallIdx < 0 {
+		t.Fatalf("missing Helm uninstall job call %s in paths=%#v", uninstallPath, paths)
+	}
+	if retireIdx > uninstallIdx {
+		t.Fatalf("Tank retire should happen before Helm uninstall, paths=%#v", paths)
+	}
+	if tankAuth != "Bearer caller-jwt" {
+		t.Fatalf("Tank retire Authorization=%q", tankAuth)
+	}
+}
+
+func TestReturnTestSlotRuntimeExchangesServiceTokenWhenCallerAuthMissing(t *testing.T) {
+	tokenPath := tempTokenFile(t)
+	var paths []string
+	var exchangeAuth string
+	var tankAuth string
+	launcher := &KubernetesNativeLauncher{
+		Settings: Settings{
+			K8sAPIHost:                 "https://kube.test",
+			K8sSATokenPath:             tokenPath,
+			TankOperatorBaseURL:        "https://tank.internal",
+			AuthRomaineLifeBaseURL:     "https://auth.internal",
+			AuthRomaineLifeTokenPath:   tokenPath,
+			NativeRunnerNamespace:      "glimmung-runs",
+			NativeRunnerServiceAccount: "glimmung-native-runner",
+			NativeRunnerJobTTLSeconds:  3600,
+		},
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			paths = append(paths, req.Method+" "+req.URL.Host+req.URL.Path)
+			switch req.URL.Host {
+			case "auth.internal":
+				exchangeAuth = req.Header.Get("Authorization")
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"token":"glimmung-service-jwt","expires_at":"2030-01-01T00:00:00Z"}`)),
+				}, nil
+			case "tank.internal":
+				tankAuth = req.Header.Get("Authorization")
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"status":"ok","retired_count":2}`)),
+				}, nil
+			}
+			body := `{"items":[]}`
+			if req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/jobs/glim-slot-uninstall-hot-") {
+				body = `{"status":{"conditions":[{"type":"Complete","status":"True"}]}}`
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		})},
+	}
+	lease := Lease{
+		Project:     "tank-operator",
+		LeaseNumber: intPtr(2),
+		Metadata: map[string]any{
+			"native_slot_name":          "tank-operator-slot-1",
+			"native_slot_index":         "1",
+			"native_sessions_namespace": "tank-operator-slot-1-sessions",
+		},
+	}
+	project := Project{
+		Name:       "tank-operator",
+		GitHubRepo: "nelsong6/tank-operator",
+		Metadata:   map[string]any{"test_slot_helm": map[string]any{"enabled": true}},
+	}
+
+	if err := launcher.ReturnTestSlotRuntime(context.Background(), lease, project); err != nil {
+		t.Fatalf("ReturnTestSlotRuntime: %v", err)
+	}
+	exchangePath := "POST auth.internal/api/auth/exchange/k8s"
+	retirePath := "POST tank.internal/api/internal/session-scopes/tank-operator-slot-1/retire"
+	uninstallPath := "POST kube.test/apis/batch/v1/namespaces/glimmung-runs/jobs"
+	exchangeIdx := indexPath(paths, exchangePath)
+	retireIdx := indexPath(paths, retirePath)
+	uninstallIdx := indexPath(paths, uninstallPath)
+	if exchangeIdx < 0 || retireIdx < 0 || uninstallIdx < 0 {
+		t.Fatalf("missing expected cleanup calls in paths=%#v", paths)
+	}
+	if exchangeIdx > retireIdx || retireIdx > uninstallIdx {
+		t.Fatalf("exchange, retire, uninstall order mismatch, paths=%#v", paths)
+	}
+	if exchangeAuth != "Bearer token" {
+		t.Fatalf("exchange Authorization=%q", exchangeAuth)
+	}
+	if tankAuth != "Bearer glimmung-service-jwt" {
+		t.Fatalf("Tank retire Authorization=%q", tankAuth)
+	}
+}
+
 func TestEnsureTestSlotPreliminariesDoesNotCreatePlaywrightRuntime(t *testing.T) {
 	tokenPath := tempTokenFile(t)
 	var paths []string
@@ -865,6 +1019,15 @@ func containsPath(paths []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func indexPath(paths []string, want string) int {
+	for i, path := range paths {
+		if path == want {
+			return i
+		}
+	}
+	return -1
 }
 
 func countPath(paths []string, want string) int {

@@ -314,7 +314,8 @@ func returnTestSlot(store ReadStore, preparer TestSlotPreparer, _ NativeGitHubTo
 				return
 			}
 			metrics.RecordTestSlotCleanupClaim(activationCancelReturn, metrics.CleanupClaimOutcomeGranted)
-			beginTestSlotCleanup(store, preparer, project, lease, true, activationCancelReturn, nil)
+			cleanupCtx := contextWithTankSessionScopeRetireAuth(context.Background(), r.Header.Get("Authorization"))
+			beginTestSlotCleanupWithContext(cleanupCtx, store, preparer, project, lease, true, activationCancelReturn, nil)
 			writeJSON(w, http.StatusAccepted, testSlotReturnResponse(project, req.Project, lease, testSlotStateCleaning, true))
 			return
 		}
@@ -794,6 +795,21 @@ const (
 	activationCancelRecovery        = "recovery"
 )
 
+type tankSessionScopeRetireAuthContextKey struct{}
+
+func contextWithTankSessionScopeRetireAuth(ctx context.Context, authorization string) context.Context {
+	authorization = strings.TrimSpace(authorization)
+	if authorization == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, tankSessionScopeRetireAuthContextKey{}, authorization)
+}
+
+func tankSessionScopeRetireAuth(ctx context.Context) string {
+	authorization, _ := ctx.Value(tankSessionScopeRetireAuthContextKey{}).(string)
+	return strings.TrimSpace(authorization)
+}
+
 func activateTestSlotRuntime(parent context.Context, store ReadStore, preparer TestSlotPreparer, minter NativeGitHubTokenMinter, project Project, lease Lease, logf func(string, ...any)) {
 	// Cross-replica dedup story for activation: there is no meaningful state
 	// transition we could CAS on (the slot stays in `activating` throughout
@@ -860,6 +876,10 @@ func cleanupTestSlotInstaller(parent context.Context, preparer TestSlotPreparer,
 }
 
 func beginTestSlotCleanup(store ReadStore, preparer TestSlotPreparer, project Project, lease Lease, releaseLease bool, cause string, logf func(string, ...any)) bool {
+	return beginTestSlotCleanupWithContext(context.Background(), store, preparer, project, lease, releaseLease, cause, logf)
+}
+
+func beginTestSlotCleanupWithContext(parent context.Context, store ReadStore, preparer TestSlotPreparer, project Project, lease Lease, releaseLease bool, cause string, logf func(string, ...any)) bool {
 	if preparer == nil {
 		return false
 	}
@@ -894,7 +914,7 @@ func beginTestSlotCleanup(store ReadStore, preparer TestSlotPreparer, project Pr
 		waitCtx, cancelWait := context.WithTimeout(context.Background(), activationCancelWait)
 		cancelInflightActivation(waitCtx, key, cause)
 		cancelWait()
-		cleanupTestSlotRuntime(context.Background(), store, preparer, project, lease, releaseLease, logf)
+		cleanupTestSlotRuntime(parent, store, preparer, project, lease, releaseLease, logf)
 	}()
 	return true
 }
