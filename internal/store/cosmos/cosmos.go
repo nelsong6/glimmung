@@ -21,6 +21,7 @@ import (
 	"github.com/nelsong6/glimmung/internal/domain/budget"
 	"github.com/nelsong6/glimmung/internal/domain/publicids"
 	"github.com/nelsong6/glimmung/internal/server"
+	pgstore "github.com/nelsong6/glimmung/internal/store/pg"
 )
 
 type Store struct {
@@ -37,6 +38,27 @@ type Store struct {
 	slots                    *azcosmos.ContainerClient
 	slotHistory              *azcosmos.ContainerClient
 	nativeProjectConcurrency int
+
+	// pgLocks is the Postgres-backed lock store. Injected by main.go
+	// via SetPGLocks after both cosmos.Store and pg.LocksStore are
+	// constructed. All Claim/Release/IsHeld/ListHeld lock operations
+	// flow through this field; cosmos.Store no longer talks to its
+	// `locks` container client for those operations (Stage 2b cutover
+	// per docs/postgres-migration.md). The `locks` field above is
+	// retained only so ListAllLockDocsForMigration can read the
+	// pre-migration snapshot for the one-shot Migrate copy — Stage 2i
+	// deletes both this field and the cosmos lock container client
+	// entirely.
+	pgLocks *pgstore.LocksStore
+}
+
+// SetPGLocks injects the Postgres-backed lock store. Called once at
+// startup by cmd/glimmung-go/main.go after pg.LocksStore is constructed.
+// Methods that read lock state (ListIssues, ListTouchpoints,
+// GetIssueDetailByNumber, the touchpoint detail builder) all route
+// through s.pgLocks once this is set.
+func (s *Store) SetPGLocks(locks *pgstore.LocksStore) {
+	s.pgLocks = locks
 }
 
 const workflowSchemaKind = "workflow_schema"
@@ -825,17 +847,17 @@ func (s *Store) ListIssues(ctx context.Context, filter server.IssueListFilter) (
 	if err != nil {
 		return nil, err
 	}
-	locks, err := s.listIssueLockDocs(ctx)
+	// Lock state read moved from cosmos.locks container to pg.LocksStore
+	// in Stage 2b. ListHeldByScope returns only currently-held + unexpired
+	// locks, so the per-row check below collapses to a simple map lookup.
+	heldIssueLocks, err := s.pgLocks.ListHeldByScope(ctx, "issue")
 	if err != nil {
 		return nil, err
 	}
 	runContext := issueRunContext(runDocs)
-	locksByKey := map[string]lockDoc{}
-	for _, lock := range locks {
-		locksByKey[lock.Key] = lock
-	}
 
 	now := time.Now().UTC()
+	_ = now // retained for any future per-row time math; locks no longer need it.
 	rows := make([]server.IssueRow, 0, len(issues))
 	for _, issue := range issues {
 		if filter.Project != "" && issue.Project != filter.Project {
@@ -869,9 +891,8 @@ func (s *Store) ListIssues(ctx context.Context, filter server.IssueListFilter) (
 		if filter.Workflow != "" && (row.Workflow == nil || *row.Workflow != filter.Workflow) {
 			continue
 		}
-		if lock, ok := locksByKey[fmt.Sprintf("%s#%d", issue.Project, issue.Number)]; ok {
-			expiresAt := parseOptionalTime(lock.ExpiresAt)
-			row.IssueLockHeld = lock.State == "held" && expiresAt != nil && expiresAt.After(now)
+		if _, held := heldIssueLocks[fmt.Sprintf("%s#%d", issue.Project, issue.Number)]; held {
+			row.IssueLockHeld = true
 		}
 		if filter.NeedsAttention && !issueRowNeedsAttention(row) {
 			continue
@@ -923,7 +944,7 @@ func (s *Store) GetIssueDetailByNumber(ctx context.Context, project string, numb
 		detail.LastRunRef = optionalNonEmptyStringPtr(publicids.RunRef(issue.Project, &issue.Number, display))
 		detail.LastRunState = optionalNonEmptyStringPtr(latestRun.State)
 	}
-	held, err := s.issueLockHeld(ctx, issue.Project, issue.Number)
+	held, err := s.pgLocks.IssueLockHeld(ctx, issue.Project, issue.Number)
 	if err != nil {
 		return server.IssueDetail{}, err
 	}
@@ -1295,19 +1316,42 @@ func (s *Store) listRunDocs(ctx context.Context) ([]runDoc, error) {
 	return docs, nil
 }
 
-func (s *Store) listIssueLockDocs(ctx context.Context) ([]lockDoc, error) {
+// ListAllLockDocsForMigration reads every lock document in the cosmos
+// `locks` container and returns it in the narrow shape pg.LocksStore's
+// Migrate path expects. Runs once per pod start (idempotent via ON
+// CONFLICT DO NOTHING on the receiving side). Stage 2i removes this
+// method along with the cosmos lock container client entirely.
+//
+// "All scopes" here means every doc in the container regardless of
+// scope. The user opted for "full copy of everything" in the migration
+// plan, so released and expired rows are preserved too.
+func (s *Store) ListAllLockDocsForMigration(ctx context.Context) ([]pgstore.LockMigrationRow, error) {
+	if s == nil || s.locks == nil {
+		return nil, nil
+	}
 	var docs []lockDoc
-	if err := singlePartitionQuery(
-		ctx,
-		s.locks,
-		azcosmos.NewPartitionKeyString("issue"),
-		"SELECT * FROM c WHERE c.scope = @scope",
-		[]azcosmos.QueryParameter{{Name: "@scope", Value: "issue"}},
-		&docs,
-	); err != nil {
+	if err := crossPartitionQuery(ctx, s.locks, "SELECT * FROM c", nil, &docs); err != nil {
 		return nil, err
 	}
-	return docs, nil
+	out := make([]pgstore.LockMigrationRow, 0, len(docs))
+	for _, doc := range docs {
+		row := pgstore.LockMigrationRow{
+			Scope: doc.Scope,
+			Key:   doc.Key,
+			State: doc.State,
+		}
+		if doc.HeldBy != nil {
+			row.HolderID = *doc.HeldBy
+		}
+		if expires := parseOptionalTime(doc.ExpiresAt); expires != nil {
+			row.ExpiresAt = expires
+		}
+		if claimed := parseOptionalTime(doc.ClaimedAt); claimed != nil {
+			row.ClaimedAt = claimed
+		}
+		out = append(out, row)
+	}
+	return out, nil
 }
 
 func (s *Store) latestRunForIssue(ctx context.Context, issue issueDoc) (*runDoc, []runDoc, error) {
@@ -1342,64 +1386,6 @@ func (s *Store) latestRunForIssue(ctx context.Context, issue issueDoc) (*runDoc,
 	})
 	latest := docs[len(docs)-1]
 	return &latest, docs, nil
-}
-
-// AnyLockHeld reports whether any lock with the given scope is currently
-// held (state == "held" and not past expires_at). Used by the state
-// snapshot to feed the SPA's inflight-lock pulse without forcing the
-// frontend to poll /v1/issues + /v1/touchpoints every 20 seconds. The
-// query is single-partition (locks PK is /scope) so cost is bounded.
-//
-// scope is the lock kind — "issue" or "pr" — and must match the value
-// the lock writer used (see ClaimLock at the bottom of this file).
-func (s *Store) AnyLockHeld(ctx context.Context, scope string) (bool, error) {
-	var docs []lockDoc
-	if err := singlePartitionQuery(
-		ctx,
-		s.locks,
-		azcosmos.NewPartitionKeyString(scope),
-		"SELECT * FROM c WHERE c.scope = @scope AND c.state = @state",
-		[]azcosmos.QueryParameter{
-			{Name: "@scope", Value: scope},
-			{Name: "@state", Value: "held"},
-		},
-		&docs,
-	); err != nil {
-		return false, err
-	}
-	now := time.Now().UTC()
-	for _, doc := range docs {
-		expiresAt := parseOptionalTime(doc.ExpiresAt)
-		if expiresAt != nil && expiresAt.After(now) {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func (s *Store) issueLockHeld(ctx context.Context, project string, number int) (bool, error) {
-	var docs []lockDoc
-	if err := singlePartitionQuery(
-		ctx,
-		s.locks,
-		azcosmos.NewPartitionKeyString("issue"),
-		"SELECT * FROM c WHERE c.scope = @scope AND c.key = @key",
-		[]azcosmos.QueryParameter{
-			{Name: "@scope", Value: "issue"},
-			{Name: "@key", Value: fmt.Sprintf("%s#%d", project, number)},
-		},
-		&docs,
-	); err != nil {
-		return false, err
-	}
-	now := time.Now().UTC()
-	for _, doc := range docs {
-		expiresAt := parseOptionalTime(doc.ExpiresAt)
-		if doc.State == "held" && expiresAt != nil && expiresAt.After(now) {
-			return true, nil
-		}
-	}
-	return false, nil
 }
 
 func (s *Store) issueRunDocs(ctx context.Context, project string, issueNumber int) ([]runDoc, error) {
@@ -2848,11 +2834,18 @@ func (s *Store) ListTouchpoints(ctx context.Context, filter server.TouchpointLis
 	// Enrich with issue and run data.
 	issueDocs, _ := s.listIssueDocs(ctx)
 	runDocs, _ := s.listRunDocs(ctx)
-	lockDocs, _ := s.listIssueLockDocs(ctx)
+	// PR lock read moved from cosmos.locks container to pg.LocksStore in
+	// Stage 2b. ListHeldByScope("pr") returns only currently-held +
+	// unexpired locks; convert to the map[key]bool shape the existing
+	// touchpoint row builder expects.
+	heldPRLocks, _ := s.pgLocks.ListHeldByScope(ctx, "pr")
+	prLockByKey := make(map[string]bool, len(heldPRLocks))
+	for key := range heldPRLocks {
+		prLockByKey[key] = true
+	}
 
 	issueRefByID, issueNumberByID := buildIssueIndexes(issueDocs)
 	runRefByID, runByLinkedIssueID, runByRepoPR := buildRunIndexes(runDocs)
-	prLockByKey := buildPRLockIndex(lockDocs)
 
 	now := time.Now().UTC()
 	rows := make([]server.TouchpointRow, 0, len(touchpointDocs))
@@ -3049,8 +3042,9 @@ func (s *Store) buildTouchpointDetail(ctx context.Context, doc touchpointDoc) (s
 		}
 	}
 
-	// PR lock check.
-	prLockHeld, _ := s.prLockHeld(ctx, doc.Repo, doc.Number)
+	// PR lock check moved from cosmos.locks container to pg.LocksStore
+	// in Stage 2b.
+	prLockHeld, _ := s.pgLocks.PRLockHeld(ctx, doc.Repo, doc.Number)
 
 	detail := server.TouchpointDetail{
 		Ref:            publicids.TouchpointRef(doc.Repo, &doc.Number),
@@ -3107,28 +3101,6 @@ func (s *Store) replaceTouchpointDoc(ctx context.Context, doc touchpointDoc) err
 	partitionKey := azcosmos.NewPartitionKeyString(doc.Project)
 	_, err = s.reports.ReplaceItem(ctx, partitionKey, doc.ID, payload, nil)
 	return err
-}
-
-func (s *Store) prLockHeld(ctx context.Context, repo string, prNumber int) (bool, error) {
-	key := fmt.Sprintf("%s#%d", repo, prNumber)
-	var docs []lockDoc
-	if err := singlePartitionQuery(ctx, s.locks,
-		azcosmos.NewPartitionKeyString("pr"),
-		"SELECT * FROM c WHERE c.scope = @scope AND c.key = @key",
-		[]azcosmos.QueryParameter{
-			{Name: "@scope", Value: "pr"},
-			{Name: "@key", Value: key},
-		},
-		&docs,
-	); err != nil || len(docs) == 0 {
-		return false, err
-	}
-	lock := docs[0]
-	if lock.State != "held" {
-		return false, nil
-	}
-	expires := parseTimeOrZero(lock.ExpiresAt)
-	return expires.After(time.Now().UTC()), nil
 }
 
 func (s *Store) resolveIssueIDByRef(ctx context.Context, project, ref string) *string {
@@ -3220,20 +3192,6 @@ func buildRunIndexes(docs []runDoc) (map[string]string, map[string]*runDoc, map[
 		}
 	}
 	return refByID, byLinkedIssue, byRepoPR
-}
-
-// buildPRLockIndex maps "{repo}#{pr_number}" â†’ whether a held, unexpired lock exists.
-func buildPRLockIndex(docs []lockDoc) map[string]bool {
-	m := make(map[string]bool, len(docs))
-	now := time.Now().UTC()
-	for _, d := range docs {
-		if d.Scope != "pr" || d.State != "held" {
-			continue
-		}
-		expires := parseTimeOrZero(d.ExpiresAt)
-		m[d.Key] = expires.After(now)
-	}
-	return m
 }
 
 func touchpointRowFromDoc(
@@ -5480,11 +5438,11 @@ func (s *Store) AbortRunByID(ctx context.Context, project, runID, reason string)
 	// Best-effort lock releases.
 	var issueLockReleased, prLockReleased *bool
 	if doc.IssueLockHolderID != nil && *doc.IssueLockHolderID != "" && doc.IssueNumber > 0 {
-		released := s.releaseLock(ctx, "issue", fmt.Sprintf("%s#%d", project, doc.IssueNumber), *doc.IssueLockHolderID)
+		released := s.pgLocks.ReleaseLock(ctx, "issue", fmt.Sprintf("%s#%d", project, doc.IssueNumber), *doc.IssueLockHolderID)
 		issueLockReleased = &released
 	}
 	if doc.PRLockHolderID != nil && *doc.PRLockHolderID != "" && doc.PRNumber != nil && doc.IssueRepo != "" {
-		released := s.releaseLock(ctx, "pr", fmt.Sprintf("%s#%d", doc.IssueRepo, *doc.PRNumber), *doc.PRLockHolderID)
+		released := s.pgLocks.ReleaseLock(ctx, "pr", fmt.Sprintf("%s#%d", doc.IssueRepo, *doc.PRNumber), *doc.PRLockHolderID)
 		prLockReleased = &released
 	}
 	slotLeaseReleased := s.releaseRunSlotLease(ctx, doc)
@@ -5508,43 +5466,6 @@ func (s *Store) releaseRunSlotLease(ctx context.Context, doc runDoc) *bool {
 	_, err := s.CancelLeaseByRef(ctx, doc.Project, ref)
 	released := err == nil
 	return &released
-}
-
-// releaseLock releases a held lock by scope+key if held_by matches holderID. Returns true if released.
-func (s *Store) releaseLock(ctx context.Context, scope, key, holderID string) bool {
-	docID := lockDocID(scope, key)
-	pk := azcosmos.NewPartitionKeyString(scope)
-	resp, err := s.locks.ReadItem(ctx, pk, docID, nil)
-	if err != nil {
-		return false
-	}
-	var raw map[string]any
-	if err := json.Unmarshal(resp.Value, &raw); err != nil {
-		return false
-	}
-	if stringValue(raw["held_by"]) != holderID {
-		return false
-	}
-	if stringValue(raw["state"]) != "held" {
-		return false
-	}
-	raw["state"] = "released"
-	payload, err := json.Marshal(raw)
-	if err != nil {
-		return false
-	}
-	etag := azcore.ETag(resp.ETag)
-	_, err = s.locks.ReplaceItem(ctx, pk, docID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag})
-	return err == nil
-}
-
-// lockDocID returns the Cosmos document ID for a lock, matching Python's lock_ops._doc_id.
-func lockDocID(scope, key string) string {
-	// Python: f"{scope}::{quote(key, safe='')}"
-	// We URL-encode the key's '#' character as %23.
-	encoded := strings.ReplaceAll(key, "#", "%23")
-	encoded = strings.ReplaceAll(encoded, "/", "%2F")
-	return scope + "::" + encoded
 }
 
 // ---- NativeRunStore implementation ----
@@ -6916,11 +6837,11 @@ func (s *Store) SetRunTerminalState(ctx context.Context, project, runID, state s
 
 	var issueLockReleased, prLockReleased *bool
 	if doc.IssueLockHolderID != nil && *doc.IssueLockHolderID != "" && doc.IssueNumber > 0 {
-		released := s.releaseLock(ctx, "issue", fmt.Sprintf("%s#%d", project, doc.IssueNumber), *doc.IssueLockHolderID)
+		released := s.pgLocks.ReleaseLock(ctx, "issue", fmt.Sprintf("%s#%d", project, doc.IssueNumber), *doc.IssueLockHolderID)
 		issueLockReleased = &released
 	}
 	if doc.PRLockHolderID != nil && *doc.PRLockHolderID != "" && doc.PRNumber != nil && doc.IssueRepo != "" {
-		released := s.releaseLock(ctx, "pr", fmt.Sprintf("%s#%d", doc.IssueRepo, *doc.PRNumber), *doc.PRLockHolderID)
+		released := s.pgLocks.ReleaseLock(ctx, "pr", fmt.Sprintf("%s#%d", doc.IssueRepo, *doc.PRNumber), *doc.PRLockHolderID)
 		prLockReleased = &released
 	}
 
@@ -7056,85 +6977,6 @@ func (s *Store) StartRunCycle(ctx context.Context, req server.StartRunCycleReque
 // ---------------------------------------------------------------------------
 // RunDispatchStore implementation
 // ---------------------------------------------------------------------------
-
-// ClaimIssueLock atomically claims the issue-scoped lock for dispatch serialization.
-// Returns server.ErrAlreadyRunning (wrapped in *server.AlreadyRunningError) if currently held.
-func (s *Store) ClaimIssueLock(ctx context.Context, project string, issueNumber int, holderID string, ttlSeconds int) error {
-	key := fmt.Sprintf("%s#%d", project, issueNumber)
-	return s.ClaimLock(ctx, "issue", key, holderID, ttlSeconds, map[string]any{})
-}
-
-func (s *Store) ClaimLock(ctx context.Context, scope, key, holderID string, ttlSeconds int, metadata map[string]any) error {
-	docID := lockDocID(scope, key)
-	pk := azcosmos.NewPartitionKeyString(scope)
-
-	const maxRetries = 5
-	for i := 0; i < maxRetries; i++ {
-		now := time.Now().UTC()
-		newDoc := lockDoc{
-			ID:              docID,
-			Scope:           scope,
-			Key:             key,
-			State:           "held",
-			HeldBy:          &holderID,
-			ClaimedAt:       now.Format(time.RFC3339Nano),
-			ExpiresAt:       now.Add(time.Duration(ttlSeconds) * time.Second).Format(time.RFC3339Nano),
-			LastHeartbeatAt: now.Format(time.RFC3339Nano),
-			Metadata:        mapOrEmpty(metadata),
-		}
-		payload, err := json.Marshal(newDoc)
-		if err != nil {
-			return err
-		}
-
-		resp, readErr := s.locks.ReadItem(ctx, pk, docID, nil)
-		if isCosmosStatus(readErr, http.StatusNotFound) {
-			// No existing lock â€” try to create.
-			if _, createErr := s.locks.CreateItem(ctx, pk, payload, nil); createErr == nil {
-				return nil
-			} else if isCosmosStatus(createErr, http.StatusConflict) {
-				continue // lost the race; retry
-			} else {
-				return createErr
-			}
-		}
-		if readErr != nil {
-			return readErr
-		}
-
-		// Lock exists. Check if held and unexpired.
-		var existing lockDoc
-		if err := json.Unmarshal(resp.Value, &existing); err != nil {
-			return err
-		}
-		expiresAt := parseOptionalTime(existing.ExpiresAt)
-		if existing.State == "held" && expiresAt != nil && expiresAt.After(time.Now().UTC()) {
-			heldBy := stringOrEmpty(existing.HeldBy)
-			return &server.AlreadyRunningError{HeldBy: heldBy, ExpiresAt: *expiresAt}
-		}
-
-		// Take over: expired, released, or expired-held.
-		etag := azcore.ETag(resp.ETag)
-		if _, replaceErr := s.locks.ReplaceItem(ctx, pk, docID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag}); replaceErr == nil {
-			return nil
-		} else if isCosmosStatus(replaceErr, http.StatusPreconditionFailed) {
-			continue // CAS conflict; retry
-		} else {
-			return replaceErr
-		}
-	}
-	return fmt.Errorf("claim lock: too many retries for %s/%s", scope, key)
-}
-
-// ReleaseIssueLock releases the issue lock if held by holderID. Best-effort (ignores errors).
-func (s *Store) ReleaseIssueLock(ctx context.Context, project string, issueNumber int, holderID string) {
-	key := fmt.Sprintf("%s#%d", project, issueNumber)
-	s.releaseLock(ctx, "issue", key, holderID)
-}
-
-func (s *Store) ReleaseLock(ctx context.Context, scope, key, holderID string) bool {
-	return s.releaseLock(ctx, scope, key, holderID)
-}
 
 // ReadProjectGitHubRepo returns the githubRepo field for a registered project.
 func (s *Store) ReadProjectGitHubRepo(ctx context.Context, project string) (string, error) {
