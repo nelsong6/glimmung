@@ -159,6 +159,22 @@ var schemaMigrations = []string{
 		updated_at                  timestamptz NOT NULL DEFAULT now()
 	)`,
 
+	// Stage 2j: portfolios — replaces cosmos portfolio_element docs that
+	// shared the `reports` container under kind='portfolio_element'.
+	// Postgres splits them out; each (project, route, element_id) is
+	// unique.
+	`CREATE TABLE IF NOT EXISTS portfolios (
+		project    text NOT NULL,
+		route      text NOT NULL,
+		element_id text NOT NULL,
+		payload    jsonb NOT NULL DEFAULT '{}'::jsonb,
+		created_at timestamptz NOT NULL DEFAULT now(),
+		updated_at timestamptz NOT NULL DEFAULT now(),
+		PRIMARY KEY (project, route, element_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS portfolios_by_project_updated
+		ON portfolios (project, updated_at DESC)`,
+
 	// ------------------------------------------------------------------
 	// locks — replaces the Cosmos id-uniqueness primitive. Acquire uses
 	// the atomic "INSERT ... ON CONFLICT DO UPDATE WHERE state='released'

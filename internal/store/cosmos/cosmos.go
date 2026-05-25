@@ -155,6 +155,142 @@ func (s *Store) ListAllSlotDocsForMigration(ctx context.Context) ([]pgstore.Slot
 	return slots, history, nil
 }
 
+// ListAllPlaybookDocsForMigration reads cosmos playbooks container.
+func (s *Store) ListAllPlaybookDocsForMigration(ctx context.Context) ([]pgstore.PlaybookRow, error) {
+	if s == nil || s.playbooks == nil {
+		return nil, nil
+	}
+	var docs []playbookDoc
+	if err := crossPartitionQuery(ctx, s.playbooks, "SELECT * FROM c", nil, &docs); err != nil {
+		return nil, err
+	}
+	out := make([]pgstore.PlaybookRow, 0, len(docs))
+	for _, doc := range docs {
+		payload, err := json.Marshal(doc)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, pgstore.PlaybookRow{
+			Project:   doc.Project,
+			Name:      doc.ID,
+			Payload:   payload,
+			CreatedAt: parseTimeOrZero(doc.CreatedAt),
+			UpdatedAt: parseTimeOrZero(doc.UpdatedAt),
+		})
+	}
+	return out, nil
+}
+
+// ListAllReportDocsForMigration reads cosmos reports container,
+// filtering out portfolio_element kind docs (those go to pg.portfolios
+// via ListAllPortfolioDocsForMigration).
+func (s *Store) ListAllReportDocsForMigration(ctx context.Context) ([]pgstore.ReportRow, error) {
+	if s == nil || s.reports == nil {
+		return nil, nil
+	}
+	var raw []map[string]any
+	if err := crossPartitionQuery(ctx, s.reports, "SELECT * FROM c", nil, &raw); err != nil {
+		return nil, err
+	}
+	out := make([]pgstore.ReportRow, 0, len(raw))
+	for _, doc := range raw {
+		if kind, _ := doc["kind"].(string); kind == "portfolio_element" {
+			continue
+		}
+		id, _ := doc["id"].(string)
+		project, _ := doc["project"].(string)
+		if id == "" || project == "" {
+			continue
+		}
+		var issueNumber *int
+		if v, ok := doc["issue_number"].(float64); ok {
+			n := int(v)
+			issueNumber = &n
+		}
+		var createdAt, updatedAt time.Time
+		if v, ok := doc["created_at"].(string); ok {
+			if t := parseOptionalTime(v); t != nil {
+				createdAt = *t
+			}
+		}
+		if v, ok := doc["updated_at"].(string); ok {
+			if t := parseOptionalTime(v); t != nil {
+				updatedAt = *t
+			}
+		}
+		payload, err := json.Marshal(doc)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, pgstore.ReportRow{
+			ID:          id,
+			Project:     project,
+			IssueNumber: issueNumber,
+			Payload:     payload,
+			CreatedAt:   createdAt,
+			UpdatedAt:   updatedAt,
+		})
+	}
+	return out, nil
+}
+
+// ListAllPortfolioDocsForMigration reads cosmos reports container for
+// kind='portfolio_element' docs.
+func (s *Store) ListAllPortfolioDocsForMigration(ctx context.Context) ([]pgstore.PortfolioRow, error) {
+	if s == nil || s.reports == nil {
+		return nil, nil
+	}
+	var docs []portfolioElementDoc
+	if err := crossPartitionQuery(ctx, s.reports, "SELECT * FROM c WHERE c.kind = @kind",
+		[]azcosmos.QueryParameter{{Name: "@kind", Value: "portfolio_element"}}, &docs); err != nil {
+		return nil, err
+	}
+	out := make([]pgstore.PortfolioRow, 0, len(docs))
+	for _, doc := range docs {
+		payload, err := json.Marshal(doc)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, pgstore.PortfolioRow{
+			Project:   doc.Project,
+			Route:     doc.Route,
+			ElementID: doc.ElementID,
+			Payload:   payload,
+			CreatedAt: parseTimeOrZero(doc.CreatedAt),
+			UpdatedAt: parseTimeOrZero(doc.UpdatedAt),
+		})
+	}
+	return out, nil
+}
+
+// ListAllTouchpointDocsForMigration reads cosmos touchpoint docs
+// (which live in the reports container as well — kind='touchpoint').
+func (s *Store) ListAllTouchpointDocsForMigration(ctx context.Context) ([]pgstore.TouchpointRow, error) {
+	if s == nil || s.reports == nil {
+		return nil, nil
+	}
+	var docs []touchpointDoc
+	if err := crossPartitionQuery(ctx, s.reports, "SELECT * FROM c WHERE c.kind = @kind",
+		[]azcosmos.QueryParameter{{Name: "@kind", Value: "touchpoint"}}, &docs); err != nil {
+		return nil, err
+	}
+	out := make([]pgstore.TouchpointRow, 0, len(docs))
+	for _, doc := range docs {
+		payload, err := json.Marshal(doc)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, pgstore.TouchpointRow{
+			Project:     doc.Project,
+			IssueNumber: doc.Number,
+			Payload:     payload,
+			CreatedAt:   parseTimeOrZero(doc.CreatedAt),
+			UpdatedAt:   parseTimeOrZero(doc.UpdatedAt),
+		})
+	}
+	return out, nil
+}
+
 // ListAllSignalDocsForMigration reads cosmos signals container for
 // pg.SignalsStore.Migrate.
 func (s *Store) ListAllSignalDocsForMigration(ctx context.Context) ([]pgstore.SignalRow, error) {

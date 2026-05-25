@@ -220,6 +220,59 @@ func main() {
 			log.Printf("signals migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
 		}()
 
+		// Stage 2j foundations: playbooks + reports + portfolios + touchpoints.
+		pgPlaybooks := pgstore.NewPlaybooksStore(pgPool)
+		_ = pgPlaybooks
+		go func() {
+			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			copied, skipped, err := pgPlaybooks.Migrate(migCtx, store)
+			if err != nil {
+				log.Printf("playbooks migration cosmos->pg failed: %v", err)
+				return
+			}
+			log.Printf("playbooks migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
+		}()
+
+		pgReports := pgstore.NewReportsStore(pgPool)
+		_ = pgReports
+		go func() {
+			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			copied, skipped, err := pgReports.Migrate(migCtx, store)
+			if err != nil {
+				log.Printf("reports migration cosmos->pg failed: %v", err)
+				return
+			}
+			log.Printf("reports migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
+		}()
+
+		pgPortfolios := pgstore.NewPortfoliosStore(pgPool)
+		_ = pgPortfolios
+		go func() {
+			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			copied, skipped, err := pgPortfolios.Migrate(migCtx, store)
+			if err != nil {
+				log.Printf("portfolios migration cosmos->pg failed: %v", err)
+				return
+			}
+			log.Printf("portfolios migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
+		}()
+
+		pgTouchpoints := pgstore.NewTouchpointsStore(pgPool)
+		_ = pgTouchpoints
+		go func() {
+			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			copied, skipped, err := pgTouchpoints.Migrate(migCtx, store)
+			if err != nil {
+				log.Printf("touchpoints migration cosmos->pg failed: %v", err)
+				return
+			}
+			log.Printf("touchpoints migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
+		}()
+
 		rt = &runtimeStore{Store: store, LocksStore: pgLocks}
 	} else {
 		log.Printf("runtime store disabled: cosmos store and postgres pool both required (store=%v pgPool=%v)", store != nil, pgPool != nil)
