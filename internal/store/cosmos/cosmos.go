@@ -82,6 +82,12 @@ type Store struct {
 	// cutover). ListPlaybooks / GetPlaybook / CreatePlaybook /
 	// PatchPlaybookEntryGate delegate here.
 	pgPlaybooks *pgstore.PlaybooksStore
+
+	// pgSignals is the Postgres-backed signals store (Stage 2-signals
+	// cutover). EnqueueSignal / ListGraphSignals / ListPendingSignals /
+	// MarkSignalProcessing / MarkSignalProcessed / MarkSignalFailed
+	// delegate here.
+	pgSignals *pgstore.SignalsStore
 }
 
 // SetPGLocks injects the Postgres-backed lock store. Called once at
@@ -124,6 +130,22 @@ func (s *Store) SetPGPortfolios(portfolios *pgstore.PortfoliosStore) {
 // SetPGPlaybooks injects the Postgres-backed playbooks store.
 func (s *Store) SetPGPlaybooks(playbooks *pgstore.PlaybooksStore) {
 	s.pgPlaybooks = playbooks
+}
+
+// SetPGSignals injects the Postgres-backed signals store.
+func (s *Store) SetPGSignals(signals *pgstore.SignalsStore) {
+	s.pgSignals = signals
+}
+
+// signalDocFromPayload deserializes a pg signal row's payload back into
+// the cosmos signalDoc shape so the existing queuedSignalFromDoc helper
+// and the public-shape conversions can be reused.
+func signalDocFromPayload(payload []byte) (signalDoc, error) {
+	var doc signalDoc
+	if err := json.Unmarshal(payload, &doc); err != nil {
+		return signalDoc{}, err
+	}
+	return doc, nil
 }
 
 // playbookDocFromPayload deserializes a pg playbook row's payload back
@@ -5263,8 +5285,11 @@ func (s *Store) EnqueueSignal(ctx context.Context, req server.SignalEnqueue) (se
 	if err != nil {
 		return server.PublicSignal{}, fmt.Errorf("marshal signal: %w", err)
 	}
-	pk := azcosmos.NewPartitionKeyString(doc.TargetRepo)
-	if _, err := s.signals.CreateItem(ctx, pk, data, nil); err != nil {
+	if _, err := s.pgSignals.Create(ctx, pgstore.SignalRow{
+		ID:         doc.ID,
+		TargetRepo: doc.TargetRepo,
+		Payload:    data,
+	}); err != nil {
 		return server.PublicSignal{}, fmt.Errorf("create signal: %w", err)
 	}
 	ref := fmt.Sprintf("signal:%s:%s:%s:%s", doc.TargetType, doc.TargetRepo, req.TargetRef, now.Format(time.RFC3339Nano))
@@ -5280,26 +5305,17 @@ func (s *Store) EnqueueSignal(ctx context.Context, req server.SignalEnqueue) (se
 }
 
 func (s *Store) ListGraphSignals(ctx context.Context, filter server.GraphSignalFilter) ([]server.GraphSignal, error) {
-	// signals container is partitioned by /target_repo and the dashboard
-	// asks for a global view across every repo. Cosmos cannot serve an
-	// ORDER BY across partitions from the Go SDK, so we drop ORDER BY
-	// here and sort in Go after — the docs are small (one per pending
-	// signal) and ListPendingSignals already follows the same pattern.
-	query := "SELECT * FROM c"
-	var params []azcosmos.QueryParameter
-	if strings.TrimSpace(filter.State) != "" {
-		query += " WHERE c.state = @state"
-		params = append(params, azcosmos.QueryParameter{Name: "@state", Value: filter.State})
-	}
-	var docs []signalDoc
-	if err := crossPartitionQuery(ctx, s.signals, query, params, &docs); err != nil {
+	state := strings.TrimSpace(filter.State)
+	rows, err := s.pgSignals.List(ctx, state, "", 0)
+	if err != nil {
 		return nil, err
 	}
-	sort.Slice(docs, func(i, j int) bool {
-		return docs[i].EnqueuedAt < docs[j].EnqueuedAt
-	})
-	signals := make([]server.GraphSignal, 0, len(docs))
-	for _, doc := range docs {
+	signals := make([]server.GraphSignal, 0, len(rows))
+	for _, row := range rows {
+		doc, err := signalDocFromPayload(row.Payload)
+		if err != nil {
+			return nil, err
+		}
 		signals = append(signals, server.GraphSignal{
 			ID:                doc.ID,
 			TargetType:        doc.TargetType,
@@ -5317,113 +5333,103 @@ func (s *Store) ListGraphSignals(ctx context.Context, filter server.GraphSignalF
 }
 
 func (s *Store) ListPendingSignals(ctx context.Context, limit int) ([]server.QueuedSignal, error) {
-	// Global dispatch queue across every repo; signals container is
-	// partitioned by /target_repo. Cross-partition scan with no ORDER
-	// BY — the gateway handles this directly.
-	query := "SELECT * FROM c WHERE c.state = @state"
-	var docs []signalDoc
-	if err := crossPartitionQuery(ctx, s.signals, query,
-		[]azcosmos.QueryParameter{{Name: "@state", Value: "pending"}},
-		&docs,
-	); err != nil {
+	rows, err := s.pgSignals.List(ctx, "pending", "", limit)
+	if err != nil {
 		return nil, err
 	}
-	sort.Slice(docs, func(i, j int) bool {
-		return docs[i].EnqueuedAt < docs[j].EnqueuedAt
-	})
-	if limit > 0 && len(docs) > limit {
-		docs = docs[:limit]
-	}
-	out := make([]server.QueuedSignal, 0, len(docs))
-	for _, doc := range docs {
+	out := make([]server.QueuedSignal, 0, len(rows))
+	for _, row := range rows {
+		doc, err := signalDocFromPayload(row.Payload)
+		if err != nil {
+			return nil, err
+		}
 		out = append(out, queuedSignalFromDoc(doc))
 	}
 	return out, nil
 }
 
 func (s *Store) MarkSignalProcessing(ctx context.Context, signal server.QueuedSignal) (server.QueuedSignal, bool, error) {
-	doc, etag, err := s.readSignalDoc(ctx, signal.TargetRepo, signal.ID)
-	if err != nil {
-		return server.QueuedSignal{}, false, err
-	}
-	if doc.State != "pending" {
+	// Use a transactional read-modify-write: SELECT FOR UPDATE prevents
+	// the state-pending check from racing another dispatcher claiming
+	// the same signal. The mutator returns errSignalAlreadyClaimed when
+	// state != pending; that becomes the "claimed=false" return.
+	var alreadyClaimed bool
+	patched, err := s.pgSignals.PatchPayload(ctx, signal.ID, func(payload map[string]any) error {
+		state, _ := payload["state"].(string)
+		if state != "pending" {
+			alreadyClaimed = true
+			return errSignalAlreadyClaimed
+		}
+		payload["state"] = "processing"
+		return nil
+	})
+	if alreadyClaimed {
+		// Re-read the current row so we can return its current state.
+		row, getErr := s.pgSignals.GetByID(ctx, signal.ID)
+		if getErr != nil {
+			return server.QueuedSignal{}, false, getErr
+		}
+		doc, derr := signalDocFromPayload(row.Payload)
+		if derr != nil {
+			return server.QueuedSignal{}, false, derr
+		}
 		return queuedSignalFromDoc(doc), false, nil
 	}
-	doc.State = "processing"
-	updated, err := s.replaceSignalDoc(ctx, signal.TargetRepo, doc, etag)
-	if isCosmosStatus(err, http.StatusPreconditionFailed) {
-		return server.QueuedSignal{}, false, nil
+	if errors.Is(err, pgstore.ErrSignalNotFound) {
+		return server.QueuedSignal{}, false, server.ErrNotFound
 	}
 	if err != nil {
 		return server.QueuedSignal{}, false, err
 	}
-	return queuedSignalFromDoc(updated), true, nil
+	doc, err := signalDocFromPayload(patched.Payload)
+	if err != nil {
+		return server.QueuedSignal{}, false, err
+	}
+	return queuedSignalFromDoc(doc), true, nil
 }
 
 func (s *Store) MarkSignalProcessed(ctx context.Context, signal server.QueuedSignal, decision string) (server.QueuedSignal, error) {
-	doc, etag, err := s.readSignalDoc(ctx, signal.TargetRepo, signal.ID)
+	patched, err := s.pgSignals.PatchPayload(ctx, signal.ID, func(payload map[string]any) error {
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		payload["state"] = "processed"
+		payload["processed_at"] = now
+		payload["processed_decision"] = decision
+		return nil
+	})
+	if errors.Is(err, pgstore.ErrSignalNotFound) {
+		return server.QueuedSignal{}, server.ErrNotFound
+	}
 	if err != nil {
 		return server.QueuedSignal{}, err
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	doc.State = "processed"
-	doc.ProcessedAt = &now
-	doc.ProcessedDecision = &decision
-	updated, err := s.replaceSignalDoc(ctx, signal.TargetRepo, doc, etag)
+	doc, err := signalDocFromPayload(patched.Payload)
 	if err != nil {
 		return server.QueuedSignal{}, err
 	}
-	return queuedSignalFromDoc(updated), nil
+	return queuedSignalFromDoc(doc), nil
 }
 
 func (s *Store) MarkSignalFailed(ctx context.Context, signal server.QueuedSignal, reason string) error {
-	doc, etag, err := s.readSignalDoc(ctx, signal.TargetRepo, signal.ID)
-	if err != nil {
-		return err
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	doc.State = "failed"
-	doc.ProcessedAt = &now
 	if len(reason) > 500 {
 		reason = reason[:500]
 	}
-	doc.FailureReason = &reason
-	_, err = s.replaceSignalDoc(ctx, signal.TargetRepo, doc, etag)
+	_, err := s.pgSignals.PatchPayload(ctx, signal.ID, func(payload map[string]any) error {
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		payload["state"] = "failed"
+		payload["processed_at"] = now
+		payload["failure_reason"] = reason
+		return nil
+	})
+	if errors.Is(err, pgstore.ErrSignalNotFound) {
+		return server.ErrNotFound
+	}
 	return err
 }
 
-func (s *Store) readSignalDoc(ctx context.Context, targetRepo, id string) (signalDoc, azcore.ETag, error) {
-	pk := azcosmos.NewPartitionKeyString(targetRepo)
-	resp, err := s.signals.ReadItem(ctx, pk, id, nil)
-	if isCosmosStatus(err, http.StatusNotFound) {
-		return signalDoc{}, "", server.ErrNotFound
-	}
-	if err != nil {
-		return signalDoc{}, "", err
-	}
-	var doc signalDoc
-	if err := json.Unmarshal(resp.Value, &doc); err != nil {
-		return signalDoc{}, "", err
-	}
-	return doc, resp.ETag, nil
-}
-
-func (s *Store) replaceSignalDoc(ctx context.Context, targetRepo string, doc signalDoc, etag azcore.ETag) (signalDoc, error) {
-	payload, err := json.Marshal(doc)
-	if err != nil {
-		return signalDoc{}, err
-	}
-	pk := azcosmos.NewPartitionKeyString(targetRepo)
-	resp, err := s.signals.ReplaceItem(ctx, pk, doc.ID, payload, &azcosmos.ItemOptions{IfMatchEtag: &etag})
-	if err != nil {
-		return signalDoc{}, err
-	}
-	var updated signalDoc
-	if err := json.Unmarshal(resp.Value, &updated); err != nil {
-		return signalDoc{}, err
-	}
-	return updated, nil
-}
+// errSignalAlreadyClaimed is returned from the MarkSignalProcessing
+// mutator when state != "pending", so the outer call can distinguish
+// "claim lost" from a real database error.
+var errSignalAlreadyClaimed = errors.New("signal already claimed")
 
 func queuedSignalFromDoc(doc signalDoc) server.QueuedSignal {
 	return server.QueuedSignal{
