@@ -97,39 +97,50 @@ func main() {
 	// compile against any interface that includes ClaimLock etc.
 	var rt *runtimeStore
 	if store != nil && pgPool != nil {
+		// Stage 2c hotfix: pg.LocksStore and pg.RunEventsStore are
+		// constructed and SET on cosmos.Store synchronously so the
+		// runtime store the HTTP server consumes is correctly wired
+		// from t=0. But the one-shot cosmos->pg Migrate copies run in
+		// background goroutines, NOT blocking main.go's path to
+		// srv.ListenAndServe(). The original Stage 2c blocked startup
+		// on Migrate; for run_events that meant the pod's liveness
+		// probe killed the container before the HTTP server bound to
+		// port 8000 (cosmos `run_events` has thousands of rows and the
+		// crossPartitionQuery + per-row INSERT took longer than the
+		// 90s liveness window).
+		//
+		// Async is safe because Insert is idempotent (ON CONFLICT DO
+		// NOTHING / DO UPDATE WHERE released-or-expired). Any new
+		// claim or event written by handlers while the migration is in
+		// flight goes to pg directly; if the migration later sees the
+		// same key in cosmos, the ON CONFLICT path swallows it. The
+		// runtime correctness contract — pg is the source of truth from
+		// pod start — holds throughout.
 		pgLocks := pgstore.NewLocksStore(pgPool)
-		migCtx, migCancel := context.WithTimeout(context.Background(), 60*time.Second)
-		copied, skipped, lockMigErr := pgLocks.Migrate(migCtx, store)
-		migCancel()
-		if lockMigErr != nil {
-			// Don't block startup on migration failure — the user's
-			// explicit choice in docs/postgres-migration.md is a full
-			// copy of existing data, but a transient cosmos read error
-			// shouldn't keep the pod from serving traffic on the new
-			// (empty) pg locks table. The pod logs the failure, and
-			// the operator can re-trigger the migration by deleting
-			// the pod (Migrate is idempotent).
-			log.Printf("lock migration cosmos->pg failed: %v (proceeding with pg locks; re-run by restarting pod)", lockMigErr)
-		} else {
-			log.Printf("lock migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
-		}
 		store.SetPGLocks(pgLocks)
+		go func() {
+			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			copied, skipped, err := pgLocks.Migrate(migCtx, store)
+			if err != nil {
+				log.Printf("lock migration cosmos->pg failed: %v (re-run by restarting pod; Migrate is idempotent)", err)
+				return
+			}
+			log.Printf("lock migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
+		}()
 
-		// Stage 2c: pg.RunEventsStore + idempotent Migrate copy. Same
-		// shape as the lock migration above. After SetPGRunEvents,
-		// cosmos.Store.RecordNativeEventByID writes events to pg via
-		// pgRunEvents instead of the cosmos `run_events` container, and
-		// ListNativeEventsByID reads from pg.
 		pgRunEvents := pgstore.NewRunEventsStore(pgPool)
-		runEvMigCtx, runEvMigCancel := context.WithTimeout(context.Background(), 120*time.Second)
-		reCopied, reSkipped, reMigErr := pgRunEvents.Migrate(runEvMigCtx, store)
-		runEvMigCancel()
-		if reMigErr != nil {
-			log.Printf("run-events migration cosmos->pg failed: %v (proceeding with whatever migrated; re-run by restarting pod)", reMigErr)
-		} else {
-			log.Printf("run-events migration cosmos->pg: copied=%d skipped=%d", reCopied, reSkipped)
-		}
 		store.SetPGRunEvents(pgRunEvents)
+		go func() {
+			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			copied, skipped, err := pgRunEvents.Migrate(migCtx, store)
+			if err != nil {
+				log.Printf("run-events migration cosmos->pg failed: %v (re-run by restarting pod; Migrate is idempotent)", err)
+				return
+			}
+			log.Printf("run-events migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
+		}()
 
 		rt = &runtimeStore{Store: store, LocksStore: pgLocks}
 	} else {
