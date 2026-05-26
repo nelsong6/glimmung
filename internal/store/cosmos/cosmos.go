@@ -13,8 +13,6 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
-	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
-	"github.com/Azure/azure-sdk-for-go/sdk/data/azcosmos"
 	"github.com/google/uuid"
 
 	"github.com/nelsong6/glimmung/internal/domain/budget"
@@ -23,19 +21,13 @@ import (
 	pgstore "github.com/nelsong6/glimmung/internal/store/pg"
 )
 
+// Store is the data-access wrapper that the server-side handlers use.
+// Stage 3 cleanup: every R/W cluster has migrated to Postgres and the
+// Cosmos container clients are gone. Methods on Store now delegate to
+// the per-cluster pg.*Store fields below. The package name is
+// retained for stability of the import path; the doctrinally clean
+// rename to `internal/store/store` is a follow-up.
 type Store struct {
-	projects                 *azcosmos.ContainerClient
-	workflows                *azcosmos.ContainerClient
-	leases                   *azcosmos.ContainerClient
-	runs                     *azcosmos.ContainerClient
-	runEvents                *azcosmos.ContainerClient
-	issues                   *azcosmos.ContainerClient
-	locks                    *azcosmos.ContainerClient
-	reports                  *azcosmos.ContainerClient
-	playbooks                *azcosmos.ContainerClient
-	signals                  *azcosmos.ContainerClient
-	slots                    *azcosmos.ContainerClient
-	slotHistory              *azcosmos.ContainerClient
 	nativeProjectConcurrency int
 
 	// pgLocks is the Postgres-backed lock store. Injected by main.go
@@ -319,319 +311,6 @@ func portfolioElementDocFromPayload(payload []byte) (portfolioElementDoc, error)
 	return doc, nil
 }
 
-// ListAllSlotDocsForMigration reads cosmos slots + slot_history
-// containers for pg.SlotsStore.Migrate.
-func (s *Store) ListAllSlotDocsForMigration(ctx context.Context) ([]pgstore.SlotRow, []pgstore.SlotHistoryRow, error) {
-	if s == nil || s.slots == nil {
-		return nil, nil, nil
-	}
-	var slotDocs []slotDoc
-	if err := crossPartitionQuery(ctx, s.slots, "SELECT * FROM c", nil, &slotDocs); err != nil {
-		return nil, nil, err
-	}
-	slots := make([]pgstore.SlotRow, 0, len(slotDocs))
-	for _, doc := range slotDocs {
-		payload, err := json.Marshal(doc)
-		if err != nil {
-			return nil, nil, err
-		}
-		slots = append(slots, pgstore.SlotRow{
-			Project:   doc.Project,
-			SlotIndex: doc.SlotIndex,
-			Payload:   payload,
-		})
-	}
-	var historyDocs []slotHistoryDoc
-	if s.slotHistory != nil {
-		if err := crossPartitionQuery(ctx, s.slotHistory, "SELECT * FROM c", nil, &historyDocs); err != nil {
-			return nil, nil, err
-		}
-	}
-	history := make([]pgstore.SlotHistoryRow, 0, len(historyDocs))
-	for _, doc := range historyDocs {
-		payload, err := json.Marshal(doc)
-		if err != nil {
-			return nil, nil, err
-		}
-		slotIdx := 0
-		if doc.SlotIndex != nil {
-			slotIdx = *doc.SlotIndex
-		}
-		history = append(history, pgstore.SlotHistoryRow{
-			ID:        doc.ID,
-			Project:   doc.Project,
-			SlotIndex: slotIdx,
-			Payload:   payload,
-			CreatedAt: doc.CreatedAt,
-		})
-	}
-	return slots, history, nil
-}
-
-// ListAllRunDocsForMigration reads cosmos runs container.
-func (s *Store) ListAllRunDocsForMigration(ctx context.Context) ([]pgstore.RunRow, error) {
-	if s == nil || s.runs == nil {
-		return nil, nil
-	}
-	var docs []runDoc
-	if err := crossPartitionQuery(ctx, s.runs, "SELECT * FROM c", nil, &docs); err != nil {
-		return nil, err
-	}
-	out := make([]pgstore.RunRow, 0, len(docs))
-	for _, doc := range docs {
-		payload, err := json.Marshal(doc)
-		if err != nil {
-			return nil, err
-		}
-		var issueNum *int
-		if doc.IssueNumber > 0 {
-			n := doc.IssueNumber
-			issueNum = &n
-		}
-		out = append(out, pgstore.RunRow{
-			ID:          doc.ID,
-			Project:     doc.Project,
-			IssueNumber: issueNum,
-			Payload:     payload,
-			CreatedAt:   parseTimeOrZero(doc.CreatedAt),
-			UpdatedAt:   parseTimeOrZero(doc.UpdatedAt),
-		})
-	}
-	return out, nil
-}
-
-// ListAllLeaseDocsForMigration reads cosmos leases container.
-func (s *Store) ListAllLeaseDocsForMigration(ctx context.Context) ([]pgstore.LeaseRow, error) {
-	if s == nil || s.leases == nil {
-		return nil, nil
-	}
-	var docs []leaseDoc
-	if err := crossPartitionQuery(ctx, s.leases, "SELECT * FROM c", nil, &docs); err != nil {
-		return nil, err
-	}
-	out := make([]pgstore.LeaseRow, 0, len(docs))
-	for _, doc := range docs {
-		payload, err := json.Marshal(doc)
-		if err != nil {
-			return nil, err
-		}
-		token := ""
-		if doc.Metadata != nil {
-			if v, ok := doc.Metadata["lease_callback_token"].(string); ok {
-				token = v
-			}
-		}
-		var expiresAt *time.Time
-		if doc.AssignedAt != "" && doc.TTLSeconds > 0 {
-			if t := parseOptionalTime(doc.AssignedAt); t != nil {
-				exp := t.Add(time.Duration(doc.TTLSeconds) * time.Second)
-				expiresAt = &exp
-			}
-		}
-		out = append(out, pgstore.LeaseRow{
-			ID:            doc.ID,
-			Project:       doc.Project,
-			CallbackToken: token,
-			Payload:       payload,
-			CreatedAt:     parseTimeOrZero(doc.RequestedAt),
-			ExpiresAt:     expiresAt,
-		})
-	}
-	return out, nil
-}
-
-// ListAllPlaybookDocsForMigration reads cosmos playbooks container.
-func (s *Store) ListAllPlaybookDocsForMigration(ctx context.Context) ([]pgstore.PlaybookRow, error) {
-	if s == nil || s.playbooks == nil {
-		return nil, nil
-	}
-	var docs []playbookDoc
-	if err := crossPartitionQuery(ctx, s.playbooks, "SELECT * FROM c", nil, &docs); err != nil {
-		return nil, err
-	}
-	out := make([]pgstore.PlaybookRow, 0, len(docs))
-	for _, doc := range docs {
-		payload, err := json.Marshal(doc)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, pgstore.PlaybookRow{
-			Project:   doc.Project,
-			Name:      doc.ID,
-			Payload:   payload,
-			CreatedAt: parseTimeOrZero(doc.CreatedAt),
-			UpdatedAt: parseTimeOrZero(doc.UpdatedAt),
-		})
-	}
-	return out, nil
-}
-
-// ListAllReportDocsForMigration returns nothing. Stage 2j shipped this
-// reading from `s.reports`, but that container actually holds
-// touchpoints (no dedicated "reports" docs exist in cosmos — run
-// reports are derived views over the runs container). The 627 rows
-// Stage 2j wrongly inserted into pg.reports are cleared by a one-time
-// migration step in pg/migrations.go. The method is kept rather than
-// deleted so the goroutine call site in main.go still compiles;
-// returning empty makes future Migrate runs no-ops. Stage 2i / final
-// cleanup deletes this method along with the cosmos container client.
-func (s *Store) ListAllReportDocsForMigration(ctx context.Context) ([]pgstore.ReportRow, error) {
-	return nil, nil
-}
-
-// ListAllPortfolioDocsForMigration reads cosmos issues container for
-// kind='portfolio_element' docs (Stage 2j shipped this reading from
-// `s.reports` which was wrong — portfolios cohabit the issues
-// container, partitioned by /project, with kind='portfolio_element').
-func (s *Store) ListAllPortfolioDocsForMigration(ctx context.Context) ([]pgstore.PortfolioRow, error) {
-	if s == nil || s.issues == nil {
-		return nil, nil
-	}
-	var docs []portfolioElementDoc
-	if err := crossPartitionQuery(ctx, s.issues, "SELECT * FROM c WHERE c.kind = @kind",
-		[]azcosmos.QueryParameter{{Name: "@kind", Value: "portfolio_element"}}, &docs); err != nil {
-		return nil, err
-	}
-	out := make([]pgstore.PortfolioRow, 0, len(docs))
-	for _, doc := range docs {
-		payload, err := json.Marshal(doc)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, pgstore.PortfolioRow{
-			Project:   doc.Project,
-			Route:     doc.Route,
-			ElementID: doc.ElementID,
-			Payload:   payload,
-			CreatedAt: parseTimeOrZero(doc.CreatedAt),
-			UpdatedAt: parseTimeOrZero(doc.UpdatedAt),
-		})
-	}
-	return out, nil
-}
-
-// ListAllTouchpointDocsForMigration reads cosmos touchpoint docs. They
-// live in `s.reports` (the reports container is in practice the
-// touchpoints container — the historical naming is misleading). Stage
-// 2j shipped this with a kind='touchpoint' filter, but touchpointDoc
-// has no Kind field so the filter matched nothing. Fix: no filter;
-// every doc in s.reports IS a touchpoint.
-func (s *Store) ListAllTouchpointDocsForMigration(ctx context.Context) ([]pgstore.TouchpointRow, error) {
-	if s == nil || s.reports == nil {
-		return nil, nil
-	}
-	var docs []touchpointDoc
-	if err := crossPartitionQuery(ctx, s.reports, "SELECT * FROM c", nil, &docs); err != nil {
-		return nil, err
-	}
-	out := make([]pgstore.TouchpointRow, 0, len(docs))
-	for _, doc := range docs {
-		payload, err := json.Marshal(doc)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, pgstore.TouchpointRow{
-			Project:     doc.Project,
-			IssueNumber: doc.Number,
-			Payload:     payload,
-			CreatedAt:   parseTimeOrZero(doc.CreatedAt),
-			UpdatedAt:   parseTimeOrZero(doc.UpdatedAt),
-		})
-	}
-	return out, nil
-}
-
-// ListAllSignalDocsForMigration reads cosmos signals container for
-// pg.SignalsStore.Migrate.
-func (s *Store) ListAllSignalDocsForMigration(ctx context.Context) ([]pgstore.SignalRow, error) {
-	if s == nil || s.signals == nil {
-		return nil, nil
-	}
-	var docs []signalDoc
-	if err := crossPartitionQuery(ctx, s.signals, "SELECT * FROM c", nil, &docs); err != nil {
-		return nil, err
-	}
-	out := make([]pgstore.SignalRow, 0, len(docs))
-	for _, doc := range docs {
-		payload, err := json.Marshal(doc)
-		if err != nil {
-			return nil, err
-		}
-		var processedAt *time.Time
-		if doc.ProcessedAt != nil {
-			if t := parseOptionalTime(*doc.ProcessedAt); t != nil {
-				processedAt = t
-			}
-		}
-		out = append(out, pgstore.SignalRow{
-			ID:          doc.ID,
-			TargetRepo:  doc.TargetRepo,
-			Payload:     payload,
-			CreatedAt:   parseTimeOrZero(doc.EnqueuedAt),
-			ProcessedAt: processedAt,
-		})
-	}
-	return out, nil
-}
-
-// ListAllIssueDocsForMigration reads every cosmos issue doc and
-// splits it into the per-issue row + per-comment rows that
-// pg.IssuesStore.Migrate consumes. Consumed once at startup; Stage 2i
-// (or wherever issues cut over) deletes this method along with the
-// cosmos `issues` container client.
-func (s *Store) ListAllIssueDocsForMigration(ctx context.Context) ([]pgstore.IssueRow, []pgstore.IssueCommentRow, error) {
-	if s == nil || s.issues == nil {
-		return nil, nil, nil
-	}
-	var docs []issueDoc
-	if err := crossPartitionQuery(ctx, s.issues, "SELECT * FROM c", nil, &docs); err != nil {
-		return nil, nil, err
-	}
-	issues := make([]pgstore.IssueRow, 0, len(docs))
-	comments := make([]pgstore.IssueCommentRow, 0)
-	for _, doc := range docs {
-		// Strip comments before marshaling the issue payload; comments
-		// have their own table.
-		stripped := doc
-		stripped.Comments = nil
-		payload, err := encodeIssueDocPayload(stripped)
-		if err != nil {
-			return nil, nil, err
-		}
-		var archived *time.Time
-		if doc.ClosedAt != nil {
-			if t := parseOptionalTime(*doc.ClosedAt); t != nil {
-				archived = t
-			}
-		}
-		created := parseTimeOrZero(doc.CreatedAt)
-		updated := parseTimeOrZero(doc.UpdatedAt)
-		issues = append(issues, pgstore.IssueRow{
-			Project:    doc.Project,
-			Number:     doc.Number,
-			Payload:    payload,
-			ArchivedAt: archived,
-			CreatedAt:  created,
-			UpdatedAt:  updated,
-		})
-		for _, c := range doc.Comments {
-			cPayload, err := encodeIssueCommentPayload(c)
-			if err != nil {
-				return nil, nil, err
-			}
-			comments = append(comments, pgstore.IssueCommentRow{
-				ID:          c.ID,
-				Project:     doc.Project,
-				IssueNumber: doc.Number,
-				Payload:     cPayload,
-				CreatedAt:   parseTimeOrZero(c.CreatedAt),
-				UpdatedAt:   parseTimeOrZero(c.UpdatedAt),
-			})
-		}
-	}
-	return issues, comments, nil
-}
-
 func encodeIssueDocPayload(doc issueDoc) ([]byte, error) {
 	return json.Marshal(doc)
 }
@@ -649,73 +328,6 @@ func workflowFromPayload(payload []byte) (server.Workflow, error) {
 		return server.Workflow{}, err
 	}
 	return workflowFromDoc(doc), nil
-}
-
-// ListAllWorkflowDocsForMigration reads every doc in the cosmos
-// `workflows` container and splits it into workflow rows + workflow-
-// schema rows by the embedded `kind` discriminator. Consumed by
-// pg.WorkflowsStore.Migrate at startup. Stage 2g cuts the public
-// workflow methods over to pg; Stage 2i deletes this method along
-// with the cosmos `workflows` container client.
-func (s *Store) ListAllWorkflowDocsForMigration(ctx context.Context) ([]pgstore.WorkflowRow, []pgstore.WorkflowSchemaRow, error) {
-	if s == nil || s.workflows == nil {
-		return nil, nil, nil
-	}
-	var raw []map[string]any
-	if err := crossPartitionQuery(ctx, s.workflows, "SELECT * FROM c", nil, &raw); err != nil {
-		return nil, nil, err
-	}
-	workflows := make([]pgstore.WorkflowRow, 0, len(raw))
-	schemas := make([]pgstore.WorkflowSchemaRow, 0)
-	for _, doc := range raw {
-		project, _ := doc["project"].(string)
-		name, _ := doc["name"].(string)
-		schemaRef, _ := doc["schema_ref"].(string)
-		kind, _ := doc["kind"].(string)
-		id, _ := doc["id"].(string)
-		var createdAt time.Time
-		if v, ok := doc["createdAt"].(string); ok {
-			if t := parseOptionalTime(v); t != nil {
-				createdAt = *t
-			}
-		}
-		payload, err := json.Marshal(doc)
-		if err != nil {
-			return nil, nil, fmt.Errorf("workflows migrate: marshal %s/%s: %w", project, name, err)
-		}
-		if kind == workflowSchemaKind || strings.HasPrefix(id, "schema:") {
-			// workflow_schema row. schema_ref might be empty in the
-			// doc body; the id encodes "schema:<name>:<schemaRef>".
-			if schemaRef == "" && strings.HasPrefix(id, "schema:") {
-				parts := strings.SplitN(id, ":", 3)
-				if len(parts) == 3 {
-					schemaRef = parts[2]
-				}
-			}
-			if schemaRef == "" || project == "" {
-				continue
-			}
-			schemas = append(schemas, pgstore.WorkflowSchemaRow{
-				Project:   project,
-				SchemaRef: schemaRef,
-				Payload:   payload,
-				CreatedAt: createdAt,
-			})
-			continue
-		}
-		if project == "" || name == "" {
-			continue
-		}
-		workflows = append(workflows, pgstore.WorkflowRow{
-			Project:   project,
-			Name:      name,
-			SchemaRef: schemaRef,
-			Payload:   payload,
-			CreatedAt: createdAt,
-			UpdatedAt: createdAt,
-		})
-	}
-	return workflows, schemas, nil
 }
 
 // projectFromRecord converts a pg.ProjectRecord to the server-package
@@ -742,155 +354,13 @@ func testLeaseDefaultsFromRow(row pgstore.TestLeaseDefaultsRow) server.TestLease
 	}
 }
 
-// ListAllProjectDocsForMigration reads every doc in the cosmos
-// `projects` container and splits it into per-project rows + the
-// optional singleton settings row. Consumed by
-// pg.ProjectsStore.Migrate at startup. Stage 2d ships this as
-// foundation-only — pg.ProjectsStore is populated but cosmos.Store's
-// project methods still serve all reads/writes. Stage 2e wires the
-// cutover (cosmos methods delegate to pg) and Stage 2i deletes this
-// method along with the cosmos `projects` container client.
-func (s *Store) ListAllProjectDocsForMigration(ctx context.Context) ([]pgstore.ProjectRow, *pgstore.TestLeaseDefaultsRow, error) {
-	if s == nil || s.projects == nil {
-		return nil, nil, nil
-	}
-	var raw []map[string]any
-	if err := crossPartitionQuery(ctx, s.projects, "SELECT * FROM c", nil, &raw); err != nil {
-		return nil, nil, err
-	}
-	out := make([]pgstore.ProjectRow, 0, len(raw))
-	var defaults *pgstore.TestLeaseDefaultsRow
-	for _, doc := range raw {
-		kind, _ := doc["kind"].(string)
-		if kind == testLeaseDefaultsDocKind {
-			row := pgstore.TestLeaseDefaultsRow{}
-			if v, ok := doc["globalTTLSeconds"].(float64); ok {
-				row.GlobalTTLSeconds = int(v)
-			}
-			if v, ok := doc["hotSwapMinTTLSeconds"].(float64); ok {
-				row.HotSwapMinTTLSeconds = int(v)
-			}
-			if v, ok := doc["createdAt"].(string); ok {
-				if t := parseOptionalTime(v); t != nil {
-					row.CreatedAt = *t
-				}
-			}
-			if v, ok := doc["updatedAt"].(string); ok {
-				if t := parseOptionalTime(v); t != nil {
-					row.UpdatedAt = *t
-				}
-			}
-			defaults = &row
-			continue
-		}
-		// Per-project row. Cosmos doc id == project name.
-		name, _ := doc["id"].(string)
-		if name == "" {
-			if n, ok := doc["name"].(string); ok {
-				name = n
-			}
-		}
-		if name == "" {
-			continue
-		}
-		row := pgstore.ProjectRow{
-			Name:     name,
-			Metadata: map[string]any{},
-		}
-		if v, ok := doc["githubRepo"].(string); ok {
-			row.GitHubRepo = v
-		}
-		if v, ok := doc["argocdApp"].(string); ok {
-			row.ArgoCDApp = v
-		}
-		if v, ok := doc["metadata"].(map[string]any); ok {
-			row.Metadata = v
-		}
-		if v, ok := doc["createdAt"].(string); ok {
-			if t := parseOptionalTime(v); t != nil {
-				row.CreatedAt = *t
-			}
-		}
-		out = append(out, row)
-	}
-	return out, defaults, nil
-}
-
 const workflowSchemaKind = "workflow_schema"
 
+// NewFromSettings constructs an empty Store. Stage 3 cleanup removed
+// the Cosmos client + container clients; callers wire in the
+// pg.*Store fields via SetPG* setters after construction.
 func NewFromSettings(settings server.Settings) (*Store, error) {
-	if settings.CosmosEndpoint == "" || settings.CosmosDatabase == "" {
-		return nil, errors.New("COSMOS_ENDPOINT and COSMOS_DATABASE are required")
-	}
-	cred, err := azidentity.NewDefaultAzureCredential(nil)
-	if err != nil {
-		return nil, fmt.Errorf("create default Azure credential: %w", err)
-	}
-	client, err := azcosmos.NewClient(settings.CosmosEndpoint, cred, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create cosmos client: %w", err)
-	}
-	projects, err := client.NewContainer(settings.CosmosDatabase, "projects")
-	if err != nil {
-		return nil, fmt.Errorf("create projects container client: %w", err)
-	}
-	workflows, err := client.NewContainer(settings.CosmosDatabase, "workflows")
-	if err != nil {
-		return nil, fmt.Errorf("create workflows container client: %w", err)
-	}
-	leases, err := client.NewContainer(settings.CosmosDatabase, "leases")
-	if err != nil {
-		return nil, fmt.Errorf("create leases container client: %w", err)
-	}
-	runs, err := client.NewContainer(settings.CosmosDatabase, "runs")
-	if err != nil {
-		return nil, fmt.Errorf("create runs container client: %w", err)
-	}
-	runEvents, err := client.NewContainer(settings.CosmosDatabase, "run_events")
-	if err != nil {
-		return nil, fmt.Errorf("create run_events container client: %w", err)
-	}
-	issues, err := client.NewContainer(settings.CosmosDatabase, "issues")
-	if err != nil {
-		return nil, fmt.Errorf("create issues container client: %w", err)
-	}
-	locks, err := client.NewContainer(settings.CosmosDatabase, "locks")
-	if err != nil {
-		return nil, fmt.Errorf("create locks container client: %w", err)
-	}
-	reports, err := client.NewContainer(settings.CosmosDatabase, "reports")
-	if err != nil {
-		return nil, fmt.Errorf("create reports container client: %w", err)
-	}
-	playbooks, err := client.NewContainer(settings.CosmosDatabase, "playbooks")
-	if err != nil {
-		return nil, fmt.Errorf("create playbooks container client: %w", err)
-	}
-	signals, err := client.NewContainer(settings.CosmosDatabase, "signals")
-	if err != nil {
-		return nil, fmt.Errorf("create signals container client: %w", err)
-	}
-	slots, err := client.NewContainer(settings.CosmosDatabase, "slots")
-	if err != nil {
-		return nil, fmt.Errorf("create slots container client: %w", err)
-	}
-	slotHistory, err := client.NewContainer(settings.CosmosDatabase, "slot_history")
-	if err != nil {
-		return nil, fmt.Errorf("create slot_history container client: %w", err)
-	}
 	return &Store{
-		projects:                 projects,
-		workflows:                workflows,
-		leases:                   leases,
-		runs:                     runs,
-		runEvents:                runEvents,
-		issues:                   issues,
-		locks:                    locks,
-		reports:                  reports,
-		playbooks:                playbooks,
-		signals:                  signals,
-		slots:                    slots,
-		slotHistory:              slotHistory,
 		nativeProjectConcurrency: settings.NativeRunnerProjectConcurrency,
 	}, nil
 }
@@ -1711,44 +1181,6 @@ func (s *Store) listRunDocs(ctx context.Context) ([]runDoc, error) {
 		docs = append(docs, doc)
 	}
 	return docs, nil
-}
-
-// ListAllLockDocsForMigration reads every lock document in the cosmos
-// `locks` container and returns it in the narrow shape pg.LocksStore's
-// Migrate path expects. Runs once per pod start (idempotent via ON
-// CONFLICT DO NOTHING on the receiving side). Stage 2i removes this
-// method along with the cosmos lock container client entirely.
-//
-// "All scopes" here means every doc in the container regardless of
-// scope. The user opted for "full copy of everything" in the migration
-// plan, so released and expired rows are preserved too.
-func (s *Store) ListAllLockDocsForMigration(ctx context.Context) ([]pgstore.LockMigrationRow, error) {
-	if s == nil || s.locks == nil {
-		return nil, nil
-	}
-	var docs []lockDoc
-	if err := crossPartitionQuery(ctx, s.locks, "SELECT * FROM c", nil, &docs); err != nil {
-		return nil, err
-	}
-	out := make([]pgstore.LockMigrationRow, 0, len(docs))
-	for _, doc := range docs {
-		row := pgstore.LockMigrationRow{
-			Scope: doc.Scope,
-			Key:   doc.Key,
-			State: doc.State,
-		}
-		if doc.HeldBy != nil {
-			row.HolderID = *doc.HeldBy
-		}
-		if expires := parseOptionalTime(doc.ExpiresAt); expires != nil {
-			row.ExpiresAt = expires
-		}
-		if claimed := parseOptionalTime(doc.ClaimedAt); claimed != nil {
-			row.ClaimedAt = claimed
-		}
-		out = append(out, row)
-	}
-	return out, nil
 }
 
 func (s *Store) latestRunForIssue(ctx context.Context, issue issueDoc) (*runDoc, []runDoc, error) {
@@ -4124,23 +3556,22 @@ func (s *Store) AdvancePlaybooksForRun(ctx context.Context, project, runID strin
 	if err != nil {
 		return err
 	}
-	var docs []playbookDoc
-	if err := singlePartitionQuery(ctx, s.playbooks,
-		azcosmos.NewPartitionKeyString(project),
-		"SELECT * FROM c WHERE c.project = @project ORDER BY c.created_at DESC",
-		[]azcosmos.QueryParameter{{Name: "@project", Value: project}},
-		&docs,
-	); err != nil {
+	rows, err := s.pgPlaybooks.List(ctx, project, "", nil)
+	if err != nil {
 		return err
 	}
-	for i := range docs {
-		if !playbookReferencesRun(docs[i], runID, runRef) {
+	for _, row := range rows {
+		doc, derr := playbookDocFromPayload(row.Payload)
+		if derr != nil {
+			return derr
+		}
+		if !playbookReferencesRun(doc, runID, runRef) {
 			continue
 		}
-		if err := s.advancePlaybookDoc(ctx, &docs[i], dispatch); err != nil {
+		if err := s.advancePlaybookDoc(ctx, &doc, dispatch); err != nil {
 			return err
 		}
-		if err := s.replacePlaybookDoc(ctx, &docs[i]); err != nil {
+		if err := s.replacePlaybookDoc(ctx, &doc); err != nil {
 			return err
 		}
 	}
@@ -4148,18 +3579,17 @@ func (s *Store) AdvancePlaybooksForRun(ctx context.Context, project, runID strin
 }
 
 func (s *Store) readPlaybookDocByRef(ctx context.Context, project, ref string) (*playbookDoc, error) {
-	var docs []playbookDoc
-	if err := singlePartitionQuery(ctx, s.playbooks,
-		azcosmos.NewPartitionKeyString(project),
-		"SELECT * FROM c WHERE c.project = @project ORDER BY c.created_at DESC",
-		[]azcosmos.QueryParameter{{Name: "@project", Value: project}},
-		&docs,
-	); err != nil {
+	rows, err := s.pgPlaybooks.List(ctx, project, "", nil)
+	if err != nil {
 		return nil, err
 	}
-	for i := range docs {
-		if playbookPublicRef(docs[i]) == ref {
-			return &docs[i], nil
+	for _, row := range rows {
+		doc, derr := playbookDocFromPayload(row.Payload)
+		if derr != nil {
+			return nil, derr
+		}
+		if playbookPublicRef(doc) == ref {
+			return &doc, nil
 		}
 	}
 	return nil, server.ErrNotFound
@@ -4171,8 +3601,26 @@ func (s *Store) replacePlaybookDoc(ctx context.Context, doc *playbookDoc) error 
 	if err != nil {
 		return err
 	}
-	pk := azcosmos.NewPartitionKeyString(doc.Project)
-	if _, err := s.playbooks.ReplaceItem(ctx, pk, doc.ID, data, nil); err != nil {
+	_, err = s.pgPlaybooks.PatchPayload(ctx, doc.Project, doc.ID, func(payload map[string]any) error {
+		var fresh map[string]any
+		if err := json.Unmarshal(data, &fresh); err != nil {
+			return err
+		}
+		// Wholesale replace: clear existing keys then copy fresh
+		// values. Preserves jsonb-level atomicity inside the
+		// SELECT FOR UPDATE tx that PatchPayload runs.
+		for k := range payload {
+			delete(payload, k)
+		}
+		for k, v := range fresh {
+			payload[k] = v
+		}
+		return nil
+	})
+	if errors.Is(err, pgstore.ErrPlaybookNotFound) {
+		return server.ErrNotFound
+	}
+	if err != nil {
 		return fmt.Errorf("replace playbook: %w", err)
 	}
 	return nil
@@ -5705,39 +5153,6 @@ func (s *Store) RecordNativeEventByID(ctx context.Context, project, runID string
 		Seq:      req.Seq,
 		Accepted: true,
 	}, nil
-}
-
-// ListAllRunEventDocsForMigration reads every native-event document in
-// the cosmos `run_events` container and returns it in the shape
-// pg.RunEventsStore.Migrate consumes. Runs once per pod start (Insert
-// is idempotent via ON CONFLICT DO NOTHING). Stage 2i removes this
-// method along with the cosmos runEvents container client.
-func (s *Store) ListAllRunEventDocsForMigration(ctx context.Context) ([]pgstore.RunEventRow, error) {
-	if s == nil || s.runEvents == nil {
-		return nil, nil
-	}
-	var docs []nativeEventDoc
-	if err := crossPartitionQuery(ctx, s.runEvents, "SELECT * FROM c", nil, &docs); err != nil {
-		return nil, err
-	}
-	out := make([]pgstore.RunEventRow, 0, len(docs))
-	for _, doc := range docs {
-		out = append(out, pgstore.RunEventRow{
-			RunID:        doc.RunID,
-			AttemptIndex: doc.AttemptIndex,
-			JobID:        doc.JobID,
-			Seq:          doc.Seq,
-			Project:      doc.Project,
-			Event:        doc.Event,
-			Phase:        doc.Phase,
-			StepSlug:     doc.StepSlug,
-			Message:      doc.Message,
-			ExitCode:     doc.ExitCode,
-			Metadata:     mapOrEmpty(doc.Metadata),
-			CreatedAt:    parseTimeOrZero(doc.CreatedAt),
-		})
-	}
-	return out, nil
 }
 
 func (s *Store) applyNativeEventExecutionState(ctx context.Context, project, runID string, event nativeEventDoc) error {

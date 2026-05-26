@@ -97,209 +97,46 @@ func main() {
 	// compile against any interface that includes ClaimLock etc.
 	var rt *runtimeStore
 	if store != nil && pgPool != nil {
-		// Stage 2c hotfix: pg.LocksStore and pg.RunEventsStore are
-		// constructed and SET on cosmos.Store synchronously so the
-		// runtime store the HTTP server consumes is correctly wired
-		// from t=0. But the one-shot cosmos->pg Migrate copies run in
-		// background goroutines, NOT blocking main.go's path to
-		// srv.ListenAndServe(). The original Stage 2c blocked startup
-		// on Migrate; for run_events that meant the pod's liveness
-		// probe killed the container before the HTTP server bound to
-		// port 8000 (cosmos `run_events` has thousands of rows and the
-		// crossPartitionQuery + per-row INSERT took longer than the
-		// 90s liveness window).
-		//
-		// Async is safe because Insert is idempotent (ON CONFLICT DO
-		// NOTHING / DO UPDATE WHERE released-or-expired). Any new
-		// claim or event written by handlers while the migration is in
-		// flight goes to pg directly; if the migration later sees the
-		// same key in cosmos, the ON CONFLICT path swallows it. The
-		// runtime correctness contract — pg is the source of truth from
-		// pod start — holds throughout.
+		// Stage 3 cleanup: every R/W cluster has migrated to Postgres.
+		// Each pg.*Store is constructed and SET on cosmos.Store so the
+		// runtime store the HTTP server consumes is wired from t=0.
+		// The one-shot cosmos->pg Migrate goroutines that previously
+		// ran here are gone — there is no Cosmos source to read from.
 		pgLocks := pgstore.NewLocksStore(pgPool)
 		store.SetPGLocks(pgLocks)
-		go func() {
-			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-			defer cancel()
-			copied, skipped, err := pgLocks.Migrate(migCtx, store)
-			if err != nil {
-				log.Printf("lock migration cosmos->pg failed: %v (re-run by restarting pod; Migrate is idempotent)", err)
-				return
-			}
-			log.Printf("lock migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
-		}()
 
 		pgRunEvents := pgstore.NewRunEventsStore(pgPool)
 		store.SetPGRunEvents(pgRunEvents)
-		go func() {
-			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-			defer cancel()
-			copied, skipped, err := pgRunEvents.Migrate(migCtx, store)
-			if err != nil {
-				log.Printf("run-events migration cosmos->pg failed: %v (re-run by restarting pod; Migrate is idempotent)", err)
-				return
-			}
-			log.Printf("run-events migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
-		}()
 
-		// Stage 2e: pg.ProjectsStore now serves every project read/write
-		// on cosmos.Store via delegation. SetPGProjects wires the field
-		// before the HTTP server starts so handlers find a populated
-		// store. Migrate runs in the background to ensure cosmos
-		// `projects` content is fully copied to pg (idempotent — Stage
-		// 2d already populated it; subsequent restarts re-run as
-		// safety).
 		pgProjects := pgstore.NewProjectsStore(pgPool)
 		store.SetPGProjects(pgProjects)
-		go func() {
-			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-			defer cancel()
-			copied, skipped, err := pgProjects.Migrate(migCtx, store)
-			if err != nil {
-				log.Printf("projects migration cosmos->pg failed: %v (re-run by restarting pod; Migrate is idempotent)", err)
-				return
-			}
-			log.Printf("projects migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
-		}()
 
-		// Stage 2g: pg.WorkflowsStore now serves every workflow R/W on
-		// cosmos.Store via delegation. SetPGWorkflows wires the field
-		// before the HTTP server starts.
 		pgWorkflows := pgstore.NewWorkflowsStore(pgPool)
 		store.SetPGWorkflows(pgWorkflows)
-		go func() {
-			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-			defer cancel()
-			copied, skipped, err := pgWorkflows.Migrate(migCtx, store)
-			if err != nil {
-				log.Printf("workflows migration cosmos->pg failed: %v (re-run by restarting pod; Migrate is idempotent)", err)
-				return
-			}
-			log.Printf("workflows migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
-		}()
 
-		// Stage 2h foundation + Stage 2-issues cutover.
-		// pg.IssuesStore now serves all issue R/W; Migrate keeps copying
-		// historical cosmos rows on every boot (idempotent).
 		pgIssues := pgstore.NewIssuesStore(pgPool)
 		store.SetPGIssues(pgIssues)
-		go func() {
-			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-			defer cancel()
-			copied, skipped, err := pgIssues.Migrate(migCtx, store)
-			if err != nil {
-				log.Printf("issues migration cosmos->pg failed: %v (re-run by restarting pod; Migrate is idempotent)", err)
-				return
-			}
-			log.Printf("issues migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
-		}()
 
-		// Stage 2i foundation + Stage 2-slots cutover.
 		pgSlots := pgstore.NewSlotsStore(pgPool)
 		store.SetPGSlots(pgSlots)
-		go func() {
-			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-			defer cancel()
-			copied, skipped, err := pgSlots.Migrate(migCtx, store)
-			if err != nil {
-				log.Printf("slots migration cosmos->pg failed: %v (re-run by restarting pod; Migrate is idempotent)", err)
-				return
-			}
-			log.Printf("slots migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
-		}()
 
 		pgSignals := pgstore.NewSignalsStore(pgPool)
 		store.SetPGSignals(pgSignals)
-		go func() {
-			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-			defer cancel()
-			copied, skipped, err := pgSignals.Migrate(migCtx, store)
-			if err != nil {
-				log.Printf("signals migration cosmos->pg failed: %v (re-run by restarting pod; Migrate is idempotent)", err)
-				return
-			}
-			log.Printf("signals migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
-		}()
 
-		// Stage 2j foundations: playbooks + reports + portfolios + touchpoints.
 		pgPlaybooks := pgstore.NewPlaybooksStore(pgPool)
 		store.SetPGPlaybooks(pgPlaybooks)
-		go func() {
-			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-			defer cancel()
-			copied, skipped, err := pgPlaybooks.Migrate(migCtx, store)
-			if err != nil {
-				log.Printf("playbooks migration cosmos->pg failed: %v", err)
-				return
-			}
-			log.Printf("playbooks migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
-		}()
-
-		pgReports := pgstore.NewReportsStore(pgPool)
-		_ = pgReports
-		go func() {
-			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-			defer cancel()
-			copied, skipped, err := pgReports.Migrate(migCtx, store)
-			if err != nil {
-				log.Printf("reports migration cosmos->pg failed: %v", err)
-				return
-			}
-			log.Printf("reports migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
-		}()
 
 		pgPortfolios := pgstore.NewPortfoliosStore(pgPool)
 		store.SetPGPortfolios(pgPortfolios)
-		go func() {
-			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-			defer cancel()
-			copied, skipped, err := pgPortfolios.Migrate(migCtx, store)
-			if err != nil {
-				log.Printf("portfolios migration cosmos->pg failed: %v", err)
-				return
-			}
-			log.Printf("portfolios migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
-		}()
 
 		pgTouchpoints := pgstore.NewTouchpointsStore(pgPool)
 		store.SetPGTouchpoints(pgTouchpoints)
-		go func() {
-			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-			defer cancel()
-			copied, skipped, err := pgTouchpoints.Migrate(migCtx, store)
-			if err != nil {
-				log.Printf("touchpoints migration cosmos->pg failed: %v", err)
-				return
-			}
-			log.Printf("touchpoints migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
-		}()
 
-		// Stage 2k foundation + Stage 2-runs cutover.
 		pgRuns := pgstore.NewRunsStore(pgPool)
 		store.SetPGRuns(pgRuns)
-		go func() {
-			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-			defer cancel()
-			copied, skipped, err := pgRuns.Migrate(migCtx, store)
-			if err != nil {
-				log.Printf("runs migration cosmos->pg failed: %v", err)
-				return
-			}
-			log.Printf("runs migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
-		}()
 
 		pgLeases := pgstore.NewLeasesStore(pgPool)
 		store.SetPGLeases(pgLeases)
-		go func() {
-			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-			defer cancel()
-			copied, skipped, err := pgLeases.Migrate(migCtx, store)
-			if err != nil {
-				log.Printf("leases migration cosmos->pg failed: %v", err)
-				return
-			}
-			log.Printf("leases migration cosmos->pg: copied=%d skipped=%d", copied, skipped)
-		}()
 
 		rt = &runtimeStore{Store: store, LocksStore: pgLocks}
 	} else {
