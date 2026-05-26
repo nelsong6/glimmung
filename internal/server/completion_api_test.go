@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nelsong6/glimmung/internal/auth"
 	"github.com/nelsong6/glimmung/internal/domain/budget"
 	"github.com/nelsong6/glimmung/internal/domain/decision"
 )
@@ -71,6 +72,19 @@ func (s *fakeCompletionStore) ReadRunIDForCallbackToken(context.Context, string)
 		return "", "", "", ErrNotFound
 	}
 	return s.tokenRunID, s.tokenProject, s.tokenRef, nil
+}
+
+func (s *fakeCompletionStore) ReadRunIDForNumber(_ context.Context, project string, _ int, _ string) (string, string, error) {
+	if s.tokenErr != nil {
+		return "", "", s.tokenErr
+	}
+	if s.tokenRunID == "" {
+		return "", "", ErrNotFound
+	}
+	if s.tokenProject != "" && s.tokenProject != project {
+		return "", "", ErrNotFound
+	}
+	return s.tokenRunID, firstNonEmpty(s.tokenRef, "proj#7/runs/1"), nil
 }
 
 func (s *fakeCompletionStore) AbortRunByID(context.Context, string, string, string) (AbortRunResult, error) {
@@ -278,6 +292,10 @@ func (c *fakePullRequestClient) EnsurePullRequest(_ context.Context, req PullReq
 		}
 	}
 	return c.pr, nil
+}
+
+func (c *fakePullRequestClient) FetchWorkflowFile(context.Context, string, string, string) ([]byte, int, error) {
+	return nil, 0, ErrNotFound
 }
 
 func aggregateFakeNativePayload(expected []string, completions map[string]CompletionPayload) CompletionPayload {
@@ -579,6 +597,102 @@ func TestNativePRTouchpointByCallbackTokenSkipsAbortPath(t *testing.T) {
 	}
 	if prClient.req.Repo != "" || store.touchpointReq != nil {
 		t.Fatalf("unexpected PR materialization req=%#v touchpoint=%#v", prClient.req, store.touchpointReq)
+	}
+}
+
+func TestFinalizeRunTouchpointByNumberEnsuresPRAndTouchpoint(t *testing.T) {
+	store := &fakeCompletionStore{tokenRunID: "run-1", tokenProject: "proj", tokenRef: "proj#7/runs/1"}
+	store.run = runDataForCompletion("impl")
+	store.run.Attempts[0].Completed = true
+	store.run.Attempts[0].Conclusion = "success"
+	store.run.Attempts[0].Decision = string(decision.Advance)
+	store.run.Attempts[0].PhaseOutputs = map[string]string{"branch_name": "issue-7-run-1"}
+	store.wf = prWorkflowForCompletion("impl")
+	prClient := &fakePullRequestClient{}
+	handler := NewWithRuntimeClients(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, prClient, nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/projects/proj/issues/7/runs/1/touchpoint/finalize", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var result PRPrimitiveResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "ensured" || result.PRNumber != 123 || result.TouchpointRef != "owner/repo#123" {
+		t.Fatalf("result=%#v", result)
+	}
+	if store.linkPRNumber != 123 {
+		t.Fatalf("linked pr=%d, want 123", store.linkPRNumber)
+	}
+	if store.touchpointReq == nil || store.touchpointReq.LinkedIssueRef != "proj#7" || store.touchpointReq.LinkedRunRef != "proj#7/runs/1" {
+		t.Fatalf("touchpoint req=%#v", store.touchpointReq)
+	}
+}
+
+func TestFinalizeRunTouchpointByNumberRejectsAbortPath(t *testing.T) {
+	store := &fakeCompletionStore{tokenRunID: "run-1", tokenProject: "proj"}
+	store.run = runDataForCompletion("impl")
+	store.run.Attempts[0].Completed = true
+	store.run.Attempts[0].Decision = string(decision.AbortMalformed)
+	store.wf = prWorkflowForCompletion("impl")
+	prClient := &fakePullRequestClient{}
+	handler := NewWithRuntimeClients(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, prClient, nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/projects/proj/issues/7/runs/1/touchpoint/finalize", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if prClient.req.Repo != "" || store.touchpointReq != nil {
+		t.Fatalf("unexpected PR materialization req=%#v touchpoint=%#v", prClient.req, store.touchpointReq)
+	}
+}
+
+func TestFinalizeRunTouchpointByNumberRequiresBranchOutput(t *testing.T) {
+	store := &fakeCompletionStore{tokenRunID: "run-1", tokenProject: "proj"}
+	store.run = runDataForCompletion("impl")
+	store.run.RunNumber = nil
+	store.run.RunDisplayNumber = nil
+	store.run.Attempts[0].Completed = true
+	store.run.Attempts[0].Conclusion = "success"
+	store.run.Attempts[0].Decision = string(decision.Advance)
+	store.wf = prWorkflowForCompletion("impl")
+	prClient := &fakePullRequestClient{}
+	handler := NewWithRuntimeClients(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, prClient, nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/projects/proj/issues/7/runs/1/touchpoint/finalize", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "branch_name") {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
+func TestFinalizeRunTouchpointByNumberRequiresAdmin(t *testing.T) {
+	store := &fakeCompletionStore{tokenRunID: "run-1", tokenProject: "proj"}
+	store.run = runDataForCompletion("impl")
+	store.wf = prWorkflowForCompletion("impl")
+	handler := NewWithRuntimeClients(Settings{}, store, nil, &fakePullRequestClient{}, nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/projects/proj/issues/7/runs/1/touchpoint/finalize", nil)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code == http.StatusOK {
+		t.Fatalf("expected non-200 without admin auth, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

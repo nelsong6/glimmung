@@ -3,7 +3,7 @@ image:
   # SHA-pinned. The build workflow rewrites this line on every push to main
   # via a `[skip ci]` follow-up commit. Quote the value so all-digit short
   # SHAs aren't reformatted as scientific notation by YAML.
-  tag: "app-b4d9da7b43b33e613b65433ec0f1e469cdf515cb3db7b6ada013ff502aa46944"
+  tag: "app-1a7f091fc0e4445e30c6bddbe870fb3d3bb3b4d3867f07a75ec86a6a2e8e7e26"
   pullPolicy: IfNotPresent
 
 namespace: glimmung
@@ -16,7 +16,7 @@ replicas: 1
 nativeRunner:
   namespace: glimmung-runs
   serviceAccount: glimmung-native-runner
-  image: romainecr.azurecr.io/glimmung-native-runner:native-runner-34967d2e40bf776866f1f924f756474a718fdc2ac32480c16700dbf12886b503
+  image: romainecr.azurecr.io/glimmung-native-runner:native-runner-d8f78ca28221a4bb058db56f4277985920a159802a859ad33a54fc138c3dba1f
   entrypoint: /app/glimmung-native-runner
   callbackBaseUrl: http://glimmung.glimmung.svc.cluster.local
   projectConcurrency: 5

@@ -168,10 +168,17 @@ phases:
 ```
 
 The job is Glimmung-supplied. Registration canonicalizes the declared job into
-the managed native runner step that calls the run callback endpoint for PR and
-touchpoint materialization. The workflow owns the placement and job id; Glimmung
-owns the implementation. If `pr.enabled` is false, declaring this primitive is
-invalid.
+the managed native runner step that calls Glimmung's PR/touchpoint finalizer.
+The workflow owns the placement and job id; Glimmung owns the implementation. If
+`pr.enabled` is false, declaring this primitive is invalid.
+
+The same finalizer is also exposed as an admin repair/control endpoint:
+`POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/touchpoint/finalize`.
+It is idempotent and uses the durable Run state as source of truth: it creates
+or reuses the GitHub PR, records `run.pr_number`, and ensures the Touchpoint
+linked to the Issue and Run. Operators should use this endpoint when a Run
+already passed verification but an older or interrupted workflow did not
+materialize the review surface.
 
 ## Naming convention
 
