@@ -1076,6 +1076,10 @@ function ProjectView({
       </section>
 
       <section className="home-links" aria-label={`${project.name} destinations`}>
+        <Link to={`${projectPath}/issues`} className="home-link">
+          <span className="key">Issues</span>
+          <strong>All open issues for {project.name}</strong>
+        </Link>
         <Link to={`${projectPath}/leases/test`} className="home-link">
           <span className="key">Test leases</span>
           <strong>{testLeases.length} active test environment lease{testLeases.length === 1 ? "" : "s"}</strong>
@@ -1087,10 +1091,6 @@ function ProjectView({
         <Link to={`${projectPath}/workflows`} className="home-link">
           <span className="key">Workflows</span>
           <strong>Definitions, triggers, requirements, and workflow-scoped work</strong>
-        </Link>
-        <Link to={`${projectPath}/issues`} className="home-link">
-          <span className="key">Issues</span>
-          <strong>All open issues for {project.name}</strong>
         </Link>
         <Link to={`${projectPath}/playbooks`} className="home-link">
           <span className="key">Playbooks</span>
