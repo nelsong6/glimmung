@@ -257,8 +257,8 @@ func (r *nativeRunner) executeStep(ctx context.Context, step stepSpec, outputFil
 	wg.Add(2)
 	go r.streamLogs(ctx, &wg, step.Slug, "stdout", stdout)
 	go r.streamLogs(ctx, &wg, step.Slug, "stderr", stderr)
-	waitErr := cmd.Wait()
 	wg.Wait()
+	waitErr := cmd.Wait()
 	if waitErr == nil {
 		return 0, nil
 	}
