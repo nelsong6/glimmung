@@ -303,6 +303,38 @@ func aggregateFakeNativePayload(expected []string, completions map[string]Comple
 	return payload
 }
 
+func TestCompletionPayloadFromNativePrefersPositiveVerificationCost(t *testing.T) {
+	jobID := "verify"
+	payload := completionPayloadFromNative(NativeRunCompletedRequest{
+		JobID:      &jobID,
+		Conclusion: "success",
+		CostUSD:    2.5,
+		Verification: map[string]any{
+			"status":   "pass",
+			"cost_usd": 3.75,
+		},
+	})
+	if payload.CostUSD != 3.75 {
+		t.Fatalf("cost=%v", payload.CostUSD)
+	}
+}
+
+func TestCompletionPayloadFromNativeKeepsObservedCostWhenVerificationCostIsZero(t *testing.T) {
+	jobID := "verify"
+	payload := completionPayloadFromNative(NativeRunCompletedRequest{
+		JobID:      &jobID,
+		Conclusion: "success",
+		CostUSD:    2.5,
+		Verification: map[string]any{
+			"status":   "pass",
+			"cost_usd": 0.0,
+		},
+	})
+	if payload.CostUSD != 2.5 {
+		t.Fatalf("cost=%v", payload.CostUSD)
+	}
+}
+
 func containsTestString(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {

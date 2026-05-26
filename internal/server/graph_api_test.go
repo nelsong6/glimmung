@@ -100,6 +100,44 @@ func (s fakeGraphStore) ListNativeEventsByID(context.Context, string, string, *i
 	return s.nativeLogs, nil
 }
 
+func TestApplyNativeEventsToProjectionRunBackfillsObservedCosts(t *testing.T) {
+	run := RunProjectionRun{
+		CostUSD: 0,
+		Phases: []RunProjectionPhase{{
+			Name: "llm-work",
+			Attempts: []RunProjectionAttempt{{
+				AttemptIndex: 1,
+				JobCompletions: []RunAttemptJobCompletion{{
+					JobID: "llm-implement",
+				}},
+			}},
+			Jobs: []RunProjectionJob{{
+				ID:    "llm-implement",
+				State: "succeeded",
+			}},
+		}},
+	}
+
+	applyNativeEventsToProjectionRun(&run, []NativeRunLogEvent{{
+		AttemptIndex: 1,
+		Phase:        "llm-work",
+		JobID:        "llm-implement",
+		Event:        "log",
+		Message:      `{"type":"result","total_cost_usd":7.792545}`,
+	}})
+
+	if run.CostUSD != 7.792545 {
+		t.Fatalf("run cost=%v", run.CostUSD)
+	}
+	got := run.Phases[0].Attempts[0].CostUSD
+	if got == nil || *got != 7.792545 {
+		t.Fatalf("attempt cost=%v", got)
+	}
+	if run.Phases[0].Attempts[0].JobCompletions[0].CostUSD != 7.792545 {
+		t.Fatalf("job cost=%v", run.Phases[0].Attempts[0].JobCompletions[0].CostUSD)
+	}
+}
+
 func TestIssueGraphByNumberBuildsRunAttemptAndTouchpointNodes(t *testing.T) {
 	issueNumber := 17
 	runNumber := 1

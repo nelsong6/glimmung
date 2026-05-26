@@ -65,6 +65,7 @@ type NativeRunCompletedRequest struct {
 	JobID               *string           `json:"job_id"`
 	Conclusion          string            `json:"conclusion"`
 	AttemptIndex        *int              `json:"attempt_index,omitempty"`
+	CostUSD             float64           `json:"cost_usd,omitempty"`
 	Verification        map[string]any    `json:"verification"`
 	ScreenshotsMarkdown *string           `json:"screenshots_markdown"`
 	SummaryMarkdown     *string           `json:"summary_markdown"`
@@ -164,6 +165,7 @@ func completionPayloadFromNative(req NativeRunCompletedRequest) CompletionPayloa
 		JobID:               req.JobID,
 		Conclusion:          req.Conclusion,
 		AttemptIndex:        req.AttemptIndex,
+		CostUSD:             req.CostUSD,
 		SummaryMarkdown:     req.SummaryMarkdown,
 		ScreenshotsMarkdown: req.ScreenshotsMarkdown,
 		PhaseOutputs:        req.Outputs,
@@ -179,7 +181,7 @@ func extractVerification(raw map[string]any, p *CompletionPayload) {
 	if s, ok := raw["status"].(string); ok {
 		p.VerificationStatus = s
 	}
-	if c, ok := raw["cost_usd"].(float64); ok {
+	if c, ok := raw["cost_usd"].(float64); ok && c > 0 {
 		p.CostUSD = c
 	}
 	if reasons, ok := raw["reasons"].([]any); ok {
