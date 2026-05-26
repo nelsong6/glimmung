@@ -184,7 +184,7 @@ afterEach(() => {
 });
 
 describe("IssueDetailView run execution graph", () => {
-  it("shows run history as flat run counts and bare cycle values", async () => {
+  it("shows run history as flat run counts, base cycle values, and run-cycle ordinals", async () => {
     const baseRun = runProjection.runs[0];
     const historyRuns = [
       {
@@ -270,15 +270,17 @@ describe("IssueDetailView run execution graph", () => {
     const oldestCells = within(rows[3]).getAllByRole("cell");
 
     expect(newestCells[0]).toHaveTextContent(/^3$/);
-    expect(within(newestCells[1]).getByRole("button")).toHaveTextContent(/^2\.2$/);
+    expect(within(newestCells[1]).getByRole("button")).toHaveTextContent(/^2$/);
     expect(newestCells[1]).not.toHaveTextContent(/cycle/i);
+    expect(newestCells[1]).not.toHaveTextContent(/\./);
     expect(newestCells[2]).toHaveTextContent(/^2$/);
 
     expect(middleCells[0]).toHaveTextContent(/^2$/);
-    expect(within(middleCells[1]).getByRole("button")).toHaveTextContent(/^2\.1$/);
+    expect(within(middleCells[1]).getByRole("button")).toHaveTextContent(/^2$/);
+    expect(middleCells[2]).toHaveTextContent(/^1$/);
 
     expect(oldestCells[0]).toHaveTextContent(/^1$/);
-    expect(within(oldestCells[1]).getByRole("button")).toHaveTextContent(/^1\.1$/);
+    expect(within(oldestCells[1]).getByRole("button")).toHaveTextContent(/^1$/);
   });
 
   it("routes a dispatching job click to its selected step log", async () => {

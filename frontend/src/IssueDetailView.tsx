@@ -3161,9 +3161,9 @@ function projectionRunLabel(run: RunProjectionRun): string {
 }
 
 function projectionCycleDisplay(run: RunProjectionRun): string {
-  if (run.run_display_number) return run.run_display_number;
-  if (run.cycle_number !== null && run.cycle_number !== undefined) return String(run.cycle_number);
   if (run.run_number !== null && run.run_number !== undefined) return String(run.run_number);
+  if (run.run_display_number) return run.run_display_number.split(".")[0] || run.run_display_number;
+  if (run.cycle_number !== null && run.cycle_number !== undefined) return String(run.cycle_number);
   return run.run_ref;
 }
 
@@ -3805,7 +3805,7 @@ function runSlugDisplay(slug: string): string {
 }
 
 function runSlugValueDisplay(slug: string): string {
-  return /^\d+(\.\d+)?$/.test(slug) ? slug : `${slug.slice(0, 8)}…`;
+  return /^\d+(\.\d+)?$/.test(slug) ? slug.split(".")[0] : `${slug.slice(0, 8)}…`;
 }
 
 function runRouteSlugFromNode(run: GraphNode): string | null {
