@@ -32,10 +32,6 @@ type SlotHistoryRow struct {
 	CreatedAt time.Time
 }
 
-type SlotMigrationSource interface {
-	ListAllSlotDocsForMigration(ctx context.Context) ([]SlotRow, []SlotHistoryRow, error)
-}
-
 var (
 	ErrSlotNotFound           = errors.New("slot not found")
 	ErrSlotPreconditionFailed = errors.New("slot precondition failed")
@@ -224,54 +220,6 @@ func (s *SlotsStore) ListHistory(ctx context.Context, project string, slotIndex 
 		return nil, fmt.Errorf("slots: iterate history: %w", err)
 	}
 	return out, nil
-}
-
-// Migrate copies cosmos slot + slot_history docs into pg.
-func (s *SlotsStore) Migrate(ctx context.Context, source SlotMigrationSource) (copied int, skipped int, err error) {
-	if s == nil || s.pool == nil {
-		return 0, 0, fmt.Errorf("slots store not configured")
-	}
-	if source == nil {
-		return 0, 0, nil
-	}
-	slots, history, err := source.ListAllSlotDocsForMigration(ctx)
-	if err != nil {
-		return 0, 0, fmt.Errorf("slots: migrate: read source: %w", err)
-	}
-	const insertSlotSQL = `
-		INSERT INTO slots (project, slot_index, payload, updated_at)
-		VALUES ($1, $2, $3, COALESCE($4, now()))
-		ON CONFLICT (project, slot_index) DO NOTHING
-	`
-	for _, row := range slots {
-		tag, execErr := s.pool.Exec(ctx, insertSlotSQL, row.Project, row.SlotIndex, row.Payload, nullableTime(row.UpdatedAt))
-		if execErr != nil {
-			return copied, skipped, fmt.Errorf("slots: migrate %s/%d: %w", row.Project, row.SlotIndex, execErr)
-		}
-		if tag.RowsAffected() == 1 {
-			copied++
-		} else {
-			skipped++
-		}
-	}
-	const insertHistorySQL = `
-		INSERT INTO slot_history (id, project, slot_index, payload, created_at)
-		VALUES ($1::uuid, $2, $3, $4, COALESCE($5, now()))
-		ON CONFLICT (id) DO NOTHING
-	`
-	for _, row := range history {
-		historyID := normalizedSlotHistoryID(row)
-		tag, execErr := s.pool.Exec(ctx, insertHistorySQL, historyID, row.Project, row.SlotIndex, row.Payload, nullableTime(row.CreatedAt))
-		if execErr != nil {
-			return copied, skipped, fmt.Errorf("slots: migrate history %s: %w", historyID, execErr)
-		}
-		if tag.RowsAffected() == 1 {
-			copied++
-		} else {
-			skipped++
-		}
-	}
-	return copied, skipped, nil
 }
 
 func normalizedSlotHistoryID(row SlotHistoryRow) string {

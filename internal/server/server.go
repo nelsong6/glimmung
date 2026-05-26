@@ -19,13 +19,10 @@ const (
 )
 
 type Settings struct {
-	Port                               string
-	CosmosEndpoint                     string
-	CosmosDatabase                     string
-	// Postgres settings — present in Stage 2a but no consumer reads them
-	// yet; the pool gets constructed in cmd/glimmung-go/main.go and
-	// RunMigrations applies the schema. Per-table cutovers (2b onward)
-	// will wire callers to the pg package.
+	Port string
+	// Postgres connection settings. The pool is constructed in
+	// cmd/glimmung-go/main.go and RunMigrations applies the schema.
+	// All R/W now flows through pg per the Cosmos->Postgres migration.
 	PostgresHost     string
 	PostgresDatabase string
 	PostgresUsername string
@@ -70,8 +67,6 @@ type Settings struct {
 func SettingsFromEnv() Settings {
 	return Settings{
 		Port:                envOrDefault("PORT", defaultPort),
-		CosmosEndpoint:      os.Getenv("COSMOS_ENDPOINT"),
-		CosmosDatabase:      os.Getenv("COSMOS_DATABASE"),
 		PostgresHost:        os.Getenv("POSTGRES_HOST"),
 		PostgresDatabase:    os.Getenv("POSTGRES_DATABASE"),
 		PostgresUsername:    os.Getenv("POSTGRES_USER"),

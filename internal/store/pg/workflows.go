@@ -46,74 +46,10 @@ type WorkflowSchemaRow struct {
 	CreatedAt time.Time
 }
 
-// WorkflowMigrationSource is the narrow interface cosmos.Store
-// satisfies for the one-shot Migrate. Implemented by
-// cosmos.Store.ListAllWorkflowDocsForMigration. Stage 2i deletes it.
-type WorkflowMigrationSource interface {
-	ListAllWorkflowDocsForMigration(ctx context.Context) ([]WorkflowRow, []WorkflowSchemaRow, error)
-}
-
 var ErrWorkflowNotFound = errors.New("workflow not found")
 
 func NewWorkflowsStore(pool *pgxpool.Pool) *WorkflowsStore {
 	return &WorkflowsStore{pool: pool}
-}
-
-// Migrate copies every cosmos workflow doc into the appropriate
-// Postgres table. Idempotent — ON CONFLICT DO NOTHING preserves any
-// pg-side writes that may have raced in (none in Stage 2f since the
-// cosmos.Store public methods still own writes).
-func (s *WorkflowsStore) Migrate(ctx context.Context, source WorkflowMigrationSource) (copied int, skipped int, err error) {
-	if s == nil || s.pool == nil {
-		return 0, 0, fmt.Errorf("workflows store not configured")
-	}
-	if source == nil {
-		return 0, 0, nil
-	}
-	workflows, schemas, err := source.ListAllWorkflowDocsForMigration(ctx)
-	if err != nil {
-		return 0, 0, fmt.Errorf("workflows: migrate: read source: %w", err)
-	}
-	const insertWorkflowSQL = `
-		INSERT INTO workflows (project, name, schema_ref, payload, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, COALESCE($5, now()), COALESCE($6, $5, now()))
-		ON CONFLICT (project, name) DO NOTHING
-	`
-	for _, row := range workflows {
-		createdAt := nullableTime(row.CreatedAt)
-		updatedAt := nullableTime(row.UpdatedAt)
-		tag, execErr := s.pool.Exec(ctx, insertWorkflowSQL,
-			row.Project, row.Name, row.SchemaRef, row.Payload, createdAt, updatedAt,
-		)
-		if execErr != nil {
-			return copied, skipped, fmt.Errorf("workflows: migrate workflow %s/%s: %w", row.Project, row.Name, execErr)
-		}
-		if tag.RowsAffected() == 1 {
-			copied++
-		} else {
-			skipped++
-		}
-	}
-	const insertSchemaSQL = `
-		INSERT INTO workflow_schemas (project, schema_ref, payload, created_at)
-		VALUES ($1, $2, $3, COALESCE($4, now()))
-		ON CONFLICT (project, schema_ref) DO NOTHING
-	`
-	for _, row := range schemas {
-		createdAt := nullableTime(row.CreatedAt)
-		tag, execErr := s.pool.Exec(ctx, insertSchemaSQL,
-			row.Project, row.SchemaRef, row.Payload, createdAt,
-		)
-		if execErr != nil {
-			return copied, skipped, fmt.Errorf("workflows: migrate schema %s/%s: %w", row.Project, row.SchemaRef, execErr)
-		}
-		if tag.RowsAffected() == 1 {
-			copied++
-		} else {
-			skipped++
-		}
-	}
-	return copied, skipped, nil
 }
 
 // List returns every workflow row across all projects.

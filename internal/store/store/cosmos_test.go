@@ -1,4 +1,4 @@
-package cosmos
+package store
 
 import (
 	"encoding/json"

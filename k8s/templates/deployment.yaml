@@ -38,10 +38,6 @@ spec:
             - name: http
               containerPort: 8000
           env:
-            - name: COSMOS_ENDPOINT
-              value: {{ .Values.cosmos.endpoint | quote }}
-            - name: COSMOS_DATABASE
-              value: {{ .Values.cosmos.database | quote }}
             # POSTGRES_HOST and POSTGRES_DATABASE come from the
             # glimmung-secrets K8s Secret materialized by ExternalSecret
             # (see envFrom below). POSTGRES_USER is a literal in

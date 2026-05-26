@@ -70,17 +70,6 @@ jobs:
       - name: Guard against writeProblem 5xx (must use writeInternalError)
         run: node scripts/check-handler-5xx-migration.mjs
 
-  check-cosmos-queries:
-    name: Cosmos query partition-strategy contract
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-      - name: Guard against retired queryAllWhere / empty NewPartitionKey
-        run: node scripts/check-cosmos-queries.mjs
-
   check-503-observability:
     name: Deliberate 503 observability contract
     runs-on: ubuntu-latest
@@ -125,31 +114,3 @@ jobs:
       - name: Build frontend
         working-directory: frontend
         run: npm run build
-
-  live-cosmos-smoke:
-    runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Azure login (OIDC)
-        uses: azure/login@v2
-        with:
-          client-id: ${{ vars.ARM_CLIENT_ID }}
-          tenant-id: ${{ vars.ARM_TENANT_ID }}
-          subscription-id: ${{ vars.ARM_SUBSCRIPTION_ID }}
-
-      - name: Run Go live Cosmos smoke
-        env:
-          COSMOS_ENDPOINT: https://infra-cosmos-serverless.documents.azure.com:443/
-          COSMOS_DATABASE: glimmung
-          GLIMMUNG_TEST_COSMOS: live
-          GLIMMUNG_TEST_PREFIX: "ci-${{ github.run_id }}-${{ github.run_attempt }}"
-        run: go test ./internal/store/cosmos -run TestLiveCosmosLockLifecycle -count=1 -v
