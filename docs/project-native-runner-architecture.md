@@ -272,6 +272,10 @@ runner sums those values and sends the positive total as completion
 second compatibility read path that reparses logs during completion. Positive
 `verification.cost_usd` can still supply the cost for verifier artifacts, but a
 zero verification cost does not erase a positive runner-observed cost.
+Historical runs completed before this contract can be repaired with the
+operator command `glimmung-repair-native-costs`, which copies the already
+durable native event cost facts into the run ledger instead of adding a
+read-time fallback.
 
 Step commands set phase outputs by appending either `key=value` lines or JSON
 objects to `$GLIMMUNG_OUTPUT_FILE`. The runner rejects duplicate keys locally

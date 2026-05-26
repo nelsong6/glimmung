@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nelsong6/glimmung/internal/domain/agentcost"
 	"github.com/nelsong6/glimmung/internal/domain/publicids"
 )
 
@@ -1878,7 +1877,6 @@ func applyNativeEventsToProjectionRun(run *RunProjectionRun, events []NativeRunL
 	if run == nil || len(events) == 0 {
 		return
 	}
-	applyNativeEventCostsToProjectionRun(run, events)
 	for phaseIndex := range run.Phases {
 		phase := &run.Phases[phaseIndex]
 		if len(phase.Attempts) == 0 {
@@ -1950,50 +1948,6 @@ func applyNativeEventsToProjectionRun(run *RunProjectionRun, events []NativeRunL
 		case phase.State == "dispatching" && phaseActive:
 			phase.State = "active"
 		}
-	}
-}
-
-func applyNativeEventCostsToProjectionRun(run *RunProjectionRun, events []NativeRunLogEvent) {
-	costByAttempt := map[int]float64{}
-	costByAttemptJob := map[int]map[string]float64{}
-	for _, event := range events {
-		if event.Event != "log" {
-			continue
-		}
-		cost, ok := agentcost.FromJSONLogLine(event.Message)
-		if !ok {
-			continue
-		}
-		costByAttempt[event.AttemptIndex] += cost
-		if costByAttemptJob[event.AttemptIndex] == nil {
-			costByAttemptJob[event.AttemptIndex] = map[string]float64{}
-		}
-		costByAttemptJob[event.AttemptIndex][event.JobID] += cost
-	}
-	if len(costByAttempt) == 0 {
-		return
-	}
-	var delta float64
-	for phaseIndex := range run.Phases {
-		phase := &run.Phases[phaseIndex]
-		for attemptIndex := range phase.Attempts {
-			attempt := &phase.Attempts[attemptIndex]
-			observed := costByAttempt[attempt.AttemptIndex]
-			if observed > 0 && (attempt.CostUSD == nil || *attempt.CostUSD <= 0) {
-				attempt.CostUSD = floatPointer(observed)
-				delta += observed
-			}
-			for completionIndex := range attempt.JobCompletions {
-				completion := &attempt.JobCompletions[completionIndex]
-				jobCost := costByAttemptJob[attempt.AttemptIndex][completion.JobID]
-				if jobCost > 0 && completion.CostUSD <= 0 {
-					completion.CostUSD = jobCost
-				}
-			}
-		}
-	}
-	if delta > 0 {
-		run.CostUSD += delta
 	}
 }
 
@@ -2417,10 +2371,6 @@ func stringPointerOrNil(value string) *string {
 	if value == "" {
 		return nil
 	}
-	return &value
-}
-
-func floatPointer(value float64) *float64 {
 	return &value
 }
 
