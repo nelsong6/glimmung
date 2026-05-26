@@ -52,6 +52,8 @@ type fakeCompletionStore struct {
 	nativeExpectedJobs []string
 	nativeCompletions  map[string]CompletionPayload
 	nativeErr          error
+
+	recycleReq *CreateRecycleCycleRequest
 }
 
 func (s *fakeCompletionStore) ReadRunIDForCallbackToken(context.Context, string) (string, string, string, error) {
@@ -130,6 +132,7 @@ func (s *fakeCompletionStore) AppendRunAttempt(_ context.Context, _, _, phase, p
 }
 
 func (s *fakeCompletionStore) CreateRecycleCycle(_ context.Context, req CreateRecycleCycleRequest) (CreatedRun, error) {
+	s.recycleReq = &req
 	return CreatedRun{
 		ID:                   "recycle-run",
 		RunNumber:            1,
@@ -800,5 +803,98 @@ func TestNativeRunCompletedByCallbackTokenEvidenceGateRetryCarriesPriorOutputs(t
 	}
 	if len(launcher.req.Run.Attempts) != 2 || !launcher.req.Run.Attempts[0].CarryForward || launcher.req.Run.Attempts[1].Phase != "llm-work" {
 		t.Fatalf("recycle attempts=%#v", launcher.req.Run.Attempts)
+	}
+	if store.recycleReq == nil || store.recycleReq.TargetPhaseName != "llm-work" || len(store.recycleReq.CarryForwardAttempts) != 1 {
+		t.Fatalf("recycle request=%#v", store.recycleReq)
+	}
+}
+
+func TestNativeRunCompletedByCallbackTokenEvidenceGateRetryCanRestartAtEnvPrep(t *testing.T) {
+	leaseRef := "proj/leases/proj-1/1"
+	store := &fakeCompletionStore{
+		tokenRunID:         "r1",
+		tokenProject:       "proj",
+		appendIdx:          0,
+		nativeExpectedJobs: []string{EvidenceGateJobID},
+		leaseResult:        Lease{Project: "proj", LeaseNumber: intPtr(1), State: "claimed", Metadata: map[string]any{}},
+	}
+	store.run = &RunReplayData{
+		ID:           "r1",
+		Project:      "proj",
+		WorkflowName: "wf",
+		IssueNumber:  7,
+		IssueRepo:    "owner/repo",
+		SlotLeaseRef: &leaseRef,
+		Attempts: []RunAttemptData{
+			{
+				AttemptIndex: 0,
+				Phase:        "env-prep",
+				Conclusion:   "success",
+				Decision:     string(decision.Advance),
+				Completed:    true,
+				PhaseOutputs: map[string]string{
+					"namespace":      "ambience-slot-1",
+					"validation_url": "https://slot.example",
+				},
+			},
+			{AttemptIndex: 1, Phase: "llm-work", Conclusion: "success", Decision: string(decision.Advance), Completed: true},
+			{AttemptIndex: 2, Phase: "llm-verify", Conclusion: "success", Decision: string(decision.Advance), Completed: true},
+			{AttemptIndex: 3, Phase: "evidence-gate"},
+		},
+	}
+	store.wf = &Workflow{
+		Project: "proj",
+		Name:    "wf",
+		Budget:  budget.Config{Total: 25},
+		Phases: []PhaseSpec{
+			{Name: "env-prep", Kind: "k8s_job", Jobs: []NativeJobSpec{{ID: "env-prep"}}, Outputs: []string{"namespace", "validation_url"}},
+			{
+				Name:      "llm-work",
+				Kind:      "k8s_job",
+				DependsOn: []string{"env-prep"},
+				Inputs: map[string]string{
+					"namespace":      "${{ phases.env-prep.outputs.namespace }}",
+					"validation_url": "${{ phases.env-prep.outputs.validation_url }}",
+				},
+				Jobs: []NativeJobSpec{{ID: "llm-work", Managed: true, Steps: []NativeStepSpec{{Slug: "run", Run: "true"}}}},
+			},
+			{Name: "llm-verify", Kind: "k8s_job", Verify: true, DependsOn: []string{"llm-work"}, Jobs: []NativeJobSpec{{ID: "llm-verify"}}},
+			{
+				Name:                     "evidence-gate",
+				Kind:                     "k8s_job",
+				EvidenceVerificationGate: true,
+				DependsOn:                []string{"llm-verify"},
+				RecyclePolicy:            &RecyclePolicy{MaxAttempts: 3, On: []string{"verify_fail"}, LandsAt: "env-prep"},
+				Jobs:                     []NativeJobSpec{{ID: EvidenceGateJobID}},
+			},
+			{Name: "cleanup", Kind: "k8s_job", Always: true, DependsOn: []string{"evidence-gate"}, Jobs: []NativeJobSpec{{ID: "cleanup"}}},
+		},
+	}
+	launcher := &fakeNativeLauncher{}
+	req := completedJob(EvidenceGateJobID, "failure", nil, nil)
+	rec := httptest.NewRecorder()
+	newCompletionHandler(store, launcher).ServeHTTP(rec, nativeCompletionRequest("tok", req))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	result := readCallbackResult(t, rec)
+	if result.Decision == nil || *result.Decision != "retry" {
+		t.Fatalf("decision=%v", result.Decision)
+	}
+	if !launcher.called || launcher.req.Phase.Name != "env-prep" {
+		t.Fatalf("native launch=%#v", launcher.req)
+	}
+	phaseInputs, ok := launcher.req.Lease.Metadata["phase_inputs"].(map[string]string)
+	if !ok {
+		t.Fatalf("phase_inputs=%#v", launcher.req.Lease.Metadata["phase_inputs"])
+	}
+	if len(phaseInputs) != 0 {
+		t.Fatalf("phase_inputs=%#v", phaseInputs)
+	}
+	if len(launcher.req.Run.Attempts) != 1 || launcher.req.Run.Attempts[0].Phase != "env-prep" || launcher.req.Run.Attempts[0].CarryForward {
+		t.Fatalf("recycle attempts=%#v", launcher.req.Run.Attempts)
+	}
+	if store.recycleReq == nil || store.recycleReq.TargetPhaseName != "env-prep" || len(store.recycleReq.CarryForwardAttempts) != 0 {
+		t.Fatalf("recycle request=%#v", store.recycleReq)
 	}
 }

@@ -165,6 +165,59 @@ func TestReplayRunDecision_Retry(t *testing.T) {
 	}
 }
 
+func TestReplayRunDecision_RetryReportsExplicitEnvPrepTarget(t *testing.T) {
+	store := &fakeRunReplayStore{}
+	store.runID = "run-abc"
+	store.run = &RunReplayData{
+		ID:           "run-id-1",
+		Project:      "proj",
+		WorkflowName: "wf",
+		Attempts: []RunAttemptData{
+			{AttemptIndex: 0, Phase: "evidence-gate", Conclusion: "success"},
+		},
+	}
+	store.wf = &Workflow{
+		Project: "proj",
+		Name:    "wf",
+		Budget:  budget.Config{Total: 25},
+		Phases: []PhaseSpec{
+			{Name: "env-prep"},
+			{Name: "llm-work", DependsOn: []string{"env-prep"}},
+			{
+				Name:          "evidence-gate",
+				Verify:        true,
+				DependsOn:     []string{"llm-work"},
+				RecyclePolicy: &RecyclePolicy{MaxAttempts: 3, On: []string{"verify_fail"}, LandsAt: "env-prep"},
+			},
+		},
+	}
+	h := newReplayHandlerAdmin(store)
+
+	body, _ := json.Marshal(RunReplayRequest{
+		SyntheticCompletion: SyntheticCompletion{
+			Conclusion:   "failure",
+			Verification: map[string]any{"status": "fail", "reasons": []any{"evidence missing"}},
+		},
+	})
+	req := httptest.NewRequest("POST", "/v1/projects/proj/issues/1/runs/r1/replay", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var result ReplayResult
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Decision != "retry" {
+		t.Errorf("expected retry, got %s", result.Decision)
+	}
+	if result.WouldRetryTargetPhase == nil || *result.WouldRetryTargetPhase != "env-prep" {
+		t.Errorf("would_retry_target_phase=%v, want env-prep", result.WouldRetryTargetPhase)
+	}
+}
+
 func TestReplayRunDecision_AbortBudgetAttempts(t *testing.T) {
 	// 3 attempts already, max_attempts=3 → abort
 	store := &fakeRunReplayStore{}
