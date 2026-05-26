@@ -64,6 +64,7 @@ var expectedGoRoutes = []string{
 	"GET /v1/projects/{project}/workflows/{name}/upstream",
 	"POST /v1/projects/{project}/workflows/{name}/sync",
 	"POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/abort",
+	"POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/touchpoint/finalize",
 	"GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/events",
 	"POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/events",
 	"POST /v1/run-callbacks/{callback_token}/native/events",
