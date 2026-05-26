@@ -16,6 +16,14 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          "vendor-flow": ["@xyflow/react"],
+          "vendor-react": ["react", "react-dom", "react-router-dom"],
+        },
+      },
+    },
   },
   test: {
     environment: "jsdom",
