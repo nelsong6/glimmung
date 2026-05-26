@@ -43,24 +43,6 @@ resource "azurerm_user_assigned_identity" "native_runner" {
   location            = azurerm_resource_group.glimmung.location
 }
 
-# Cosmos DB Built-in Data Contributor (00000000-0000-0000-0000-000000000002)
-# scoped to the glimmung database only — not the account. Other apps' data on
-# the same `infra-cosmos-serverless` account stays unreachable from this
-# identity even if a glimmung pod is compromised.
-#
-# `scope` is hand-built rather than `azurerm_cosmosdb_sql_database.glimmung.id`
-# because Cosmos data-plane RBAC uses its own path scheme (`/dbs/<name>`)
-# distinct from the ARM resource ID (`/sqlDatabases/<name>`); passing the
-# ARM ID gets rejected by the Cosmos service with "Expected path segment
-# [dbs] at position [0] but found [sqlDatabases]."
-resource "azurerm_cosmosdb_sql_role_assignment" "glimmung_dedicated_cosmos" {
-  resource_group_name = local.infra.resource_group_name
-  account_name        = data.azurerm_cosmosdb_account.infra.name
-  role_definition_id  = "${data.azurerm_cosmosdb_account.infra.id}/sqlRoleDefinitions/00000000-0000-0000-0000-000000000002"
-  principal_id        = azurerm_user_assigned_identity.glimmung_dedicated.principal_id
-  scope               = "${data.azurerm_cosmosdb_account.infra.id}/dbs/${azurerm_cosmosdb_sql_database.glimmung.name}"
-}
-
 resource "azurerm_federated_identity_credential" "glimmung_dedicated" {
   name                = "aks-glimmung"
   resource_group_name = azurerm_resource_group.glimmung.name
