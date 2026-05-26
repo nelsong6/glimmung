@@ -184,6 +184,32 @@ afterEach(() => {
 });
 
 describe("IssueDetailView run execution graph", () => {
+  it("keeps issue labels inline with the issue title", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string"
+          ? new URL(input, "https://glimmung.test")
+          : input instanceof URL
+            ? input
+            : new URL(input.url);
+      if (url.pathname === "/v1/issues/by-number/ambience/172") return json(issueDetail);
+      if (url.pathname === "/v1/issues/by-number/ambience/172/graph") return json(issueGraph);
+      if (url.pathname === "/v1/workflows") return json([]);
+      throw new Error(`unhandled fetch ${url.pathname}`);
+    }));
+
+    renderIssueDetail("/projects/ambience/issues/172/touchpoint");
+
+    const heading = await screen.findByRole("heading", { name: issueDetail.title });
+    const titleRow = heading.closest(".issue-title-row");
+    if (!titleRow) throw new Error("missing issue title row");
+
+    const labels = within(titleRow as HTMLElement).getByLabelText("issue labels");
+    expect(within(labels).getByText("ambient-effects")).toBeInTheDocument();
+    expect(within(labels).getByText("in flight")).toBeInTheDocument();
+    expect(document.querySelector(".project-hero > .dag-policy-rail")).not.toBeInTheDocument();
+  });
+
   it("shows run history as flat run counts, base cycle values, and run-cycle ordinals", async () => {
     const baseRun = runProjection.runs[0];
     const historyRuns = [
