@@ -1,7 +1,7 @@
 # Per-issue helm release values. The agent-run.yml workflow overrides
 # `image.tag`, `hostname`, and `prNumber` on each install via --set;
 # everything else is shared with prod (same SA, same Secret, same
-# Cosmos endpoint).
+# Postgres-backed datastore).
 
 image:
   repository: romainecr.azurecr.io/glimmung
@@ -60,6 +60,17 @@ externalSecret:
       kvKey: glimmung-github-app-private-key
     - envVar: GITHUB_WEBHOOK_SECRET
       kvKey: glimmung-github-webhook-secret
+    # Postgres connection. Warm test slots create their own ExternalSecret in
+    # the slot namespace, so keep this list in step with the prod chart.
+    - envVar: POSTGRES_HOST
+      kvKey: glimmung-pg-host
+    - envVar: POSTGRES_DATABASE
+      kvKey: glimmung-pg-database
+
+# Postgres workload-identity user. Not a secret; auth comes from the pod's
+# federated workload identity.
+postgres:
+  user: glimmung-identity
 
 # The wildcard XListenerSet that per-install HTTPRoutes attach to. Production
 # and per-issue releases install in `glimmung`; native test slots install into
