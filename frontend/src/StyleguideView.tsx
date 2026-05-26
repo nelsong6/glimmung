@@ -138,6 +138,7 @@ const DESIGN_SYSTEM_ITEMS: PortfolioItem[] = [
     id: "phase-graph-env-prep-recycle",
     title: "Phase Graph Env Prep Recycle",
     caption: "Entry recycle lanes from verification and touchpoint phases",
+    initialOpen: true,
     render: () => (
       <Specimen title="phase graph env prep recycle">
         <div className="dag-wrap">
