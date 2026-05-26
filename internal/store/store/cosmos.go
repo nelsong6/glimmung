@@ -15,7 +15,6 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/google/uuid"
 
-	"github.com/nelsong6/glimmung/internal/domain/agentcost"
 	"github.com/nelsong6/glimmung/internal/domain/budget"
 	"github.com/nelsong6/glimmung/internal/domain/publicids"
 	"github.com/nelsong6/glimmung/internal/server"
@@ -5474,12 +5473,6 @@ func (s *Store) RecordNativeJobCompletion(ctx context.Context, project, runID st
 			earlyCompletions = completions
 			return errAbortPatch
 		}
-		if p.CostUSD <= 0 {
-			if cost := s.inferNativeJobCostUSD(ctx, runID, idx, jobID); cost > 0 {
-				p.CostUSD = cost
-				newCompletion = nativeJobCompletionDocFromPayload(jobID, p, newCompletion.CompletedAt)
-			}
-		}
 		if vErr := validateNativePhaseOutputKeys(jobID, newCompletion.PhaseOutputs, completions); vErr != nil {
 			validationErr = vErr
 			return errAbortPatch
@@ -5600,26 +5593,6 @@ func nativeJobCompletionDocFromPayload(jobID string, p server.CompletionPayload,
 		CostUSD:             p.CostUSD,
 		PhaseOutputs:        stringMapOrEmpty(p.PhaseOutputs),
 	}
-}
-
-func (s *Store) inferNativeJobCostUSD(ctx context.Context, runID string, attemptIndex int, jobID string) float64 {
-	if s.pgRunEvents == nil {
-		return 0
-	}
-	rows, err := s.pgRunEvents.List(ctx, runID, &attemptIndex, &jobID, nil)
-	if err != nil {
-		return 0
-	}
-	var total float64
-	for _, row := range rows {
-		if row.Event != "log" {
-			continue
-		}
-		if cost, ok := agentcost.FromJSONLogLine(row.Message); ok {
-			total += cost
-		}
-	}
-	return total
 }
 
 func nativeJobExecutionStateAndReason(completion nativeJobCompletionDoc) (string, string) {

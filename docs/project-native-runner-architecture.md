@@ -265,6 +265,14 @@ The launcher passes the durable job spec to the runner in
 `phase_output_set` events, and terminal job completion through Glimmung native
 callback APIs.
 
+The runner is also the owner of observed agent cost for managed jobs. When a
+step streams an agent result JSON line with top-level `total_cost_usd`, the
+runner sums those values and sends the positive total as completion
+`cost_usd`. The server stores that completion cost directly; it does not keep a
+second compatibility read path that reparses logs during completion. Positive
+`verification.cost_usd` can still supply the cost for verifier artifacts, but a
+zero verification cost does not erase a positive runner-observed cost.
+
 Step commands set phase outputs by appending either `key=value` lines or JSON
 objects to `$GLIMMUNG_OUTPUT_FILE`. The runner rejects duplicate keys locally
 and the server persists `phase_output_set` events into the attempt's

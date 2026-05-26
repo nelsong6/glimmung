@@ -323,6 +323,11 @@ graph `nodes` / `edges` metadata.
 Each projected Run carries a `topology` object derived from the workflow
 schema referenced by that run or cycle. Execution fields such as phase, job,
 step state, logs, evidence, and cost are then painted onto that topology.
+Cost normally comes from the durable job completion ledger. For historical
+cycles whose completion ledger missed runner-observed cost, the run-scoped
+projection may paint cost from durable native log events that contain
+top-level agent `total_cost_usd` result lines. That is display repair for known
+execution facts, not a completion-time compatibility path.
 Recycle/request-changes arrows belong to topology, not to execution status,
 so the run execution surface does not need a separate metadata fallback to
 discover them.
