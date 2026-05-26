@@ -1499,6 +1499,7 @@ type recyclePolicyDoc struct {
 type nativeJobDoc struct {
 	ID               string              `json:"id"`
 	Name             *string             `json:"name"`
+	Primitive        string              `json:"primitive,omitempty"`
 	Image            string              `json:"image"`
 	Command          []string            `json:"command"`
 	Args             []string            `json:"args"`
@@ -2235,6 +2236,7 @@ func nativeJobDocFromSpec(job server.NativeJobSpec) nativeJobDoc {
 	return nativeJobDoc{
 		ID:               job.ID,
 		Name:             job.Name,
+		Primitive:        job.Primitive,
 		Image:            job.Image,
 		Command:          sliceOrEmpty(job.Command),
 		Args:             sliceOrEmpty(job.Args),
@@ -2311,6 +2313,9 @@ func normalizeWorkflowRegister(req *server.WorkflowRegister) {
 		req.Phases[i].Outputs = sliceOrEmpty(req.Phases[i].Outputs)
 		req.Phases[i].DependsOn = sliceOrEmpty(req.Phases[i].DependsOn)
 		req.Phases[i].Jobs = sliceOrEmpty(req.Phases[i].Jobs)
+		for j := range req.Phases[i].Jobs {
+			req.Phases[i].Jobs[j].Primitive = strings.TrimSpace(req.Phases[i].Jobs[j].Primitive)
+		}
 		req.Phases[i] = server.CanonicalNativePhase(req.Phases[i])
 	}
 }
@@ -2430,6 +2435,7 @@ func jobFromDoc(doc nativeJobDoc) server.NativeJobSpec {
 	return server.NativeJobSpec{
 		ID:               doc.ID,
 		Name:             doc.Name,
+		Primitive:        doc.Primitive,
 		Image:            doc.Image,
 		Command:          sliceOrEmpty(doc.Command),
 		Args:             sliceOrEmpty(doc.Args),

@@ -339,6 +339,20 @@ func singlePhaseWorkflowForCompletion(name string, verify bool) *Workflow {
 	}
 }
 
+func prWorkflowForCompletion(name string) *Workflow {
+	wf := singlePhaseWorkflowForCompletion(name, false)
+	wf.PR.Enabled = true
+	wf.Phases = append(wf.Phases, PhaseSpec{
+		Name:      "cleanup",
+		Kind:      "k8s_job",
+		Always:    true,
+		DependsOn: []string{name},
+		Jobs:      []NativeJobSpec{{ID: PRTouchpointJobID, Primitive: JobPrimitivePRTouchpoint}},
+	})
+	canonical := CanonicalWorkflow(*wf)
+	return &canonical
+}
+
 func runDataForCompletion(phase string) *RunReplayData {
 	callback := "run-token"
 	leaseRef := "proj/leases/proj-1/1"
@@ -440,16 +454,14 @@ func TestNativeRunCompletedByCallbackTokenAdvancePassed(t *testing.T) {
 
 func TestNativeRunCompletedByCallbackTokenAdvanceReviewRequired(t *testing.T) {
 	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
-	store.run = runDataForCompletion(PRTouchpointJobID)
+	store.run = runDataForCompletion("cleanup")
 	store.run.Attempts = []RunAttemptData{
 		{AttemptIndex: 0, Phase: "impl", Conclusion: "success", Decision: string(decision.Advance), Completed: true, PhaseOutputs: map[string]string{"branch_name": "issue-7-run-1"}},
-		{AttemptIndex: 1, Phase: "pr-touchpoint", Conclusion: "failure"},
+		{AttemptIndex: 1, Phase: "cleanup", Conclusion: "failure"},
 	}
 	prNumber := 123
 	store.run.PRNumber = &prNumber
-	wf := singlePhaseWorkflowForCompletion("impl", false)
-	wf.PR.Enabled = true
-	store.wf = wf
+	store.wf = prWorkflowForCompletion("impl")
 	store.terminalResult = AbortRunResult{State: "review_required", RunRef: "proj#7/runs/1"}
 	rec := httptest.NewRecorder()
 	newCompletionHandler(store, nil).ServeHTTP(rec, nativeCompletionRequest("tok", completedJob(PRTouchpointJobID, "success", nil, map[string]string{"pr_number": "123"})))
@@ -489,14 +501,12 @@ func TestCompletionPayloadFromNativeExtractsEvidenceRefs(t *testing.T) {
 
 func TestNativeRunCompletedByCallbackTokenMissingPRPrimitiveLinkAborts(t *testing.T) {
 	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
-	store.run = runDataForCompletion(PRTouchpointJobID)
+	store.run = runDataForCompletion("cleanup")
 	store.run.Attempts = []RunAttemptData{
 		{AttemptIndex: 0, Phase: "impl", Conclusion: "success", Decision: string(decision.Advance), Completed: true, PhaseOutputs: map[string]string{"branch_name": "issue-7-run-1"}},
-		{AttemptIndex: 1, Phase: "pr-touchpoint", Conclusion: "failure"},
+		{AttemptIndex: 1, Phase: "cleanup", Conclusion: "failure"},
 	}
-	wf := singlePhaseWorkflowForCompletion("impl", false)
-	wf.PR.Enabled = true
-	store.wf = wf
+	store.wf = prWorkflowForCompletion("impl")
 	store.terminalResult = AbortRunResult{State: "aborted", RunRef: "proj#7/runs/1"}
 
 	rec := httptest.NewRecorder()
@@ -519,9 +529,7 @@ func TestNativePRTouchpointByCallbackTokenEnsuresPRAndTouchpoint(t *testing.T) {
 	store.run.Attempts[0].Conclusion = "success"
 	store.run.Attempts[0].Decision = string(decision.Advance)
 	store.run.Attempts[0].PhaseOutputs = map[string]string{"branch_name": "issue-7-run-1"}
-	wf := singlePhaseWorkflowForCompletion("impl", false)
-	wf.PR.Enabled = true
-	store.wf = wf
+	store.wf = prWorkflowForCompletion("impl")
 	prClient := &fakePullRequestClient{}
 
 	rec := httptest.NewRecorder()
@@ -553,9 +561,7 @@ func TestNativePRTouchpointByCallbackTokenSkipsAbortPath(t *testing.T) {
 	store.run = runDataForCompletion("impl")
 	store.run.Attempts[0].Completed = true
 	store.run.Attempts[0].Decision = string(decision.AbortMalformed)
-	wf := singlePhaseWorkflowForCompletion("impl", false)
-	wf.PR.Enabled = true
-	store.wf = wf
+	store.wf = prWorkflowForCompletion("impl")
 	prClient := &fakePullRequestClient{}
 
 	rec := httptest.NewRecorder()

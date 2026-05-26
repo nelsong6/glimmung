@@ -7,6 +7,8 @@ const (
 	EvidenceGateStepSlug = "evaluate-verdict"
 	PRTouchpointJobID    = "pr-touchpoint"
 	PRTouchpointStepSlug = "ensure-pr-touchpoint"
+
+	JobPrimitivePRTouchpoint = "pr_touchpoint"
 )
 
 const evidenceGateRunScript = `set -Eeuo pipefail
@@ -68,36 +70,10 @@ fi
 `
 
 func CanonicalWorkflow(wf Workflow) Workflow {
-	wf.Phases = canonicalWorkflowPhases(wf)
+	for i := range wf.Phases {
+		wf.Phases[i] = CanonicalNativePhase(wf.Phases[i])
+	}
 	return wf
-}
-
-func canonicalWorkflowPhases(wf Workflow) []PhaseSpec {
-	phases := make([]PhaseSpec, 0, len(wf.Phases)+1)
-	for _, phase := range wf.Phases {
-		phases = append(phases, CanonicalNativePhase(phase))
-	}
-	if !wf.PR.Enabled {
-		return phases
-	}
-	job := canonicalPRTouchpointJob(nil)
-	for i := range phases {
-		if !phases[i].Always {
-			continue
-		}
-		phases[i].Jobs = appendOrReplacePrimitiveJob(phases[i].Jobs, job)
-		return phases
-	}
-	phase := PhaseSpec{
-		Name:   "pr-touchpoint",
-		Kind:   "k8s_job",
-		Always: true,
-		Jobs:   []NativeJobSpec{job},
-	}
-	if len(phases) > 0 {
-		phase.DependsOn = []string{phases[len(phases)-1].Name}
-	}
-	return append(phases, phase)
 }
 
 // CanonicalNativePhase returns the runtime phase shape Glimmung actually
@@ -105,15 +81,27 @@ func canonicalWorkflowPhases(wf Workflow) []PhaseSpec {
 // supplied container details are replaced with the managed gate runner while
 // preserving a stable job id when one was already registered.
 func CanonicalNativePhase(phase PhaseSpec) PhaseSpec {
-	if !phase.EvidenceVerificationGate {
+	if phase.EvidenceVerificationGate {
+		phase.Jobs = []NativeJobSpec{canonicalEvidenceGateJob(phase)}
 		return phase
 	}
-	phase.Jobs = []NativeJobSpec{canonicalEvidenceGateJob(phase)}
+	for i := range phase.Jobs {
+		phase.Jobs[i] = CanonicalNativeJob(phase.Jobs[i])
+	}
 	return phase
 }
 
 func CanonicalNativePhaseJobs(phase PhaseSpec) []NativeJobSpec {
 	return CanonicalNativePhase(phase).Jobs
+}
+
+func CanonicalNativeJob(job NativeJobSpec) NativeJobSpec {
+	switch strings.TrimSpace(job.Primitive) {
+	case JobPrimitivePRTouchpoint:
+		return canonicalPRTouchpointJob(&job)
+	default:
+		return job
+	}
 }
 
 func canonicalEvidenceGateJob(phase PhaseSpec) NativeJobSpec {
@@ -148,27 +136,14 @@ func canonicalEvidenceGateJob(phase PhaseSpec) NativeJobSpec {
 	}
 }
 
-func appendOrReplacePrimitiveJob(jobs []NativeJobSpec, job NativeJobSpec) []NativeJobSpec {
-	out := make([]NativeJobSpec, 0, len(jobs)+1)
-	replaced := false
-	for _, existing := range jobs {
-		if strings.TrimSpace(existing.ID) == job.ID {
-			out = append(out, canonicalPRTouchpointJob(&existing))
-			replaced = true
-			continue
-		}
-		out = append(out, existing)
-	}
-	if !replaced {
-		out = append(out, job)
-	}
-	return out
-}
-
 func canonicalPRTouchpointJob(existing *NativeJobSpec) NativeJobSpec {
+	jobID := PRTouchpointJobID
 	name := "PR touchpoint"
 	timeout := 120
 	if existing != nil {
+		if id := strings.TrimSpace(existing.ID); id != "" {
+			jobID = id
+		}
 		if existing.Name != nil && strings.TrimSpace(*existing.Name) != "" {
 			name = strings.TrimSpace(*existing.Name)
 		}
@@ -178,8 +153,9 @@ func canonicalPRTouchpointJob(existing *NativeJobSpec) NativeJobSpec {
 	}
 	title := "Ensure PR touchpoint"
 	return NativeJobSpec{
-		ID:             PRTouchpointJobID,
+		ID:             jobID,
 		Name:           &name,
+		Primitive:      JobPrimitivePRTouchpoint,
 		Managed:        true,
 		TimeoutSeconds: &timeout,
 		Steps: []NativeStepSpec{{

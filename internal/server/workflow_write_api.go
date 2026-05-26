@@ -163,6 +163,7 @@ func normalizeWorkflowRegisterWithDefaultKind(req *WorkflowRegister, defaultKind
 		req.Phases[i].Jobs = sliceOrEmpty(req.Phases[i].Jobs)
 		for j := range req.Phases[i].Jobs {
 			job := &req.Phases[i].Jobs[j]
+			job.Primitive = strings.TrimSpace(job.Primitive)
 			job.Command = sliceOrEmpty(job.Command)
 			job.Args = sliceOrEmpty(job.Args)
 			if job.Env == nil {
@@ -219,6 +220,7 @@ func ValidateWorkflowRegister(req WorkflowRegister) error {
 	phaseNames := map[string]int{}
 	hasTesting := false
 	hasCleanup := false
+	prTouchpointJobs := 0
 	for i, phase := range req.Phases {
 		name := strings.TrimSpace(phase.Name)
 		if name == "" {
@@ -248,6 +250,16 @@ func ValidateWorkflowRegister(req WorkflowRegister) error {
 					return ValidationError{Message: fmt.Sprintf("workflow %s phase %q job %q duplicates job[%d]", req.Name, name, jobID, prev)}
 				}
 				seenJobs[jobID] = j
+				switch strings.TrimSpace(job.Primitive) {
+				case "":
+				case JobPrimitivePRTouchpoint:
+					prTouchpointJobs++
+					if !phase.Always {
+						return ValidationError{Message: fmt.Sprintf("workflow %s phase %q job %q primitive %q must be in an always phase", req.Name, name, job.ID, JobPrimitivePRTouchpoint)}
+					}
+				default:
+					return ValidationError{Message: fmt.Sprintf("workflow %s phase %q job %q declares unknown primitive %q", req.Name, name, job.ID, job.Primitive)}
+				}
 				if err := validateNativeJobSpec(req.Name, name, j, job); err != nil {
 					return err
 				}
@@ -281,6 +293,13 @@ func ValidateWorkflowRegister(req WorkflowRegister) error {
 			missing = append(missing, "cleanup")
 		}
 		return ValidationError{Message: "workflow " + req.Name + " is missing required phases: " + strings.Join(missing, ", ")}
+	}
+	if req.PR.Enabled {
+		if prTouchpointJobs != 1 {
+			return ValidationError{Message: fmt.Sprintf("workflow %s has pr.enabled=true and must declare exactly one %q job primitive in an always phase", req.Name, JobPrimitivePRTouchpoint)}
+		}
+	} else if prTouchpointJobs > 0 {
+		return ValidationError{Message: fmt.Sprintf("workflow %s declares %q job primitive but pr.enabled is false", req.Name, JobPrimitivePRTouchpoint)}
 	}
 	if err := phaserefs.Validate(phaseRefs); err != nil {
 		return ValidationError{Message: err.Error()}
