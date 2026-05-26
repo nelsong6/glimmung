@@ -49,6 +49,11 @@ spec:
             - name: http
               containerPort: 8000
           env:
+            # POSTGRES_HOST and POSTGRES_DATABASE come from the Secret
+            # materialized by ExternalSecret or shared with prod. POSTGRES_USER
+            # is the workload-identity principal name, not a secret.
+            - name: POSTGRES_USER
+              value: {{ .Values.postgres.user | quote }}
             {{- if (eq (include "glimmung-issue.isTestEnv" .) "true") }}
             - name: CONTROL_PLANE_LOOPS_ENABLED
               value: "false"
