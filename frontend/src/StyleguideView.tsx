@@ -152,6 +152,12 @@ const DESIGN_SYSTEM_ITEMS: PortfolioItem[] = [
               { name: "env-destroy", kind: "k8s_job", always: true, depends_on: ["evidence-gate"], jobs: [{ id: "env-destroy", name: "Environment destroy" }] },
             ]}
             prEnabled
+            entryArrows={[{
+              target: "env-prep",
+              label: "manual trigger",
+              active: false,
+              kind: "manual_trigger",
+            }]}
             recycleArrows={[
               {
                 source: "evidence-gate",

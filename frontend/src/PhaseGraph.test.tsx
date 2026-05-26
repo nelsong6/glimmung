@@ -16,6 +16,12 @@ describe("PhaseGraph", () => {
           { name: "env-destroy", kind: "k8s_job", always: true, depends_on: ["evidence-gate"], jobs: [{ id: "env-destroy" }] },
         ]}
         prEnabled
+        entryArrows={[{
+          target: "env-prep",
+          label: "manual trigger",
+          active: false,
+          kind: "manual_trigger",
+        }]}
         recycleArrows={[
           {
             source: "evidence-gate",
@@ -38,8 +44,9 @@ describe("PhaseGraph", () => {
     );
 
     expect(screen.getByLabelText("workflow graph")).toBeInTheDocument();
+    expect(container.querySelector('[data-id="entry-source:0"]')).toBeInTheDocument();
     expect(container.querySelector(".dag-rf-surface")).toHaveStyle({
-      width: "1700px",
+      width: "1768px",
       height: "216px",
     });
   });

@@ -62,6 +62,12 @@ describe("workflowToPhaseGraphModel", () => {
         },
       ],
       prEnabled: true,
+      entryArrows: [{
+        target: "implementation",
+        label: "manual trigger",
+        active: false,
+        kind: "manual_trigger",
+      }],
       recycleArrows: [
         {
           source: "implementation",
@@ -92,6 +98,7 @@ describe("workflowToPhaseGraphModel", () => {
     expect(workflowToPhaseGraphModel(workflow)).toEqual({
       phases: [],
       prEnabled: false,
+      entryArrows: [],
       recycleArrows: [
         {
           source: "touchpoint",
@@ -132,7 +139,14 @@ describe("workflowToPhaseGraphModel", () => {
       },
     };
 
-    expect(workflowToPhaseGraphModel(workflow).recycleArrows).toEqual([
+    const model = workflowToPhaseGraphModel(workflow);
+    expect(model.entryArrows).toEqual([{
+      target: "env-prep",
+      label: "manual trigger",
+      active: false,
+      kind: "manual_trigger",
+    }]);
+    expect(model.recycleArrows).toEqual([
       {
         source: "evidence-gate",
         target: "env-prep",
@@ -204,6 +218,12 @@ describe("runTopologyToPhaseGraphModel", () => {
         },
       ],
       prEnabled: true,
+      entryArrows: [{
+        target: "env-prep",
+        label: "manual trigger",
+        active: true,
+        kind: "default",
+      }],
       recycleArrows: [{
         source: "touchpoint",
         target: "env-prep",
