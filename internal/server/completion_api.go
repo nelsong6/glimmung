@@ -73,10 +73,6 @@ type NativeRunCompletedRequest struct {
 
 // nativeRunCompletedByCallbackToken handles POST /v1/run-callbacks/{callback_token}/native/completed.
 func nativeRunCompletedByCallbackToken(store ReadStore, nativeLauncher NativeLauncher) http.HandlerFunc {
-	return nativeRunCompletedByCallbackTokenWithPR(store, nativeLauncher, nil)
-}
-
-func nativeRunCompletedByCallbackTokenWithPR(store ReadStore, nativeLauncher NativeLauncher, prClient PullRequestClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		completionStore, ok := store.(RunCompletionStore)
 		if !ok || completionStore == nil {
@@ -149,7 +145,7 @@ func nativeRunCompletedByCallbackTokenWithPR(store ReadStore, nativeLauncher Nat
 			return
 		}
 
-		result := processRunCompletion(r.Context(), w, r, completionStore, nativeLauncher, prClient, project, runID, jobResult.PhasePayload)
+		result := processRunCompletion(r.Context(), w, r, completionStore, nativeLauncher, project, runID, jobResult.PhasePayload)
 		if result != nil {
 			phaseComplete := true
 			result.PhaseComplete = &phaseComplete
@@ -229,7 +225,6 @@ func processRunCompletion(
 	r *http.Request,
 	store RunCompletionStore,
 	nativeLauncher NativeLauncher,
-	prClient PullRequestClient,
 	project, runID string,
 	payload CompletionPayload,
 ) *RunCallbackResult {
@@ -348,8 +343,8 @@ func processRunCompletion(
 		// Mark run passed (or review_required if PR primitive enabled).
 		state := "passed"
 		if wf.PR.Enabled {
-			if err := materializePRPrimitive(ctx, store, prClient, run); err != nil {
-				abortReason := "PR primitive: " + err.Error()
+			if run.PRNumber == nil || *run.PRNumber < 1 {
+				abortReason := "PR primitive: touchpoint job completed without linking a PR"
 				return markRunAborted(ctx, w, r, store, nativeLauncher, run, runRef, decision.AbortMalformed, abortReason)
 			}
 			state = "review_required"
@@ -403,10 +398,18 @@ func processRunCompletion(
 }
 
 func workflowForRun(ctx context.Context, store RunCompletionStore, run RunReplayData) (*Workflow, error) {
+	var wf *Workflow
+	var err error
 	if run.WorkflowSchemaRef != "" {
-		return store.GetWorkflowBySchemaRef(ctx, run.Project, run.WorkflowSchemaRef)
+		wf, err = store.GetWorkflowBySchemaRef(ctx, run.Project, run.WorkflowSchemaRef)
+	} else {
+		wf, err = store.GetWorkflowByName(ctx, run.Project, run.WorkflowName)
 	}
-	return store.GetWorkflowByName(ctx, run.Project, run.WorkflowName)
+	if err != nil || wf == nil {
+		return wf, err
+	}
+	canonical := CanonicalWorkflow(*wf)
+	return &canonical, nil
 }
 
 func abortRunWithWorkflowCleanup(

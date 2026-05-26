@@ -145,7 +145,7 @@ func timedOutJobIDs(run RunReport, phaseName string) []string {
 func processSyntheticRunCompletion(ctx context.Context, store RunCompletionStore, nativeLauncher NativeLauncher, project, runID string, payload CompletionPayload) (*RunCallbackResult, error) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/", nil)
 	w := &captureResponseWriter{header: http.Header{}}
-	result := processRunCompletion(ctx, w, req, store, nativeLauncher, nil, project, runID, payload)
+	result := processRunCompletion(ctx, w, req, store, nativeLauncher, project, runID, payload)
 	if result == nil {
 		status := w.status
 		if status == 0 {

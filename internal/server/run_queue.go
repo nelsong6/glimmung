@@ -191,10 +191,18 @@ func AdmitQueuedRunCycle(ctx context.Context, store RunQueueStore, nativeLaunche
 }
 
 func workflowForQueuedRun(ctx context.Context, store RunQueueStore, run RunReplayData) (*Workflow, error) {
+	var wf *Workflow
+	var err error
 	if run.WorkflowSchemaRef != "" {
-		return store.GetWorkflowBySchemaRef(ctx, run.Project, run.WorkflowSchemaRef)
+		wf, err = store.GetWorkflowBySchemaRef(ctx, run.Project, run.WorkflowSchemaRef)
+	} else {
+		wf, err = store.GetWorkflowByName(ctx, run.Project, run.WorkflowName)
 	}
-	return store.GetWorkflowByName(ctx, run.Project, run.WorkflowName)
+	if err != nil || wf == nil {
+		return wf, err
+	}
+	canonical := CanonicalWorkflow(*wf)
+	return &canonical, nil
 }
 
 func abortQueuedAdmission(ctx context.Context, store RunQueueStore, run RunReplayData, reason string) (RunCycleAdmissionResult, error) {

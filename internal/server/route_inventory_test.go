@@ -71,6 +71,7 @@ var expectedGoRoutes = []string{
 	"GET /v1/run-callbacks/{callback_token}/native/status",
 	"POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/github-token",
 	"POST /v1/run-callbacks/{callback_token}/native/github-token",
+	"POST /v1/run-callbacks/{callback_token}/native/pr-touchpoint",
 	"POST /v1/run-callbacks/{callback_token}/native/completed",
 	"POST /v1/test-slots/checkout",
 	"POST /v1/test-slots/return",

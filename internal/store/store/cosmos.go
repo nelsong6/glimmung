@@ -1985,10 +1985,10 @@ func appendMissingStrings(values []string, additions ...string) []string {
 }
 
 func phaseExecutionDocsFromWorkflow(wf server.Workflow, createdAt string, entrypointPhase *string) []phaseExecutionDoc {
+	wf = server.CanonicalWorkflow(wf)
 	out := make([]phaseExecutionDoc, 0, len(wf.Phases))
 	beforeEntrypoint := strings.TrimSpace(stringOrEmpty(entrypointPhase)) != ""
 	for _, phase := range wf.Phases {
-		phase = server.CanonicalNativePhase(phase)
 		state := "not_started"
 		if beforeEntrypoint {
 			if phase.Name == strings.TrimSpace(stringOrEmpty(entrypointPhase)) {
@@ -2065,7 +2065,8 @@ func (s *Store) workflowForRunExecution(ctx context.Context, project, workflowNa
 			return nil, err
 		}
 		if wf != nil {
-			return wf, nil
+			canonical := server.CanonicalWorkflow(*wf)
+			return &canonical, nil
 		}
 	}
 	wf, err := s.GetWorkflowByName(ctx, project, workflowName)
@@ -2075,7 +2076,8 @@ func (s *Store) workflowForRunExecution(ctx context.Context, project, workflowNa
 	if wf == nil {
 		return nil, server.ValidationError{Message: fmt.Sprintf("workflow %q is not registered", workflowName)}
 	}
-	return wf, nil
+	canonical := server.CanonicalWorkflow(*wf)
+	return &canonical, nil
 }
 
 func runDisplayNumber(doc runDoc, fallback int) string {

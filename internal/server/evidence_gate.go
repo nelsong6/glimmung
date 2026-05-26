@@ -5,6 +5,8 @@ import "strings"
 const (
 	EvidenceGateJobID    = "evidence-verification-gate"
 	EvidenceGateStepSlug = "evaluate-verdict"
+	PRTouchpointJobID    = "pr-touchpoint"
+	PRTouchpointStepSlug = "ensure-pr-touchpoint"
 )
 
 const evidenceGateRunScript = `set -Eeuo pipefail
@@ -23,7 +25,80 @@ if [ "${status}" = "pass" ]; then
   exit 0
 fi
 exit 1
+	`
+
+const prTouchpointRunScript = `set -Eeuo pipefail
+if [ -z "${GLIMMUNG_PR_TOUCHPOINT_URL:-}" ]; then
+  echo "GLIMMUNG_PR_TOUCHPOINT_URL is not configured" >&2
+  exit 2
+fi
+echo "Ensuring PR touchpoint for ${GLIMMUNG_RUN_REF:-unknown run}"
+response="$(mktemp)"
+status="$(curl -sS -o "${response}" -w '%{http_code}' -X POST "${GLIMMUNG_PR_TOUCHPOINT_URL}")" || {
+  code="$?"
+  echo "PR touchpoint request failed with curl exit ${code}" >&2
+  exit "${code}"
+}
+cat "${response}" | jq .
+if [ "${status}" -lt 200 ] || [ "${status}" -ge 300 ]; then
+  echo "PR touchpoint request returned HTTP ${status}" >&2
+  exit 1
+fi
+result_status="$(jq -r '.status // empty' "${response}")"
+if [ "${result_status}" = "skipped" ]; then
+  echo "PR touchpoint skipped: $(jq -r '.reason // "no reason"' "${response}")"
+  exit 0
+fi
+if [ "${result_status}" != "ensured" ]; then
+  echo "PR touchpoint returned unexpected status '${result_status}'" >&2
+  exit 2
+fi
+pr_number="$(jq -r '.pr_number // empty' "${response}")"
+touchpoint_ref="$(jq -r '.touchpoint_ref // empty' "${response}")"
+html_url="$(jq -r '.html_url // empty' "${response}")"
+{
+  if [ -n "${pr_number}" ]; then printf 'pr_number=%s\n' "${pr_number}"; fi
+  if [ -n "${touchpoint_ref}" ]; then printf 'touchpoint_ref=%s\n' "${touchpoint_ref}"; fi
+  if [ -n "${html_url}" ]; then printf 'pr_url=%s\n' "${html_url}"; fi
+} >>"${GLIMMUNG_OUTPUT_FILE}"
+echo "PR touchpoint ensured: ${touchpoint_ref:-unknown}"
+if [ -n "${html_url}" ]; then
+  echo "PR URL: ${html_url}"
+fi
 `
+
+func CanonicalWorkflow(wf Workflow) Workflow {
+	wf.Phases = canonicalWorkflowPhases(wf)
+	return wf
+}
+
+func canonicalWorkflowPhases(wf Workflow) []PhaseSpec {
+	phases := make([]PhaseSpec, 0, len(wf.Phases)+1)
+	for _, phase := range wf.Phases {
+		phases = append(phases, CanonicalNativePhase(phase))
+	}
+	if !wf.PR.Enabled {
+		return phases
+	}
+	job := canonicalPRTouchpointJob(nil)
+	for i := range phases {
+		if !phases[i].Always {
+			continue
+		}
+		phases[i].Jobs = appendOrReplacePrimitiveJob(phases[i].Jobs, job)
+		return phases
+	}
+	phase := PhaseSpec{
+		Name:   "pr-touchpoint",
+		Kind:   "k8s_job",
+		Always: true,
+		Jobs:   []NativeJobSpec{job},
+	}
+	if len(phases) > 0 {
+		phase.DependsOn = []string{phases[len(phases)-1].Name}
+	}
+	return append(phases, phase)
+}
 
 // CanonicalNativePhase returns the runtime phase shape Glimmung actually
 // launches. Evidence gates are a Glimmung-owned primitive, so any project-
@@ -68,6 +143,50 @@ func canonicalEvidenceGateJob(phase PhaseSpec) NativeJobSpec {
 			Title: &title,
 			Type:  "run",
 			Run:   evidenceGateRunScript,
+			Shell: "bash",
+		}},
+	}
+}
+
+func appendOrReplacePrimitiveJob(jobs []NativeJobSpec, job NativeJobSpec) []NativeJobSpec {
+	out := make([]NativeJobSpec, 0, len(jobs)+1)
+	replaced := false
+	for _, existing := range jobs {
+		if strings.TrimSpace(existing.ID) == job.ID {
+			out = append(out, canonicalPRTouchpointJob(&existing))
+			replaced = true
+			continue
+		}
+		out = append(out, existing)
+	}
+	if !replaced {
+		out = append(out, job)
+	}
+	return out
+}
+
+func canonicalPRTouchpointJob(existing *NativeJobSpec) NativeJobSpec {
+	name := "PR touchpoint"
+	timeout := 120
+	if existing != nil {
+		if existing.Name != nil && strings.TrimSpace(*existing.Name) != "" {
+			name = strings.TrimSpace(*existing.Name)
+		}
+		if existing.TimeoutSeconds != nil && *existing.TimeoutSeconds > 0 {
+			timeout = *existing.TimeoutSeconds
+		}
+	}
+	title := "Ensure PR touchpoint"
+	return NativeJobSpec{
+		ID:             PRTouchpointJobID,
+		Name:           &name,
+		Managed:        true,
+		TimeoutSeconds: &timeout,
+		Steps: []NativeStepSpec{{
+			Slug:  PRTouchpointStepSlug,
+			Title: &title,
+			Type:  "run",
+			Run:   prTouchpointRunScript,
 			Shell: "bash",
 		}},
 	}

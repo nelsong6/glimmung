@@ -204,6 +204,35 @@ func TestNormalizeWorkflowRegisterCanonicalizesEvidenceGate(t *testing.T) {
 	}
 }
 
+func TestCanonicalWorkflowInjectsPRTouchpointIntoAlwaysPhase(t *testing.T) {
+	wf := Workflow{
+		Project: "ambience",
+		Name:    "agent-run",
+		PR:      PrPrimitive{Enabled: true},
+		Phases: []PhaseSpec{
+			{Name: "work", Jobs: []NativeJobSpec{{ID: "work"}}},
+			{Name: "cleanup", Always: true, DependsOn: []string{"work"}, Jobs: []NativeJobSpec{{ID: "env-destroy"}}},
+		},
+	}
+
+	got := CanonicalWorkflow(wf)
+
+	if len(got.Phases) != 2 {
+		t.Fatalf("phase count=%d, want 2", len(got.Phases))
+	}
+	cleanup := got.Phases[1]
+	if len(cleanup.Jobs) != 2 {
+		t.Fatalf("cleanup jobs=%#v", cleanup.Jobs)
+	}
+	if cleanup.Jobs[0].ID != "env-destroy" || cleanup.Jobs[1].ID != PRTouchpointJobID {
+		t.Fatalf("cleanup job ids=%q,%q", cleanup.Jobs[0].ID, cleanup.Jobs[1].ID)
+	}
+	job := cleanup.Jobs[1]
+	if !job.Managed || len(job.Steps) != 1 || job.Steps[0].Slug != PRTouchpointStepSlug || !strings.Contains(job.Steps[0].Run, "GLIMMUNG_PR_TOUCHPOINT_URL") {
+		t.Fatalf("pr touchpoint job=%#v", job)
+	}
+}
+
 func TestValidateWorkflowRegisterRejectsInvalidManagedSteps(t *testing.T) {
 	base := func(job NativeJobSpec) WorkflowRegister {
 		return WorkflowRegister{

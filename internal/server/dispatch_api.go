@@ -385,7 +385,8 @@ func resolveDispatchWorkflow(ctx context.Context, store RunDispatchStore, projec
 		if wf == nil {
 			return nil, fmt.Sprintf("workflow %s/%s not registered", project, workflowName), nil
 		}
-		return wf, "", nil
+		canonical := CanonicalWorkflow(*wf)
+		return &canonical, "", nil
 	}
 	workflows, err := store.ListProjectWorkflows(ctx, project)
 	if err != nil {
@@ -395,7 +396,8 @@ func resolveDispatchWorkflow(ctx context.Context, store RunDispatchStore, projec
 	case 0:
 		return nil, fmt.Sprintf("project %q has no workflows registered", project), nil
 	case 1:
-		return &workflows[0], "", nil
+		canonical := CanonicalWorkflow(workflows[0])
+		return &canonical, "", nil
 	default:
 		names := make([]string, 0, len(workflows))
 		for _, wf := range workflows {

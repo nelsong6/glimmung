@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 
+	"github.com/nelsong6/glimmung/internal/domain/decision"
 	"github.com/nelsong6/glimmung/internal/domain/publicids"
 )
 
@@ -40,25 +42,119 @@ type prPrimitiveStore interface {
 	EnsureTouchpoint(ctx context.Context, req TouchpointCreate) (TouchpointDetail, error)
 }
 
-func materializePRPrimitive(ctx context.Context, store RunCompletionStore, prClient PullRequestClient, run RunReplayData) error {
+type PRPrimitiveResult struct {
+	Status         string `json:"status"`
+	Reason         string `json:"reason,omitempty"`
+	Repo           string `json:"repo,omitempty"`
+	PRNumber       int    `json:"pr_number,omitempty"`
+	Title          string `json:"title,omitempty"`
+	Branch         string `json:"branch,omitempty"`
+	BaseRef        string `json:"base_ref,omitempty"`
+	HeadSHA        string `json:"head_sha,omitempty"`
+	HTMLURL        string `json:"html_url,omitempty"`
+	TouchpointRef  string `json:"touchpoint_ref,omitempty"`
+	LinkedIssueRef string `json:"linked_issue_ref,omitempty"`
+	LinkedRunRef   string `json:"linked_run_ref,omitempty"`
+}
+
+func nativePRTouchpointByCallbackToken(store ReadStore, prClient PullRequestClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		completionStore, ok := store.(RunCompletionStore)
+		if !ok || completionStore == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "completion store not configured")
+			return
+		}
+		runID, project, _, err := completionStore.ReadRunIDForCallbackToken(r.Context(), r.PathValue("callback_token"))
+		if errors.Is(err, ErrNotFound) {
+			writeProblem(w, http.StatusNotFound, "run callback token not found")
+			return
+		}
+		if err != nil {
+			writeInternalError(w, r, err, "read run by callback token failed")
+			return
+		}
+		run, err := completionStore.ReadRunForReplay(r.Context(), project, runID)
+		if errors.Is(err, ErrNotFound) {
+			writeProblem(w, http.StatusNotFound, "run not found")
+			return
+		}
+		if err != nil {
+			writeInternalError(w, r, err, "read run failed")
+			return
+		}
+		wf, err := workflowForRun(r.Context(), completionStore, run)
+		if err != nil {
+			writeInternalError(w, r, err, "read workflow failed")
+			return
+		}
+		if wf == nil || !wf.PR.Enabled {
+			writeJSON(w, http.StatusOK, PRPrimitiveResult{Status: "skipped", Reason: "workflow PR primitive is disabled"})
+			return
+		}
+		if ready, reason := prPrimitiveReadyForRun(wf, run); !ready {
+			writeJSON(w, http.StatusOK, PRPrimitiveResult{Status: "skipped", Reason: reason})
+			return
+		}
+		if prClient == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "pull request client not configured")
+			return
+		}
+		result, err := materializePRPrimitive(r.Context(), completionStore, prClient, run)
+		if err != nil {
+			writeInternalError(w, r, err, "ensure PR touchpoint failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+	}
+}
+
+func prPrimitiveReadyForRun(wf *Workflow, run RunReplayData) (bool, string) {
+	var latestPrimary *RunAttemptData
+	for i := range run.Attempts {
+		attempt := &run.Attempts[i]
+		phase := phaseSpecByName(wf.Phases, attempt.Phase)
+		if phase != nil && phase.Always {
+			continue
+		}
+		if !attempt.Completed && attempt.Decision == "" {
+			return false, "primary phase is still in progress"
+		}
+		if isAbortDecision(attempt.Decision) {
+			return false, "run is on an abort path"
+		}
+		latestPrimary = attempt
+	}
+	if latestPrimary == nil {
+		return false, "run has no primary phase attempts"
+	}
+	if latestPrimary.Decision == string(decision.Advance) {
+		return true, ""
+	}
+	if latestPrimary.Decision == "" && latestPrimary.Completed && latestPrimary.Conclusion == "success" {
+		return true, ""
+	}
+	return false, "latest primary phase has not advanced"
+}
+
+func materializePRPrimitive(ctx context.Context, store RunCompletionStore, prClient PullRequestClient, run RunReplayData) (PRPrimitiveResult, error) {
 	if prClient == nil {
-		return errors.New("pull request client not configured")
+		return PRPrimitiveResult{}, errors.New("pull request client not configured")
 	}
 	prStore, ok := any(store).(prPrimitiveStore)
 	if !ok || prStore == nil {
-		return errors.New("store does not support PR primitive materialization")
+		return PRPrimitiveResult{}, errors.New("store does not support PR primitive materialization")
 	}
 	repo := strings.TrimSpace(run.IssueRepo)
 	if repo == "" {
-		return errors.New("run has no issue_repo")
+		return PRPrimitiveResult{}, errors.New("run has no issue_repo")
 	}
 	branch := prBranchForRun(run)
 	if branch == "" {
-		return errors.New("run did not emit a branch_name output")
+		return PRPrimitiveResult{}, errors.New("run did not emit a branch_name output")
 	}
 	issue, err := prStore.ReadIssueForDispatch(ctx, run.Project, run.IssueNumber)
 	if err != nil {
-		return fmt.Errorf("read issue: %w", err)
+		return PRPrimitiveResult{}, fmt.Errorf("read issue: %w", err)
 	}
 	title := strings.TrimSpace(issue.Title)
 	if title == "" {
@@ -73,17 +169,17 @@ func materializePRPrimitive(ctx context.Context, store RunCompletionStore, prCli
 		Body:  body,
 	})
 	if err != nil {
-		return fmt.Errorf("ensure GitHub PR: %w", err)
+		return PRPrimitiveResult{}, fmt.Errorf("ensure GitHub PR: %w", err)
 	}
 	if pr.Number < 1 {
-		return errors.New("GitHub PR response did not include a positive number")
+		return PRPrimitiveResult{}, errors.New("GitHub PR response did not include a positive number")
 	}
 	if err := prStore.LinkRunPullRequest(ctx, run.Project, run.ID, pr.Number); err != nil {
-		return fmt.Errorf("link run to PR: %w", err)
+		return PRPrimitiveResult{}, fmt.Errorf("link run to PR: %w", err)
 	}
 	runRef := runRefFromData(run)
 	issueRef := publicids.IssueRef(run.Project, &run.IssueNumber)
-	if _, err := prStore.EnsureTouchpoint(ctx, TouchpointCreate{
+	touchpoint, err := prStore.EnsureTouchpoint(ctx, TouchpointCreate{
 		Project:        run.Project,
 		Repo:           repo,
 		Number:         pr.Number,
@@ -95,10 +191,23 @@ func materializePRPrimitive(ctx context.Context, store RunCompletionStore, prCli
 		HTMLURL:        pr.HTMLURL,
 		LinkedIssueRef: issueRef,
 		LinkedRunRef:   runRef,
-	}); err != nil {
-		return fmt.Errorf("ensure touchpoint: %w", err)
+	})
+	if err != nil {
+		return PRPrimitiveResult{}, fmt.Errorf("ensure touchpoint: %w", err)
 	}
-	return nil
+	return PRPrimitiveResult{
+		Status:         "ensured",
+		Repo:           repo,
+		PRNumber:       pr.Number,
+		Title:          firstNonEmpty(pr.Title, title),
+		Branch:         firstNonEmpty(pr.Branch, branch),
+		BaseRef:        firstNonEmpty(pr.BaseRef, "main"),
+		HeadSHA:        pr.HeadSHA,
+		HTMLURL:        pr.HTMLURL,
+		TouchpointRef:  touchpoint.Ref,
+		LinkedIssueRef: issueRef,
+		LinkedRunRef:   runRef,
+	}, nil
 }
 
 func prBranchForRun(run RunReplayData) string {
