@@ -5340,14 +5340,14 @@ func (s *Store) RecordNativeJobCompletion(ctx context.Context, project, runID st
 	// duplicate idempotent completion) are emitted as sentinel
 	// errors from the mutator and translated outside.
 	var (
-		completedIdempotent      bool
-		duplicateCompletion      bool
-		earlyExpectedJobIDs      []string
-		earlyCompletions         map[string]nativeJobCompletionDoc
-		writtenCompletions       map[string]nativeJobCompletionDoc
-		writtenExpectedJobIDs    []string
-		validationErr            error
-		conflictMsg              error
+		completedIdempotent   bool
+		duplicateCompletion   bool
+		earlyExpectedJobIDs   []string
+		earlyCompletions      map[string]nativeJobCompletionDoc
+		writtenCompletions    map[string]nativeJobCompletionDoc
+		writtenExpectedJobIDs []string
+		validationErr         error
+		conflictMsg           error
 	)
 	_, err := s.pgRuns.PatchPayload(ctx, project, runID, func(raw map[string]any) error {
 		// Re-marshal to get a runDoc for typed access.
@@ -5996,6 +5996,11 @@ func canonicalExecutionFailureReason(reason string) string {
 	switch {
 	case strings.Contains(reason, "dispatch_timeout"):
 		return "dispatch_timeout"
+	case strings.Contains(reason, "forward_dispatch_failed"),
+		strings.Contains(reason, "retry_dispatch_failed"),
+		strings.Contains(reason, "teardown_dispatch_failed"),
+		strings.Contains(reason, "cleanup_dispatch_failed"):
+		return "dispatch_failed"
 	case strings.Contains(reason, "timeout"), strings.Contains(reason, "timed_out"):
 		return "timeout"
 	case strings.Contains(reason, "cancel"):

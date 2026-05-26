@@ -205,6 +205,92 @@ func TestJobCompletionFailurePreservesUnstartedSteps(t *testing.T) {
 	}
 }
 
+func TestFinalizeExecutionFailureClassifiesForwardDispatchFailure(t *testing.T) {
+	now := "2026-05-25T07:32:14Z"
+	raw := map[string]any{
+		"phase_executions": []any{
+			map[string]any{
+				"name":  "env-prep",
+				"kind":  "k8s_job",
+				"state": "succeeded",
+				"jobs": []any{map[string]any{
+					"id":    "env-prep",
+					"state": "succeeded",
+				}},
+			},
+			map[string]any{
+				"name":  "llm-work",
+				"kind":  "k8s_job",
+				"state": "not_started",
+				"jobs": []any{
+					map[string]any{
+						"id":    "llm-test-plan",
+						"state": "not_started",
+						"steps": []any{
+							map[string]any{"slug": "clone", "state": "not_started"},
+							map[string]any{"slug": "run-test-plan", "state": "not_started"},
+						},
+					},
+					map[string]any{
+						"id":    "llm-implement",
+						"state": "not_started",
+						"steps": []any{
+							map[string]any{"slug": "clone", "state": "not_started"},
+							map[string]any{"slug": "run-implementation", "state": "not_started"},
+						},
+					},
+				},
+			},
+			map[string]any{
+				"name":  "llm-verify",
+				"kind":  "k8s_job",
+				"state": "not_started",
+				"jobs": []any{map[string]any{
+					"id":    "llm-verify",
+					"state": "not_started",
+					"steps": []any{map[string]any{"slug": "clone", "state": "not_started"}},
+				}},
+			},
+		},
+	}
+
+	reason := canonicalExecutionFailureReason(`forward_dispatch_failed: phase "llm-work" input "claude_ca_namespace" refs phase "env-prep" which has no captured outputs on this run`)
+	finalizeExecutionFailureRaw(raw, reason, now)
+
+	work := rawPhase(t, raw, "llm-work")
+	if got := stringValue(work["state"]); got != "failed" {
+		t.Fatalf("llm-work state=%q", got)
+	}
+	if got := stringValue(work["reason"]); got != "dispatch_failed" {
+		t.Fatalf("llm-work reason=%q", got)
+	}
+	for _, id := range []string{"llm-test-plan", "llm-implement"} {
+		job := rawJob(t, work, id)
+		if got := stringValue(job["state"]); got != "failed" {
+			t.Fatalf("%s state=%q", id, got)
+		}
+		if got := stringValue(job["reason"]); got != "dispatch_failed" {
+			t.Fatalf("%s reason=%q", id, got)
+		}
+		for _, stepValue := range job["steps"].([]any) {
+			step := stepValue.(map[string]any)
+			if got := stringValue(step["state"]); got != "not_started" {
+				t.Fatalf("%s step %#v should remain not_started", id, step)
+			}
+			if _, ok := step["reason"]; ok {
+				t.Fatalf("%s step should not have failure reason: %#v", id, step)
+			}
+			if _, ok := step["completed_at"]; ok {
+				t.Fatalf("%s step should not be completed: %#v", id, step)
+			}
+		}
+	}
+	verify := rawPhase(t, raw, "llm-verify")
+	if got := stringValue(verify["state"]); got != "skipped" {
+		t.Fatalf("llm-verify state=%q", got)
+	}
+}
+
 func rawPhase(t *testing.T, raw map[string]any, name string) map[string]any {
 	t.Helper()
 	for _, value := range raw["phase_executions"].([]any) {

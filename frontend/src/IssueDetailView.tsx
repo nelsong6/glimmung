@@ -113,6 +113,7 @@ type RunProjectionRun = {
   state: string;
   current_phase?: string | null;
   validation_url?: string | null;
+  abort_reason?: string | null;
   cost_usd: number;
   attempts_count: number;
   started_at: string;
@@ -2456,14 +2457,36 @@ function ProjectionPipelineDag({
 }
 
 function preferredProjectionStepSlug(job: RunProjectionPhase["jobs"][number]): string | null {
+  const observedStep = (
+    job.steps.find((step) => step.state === "active")
+    ?? job.steps.find((step) => step.state === "failed")
+    ?? job.steps.find((step) => step.state === "dispatching" || step.state === "claimed")
+  );
+  if (observedStep) return observedStep.slug;
+  if (job.state === "failed" && isDispatchFailureReason(job.reason)) {
+    return null;
+  }
   return (
-    job.steps.find((step) => step.state === "active")?.slug
-    ?? job.steps.find((step) => step.state === "failed")?.slug
-    ?? job.steps.find((step) => step.state === "dispatching" || step.state === "claimed")?.slug
-    ?? job.steps.find((step) => step.state === "not_started")?.slug
+    job.steps.find((step) => step.state === "not_started")?.slug
     ?? job.steps[0]?.slug
     ?? null
   );
+}
+
+function isDispatchFailureReason(reason?: string | null): boolean {
+  return reason === "dispatch_failed" || reason === "dispatch_timeout";
+}
+
+function projectionDispatchFailureDetail(
+  run: RunProjectionRun,
+  phase: RunProjectionPhase,
+  job: RunProjectionPhase["jobs"][number] | null,
+): string | null {
+  if (!isDispatchFailureReason(job?.reason ?? phase.reason)) {
+    return null;
+  }
+  return run.abort_reason
+    ?? "The job was not dispatched, so no step-level logs were created.";
 }
 
 function projectionPhaseForSelection(run: RunProjectionRun, phaseName: string): RunProjectionPhase | null {
@@ -2518,6 +2541,7 @@ function ProjectionInspector({
   const selectedJob = job ?? phase.jobs[0] ?? null;
   const nativeJob = selectedJob ? projectionJobToNativeJob(selectedJob) : null;
   const runNumber = run.run_display_number ?? (run.run_number ? `${run.run_number}.${run.run_cycle_number ?? 1}` : null);
+  const dispatchFailureDetail = projectionDispatchFailureDetail(run, phase, selectedJob);
   return (
     <div className="run-panel">
       <div className="run-panel-header">
@@ -2562,6 +2586,12 @@ function ProjectionInspector({
           </div>
         )}
       </div>
+      {dispatchFailureDetail && (
+        <div className="run-failure-detail" role="alert">
+          <span className="pill drain">dispatch failed</span>
+          <span className="mono">{dispatchFailureDetail}</span>
+        </div>
+      )}
       {selectedJob && nativeJob ? (
         latestAttempt && issueNumber !== null && runNumber ? (
           <NativeJobInspector
@@ -2609,6 +2639,11 @@ function ProjectionRunMetaSummary({ run, repo }: { run: RunProjectionRun; repo: 
       <div>
         <span className="key">cost</span> <span className="mono">${run.cost_usd.toFixed(4)}</span>
       </div>
+      {run.abort_reason && (
+        <div>
+          <span className="key">abort</span> <span className="mono">{run.abort_reason}</span>
+        </div>
+      )}
       {repo && (
         <div>
           <span className="key">repo</span> <span className="mono">{repo}</span>

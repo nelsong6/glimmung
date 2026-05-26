@@ -106,6 +106,7 @@ type RunProjectionRun struct {
 	CycleNumber       *int                    `json:"cycle_number,omitempty"`
 	RunCycleNumber    *int                    `json:"run_cycle_number,omitempty"`
 	ValidationURL     *string                 `json:"validation_url,omitempty"`
+	AbortReason       *string                 `json:"abort_reason,omitempty"`
 	CostUSD           float64                 `json:"cost_usd"`
 	AttemptsCount     int                     `json:"attempts_count"`
 	StartedAt         string                  `json:"started_at"`
@@ -1031,6 +1032,7 @@ func runProjectionFromReport(run RunReport, workflow Workflow, touchpoints []Tou
 		CycleNumber:       run.CycleNumber,
 		RunCycleNumber:    run.RunCycleNumber,
 		ValidationURL:     run.ValidationURL,
+		AbortReason:       run.AbortReason,
 		CostUSD:           run.CumulativeCostUSD,
 		AttemptsCount:     attemptsCount,
 		StartedAt:         run.StartedAt.Format(time.RFC3339Nano),
@@ -1193,7 +1195,7 @@ func runProjectionPhasesFromExecutions(run RunReport, workflow Workflow) []RunPr
 			}
 			attempts := attemptsForProjectionPhase(run.Attempts, spec.Name)
 			if execution, ok := executionByName[spec.Name]; ok {
-				phase := projectionPhaseFromExecution(execution, spec, attempts)
+				phase := projectionPhaseFromExecution(execution, spec, attempts, run.AbortReason)
 				phases = append(phases, phase)
 				emitted[spec.Name] = true
 				if phase.State == "failed" {
@@ -1224,7 +1226,7 @@ func runProjectionPhasesFromExecutions(run RunReport, workflow Workflow) []RunPr
 			}
 			execution := executionByName[name]
 			spec := phaseByName[name]
-			phases = append(phases, projectionPhaseFromExecution(execution, spec, attemptsForProjectionPhase(run.Attempts, name)))
+			phases = append(phases, projectionPhaseFromExecution(execution, spec, attemptsForProjectionPhase(run.Attempts, name), run.AbortReason))
 		}
 		return phases
 	}
@@ -1233,26 +1235,40 @@ func runProjectionPhasesFromExecutions(run RunReport, workflow Workflow) []RunPr
 	for _, execution := range run.PhaseExecutions {
 		spec := phaseByName[execution.Name]
 		attempts := attemptsForProjectionPhase(run.Attempts, execution.Name)
-		phases = append(phases, projectionPhaseFromExecution(execution, spec, attempts))
+		phases = append(phases, projectionPhaseFromExecution(execution, spec, attempts, run.AbortReason))
 	}
 	return phases
 }
 
-func projectionPhaseFromExecution(execution RunPhaseExecution, spec PhaseSpec, attempts []RunReportAttempt) RunProjectionPhase {
+func projectionPhaseFromExecution(execution RunPhaseExecution, spec PhaseSpec, attempts []RunReportAttempt, abortReason *string) RunProjectionPhase {
 	name := firstNonEmpty(execution.Name, spec.Name, "phase")
 	kind := workflowPhaseKind(firstNonEmpty(execution.Kind, spec.Kind))
 	state := projectionExecutionState(execution.State)
+	reason := projectionExecutionReason(state, execution.Reason, attempts, abortReason)
 	return RunProjectionPhase{
 		Name:      name,
 		Kind:      kind,
 		State:     state,
-		Reason:    execution.Reason,
+		Reason:    reason,
 		Verify:    spec.Verify,
 		Always:    spec.Always,
 		DependsOn: sliceOrEmpty(spec.DependsOn),
-		Jobs:      runProjectionJobsForExecution(execution, spec, state, execution.Reason, attempts),
+		Jobs:      runProjectionJobsForExecution(execution, spec, state, reason, attempts),
 		Attempts:  runProjectionAttempts(attempts),
 	}
+}
+
+func projectionExecutionReason(state string, executionReason *string, attempts []RunReportAttempt, abortReason *string) *string {
+	if state != "failed" {
+		return executionReason
+	}
+	if len(attempts) == 0 && abortReason != nil && strings.TrimSpace(*abortReason) != "" {
+		reason := projectionFailureReason(*abortReason)
+		if reason == "dispatch_failed" {
+			return stringPointerOrNil(reason)
+		}
+	}
+	return executionReason
 }
 
 func runProjectionJobsForExecution(
@@ -1263,6 +1279,7 @@ func runProjectionJobsForExecution(
 	attempts []RunReportAttempt,
 ) []RunProjectionJob {
 	executionJobs := runProjectionJobsFromExecutions(execution.Jobs, latestJobCompletionsByJob(attempts))
+	executionJobs = applyUndispatchedPhaseReason(executionJobs, phaseReason, len(attempts) == 0)
 	if len(spec.Jobs) == 0 {
 		return executionJobs
 	}
@@ -1332,6 +1349,23 @@ func runProjectionJobsFromExecutions(executions []RunJobExecution, completions m
 		})
 	}
 	return jobs
+}
+
+func applyUndispatchedPhaseReason(jobs []RunProjectionJob, phaseReason *string, undispatched bool) []RunProjectionJob {
+	if !undispatched || phaseReason == nil || *phaseReason == "" {
+		return jobs
+	}
+	out := make([]RunProjectionJob, len(jobs))
+	copy(out, jobs)
+	for i := range out {
+		if out[i].State != "failed" {
+			continue
+		}
+		if out[i].Reason == nil || *out[i].Reason == "" || *out[i].Reason == "job_failed" {
+			out[i].Reason = phaseReason
+		}
+	}
+	return out
 }
 
 func projectionExecutionState(state string) string {
@@ -1422,11 +1456,14 @@ func phaseSkippedByEntrypoint(phases []PhaseSpec, phaseName string, entrypoint *
 }
 
 func projectionPhaseReason(state string, attempts []RunReportAttempt, abortReason *string) *string {
-	if state != "failed" || len(attempts) == 0 {
+	if state != "failed" {
 		return nil
 	}
 	if abortReason != nil && strings.TrimSpace(*abortReason) != "" {
 		return stringPointerOrNil(projectionFailureReason(*abortReason))
+	}
+	if len(attempts) == 0 {
+		return stringPointerOrNil("job_failed")
 	}
 	latest := attempts[len(attempts)-1]
 	if latest.VerificationStatus != nil {
@@ -1455,6 +1492,11 @@ func projectionFailureReason(reason string) string {
 	switch {
 	case strings.Contains(normalized, "dispatch_timeout"):
 		return "dispatch_timeout"
+	case strings.Contains(normalized, "forward_dispatch_failed"),
+		strings.Contains(normalized, "retry_dispatch_failed"),
+		strings.Contains(normalized, "teardown_dispatch_failed"),
+		strings.Contains(normalized, "cleanup_dispatch_failed"):
+		return "dispatch_failed"
 	case strings.Contains(normalized, "timeout"), strings.Contains(normalized, "timed_out"):
 		return "timeout"
 	case strings.Contains(normalized, "cancel"):
@@ -1482,17 +1524,18 @@ func runProjectionJobs(phase PhaseSpec, phaseState string, phaseReason *string, 
 			}
 		}
 		state, conclusion, completedAt := projectionJobCompletionAttrs(jobCompletions[jobID], phaseState, len(attempts) > 0)
+		reason := projectionJobReason(state, jobCompletions[jobID], phaseReason)
 		return []RunProjectionJob{{
 			ID:          jobID,
 			Name:        stringPointerOrNil(jobID),
 			State:       state,
-			Reason:      projectionJobReason(state, jobCompletions[jobID], phaseReason),
+			Reason:      reason,
 			Conclusion:  conclusion,
 			CompletedAt: completedAt,
 			Steps: []RunProjectionStep{{
 				Slug:  "workflow-run",
 				Title: stringPointerOrNil("Workflow run"),
-				State: projectionStepState(state),
+				State: projectionStepStateForJob(state, reason, jobCompletions[jobID]),
 			}},
 		}}
 	}
@@ -1500,27 +1543,29 @@ func runProjectionJobs(phase PhaseSpec, phaseState string, phaseReason *string, 
 	for _, job := range phase.Jobs {
 		jobID := firstNonEmpty(job.ID, "job")
 		state, conclusion, completedAt := projectionJobCompletionAttrs(jobCompletions[jobID], phaseState, len(attempts) > 0)
+		reason := projectionJobReason(state, jobCompletions[jobID], phaseReason)
+		stepState := projectionStepStateForJob(state, reason, jobCompletions[jobID])
 		steps := make([]RunProjectionStep, 0, len(job.Steps))
 		for _, step := range job.Steps {
 			slug := firstNonEmpty(step.Slug, "step")
 			steps = append(steps, RunProjectionStep{
 				Slug:  slug,
 				Title: step.Title,
-				State: projectionStepState(state),
+				State: stepState,
 			})
 		}
 		if len(steps) == 0 {
 			steps = append(steps, RunProjectionStep{
 				Slug:  "job",
 				Title: job.Name,
-				State: projectionStepState(state),
+				State: stepState,
 			})
 		}
 		jobs = append(jobs, RunProjectionJob{
 			ID:          jobID,
 			Name:        job.Name,
 			State:       state,
-			Reason:      projectionJobReason(state, jobCompletions[jobID], phaseReason),
+			Reason:      reason,
 			Conclusion:  conclusion,
 			CompletedAt: completedAt,
 			Steps:       steps,
@@ -1599,6 +1644,13 @@ func projectionStepState(jobState string) string {
 	default:
 		return "not_started"
 	}
+}
+
+func projectionStepStateForJob(jobState string, jobReason *string, completion RunAttemptJobCompletion) string {
+	if completion.JobID == "" && jobState == "failed" && jobReason != nil && (*jobReason == "dispatch_failed" || *jobReason == "dispatch_timeout") {
+		return "not_started"
+	}
+	return projectionStepState(jobState)
 }
 
 func projectionJobReason(state string, completion RunAttemptJobCompletion, fallback *string) *string {
