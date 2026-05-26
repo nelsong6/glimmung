@@ -85,11 +85,6 @@ authRomaineLife:
   # token's audience in deployment.yaml.
   tokenMountPath: /var/run/secrets/auth.romaine.life
 
-# Cosmos DB — endpoint of the shared serverless account, database is glimmung's own.
-cosmos:
-  endpoint: https://infra-cosmos-serverless.documents.azure.com:443/
-  database: glimmung
-
 # Phase 2: ingress at glimmung.romaine.life. The XListenerSet adds a
 # dedicated HTTPS listener on the shared envoy-gateway with TLS
 # termination from the cert-manager Certificate. ExternalDNS picks the

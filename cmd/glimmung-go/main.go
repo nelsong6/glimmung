@@ -17,25 +17,23 @@ import (
 	githubclient "github.com/nelsong6/glimmung/internal/github"
 	"github.com/nelsong6/glimmung/internal/server"
 	artifactstore "github.com/nelsong6/glimmung/internal/store/artifacts"
-	cosmosstore "github.com/nelsong6/glimmung/internal/store/cosmos"
 	pgstore "github.com/nelsong6/glimmung/internal/store/pg"
+	glimmungstore "github.com/nelsong6/glimmung/internal/store/store"
 )
 
 // runtimeStore is the combined store passed to the HTTP server and the
-// background reconcilers. It embeds the cosmos-backed store (which holds
-// every method that hasn't been migrated yet) AND the Postgres-backed
-// LocksStore (which serves all lock operations as of Stage 2b). Go field
-// promotion gives the wrapper the union of both method sets — no manual
-// forwarding. Successive sub-stages will add more pg.* embeds; Stage 2i
-// removes the cosmos embed entirely.
+// background reconcilers. It embeds the data-access wrapper (which now
+// delegates every R/W to per-cluster pg.*Store fields after the
+// Postgres migration) plus the Postgres-backed LocksStore. Go field
+// promotion gives the wrapper the union of both method sets.
 type runtimeStore struct {
-	*cosmosstore.Store
+	*glimmungstore.Store
 	*pgstore.LocksStore
 }
 
 func main() {
 	settings := server.SettingsFromEnv()
-	store, err := cosmosstore.NewFromSettings(settings)
+	store, err := glimmungstore.NewFromSettings(settings)
 	if err != nil {
 		log.Printf("cosmos read store disabled: %v", err)
 	}

@@ -58,13 +58,6 @@ type TestLeaseDefaultsRow struct {
 	UpdatedAt            time.Time
 }
 
-// ProjectMigrationSource is the narrow interface cosmos.Store satisfies
-// for the one-shot Migrate call. Implemented by
-// cosmos.Store.ListAllProjectDocsForMigration which deletes in Stage 2i.
-type ProjectMigrationSource interface {
-	ListAllProjectDocsForMigration(ctx context.Context) ([]ProjectRow, *TestLeaseDefaultsRow, error)
-}
-
 // ProjectRegister is the narrow payload UpsertProject accepts. Matches
 // the field set the server's ProjectRegister type carries (Name +
 // GitHubRepo + Metadata); kept separate so this package doesn't import
@@ -454,82 +447,6 @@ func (s *ProjectsStore) upsertGlobalDefault(ctx context.Context, column string, 
 		return TestLeaseDefaultsRow{}, fmt.Errorf("projects: upsert defaults: %w", err)
 	}
 	return row, nil
-}
-
-// Migrate copies every cosmos `projects` container doc into the
-// appropriate Postgres table: per-project docs into `projects`, the
-// singleton settings doc into `test_lease_defaults`. Idempotent.
-// Stage 2i deletes this method and the cosmos source.
-func (s *ProjectsStore) Migrate(ctx context.Context, source ProjectMigrationSource) (copied int, skipped int, err error) {
-	if s == nil || s.pool == nil {
-		return 0, 0, fmt.Errorf("projects store not configured")
-	}
-	if source == nil {
-		return 0, 0, nil
-	}
-	projects, defaults, err := source.ListAllProjectDocsForMigration(ctx)
-	if err != nil {
-		return 0, 0, fmt.Errorf("projects: migrate: read source: %w", err)
-	}
-	for _, row := range projects {
-		payload, err := json.Marshal(map[string]any{
-			"name":       row.Name,
-			"githubRepo": row.GitHubRepo,
-			"argocdApp":  row.ArgoCDApp,
-			"metadata":   ensureMap(row.Metadata),
-		})
-		if err != nil {
-			return copied, skipped, fmt.Errorf("projects: migrate marshal %q: %w", row.Name, err)
-		}
-		const insertSQL = `
-			INSERT INTO projects (name, kind, payload, github_repo, created_at, updated_at)
-			VALUES ($1, 'project', $2, $3, COALESCE(NULLIF($4, '0001-01-01T00:00:00Z'::timestamptz), now()), now())
-			ON CONFLICT (name) DO NOTHING
-		`
-		createdAt := row.CreatedAt
-		if createdAt.IsZero() {
-			createdAt = time.Now().UTC()
-		}
-		tag, execErr := s.pool.Exec(ctx, insertSQL, row.Name, payload, row.GitHubRepo, createdAt)
-		if execErr != nil {
-			return copied, skipped, fmt.Errorf("projects: migrate insert %q: %w", row.Name, execErr)
-		}
-		if tag.RowsAffected() == 1 {
-			copied++
-		} else {
-			skipped++
-		}
-	}
-	if defaults != nil {
-		const insertSQL = `
-			INSERT INTO test_lease_defaults (id, global_ttl_seconds, hot_swap_min_ttl_seconds, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5)
-			ON CONFLICT (id) DO NOTHING
-		`
-		createdAt := defaults.CreatedAt
-		if createdAt.IsZero() {
-			createdAt = time.Now().UTC()
-		}
-		updatedAt := defaults.UpdatedAt
-		if updatedAt.IsZero() {
-			updatedAt = createdAt
-		}
-		tag, execErr := s.pool.Exec(ctx, insertSQL,
-			TestLeaseDefaultsSingletonID,
-			defaults.GlobalTTLSeconds,
-			defaults.HotSwapMinTTLSeconds,
-			createdAt, updatedAt,
-		)
-		if execErr != nil {
-			return copied, skipped, fmt.Errorf("projects: migrate defaults: %w", execErr)
-		}
-		if tag.RowsAffected() == 1 {
-			copied++
-		} else {
-			skipped++
-		}
-	}
-	return copied, skipped, nil
 }
 
 func scanProjectRow(rows pgx.Rows) (ProjectRecord, error) {

@@ -53,14 +53,6 @@ type RunEventRow struct {
 	CreatedAt    time.Time
 }
 
-// RunEventMigrationSource is the narrow interface cosmos.Store satisfies
-// for the one-shot Migrate call. Implemented by
-// cosmos.Store.ListAllRunEventDocsForMigration (which exists only for
-// this transition; Stage 2i deletes it).
-type RunEventMigrationSource interface {
-	ListAllRunEventDocsForMigration(ctx context.Context) ([]RunEventRow, error)
-}
-
 // ErrRunEventConflict signals that an event with the same primary key
 // already exists in the table but with a different payload. Mirrors the
 // cosmos.Store behavior (server.ErrConflict) which the public API
@@ -187,52 +179,6 @@ func (s *RunEventsStore) List(ctx context.Context, runID string, attemptIndex *i
 		return nil, fmt.Errorf("run events: iterate list: %w", err)
 	}
 	return out, nil
-}
-
-// Migrate copies every run event document from the cosmos source into
-// the Postgres run_events table, idempotently. ON CONFLICT DO NOTHING
-// means re-running on every pod startup is safe — already-migrated rows
-// stay untouched.
-//
-// Failures on individual rows abort the migration with the row's
-// identifying info so the operator can diagnose and re-run. The choice
-// of "abort vs. skip" matches LocksStore.Migrate's semantics; per the
-// plan doc, the user opted for "full copy of everything" so silently
-// skipping bad rows would mask data loss.
-func (s *RunEventsStore) Migrate(ctx context.Context, source RunEventMigrationSource) (copied int, skipped int, err error) {
-	if s == nil || s.pool == nil {
-		return 0, 0, fmt.Errorf("run events store not configured")
-	}
-	if source == nil {
-		return 0, 0, nil
-	}
-	rows, err := source.ListAllRunEventDocsForMigration(ctx)
-	if err != nil {
-		return 0, 0, fmt.Errorf("run events: migrate: read source: %w", err)
-	}
-	for _, row := range rows {
-		created, insErr := s.Insert(ctx, row)
-		if errors.Is(insErr, ErrRunEventConflict) {
-			// Migration row collides with an existing pg row whose
-			// payload differs — treat as skip-with-warning rather
-			// than fatal. Indicates either a partial earlier
-			// migration or a mid-flight write between cosmos and
-			// pg. Either way, the pg row wins (it was written by
-			// the migrated app); don't overwrite it from cosmos.
-			skipped++
-			continue
-		}
-		if insErr != nil {
-			return copied, skipped, fmt.Errorf("run events: migrate row %s/%d/%s/%d: %w",
-				row.RunID, row.AttemptIndex, row.JobID, row.Seq, insErr)
-		}
-		if created {
-			copied++
-		} else {
-			skipped++
-		}
-	}
-	return copied, skipped, nil
 }
 
 // getByPK is the internal helper that reads back a row after a conflict

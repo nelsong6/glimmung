@@ -48,26 +48,6 @@ type LockState struct {
 	ExpiresAt *time.Time
 }
 
-// LockMigrationRow is the narrow shape the cosmos-side migration source
-// produces. Decouples pg.LocksStore from the cosmos package's lockDoc
-// type and from azcosmos.
-type LockMigrationRow struct {
-	Scope     string
-	Key       string
-	HolderID  string
-	State     string // "held" or "released"
-	ExpiresAt *time.Time
-	ClaimedAt *time.Time
-}
-
-// LockMigrationSource is the narrow interface cosmos.Store satisfies for
-// the one-shot Migrate call. Implemented by
-// cosmos.Store.ListAllLockDocsForMigration (which exists only for this
-// transition; Stage 2i deletes it).
-type LockMigrationSource interface {
-	ListAllLockDocsForMigration(ctx context.Context) ([]LockMigrationRow, error)
-}
-
 // NewLocksStore returns a LocksStore backed by pool. The pool's
 // migrations (RunMigrations in pg/migrations.go) must have applied
 // successfully before the first call.
@@ -276,57 +256,6 @@ func (s *LocksStore) PRLockHeld(ctx context.Context, repo string, prNumber int) 
 		return false, fmt.Errorf("locks: pr lock held: %w", err)
 	}
 	return held, nil
-}
-
-// Migrate copies every lock document from the cosmos source into the
-// Postgres `locks` table, idempotently. Safe to call on every pod
-// startup: rows that already exist in pg are left untouched (ON CONFLICT
-// DO NOTHING). After Stage 2i deletes the cosmos lock plumbing entirely,
-// the Migrate call sites in main.go go away too.
-//
-// Per the migration plan (docs/postgres-migration.md), the user opted
-// for a "full copy" — every cosmos lock row (held, released, expired)
-// is preserved into pg so operators retain history. The CHECK (state IN
-// ('held','released')) constraint in the locks table means any cosmos
-// row with an unrecognized state value will be rejected; that surface
-// is logged but doesn't fail Migrate, since one bad row shouldn't block
-// pod startup.
-func (s *LocksStore) Migrate(ctx context.Context, source LockMigrationSource) (copied int, skipped int, err error) {
-	if s == nil || s.pool == nil {
-		return 0, 0, fmt.Errorf("locks store not configured")
-	}
-	if source == nil {
-		return 0, 0, nil // nothing to migrate from
-	}
-	rows, err := source.ListAllLockDocsForMigration(ctx)
-	if err != nil {
-		return 0, 0, fmt.Errorf("locks: migrate: read source: %w", err)
-	}
-	const insertSQL = `
-		INSERT INTO locks (scope, key, holder_id, state, expires_at, acquired_at)
-		VALUES ($1, $2, $3, $4, $5, COALESCE($6, now()))
-		ON CONFLICT (scope, key) DO NOTHING
-	`
-	for _, row := range rows {
-		// Reject unknown state values defensively. The CHECK constraint
-		// would reject too, but skipping here keeps the error path
-		// off Postgres logs.
-		if row.State != "held" && row.State != "released" {
-			skipped++
-			continue
-		}
-		tag, execErr := s.pool.Exec(ctx, insertSQL,
-			row.Scope, row.Key, row.HolderID, row.State, row.ExpiresAt, row.ClaimedAt)
-		if execErr != nil {
-			return copied, skipped, fmt.Errorf("locks: migrate row %s/%s: %w", row.Scope, row.Key, execErr)
-		}
-		if tag.RowsAffected() == 1 {
-			copied++
-		} else {
-			skipped++
-		}
-	}
-	return copied, skipped, nil
 }
 
 // issueKey encodes a (project, issueNumber) pair as the lock key, exactly

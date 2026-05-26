@@ -31,9 +31,6 @@ serviceAccount: infra-shared
 serviceAccountClientId: "3644b9f0-2eb0-42dd-92a4-696f9a3ca090"
 configMapName: glimmung-config
 secretName: glimmung-secrets
-cosmos:
-  endpoint: https://infra-cosmos-serverless.documents.azure.com:443/
-  database: glimmung
 
 staticOverride:
   enabled: true
