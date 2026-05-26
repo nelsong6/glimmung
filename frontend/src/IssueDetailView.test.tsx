@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Outlet, Route, Routes, useLocation } from "react-router-dom";
@@ -184,6 +184,103 @@ afterEach(() => {
 });
 
 describe("IssueDetailView run execution graph", () => {
+  it("shows run history as flat run counts and bare cycle values", async () => {
+    const baseRun = runProjection.runs[0];
+    const historyRuns = [
+      {
+        ...baseRun,
+        run_ref: "ambience#172/runs/1.1",
+        run_number: 1,
+        run_display_number: "1.1",
+        cycle_number: 1,
+        run_cycle_number: 1,
+        state: "recycled",
+        started_at: "2026-05-20T17:24:09.336Z",
+      },
+      {
+        ...baseRun,
+        run_ref: "ambience#172/runs/2.1",
+        run_number: 2,
+        run_display_number: "2.1",
+        cycle_number: 2,
+        run_cycle_number: 1,
+        state: "recycled",
+        started_at: "2026-05-20T18:24:09.336Z",
+      },
+      {
+        ...baseRun,
+        run_ref: "ambience#172/runs/2.2",
+        run_number: 2,
+        run_display_number: "2.2",
+        cycle_number: 3,
+        run_cycle_number: 2,
+        state: "in_progress",
+        started_at: "2026-05-20T19:24:09.336Z",
+      },
+    ];
+    const historyProjection = {
+      ...runProjection,
+      current_run_ref: "ambience#172/runs/2.2",
+      default_focus: { kind: "run", ref: "ambience#172/runs/2.2" },
+      next_action: { kind: "watch_run", label: "watch run", target_ref: "ambience#172/runs/2.2" },
+      runs: historyRuns,
+    };
+    const historyGraph = {
+      ...issueGraph,
+      nodes: [
+        issueGraph.nodes[0],
+        ...historyRuns.map((run) => ({
+          id: `run:${run.run_ref}`,
+          kind: "run",
+          label: `Run ${run.run_display_number}`,
+          state: run.state,
+          timestamp: run.started_at,
+          metadata: {
+            run_number: run.run_number,
+            run_display_number: run.run_display_number,
+            cycle_number: run.cycle_number,
+            run_cycle_number: run.run_cycle_number,
+            workflow: run.workflow,
+          },
+        })),
+      ],
+      edges: [],
+      projection: historyProjection,
+    };
+
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string"
+          ? new URL(input, "https://glimmung.test")
+          : input instanceof URL
+            ? input
+            : new URL(input.url);
+      if (url.pathname === "/v1/issues/by-number/ambience/172") return json(issueDetail);
+      if (url.pathname === "/v1/issues/by-number/ambience/172/graph") return json(historyGraph);
+      if (url.pathname === "/v1/workflows") return json([]);
+      throw new Error(`unhandled fetch ${url.pathname}`);
+    }));
+
+    renderIssueDetail("/projects/ambience/issues/172/runs");
+
+    const table = await screen.findByRole("table");
+    const rows = within(table).getAllByRole("row");
+    const newestCells = within(rows[1]).getAllByRole("cell");
+    const middleCells = within(rows[2]).getAllByRole("cell");
+    const oldestCells = within(rows[3]).getAllByRole("cell");
+
+    expect(newestCells[0]).toHaveTextContent(/^3$/);
+    expect(within(newestCells[1]).getByRole("button")).toHaveTextContent(/^2\.2$/);
+    expect(newestCells[1]).not.toHaveTextContent(/cycle/i);
+    expect(newestCells[2]).toHaveTextContent(/^2$/);
+
+    expect(middleCells[0]).toHaveTextContent(/^2$/);
+    expect(within(middleCells[1]).getByRole("button")).toHaveTextContent(/^2\.1$/);
+
+    expect(oldestCells[0]).toHaveTextContent(/^1$/);
+    expect(within(oldestCells[1]).getByRole("button")).toHaveTextContent(/^1\.1$/);
+  });
+
   it("routes a dispatching job click to its selected step log", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url =

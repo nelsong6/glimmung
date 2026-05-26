@@ -2180,12 +2180,12 @@ function RunsPane({
           </tr>
         </thead>
         <tbody>
-          {(projectionRuns.length > 0 ? projectionRuns : []).map((r) => {
+          {(projectionRuns.length > 0 ? projectionRuns : []).map((r, index) => {
             const path = projectionRunCyclePath("", r);
             const cost = r.cost_usd;
             return (
               <tr key={r.run_ref}>
-                <td className="mono">{r.run_number ?? "—"}</td>
+                <td className="mono">{projectionRunHistoryCountDisplay(r, index, projectionRuns.length)}</td>
                 <td className="mono">
                   <button
                     type="button"
@@ -2193,7 +2193,7 @@ function RunsPane({
                     title={r.run_ref}
                     onClick={() => onSelectProjectionRun(r)}
                   >
-                    {projectionRunLabel(r)}
+                    {projectionCycleDisplay(r)}
                   </button>
                 </td>
                 <td className="mono">{r.run_cycle_number ?? "—"}</td>
@@ -2223,7 +2223,7 @@ function RunsPane({
               </tr>
             );
           })}
-          {projectionRuns.length === 0 && runs.map((r) => {
+          {projectionRuns.length === 0 && runs.map((r, index) => {
             const id = runIdFromNode(r);
             const slug = issueRunSlug(graph, r);
             const meta = r.metadata;
@@ -2232,7 +2232,7 @@ function RunsPane({
             const lineage = computeCycleLineage(graph, id);
             return (
               <tr key={r.id}>
-                <td className="mono">{runNumberDisplay(r)}</td>
+                <td className="mono">{graphRunHistoryCountDisplay(r, index, runs.length)}</td>
                 <td className="mono">
                   <button
                     type="button"
@@ -2240,7 +2240,7 @@ function RunsPane({
                     title={id}
                     onClick={() => onSelectRun(id)}
                   >
-                    {runSlugDisplay(slug)}
+                    {runSlugValueDisplay(slug)}
                   </button>
                 </td>
                 <td className="mono">{runCycleDisplay(r)}</td>
@@ -3160,6 +3160,18 @@ function projectionRunLabel(run: RunProjectionRun): string {
   return run.run_ref;
 }
 
+function projectionCycleDisplay(run: RunProjectionRun): string {
+  if (run.run_display_number) return run.run_display_number;
+  if (run.cycle_number !== null && run.cycle_number !== undefined) return String(run.cycle_number);
+  if (run.run_number !== null && run.run_number !== undefined) return String(run.run_number);
+  return run.run_ref;
+}
+
+function projectionRunHistoryCountDisplay(run: RunProjectionRun, index: number, total: number): string {
+  if (run.cycle_number !== null && run.cycle_number !== undefined) return String(run.cycle_number);
+  return String(Math.max(total - index, 1));
+}
+
 function countProjectionPhases(run: RunProjectionRun) {
   return run.phases.reduce(
     (acc, phase) => {
@@ -3792,6 +3804,10 @@ function runSlugDisplay(slug: string): string {
   return /^\d+(\.\d+)?$/.test(slug) ? `cycle ${slug}` : `${slug.slice(0, 8)}…`;
 }
 
+function runSlugValueDisplay(slug: string): string {
+  return /^\d+(\.\d+)?$/.test(slug) ? slug : `${slug.slice(0, 8)}…`;
+}
+
 function runRouteSlugFromNode(run: GraphNode): string | null {
   const display = stringOrNull(run.metadata.run_display_number);
   if (display) return display;
@@ -3812,6 +3828,12 @@ function runCycleDisplay(run: GraphNode): string {
   if (runCycle !== null) return String(runCycle);
   const display = stringOrNull(run.metadata.run_display_number);
   return display ?? "—";
+}
+
+function graphRunHistoryCountDisplay(run: GraphNode, index: number, total: number): string {
+  const cycleNumber = numberOrNull(run.metadata.cycle_number);
+  if (cycleNumber !== null) return String(cycleNumber);
+  return String(Math.max(total - index, 1));
 }
 
 type CycleLineage = {
