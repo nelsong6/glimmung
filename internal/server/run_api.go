@@ -90,6 +90,7 @@ type RunReport struct {
 	RootRunRef          *string             `json:"root_run_ref"`
 	OriginKind          *string             `json:"origin_kind"`
 	EntrypointPhase     *string             `json:"entrypoint_phase"`
+	TriggerSource       map[string]any      `json:"-"`
 	IsCycle             bool                `json:"is_cycle"`
 	CycleNumber         *int                `json:"cycle_number"`
 	RunCycleNumber      *int                `json:"run_cycle_number"`

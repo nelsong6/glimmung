@@ -1811,6 +1811,7 @@ func runReportFromDoc(doc runDoc, lineageByID map[string]string) server.RunRepor
 		RootRunRef:          refPtr(lineageByID, rootID),
 		OriginKind:          emptyStringNil(originKind),
 		EntrypointPhase:     emptyStringNil(doc.EntrypointPhase),
+		TriggerSource:       mapOrEmpty(doc.TriggerSource),
 		IsCycle:             doc.IsCycle,
 		CycleNumber:         doc.CycleNumber,
 		RunCycleNumber:      doc.RunCycleNumber,

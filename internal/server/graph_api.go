@@ -1039,10 +1039,16 @@ func runProjectionFromReport(run RunReport, workflow Workflow, touchpoints []Tou
 		StartedAt:         run.StartedAt.Format(time.RFC3339Nano),
 		UpdatedAt:         run.UpdatedAt.Format(time.RFC3339Nano),
 		CompletedAt:       timeStringPtr(run.CompletedAt),
-		Topology:          workflowTopologyFromWorkflow(workflow),
+		Topology:          workflowTopologyForRun(workflow, run),
 		Phases:            runProjectionPhases(run, workflow),
 		Evidence:          runProjectionEvidence(run, touchpoints),
 	}
+}
+
+func workflowTopologyForRun(workflow Workflow, run RunReport) RunProjectionTopology {
+	topology := workflowTopologyFromWorkflow(workflow)
+	applyRunTopologyActivity(&topology, run)
+	return topology
 }
 
 func workflowTopologyFromWorkflow(workflow Workflow) RunProjectionTopology {
@@ -1097,6 +1103,61 @@ func workflowTopologyFromWorkflow(workflow Workflow) RunProjectionTopology {
 	}
 	topology.Terminal.Enabled = workflow.PR.Enabled
 	return topology
+}
+
+func applyRunTopologyActivity(topology *RunProjectionTopology, run RunReport) {
+	if topology == nil {
+		return
+	}
+	for idx := range topology.RecycleArrows {
+		topology.RecycleArrows[idx].Active = false
+	}
+	if topology.DefaultEntry != nil {
+		topology.DefaultEntry.Active = runActivatesManualEntry(run)
+	}
+	selector, ok := activeRecycleSelector(run)
+	if !ok {
+		return
+	}
+	for idx := range topology.RecycleArrows {
+		arrow := &topology.RecycleArrows[idx]
+		if selector.Kind != "" && arrow.Kind != selector.Kind {
+			continue
+		}
+		if selector.Source != "" && arrow.Source != selector.Source {
+			continue
+		}
+		arrow.Active = true
+	}
+}
+
+type recycleSelector struct {
+	Kind   string
+	Source string
+}
+
+func activeRecycleSelector(run RunReport) (recycleSelector, bool) {
+	switch strings.TrimSpace(stringValueOrEmpty(run.OriginKind)) {
+	case "recycle_policy":
+		source := strings.TrimSpace(stringValue(run.TriggerSource["failing_phase"]))
+		if source == "" {
+			return recycleSelector{}, false
+		}
+		return recycleSelector{Kind: "phase_recycle", Source: source}, true
+	case "pr_feedback":
+		return recycleSelector{Kind: "touchpoint_recycle", Source: "touchpoint"}, true
+	default:
+		return recycleSelector{}, false
+	}
+}
+
+func runActivatesManualEntry(run RunReport) bool {
+	switch strings.TrimSpace(stringValueOrEmpty(run.OriginKind)) {
+	case "recycle_policy", "pr_feedback":
+		return false
+	default:
+		return true
+	}
 }
 
 func runProjectionTopologyJobs(phase PhaseSpec) []RunProjectionTopologyJob {

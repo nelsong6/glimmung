@@ -374,6 +374,109 @@ func TestRunCycleGraphProjectionUsesCanonicalStateAndNativeActivity(t *testing.T
 	}
 }
 
+func TestWorkflowTopologyForRunMarksRecycleOriginArrowActive(t *testing.T) {
+	workflow := Workflow{
+		Project: "ambience",
+		Name:    "default",
+		Phases: []PhaseSpec{
+			{Name: "env-prep", Kind: "k8s_job"},
+			{Name: "llm-work", Kind: "k8s_job", DependsOn: []string{"env-prep"}},
+			{
+				Name:      "evidence-gate",
+				Kind:      "k8s_job",
+				DependsOn: []string{"llm-work"},
+				RecyclePolicy: &RecyclePolicy{
+					MaxAttempts: 3,
+					On:          []string{"verify_fail"},
+					LandsAt:     "env-prep",
+				},
+			},
+		},
+		PR: PrPrimitive{
+			Enabled: true,
+			RecyclePolicy: &RecyclePolicy{
+				MaxAttempts: 3,
+				On:          []string{"changes_requested"},
+				LandsAt:     "env-prep",
+			},
+		},
+	}
+	origin := "recycle_policy"
+
+	topology := workflowTopologyForRun(workflow, RunReport{
+		OriginKind:      &origin,
+		EntrypointPhase: stringPtr("env-prep"),
+		TriggerSource:   map[string]any{"failing_phase": "evidence-gate"},
+	})
+
+	if topology.DefaultEntry == nil || topology.DefaultEntry.Active {
+		t.Fatalf("default entry active=%#v, want inactive for recycle", topology.DefaultEntry)
+	}
+	if len(topology.RecycleArrows) != 2 {
+		t.Fatalf("recycle arrows=%#v", topology.RecycleArrows)
+	}
+	if !topology.RecycleArrows[0].Active || topology.RecycleArrows[1].Active {
+		t.Fatalf("recycle arrows active=%#v, want only phase recycle active", topology.RecycleArrows)
+	}
+}
+
+func TestWorkflowTopologyForRunMarksTouchpointRecycleOriginArrowActive(t *testing.T) {
+	workflow := Workflow{
+		Project: "ambience",
+		Name:    "default",
+		Phases: []PhaseSpec{
+			{Name: "env-prep", Kind: "k8s_job"},
+			{
+				Name:      "evidence-gate",
+				Kind:      "k8s_job",
+				DependsOn: []string{"env-prep"},
+				RecyclePolicy: &RecyclePolicy{
+					MaxAttempts: 3,
+					On:          []string{"verify_fail"},
+					LandsAt:     "env-prep",
+				},
+			},
+		},
+		PR: PrPrimitive{
+			Enabled: true,
+			RecyclePolicy: &RecyclePolicy{
+				MaxAttempts: 3,
+				On:          []string{"changes_requested"},
+				LandsAt:     "env-prep",
+			},
+		},
+	}
+	origin := "pr_feedback"
+
+	topology := workflowTopologyForRun(workflow, RunReport{OriginKind: &origin})
+
+	if topology.DefaultEntry == nil || topology.DefaultEntry.Active {
+		t.Fatalf("default entry active=%#v, want inactive for PR feedback recycle", topology.DefaultEntry)
+	}
+	if len(topology.RecycleArrows) != 2 {
+		t.Fatalf("recycle arrows=%#v", topology.RecycleArrows)
+	}
+	if topology.RecycleArrows[0].Active || !topology.RecycleArrows[1].Active {
+		t.Fatalf("recycle arrows active=%#v, want only touchpoint recycle active", topology.RecycleArrows)
+	}
+}
+
+func TestWorkflowTopologyForRunKeepsManualEntryActiveForDispatch(t *testing.T) {
+	workflow := Workflow{
+		Project: "ambience",
+		Name:    "default",
+		Phases:  []PhaseSpec{{Name: "env-prep", Kind: "k8s_job"}},
+		PR:      PrPrimitive{Enabled: true},
+	}
+	origin := "dispatch"
+
+	topology := workflowTopologyForRun(workflow, RunReport{OriginKind: &origin})
+
+	if topology.DefaultEntry == nil || !topology.DefaultEntry.Active {
+		t.Fatalf("default entry active=%#v, want active for dispatch", topology.DefaultEntry)
+	}
+}
+
 func TestRunCycleGraphProjectionUsesDurableExecutions(t *testing.T) {
 	issueNumber := 17
 	runNumber := 1
