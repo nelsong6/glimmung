@@ -374,6 +374,109 @@ func TestRunCycleGraphProjectionUsesCanonicalStateAndNativeActivity(t *testing.T
 	}
 }
 
+func TestWorkflowTopologyForRunMarksRecycleOriginArrowActive(t *testing.T) {
+	workflow := Workflow{
+		Project: "ambience",
+		Name:    "default",
+		Phases: []PhaseSpec{
+			{Name: "env-prep", Kind: "k8s_job"},
+			{Name: "llm-work", Kind: "k8s_job", DependsOn: []string{"env-prep"}},
+			{
+				Name:      "evidence-gate",
+				Kind:      "k8s_job",
+				DependsOn: []string{"llm-work"},
+				RecyclePolicy: &RecyclePolicy{
+					MaxAttempts: 3,
+					On:          []string{"verify_fail"},
+					LandsAt:     "env-prep",
+				},
+			},
+		},
+		PR: PrPrimitive{
+			Enabled: true,
+			RecyclePolicy: &RecyclePolicy{
+				MaxAttempts: 3,
+				On:          []string{"changes_requested"},
+				LandsAt:     "env-prep",
+			},
+		},
+	}
+	origin := "recycle_policy"
+
+	topology := workflowTopologyForRun(workflow, RunReport{
+		OriginKind:      &origin,
+		EntrypointPhase: stringPtr("env-prep"),
+		TriggerSource:   map[string]any{"failing_phase": "evidence-gate"},
+	})
+
+	if topology.DefaultEntry == nil || topology.DefaultEntry.Active {
+		t.Fatalf("default entry active=%#v, want inactive for recycle", topology.DefaultEntry)
+	}
+	if len(topology.RecycleArrows) != 2 {
+		t.Fatalf("recycle arrows=%#v", topology.RecycleArrows)
+	}
+	if !topology.RecycleArrows[0].Active || topology.RecycleArrows[1].Active {
+		t.Fatalf("recycle arrows active=%#v, want only phase recycle active", topology.RecycleArrows)
+	}
+}
+
+func TestWorkflowTopologyForRunMarksTouchpointRecycleOriginArrowActive(t *testing.T) {
+	workflow := Workflow{
+		Project: "ambience",
+		Name:    "default",
+		Phases: []PhaseSpec{
+			{Name: "env-prep", Kind: "k8s_job"},
+			{
+				Name:      "evidence-gate",
+				Kind:      "k8s_job",
+				DependsOn: []string{"env-prep"},
+				RecyclePolicy: &RecyclePolicy{
+					MaxAttempts: 3,
+					On:          []string{"verify_fail"},
+					LandsAt:     "env-prep",
+				},
+			},
+		},
+		PR: PrPrimitive{
+			Enabled: true,
+			RecyclePolicy: &RecyclePolicy{
+				MaxAttempts: 3,
+				On:          []string{"changes_requested"},
+				LandsAt:     "env-prep",
+			},
+		},
+	}
+	origin := "pr_feedback"
+
+	topology := workflowTopologyForRun(workflow, RunReport{OriginKind: &origin})
+
+	if topology.DefaultEntry == nil || topology.DefaultEntry.Active {
+		t.Fatalf("default entry active=%#v, want inactive for PR feedback recycle", topology.DefaultEntry)
+	}
+	if len(topology.RecycleArrows) != 2 {
+		t.Fatalf("recycle arrows=%#v", topology.RecycleArrows)
+	}
+	if topology.RecycleArrows[0].Active || !topology.RecycleArrows[1].Active {
+		t.Fatalf("recycle arrows active=%#v, want only touchpoint recycle active", topology.RecycleArrows)
+	}
+}
+
+func TestWorkflowTopologyForRunKeepsManualEntryActiveForDispatch(t *testing.T) {
+	workflow := Workflow{
+		Project: "ambience",
+		Name:    "default",
+		Phases:  []PhaseSpec{{Name: "env-prep", Kind: "k8s_job"}},
+		PR:      PrPrimitive{Enabled: true},
+	}
+	origin := "dispatch"
+
+	topology := workflowTopologyForRun(workflow, RunReport{OriginKind: &origin})
+
+	if topology.DefaultEntry == nil || !topology.DefaultEntry.Active {
+		t.Fatalf("default entry active=%#v, want active for dispatch", topology.DefaultEntry)
+	}
+}
+
 func TestRunCycleGraphProjectionUsesDurableExecutions(t *testing.T) {
 	issueNumber := 17
 	runNumber := 1
@@ -471,6 +574,95 @@ func TestRunCycleGraphProjectionUsesDurableExecutions(t *testing.T) {
 	executePhase := assertProjectionPhase(t, projection.Runs[0], "agent-execute")
 	if executePhase.State != "skipped" || executePhase.Jobs[0].State != "skipped" {
 		t.Fatalf("agent-execute projection=%#v", executePhase)
+	}
+}
+
+func TestRunCycleGraphProjectionShowsCarriedForwardEntrypointInputs(t *testing.T) {
+	issueNumber := 171
+	runNumber := 4
+	cycleNumber := 6
+	runCycle := 2
+	runDisplay := "4.2"
+	now := time.Date(2026, 5, 26, 6, 18, 0, 0, time.UTC)
+	completed := now.Format(time.RFC3339Nano)
+	completedAt := now
+	runRef := "ambience#171/runs/4.2"
+	store := fakeGraphStore{
+		fakeReadStore: fakeReadStore{workflows: []Workflow{{
+			Project: "ambience",
+			Name:    "default",
+			Phases: []PhaseSpec{
+				{Name: "env-prep", Kind: "k8s_job", Jobs: []NativeJobSpec{{ID: "env-prep", Name: stringPtr("Environment prep")}}},
+				{Name: "llm-work", Kind: "k8s_job", DependsOn: []string{"env-prep"}, Jobs: []NativeJobSpec{{ID: "llm-implement"}}},
+			},
+		}}},
+		issue: IssueDetail{
+			Ref:     "ambience#171",
+			Project: "ambience",
+			Number:  &issueNumber,
+			Title:   "Bog bubbles",
+			State:   "open",
+		},
+		runs: []RunReport{{
+			ID:               "run-4-2",
+			Project:          "ambience",
+			RunRef:           runRef,
+			RunNumber:        &runNumber,
+			CycleNumber:      &cycleNumber,
+			RunCycleNumber:   &runCycle,
+			RunDisplayNumber: &runDisplay,
+			Workflow:         "default",
+			IssueRef:         stringPtr("ambience#171"),
+			IssueNumber:      &issueNumber,
+			State:            "review_required",
+			StartedAt:        now,
+			UpdatedAt:        now,
+			PhaseExecutions: []RunPhaseExecution{{
+				Name:        "env-prep",
+				Kind:        "k8s_job",
+				State:       "skipped",
+				CreatedAt:   completed,
+				CompletedAt: &completed,
+				Jobs: []RunJobExecution{{
+					ID:          "env-prep",
+					State:       "skipped",
+					CreatedAt:   completed,
+					CompletedAt: &completed,
+					Steps: []RunStepExecution{{
+						Slug:        "emit-env-outputs",
+						State:       "skipped",
+						CreatedAt:   completed,
+						CompletedAt: &completed,
+					}},
+				}},
+			}},
+			Attempts: []RunReportAttempt{{
+				AttemptIndex: 0,
+				Phase:        "env-prep",
+				PhaseKind:    "k8s_job",
+				CarryForward: true,
+				DispatchedAt: now,
+				CompletedAt:  &completedAt,
+				Conclusion:   stringPtr("success"),
+				Decision:     stringPtr("advance"),
+				PhaseOutputs: map[string]string{"validation_url": "https://slot.example"},
+			}},
+		}},
+	}
+	handler := NewWithStore(Settings{}, store)
+
+	var projection RunGraphProjection
+	getJSON(t, handler, "/v1/projects/ambience/issues/171/runs/4/cycles/2/graph", &projection)
+
+	envPhase := assertProjectionPhase(t, projection.Runs[0], "env-prep")
+	if envPhase.State != "succeeded" || envPhase.Reason == nil || *envPhase.Reason != "carried_forward" {
+		t.Fatalf("env-prep projection=%#v", envPhase)
+	}
+	if envPhase.Jobs[0].State != "succeeded" || envPhase.Jobs[0].Reason == nil || *envPhase.Jobs[0].Reason != "carried_forward" {
+		t.Fatalf("env-prep job projection=%#v", envPhase.Jobs[0])
+	}
+	if !envPhase.Attempts[0].CarryForward {
+		t.Fatalf("carry_forward not projected: %#v", envPhase.Attempts[0])
 	}
 }
 

@@ -308,7 +308,7 @@ func TestTestSlotHotSwapCopiesStaticOnly(t *testing.T) {
 	if result.Static == nil || result.Backend != nil {
 		t.Fatalf("result=%#v", result)
 	}
-	assertCommand(t, runner.commands[0].Command, "kubectl", []string{"-n", "ambience-slot-1", "cp", filepath.Join(staticDir, "."), "ambience-pod:/var/run/app-static-override"})
+	assertCommand(t, runner.commands[0].Command, "kubectl", []string{"-n", "ambience-slot-1", "cp", staticDir + string(filepath.Separator) + ".", "ambience-pod:/var/run/app-static-override"})
 }
 
 func TestTestSlotHotSwapCopiesStaticToAllSelectedPods(t *testing.T) {
@@ -334,8 +334,8 @@ func TestTestSlotHotSwapCopiesStaticToAllSelectedPods(t *testing.T) {
 	if !reflect.DeepEqual(result.Pods, []string{"pod-a", "pod-b"}) {
 		t.Fatalf("pods=%#v", result.Pods)
 	}
-	assertCommand(t, runner.commands[1].Command, "kubectl", []string{"-n", "tank-slot-1", "cp", filepath.Join(staticDir, "."), "pod-a:/var/run/static"})
-	assertCommand(t, runner.commands[2].Command, "kubectl", []string{"-n", "tank-slot-1", "cp", filepath.Join(staticDir, "."), "pod-b:/var/run/static"})
+	assertCommand(t, runner.commands[1].Command, "kubectl", []string{"-n", "tank-slot-1", "cp", staticDir + string(filepath.Separator) + ".", "pod-a:/var/run/static"})
+	assertCommand(t, runner.commands[2].Command, "kubectl", []string{"-n", "tank-slot-1", "cp", staticDir + string(filepath.Separator) + ".", "pod-b:/var/run/static"})
 }
 
 func TestTestSlotHotSwapRejectsImageRequiredChanges(t *testing.T) {

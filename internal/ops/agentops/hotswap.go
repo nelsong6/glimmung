@@ -256,7 +256,7 @@ func staticSourcePath(root, source string) string {
 func staticCopySource(root, source string) string {
 	path := staticSourcePath(root, source)
 	if info, err := os.Stat(path); err == nil && info.IsDir() {
-		return filepath.Join(path, ".")
+		return filepath.Clean(path) + string(filepath.Separator) + "."
 	}
 	return path
 }

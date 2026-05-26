@@ -673,6 +673,58 @@ func TestRunReportsFromDocsBuildsPublicRefsAndAttempts(t *testing.T) {
 	}
 }
 
+func TestRunReportAttemptFallsBackToVerificationPhaseOutputEvidenceRefs(t *testing.T) {
+	completed := "2026-05-11T03:05:00Z"
+	docs := []runDoc{{
+		ID:          "run-1",
+		Project:     "ambience",
+		Workflow:    "default",
+		RunNumber:   intPtr(4),
+		IssueRepo:   "nelsong6/ambience",
+		IssueNumber: 171,
+		State:       "review_required",
+		CreatedAt:   "2026-05-11T03:00:00Z",
+		UpdatedAt:   "2026-05-11T03:06:00Z",
+		Attempts: []attemptDoc{{
+			AttemptIndex:     2,
+			Phase:            "llm-verify",
+			PhaseKind:        "k8s_job",
+			WorkflowFilename: "k8s_job:llm-verify",
+			DispatchedAt:     "2026-05-11T03:01:00Z",
+			CompletedAt:      completed,
+			Conclusion:       stringPtr("success"),
+			Verification:     &verificationDoc{Status: "pass"},
+			PhaseOutputs: map[string]string{
+				"verification": `{"schema_version":1,"status":"pass","evidence_refs":["screenshots/default.png",""]}`,
+			},
+		}},
+	}}
+
+	reports := runReportsFromDocs(docs)
+
+	refs := reports[0].Attempts[0].EvidenceRefs
+	if len(refs) != 1 || refs[0] != "screenshots/default.png" {
+		t.Fatalf("evidence refs=%#v", refs)
+	}
+}
+
+func TestAggregateNativePhaseCompletionPreservesEvidenceRefs(t *testing.T) {
+	payload := aggregateNativePhaseCompletion([]string{"verify"}, map[string]nativeJobCompletionDoc{
+		"verify": {
+			JobID:      "verify",
+			Conclusion: "success",
+			Verification: &verificationDoc{
+				Status:       "pass",
+				EvidenceRefs: []string{"screenshots/default.png"},
+			},
+		},
+	})
+
+	if len(payload.EvidenceRefs) != 1 || payload.EvidenceRefs[0] != "screenshots/default.png" {
+		t.Fatalf("evidence refs=%#v", payload.EvidenceRefs)
+	}
+}
+
 func TestIssueDetailFromDocBuildsPublicShape(t *testing.T) {
 	doc := issueDoc{
 		ID:      "01KISSUE",

@@ -1439,6 +1439,7 @@ function DefinitionDag({
           prEnabled={graphModel.prEnabled}
           dagClassName="dag-definition"
           ariaLabel="workflow definition"
+          entryArrows={graphModel.entryArrows}
           recycleArrows={graphModel.recycleArrows}
         />
       )}
@@ -1634,6 +1635,7 @@ function PipelineDag({
         renderTouchpoint={renderTouchpoint}
         ariaLabel="pipeline"
         entryPhaseName={activeEntry}
+        entryArrows={graphModel.entryArrows}
         recycleArrows={graphModel.recycleArrows}
       />
     </div>
@@ -2450,6 +2452,7 @@ function ProjectionPipelineDag({
         ariaLabel="run execution"
         entryPhaseName={run.current_phase ?? null}
         prEnabled={graphModel.prEnabled}
+        entryArrows={graphModel.entryArrows}
         recycleArrows={graphModel.recycleArrows}
       />
     </div>

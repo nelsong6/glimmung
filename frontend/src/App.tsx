@@ -1281,6 +1281,7 @@ function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
           ariaLabel={`${workflow.name} workflow graph`}
           renderPhase={renderPhase}
           renderTouchpoint={renderTouchpoint}
+          entryArrows={graphModel.entryArrows}
           recycleArrows={graphModel.recycleArrows}
         />
       </div>

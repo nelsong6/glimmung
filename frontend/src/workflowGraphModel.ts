@@ -1,4 +1,4 @@
-import type { PhaseGraphPhase, RecycleArrow } from "./PhaseGraph";
+import type { EntryArrow, PhaseGraphPhase, RecycleArrow } from "./PhaseGraph";
 
 type RecyclePolicy = {
   max_attempts: number;
@@ -25,6 +25,7 @@ export type WorkflowGraphSource = {
 export type WorkflowGraphModel = {
   phases: PhaseGraphPhase[];
   prEnabled: boolean;
+  entryArrows: EntryArrow[];
   recycleArrows: RecycleArrow[];
 };
 
@@ -59,6 +60,34 @@ function touchpointRecycleArrow(policy: RecyclePolicy | null | undefined, active
   };
 }
 
+function manualTriggerEntryArrow(phases: PhaseGraphPhase[]): EntryArrow[] {
+  const firstPhase = phases.find((phase) => phase.name !== "");
+  if (!firstPhase) return [];
+  return [{
+    target: firstPhase.name,
+    label: "manual trigger",
+    active: false,
+    kind: "manual_trigger",
+  }];
+}
+
+function topologyEntryArrow(
+  entry: RunProjectionTopologySource["default_entry"] | null | undefined,
+): EntryArrow[] {
+  if (!entry?.target) return [];
+  return [{
+    target: entry.target,
+    label: entryLabel(entry.kind),
+    active: entry.active,
+    kind: entry.kind,
+  }];
+}
+
+function entryLabel(kind: string): string {
+  if (kind === "" || kind === "default" || kind === "manual_trigger") return "manual trigger";
+  return kind.replace(/_/g, " ");
+}
+
 export function workflowToPhaseGraphModel(
   workflow: WorkflowGraphSource,
   options: {
@@ -66,21 +95,23 @@ export function workflowToPhaseGraphModel(
   } = {},
 ): WorkflowGraphModel {
   const active = options.recycleActive ?? false;
-  return {
-    phases: workflow.phases.map((phase) => ({
-      name: phase.name,
-      kind: phase.kind,
-      verify: phase.verify,
-      always: phase.always,
-      evidence_verification_gate: phase.evidence_verification_gate,
-      depends_on: phase.depends_on ?? [],
-      jobs: (phase.jobs ?? []).map((job) => ({
-        id: job.id,
-        name: job.name,
-        image: job.image,
-      })),
+  const phases = workflow.phases.map((phase) => ({
+    name: phase.name,
+    kind: phase.kind,
+    verify: phase.verify,
+    always: phase.always,
+    evidence_verification_gate: phase.evidence_verification_gate,
+    depends_on: phase.depends_on ?? [],
+    jobs: (phase.jobs ?? []).map((job) => ({
+      id: job.id,
+      name: job.name,
+      image: job.image,
     })),
+  }));
+  return {
+    phases,
     prEnabled: workflow.pr.enabled,
+    entryArrows: manualTriggerEntryArrow(phases),
     recycleArrows: [
       ...workflow.phases.flatMap((phase) => {
         const arrow = phaseRecycleArrow(phase, active);
@@ -95,17 +126,19 @@ export function workflowToPhaseGraphModel(
 }
 
 export function runTopologyToPhaseGraphModel(topology: RunProjectionTopologySource): WorkflowGraphModel {
-  return {
-    phases: topology.phases.map((phase) => ({
-      ...phase,
-      depends_on: phase.depends_on ?? [],
-      jobs: (phase.jobs ?? []).map((job) => ({
-        id: job.id,
-        name: job.name ?? job.id,
-        image: job.image,
-      })),
+  const phases = topology.phases.map((phase) => ({
+    ...phase,
+    depends_on: phase.depends_on ?? [],
+    jobs: (phase.jobs ?? []).map((job) => ({
+      id: job.id,
+      name: job.name ?? job.id,
+      image: job.image,
     })),
+  }));
+  return {
+    phases,
     prEnabled: topology.terminal.enabled,
+    entryArrows: topologyEntryArrow(topology.default_entry),
     recycleArrows: topology.recycle_arrows,
   };
 }

@@ -196,6 +196,7 @@ type RunProjectionAttempt struct {
 	Phase              string                    `json:"phase"`
 	PhaseKind          string                    `json:"phase_kind"`
 	State              string                    `json:"state"`
+	CarryForward       bool                      `json:"carry_forward,omitempty"`
 	Conclusion         *string                   `json:"conclusion,omitempty"`
 	VerificationStatus *string                   `json:"verification_status,omitempty"`
 	Decision           *string                   `json:"decision,omitempty"`
@@ -1038,10 +1039,16 @@ func runProjectionFromReport(run RunReport, workflow Workflow, touchpoints []Tou
 		StartedAt:         run.StartedAt.Format(time.RFC3339Nano),
 		UpdatedAt:         run.UpdatedAt.Format(time.RFC3339Nano),
 		CompletedAt:       timeStringPtr(run.CompletedAt),
-		Topology:          workflowTopologyFromWorkflow(workflow),
+		Topology:          workflowTopologyForRun(workflow, run),
 		Phases:            runProjectionPhases(run, workflow),
 		Evidence:          runProjectionEvidence(run, touchpoints),
 	}
+}
+
+func workflowTopologyForRun(workflow Workflow, run RunReport) RunProjectionTopology {
+	topology := workflowTopologyFromWorkflow(workflow)
+	applyRunTopologyActivity(&topology, run)
+	return topology
 }
 
 func workflowTopologyFromWorkflow(workflow Workflow) RunProjectionTopology {
@@ -1096,6 +1103,61 @@ func workflowTopologyFromWorkflow(workflow Workflow) RunProjectionTopology {
 	}
 	topology.Terminal.Enabled = workflow.PR.Enabled
 	return topology
+}
+
+func applyRunTopologyActivity(topology *RunProjectionTopology, run RunReport) {
+	if topology == nil {
+		return
+	}
+	for idx := range topology.RecycleArrows {
+		topology.RecycleArrows[idx].Active = false
+	}
+	if topology.DefaultEntry != nil {
+		topology.DefaultEntry.Active = runActivatesManualEntry(run)
+	}
+	selector, ok := activeRecycleSelector(run)
+	if !ok {
+		return
+	}
+	for idx := range topology.RecycleArrows {
+		arrow := &topology.RecycleArrows[idx]
+		if selector.Kind != "" && arrow.Kind != selector.Kind {
+			continue
+		}
+		if selector.Source != "" && arrow.Source != selector.Source {
+			continue
+		}
+		arrow.Active = true
+	}
+}
+
+type recycleSelector struct {
+	Kind   string
+	Source string
+}
+
+func activeRecycleSelector(run RunReport) (recycleSelector, bool) {
+	switch strings.TrimSpace(stringValueOrEmpty(run.OriginKind)) {
+	case "recycle_policy":
+		source := strings.TrimSpace(stringValue(run.TriggerSource["failing_phase"]))
+		if source == "" {
+			return recycleSelector{}, false
+		}
+		return recycleSelector{Kind: "phase_recycle", Source: source}, true
+	case "pr_feedback":
+		return recycleSelector{Kind: "touchpoint_recycle", Source: "touchpoint"}, true
+	default:
+		return recycleSelector{}, false
+	}
+}
+
+func runActivatesManualEntry(run RunReport) bool {
+	switch strings.TrimSpace(stringValueOrEmpty(run.OriginKind)) {
+	case "recycle_policy", "pr_feedback":
+		return false
+	default:
+		return true
+	}
 }
 
 func runProjectionTopologyJobs(phase PhaseSpec) []RunProjectionTopologyJob {
@@ -1245,6 +1307,8 @@ func projectionPhaseFromExecution(execution RunPhaseExecution, spec PhaseSpec, a
 	kind := workflowPhaseKind(firstNonEmpty(execution.Kind, spec.Kind))
 	state := projectionExecutionState(execution.State)
 	reason := projectionExecutionReason(state, execution.Reason, attempts, abortReason)
+	jobs := runProjectionJobsForExecution(execution, spec, state, reason, attempts)
+	state, reason, jobs = applyCarryForwardProjection(state, reason, jobs, attempts)
 	return RunProjectionPhase{
 		Name:      name,
 		Kind:      kind,
@@ -1253,9 +1317,43 @@ func projectionPhaseFromExecution(execution RunPhaseExecution, spec PhaseSpec, a
 		Verify:    spec.Verify,
 		Always:    spec.Always,
 		DependsOn: sliceOrEmpty(spec.DependsOn),
-		Jobs:      runProjectionJobsForExecution(execution, spec, state, reason, attempts),
+		Jobs:      jobs,
 		Attempts:  runProjectionAttempts(attempts),
 	}
+}
+
+func applyCarryForwardProjection(state string, reason *string, jobs []RunProjectionJob, attempts []RunReportAttempt) (string, *string, []RunProjectionJob) {
+	if state != "skipped" || !latestAttemptIsCarryForwardSuccess(attempts) {
+		return state, reason, jobs
+	}
+	carryReason := stringPointerOrNil("carried_forward")
+	out := make([]RunProjectionJob, len(jobs))
+	copy(out, jobs)
+	for i := range out {
+		if out[i].State == "skipped" {
+			out[i].State = "succeeded"
+		}
+		if out[i].Reason == nil || *out[i].Reason == "" {
+			out[i].Reason = carryReason
+		}
+		for j := range out[i].Steps {
+			if out[i].Steps[j].State == "skipped" {
+				out[i].Steps[j].State = "succeeded"
+			}
+			if out[i].Steps[j].Reason == nil || *out[i].Steps[j].Reason == "" {
+				out[i].Steps[j].Reason = carryReason
+			}
+		}
+	}
+	return "succeeded", carryReason, out
+}
+
+func latestAttemptIsCarryForwardSuccess(attempts []RunReportAttempt) bool {
+	if len(attempts) == 0 {
+		return false
+	}
+	latest := attempts[len(attempts)-1]
+	return latest.CarryForward && projectionAttemptState(latest) == "succeeded"
 }
 
 func projectionExecutionReason(state string, executionReason *string, attempts []RunReportAttempt, abortReason *string) *string {
@@ -1691,6 +1789,7 @@ func runProjectionAttempts(attempts []RunReportAttempt) []RunProjectionAttempt {
 			Phase:              attempt.Phase,
 			PhaseKind:          firstNonEmpty(attempt.PhaseKind, workflowKindNativeK8sJob),
 			State:              projectionAttemptState(attempt),
+			CarryForward:       attempt.CarryForward,
 			Conclusion:         attempt.Conclusion,
 			VerificationStatus: attempt.VerificationStatus,
 			Decision:           attempt.Decision,

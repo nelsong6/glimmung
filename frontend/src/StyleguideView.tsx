@@ -3,6 +3,7 @@
  * presenting the system as reviewable specimens instead of a long static page.
  */
 import { useState } from "react";
+import { PhaseGraph } from "./PhaseGraph";
 import "./index.css";
 
 type ReviewState = "unset" | "reviewed" | "needs-review";
@@ -129,6 +130,53 @@ const DESIGN_SYSTEM_ITEMS: PortfolioItem[] = [
           <button type="button" className="link" disabled>in flight</button>
           <button type="button" className="link" disabled>sign in</button>
           <span className="pill drain">error</span>
+        </div>
+      </Specimen>
+    ),
+  },
+  {
+    id: "phase-graph-env-prep-recycle",
+    title: "Phase Graph Env Prep Recycle",
+    caption: "Entry recycle lanes from verification and touchpoint phases",
+    initialOpen: true,
+    render: () => (
+      <Specimen title="phase graph env prep recycle">
+        <div className="dag-wrap">
+          <PhaseGraph
+            ariaLabel="env prep recycle graph"
+            phases={[
+              { name: "env-prep", kind: "k8s_job", jobs: [{ id: "env-prep", name: "Environment prep" }] },
+              { name: "llm-work", kind: "k8s_job", depends_on: ["env-prep"], jobs: [{ id: "llm-work", name: "LLM work" }] },
+              { name: "llm-verify", kind: "k8s_job", verify: true, depends_on: ["llm-work"], jobs: [{ id: "llm-verify", name: "LLM verify" }] },
+              { name: "evidence-gate", kind: "k8s_job", evidence_verification_gate: true, depends_on: ["llm-verify"], jobs: [{ id: "evidence-gate", name: "Evidence gate" }] },
+              { name: "env-destroy", kind: "k8s_job", always: true, depends_on: ["evidence-gate"], jobs: [{ id: "env-destroy", name: "Environment destroy" }] },
+            ]}
+            prEnabled
+            entryArrows={[{
+              target: "env-prep",
+              label: "manual trigger",
+              active: false,
+              kind: "manual_trigger",
+            }]}
+            recycleArrows={[
+              {
+                source: "evidence-gate",
+                target: "env-prep",
+                trigger: "verify_fail",
+                max_attempts: 3,
+                active: true,
+                kind: "phase_recycle",
+              },
+              {
+                source: "touchpoint",
+                target: "env-prep",
+                trigger: "changes_requested",
+                max_attempts: 3,
+                active: false,
+                kind: "touchpoint_recycle",
+              },
+            ]}
+          />
         </div>
       </Specimen>
     ),

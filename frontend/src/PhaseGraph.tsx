@@ -5,6 +5,7 @@
 import { Fragment, ReactNode, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   BaseEdge,
+  EdgeLabelRenderer,
   Handle,
   MarkerType,
   Position,
@@ -41,6 +42,13 @@ export type RecycleArrow = {
   kind: "phase_recycle" | "touchpoint_recycle";
 };
 
+export type EntryArrow = {
+  target: string;
+  label: string;
+  active: boolean;
+  kind: string;
+};
+
 export type PhaseGraphProps = {
   phases: PhaseGraphPhase[];
   prEnabled: boolean;
@@ -50,6 +58,7 @@ export type PhaseGraphProps = {
   dagClassName?: string;
   ariaLabel?: string;
   entryPhaseName?: string | null;
+  entryArrows?: EntryArrow[];
   recycleArrows?: RecycleArrow[];
 };
 
@@ -66,19 +75,31 @@ type TouchpointNodeData = {
   renderTouchpoint: () => ReactNode;
 };
 
+type EntrySourceNodeData = Record<string, never>;
+
 type RecycleEdgeData = {
   laneIndex: number;
   laneBaseY: number;
+};
+
+type EntryEdgeData = {
+  label: string;
+  active: boolean;
+  laneIndex: number;
 };
 
 type AdvanceGraphEdge = Edge & {
   type: "advance";
 };
 
-type GraphEdge = Edge<RecycleEdgeData>;
+type GraphEdge = Edge<RecycleEdgeData | EntryEdgeData>;
 
 type RecycleGraphEdge = Edge<RecycleEdgeData> & {
   type: "recycle";
+};
+
+type EntryGraphEdge = Edge<EntryEdgeData> & {
+  type: "entry";
 };
 
 const PHASE_WIDTH = 172;
@@ -88,6 +109,14 @@ const JOB_HEIGHT = 70;
 const PHASE_BASE_HEIGHT = 44;
 const TOUCHPOINT_FALLBACK_HEIGHT = 55;
 const ENTRY_OFFSET_PERCENT = 13;
+const RECYCLE_LANE_TOP_OFFSET = 24;
+const RECYCLE_LANE_GAP = 24;
+const RECYCLE_LANE_BOTTOM_PADDING = 42;
+const RECYCLE_APPROACH_OFFSET = 30;
+const RECYCLE_APPROACH_STAGGER = 16;
+const RECYCLE_FIRST_COLUMN_GUTTER = 72;
+const ENTRY_LEFT_GUTTER = 156;
+const ENTRY_LABEL_Y_OFFSET = -16;
 
 function estimatedPhaseHeight(col: PhaseGraphPhase[]): number {
   const phase = col[0];
@@ -139,6 +168,10 @@ function handleTop(index: number, count: number): string {
   return `${50 + index * ENTRY_OFFSET_PERCENT}%`;
 }
 
+function entryHandlePercent(recycleTargets: number): number {
+  return recycleTargets > 0 ? 50 - ENTRY_OFFSET_PERCENT : 50;
+}
+
 function PhaseFlowNode({ data }: NodeProps<Node<PhaseNodeData>>) {
   const hasParallelJobs = data.col.some((phase) => (phase.jobs?.length ?? 0) > 1);
   return (
@@ -153,7 +186,7 @@ function PhaseFlowNode({ data }: NodeProps<Node<PhaseNodeData>>) {
         type="target"
         position={Position.Left}
         className="dag-rf-handle"
-        style={data.recycleTargets > 0 ? { top: `${50 - ENTRY_OFFSET_PERCENT}%` } : undefined}
+        style={{ top: `${entryHandlePercent(data.recycleTargets)}%` }}
       />
       <Handle id="advance-out" type="source" position={Position.Right} className="dag-rf-handle" />
       <Handle id="recycle-out" type="source" position={Position.Bottom} className="dag-rf-handle" />
@@ -180,6 +213,14 @@ function PhaseFlowNode({ data }: NodeProps<Node<PhaseNodeData>>) {
   );
 }
 
+function EntrySourceFlowNode() {
+  return (
+    <div className="dag-rf-entry-source">
+      <Handle id="entry-out" type="source" position={Position.Right} className="dag-rf-handle" />
+    </div>
+  );
+}
+
 function TouchpointFlowNode({ data }: NodeProps<Node<TouchpointNodeData>>) {
   return (
     <div className="dag-terminal">
@@ -191,9 +232,53 @@ function TouchpointFlowNode({ data }: NodeProps<Node<TouchpointNodeData>>) {
 }
 
 const nodeTypes = {
+  entrySource: EntrySourceFlowNode,
   phase: PhaseFlowNode,
   touchpoint: TouchpointFlowNode,
 };
+
+function EntryFlowEdge({
+  id,
+  sourceX,
+  sourceY,
+  targetX,
+  targetY,
+  markerEnd,
+  style,
+  data,
+  interactionWidth,
+}: EdgeProps<EntryGraphEdge>) {
+  const label = data?.label ?? "manual trigger";
+  const laneIndex = data?.laneIndex ?? 0;
+  const verticalDelta = Math.abs(sourceY - targetY);
+  const path = verticalDelta < 1
+    ? `M ${sourceX},${sourceY} L ${targetX},${targetY}`
+    : `M ${sourceX},${sourceY} C ${sourceX + 44},${sourceY} ${targetX - 44},${targetY} ${targetX},${targetY}`;
+  const labelX = sourceX + (targetX - sourceX) * 0.48;
+  const labelY = Math.min(sourceY, targetY) + ENTRY_LABEL_Y_OFFSET - laneIndex * 20;
+
+  return (
+    <>
+      <BaseEdge
+        id={id}
+        path={path}
+        markerEnd={markerEnd}
+        style={style}
+        interactionWidth={interactionWidth}
+      />
+      <EdgeLabelRenderer>
+        <div
+          className={`dag-rf-entry-label${data?.active ? " active" : ""}`}
+          style={{
+            transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
+          }}
+        >
+          {label}
+        </div>
+      </EdgeLabelRenderer>
+    </>
+  );
+}
 
 function RecycleFlowEdge({
   id,
@@ -209,8 +294,8 @@ function RecycleFlowEdge({
   const laneIndex = data?.laneIndex ?? 0;
   const laneBaseY = data?.laneBaseY ?? Math.max(sourceY, targetY) + 30;
   const radius = 10;
-  const laneY = laneBaseY + laneIndex * 24;
-  const approachX = targetX - 30 - laneIndex * 16;
+  const laneY = laneBaseY + laneIndex * RECYCLE_LANE_GAP;
+  const approachX = targetX - RECYCLE_APPROACH_OFFSET - laneIndex * RECYCLE_APPROACH_STAGGER;
   const finalCurveLead = Math.min(36, Math.abs(laneY - targetY));
   const finalCurveStartY = targetY + finalCurveLead;
   const finalControlX = targetX - Math.min(44, Math.max(18, (targetX - approachX) * 0.6));
@@ -263,6 +348,7 @@ function AdvanceFlowEdge({
 
 const edgeTypes = {
   advance: AdvanceFlowEdge,
+  entry: EntryFlowEdge,
   recycle: RecycleFlowEdge,
 };
 
@@ -275,6 +361,7 @@ export function PhaseGraph({
   dagClassName,
   ariaLabel,
   entryPhaseName = null,
+  entryArrows = [],
   recycleArrows = [],
 }: PhaseGraphProps) {
   const graphRef = useRef<HTMLDivElement | null>(null);
@@ -292,16 +379,54 @@ export function PhaseGraph({
     }
     return counts;
   }, [recycleArrows]);
+  const maxRecycleLanes = useMemo(
+    () => Math.max(0, ...Array.from(recycleTargetCounts.values())),
+    [recycleTargetCounts],
+  );
+  const firstColumnRecycleLanes = useMemo(() => {
+    const firstColumn = columns[0] ?? [];
+    return Math.max(0, ...firstColumn.map((phase) => recycleTargetCounts.get(phase.name) ?? 0));
+  }, [columns, recycleTargetCounts]);
+  const recycleLeftGutter = firstColumnRecycleLanes > 0
+    ? RECYCLE_FIRST_COLUMN_GUTTER + (firstColumnRecycleLanes - 1) * RECYCLE_APPROACH_STAGGER
+    : 0;
+  const visibleEntryArrows = useMemo(
+    () => entryArrows.filter((arrow) => phaseToColumn.has(arrow.target)),
+    [entryArrows, phaseToColumn],
+  );
+  const entryLeftGutter = visibleEntryArrows.length > 0 ? ENTRY_LEFT_GUTTER : 0;
+  const leftGutter = Math.max(recycleLeftGutter, entryLeftGutter);
 
   const nodes = useMemo<Node[]>(() => {
     const phaseHeight = (idx: number, col: PhaseGraphPhase[]) => nodeHeights[`phase:${idx}`] ?? estimatedPhaseHeight(col);
     const measuredPhaseHeights = columns.map((col, idx) => phaseHeight(idx, col));
     const maxPhaseHeight = Math.max(...measuredPhaseHeights, estimatedPhaseHeight([]));
+    const entryNodes: Node<EntrySourceNodeData>[] = visibleEntryArrows.map((arrow, idx) => {
+      const targetCol = phaseToColumn.get(arrow.target) ?? 0;
+      const col = columns[targetCol] ?? [];
+      const targetHeight = phaseHeight(targetCol, col);
+      const recycleTargets = Math.max(...col.map((phase) => recycleTargetCounts.get(phase.name) ?? 0), 0);
+      const targetY = PHASE_Y
+        + (maxPhaseHeight - targetHeight) / 2
+        + targetHeight * (entryHandlePercent(recycleTargets) / 100);
+      return {
+        id: `entry-source:${idx}`,
+        type: "entrySource",
+        position: {
+          x: 0,
+          y: targetY - 0.5,
+        },
+        style: { width: 1, height: 1, pointerEvents: "none" },
+        draggable: false,
+        selectable: false,
+        data: {},
+      };
+    });
     const phaseNodes: Node<PhaseNodeData>[] = columns.map((col, idx) => ({
       id: `phase:${idx}`,
       type: "phase",
       position: {
-        x: idx * PHASE_X_GAP,
+        x: leftGutter + idx * PHASE_X_GAP,
         y: PHASE_Y + (maxPhaseHeight - phaseHeight(idx, col)) / 2,
       },
       style: { pointerEvents: "all" },
@@ -316,14 +441,15 @@ export function PhaseGraph({
         recycleTargets: Math.max(...col.map((phase) => recycleTargetCounts.get(phase.name) ?? 0), 0),
       },
     }));
-    if (!prEnabled) return phaseNodes;
+    if (!prEnabled) return [...entryNodes, ...phaseNodes];
     return [
+      ...entryNodes,
       ...phaseNodes,
       {
         id: "touchpoint",
         type: "touchpoint",
         position: {
-          x: columns.length * PHASE_X_GAP,
+          x: leftGutter + columns.length * PHASE_X_GAP,
           y: PHASE_Y + (maxPhaseHeight - (nodeHeights.touchpoint ?? TOUCHPOINT_FALLBACK_HEIGHT)) / 2,
         },
         style: { pointerEvents: "all" },
@@ -332,7 +458,7 @@ export function PhaseGraph({
         data: { renderTouchpoint },
       } satisfies Node<TouchpointNodeData>,
     ];
-  }, [columns, nodeHeights, phaseRef, prEnabled, recycleTargetCounts, renderPhase, renderTouchpoint]);
+  }, [columns, leftGutter, nodeHeights, phaseRef, phaseToColumn, prEnabled, recycleTargetCounts, renderPhase, renderTouchpoint, visibleEntryArrows]);
 
   const edges = useMemo<GraphEdge[]>(() => {
     const out: GraphEdge[] = [];
@@ -340,7 +466,22 @@ export function PhaseGraph({
       ...columns.map((col, idx) => nodeHeights[`phase:${idx}`] ?? estimatedPhaseHeight(col)),
       estimatedPhaseHeight([]),
     );
-    const recycleLaneBaseY = PHASE_Y + maxPhaseHeight + 8;
+    const recycleLaneBaseY = PHASE_Y + maxPhaseHeight + RECYCLE_LANE_TOP_OFFSET;
+    visibleEntryArrows.forEach((arrow, idx) => {
+      const targetCol = phaseToColumn.get(arrow.target);
+      if (targetCol == null) return;
+      out.push({
+        id: `entry:${arrow.target}:${idx}`,
+        source: `entry-source:${idx}`,
+        sourceHandle: "entry-out",
+        target: `phase:${targetCol}`,
+        targetHandle: "advance-in",
+        type: "entry",
+        markerEnd: { type: MarkerType.ArrowClosed },
+        className: `dag-rf-edge dag-rf-manual-entry${arrow.active ? " active" : ""}`,
+        data: { label: arrow.label, active: arrow.active, laneIndex: idx },
+      });
+    });
     for (let idx = 0; idx < columns.length - 1; idx += 1) {
       const entry = columns[idx + 1].some((phase) => entryPhaseName != null && phase.name === entryPhaseName);
       out.push({
@@ -381,32 +522,32 @@ export function PhaseGraph({
         .sort((a, b) => sourceOrder(a, phaseToColumn, columns.length) - sourceOrder(b, phaseToColumn, columns.length));
       const touchpointArrowIndex = orderedArrows.findIndex((arrow) => arrow.kind === "touchpoint_recycle" || arrow.source === "touchpoint");
       orderedArrows.forEach((arrow, idx) => {
-          const targetHandleIndex = touchpointArrowIndex >= 0
-            ? idx === touchpointArrowIndex
-              ? 0
-              : idx < touchpointArrowIndex
-                ? idx + 1
-                : idx
-            : idx;
-          const source = arrow.kind === "touchpoint_recycle" || arrow.source === "touchpoint"
-            ? "touchpoint"
-            : `phase:${phaseToColumn.get(arrow.source) ?? 0}`;
-          out.push({
-            id: `recycle:${arrow.source}:${arrow.target}:${idx}`,
-            source,
-            sourceHandle: "recycle-out",
-            target: `phase:${targetCol}`,
-            targetHandle: `recycle-in-${targetHandleIndex}`,
-            type: "recycle",
-            markerEnd: { type: MarkerType.ArrowClosed },
-            className: `dag-rf-edge dag-rf-recycle${arrow.active ? " fired" : ""}`,
-            data: { laneIndex: idx, laneBaseY: recycleLaneBaseY },
-            label: "",
-          });
+        const targetHandleIndex = touchpointArrowIndex >= 0
+          ? idx === touchpointArrowIndex
+            ? 0
+            : idx < touchpointArrowIndex
+              ? idx + 1
+              : idx
+          : idx;
+        const source = arrow.kind === "touchpoint_recycle" || arrow.source === "touchpoint"
+          ? "touchpoint"
+          : `phase:${phaseToColumn.get(arrow.source) ?? 0}`;
+        out.push({
+          id: `recycle:${arrow.source}:${arrow.target}:${idx}`,
+          source,
+          sourceHandle: "recycle-out",
+          target: `phase:${targetCol}`,
+          targetHandle: `recycle-in-${targetHandleIndex}`,
+          type: "recycle",
+          markerEnd: { type: MarkerType.ArrowClosed },
+          className: `dag-rf-edge dag-rf-recycle${arrow.active ? " fired" : ""}`,
+          data: { laneIndex: idx, laneBaseY: recycleLaneBaseY },
+          label: "",
         });
+      });
     });
     return out;
-  }, [columns, entryPhaseName, nodeHeights, phaseToColumn, prEnabled, recycleArrows]);
+  }, [columns, entryPhaseName, nodeHeights, phaseToColumn, prEnabled, recycleArrows, visibleEntryArrows]);
 
   useLayoutEffect(() => {
     const root = graphRef.current;
@@ -443,12 +584,15 @@ export function PhaseGraph({
     };
   }, [columns.length]);
 
-  const graphHeight =
-    Math.max(
-      ...columns.map((col, idx) => nodeHeights[`phase:${idx}`] ?? estimatedPhaseHeight(col)),
-      estimatedPhaseHeight([]),
-    ) + 76;
-  const graphWidth = (columns.length + (prEnabled ? 1 : 0)) * PHASE_X_GAP + PHASE_WIDTH;
+  const maxPhaseHeight = Math.max(
+    ...columns.map((col, idx) => nodeHeights[`phase:${idx}`] ?? estimatedPhaseHeight(col)),
+    estimatedPhaseHeight([]),
+  );
+  const recycleBottomRoom = maxRecycleLanes > 0
+    ? RECYCLE_LANE_TOP_OFFSET + (maxRecycleLanes - 1) * RECYCLE_LANE_GAP + RECYCLE_LANE_BOTTOM_PADDING
+    : 64;
+  const graphHeight = PHASE_Y + maxPhaseHeight + Math.max(64, recycleBottomRoom);
+  const graphWidth = leftGutter + (columns.length + (prEnabled ? 1 : 0)) * PHASE_X_GAP + PHASE_WIDTH;
 
   return (
     <div className={`dag dag-rf${dagClassName ? " " + dagClassName : ""}`} aria-label={ariaLabel}>

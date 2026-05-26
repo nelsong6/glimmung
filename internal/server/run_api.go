@@ -18,6 +18,7 @@ type RunReportAttempt struct {
 	Phase              string                    `json:"phase"`
 	PhaseKind          string                    `json:"phase_kind"`
 	WorkflowFilename   string                    `json:"workflow_filename"`
+	CarryForward       bool                      `json:"carry_forward,omitempty"`
 	DispatchedAt       time.Time                 `json:"dispatched_at"`
 	CompletedAt        *time.Time                `json:"completed_at"`
 	Conclusion         *string                   `json:"conclusion"`
@@ -73,6 +74,7 @@ type RunAttemptJobCompletion struct {
 	Conclusion          string            `json:"conclusion"`
 	VerificationStatus  *string           `json:"verification_status"`
 	VerificationReasons []string          `json:"verification_reasons"`
+	EvidenceRefs        []string          `json:"evidence_refs"`
 	CostUSD             float64           `json:"cost_usd"`
 	PhaseOutputs        map[string]string `json:"phase_outputs"`
 }
@@ -88,6 +90,7 @@ type RunReport struct {
 	RootRunRef          *string             `json:"root_run_ref"`
 	OriginKind          *string             `json:"origin_kind"`
 	EntrypointPhase     *string             `json:"entrypoint_phase"`
+	TriggerSource       map[string]any      `json:"-"`
 	IsCycle             bool                `json:"is_cycle"`
 	CycleNumber         *int                `json:"cycle_number"`
 	RunCycleNumber      *int                `json:"run_cycle_number"`

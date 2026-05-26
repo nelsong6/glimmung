@@ -62,6 +62,12 @@ describe("workflowToPhaseGraphModel", () => {
         },
       ],
       prEnabled: true,
+      entryArrows: [{
+        target: "implementation",
+        label: "manual trigger",
+        active: false,
+        kind: "manual_trigger",
+      }],
       recycleArrows: [
         {
           source: "implementation",
@@ -92,6 +98,7 @@ describe("workflowToPhaseGraphModel", () => {
     expect(workflowToPhaseGraphModel(workflow)).toEqual({
       phases: [],
       prEnabled: false,
+      entryArrows: [],
       recycleArrows: [
         {
           source: "touchpoint",
@@ -103,6 +110,60 @@ describe("workflowToPhaseGraphModel", () => {
         },
       ],
     });
+  });
+
+  it("keeps explicit recycle targets that return to the entry phase", () => {
+    const workflow: WorkflowGraphSource = {
+      name: "ambience",
+      phases: [
+        { name: "env-prep", kind: "k8s_job" },
+        { name: "llm-work", kind: "k8s_job", depends_on: ["env-prep"] },
+        {
+          name: "evidence-gate",
+          kind: "k8s_job",
+          depends_on: ["llm-work"],
+          recycle_policy: {
+            max_attempts: 3,
+            on: ["verify_fail"],
+            lands_at: "env-prep",
+          },
+        },
+      ],
+      pr: {
+        enabled: true,
+        recycle_policy: {
+          max_attempts: 3,
+          on: ["changes_requested"],
+          lands_at: "env-prep",
+        },
+      },
+    };
+
+    const model = workflowToPhaseGraphModel(workflow);
+    expect(model.entryArrows).toEqual([{
+      target: "env-prep",
+      label: "manual trigger",
+      active: false,
+      kind: "manual_trigger",
+    }]);
+    expect(model.recycleArrows).toEqual([
+      {
+        source: "evidence-gate",
+        target: "env-prep",
+        trigger: "verify_fail",
+        max_attempts: 3,
+        active: false,
+        kind: "phase_recycle",
+      },
+      {
+        source: "touchpoint",
+        target: "env-prep",
+        trigger: "changes_requested",
+        max_attempts: 3,
+        active: false,
+        kind: "touchpoint_recycle",
+      },
+    ]);
   });
 });
 
@@ -157,6 +218,12 @@ describe("runTopologyToPhaseGraphModel", () => {
         },
       ],
       prEnabled: true,
+      entryArrows: [{
+        target: "env-prep",
+        label: "manual trigger",
+        active: true,
+        kind: "default",
+      }],
       recycleArrows: [{
         source: "touchpoint",
         target: "env-prep",
