@@ -196,6 +196,7 @@ type RunProjectionAttempt struct {
 	Phase              string                    `json:"phase"`
 	PhaseKind          string                    `json:"phase_kind"`
 	State              string                    `json:"state"`
+	CarryForward       bool                      `json:"carry_forward,omitempty"`
 	Conclusion         *string                   `json:"conclusion,omitempty"`
 	VerificationStatus *string                   `json:"verification_status,omitempty"`
 	Decision           *string                   `json:"decision,omitempty"`
@@ -1245,6 +1246,8 @@ func projectionPhaseFromExecution(execution RunPhaseExecution, spec PhaseSpec, a
 	kind := workflowPhaseKind(firstNonEmpty(execution.Kind, spec.Kind))
 	state := projectionExecutionState(execution.State)
 	reason := projectionExecutionReason(state, execution.Reason, attempts, abortReason)
+	jobs := runProjectionJobsForExecution(execution, spec, state, reason, attempts)
+	state, reason, jobs = applyCarryForwardProjection(state, reason, jobs, attempts)
 	return RunProjectionPhase{
 		Name:      name,
 		Kind:      kind,
@@ -1253,9 +1256,43 @@ func projectionPhaseFromExecution(execution RunPhaseExecution, spec PhaseSpec, a
 		Verify:    spec.Verify,
 		Always:    spec.Always,
 		DependsOn: sliceOrEmpty(spec.DependsOn),
-		Jobs:      runProjectionJobsForExecution(execution, spec, state, reason, attempts),
+		Jobs:      jobs,
 		Attempts:  runProjectionAttempts(attempts),
 	}
+}
+
+func applyCarryForwardProjection(state string, reason *string, jobs []RunProjectionJob, attempts []RunReportAttempt) (string, *string, []RunProjectionJob) {
+	if state != "skipped" || !latestAttemptIsCarryForwardSuccess(attempts) {
+		return state, reason, jobs
+	}
+	carryReason := stringPointerOrNil("carried_forward")
+	out := make([]RunProjectionJob, len(jobs))
+	copy(out, jobs)
+	for i := range out {
+		if out[i].State == "skipped" {
+			out[i].State = "succeeded"
+		}
+		if out[i].Reason == nil || *out[i].Reason == "" {
+			out[i].Reason = carryReason
+		}
+		for j := range out[i].Steps {
+			if out[i].Steps[j].State == "skipped" {
+				out[i].Steps[j].State = "succeeded"
+			}
+			if out[i].Steps[j].Reason == nil || *out[i].Steps[j].Reason == "" {
+				out[i].Steps[j].Reason = carryReason
+			}
+		}
+	}
+	return "succeeded", carryReason, out
+}
+
+func latestAttemptIsCarryForwardSuccess(attempts []RunReportAttempt) bool {
+	if len(attempts) == 0 {
+		return false
+	}
+	latest := attempts[len(attempts)-1]
+	return latest.CarryForward && projectionAttemptState(latest) == "succeeded"
 }
 
 func projectionExecutionReason(state string, executionReason *string, attempts []RunReportAttempt, abortReason *string) *string {
@@ -1691,6 +1728,7 @@ func runProjectionAttempts(attempts []RunReportAttempt) []RunProjectionAttempt {
 			Phase:              attempt.Phase,
 			PhaseKind:          firstNonEmpty(attempt.PhaseKind, workflowKindNativeK8sJob),
 			State:              projectionAttemptState(attempt),
+			CarryForward:       attempt.CarryForward,
 			Conclusion:         attempt.Conclusion,
 			VerificationStatus: attempt.VerificationStatus,
 			Decision:           attempt.Decision,

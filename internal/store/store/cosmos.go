@@ -1894,6 +1894,7 @@ func runReportAttemptFromDoc(doc attemptDoc, lineageByID map[string]string) serv
 			cost = &doc.Verification.CostUSD
 		}
 	}
+	evidenceRefs = appendMissingStrings(evidenceRefs, evidenceRefsFromPhaseOutputs(doc.PhaseOutputs)...)
 	if doc.CostUSD != nil {
 		cost = doc.CostUSD
 	}
@@ -1909,6 +1910,7 @@ func runReportAttemptFromDoc(doc attemptDoc, lineageByID map[string]string) serv
 		Phase:              doc.Phase,
 		PhaseKind:          firstNonEmpty(doc.PhaseKind, "k8s_job"),
 		WorkflowFilename:   doc.WorkflowFilename,
+		CarryForward:       doc.CarryForward,
 		DispatchedAt:       parseTimeOrNow(doc.DispatchedAt),
 		CompletedAt:        parseOptionalTime(doc.CompletedAt),
 		Conclusion:         emptyStringNil(doc.Conclusion),
@@ -1926,9 +1928,11 @@ func runReportAttemptFromDoc(doc attemptDoc, lineageByID map[string]string) serv
 func runAttemptJobCompletionFromDoc(doc nativeJobCompletionDoc) server.RunAttemptJobCompletion {
 	var verificationStatus *string
 	verificationReasons := []string{}
+	evidenceRefs := []string{}
 	if doc.Verification != nil {
 		verificationStatus = optionalNonEmptyStringPtr(doc.Verification.Status)
 		verificationReasons = sliceOrEmpty(doc.Verification.Reasons)
+		evidenceRefs = sliceOrEmpty(doc.Verification.EvidenceRefs)
 	}
 	return server.RunAttemptJobCompletion{
 		JobID:               doc.JobID,
@@ -1936,9 +1940,47 @@ func runAttemptJobCompletionFromDoc(doc nativeJobCompletionDoc) server.RunAttemp
 		Conclusion:          doc.Conclusion,
 		VerificationStatus:  verificationStatus,
 		VerificationReasons: verificationReasons,
+		EvidenceRefs:        evidenceRefs,
 		CostUSD:             doc.CostUSD,
 		PhaseOutputs:        mapStringOrEmpty(doc.PhaseOutputs),
 	}
+}
+
+func evidenceRefsFromPhaseOutputs(outputs map[string]string) []string {
+	raw := strings.TrimSpace(outputs["verification"])
+	if raw == "" {
+		return nil
+	}
+	var payload struct {
+		EvidenceRefs []string `json:"evidence_refs"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return nil
+	}
+	return cleanStringRefs(payload.EvidenceRefs)
+}
+
+func cleanStringRefs(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func appendMissingStrings(values []string, additions ...string) []string {
+	out := append([]string{}, values...)
+	for _, addition := range additions {
+		addition = strings.TrimSpace(addition)
+		if addition == "" || containsString(out, addition) {
+			continue
+		}
+		out = append(out, addition)
+	}
+	return out
 }
 
 func phaseExecutionDocsFromWorkflow(wf server.Workflow, createdAt string, entrypointPhase *string) []phaseExecutionDoc {
@@ -5509,9 +5551,10 @@ func nativeJobCompletionDocFromPayload(jobID string, p server.CompletionPayload,
 	var verification *verificationDoc
 	if p.VerificationStatus != "" {
 		verification = &verificationDoc{
-			Status:  p.VerificationStatus,
-			Reasons: sliceOrEmpty(p.VerificationReasons),
-			CostUSD: p.CostUSD,
+			Status:       p.VerificationStatus,
+			Reasons:      sliceOrEmpty(p.VerificationReasons),
+			EvidenceRefs: sliceOrEmpty(p.EvidenceRefs),
+			CostUSD:      p.CostUSD,
 		}
 	}
 	return nativeJobCompletionDoc{
@@ -6103,6 +6146,7 @@ func aggregateNativePhaseCompletion(expected []string, completions map[string]na
 	summaries := make([]string, 0)
 	screenshots := make([]string, 0)
 	reasons := make([]string, 0)
+	evidenceRefs := make([]string, 0)
 	conclusion := "success"
 	verificationStatus := ""
 	for _, id := range ids {
@@ -6129,12 +6173,14 @@ func aggregateNativePhaseCompletion(expected []string, completions map[string]na
 					reasons = append(reasons, id+": "+reason)
 				}
 			}
+			evidenceRefs = appendMissingStrings(evidenceRefs, completion.Verification.EvidenceRefs...)
 		}
 	}
 	payload := server.CompletionPayload{
 		Conclusion:          conclusion,
 		VerificationStatus:  verificationStatus,
 		VerificationReasons: reasons,
+		EvidenceRefs:        evidenceRefs,
 		CostUSD:             sumNativeJobCosts(completions),
 		PhaseOutputs:        phaseOutputs,
 	}
@@ -6216,9 +6262,10 @@ func (s *Store) StampRunCompletion(ctx context.Context, project, runID string, p
 		}
 		if p.VerificationStatus != "" {
 			attempt["verification"] = map[string]any{
-				"status":   p.VerificationStatus,
-				"reasons":  p.VerificationReasons,
-				"cost_usd": p.CostUSD,
+				"status":        p.VerificationStatus,
+				"reasons":       p.VerificationReasons,
+				"evidence_refs": sliceOrEmpty(p.EvidenceRefs),
+				"cost_usd":      p.CostUSD,
 			}
 		}
 		attempt["cost_usd"] = p.CostUSD

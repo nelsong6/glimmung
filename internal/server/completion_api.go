@@ -21,6 +21,7 @@ type CompletionPayload struct {
 	Conclusion          string
 	VerificationStatus  string
 	VerificationReasons []string
+	EvidenceRefs        []string
 	CostUSD             float64
 	SummaryMarkdown     *string
 	ScreenshotsMarkdown *string
@@ -188,6 +189,32 @@ func extractVerification(raw map[string]any, p *CompletionPayload) {
 			}
 		}
 	}
+	p.EvidenceRefs = stringSliceFromVerification(raw["evidence_refs"])
+}
+
+func stringSliceFromVerification(raw any) []string {
+	out := []string{}
+	switch values := raw.(type) {
+	case []string:
+		for _, value := range values {
+			value = strings.TrimSpace(value)
+			if value != "" {
+				out = append(out, value)
+			}
+		}
+	case []any:
+		for _, value := range values {
+			s, ok := value.(string)
+			if !ok {
+				continue
+			}
+			s = strings.TrimSpace(s)
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
 }
 
 // processRunCompletion is the shared decision-engine path for native completions.

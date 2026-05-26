@@ -227,6 +227,7 @@ func aggregateFakeNativePayload(expected []string, completions map[string]Comple
 		if completion.VerificationStatus != "" {
 			payload.VerificationStatus = completion.VerificationStatus
 			payload.VerificationReasons = append(payload.VerificationReasons, completion.VerificationReasons...)
+			payload.EvidenceRefs = append(payload.EvidenceRefs, completion.EvidenceRefs...)
 		}
 		payload.CostUSD += completion.CostUSD
 		for key, value := range completion.PhaseOutputs {
@@ -375,6 +376,29 @@ func TestNativeRunCompletedByCallbackTokenAdvanceReviewRequired(t *testing.T) {
 	}
 	if got := readCallbackResult(t, rec).Decision; got == nil || *got != "advance" {
 		t.Fatalf("decision=%v", got)
+	}
+}
+
+func TestCompletionPayloadFromNativeExtractsEvidenceRefs(t *testing.T) {
+	id := "verify"
+	req := NativeRunCompletedRequest{
+		JobID:      &id,
+		Conclusion: "success",
+		Verification: map[string]any{
+			"status":        "pass",
+			"reasons":       []any{"screenshots ok"},
+			"evidence_refs": []any{"screenshots/default.png", "", 42},
+			"cost_usd":      1.25,
+		},
+	}
+
+	payload := completionPayloadFromNative(req)
+
+	if payload.VerificationStatus != "pass" || len(payload.VerificationReasons) != 1 {
+		t.Fatalf("verification=%#v", payload)
+	}
+	if len(payload.EvidenceRefs) != 1 || payload.EvidenceRefs[0] != "screenshots/default.png" {
+		t.Fatalf("evidence_refs=%#v", payload.EvidenceRefs)
 	}
 }
 
