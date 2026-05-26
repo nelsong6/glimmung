@@ -7,13 +7,6 @@ locals {
   }
 }
 
-data "azurerm_cosmosdb_account" "infra" {
-  name                = "infra-cosmos-serverless"
-  resource_group_name = local.infra.resource_group_name
-}
-
-data "azuread_client_config" "current" {}
-
 data "azurerm_client_config" "current" {}
 
 data "terraform_remote_state" "infra_bootstrap" {
