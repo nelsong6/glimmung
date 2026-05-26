@@ -4706,26 +4706,28 @@ func runReplayDataFromDoc(doc runDoc) server.RunReplayData {
 		bdg.Total = doc.Budget.Total
 	}
 	return server.RunReplayData{
-		ID:                doc.ID,
-		Project:           doc.Project,
-		WorkflowName:      doc.Workflow,
-		WorkflowSchemaRef: doc.WorkflowSchemaRef,
-		Attempts:          attempts,
-		CumulativeCostUSD: doc.CumulativeCostUSD,
-		Budget:            bdg,
-		IssueNumber:       doc.IssueNumber,
-		RunNumber:         doc.RunNumber,
-		CycleNumber:       doc.CycleNumber,
-		RunCycleNumber:    doc.RunCycleNumber,
-		RunDisplayNumber:  doc.RunDisplayNumber,
-		IssueRepo:         doc.IssueRepo,
-		CallbackToken:     doc.CallbackToken,
-		IssueLockHolderID: doc.IssueLockHolderID,
-		PRNumber:          doc.PRNumber,
-		PRLockHolderID:    doc.PRLockHolderID,
-		SlotLeaseRef:      doc.SlotLeaseRef,
-		EntrypointPhase:   doc.EntrypointPhase,
-		TriggerSource:     mapOrEmpty(doc.TriggerSource),
+		ID:                  doc.ID,
+		Project:             doc.Project,
+		WorkflowName:        doc.Workflow,
+		WorkflowSchemaRef:   doc.WorkflowSchemaRef,
+		Attempts:            attempts,
+		CumulativeCostUSD:   doc.CumulativeCostUSD,
+		Budget:              bdg,
+		IssueNumber:         doc.IssueNumber,
+		RunNumber:           doc.RunNumber,
+		CycleNumber:         doc.CycleNumber,
+		RunCycleNumber:      doc.RunCycleNumber,
+		RunDisplayNumber:    doc.RunDisplayNumber,
+		IssueRepo:           doc.IssueRepo,
+		ValidationURL:       doc.ValidationURL,
+		ScreenshotsMarkdown: doc.ScreenshotsMarkdown,
+		CallbackToken:       doc.CallbackToken,
+		IssueLockHolderID:   doc.IssueLockHolderID,
+		PRNumber:            doc.PRNumber,
+		PRLockHolderID:      doc.PRLockHolderID,
+		SlotLeaseRef:        doc.SlotLeaseRef,
+		EntrypointPhase:     doc.EntrypointPhase,
+		TriggerSource:       mapOrEmpty(doc.TriggerSource),
 	}
 }
 
@@ -4946,6 +4948,21 @@ func (s *Store) FindRunForPR(ctx context.Context, repo string, prNumber int) (se
 		return server.RunReplayData{}, err
 	}
 	return s.ReadRunForReplay(ctx, row.Project, row.ID)
+}
+
+func (s *Store) LinkRunPullRequest(ctx context.Context, project, runID string, prNumber int) error {
+	if prNumber < 1 {
+		return server.ValidationError{Message: "pr number must be positive"}
+	}
+	_, err := s.pgRuns.PatchPayload(ctx, project, runID, func(raw map[string]any) error {
+		raw["pr_number"] = prNumber
+		raw["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+		return nil
+	})
+	if errors.Is(err, pgstore.ErrRunNotFound) {
+		return server.ErrNotFound
+	}
+	return err
 }
 
 // ---- RunMutationStore implementation ----

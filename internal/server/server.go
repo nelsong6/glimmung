@@ -23,9 +23,9 @@ type Settings struct {
 	// Postgres connection settings. The pool is constructed in
 	// cmd/glimmung-go/main.go and RunMigrations applies the schema.
 	// All R/W now flows through pg per the Cosmos->Postgres migration.
-	PostgresHost     string
-	PostgresDatabase string
-	PostgresUsername string
+	PostgresHost                       string
+	PostgresDatabase                   string
+	PostgresUsername                   string
 	K8sSAAllowlist                     string
 	K8sAPIHost                         string
 	K8sSATokenPath                     string
@@ -200,6 +200,10 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	if m, ok := ghClient.(NativeGitHubTokenMinter); ok {
 		nativeTokenMinter = m
 	}
+	var prClient PullRequestClient
+	if c, ok := ghClient.(PullRequestClient); ok {
+		prClient = c
+	}
 	var testSlotPreparer TestSlotPreparer
 	if p, ok := nativeLauncher.(TestSlotPreparer); ok {
 		testSlotPreparer = p
@@ -300,7 +304,7 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	mux.HandleFunc("GET /v1/run-callbacks/{callback_token}/native/status", nativeRunStatusByCallbackToken(store))
 	mux.HandleFunc("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/github-token", nativeGitHubTokenByNumber(store, nativeTokenMinter))
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/github-token", nativeGitHubTokenByCallbackToken(store, nativeTokenMinter))
-	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/completed", nativeRunCompletedByCallbackToken(store, nativeLauncher))
+	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/completed", nativeRunCompletedByCallbackTokenWithPR(store, nativeLauncher, prClient))
 	mux.Handle("POST /v1/test-slots/checkout", requireAdmin(adminAuthenticator, http.HandlerFunc(checkoutTestSlot(settings, store, testSlotPreparer, nativeTokenMinter))))
 	mux.Handle("POST /v1/test-slots/return", requireAdmin(adminAuthenticator, http.HandlerFunc(returnTestSlot(store, testSlotPreparer, nativeTokenMinter))))
 	mux.Handle("POST /v1/test-slots/extend", requireAdmin(adminAuthenticator, http.HandlerFunc(extendTestSlotLease(store, testSlotPreparer))))
