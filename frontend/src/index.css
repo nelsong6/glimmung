@@ -2233,6 +2233,21 @@ h2 .inline-action,
   font-size: 0.75rem;
   margin-right: 4px;
 }
+.run-failure-detail {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  border: 1px solid #60412a;
+  border-radius: 6px;
+  background: #15100c;
+  padding: 8px 10px;
+  margin: -4px 0 12px;
+  color: #d7c3ad;
+  font-size: 0.85rem;
+}
+.run-failure-detail .pill {
+  flex: 0 0 auto;
+}
 .live-dot {
   display: inline-block;
   width: 8px;

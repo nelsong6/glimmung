@@ -687,6 +687,91 @@ func TestRunCycleGraphProjectionShowsLegacyAbortedDispatchTimeout(t *testing.T) 
 	}
 }
 
+func TestRunCycleGraphProjectionShowsForwardDispatchFailureWithoutFakeStepFailure(t *testing.T) {
+	issueNumber := 171
+	runNumber := 3
+	cycleNumber := 4
+	runCycle := 1
+	runDisplay := "3.1"
+	now := time.Date(2026, 5, 25, 7, 32, 14, 0, time.UTC)
+	abortReason := `forward_dispatch_failed: phase "llm-work" input "claude_ca_namespace" refs phase "env-prep" which has no captured outputs on this run`
+	store := fakeGraphStore{
+		fakeReadStore: fakeReadStore{workflows: []Workflow{{
+			Project: "ambience",
+			Name:    "default",
+			Phases: []PhaseSpec{
+				{Name: "env-prep", Kind: "k8s_job", Outputs: []string{"claude_ca_namespace"}, Jobs: []NativeJobSpec{{ID: "env-prep"}}},
+				{
+					Name:      "llm-work",
+					Kind:      "k8s_job",
+					DependsOn: []string{"env-prep"},
+					Inputs:    map[string]string{"claude_ca_namespace": "${{ phases.env-prep.outputs.claude_ca_namespace }}"},
+					Jobs: []NativeJobSpec{
+						{ID: "llm-test-plan", Steps: []NativeStepSpec{{Slug: "clone"}, {Slug: "run-test-plan"}}},
+						{ID: "llm-implement", Steps: []NativeStepSpec{{Slug: "clone"}, {Slug: "run-implementation"}}},
+					},
+				},
+				{Name: "llm-verify", Kind: "k8s_job", DependsOn: []string{"llm-work"}, Jobs: []NativeJobSpec{{ID: "llm-verify"}}},
+			},
+		}}},
+		issue: IssueDetail{
+			Ref:     "ambience#171",
+			Project: "ambience",
+			Number:  &issueNumber,
+			Title:   "Bog bubbles",
+			State:   "open",
+		},
+		runs: []RunReport{{
+			ID:               "run-3",
+			Project:          "ambience",
+			RunRef:           "ambience#171/runs/3.1",
+			RunNumber:        &runNumber,
+			CycleNumber:      &cycleNumber,
+			RunCycleNumber:   &runCycle,
+			RunDisplayNumber: &runDisplay,
+			Workflow:         "default",
+			IssueRef:         stringPtr("ambience#171"),
+			IssueNumber:      &issueNumber,
+			State:            "aborted",
+			CurrentPhase:     stringPtr("llm-work"),
+			AbortReason:      &abortReason,
+			StartedAt:        now.Add(-time.Minute),
+			UpdatedAt:        now,
+			Attempts: []RunReportAttempt{{
+				AttemptIndex:     0,
+				Phase:            "env-prep",
+				PhaseKind:        "k8s_job",
+				WorkflowFilename: "k8s_job:env-prep",
+				DispatchedAt:     now.Add(-time.Minute),
+				CompletedAt:      &now,
+				Conclusion:       stringPtr("success"),
+			}},
+		}},
+	}
+	handler := NewWithStore(Settings{}, store)
+
+	var projection RunGraphProjection
+	getJSON(t, handler, "/v1/projects/ambience/issues/171/runs/3/cycles/1/graph", &projection)
+
+	if projection.Runs[0].AbortReason == nil || *projection.Runs[0].AbortReason != abortReason {
+		t.Fatalf("run abort reason not projected: %#v", projection.Runs[0].AbortReason)
+	}
+	workPhase := assertProjectionPhase(t, projection.Runs[0], "llm-work")
+	if workPhase.State != "failed" || workPhase.Reason == nil || *workPhase.Reason != "dispatch_failed" {
+		t.Fatalf("llm-work projection=%#v", workPhase)
+	}
+	for _, job := range workPhase.Jobs {
+		if job.State != "failed" || job.Reason == nil || *job.Reason != "dispatch_failed" {
+			t.Fatalf("llm-work job projection=%#v", job)
+		}
+		for _, step := range job.Steps {
+			if step.State != "not_started" || step.Reason != nil || step.ExitCode != nil {
+				t.Fatalf("dispatch failure should not synthesize failed step: %#v", step)
+			}
+		}
+	}
+}
+
 func TestSystemGraphUsesProjectFilter(t *testing.T) {
 	number := 17
 	now := time.Date(2026, 5, 12, 18, 0, 0, 0, time.UTC)
