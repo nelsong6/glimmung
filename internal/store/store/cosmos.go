@@ -2563,25 +2563,26 @@ func sliceOrEmpty[T any](values []T) []T {
 // Touchpoint store.
 
 type touchpointDoc struct {
-	ID            string           `json:"id"`
-	Project       string           `json:"project"`
-	Repo          string           `json:"repo"`
-	Number        int              `json:"number"`
-	Title         string           `json:"title"`
-	Body          string           `json:"body"`
-	State         string           `json:"state"`
-	Branch        string           `json:"branch"`
-	BaseRef       string           `json:"base_ref"`
-	HeadSHA       string           `json:"head_sha"`
-	HTMLURL       string           `json:"html_url"`
-	LinkedIssueID *string          `json:"linked_issue_id"`
-	LinkedRunID   *string          `json:"linked_run_id"`
-	MergedAt      *string          `json:"merged_at"`
-	MergedBy      *string          `json:"merged_by"`
-	Comments      []map[string]any `json:"comments"`
-	Reviews       []map[string]any `json:"reviews"`
-	CreatedAt     string           `json:"created_at"`
-	UpdatedAt     string           `json:"updated_at"`
+	ID            string                      `json:"id"`
+	Project       string                      `json:"project"`
+	Repo          string                      `json:"repo"`
+	Number        int                         `json:"number"`
+	Title         string                      `json:"title"`
+	Body          string                      `json:"body"`
+	State         string                      `json:"state"`
+	Branch        string                      `json:"branch"`
+	BaseRef       string                      `json:"base_ref"`
+	HeadSHA       string                      `json:"head_sha"`
+	HTMLURL       string                      `json:"html_url"`
+	LinkedIssueID *string                     `json:"linked_issue_id"`
+	LinkedRunID   *string                     `json:"linked_run_id"`
+	MergedAt      *string                     `json:"merged_at"`
+	MergedBy      *string                     `json:"merged_by"`
+	Comments      []map[string]any            `json:"comments"`
+	Reviews       []map[string]any            `json:"reviews"`
+	Evidence      []server.TouchpointEvidence `json:"evidence"`
+	CreatedAt     string                      `json:"created_at"`
+	UpdatedAt     string                      `json:"updated_at"`
 }
 
 func (s *Store) ListTouchpoints(ctx context.Context, filter server.TouchpointListFilter) ([]server.TouchpointRow, error) {
@@ -2670,17 +2671,32 @@ func (s *Store) EnsureTouchpoint(ctx context.Context, req server.TouchpointCreat
 			if derr != nil {
 				return server.TouchpointDetail{}, derr
 			}
+			shouldPatch := false
 			if linkedRunID != nil && (doc.LinkedRunID == nil || *doc.LinkedRunID != *linkedRunID) {
+				shouldPatch = true
+			}
+			if req.EvidenceSet && !reflect.DeepEqual(sliceOrEmpty(doc.Evidence), sliceOrEmpty(req.Evidence)) {
+				shouldPatch = true
+			}
+			if shouldPatch {
 				patched, perr := s.pgTouchpoints.PatchPayload(ctx, doc.Project, doc.Number, func(payload map[string]any) error {
-					payload["linked_run_id"] = *linkedRunID
+					if linkedRunID != nil {
+						payload["linked_run_id"] = *linkedRunID
+					}
+					if req.EvidenceSet {
+						payload["evidence"] = sliceOrEmpty(req.Evidence)
+					}
 					payload["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
 					return nil
 				})
-				if perr == nil {
-					if updated, uerr := touchpointDocFromPayload(patched.Payload); uerr == nil {
-						doc = updated
-					}
+				if perr != nil {
+					return server.TouchpointDetail{}, perr
 				}
+				updated, uerr := touchpointDocFromPayload(patched.Payload)
+				if uerr != nil {
+					return server.TouchpointDetail{}, uerr
+				}
+				doc = updated
 			}
 			return s.buildTouchpointDetail(ctx, doc)
 		}
@@ -2701,6 +2717,9 @@ func (s *Store) EnsureTouchpoint(ctx context.Context, req server.TouchpointCreat
 		if linkedRunID != nil && (doc.LinkedRunID == nil || *doc.LinkedRunID != *linkedRunID) {
 			updated = true
 		}
+		if req.EvidenceSet && !reflect.DeepEqual(sliceOrEmpty(doc.Evidence), sliceOrEmpty(req.Evidence)) {
+			updated = true
+		}
 		if updated {
 			patched, perr := s.pgTouchpoints.PatchPayload(ctx, doc.Project, doc.Number, func(payload map[string]any) error {
 				if linkedIssueID != nil {
@@ -2714,14 +2733,20 @@ func (s *Store) EnsureTouchpoint(ctx context.Context, req server.TouchpointCreat
 						payload["linked_run_id"] = *linkedRunID
 					}
 				}
+				if req.EvidenceSet {
+					payload["evidence"] = sliceOrEmpty(req.Evidence)
+				}
 				payload["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
 				return nil
 			})
-			if perr == nil {
-				if updatedDoc, uerr := touchpointDocFromPayload(patched.Payload); uerr == nil {
-					doc = updatedDoc
-				}
+			if perr != nil {
+				return server.TouchpointDetail{}, perr
 			}
+			updatedDoc, uerr := touchpointDocFromPayload(patched.Payload)
+			if uerr != nil {
+				return server.TouchpointDetail{}, uerr
+			}
+			doc = updatedDoc
 		}
 		return s.buildTouchpointDetail(ctx, doc)
 	}
@@ -2742,6 +2767,7 @@ func (s *Store) EnsureTouchpoint(ctx context.Context, req server.TouchpointCreat
 		HTMLURL:       req.HTMLURL,
 		LinkedIssueID: linkedIssueID,
 		LinkedRunID:   linkedRunID,
+		Evidence:      sliceOrEmpty(req.Evidence),
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}
@@ -2837,6 +2863,7 @@ func (s *Store) buildTouchpointDetail(ctx context.Context, doc touchpointDoc) (s
 		Comments:       sliceOrEmpty(doc.Comments),
 		Reviews:        sliceOrEmpty(doc.Reviews),
 		PRLockHeld:     prLockHeld,
+		Evidence:       sliceOrEmpty(doc.Evidence),
 	}
 	if doc.PRBranchStr() != "" {
 		b := doc.PRBranchStr()
@@ -3002,6 +3029,7 @@ func touchpointRowFromDoc(
 		Title:    doc.Title,
 		State:    firstNonEmpty(doc.State, "ready"),
 		Merged:   doc.MergedAt != nil,
+		Evidence: sliceOrEmpty(doc.Evidence),
 	}
 	if doc.Branch != "" {
 		row.PRBranch = &doc.Branch

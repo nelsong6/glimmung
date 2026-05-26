@@ -183,6 +183,13 @@ type RunProjectionTouchpoint = {
   html_url?: string | null;
   linked_run_ref?: string | null;
   validation_url?: string | null;
+  evidence: Array<{
+    kind: string;
+    ref: string;
+    label: string;
+    url?: string | null;
+    artifact_path?: string | null;
+  }>;
 };
 
 type RunProjectionSignal = {
@@ -2953,9 +2960,13 @@ function TouchpointTab({
   const touchpointUrl = projectedTouchpoint?.html_url ?? stringOrNull(latestMeta.touchpoint_url) ?? stringOrNull(latestPrMeta.html_url);
   const evidenceRepo = projectedTouchpoint?.repo ?? repo ?? stringOrNull(latestPrMeta.repo);
   const validationUrl = projectedRun?.validation_url ?? projectedTouchpoint?.validation_url ?? stringOrNull(latestMeta.validation_url);
-  const screenshotsMarkdown = stringOrNull(latestMeta.screenshots_markdown);
   const projectionEvidence = projectedRun?.evidence ?? [];
-  const hasCurrentEvidence = prNumber !== null || Boolean(validationUrl) || Boolean(screenshotsMarkdown) || projectionEvidence.length > 0;
+  const structuredScreenshots = projectionEvidence.filter(isInlineScreenshotEvidence);
+  const listedEvidence = projectionEvidence.filter((item) => (
+    !isInlineScreenshotEvidence(item)
+    && !(structuredScreenshots.length > 0 && isRawScreenshotArtifact(item))
+  ));
+  const hasCurrentEvidence = prNumber !== null || Boolean(validationUrl) || projectionEvidence.length > 0;
   const canReject = signedIn && isAdmin && !pendingSignal && prNumber !== null && Boolean(evidenceRepo) && reject.kind !== "submitting";
 
   const submitReject = async () => {
@@ -3037,12 +3048,13 @@ function TouchpointTab({
         </div>
       </div>
 
-      {(projectionEvidence.length > 0 || screenshotsMarkdown || !hasCurrentEvidence) && (
+      {(projectionEvidence.length > 0 || !hasCurrentEvidence) && (
         <>
           <h2>Evidence</h2>
-          {projectionEvidence.length > 0 && (
+          {structuredScreenshots.length > 0 && <StructuredScreenshotEvidence items={structuredScreenshots} />}
+          {listedEvidence.length > 0 && (
             <div className="project-info touchpoint-evidence-list">
-              {projectionEvidence.map((item) => (
+              {listedEvidence.map((item) => (
                 <div className="row" key={`${item.kind}:${item.ref}`}>
                   <span className="key">{item.kind}</span>
                   <span className="val">
@@ -3058,8 +3070,7 @@ function TouchpointTab({
               ))}
             </div>
           )}
-          {screenshotsMarkdown ? <ScreenshotEvidence markdown={screenshotsMarkdown} /> : null}
-          {!screenshotsMarkdown && projectionEvidence.length === 0 && (
+          {projectionEvidence.length === 0 && (
             <div className="empty">No current evidence has landed yet.</div>
           )}
         </>
@@ -3732,28 +3743,26 @@ function nativeEventLine(event: NativeRunEvent): string {
   return `${prefix}: ${event.message}${suffix}`;
 }
 
-function ScreenshotEvidence({ markdown }: { markdown: string }) {
-  const shots = screenshotLinks(markdown);
-  if (shots.length === 0) {
-    return <pre className="evidence-notes">{markdown}</pre>;
-  }
+function StructuredScreenshotEvidence({ items }: { items: RunProjectionEvidence[] }) {
   return (
     <div className="evidence-gallery">
-      {shots.map((shot) => (
-        <a key={shot.url} className="evidence-shot" href={shot.url} target="_blank" rel="noreferrer">
-          <img src={shot.url} alt={shot.label} loading="lazy" />
-          <span>{shot.label}</span>
+      {items.map((item) => (
+        <a key={`${item.kind}:${item.ref}`} className="evidence-shot" href={item.url ?? item.ref} target="_blank" rel="noreferrer">
+          <img src={item.url ?? item.ref} alt={item.label} loading="lazy" />
+          <span>{item.label}</span>
         </a>
       ))}
     </div>
   );
 }
 
-function screenshotLinks(markdown: string): { label: string; url: string }[] {
-  return [...markdown.matchAll(/!\[([^\]]*)\]\(([^)]+)\)/g)].map((match) => ({
-    label: match[1] || "screenshot",
-    url: match[2],
-  }));
+function isInlineScreenshotEvidence(item: RunProjectionEvidence): boolean {
+  return item.kind === "screenshot" && Boolean(item.url);
+}
+
+function isRawScreenshotArtifact(item: RunProjectionEvidence): boolean {
+  if (item.kind !== "artifact") return false;
+  return /\.(png|jpe?g|webp|gif)$/i.test(item.ref.split(/[?#]/)[0] ?? "");
 }
 
 function nativeStepIsLlm(step: NativeAttemptStep): boolean {

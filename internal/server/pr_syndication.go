@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -64,7 +63,7 @@ type PRPrimitiveResult struct {
 	LinkedRunRef   string `json:"linked_run_ref,omitempty"`
 }
 
-func nativePRTouchpointByCallbackToken(store ReadStore, prClient PullRequestClient) http.HandlerFunc {
+func nativePRTouchpointByCallbackToken(store ReadStore, prClient PullRequestClient, artifactStore ArtifactStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		completionStore, ok := store.(RunCompletionStore)
 		if !ok || completionStore == nil {
@@ -111,8 +110,13 @@ func nativePRTouchpointByCallbackToken(store ReadStore, prClient PullRequestClie
 			writeProblem(w, http.StatusServiceUnavailable, "PR primitive store not configured")
 			return
 		}
-		result, err := materializePRPrimitive(r.Context(), prStore, prClient, run)
+		result, err := materializePRPrimitive(r.Context(), prStore, prClient, artifactStore, run)
 		if err != nil {
+			var validationErr ValidationError
+			if errors.As(err, &validationErr) {
+				writeProblem(w, http.StatusUnprocessableEntity, validationErr.Message)
+				return
+			}
 			writeInternalError(w, r, err, "ensure PR touchpoint failed")
 			return
 		}
@@ -120,7 +124,7 @@ func nativePRTouchpointByCallbackToken(store ReadStore, prClient PullRequestClie
 	}
 }
 
-func finalizeRunTouchpointByNumber(store ReadStore, prClient PullRequestClient) http.HandlerFunc {
+func finalizeRunTouchpointByNumber(store ReadStore, prClient PullRequestClient, artifactStore ArtifactStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		finalizeStore, ok := store.(runTouchpointFinalizeStore)
 		if !ok || finalizeStore == nil {
@@ -180,8 +184,13 @@ func finalizeRunTouchpointByNumber(store ReadStore, prClient PullRequestClient) 
 			writeProblem(w, http.StatusUnprocessableEntity, "run did not emit a branch_name output")
 			return
 		}
-		result, err := materializePRPrimitive(r.Context(), finalizeStore, prClient, run)
+		result, err := materializePRPrimitive(r.Context(), finalizeStore, prClient, artifactStore, run)
 		if err != nil {
+			var validationErr ValidationError
+			if errors.As(err, &validationErr) {
+				writeProblem(w, http.StatusUnprocessableEntity, validationErr.Message)
+				return
+			}
 			writeInternalError(w, r, err, "finalize touchpoint failed")
 			return
 		}
@@ -217,7 +226,7 @@ func prPrimitiveReadyForRun(wf *Workflow, run RunReplayData) (bool, string) {
 	return false, "latest primary phase has not advanced"
 }
 
-func materializePRPrimitive(ctx context.Context, store prPrimitiveStore, prClient PullRequestClient, run RunReplayData) (PRPrimitiveResult, error) {
+func materializePRPrimitive(ctx context.Context, store prPrimitiveStore, prClient PullRequestClient, artifactStore ArtifactStore, run RunReplayData) (PRPrimitiveResult, error) {
 	if prClient == nil {
 		return PRPrimitiveResult{}, errors.New("pull request client not configured")
 	}
@@ -232,6 +241,10 @@ func materializePRPrimitive(ctx context.Context, store prPrimitiveStore, prClien
 	if branch == "" {
 		return PRPrimitiveResult{}, errors.New("run did not emit a branch_name output")
 	}
+	evidence, err := touchpointEvidenceForRun(ctx, artifactStore, run)
+	if err != nil {
+		return PRPrimitiveResult{}, err
+	}
 	issue, err := store.ReadIssueForDispatch(ctx, run.Project, run.IssueNumber)
 	if err != nil {
 		return PRPrimitiveResult{}, fmt.Errorf("read issue: %w", err)
@@ -240,7 +253,7 @@ func materializePRPrimitive(ctx context.Context, store prPrimitiveStore, prClien
 	if title == "" {
 		title = fmt.Sprintf("Address %s", publicids.IssueRef(run.Project, &run.IssueNumber))
 	}
-	body := prBodyForRun(run, issue, branch)
+	body := prBodyForRun(run, issue)
 	pr, err := prClient.EnsurePullRequest(ctx, PullRequestEnsureRequest{
 		Repo:  repo,
 		Base:  "main",
@@ -271,6 +284,8 @@ func materializePRPrimitive(ctx context.Context, store prPrimitiveStore, prClien
 		HTMLURL:        pr.HTMLURL,
 		LinkedIssueRef: issueRef,
 		LinkedRunRef:   runRef,
+		Evidence:       evidence,
+		EvidenceSet:    true,
 	})
 	if err != nil {
 		return PRPrimitiveResult{}, fmt.Errorf("ensure touchpoint: %w", err)
@@ -313,7 +328,7 @@ func phaseOutput(run RunReplayData, key string) string {
 	return ""
 }
 
-func prBodyForRun(run RunReplayData, issue IssueDispatchData, branch string) string {
+func prBodyForRun(run RunReplayData, issue IssueDispatchData) string {
 	issueRef := publicids.IssueRef(run.Project, &run.IssueNumber)
 	runRef := runRefFromData(run)
 	runURL := fmt.Sprintf("https://glimmung.romaine.life/projects/%s/issues/%d/runs/%s",
@@ -333,19 +348,6 @@ func prBodyForRun(run RunReplayData, issue IssueDispatchData, branch string) str
 	}
 	fmt.Fprintf(&b, "- Run: [%s](%s)\n", runRef, runURL)
 	fmt.Fprintf(&b, "- Touchpoint: %s\n", touchpointURL)
-	fmt.Fprintf(&b, "- Branch: `%s`\n", branch)
-	if validationURL := runValidationURL(run); validationURL != "" {
-		fmt.Fprintf(&b, "- Validation: %s\n", validationURL)
-	}
-	if summary := phaseOutputJSONField(run, "implementation", "summary"); summary != "" {
-		fmt.Fprintf(&b, "\n## Implementation Summary\n\n%s\n", summary)
-	}
-	if verificationStatus := phaseOutputJSONField(run, "verification", "status"); verificationStatus != "" {
-		fmt.Fprintf(&b, "\n## Verification\n\nStatus: `%s`\n", verificationStatus)
-	}
-	if run.ScreenshotsMarkdown != nil && strings.TrimSpace(*run.ScreenshotsMarkdown) != "" {
-		fmt.Fprintf(&b, "\n%s\n", strings.TrimSpace(*run.ScreenshotsMarkdown))
-	}
 	fmt.Fprintf(&b, "\nGlimmung issue: %s\n", issueRef)
 	return b.String()
 }
@@ -358,24 +360,4 @@ func runDisplayForURL(run RunReplayData) string {
 		return fmt.Sprintf("%d", *run.RunNumber)
 	}
 	return run.ID
-}
-
-func runValidationURL(run RunReplayData) string {
-	if run.ValidationURL != nil && strings.TrimSpace(*run.ValidationURL) != "" {
-		return strings.TrimSpace(*run.ValidationURL)
-	}
-	return phaseOutput(run, "validation_url")
-}
-
-func phaseOutputJSONField(run RunReplayData, outputKey, field string) string {
-	raw := phaseOutput(run, outputKey)
-	if raw == "" {
-		return ""
-	}
-	var payload map[string]any
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		return ""
-	}
-	value, _ := payload[field].(string)
-	return strings.TrimSpace(value)
 }

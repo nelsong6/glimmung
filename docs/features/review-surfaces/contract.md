@@ -59,8 +59,9 @@ RunReports own factual per-run audit state.
 - Touchpoint, RunReport, signal, and Playbook APIs should expose enough state
   for an operator to distinguish missing evidence, failed syndication, queued
   feedback, and failed rerun.
-- PR body generation should name issue/run refs, validation URL, and evidence
-  refs when available.
+- PR body generation should name issue/run refs and the Glimmung Touchpoint.
+  Review evidence, including screenshots, is stored and rendered by Glimmung
+  rather than copied into the GitHub PR body.
 - Signal drain logs should identify target repo/ref, source, kind, and outcome.
 
 ## Acceptance Checks

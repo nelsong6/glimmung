@@ -176,9 +176,13 @@ The same finalizer is also exposed as an admin repair/control endpoint:
 `POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/touchpoint/finalize`.
 It is idempotent and uses the durable Run state as source of truth: it creates
 or reuses the GitHub PR, records `run.pr_number`, and ensures the Touchpoint
-linked to the Issue and Run. Operators should use this endpoint when a Run
-already passed verification but an older or interrupted workflow did not
-materialize the review surface.
+linked to the Issue and Run. During that same call, Glimmung normalizes run
+artifact evidence into Touchpoint evidence and validates required screenshot
+artifacts before the Touchpoint is ready. GitHub PR bodies stay a syndicated
+pointer into Glimmung; screenshots and other review evidence belong on the
+Glimmung Touchpoint. Operators should use this endpoint when a Run already
+passed verification but an older or interrupted workflow did not materialize
+the review surface.
 
 ## Naming convention
 

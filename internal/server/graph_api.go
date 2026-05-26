@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -217,14 +216,15 @@ type RunProjectionEvidence struct {
 }
 
 type RunProjectionTouchpoint struct {
-	Ref           string  `json:"ref"`
-	Repo          string  `json:"repo"`
-	PRNumber      int     `json:"pr_number"`
-	Title         string  `json:"title"`
-	State         string  `json:"state"`
-	HTMLURL       *string `json:"html_url,omitempty"`
-	LinkedRunRef  *string `json:"linked_run_ref,omitempty"`
-	ValidationURL *string `json:"validation_url,omitempty"`
+	Ref           string               `json:"ref"`
+	Repo          string               `json:"repo"`
+	PRNumber      int                  `json:"pr_number"`
+	Title         string               `json:"title"`
+	State         string               `json:"state"`
+	HTMLURL       *string              `json:"html_url,omitempty"`
+	LinkedRunRef  *string              `json:"linked_run_ref,omitempty"`
+	ValidationURL *string              `json:"validation_url,omitempty"`
+	Evidence      []TouchpointEvidence `json:"evidence"`
 }
 
 type RunProjectionSignal struct {
@@ -239,8 +239,6 @@ type RunProjectionSignal struct {
 	ProcessedDecision *string `json:"processed_decision,omitempty"`
 	FailureReason     *string `json:"failure_reason,omitempty"`
 }
-
-var markdownEvidenceURL = regexp.MustCompile(`!?\[[^\]]*\]\(([^)]+)\)`)
 
 func issueGraphByNumber(store ReadStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -705,6 +703,7 @@ func graphNodeFromTouchpoint(tp TouchpointRow) GraphNode {
 			"linked_run_ref":   tp.LinkedRunRef,
 			"run_state":        tp.RunState,
 			"validation_url":   tp.ValidationURL,
+			"evidence":         sliceOrEmpty(tp.Evidence),
 		},
 	}
 }
@@ -1842,15 +1841,6 @@ func runProjectionEvidence(run RunReport, touchpoints []TouchpointRow) []RunProj
 	if run.ValidationURL != nil && *run.ValidationURL != "" {
 		add("validation", *run.ValidationURL, "validation", run.ValidationURL)
 	}
-	if run.ScreenshotsMarkdown != nil {
-		for i, url := range markdownEvidenceURLs(*run.ScreenshotsMarkdown) {
-			u := url
-			add("screenshot", url, fmt.Sprintf("screenshot %d", i+1), &u)
-		}
-		if len(markdownEvidenceURLs(*run.ScreenshotsMarkdown)) == 0 && strings.TrimSpace(*run.ScreenshotsMarkdown) != "" {
-			add("screenshots", "screenshots_markdown", "screenshots", nil)
-		}
-	}
 	for _, attempt := range run.Attempts {
 		for _, ref := range attempt.EvidenceRefs {
 			add("artifact", ref, evidenceLabel(ref), evidenceURL(ref))
@@ -1862,6 +1852,18 @@ func runProjectionEvidence(run RunReport, touchpoints []TouchpointRow) []RunProj
 	for _, tp := range touchpoints {
 		if tp.LinkedRunRef != nil && *tp.LinkedRunRef != run.RunRef {
 			continue
+		}
+		for _, item := range tp.Evidence {
+			ref := firstNonEmpty(strings.TrimSpace(item.Ref), strings.TrimSpace(item.ArtifactPath), strings.TrimSpace(item.URL))
+			if ref == "" {
+				continue
+			}
+			label := firstNonEmpty(strings.TrimSpace(item.Label), evidenceLabel(ref))
+			itemURL := strings.TrimSpace(item.URL)
+			if itemURL == "" && strings.TrimSpace(item.ArtifactPath) != "" {
+				itemURL = artifactURLForBlobName(item.ArtifactPath)
+			}
+			add(firstNonEmpty(strings.TrimSpace(item.Kind), "artifact"), ref, label, stringPointerOrNil(itemURL))
 		}
 		if tp.HTMLURL != nil && *tp.HTMLURL != "" {
 			add("pull_request", *tp.HTMLURL, fmt.Sprintf("PR #%d", tp.PRNumber), tp.HTMLURL)
@@ -1989,17 +1991,6 @@ func nativeEventsForProjectionJob(events []NativeRunLogEvent, attemptIndex int, 
 	return out
 }
 
-func markdownEvidenceURLs(markdown string) []string {
-	matches := markdownEvidenceURL.FindAllStringSubmatch(markdown, -1)
-	urls := make([]string, 0, len(matches))
-	for _, match := range matches {
-		if len(match) > 1 && strings.TrimSpace(match[1]) != "" {
-			urls = append(urls, strings.TrimSpace(match[1]))
-		}
-	}
-	return urls
-}
-
 func evidenceLabel(ref string) string {
 	clean := strings.TrimRight(strings.Split(strings.Split(ref, "?")[0], "#")[0], "/")
 	if clean == "" {
@@ -2032,6 +2023,7 @@ func projectionTouchpoints(touchpoints []TouchpointRow) []RunProjectionTouchpoin
 			HTMLURL:       tp.HTMLURL,
 			LinkedRunRef:  tp.LinkedRunRef,
 			ValidationURL: tp.ValidationURL,
+			Evidence:      sliceOrEmpty(tp.Evidence),
 		})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Ref < out[j].Ref })
