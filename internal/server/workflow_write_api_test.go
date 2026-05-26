@@ -204,6 +204,100 @@ func TestNormalizeWorkflowRegisterCanonicalizesEvidenceGate(t *testing.T) {
 	}
 }
 
+func TestCanonicalWorkflowCanonicalizesDeclaredPRTouchpointPrimitive(t *testing.T) {
+	wf := Workflow{
+		Project: "ambience",
+		Name:    "agent-run",
+		PR:      PrPrimitive{Enabled: true},
+		Phases: []PhaseSpec{
+			{Name: "work", Jobs: []NativeJobSpec{{ID: "work"}}},
+			{Name: "cleanup", Always: true, DependsOn: []string{"work"}, Jobs: []NativeJobSpec{
+				{ID: "env-destroy"},
+				{ID: "publish-pr", Primitive: JobPrimitivePRTouchpoint, Image: "ignored:latest", Command: []string{"ignored"}, TimeoutSeconds: intPtr(30)},
+			}},
+		},
+	}
+
+	got := CanonicalWorkflow(wf)
+
+	if len(got.Phases) != 2 {
+		t.Fatalf("phase count=%d, want 2", len(got.Phases))
+	}
+	cleanup := got.Phases[1]
+	if len(cleanup.Jobs) != 2 {
+		t.Fatalf("cleanup jobs=%#v", cleanup.Jobs)
+	}
+	if cleanup.Jobs[0].ID != "env-destroy" || cleanup.Jobs[1].ID != "publish-pr" {
+		t.Fatalf("cleanup job ids=%q,%q", cleanup.Jobs[0].ID, cleanup.Jobs[1].ID)
+	}
+	job := cleanup.Jobs[1]
+	if job.ID != "publish-pr" || job.Primitive != JobPrimitivePRTouchpoint || !job.Managed || job.Image != "" || len(job.Command) != 0 {
+		t.Fatalf("pr touchpoint job=%#v", job)
+	}
+	if job.TimeoutSeconds == nil || *job.TimeoutSeconds != 30 {
+		t.Fatalf("timeout=%v, want 30", job.TimeoutSeconds)
+	}
+	if len(job.Steps) != 1 || job.Steps[0].Slug != PRTouchpointStepSlug || !strings.Contains(job.Steps[0].Run, "GLIMMUNG_PR_TOUCHPOINT_URL") {
+		t.Fatalf("pr touchpoint job=%#v", job)
+	}
+}
+
+func TestValidateWorkflowRegisterRequiresDeclaredPRTouchpointWhenPREnabled(t *testing.T) {
+	req := WorkflowRegister{
+		Project: "ambience",
+		Name:    "agent-run",
+		PR:      PrPrimitive{Enabled: true},
+		Phases: []PhaseSpec{
+			{Name: "prep", Jobs: []NativeJobSpec{{ID: "prep"}}},
+			{Name: "verify", Verify: true, DependsOn: []string{"prep"}, Jobs: []NativeJobSpec{{ID: "verify"}}},
+			{Name: "cleanup", Always: true, DependsOn: []string{"verify"}, Jobs: []NativeJobSpec{{ID: "cleanup"}}},
+		},
+	}
+	normalizeWorkflowRegister(&req)
+
+	err := ValidateWorkflowRegister(req)
+	if err == nil || !strings.Contains(err.Error(), "must declare exactly one") {
+		t.Fatalf("ValidateWorkflowRegister err=%v, want missing pr_touchpoint", err)
+	}
+}
+
+func TestValidateWorkflowRegisterRequiresPRTouchpointInAlwaysPhase(t *testing.T) {
+	req := WorkflowRegister{
+		Project: "ambience",
+		Name:    "agent-run",
+		PR:      PrPrimitive{Enabled: true},
+		Phases: []PhaseSpec{
+			{Name: "prep", Jobs: []NativeJobSpec{{ID: "prep"}}},
+			{Name: "verify", Verify: true, DependsOn: []string{"prep"}, Jobs: []NativeJobSpec{{ID: "publish-pr", Primitive: JobPrimitivePRTouchpoint}}},
+			{Name: "cleanup", Always: true, DependsOn: []string{"verify"}, Jobs: []NativeJobSpec{{ID: "cleanup"}}},
+		},
+	}
+	normalizeWorkflowRegister(&req)
+
+	err := ValidateWorkflowRegister(req)
+	if err == nil || !strings.Contains(err.Error(), "must be in an always phase") {
+		t.Fatalf("ValidateWorkflowRegister err=%v, want always-phase error", err)
+	}
+}
+
+func TestValidateWorkflowRegisterRejectsUnknownJobPrimitive(t *testing.T) {
+	req := WorkflowRegister{
+		Project: "ambience",
+		Name:    "agent-run",
+		Phases: []PhaseSpec{
+			{Name: "prep", Jobs: []NativeJobSpec{{ID: "prep", Primitive: "mystery"}}},
+			{Name: "verify", Verify: true, DependsOn: []string{"prep"}, Jobs: []NativeJobSpec{{ID: "verify"}}},
+			{Name: "cleanup", Always: true, DependsOn: []string{"verify"}, Jobs: []NativeJobSpec{{ID: "cleanup"}}},
+		},
+	}
+	normalizeWorkflowRegister(&req)
+
+	err := ValidateWorkflowRegister(req)
+	if err == nil || !strings.Contains(err.Error(), "unknown primitive") {
+		t.Fatalf("ValidateWorkflowRegister err=%v, want unknown primitive", err)
+	}
+}
+
 func TestValidateWorkflowRegisterRejectsInvalidManagedSteps(t *testing.T) {
 	base := func(job NativeJobSpec) WorkflowRegister {
 		return WorkflowRegister{

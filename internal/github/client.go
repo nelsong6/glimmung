@@ -1,12 +1,15 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"crypto/rsa"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -121,4 +124,165 @@ func (c *Client) FetchFileContents(ctx context.Context, repo, path, ref string) 
 		return nil, fmt.Errorf("GitHub contents returned %d: %s", resp.StatusCode, body)
 	}
 	return io.ReadAll(resp.Body)
+}
+
+type PullRequestEnsureRequest struct {
+	Repo  string
+	Base  string
+	Head  string
+	Title string
+	Body  string
+}
+
+type PullRequest struct {
+	Number  int
+	Title   string
+	Body    string
+	Branch  string
+	BaseRef string
+	HeadSHA string
+	HTMLURL string
+	State   string
+}
+
+func (c *Client) EnsurePullRequest(ctx context.Context, req PullRequestEnsureRequest) (PullRequest, error) {
+	req.Repo = strings.TrimSpace(req.Repo)
+	req.Base = firstNonEmpty(strings.TrimSpace(req.Base), "main")
+	req.Head = strings.TrimSpace(req.Head)
+	req.Title = strings.TrimSpace(req.Title)
+	if req.Repo == "" || req.Head == "" || req.Title == "" {
+		return PullRequest{}, fmt.Errorf("repo, head, and title are required")
+	}
+	if existing, ok, err := c.findOpenPullRequest(ctx, req.Repo, req.Head); err != nil {
+		return PullRequest{}, err
+	} else if ok {
+		return existing, nil
+	}
+	created, err := c.createPullRequest(ctx, req)
+	if err == nil {
+		return created, nil
+	}
+	if !strings.Contains(err.Error(), "422") {
+		return PullRequest{}, err
+	}
+	if existing, ok, findErr := c.findOpenPullRequest(ctx, req.Repo, req.Head); findErr != nil {
+		return PullRequest{}, err
+	} else if ok {
+		return existing, nil
+	}
+	return PullRequest{}, err
+}
+
+func (c *Client) findOpenPullRequest(ctx context.Context, repo, head string) (PullRequest, bool, error) {
+	owner, _, ok := strings.Cut(repo, "/")
+	if !ok || owner == "" {
+		return PullRequest{}, false, fmt.Errorf("repo must be owner/name, got %q", repo)
+	}
+	values := url.Values{}
+	values.Set("state", "open")
+	values.Set("head", owner+":"+head)
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/pulls?%s", repo, values.Encode())
+	var pulls []githubPullRequest
+	if err := c.githubJSON(ctx, http.MethodGet, apiURL, nil, &pulls); err != nil {
+		return PullRequest{}, false, err
+	}
+	if len(pulls) == 0 {
+		return PullRequest{}, false, nil
+	}
+	return pullRequestFromGitHub(pulls[0]), true, nil
+}
+
+func (c *Client) createPullRequest(ctx context.Context, req PullRequestEnsureRequest) (PullRequest, error) {
+	body := map[string]any{
+		"title":                 req.Title,
+		"head":                  req.Head,
+		"base":                  req.Base,
+		"body":                  req.Body,
+		"maintainer_can_modify": true,
+	}
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/pulls", req.Repo)
+	var pr githubPullRequest
+	if err := c.githubJSON(ctx, http.MethodPost, apiURL, body, &pr); err != nil {
+		return PullRequest{}, err
+	}
+	return pullRequestFromGitHub(pr), nil
+}
+
+func (c *Client) githubJSON(ctx context.Context, method, apiURL string, body any, out any) error {
+	token, err := c.InstallationToken(ctx)
+	if err != nil {
+		return fmt.Errorf("get installation token: %w", err)
+	}
+	var reader io.Reader
+	if body != nil {
+		payload, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		reader = bytes.NewReader(payload)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, apiURL, reader)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		payload, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("GitHub %s %s returned %d: %s", method, apiURL, resp.StatusCode, strings.TrimSpace(string(payload)))
+	}
+	if out == nil {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("decode GitHub response: %w", err)
+	}
+	return nil
+}
+
+type githubPullRequest struct {
+	Number  int    `json:"number"`
+	Title   string `json:"title"`
+	Body    string `json:"body"`
+	HTMLURL string `json:"html_url"`
+	State   string `json:"state"`
+	Head    struct {
+		Ref string `json:"ref"`
+		SHA string `json:"sha"`
+	} `json:"head"`
+	Base struct {
+		Ref string `json:"ref"`
+	} `json:"base"`
+}
+
+func pullRequestFromGitHub(pr githubPullRequest) PullRequest {
+	return PullRequest{
+		Number:  pr.Number,
+		Title:   pr.Title,
+		Body:    pr.Body,
+		Branch:  pr.Head.Ref,
+		BaseRef: pr.Base.Ref,
+		HeadSHA: pr.Head.SHA,
+		HTMLURL: pr.HTMLURL,
+		State:   pr.State,
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }

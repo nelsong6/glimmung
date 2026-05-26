@@ -1499,6 +1499,7 @@ type recyclePolicyDoc struct {
 type nativeJobDoc struct {
 	ID               string              `json:"id"`
 	Name             *string             `json:"name"`
+	Primitive        string              `json:"primitive,omitempty"`
 	Image            string              `json:"image"`
 	Command          []string            `json:"command"`
 	Args             []string            `json:"args"`
@@ -1985,10 +1986,10 @@ func appendMissingStrings(values []string, additions ...string) []string {
 }
 
 func phaseExecutionDocsFromWorkflow(wf server.Workflow, createdAt string, entrypointPhase *string) []phaseExecutionDoc {
+	wf = server.CanonicalWorkflow(wf)
 	out := make([]phaseExecutionDoc, 0, len(wf.Phases))
 	beforeEntrypoint := strings.TrimSpace(stringOrEmpty(entrypointPhase)) != ""
 	for _, phase := range wf.Phases {
-		phase = server.CanonicalNativePhase(phase)
 		state := "not_started"
 		if beforeEntrypoint {
 			if phase.Name == strings.TrimSpace(stringOrEmpty(entrypointPhase)) {
@@ -2065,7 +2066,8 @@ func (s *Store) workflowForRunExecution(ctx context.Context, project, workflowNa
 			return nil, err
 		}
 		if wf != nil {
-			return wf, nil
+			canonical := server.CanonicalWorkflow(*wf)
+			return &canonical, nil
 		}
 	}
 	wf, err := s.GetWorkflowByName(ctx, project, workflowName)
@@ -2075,7 +2077,8 @@ func (s *Store) workflowForRunExecution(ctx context.Context, project, workflowNa
 	if wf == nil {
 		return nil, server.ValidationError{Message: fmt.Sprintf("workflow %q is not registered", workflowName)}
 	}
-	return wf, nil
+	canonical := server.CanonicalWorkflow(*wf)
+	return &canonical, nil
 }
 
 func runDisplayNumber(doc runDoc, fallback int) string {
@@ -2233,6 +2236,7 @@ func nativeJobDocFromSpec(job server.NativeJobSpec) nativeJobDoc {
 	return nativeJobDoc{
 		ID:               job.ID,
 		Name:             job.Name,
+		Primitive:        job.Primitive,
 		Image:            job.Image,
 		Command:          sliceOrEmpty(job.Command),
 		Args:             sliceOrEmpty(job.Args),
@@ -2309,6 +2313,9 @@ func normalizeWorkflowRegister(req *server.WorkflowRegister) {
 		req.Phases[i].Outputs = sliceOrEmpty(req.Phases[i].Outputs)
 		req.Phases[i].DependsOn = sliceOrEmpty(req.Phases[i].DependsOn)
 		req.Phases[i].Jobs = sliceOrEmpty(req.Phases[i].Jobs)
+		for j := range req.Phases[i].Jobs {
+			req.Phases[i].Jobs[j].Primitive = strings.TrimSpace(req.Phases[i].Jobs[j].Primitive)
+		}
 		req.Phases[i] = server.CanonicalNativePhase(req.Phases[i])
 	}
 }
@@ -2428,6 +2435,7 @@ func jobFromDoc(doc nativeJobDoc) server.NativeJobSpec {
 	return server.NativeJobSpec{
 		ID:               doc.ID,
 		Name:             doc.Name,
+		Primitive:        doc.Primitive,
 		Image:            doc.Image,
 		Command:          sliceOrEmpty(doc.Command),
 		Args:             sliceOrEmpty(doc.Args),
@@ -4706,26 +4714,28 @@ func runReplayDataFromDoc(doc runDoc) server.RunReplayData {
 		bdg.Total = doc.Budget.Total
 	}
 	return server.RunReplayData{
-		ID:                doc.ID,
-		Project:           doc.Project,
-		WorkflowName:      doc.Workflow,
-		WorkflowSchemaRef: doc.WorkflowSchemaRef,
-		Attempts:          attempts,
-		CumulativeCostUSD: doc.CumulativeCostUSD,
-		Budget:            bdg,
-		IssueNumber:       doc.IssueNumber,
-		RunNumber:         doc.RunNumber,
-		CycleNumber:       doc.CycleNumber,
-		RunCycleNumber:    doc.RunCycleNumber,
-		RunDisplayNumber:  doc.RunDisplayNumber,
-		IssueRepo:         doc.IssueRepo,
-		CallbackToken:     doc.CallbackToken,
-		IssueLockHolderID: doc.IssueLockHolderID,
-		PRNumber:          doc.PRNumber,
-		PRLockHolderID:    doc.PRLockHolderID,
-		SlotLeaseRef:      doc.SlotLeaseRef,
-		EntrypointPhase:   doc.EntrypointPhase,
-		TriggerSource:     mapOrEmpty(doc.TriggerSource),
+		ID:                  doc.ID,
+		Project:             doc.Project,
+		WorkflowName:        doc.Workflow,
+		WorkflowSchemaRef:   doc.WorkflowSchemaRef,
+		Attempts:            attempts,
+		CumulativeCostUSD:   doc.CumulativeCostUSD,
+		Budget:              bdg,
+		IssueNumber:         doc.IssueNumber,
+		RunNumber:           doc.RunNumber,
+		CycleNumber:         doc.CycleNumber,
+		RunCycleNumber:      doc.RunCycleNumber,
+		RunDisplayNumber:    doc.RunDisplayNumber,
+		IssueRepo:           doc.IssueRepo,
+		ValidationURL:       doc.ValidationURL,
+		ScreenshotsMarkdown: doc.ScreenshotsMarkdown,
+		CallbackToken:       doc.CallbackToken,
+		IssueLockHolderID:   doc.IssueLockHolderID,
+		PRNumber:            doc.PRNumber,
+		PRLockHolderID:      doc.PRLockHolderID,
+		SlotLeaseRef:        doc.SlotLeaseRef,
+		EntrypointPhase:     doc.EntrypointPhase,
+		TriggerSource:       mapOrEmpty(doc.TriggerSource),
 	}
 }
 
@@ -4946,6 +4956,21 @@ func (s *Store) FindRunForPR(ctx context.Context, repo string, prNumber int) (se
 		return server.RunReplayData{}, err
 	}
 	return s.ReadRunForReplay(ctx, row.Project, row.ID)
+}
+
+func (s *Store) LinkRunPullRequest(ctx context.Context, project, runID string, prNumber int) error {
+	if prNumber < 1 {
+		return server.ValidationError{Message: "pr number must be positive"}
+	}
+	_, err := s.pgRuns.PatchPayload(ctx, project, runID, func(raw map[string]any) error {
+		raw["pr_number"] = prNumber
+		raw["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+		return nil
+	})
+	if errors.Is(err, pgstore.ErrRunNotFound) {
+		return server.ErrNotFound
+	}
+	return err
 }
 
 // ---- RunMutationStore implementation ----

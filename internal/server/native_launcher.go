@@ -64,7 +64,12 @@ func NewKubernetesNativeLauncher(settings Settings) *KubernetesNativeLauncher {
 }
 
 func (l *KubernetesNativeLauncher) LaunchNativePhase(ctx context.Context, req NativeLaunchRequest) ([]string, error) {
-	req.Phase = CanonicalNativePhase(req.Phase)
+	req.Workflow = CanonicalWorkflow(req.Workflow)
+	if phase := phaseSpecByName(req.Workflow.Phases, req.Phase.Name); phase != nil {
+		req.Phase = *phase
+	} else {
+		req.Phase = CanonicalNativePhase(req.Phase)
+	}
 	if len(req.Phase.Jobs) == 0 {
 		return nil, fmt.Errorf("native phase %q has no jobs", req.Phase.Name)
 	}
@@ -1085,12 +1090,10 @@ func (l *KubernetesNativeLauncher) transport() http.RoundTripper {
 
 func nativeJobManifest(settings Settings, req NativeLaunchRequest, job NativeJobSpec, jobName, secretName, attemptBase string) map[string]any {
 	req.Phase = CanonicalNativePhase(req.Phase)
-	if req.Phase.EvidenceVerificationGate {
-		for _, canonical := range req.Phase.Jobs {
-			if canonical.ID == job.ID {
-				job = canonical
-				break
-			}
+	for _, canonical := range req.Phase.Jobs {
+		if canonical.ID == job.ID {
+			job = canonical
+			break
 		}
 	}
 	labels := map[string]string{
@@ -1185,6 +1188,7 @@ func nativeJobEnv(settings Settings, req NativeLaunchRequest, job NativeJobSpec,
 		{"name": "GLIMMUNG_STATUS_URL", "value": baseURL + nativePath + "/status"},
 		{"name": "GLIMMUNG_COMPLETED_URL", "value": baseURL + nativePath + "/completed"},
 		{"name": "GLIMMUNG_GITHUB_TOKEN_URL", "value": baseURL + nativePath + "/github-token"},
+		{"name": "GLIMMUNG_PR_TOUCHPOINT_URL", "value": baseURL + nativePath + "/pr-touchpoint"},
 		{"name": "GLIMMUNG_ATTEMPT_TOKEN", "valueFrom": map[string]any{"secretKeyRef": map[string]any{"name": secretName, "key": "attempt-token"}}},
 	}
 	seen := envNameSet(env)

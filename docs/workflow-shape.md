@@ -144,6 +144,35 @@ job, so a project cannot accidentally make the gate an uninstrumented arbitrary
 container. Use the gate when you want enforcement to be its own visible box, its
 own recycle policy, or its own budget separately from the verifier.
 
+## PR touchpoint primitive
+
+Workflows with `pr.enabled: true` must declare exactly one native job with
+`primitive: pr_touchpoint`, and that job must live in an `always` phase. The
+usual shape is to place it beside environment teardown so PR creation and
+touchpoint linking are visible in native job logs while cleanup runs:
+
+```yaml
+pr:
+  enabled: true
+
+phases:
+  - name: cleanup
+    kind: k8s_job
+    always: true
+    depends_on: [testing]
+    jobs:
+      - id: env-destroy
+        # normal teardown job
+      - id: pr-touchpoint
+        primitive: pr_touchpoint
+```
+
+The job is Glimmung-supplied. Registration canonicalizes the declared job into
+the managed native runner step that calls the run callback endpoint for PR and
+touchpoint materialization. The workflow owns the placement and job id; Glimmung
+owns the implementation. If `pr.enabled` is false, declaring this primitive is
+invalid.
+
 ## Naming convention
 
 The reference names for the four mandatory phases are:

@@ -273,6 +273,29 @@ func (a *gitHubClientAdapter) InstallationToken(ctx context.Context) (string, er
 	return a.client.InstallationToken(ctx)
 }
 
+func (a *gitHubClientAdapter) EnsurePullRequest(ctx context.Context, req server.PullRequestEnsureRequest) (server.PullRequest, error) {
+	pr, err := a.client.EnsurePullRequest(ctx, githubclient.PullRequestEnsureRequest{
+		Repo:  req.Repo,
+		Base:  req.Base,
+		Head:  req.Head,
+		Title: req.Title,
+		Body:  req.Body,
+	})
+	if err != nil {
+		return server.PullRequest{}, err
+	}
+	return server.PullRequest{
+		Number:  pr.Number,
+		Title:   pr.Title,
+		Body:    pr.Body,
+		Branch:  pr.Branch,
+		BaseRef: pr.BaseRef,
+		HeadSHA: pr.HeadSHA,
+		HTMLURL: pr.HTMLURL,
+		State:   pr.State,
+	}, nil
+}
+
 func buildGitHubClient(settings server.Settings) server.WorkflowSyncClient {
 	if settings.GitHubAppID == "" || settings.GitHubAppInstallationID == "" || settings.GitHubAppPrivateKey == "" {
 		return nil

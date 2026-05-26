@@ -80,6 +80,7 @@ type RecyclePolicy struct {
 type NativeJobSpec struct {
 	ID               string               `json:"id"`
 	Name             *string              `json:"name"`
+	Primitive        string               `json:"primitive,omitempty"`
 	Image            string               `json:"image"`
 	Command          []string             `json:"command"`
 	Args             []string             `json:"args"`

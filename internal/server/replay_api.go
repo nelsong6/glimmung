@@ -22,26 +22,28 @@ type RunReplayStore interface {
 
 // RunReplayData is the minimal run state required by the decision engine replay and completion handling.
 type RunReplayData struct {
-	ID                string
-	Project           string
-	WorkflowName      string
-	WorkflowSchemaRef string
-	Attempts          []RunAttemptData
-	CumulativeCostUSD float64
-	Budget            budget.Config
-	IssueNumber       int
-	RunNumber         *int
-	CycleNumber       *int
-	RunCycleNumber    *int
-	RunDisplayNumber  *string
-	IssueRepo         string
-	CallbackToken     *string
-	IssueLockHolderID *string
-	PRNumber          *int
-	PRLockHolderID    *string
-	SlotLeaseRef      *string
-	EntrypointPhase   *string
-	TriggerSource     map[string]any
+	ID                  string
+	Project             string
+	WorkflowName        string
+	WorkflowSchemaRef   string
+	Attempts            []RunAttemptData
+	CumulativeCostUSD   float64
+	Budget              budget.Config
+	IssueNumber         int
+	RunNumber           *int
+	CycleNumber         *int
+	RunCycleNumber      *int
+	RunDisplayNumber    *string
+	IssueRepo           string
+	ValidationURL       *string
+	ScreenshotsMarkdown *string
+	CallbackToken       *string
+	IssueLockHolderID   *string
+	PRNumber            *int
+	PRLockHolderID      *string
+	SlotLeaseRef        *string
+	EntrypointPhase     *string
+	TriggerSource       map[string]any
 }
 
 // RunAttemptData holds one attempt's decision-engine-relevant fields.

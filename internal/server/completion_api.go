@@ -343,6 +343,10 @@ func processRunCompletion(
 		// Mark run passed (or review_required if PR primitive enabled).
 		state := "passed"
 		if wf.PR.Enabled {
+			if run.PRNumber == nil || *run.PRNumber < 1 {
+				abortReason := "PR primitive: touchpoint job completed without linking a PR"
+				return markRunAborted(ctx, w, r, store, nativeLauncher, run, runRef, decision.AbortMalformed, abortReason)
+			}
 			state = "review_required"
 		}
 		result, err := store.SetRunTerminalState(ctx, project, runID, state, nil)
@@ -394,10 +398,18 @@ func processRunCompletion(
 }
 
 func workflowForRun(ctx context.Context, store RunCompletionStore, run RunReplayData) (*Workflow, error) {
+	var wf *Workflow
+	var err error
 	if run.WorkflowSchemaRef != "" {
-		return store.GetWorkflowBySchemaRef(ctx, run.Project, run.WorkflowSchemaRef)
+		wf, err = store.GetWorkflowBySchemaRef(ctx, run.Project, run.WorkflowSchemaRef)
+	} else {
+		wf, err = store.GetWorkflowByName(ctx, run.Project, run.WorkflowName)
 	}
-	return store.GetWorkflowByName(ctx, run.Project, run.WorkflowName)
+	if err != nil || wf == nil {
+		return wf, err
+	}
+	canonical := CanonicalWorkflow(*wf)
+	return &canonical, nil
 }
 
 func abortRunWithWorkflowCleanup(
