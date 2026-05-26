@@ -239,8 +239,8 @@ func (s *Store) readRunDoc(ctx context.Context, project, runID string) (runDoc, 
 // helpers (issueRowFromDoc, issueDetailFromDoc, ...) still want a
 // single doc with comments inlined, so we read both tables here.
 func (s *Store) issueDocFromPGRow(ctx context.Context, row pgstore.IssueRow) (issueDoc, error) {
-	var doc issueDoc
-	if err := json.Unmarshal(row.Payload, &doc); err != nil {
+	doc, err := issueDocFromPGPayload(row)
+	if err != nil {
 		return issueDoc{}, err
 	}
 	// archived_at column drives the partial index but doc.ClosedAt is
@@ -260,15 +260,23 @@ func (s *Store) issueDocFromPGRow(ctx context.Context, row pgstore.IssueRow) (is
 	return doc, nil
 }
 
+func issueDocFromPGPayload(row pgstore.IssueRow) (issueDoc, error) {
+	var doc issueDoc
+	if err := json.Unmarshal(row.Payload, &doc); err != nil {
+		return issueDoc{}, err
+	}
+	doc.Comments = nil
+	return doc, nil
+}
+
 // issueDocsFromPGRows builds a slice of issueDocs from pg rows,
-// fetching all comments in one extra query per issue. Used by list
-// paths that need to render comment counts or full details. Callers
-// that don't need comments can use a simpler path that just
-// unmarshals row.Payload.
+// without hydrating comments. List surfaces only need issue row fields;
+// detail paths use issueDocFromPGRow when comments are part of the
+// response.
 func (s *Store) issueDocsFromPGRows(ctx context.Context, rows []pgstore.IssueRow) ([]issueDoc, error) {
 	out := make([]issueDoc, 0, len(rows))
 	for _, row := range rows {
-		doc, err := s.issueDocFromPGRow(ctx, row)
+		doc, err := issueDocFromPGPayload(row)
 		if err != nil {
 			return nil, err
 		}
@@ -747,11 +755,11 @@ func (s *Store) ListIssues(ctx context.Context, filter server.IssueListFilter) (
 	if state != "open" && state != "closed" && state != "all" {
 		return nil, server.ValidationError{Message: fmt.Sprintf("state must be 'open', 'closed', or 'all', not %q", filter.State)}
 	}
-	issues, err := s.listIssueDocs(ctx)
+	issues, err := s.listIssueDocs(ctx, filter.Project)
 	if err != nil {
 		return nil, err
 	}
-	runDocs, err := s.listRunDocs(ctx)
+	runDocs, err := s.listRunDocs(ctx, filter.Project)
 	if err != nil {
 		return nil, err
 	}
@@ -1137,8 +1145,8 @@ func (s *Store) readIssueByNumber(ctx context.Context, project string, number in
 	return doc, nil
 }
 
-func (s *Store) listIssueDocs(ctx context.Context) ([]issueDoc, error) {
-	rows, err := s.pgIssues.List(ctx, "")
+func (s *Store) listIssueDocs(ctx context.Context, project string) ([]issueDoc, error) {
+	rows, err := s.pgIssues.List(ctx, project)
 	if err != nil {
 		return nil, err
 	}
@@ -1167,8 +1175,16 @@ func isCanonicalIssueDoc(doc issueDoc) bool {
 	return doc.State == "open" || doc.State == "closed"
 }
 
-func (s *Store) listRunDocs(ctx context.Context) ([]runDoc, error) {
-	rows, err := s.pgRuns.ListAll(ctx)
+func (s *Store) listRunDocs(ctx context.Context, project string) ([]runDoc, error) {
+	var (
+		rows []pgstore.RunRow
+		err  error
+	)
+	if project != "" {
+		rows, err = s.pgRuns.List(ctx, project, 0)
+	} else {
+		rows, err = s.pgRuns.ListAll(ctx)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -2541,8 +2557,8 @@ func (s *Store) ListTouchpoints(ctx context.Context, filter server.TouchpointLis
 	_ = limit
 
 	// Enrich with issue and run data.
-	issueDocs, _ := s.listIssueDocs(ctx)
-	runDocs, _ := s.listRunDocs(ctx)
+	issueDocs, _ := s.listIssueDocs(ctx, filter.Project)
+	runDocs, _ := s.listRunDocs(ctx, filter.Project)
 	heldPRLocks, _ := s.pgLocks.ListHeldByScope(ctx, "pr")
 	prLockByKey := make(map[string]bool, len(heldPRLocks))
 	for key := range heldPRLocks {

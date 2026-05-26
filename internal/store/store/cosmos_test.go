@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/nelsong6/glimmung/internal/server"
+	pgstore "github.com/nelsong6/glimmung/internal/store/pg"
 )
 
 func TestNativeEventAttemptIndexAcceptsExplicitOrMetadataValue(t *testing.T) {
@@ -614,6 +615,32 @@ func TestIssueDetailFromDocBuildsPublicShape(t *testing.T) {
 	}
 	if len(detail.Comments) != 1 || detail.Comments[0].ID != "comment-1" {
 		t.Fatalf("comments=%#v", detail.Comments)
+	}
+}
+
+func TestIssueDocFromPGPayloadStripsCommentsForListPath(t *testing.T) {
+	payload, err := json.Marshal(issueDoc{
+		ID:       "issue-17",
+		Number:   17,
+		Project:  "glimmung",
+		Title:    "Fix dashboard",
+		State:    "open",
+		Comments: []issueCommentDoc{{ID: "comment-1", Body: "detail-only"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal issue payload: %v", err)
+	}
+
+	doc, err := issueDocFromPGPayload(pgstore.IssueRow{Payload: payload})
+	if err != nil {
+		t.Fatalf("issueDocFromPGPayload: %v", err)
+	}
+
+	if len(doc.Comments) != 0 {
+		t.Fatalf("list payload should not hydrate comments: %#v", doc.Comments)
+	}
+	if doc.ID != "issue-17" || doc.Project != "glimmung" || doc.Number != 17 {
+		t.Fatalf("doc=%#v", doc)
 	}
 }
 
