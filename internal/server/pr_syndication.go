@@ -42,6 +42,13 @@ type prPrimitiveStore interface {
 	EnsureTouchpoint(ctx context.Context, req TouchpointCreate) (TouchpointDetail, error)
 }
 
+type runTouchpointFinalizeStore interface {
+	ReadRunIDForNumber(ctx context.Context, project string, issueNumber int, runNumber string) (string, string, error)
+	ReadRunForReplay(ctx context.Context, project, runID string) (RunReplayData, error)
+	workflowReadStore
+	prPrimitiveStore
+}
+
 type PRPrimitiveResult struct {
 	Status         string `json:"status"`
 	Reason         string `json:"reason,omitempty"`
@@ -99,9 +106,83 @@ func nativePRTouchpointByCallbackToken(store ReadStore, prClient PullRequestClie
 			writeProblem(w, http.StatusServiceUnavailable, "pull request client not configured")
 			return
 		}
-		result, err := materializePRPrimitive(r.Context(), completionStore, prClient, run)
+		prStore, ok := any(completionStore).(prPrimitiveStore)
+		if !ok || prStore == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "PR primitive store not configured")
+			return
+		}
+		result, err := materializePRPrimitive(r.Context(), prStore, prClient, run)
 		if err != nil {
 			writeInternalError(w, r, err, "ensure PR touchpoint failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+	}
+}
+
+func finalizeRunTouchpointByNumber(store ReadStore, prClient PullRequestClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		finalizeStore, ok := store.(runTouchpointFinalizeStore)
+		if !ok || finalizeStore == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "touchpoint finalizer store not configured")
+			return
+		}
+		if prClient == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "pull request client not configured")
+			return
+		}
+		project := r.PathValue("project")
+		issueNumber, ok := positivePathInt(w, r, "issue_number")
+		if !ok {
+			return
+		}
+		runNumber := strings.TrimSpace(r.PathValue("run_number"))
+		if runNumber == "" {
+			writeProblem(w, http.StatusBadRequest, "run_number required")
+			return
+		}
+		runID, _, err := finalizeStore.ReadRunIDForNumber(r.Context(), project, issueNumber, runNumber)
+		if errors.Is(err, ErrNotFound) {
+			writeProblem(w, http.StatusNotFound, "run not found")
+			return
+		}
+		if err != nil {
+			writeInternalError(w, r, err, "read run failed")
+			return
+		}
+		run, err := finalizeStore.ReadRunForReplay(r.Context(), project, runID)
+		if errors.Is(err, ErrNotFound) {
+			writeProblem(w, http.StatusNotFound, "run not found")
+			return
+		}
+		if err != nil {
+			writeInternalError(w, r, err, "read run failed")
+			return
+		}
+		wf, err := workflowForRun(r.Context(), finalizeStore, run)
+		if err != nil {
+			writeInternalError(w, r, err, "read workflow failed")
+			return
+		}
+		if wf == nil || !wf.PR.Enabled {
+			writeProblem(w, http.StatusConflict, "workflow PR primitive is disabled")
+			return
+		}
+		if ready, reason := prPrimitiveReadyForRun(wf, run); !ready {
+			writeProblem(w, http.StatusConflict, reason)
+			return
+		}
+		if strings.TrimSpace(run.IssueRepo) == "" {
+			writeProblem(w, http.StatusUnprocessableEntity, "run has no issue_repo")
+			return
+		}
+		if prBranchForRun(run) == "" {
+			writeProblem(w, http.StatusUnprocessableEntity, "run did not emit a branch_name output")
+			return
+		}
+		result, err := materializePRPrimitive(r.Context(), finalizeStore, prClient, run)
+		if err != nil {
+			writeInternalError(w, r, err, "finalize touchpoint failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, result)
@@ -136,12 +217,11 @@ func prPrimitiveReadyForRun(wf *Workflow, run RunReplayData) (bool, string) {
 	return false, "latest primary phase has not advanced"
 }
 
-func materializePRPrimitive(ctx context.Context, store RunCompletionStore, prClient PullRequestClient, run RunReplayData) (PRPrimitiveResult, error) {
+func materializePRPrimitive(ctx context.Context, store prPrimitiveStore, prClient PullRequestClient, run RunReplayData) (PRPrimitiveResult, error) {
 	if prClient == nil {
 		return PRPrimitiveResult{}, errors.New("pull request client not configured")
 	}
-	prStore, ok := any(store).(prPrimitiveStore)
-	if !ok || prStore == nil {
+	if store == nil {
 		return PRPrimitiveResult{}, errors.New("store does not support PR primitive materialization")
 	}
 	repo := strings.TrimSpace(run.IssueRepo)
@@ -152,7 +232,7 @@ func materializePRPrimitive(ctx context.Context, store RunCompletionStore, prCli
 	if branch == "" {
 		return PRPrimitiveResult{}, errors.New("run did not emit a branch_name output")
 	}
-	issue, err := prStore.ReadIssueForDispatch(ctx, run.Project, run.IssueNumber)
+	issue, err := store.ReadIssueForDispatch(ctx, run.Project, run.IssueNumber)
 	if err != nil {
 		return PRPrimitiveResult{}, fmt.Errorf("read issue: %w", err)
 	}
@@ -174,12 +254,12 @@ func materializePRPrimitive(ctx context.Context, store RunCompletionStore, prCli
 	if pr.Number < 1 {
 		return PRPrimitiveResult{}, errors.New("GitHub PR response did not include a positive number")
 	}
-	if err := prStore.LinkRunPullRequest(ctx, run.Project, run.ID, pr.Number); err != nil {
+	if err := store.LinkRunPullRequest(ctx, run.Project, run.ID, pr.Number); err != nil {
 		return PRPrimitiveResult{}, fmt.Errorf("link run to PR: %w", err)
 	}
 	runRef := runRefFromData(run)
 	issueRef := publicids.IssueRef(run.Project, &run.IssueNumber)
-	touchpoint, err := prStore.EnsureTouchpoint(ctx, TouchpointCreate{
+	touchpoint, err := store.EnsureTouchpoint(ctx, TouchpointCreate{
 		Project:        run.Project,
 		Repo:           repo,
 		Number:         pr.Number,

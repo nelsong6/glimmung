@@ -397,7 +397,12 @@ func processRunCompletion(
 	}
 }
 
-func workflowForRun(ctx context.Context, store RunCompletionStore, run RunReplayData) (*Workflow, error) {
+type workflowReadStore interface {
+	GetWorkflowByName(ctx context.Context, project, name string) (*Workflow, error)
+	GetWorkflowBySchemaRef(ctx context.Context, project, schemaRef string) (*Workflow, error)
+}
+
+func workflowForRun(ctx context.Context, store workflowReadStore, run RunReplayData) (*Workflow, error) {
 	var wf *Workflow
 	var err error
 	if run.WorkflowSchemaRef != "" {
