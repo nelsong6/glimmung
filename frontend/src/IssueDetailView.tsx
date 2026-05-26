@@ -2168,8 +2168,8 @@ function RunsPane({
       <table>
         <thead>
           <tr>
-            <th>Cycle</th>
             <th>Run</th>
+            <th>Cycle</th>
             <th>Run cycle</th>
             <th>State</th>
             <th>Started</th>
@@ -2185,6 +2185,7 @@ function RunsPane({
             const cost = r.cost_usd;
             return (
               <tr key={r.run_ref}>
+                <td className="mono">{r.run_number ?? "—"}</td>
                 <td className="mono">
                   <button
                     type="button"
@@ -2195,7 +2196,6 @@ function RunsPane({
                     {projectionRunLabel(r)}
                   </button>
                 </td>
-                <td className="mono">{r.run_number ?? "—"}</td>
                 <td className="mono">{r.run_cycle_number ?? "—"}</td>
                 <td>
                   <button
@@ -2232,6 +2232,7 @@ function RunsPane({
             const lineage = computeCycleLineage(graph, id);
             return (
               <tr key={r.id}>
+                <td className="mono">{runNumberDisplay(r)}</td>
                 <td className="mono">
                   <button
                     type="button"
@@ -2242,7 +2243,6 @@ function RunsPane({
                     {runSlugDisplay(slug)}
                   </button>
                 </td>
-                <td className="mono">{runNumberDisplay(r)}</td>
                 <td className="mono">{runCycleDisplay(r)}</td>
                 <td>
                   <button
