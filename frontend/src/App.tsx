@@ -242,17 +242,6 @@ export function connectionStateFromSnapshotClock(now: number, startedAt: number,
   return "live";
 }
 
-function connectionTitle(conn: Connection): string {
-  switch (conn) {
-    case "live":
-      return "state stream has a recent snapshot";
-    case "stale":
-      return "state stream is waiting for snapshots";
-    case "dead":
-      return "state stream has not delivered snapshots for 30s";
-  }
-}
-
 // Server pushes this on every SSE snapshot tick. Drives the "needs
 // attention" nav dot. Optional in the type because the snapshot may
 // arrive from an older server during a rolling deploy; treat as
@@ -352,7 +341,6 @@ function MockModeRedirect() {
 function Layout() {
   const location = useLocation();
   const [snap, setSnap] = useState<Snapshot | null>(null);
-  const [conn, setConn] = useState<Connection>("stale");
   const selected = ALL;
   const [account, setAccount] = useState<Account | null>(null);
   const [authReady, setAuthReady] = useState(false);
@@ -402,39 +390,26 @@ function Layout() {
   useEffect(() => {
     if (isMockMode()) {
       setSnap(mockSnapshot as Snapshot);
-      setConn("live");
       return;
     }
 
     let es: EventSource | null = null;
-    let staleTimer: number | null = null;
-    const startedAt = Date.now();
-    let lastSeen = 0;
-    const updateConnectionState = () => {
-      setConn(connectionStateFromSnapshotClock(Date.now(), startedAt, lastSeen));
-    };
 
     const connect = () => {
       es = new EventSource("/v1/events");
       es.addEventListener("state", (e) => {
         try {
           setSnap(JSON.parse((e as MessageEvent).data));
-          lastSeen = Date.now();
-          setConn("live");
         } catch (err) {
           console.error("bad snapshot", err);
         }
       });
-      es.onerror = updateConnectionState;
     };
 
     connect();
-    updateConnectionState();
-    staleTimer = window.setInterval(updateConnectionState, 1000);
 
     return () => {
       es?.close();
-      if (staleTimer !== null) window.clearInterval(staleTimer);
     };
   }, []);
 
@@ -466,9 +441,6 @@ function Layout() {
             <div className="header-title">
               <h1>glimmung</h1>
               {isMockMode() && <span className="connection info">mock</span>}
-              <span className={`connection ${conn}`} aria-label={`state stream ${conn}`} title={connectionTitle(conn)}>
-                {conn}
-              </span>
             </div>
             <div className="epigraph">
               “The Glimmung scanned the assembled list of beings he had summoned. From a thousand worlds they had come, each with a craft to contribute.”
