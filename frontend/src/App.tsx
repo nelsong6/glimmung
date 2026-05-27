@@ -341,8 +341,12 @@ export function App() {
 }
 
 function MockModeRedirect() {
-  isMockMode();
-  return <Navigate to="/" replace />;
+  const location = useLocation();
+  const targetPath = location.pathname.replace(/^\/_mock/, "") || "/";
+  const params = new URLSearchParams(location.search);
+  params.set("mock", "1");
+  const search = params.toString();
+  return <Navigate to={`${targetPath}${search ? `?${search}` : ""}${location.hash}`} replace />;
 }
 
 function Layout() {
