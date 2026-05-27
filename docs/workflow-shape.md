@@ -57,7 +57,7 @@ Any number of `work` phases between prepare and testing — that's
 where the actual implementation happens.
 
 The mandatory-phase and linear-topology enforcement is active in the Go workflow
-writer, sync path, and Cosmos upsert path. Registrations that miss the entry
+writer, sync path, and Postgres upsert path. Registrations that miss the entry
 phase, a `verify: true` testing phase, or an always-run cleanup phase are
 rejected before they can become the project runtime contract. Registrations with
 multiple entry phases, fan-in/fan-out phase dependencies, invalid cross-phase
@@ -200,7 +200,7 @@ with these names pre-filled.
 
 ## Runtime source of truth
 
-Cosmos workflow registrations are the runtime source of truth. The
+Postgres workflow registrations are the runtime source of truth. The
 `.glimmung/workflows/<name>.yaml` upstream endpoints remain an import/sync
 convenience for older desired-state flows, but dispatch reads the registered
 workflow document, not a consumer repository file.

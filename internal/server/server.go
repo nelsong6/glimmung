@@ -22,7 +22,7 @@ type Settings struct {
 	Port string
 	// Postgres connection settings. The pool is constructed in
 	// cmd/glimmung-go/main.go and RunMigrations applies the schema.
-	// All R/W now flows through pg per the Cosmos->Postgres migration.
+	// All durable runtime reads and writes flow through Postgres.
 	PostgresHost                       string
 	PostgresDatabase                   string
 	PostgresUsername                   string

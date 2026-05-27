@@ -19,8 +19,8 @@ import (
 //
 // The bug we are guarding against: prior to glimmung#514, the only path to
 // write a 5xx was `writeProblem(w, http.StatusInternalServerError, "summary")`,
-// which discarded `err` at the call site. The Cosmos / IO / panic-recovery
-// exception was unrecoverable from logs because nothing in middleware or
+// which discarded `err` at the call site. Store / IO / panic-recovery errors
+// were unrecoverable from logs because nothing in middleware or
 // recovery saw it — the handler threw it away before either ran. See
 // docs/quality-timeframes.md: "Observability exists for the bugs a user
 // would otherwise have to guess about."
@@ -31,11 +31,11 @@ func TestWriteInternalErrorPreservesUnderlyingErrorInLog(t *testing.T) {
 	slog.SetDefault(slog.New(captureHandler))
 	t.Cleanup(func() { slog.SetDefault(orig) })
 
-	cosmosErr := errors.New("cosmos cross-partition order by failed: request rate too large")
+	storeErr := errors.New("store query failed: request rate too large")
 	req := httptest.NewRequest(http.MethodGet, "/v1/touchpoints", nil)
 	rec := httptest.NewRecorder()
 
-	writeInternalError(rec, req, cosmosErr, "list touchpoints failed")
+	writeInternalError(rec, req, storeErr, "list touchpoints failed")
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
@@ -50,11 +50,11 @@ func TestWriteInternalErrorPreservesUnderlyingErrorInLog(t *testing.T) {
 
 	logged := buf.String()
 	for _, wantSubstring := range []string{
-		"list touchpoints failed",                        // the summary
-		"cosmos cross-partition order by failed",         // the underlying err — the whole point
-		`"method":"GET"`,                                 // request method
-		`"route":"(unmatched)"`,                          // r.Pattern is empty outside ServeMux; fallback fires
-		`"level":"ERROR"`,                                // emitted at ERROR level for alerting
+		"list touchpoints failed", // the summary
+		"store query failed",      // the underlying err — the whole point
+		`"method":"GET"`,          // request method
+		`"route":"(unmatched)"`,   // r.Pattern is empty outside ServeMux; fallback fires
+		`"level":"ERROR"`,         // emitted at ERROR level for alerting
 	} {
 		if !strings.Contains(logged, wantSubstring) {
 			t.Errorf("log missing %q\nlog output: %s", wantSubstring, logged)
@@ -76,7 +76,7 @@ func TestWriteInternalErrorUsesRequestPattern(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/projects/{project}/issues/{issue_number}/touchpoint", func(w http.ResponseWriter, r *http.Request) {
-		writeInternalError(w, r, errors.New("upstream cosmos timeout"), "get touchpoint failed")
+		writeInternalError(w, r, errors.New("upstream store timeout"), "get touchpoint failed")
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/projects/tank-operator/issues/42/touchpoint", nil)

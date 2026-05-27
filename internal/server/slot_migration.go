@@ -91,7 +91,7 @@ func (s SlotMigrationSummary) String() string {
 
 // legacyProjectSlotsArrayStripper is implemented by stores that can strip
 // the legacy `metadata.native_standby_dns.slots[]` array from a project
-// doc after migration. The cosmos store implements this; fakes used in
+// doc after migration. The Postgres-backed store implements this; fakes used in
 // unit tests may omit it (the migration tolerates a no-op).
 type legacyProjectSlotsArrayStripper interface {
 	StripProjectTestEnvironmentSlotsArray(ctx context.Context, project string) error

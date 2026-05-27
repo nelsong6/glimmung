@@ -11,7 +11,7 @@ The detailed cleanup inventory lives in
 
 - Runtime entrypoint: `cmd/glimmung-go`.
 - HTTP surface: `internal/server`.
-- Persistence boundary: `internal/store/cosmos`.
+- Persistence boundary: `internal/store/store` backed by `internal/store/pg`.
 - Auth boundary: `internal/auth` for Entra JWKS auth and Kubernetes
   service-account TokenReview auth.
 - GitHub App client: `internal/github` for token minting, upstream workflow
@@ -51,8 +51,9 @@ The detailed cleanup inventory lives in
 
 ## Data contract
 
-- The active Cosmos containers are `projects`, `workflows`, `leases`, `runs`,
-  `run_events`, `issues`, `locks`, `reports`, `playbooks`, and `signals`.
+- The active Postgres tables include `projects`, `workflows`, `leases`, `runs`,
+  `run_events`, `issues`, `locks`, `reports`, `playbooks`, `signals`, `slots`,
+  `slot_history`, and `touchpoints`.
 - Workflow phases must use `k8s_job`. Blank workflow phase `kind` values
   normalize to `k8s_job`; any other executor kind is rejected before it can
   become the project runtime contract.
@@ -62,7 +63,7 @@ The detailed cleanup inventory lives in
 ## Hot-swap rules
 
 - Keep a single writer service active. The Go service is the only app process
-  supported against the production Cosmos database.
+  supported against the production Postgres database.
 - Keep the service port and in-cluster DNS expectations stable for dashboard,
   MCP, and runner clients.
 - Serve frontend assets through Go when `GLIMMUNG_STATIC_DIR` points at a built
@@ -103,8 +104,7 @@ npm run build
 ```
 
 Pull-request app CI runs the Go gate and frontend gate. It does not install
-root Python dependencies or run a Python app test suite. Pushes to `main` also
-run a Go-native live Cosmos smoke for the lock lifecycle.
+root Python dependencies or run a Python app test suite.
 
 The repository root has no Python package metadata. Repo-local agent workflow
 operations live in the Go CLI under `cmd/glimmung-agent`. The old one-shot

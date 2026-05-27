@@ -65,8 +65,7 @@ func (s *RunsStore) List(ctx context.Context, project string, limit int) ([]RunR
 }
 
 // ListAll returns every run row across all projects, ordered by
-// updated_at DESC. Used by callers that need a global view (cosmos
-// did a cross-partition scan).
+// updated_at DESC. Used by callers that need a global view.
 func (s *RunsStore) ListAll(ctx context.Context) ([]RunRow, error) {
 	if s == nil || s.pool == nil {
 		return nil, nil
@@ -142,8 +141,7 @@ func (s *RunsStore) Create(ctx context.Context, row RunRow) (RunRow, error) {
 }
 
 // PatchPayload mutates the jsonb payload inside a SELECT FOR UPDATE
-// tx. Replaces cosmos's read-modify-write ETag retry loop. The
-// mutator may also reset top-level keys; issue_number column is
+// tx. The mutator may also reset top-level keys; issue_number column is
 // derived from payload.issue_number to keep the partial index
 // runs_by_project_issue accurate.
 func (s *RunsStore) PatchPayload(ctx context.Context, project, id string, mutate func(payload map[string]any) error) (RunRow, error) {
@@ -311,8 +309,8 @@ func (s *LeasesStore) ListClaimedNative(ctx context.Context, project string) ([]
 	return s.queryLeaseRows(ctx, sql, []any{project})
 }
 
-// Create inserts a new lease row. callback_token is extracted at the
-// cosmos boundary from payload.metadata.lease_callback_token.
+// Create inserts a new lease row. callback_token is extracted from
+// payload.metadata.lease_callback_token.
 func (s *LeasesStore) Create(ctx context.Context, row LeaseRow) (LeaseRow, error) {
 	if s == nil || s.pool == nil {
 		return LeaseRow{}, fmt.Errorf("leases store not configured")
@@ -477,4 +475,3 @@ func (s *LeasesStore) queryLeaseRows(ctx context.Context, sqlText string, args [
 	}
 	return out, nil
 }
-

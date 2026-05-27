@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/google/uuid"
 
 	"github.com/nelsong6/glimmung/internal/domain/budget"
@@ -21,92 +20,46 @@ import (
 	pgstore "github.com/nelsong6/glimmung/internal/store/pg"
 )
 
-// Store is the data-access wrapper that the server-side handlers use.
-// Stage 3 cleanup: every R/W cluster has migrated to Postgres and the
-// Cosmos container clients are gone. Methods on Store now delegate to
-// the per-cluster pg.*Store fields below. The package name is
-// retained for stability of the import path; the doctrinally clean
-// rename to `internal/store/store` is a follow-up.
+// Store is the Postgres-backed data-access wrapper used by server-side
+// handlers. Methods delegate to the per-cluster pg.*Store fields below while
+// preserving the server-facing domain method set.
 type Store struct {
 	nativeProjectConcurrency int
 
-	// pgLocks is the Postgres-backed lock store. Injected by main.go
-	// via SetPGLocks after both cosmos.Store and pg.LocksStore are
-	// constructed. All Claim/Release/IsHeld/ListHeld lock operations
-	// flow through this field; cosmos.Store no longer talks to its
-	// `locks` container client for those operations (Stage 2b cutover
-	// per docs/postgres-migration.md). The `locks` field above is
-	// retained only so ListAllLockDocsForMigration can read the
-	// pre-migration snapshot for the one-shot Migrate copy — Stage 2i
-	// deletes both this field and the cosmos lock container client
-	// entirely.
+	// pgLocks owns durable lock state.
 	pgLocks *pgstore.LocksStore
 
-	// pgRunEvents is the Postgres-backed run-events store. Injected
-	// via SetPGRunEvents (Stage 2c). RecordNativeEventByID and
-	// ListNativeEventsByID delegate event storage to this field;
-	// cosmos.Store no longer writes to or reads from its `runEvents`
-	// container for those operations. The `runEvents` container client
-	// is retained only so ListAllRunEventDocsForMigration can feed the
-	// one-shot Migrate copy. Stage 2i deletes both.
+	// pgRunEvents owns native-runner event storage.
 	pgRunEvents *pgstore.RunEventsStore
 
-	// pgProjects is the Postgres-backed projects store (Stage 2e).
-	// All project read/write methods on cosmos.Store delegate to this
-	// field; the internal readProjectDoc helper is gone. The cosmos
-	// `projects` container client is retained only for
-	// ListAllProjectDocsForMigration. Stage 2i deletes both.
+	// pgProjects owns project rows and test-lease defaults.
 	pgProjects *pgstore.ProjectsStore
 
-	// pgWorkflows is the Postgres-backed workflows store (Stage 2g).
-	// All workflow read/write methods on cosmos.Store delegate here.
-	// The cosmos `workflows` container client is retained only for
-	// ListAllWorkflowDocsForMigration. Stage 2i deletes both.
+	// pgWorkflows owns workflow registrations and workflow schemas.
 	pgWorkflows *pgstore.WorkflowsStore
 
-	// pgPortfolios is the Postgres-backed portfolios store (Stage 2m
-	// cutover). ListPortfolioElements / UpsertPortfolioElement /
-	// PatchPortfolioElement delegate here.
+	// pgPortfolios owns design portfolio elements.
 	pgPortfolios *pgstore.PortfoliosStore
 
-	// pgPlaybooks is the Postgres-backed playbooks store (Stage 2n
-	// cutover). ListPlaybooks / GetPlaybook / CreatePlaybook /
-	// PatchPlaybookEntryGate delegate here.
+	// pgPlaybooks owns operator-authored playbooks.
 	pgPlaybooks *pgstore.PlaybooksStore
 
-	// pgSignals is the Postgres-backed signals store (Stage 2-signals
-	// cutover). EnqueueSignal / ListGraphSignals / ListPendingSignals /
-	// MarkSignalProcessing / MarkSignalProcessed / MarkSignalFailed
-	// delegate here.
+	// pgSignals owns the webhook signal queue.
 	pgSignals *pgstore.SignalsStore
 
-	// pgIssues is the Postgres-backed issues + issue_comments store
-	// (Stage 2-issues cutover). All issue R/W on cosmos.Store delegates
-	// here once set. The pg layer splits cosmos's embedded comments
-	// into a separate issue_comments table.
+	// pgIssues owns issues and issue comments.
 	pgIssues *pgstore.IssuesStore
 
-	// pgSlots is the Postgres-backed slots + slot_history store
-	// (Stage 2-slots cutover). All slot R/W on cosmos.Store delegates
-	// here. CAS uses updated_at as the version (substituted for the
-	// prior Cosmos ETag).
+	// pgSlots owns test-slot state and slot history.
 	pgSlots *pgstore.SlotsStore
 
-	// pgRuns is the Postgres-backed runs store (Stage 2-runs cutover).
-	// All run R/W on cosmos.Store delegates here. PatchPayload runs
-	// SELECT FOR UPDATE inside a transaction, removing the ETag retry
-	// loop that the cosmos mutateRunRaw helper carried.
+	// pgRuns owns durable run records.
 	pgRuns *pgstore.RunsStore
 
-	// pgTouchpoints is the Postgres-backed touchpoints store (Stage
-	// 2-touchpoints cutover). All touchpoint R/W on cosmos.Store
-	// delegates here.
+	// pgTouchpoints owns operator-visible review touchpoints.
 	pgTouchpoints *pgstore.TouchpointsStore
 
-	// pgLeases is the Postgres-backed leases store (Stage 2-leases
-	// cutover). All lease R/W on cosmos.Store delegates here. The
-	// next-lease-number counter moves to a per-project pg row with
-	// an atomic seed+increment transaction.
+	// pgLeases owns native lease rows and lease counters.
 	pgLeases *pgstore.LeasesStore
 }
 
@@ -128,7 +81,7 @@ func (s *Store) SetPGRunEvents(runEvents *pgstore.RunEventsStore) {
 }
 
 // SetPGProjects injects the Postgres-backed projects store. All
-// project read/write methods on cosmos.Store route through this field
+// project read/write methods on Store route through this field
 // once set. Called by main.go at startup after pg.ProjectsStore is
 // constructed.
 func (s *Store) SetPGProjects(projects *pgstore.ProjectsStore) {
@@ -136,7 +89,7 @@ func (s *Store) SetPGProjects(projects *pgstore.ProjectsStore) {
 }
 
 // SetPGWorkflows injects the Postgres-backed workflows store. All
-// workflow read/write methods on cosmos.Store route through this
+// workflow read/write methods on Store route through this
 // field once set.
 func (s *Store) SetPGWorkflows(workflows *pgstore.WorkflowsStore) {
 	s.pgWorkflows = workflows
@@ -182,9 +135,7 @@ func (s *Store) SetPGLeases(leases *pgstore.LeasesStore) {
 	s.pgLeases = leases
 }
 
-// leaseDocFromPayload decodes a pg lease payload into the cosmos
-// leaseDoc shape so the existing leaseFromDoc / listedLeaseFromDoc /
-// selectLeaseDocByPublicRef helpers continue to work.
+// leaseDocFromPayload decodes a lease payload into the internal helper shape.
 func leaseDocFromPayload(payload []byte) (leaseDoc, error) {
 	var doc leaseDoc
 	if err := json.Unmarshal(payload, &doc); err != nil {
@@ -193,9 +144,8 @@ func leaseDocFromPayload(payload []byte) (leaseDoc, error) {
 	return doc, nil
 }
 
-// touchpointDocFromPayload decodes a pg touchpoint payload into the
-// cosmos touchpointDoc shape so the existing builder helpers continue
-// to work.
+// touchpointDocFromPayload decodes a touchpoint payload into the internal
+// helper shape.
 func touchpointDocFromPayload(payload []byte) (touchpointDoc, error) {
 	var doc touchpointDoc
 	if err := json.Unmarshal(payload, &doc); err != nil {
@@ -204,9 +154,7 @@ func touchpointDocFromPayload(payload []byte) (touchpointDoc, error) {
 	return doc, nil
 }
 
-// runDocFromPGRow unmarshals a pg runs row's payload into the cosmos
-// runDoc shape. The pg layer stores the original cosmos doc payload
-// verbatim, so this is a pure JSON decode.
+// runDocFromPGRow unmarshals a pg runs row payload into the internal run shape.
 func runDocFromPGRow(row pgstore.RunRow) (runDoc, error) {
 	var doc runDoc
 	if err := json.Unmarshal(row.Payload, &doc); err != nil {
@@ -233,11 +181,8 @@ func (s *Store) readRunDoc(ctx context.Context, project, runID string) (runDoc, 
 	return doc, row.Payload, nil
 }
 
-// issueDocFromPGRow assembles the cosmos-shaped issueDoc from a pg
-// issues row plus the per-issue comment rows. Comments are stripped
-// when migrating into pg and live in issue_comments; the public
-// helpers (issueRowFromDoc, issueDetailFromDoc, ...) still want a
-// single doc with comments inlined, so we read both tables here.
+// issueDocFromPGRow assembles the internal issue helper from a pg issues row
+// plus the per-issue comment rows.
 func (s *Store) issueDocFromPGRow(ctx context.Context, row pgstore.IssueRow) (issueDoc, error) {
 	doc, err := issueDocFromPGPayload(row)
 	if err != nil {
@@ -285,9 +230,8 @@ func (s *Store) issueDocsFromPGRows(ctx context.Context, rows []pgstore.IssueRow
 	return out, nil
 }
 
-// signalDocFromPayload deserializes a pg signal row's payload back into
-// the cosmos signalDoc shape so the existing queuedSignalFromDoc helper
-// and the public-shape conversions can be reused.
+// signalDocFromPayload deserializes a pg signal row payload into the internal
+// signal helper shape.
 func signalDocFromPayload(payload []byte) (signalDoc, error) {
 	var doc signalDoc
 	if err := json.Unmarshal(payload, &doc); err != nil {
@@ -296,9 +240,8 @@ func signalDocFromPayload(payload []byte) (signalDoc, error) {
 	return doc, nil
 }
 
-// playbookDocFromPayload deserializes a pg playbook row's payload back
-// into the cosmos playbookDoc shape so the existing playbookToPublic
-// helper can convert it to server.PlaybookPublic.
+// playbookDocFromPayload deserializes a pg playbook row payload into the
+// internal playbook helper shape.
 func playbookDocFromPayload(payload []byte) (playbookDoc, error) {
 	var doc playbookDoc
 	if err := json.Unmarshal(payload, &doc); err != nil {
@@ -307,10 +250,8 @@ func playbookDocFromPayload(payload []byte) (playbookDoc, error) {
 	return doc, nil
 }
 
-// portfolioElementDocFromPayload deserializes a pg portfolio row's
-// payload back into the cosmos doc shape, then converts it to the
-// server-facing public shape. Used by ListPortfolioElements /
-// UpsertPortfolioElement / PatchPortfolioElement.
+// portfolioElementDocFromPayload deserializes a pg portfolio row payload into
+// the server-facing helper shape.
 func portfolioElementDocFromPayload(payload []byte) (portfolioElementDoc, error) {
 	var doc portfolioElementDoc
 	if err := json.Unmarshal(payload, &doc); err != nil {
@@ -327,9 +268,8 @@ func encodeIssueCommentPayload(c issueCommentDoc) ([]byte, error) {
 	return json.Marshal(c)
 }
 
-// workflowFromPayload unmarshals a pg workflow payload (raw JSON of
-// the cosmos workflowDoc shape) and converts it to the server-package
-// Workflow type via the existing workflowFromDoc helper.
+// workflowFromPayload unmarshals a pg workflow payload and converts it to the
+// server-package Workflow type via workflowFromDoc.
 func workflowFromPayload(payload []byte) (server.Workflow, error) {
 	var doc workflowDoc
 	if err := json.Unmarshal(payload, &doc); err != nil {
@@ -338,9 +278,8 @@ func workflowFromPayload(payload []byte) (server.Workflow, error) {
 	return workflowFromDoc(doc), nil
 }
 
-// projectFromRecord converts a pg.ProjectRecord to the server-package
-// Project type the delegation methods return. ID == Name because the
-// cosmos doc id was always the project name.
+// projectFromRecord converts a pg.ProjectRecord to the server-package Project
+// type the delegation methods return. ID and Name are the same project key.
 func projectFromRecord(rec pgstore.ProjectRecord) server.Project {
 	return server.Project{
 		ID:         rec.Name,
@@ -364,9 +303,8 @@ func testLeaseDefaultsFromRow(row pgstore.TestLeaseDefaultsRow) server.TestLease
 
 const workflowSchemaKind = "workflow_schema"
 
-// NewFromSettings constructs an empty Store. Stage 3 cleanup removed
-// the Cosmos client + container clients; callers wire in the
-// pg.*Store fields via SetPG* setters after construction.
+// NewFromSettings constructs the store wrapper; callers wire in pg.*Store
+// fields via SetPG* setters after constructing the Postgres pool.
 func NewFromSettings(settings server.Settings) (*Store, error) {
 	return &Store{
 		nativeProjectConcurrency: settings.NativeRunnerProjectConcurrency,
@@ -438,12 +376,8 @@ func (s *Store) SetProjectManagedAuthOriginStatus(ctx context.Context, project s
 }
 
 const (
-	// testLeaseDefaultsDocKind is the cosmos doc-kind value the
-	// migration source uses to identify the singleton settings row in
-	// the legacy `projects` container. Kept only so
-	// ListAllProjectDocsForMigration can recognize it during the
-	// one-shot copy; Stage 2i deletes both the constant and the
-	// container client.
+	// testLeaseDefaultsDocKind is the persisted kind value for the singleton
+	// settings row.
 	testLeaseDefaultsDocKind = "test_lease_defaults"
 )
 
@@ -508,10 +442,9 @@ func (s *Store) SetProjectTestLeaseHotSwapMinTTL(ctx context.Context, project st
 	return projectFromRecord(rec), nil
 }
 
-// StripProjectTestEnvironmentSlotsArray removes the legacy
-// `metadata.native_standby_dns.slots[]` array from a project doc.
-// Called by the one-shot slot-storage-rework migration in
-// internal/server/slot_migration.go. Idempotent.
+// StripProjectTestEnvironmentSlotsArray removes the embedded
+// `metadata.native_standby_dns.slots[]` array from a project row. Called by
+// the one-shot slot-storage cleanup in internal/server/slot_migration.go.
 func (s *Store) StripProjectTestEnvironmentSlotsArray(ctx context.Context, project string) error {
 	err := s.pgProjects.StripLegacySlotsArray(ctx, project)
 	if errors.Is(err, pgstore.ErrProjectNotFound) {
@@ -520,12 +453,8 @@ func (s *Store) StripProjectTestEnvironmentSlotsArray(ctx context.Context, proje
 	return err
 }
 
-// ReadProject returns the project record. Used by the dispatch/clone
-// paths and operator queries. The etag field that the cosmos
-// implementation captured for optimistic-concurrency writes is no
-// longer meaningful — Postgres uses row-level locking inside
-// pg.ProjectsStore — but the field is preserved as empty so consumers
-// that call WithETag still compile.
+// ReadProject returns the project record. Project writes use row-level locking
+// inside pg.ProjectsStore, so the returned Project has no external CAS token.
 func (s *Store) ReadProject(ctx context.Context, project string) (server.Project, error) {
 	rec, err := s.pgProjects.Read(ctx, project)
 	if errors.Is(err, pgstore.ErrProjectNotFound) {
@@ -763,9 +692,8 @@ func (s *Store) ListIssues(ctx context.Context, filter server.IssueListFilter) (
 	if err != nil {
 		return nil, err
 	}
-	// Lock state read moved from cosmos.locks container to pg.LocksStore
-	// in Stage 2b. ListHeldByScope returns only currently-held + unexpired
-	// locks, so the per-row check below collapses to a simple map lookup.
+	// ListHeldByScope returns only currently-held + unexpired locks, so the
+	// per-row check below collapses to a simple map lookup.
 	heldIssueLocks, err := s.pgLocks.ListHeldByScope(ctx, "issue")
 	if err != nil {
 		return nil, err
@@ -1106,8 +1034,7 @@ func (s *Store) UpdateIssueComment(ctx context.Context, req server.IssueCommentU
 
 func (s *Store) DeleteIssueComment(ctx context.Context, req server.IssueCommentDelete) (server.IssueDetail, error) {
 	// Verify scope so a caller can't delete a comment by id from the
-	// wrong issue. Match the prior cosmos semantics (which scanned the
-	// parent doc's embedded comments and 404'd on miss).
+	// wrong issue. Match the materialized issue payload by 404ing on miss.
 	existing, err := s.pgIssues.GetComment(ctx, req.CommentID)
 	if errors.Is(err, pgstore.ErrIssueNotFound) {
 		return server.IssueDetail{}, server.ErrNotFound
@@ -1267,12 +1194,6 @@ func (s *Store) readLeaseDocByCallbackToken(ctx context.Context, token string) (
 	return leaseDocFromPayload(row.Payload)
 }
 
-// Cosmos query primitives live in query.go. The legacy queryAll /
-// queryAllWhere helpers that defaulted to an empty partition key were
-// deleted as part of the queryAllWhere → singlePartitionQuery migration.
-// See docs/cosmos-partition-strategy.md and the migration guard at
-// scripts/check-cosmos-queries.sh.
-
 type workflowDoc struct {
 	ID                  string         `json:"id"`
 	Kind                string         `json:"kind,omitempty"`
@@ -1338,7 +1259,7 @@ type runDoc struct {
 	TriggerSource       map[string]any      `json:"trigger_source"`
 	CreatedAt           string              `json:"created_at"`
 	UpdatedAt           string              `json:"updated_at"`
-	// Fields for mutation operations (populated from Cosmos documents as needed).
+	// Fields used by mutation operations.
 	CallbackToken     *string `json:"callback_token,omitempty"`
 	IssueLockHolderID *string `json:"issue_lock_holder_id,omitempty"`
 	PRLockHolderID    *string `json:"pr_lock_holder_id,omitempty"`
@@ -2525,11 +2446,6 @@ func boolPtrValue(value *bool) bool {
 	return value != nil && *value
 }
 
-func isCosmosStatus(err error, status int) bool {
-	var responseErr *azcore.ResponseError
-	return errors.As(err, &responseErr) && responseErr.StatusCode == status
-}
-
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if value != "" {
@@ -2587,9 +2503,8 @@ type touchpointDoc struct {
 
 func (s *Store) ListTouchpoints(ctx context.Context, filter server.TouchpointListFilter) ([]server.TouchpointRow, error) {
 	// pg.TouchpointsStore.List handles both the single-project and
-	// cross-project cases via a single SELECT — the cosmos
-	// single-partition vs cross-partition split collapses to one
-	// query path against the unified touchpoints table.
+	// cross-project cases via a single SELECT against the unified
+	// touchpoints table.
 	limit := 0
 	if filter.Limit != nil {
 		limit = *filter.Limit
@@ -2702,9 +2617,7 @@ func (s *Store) EnsureTouchpoint(ctx context.Context, req server.TouchpointCreat
 		}
 	}
 
-	// 2) Fall back to (repo, number) idempotency key. Cosmos used a
-	//    cross-partition scan; pg.TouchpointsStore.FindByRepoNumber
-	//    does the same lookup against the unified table.
+	// 2) Fall back to (repo, number) idempotency key.
 	if row, err := s.pgTouchpoints.FindByRepoNumber(ctx, req.Repo, req.Number); err == nil {
 		doc, derr := touchpointDocFromPayload(row.Payload)
 		if derr != nil {
@@ -2786,8 +2699,8 @@ func (s *Store) EnsureTouchpoint(ctx context.Context, req server.TouchpointCreat
 }
 
 func (s *Store) buildTouchpointDetail(ctx context.Context, doc touchpointDoc) (server.TouchpointDetail, error) {
-	// Look up linked run by id (the cosmos doc id). Touchpoints and
-	// their linked runs share a project.
+	// Look up linked run by id. Touchpoints and their linked runs share a
+	// project.
 	var run *runDoc
 	if doc.LinkedRunID != nil && *doc.LinkedRunID != "" {
 		runRow, err := s.pgRuns.Get(ctx, doc.Project, *doc.LinkedRunID)
@@ -2800,8 +2713,7 @@ func (s *Store) buildTouchpointDetail(ctx context.Context, doc touchpointDoc) (s
 	}
 	if run == nil {
 		// Fall back to latest run by (repo, pr_number) scoped to this
-		// project. Cosmos cross-partition query is replaced by an in-
-		// memory filter over project runs ordered by created_at DESC.
+		// project by filtering project runs ordered by created_at DESC.
 		rows, err := s.pgRuns.List(ctx, doc.Project, 0)
 		if err == nil {
 			for _, row := range rows {
@@ -2823,9 +2735,8 @@ func (s *Store) buildTouchpointDetail(ctx context.Context, doc touchpointDoc) (s
 		}
 	}
 
-	// Look up linked issue by its cosmos UUID (payload->>'id' in pg).
-	// The (project, number) primary key is preferred but the
-	// touchpoint doc still carries the legacy id reference.
+	// Look up linked issue by its payload UUID. The (project, number) primary
+	// key is preferred but the touchpoint payload carries this id reference.
 	var linkedIssueRef *string
 	var linkedIssueNumber *int
 	var linkedIssueTitle *string
@@ -2842,8 +2753,7 @@ func (s *Store) buildTouchpointDetail(ctx context.Context, doc touchpointDoc) (s
 		}
 	}
 
-	// PR lock check moved from cosmos.locks container to pg.LocksStore
-	// in Stage 2b.
+	// PR lock state lives in pg.LocksStore.
 	prLockHeld, _ := s.pgLocks.PRLockHeld(ctx, doc.Repo, doc.Number)
 
 	detail := server.TouchpointDetail{
@@ -3253,10 +3163,9 @@ func (s *Store) playbookToPublic(ctx context.Context, doc playbookDoc) server.Pl
 		if e.RunRef != nil && *e.RunRef != "" {
 			pub.RunRef = e.RunRef
 		}
-		// Resolve created_issue_ref from created_issue_id (the legacy
-		// cosmos UUID). Issues now live in pg, keyed by (project,
-		// number); GetByPayloadID returns the same row by its
-		// payload->>'id' field.
+		// Resolve created_issue_ref from created_issue_id. Issues live in pg,
+		// keyed by (project, number); GetByPayloadID returns the same row by
+		// its payload->>'id' field.
 		if e.CreatedIssueID != nil && *e.CreatedIssueID != "" {
 			row, err := s.pgIssues.GetByPayloadID(ctx, doc.Project, *e.CreatedIssueID)
 			if err == nil {
@@ -4175,21 +4084,9 @@ func (s *Store) availableNativeSlot(ctx context.Context, project string) (*int, 
 // nativeReadySlots returns the slot indices that are currently in the
 // `provisioned` state and therefore eligible to receive a new lease.
 //
-// Slot status moved into the dedicated `slots` Cosmos collection in
-// #518 ("test-slot: split slot status into its own Cosmos collection")
-// so that per-slot warmup writes stopped contending on the project doc's
-// etag. The dispatcher path was not updated at the same time: until this
-// fix it kept reading `project.metadata.native_standby_dns.slots[]`,
-// which #518 stopped populating, so every project's checkout returned
-// ErrUnavailable regardless of actual capacity. The Stage 4 deliberate-
-// 503 observability shipped in the contemporaneous Cosmos query
-// contract rollout surfaced this directly:
-// glimmung_unavailable_total{reason="test_slot_saturation"} ticked on
-// every checkout attempt.
-//
-// The query is single-partition (slots PK is /project). count from
-// project metadata still bounds the result so a stale slot doc cannot
-// extend capacity past the declared scale.
+// Slot state lives in the pg slots table. The project metadata count still
+// bounds the result so a stale slot row cannot extend capacity past the
+// declared scale.
 func (s *Store) nativeReadySlots(ctx context.Context, project string) []int {
 	rec, err := s.pgProjects.Read(ctx, project)
 	if err != nil {
@@ -4212,8 +4109,8 @@ func (s *Store) nativeReadySlots(ctx context.Context, project string) []int {
 
 // selectReadySlotIndices returns the sorted slot indices that are in
 // state provisioned and within the declared 1..count bound. Extracted
-// from nativeReadySlots so the selection contract is testable without a
-// live Cosmos round trip.
+// from nativeReadySlots so the selection contract is testable without a live
+// database round trip.
 func selectReadySlotIndices(slots []server.Slot, count int) []int {
 	out := make([]int, 0, len(slots))
 	for _, slot := range slots {
@@ -4700,7 +4597,7 @@ func (s *Store) ListQueuedRunCycles(ctx context.Context, project string, limit i
 		}
 		docs = append(docs, doc)
 	}
-	// Cosmos query ordered by created_at ASC; preserve that.
+	// Preserve ascending creation order.
 	sort.SliceStable(docs, func(i, j int) bool { return docs[i].CreatedAt < docs[j].CreatedAt })
 	if limit > 0 && len(docs) > limit {
 		docs = docs[:limit]
@@ -4974,8 +4871,7 @@ func queuedSignalFromDoc(doc signalDoc) server.QueuedSignal {
 func (s *Store) FindRunForPR(ctx context.Context, repo string, prNumber int) (server.RunReplayData, error) {
 	// pg.RunsStore.FindByPR returns the most-recently-updated row
 	// across all projects via payload->>'issue_repo' + payload->>'pr_number'.
-	// The cross-project fan-out cosmos required is collapsed into a
-	// single SELECT against the runs table.
+	// A single SELECT against the runs table handles the cross-project view.
 	row, err := s.pgRuns.FindByPR(ctx, repo, prNumber)
 	if errors.Is(err, pgstore.ErrRunNotFound) {
 		return server.RunReplayData{}, server.ErrNotFound
@@ -5026,8 +4922,7 @@ func (s *Store) ReadRunIDForNumber(ctx context.Context, project string, issueNum
 
 // ReadRunIDForCallbackToken resolves a run callback token to (runID, project, runRef).
 func (s *Store) ReadRunIDForCallbackToken(ctx context.Context, token string) (string, string, string, error) {
-	// Scan all runs in pg and match by payload->>'callback_token'.
-	// Cosmos used a cross-partition query for the same lookup; the
+	// Scan all runs in pg and match by payload->>'callback_token'. The
 	// expected runs row count is small (active runs across all
 	// projects) so a full scan is acceptable here. If this becomes a
 	// hot path, add a partial index on (payload->>'callback_token')
@@ -5206,13 +5101,9 @@ func (s *Store) RecordNativeEventByID(ctx context.Context, project, runID string
 		message = *req.Message
 	}
 
-	// Stage 2c: write the event to pg via pgRunEvents instead of the
-	// cosmos `runEvents` container. The cosmos-shaped nativeEventDoc is
-	// kept for the in-process applyNativeEventExecutionState call below
-	// (which mutates the runs document — runs is still in cosmos until
-	// Stage 2e). Idempotency semantics match the cosmos contract: the
-	// same PK with the same payload is accepted silently; the same PK
-	// with a different payload returns ErrConflict.
+	// Write the event to pg via pgRunEvents. Idempotency is based on the
+	// natural event key: the same key with the same payload is accepted
+	// silently; the same key with a different payload returns ErrConflict.
 	eventDoc := nativeEventDoc{
 		ID:           docID,
 		Project:      project,
@@ -5347,8 +5238,7 @@ func (s *Store) ListNativeEventsByID(ctx context.Context, project, runID string,
 		return server.NativeRunLogsResponse{}, err
 	}
 
-	// Stage 2c: read events from pg instead of the cosmos `runEvents`
-	// container. pg.RunEventsStore.List returns rows in the canonical
+	// Read events from pg. pg.RunEventsStore.List returns rows in the canonical
 	// sort order (attempt_index, job_id, seq, created_at) so no
 	// post-sort is needed. Optional attemptIndex/jobID/limit are
 	// pushed down to SQL.
@@ -5431,8 +5321,8 @@ func (s *Store) RecordNativeJobCompletion(ctx context.Context, project, runID st
 		return server.NativeJobCompletionResult{}, server.ValidationError{Message: "job_id required"}
 	}
 
-	// pg's SELECT FOR UPDATE inside PatchPayload replaces the cosmos
-	// ETag retry loop. Early-return paths (already terminal /
+	// pg's SELECT FOR UPDATE inside PatchPayload owns serialization.
+	// Early-return paths (already terminal /
 	// duplicate idempotent completion) are emitted as sentinel
 	// errors from the mutator and translated outside.
 	var (
@@ -5657,9 +5547,8 @@ func cloneJobCompletions(values map[string]nativeJobCompletionDoc) map[string]na
 }
 
 func (s *Store) mutateRunRaw(ctx context.Context, project, runID string, mutate func(runDoc, map[string]any) (bool, error)) error {
-	// SELECT FOR UPDATE inside PatchPayload's tx replaces the cosmos
-	// ETag retry loop — concurrent writers serialize on the row lock
-	// instead of conflicting on ETag. The mutator still receives both
+	// SELECT FOR UPDATE inside PatchPayload's tx serializes concurrent
+	// writers on the row lock. The mutator still receives both
 	// the typed runDoc and the raw map[string]any so existing call
 	// sites continue to work unchanged.
 	var noChange bool

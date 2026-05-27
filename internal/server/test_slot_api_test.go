@@ -997,10 +997,8 @@ func TestClaimTestSlotCleanupDedupsOnEtagConflict(t *testing.T) {
 // slot-storage rework — the function it tested (claimTestSlotWarmup)
 // existed only to CAS the unseeded→provisioning transition against the
 // shared project doc. Per-row CAS in SlotStore replaces it; concurrent
-// `markSlotProvisioning` calls against the same slot doc still
-// produce exactly one winner via Cosmos etag, which is exercised by
-// TestLiveCosmosSlotUpdateIfMatchSurfacesPreconditionFailed in the live
-// smoke suite.
+// `markSlotProvisioning` calls against the same slot doc still produce
+// exactly one winner via SlotStore.UpdateIfMatch.
 
 func TestClaimTestSlotWarmupRetriesAcrossCrossSlotWrites(t *testing.T) {
 	// Cross-slot writes bump the project doc's etag without affecting our

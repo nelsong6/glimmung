@@ -23,9 +23,7 @@ type QueryTracer struct {
 }
 
 // SQLMetrics is the narrow interface the tracer needs to record outcomes.
-// It is satisfied by a prom* type in internal/metrics once Stage 2b wires
-// up the actual collectors; for Stage 2a the tracer is constructed with
-// nil metrics and is a no-op.
+// It is satisfied by the Prometheus adapter in internal/metrics.
 type SQLMetrics interface {
 	RecordQuery(operation string, outcome string, duration time.Duration)
 }
@@ -152,11 +150,15 @@ var knownTables = []string{
 	"signals",
 	"issues",
 	"issue_comments",
+	"issue_counters",
+	"lease_counters",
 	"playbooks",
 	"reports",
+	"portfolios",
 	"slots",
 	"slot_history",
 	"touchpoints",
+	"test_lease_defaults",
 }
 
 // tableFromSQL pulls the first known table name out of a SELECT/INSERT/

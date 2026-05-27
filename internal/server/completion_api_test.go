@@ -1067,7 +1067,7 @@ func TestNativeRunCompletedByCallbackTokenCycleOrdinalCountsRecycleAttempts(t *t
 }
 
 func TestNativeRunCompletedByCallbackTokenStampError(t *testing.T) {
-	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj", stampErr: errors.New("cosmos unavailable")}
+	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj", stampErr: errors.New("store unavailable")}
 	store.run = runDataForCompletion("impl")
 	rec := httptest.NewRecorder()
 	newCompletionHandler(store, nil).ServeHTTP(rec, nativeCompletionRequest("tok", completedJob("impl", "success", nil, nil)))

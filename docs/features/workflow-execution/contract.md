@@ -13,7 +13,7 @@ after registration changes.
 
 ## Sources Of Truth
 
-- Cosmos `workflows` owns logical workflow registrations and current schema
+- Postgres `workflows` owns logical workflow registrations and current schema
   pointers.
 - Historical workflow schemas referenced by runs own projection for past
   cycles.

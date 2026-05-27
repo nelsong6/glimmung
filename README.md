@@ -1,8 +1,8 @@
 # glimmung
 
 Go service for issue-driven agentic development. Glimmung stores projects,
-workflows, issues, runs, leases, touchpoints, and signals in Cosmos DB; serves the
-Vite + React dashboard; and coordinates native Kubernetes jobs.
+workflows, issues, runs, leases, touchpoints, and signals in Postgres; serves
+the Vite + React dashboard; and coordinates native Kubernetes jobs.
 
 > *The Glimmung scanned the assembled list of beings he had summoned. From a thousand worlds they had come, each with a craft to contribute.*
 > — paraphrased from Philip K. Dick, *Galactic Pot-Healer*
@@ -32,7 +32,7 @@ Project -> Workflow -> Issue -> Run -> Phase/Job -> RunReport
 
 - **Project** = a repo (e.g. `spirelens`), declares the github_repo only.
 - **Workflow** = a database-backed automation shape under a project. Dispatch
-  reads the Workflow row from Cosmos: phases, native jobs, PR policy, budget,
+  reads the Workflow row from Postgres: phases, native jobs, PR policy, budget,
   and requirements. Omitted phase kinds default to `k8s_job`; registered
   phases must use `k8s_job`.
 - **Issue** = the canonical Glimmung issue row. GitHub Issues may still feed
@@ -47,8 +47,8 @@ Project -> Workflow -> Issue -> Run -> Phase/Job -> RunReport
 Workflow registration is an admin/control-plane operation. Consumer repos do
 not need `.glimmung/workflows/<name>.yaml` files for runtime dispatch; changing
 repo files has no effect unless an operator explicitly writes a new Workflow
-registration into Cosmos. The upstream-sync helper is an import convenience for
-older desired-state flows, not the runtime source of truth.
+  registration into Postgres. The upstream-sync helper is an import
+  convenience for older desired-state flows, not the runtime source of truth.
 
 The "agent" — Claude Code, Codex, whatever runs inside the workflow — is opaque to glimmung. We dispatch a venue to a workflow; the workflow runs an agent on it.
 
@@ -87,7 +87,7 @@ cmd/glimmung-agent/   # Go ops CLI for agent jobs and validation previews
 internal/             # Go domain/server/store packages
 frontend/             # Vite + React dashboard (live SSE state, MSAL admin)
 k8s/                  # Helm chart, ArgoCD-synced from main
-tofu/                 # Cosmos database + containers + Entra app reg
+tofu/                 # Postgres, managed identities, Entra app reg
 Dockerfile            # multi-stage: node frontend build -> Go backend
 .github/workflows/    # build + ACR push + chart bump + tofu plan/apply
 ```
@@ -342,9 +342,10 @@ them.
 
 `POST /v1/runs/dispatch` is handled in
 [`internal/server/dispatch_api.go`](internal/server/dispatch_api.go), backed by
-Cosmos operations in [`internal/store/cosmos`](internal/store/cosmos). It:
+the Postgres store in [`internal/store/store`](internal/store/store) and
+[`internal/store/pg`](internal/store/pg). It:
 
-1. Resolves the project and workflow from Cosmos.
+1. Resolves the project and workflow from Postgres.
 2. Reads the Glimmung issue by project issue number.
 3. Claims the `("issue", "<project>#<number>")` lock; concurrent dispatches on the same issue return `state="already_running"`.
 4. Creates the Run record while the issue lock serializes run-number allocation.
@@ -370,21 +371,20 @@ review state stays in the Glimmung Issue workspace.
 
 ## Storage
 
-Cosmos DB NoSQL on the shared `infra-cosmos-serverless` account. Database `glimmung`, containers pre-created by [`tofu/db.tf`](tofu/db.tf):
-
-- `projects` (partition key `/name`)
-- `workflows` (partition key `/project`)
-- `leases` (partition key `/project`)
-- `runs` (partition key `/project`) — verify-loop run state, see below
-- `locks` (partition key `/scope`) — generic mutual-exclusion primitive, see below
-- `signals` (partition key `/target_repo`) — signal bus for triage / re-entry / future automations, see below
-- `playbooks` (partition key `/project`) — stored operator plans for coordinated issue batches
+Azure Database for PostgreSQL Flexible Server, provisioned by
+[`tofu/postgres.tf`](tofu/postgres.tf). Runtime tables include `projects`,
+`workflows`, `leases`, `runs`, `run_events`, `locks`, `signals`, `issues`,
+`playbooks`, `reports`, `slots`, `slot_history`, `touchpoints`, and supporting
+counter/schema tables. Schema is applied idempotently at service startup by
+[`internal/store/pg/migrations.go`](internal/store/pg/migrations.go).
 
 Epics are not persisted yet. For now, Epic-level context lives in Playbook
 descriptions or linked documentation; the model boundary is documented in
 [Epics and Playbooks](docs/epics-and-playbooks.md).
 
-Runtime pod auth via the `infra-shared-identity` workload identity, which has `Cosmos DB Built-in Data Contributor` at the account scope (granted in [`infra-bootstrap/tofu/cosmos-serverless.tf`](https://github.com/nelsong6/infra-bootstrap/blob/main/tofu/cosmos-serverless.tf)). The Go store opens existing containers with `azcosmos.NewContainer`; reads/writes use the data-plane permissions. CREATE DATABASE / CREATE CONTAINER is control-plane and runs only via tofu under the app SP.
+Runtime pod auth uses the `glimmung-identity` workload identity as the
+Postgres AAD principal. The app constructs a pgx pool with AAD tokens and runs
+schema migrations before serving traffic.
 
 ## Lock semantics
 
@@ -436,8 +436,9 @@ runs, reports, and native test slots.
 
 ```sh
 az login                                 # for DefaultAzureCredential
-COSMOS_ENDPOINT=https://infra-cosmos-serverless.documents.azure.com:443/ \
-  COSMOS_DATABASE=glimmung \
+POSTGRES_HOST=<glimmung-pg-host> \
+  POSTGRES_DATABASE=glimmung \
+  POSTGRES_USER=glimmung-identity \
   go run ./cmd/glimmung-go
 ```
 
@@ -465,9 +466,7 @@ npm run build
 
 GitHub Actions runs those checks on pull requests and pushes. Pull requests
 also run `.github/workflows/docker-build-check.yaml`, which performs a
-throwaway app image build with `push: false`. Pushes to `main` also run a
-Go-native live Cosmos smoke test for the lock lifecycle with GitHub OIDC, using
-the database-scoped CI role assignment in [`tofu/test-access.tf`](tofu/test-access.tf).
+throwaway app image build with `push: false`.
 
 The repository root no longer carries Python packaging; the retired
 `src/glimmung/` app tree is gone, and the root Python `tests/` suite has been
@@ -478,19 +477,6 @@ they are covered by `go test ./...`.
 ```sh
 go run ./cmd/glimmung-agent --help
 ```
-
-To exercise the Go live Cosmos smoke locally, opt in with:
-
-```sh
-az login
-COSMOS_ENDPOINT=https://infra-cosmos-serverless.documents.azure.com:443/ \
-  COSMOS_DATABASE=glimmung \
-  GLIMMUNG_TEST_COSMOS=live \
-  go test ./internal/store/cosmos -run TestLiveCosmosLockLifecycle -count=1 -v
-```
-
-Set `GLIMMUNG_TEST_PREFIX=test-my-run` to reuse or inspect a specific smoke-test
-lock name. The test deletes its lock document before and after the run.
 
 ## Browser inspection
 
@@ -511,19 +497,6 @@ elements with selectors/roles/bounds/styles, console and page errors, failed
 requests and HTTP >= 400 responses, optional accessibility data, optional
 screenshot path, and canvas nonblank sampling. Use it when rendered browser
 state matters more than a static screenshot alone.
-
-First-time setup grants your `az login` principal data-plane access on the
-glimmung Cosmos database (without it the first read fails with `readMetadata`
-denied). Add your Entra object id to `dev_test_principal_ids` in
-[`tofu/test-access.tf`](tofu/test-access.tf) and apply:
-
-```sh
-az ad signed-in-user show --query id -o tsv   # your object id
-# append to dev_test_principal_ids in tofu, then `tofu apply` from tofu/
-```
-
-Scope is the glimmung database only; sibling apps on the same Cosmos account
-stay unreachable.
 
 The attended-pickup launch flow ([#127](https://github.com/nelsong6/glimmung/issues/127))
 is dogfooded against real Glimmung PR rows: a Glimmung run produces an
@@ -619,23 +592,24 @@ Decision logic and edge-case coverage live in
 
 ## Lock primitive (W1 substrate)
 
-Generic mutual-exclusion claims are stored in the `locks` Cosmos container and
-keyed by `(scope, key)`. Active Go callers use the primitive for per-issue
-run serialization and PR/issue lock release at terminal run states.
-The implementation lives in [`internal/store/cosmos`](internal/store/cosmos),
+Generic mutual-exclusion claims are stored in the Postgres `locks` table and
+keyed by `(scope, key)`. Active Go callers use the primitive for per-issue run
+serialization and PR/issue lock release at terminal run states. The
+implementation lives in [`internal/store/pg/locks.go`](internal/store/pg/locks.go),
 with handler coverage in dispatch, abort, signal-drain, and completion tests.
 
 Important active operations:
 
 | Call | Behavior |
 |---|---|
-| `ClaimIssueLock(project, issueNumber, holderID, ttlSeconds)` | Atomic create or ETag-protected take-over when the prior lock is released or expired. Returns `already_running` detail when held. |
+| `ClaimIssueLock(project, issueNumber, holderID, ttlSeconds)` | Atomic `INSERT ... ON CONFLICT DO UPDATE` claim when the prior lock is released or expired. Returns `already_running` detail when held. |
 | `ReleaseIssueLock(project, issueNumber, holderID)` | Best-effort release for rollback and terminal paths; validates holder before transitioning to released. |
 | terminal run updates | Release issue/PR locks from stored holder fields when a run advances, aborts, or completes. |
 
-### Doc id
+### Row key
 
-Deterministic: `f"{scope}::{urllib.parse.quote(key, safe='')}"`. Cosmos forbids `/`, `\`, `?`, `#` in ids; URL-encoding handles all four uniformly. Same scope + same key → same doc → Cosmos's `id`-uniqueness constraint enforces "only one active claimer at a time" for free.
+`scope` and `key` form the primary key. The uniqueness constraint enforces one
+active claim row per logical critical section.
 
 ### Holder semantics
 
@@ -650,9 +624,9 @@ ported to Go store tests before the retired lock module is deleted.
 
 ## Signal bus + PR triage (#19)
 
-`POST /v1/signals` enqueues Signal documents through
-[`internal/server/signal_api.go`](internal/server/signal_api.go) and
-[`internal/store/cosmos`](internal/store/cosmos). The Go service drains queued
+`POST /v1/signals` enqueues Signal rows through
+[`internal/server/signal_api.go`](internal/server/signal_api.go) and the
+Postgres store. The Go service drains queued
 signals in-process and exposes `POST /v1/signals/drain` as an admin/manual
 drain endpoint.
 
@@ -689,7 +663,7 @@ These are the original product build phases. The Go-runtime cleanup finished
 the app/runtime retirement of the Python tree; final cleanup notes
 live in [`docs/go-runtime-cleanup-inventory.md`](docs/go-runtime-cleanup-inventory.md).
 
-1. **Phase 1** ✓ — lease primitive, sweep job, Cosmos backend.
+1. **Phase 1** ✓ — lease primitive, sweep job, initial durable backend.
 2. **Phase 2** ✓ — GitHub App webhook receiver, ingress at `glimmung.romaine.life`, Entra ID auth on admin endpoints.
 3. **Phase 3** ✓ — Dashboard with SSE, project side pane, workflow as first-class abstraction, MSAL sign-in + admin panel.
 4. **Phase 2.5** ✓ — Migrate spirelens `issue-agent.yaml` to consume glimmung leases. (Numbered out of order; see [glimmung issue #2](https://github.com/nelsong6/glimmung/issues/2) for the build order that actually happened.)

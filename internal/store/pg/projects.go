@@ -11,36 +11,23 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// ProjectsStore is the Postgres-backed projects + test-lease-defaults
-// store. Replaces cosmos.Store.projects (the `projects` container, which
-// held both per-project rows kind='project' and the singleton settings
-// doc kind='test-lease-defaults') per Stage 2d of docs/postgres-migration.md.
-//
-// Two tables back this store: `projects` (per-project rows, name PK,
-// payload jsonb for the metadata that cosmos kept inline) and
-// `test_lease_defaults` (single-row settings; the cosmos sentinel doc
-// moves into its own table to keep the `projects` table free of
-// discriminator-column tricks).
+// ProjectsStore is the Postgres-backed projects + test-lease-defaults store.
+// Two tables back it: `projects` for per-project rows and
+// `test_lease_defaults` for the singleton global settings row.
 //
 // Read-modify-write helpers for the SetProject* methods take a
 // SERIALIZABLE-equivalent shape via `SELECT ... FOR UPDATE` inside a
-// transaction. That replaces the cosmos read+ReplaceItem pattern which
-// had no CAS protection (the cosmos code didn't use ETag IfMatch on
-// these methods — concurrent writes would race in cosmos too). Postgres
-// row locking gives us strict serialization "for free."
+// transaction. Postgres row locking gives these metadata updates strict
+// serialization.
 type ProjectsStore struct {
 	pool *pgxpool.Pool
 }
 
 // TestLeaseDefaultsSingletonID is the row id under which the global
-// test-lease defaults live. Matches the cosmos sentinel doc id so any
-// operator query that referenced that id by string continues to work.
+// test-lease defaults live.
 const TestLeaseDefaultsSingletonID = "test-lease-defaults"
 
-// ProjectRow is the row shape the cosmos-side migration source emits
-// and that ProjectsStore.Migrate consumes. Closely mirrors the cosmos
-// projectDoc — the `payload` map captures the metadata jsonb (which is
-// what the cosmos doc stored under `metadata`).
+// ProjectRow is the row shape ProjectsStore persists and returns.
 type ProjectRow struct {
 	Name       string
 	GitHubRepo string
@@ -49,8 +36,7 @@ type ProjectRow struct {
 	CreatedAt  time.Time
 }
 
-// TestLeaseDefaultsRow is the singleton row shape Migrate consumes for
-// the global settings.
+// TestLeaseDefaultsRow is the singleton row shape for global settings.
 type TestLeaseDefaultsRow struct {
 	GlobalTTLSeconds     int
 	HotSwapMinTTLSeconds int
@@ -68,7 +54,7 @@ type ProjectRegister struct {
 	Metadata   map[string]any
 }
 
-// ProjectRecord is the canonical return shape. cosmos.Store's
+// ProjectRecord is the canonical return shape. Store's
 // SetProject* wrappers convert this back to server.Project at the
 // call site.
 type ProjectRecord struct {
@@ -86,9 +72,7 @@ func NewProjectsStore(pool *pgxpool.Pool) *ProjectsStore {
 	return &ProjectsStore{pool: pool}
 }
 
-// List returns every per-project row, excluding the singleton settings
-// (which now lives in test_lease_defaults). Ordering is unspecified —
-// matches cosmos.ListProjects.
+// List returns every per-project row. Ordering is unspecified.
 func (s *ProjectsStore) List(ctx context.Context) ([]ProjectRecord, error) {
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("projects store not configured")
@@ -114,8 +98,7 @@ func (s *ProjectsStore) List(ctx context.Context) ([]ProjectRecord, error) {
 	return out, nil
 }
 
-// ListNames returns project names in unspecified order. Equivalent to
-// cosmos.Store.listProjectNames; used by fanOutByProject.
+// ListNames returns project names in unspecified order.
 func (s *ProjectsStore) ListNames(ctx context.Context) ([]string, error) {
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("projects store not configured")
@@ -287,9 +270,9 @@ func (s *ProjectsStore) mutateProject(ctx context.Context, name string, mutate f
 }
 
 // SetTestEnvironmentCount updates metadata.native_standby_dns.count and
-// strips the legacy `slots` array (per the #518 slot-storage rework).
-// The count under metadata.native_standby_workload_identity is mirrored
-// when that nested map exists, matching the cosmos behavior.
+// strips the embedded `slots` array. The count under
+// metadata.native_standby_workload_identity is mirrored when that nested map
+// exists.
 func (s *ProjectsStore) SetTestEnvironmentCount(ctx context.Context, name string, count int) (ProjectRecord, error) {
 	return s.mutateProject(ctx, name, func(metadata map[string]any) error {
 		standbyDNS, _ := metadata["native_standby_dns"].(map[string]any)
@@ -329,8 +312,7 @@ func (s *ProjectsStore) SetManagedAuthOriginStatus(ctx context.Context, name str
 // clears the field (caller-controlled "use global default").
 func (s *ProjectsStore) SetTestLeaseDefaultTTL(ctx context.Context, name string, ttlSeconds *int) (ProjectRecord, error) {
 	return s.mutateProject(ctx, name, func(metadata map[string]any) error {
-		// Drop the legacy camelCase key cosmos historically used; the
-		// snake_case key is the canonical field.
+		// Drop the camelCase key; snake_case is the canonical field.
 		delete(metadata, "testLeaseDefaultTTLSeconds")
 		if ttlSeconds == nil {
 			delete(metadata, "test_lease_default_ttl_seconds")
@@ -355,9 +337,8 @@ func (s *ProjectsStore) SetTestLeaseHotSwapMinTTL(ctx context.Context, name stri
 }
 
 // StripLegacySlotsArray removes metadata.native_standby_dns.slots[].
-// Called by the one-shot slot-storage-rework migration in
-// internal/server/. Idempotent: re-running is harmless.
-// Stage 2i deletes this method along with the slot-storage migration.
+// Called by the one-shot slot-storage cleanup in internal/server/.
+// Idempotent: re-running is harmless.
 func (s *ProjectsStore) StripLegacySlotsArray(ctx context.Context, name string) error {
 	_, err := s.mutateProject(ctx, name, func(metadata map[string]any) error {
 		standbyDNS, _ := metadata["native_standby_dns"].(map[string]any)
@@ -392,8 +373,7 @@ func (s *ProjectsStore) ReadTestLeaseDefaults(ctx context.Context) (TestLeaseDef
 }
 
 // SetGlobalTestLeaseDefaultTTL upserts the singleton row's
-// global_ttl_seconds. nil clears (sets to 0, matching the cosmos
-// "field unset → 0" behavior).
+// global_ttl_seconds. nil clears by setting the value to 0.
 func (s *ProjectsStore) SetGlobalTestLeaseDefaultTTL(ctx context.Context, ttlSeconds *int) (TestLeaseDefaultsRow, error) {
 	value := 0
 	if ttlSeconds != nil {

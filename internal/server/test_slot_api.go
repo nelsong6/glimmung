@@ -928,8 +928,8 @@ func beginTestSlotCleanupWithContext(parent context.Context, store ReadStore, pr
 // activationCancelWait bounds how long beginTestSlotCleanup waits for an
 // in-flight activation goroutine to honor cancellation. activation unwind
 // is dominated by the time it takes the in-flight K8s API call to return
-// ctx.Err() (sub-second) plus a Cosmos read in the post-cancel state-checks
-// (~100ms). 30s is generous; expiry is observable via
+// ctx.Err() plus a store read in the post-cancel state checks. 30s is
+// generous; expiry is observable via
 // glimmung_test_slot_activation_cancelled_total minus the cleanup-completed
 // counter (a delta means an activation didn't unwind cleanly).
 const activationCancelWait = 30 * time.Second
@@ -1105,14 +1105,15 @@ func recoveredSlotStatus(ctx context.Context, store ReadStore, project Project, 
 const recoveryMinAge = 5 * time.Minute
 
 // RecoverInFlightTestSlots is the one-shot startup pass that replaces the old
-// polling reconciler. It walks Cosmos once after the process boots and:
+// polling reconciler. It walks durable slot and lease state once after the
+// process boots and:
 //
 //   - Re-arms TTL expiry timers for every still-claimed test-slot lease,
 //     computing remaining duration from `assigned_at + ttl_seconds`. A lease
 //     whose deadline has already passed fires cleanup immediately.
 //   - Resumes any in-flight `activating` / `cleaning` / `warming` work whose
 //     driving goroutine died with the previous process. The goroutines are
-//     fresh; the durable Cosmos state is what makes the resume meaningful.
+//     fresh; durable slot state is what makes the resume meaningful.
 //   - Fires warmup for slots within `count` that have no `slots[*]` entry
 //     (this is also covered by the PATCH-count handler, but startup is the
 //     other valid moment for the same trigger).

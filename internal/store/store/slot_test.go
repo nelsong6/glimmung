@@ -14,8 +14,7 @@ import (
 // filter the dispatcher uses. It only returns indices whose state is
 // `provisioned` and which fall inside the project's declared 1..count
 // bound. The function exists so the contract is testable without a
-// live Cosmos round trip; the wrapper nativeReadySlots is the
-// Cosmos-backed callsite and is exercised in live_smoke_test.go.
+// database round trip; nativeReadySlots exercises the pg-backed callsite.
 //
 // The bug this fix repairs (PR #518 left nativeReadySlots reading
 // project metadata that #518 stopped populating) means the production
@@ -183,7 +182,7 @@ func TestSlotDocMarshalsCanonicalShape(t *testing.T) {
 	}
 	s := string(payload)
 
-	// Identity fields the cosmos layer needs.
+	// Identity fields the store layer needs.
 	for _, want := range []string{
 		`"id":"tank-operator:5"`,
 		`"project":"tank-operator"`,

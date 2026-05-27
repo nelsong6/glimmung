@@ -10,13 +10,13 @@ are Go plus the Vite dashboard.
 - The production entrypoint is `cmd/glimmung-go`.
 - The active HTTP surface is registered in `internal/server/server.go` and
   guarded by `internal/server/route_inventory_test.go`.
-- The Cosmos persistence boundary is `internal/store/cosmos`.
+- The Postgres persistence boundary is `internal/store/store` backed by
+  `internal/store/pg`.
 - Repo-local workflow operations live in `cmd/glimmung-agent` and
   `internal/ops/agentops`.
 - Root Python packaging is absent.
 - The retired Python app tree under `src/glimmung/` has been deleted.
-- The retired root Python test suite under `tests/` and `tests/cosmos_fake.py`
-  has been deleted.
+- The retired root Python test suite under `tests/` has been deleted.
 
 ## Ported Surfaces
 
@@ -35,18 +35,19 @@ are Go plus the Vite dashboard.
 
 ## Stored Data Notes
 
-The Go store owns these active Cosmos containers:
+The Go store owns these active Postgres tables:
 
-| Container | Data notes |
+| Table | Data notes |
 |---|---|
-| `projects` | Preserve `id`, `name`, `githubRepo`, `metadata`, and `createdAt`; `argocdApp` may still appear on old docs. |
+| `projects` | Preserve `id`, `name`, `githubRepo`, `metadata`, and `createdAt`; `argocdApp` may still appear in old payloads. |
 | `workflows` | Preserve `project`, `name`, `phases`, `pr`, `budget`, `defaultRequirements`, `metadata`, and `createdAt`. |
 | `leases` | Preserve lease numbers, state values, callback-token metadata, requester metadata, test-slot fields, and TTL timestamps. |
 | `runs` | Preserve issue refs, public run-number fields, attempts, verification, phase outputs, callback tokens, lock-holder fields, PR links, and native attempt fields. |
 | `run_events` | Preserve native event sequence fields for runner status/log replay. |
 | `issues` | Preserve project issue numbers, state values, metadata workflow link, comments, and archive/discard timestamps. |
-| `locks` | Preserve `scope`, `key`, `state`, `held_by`, timestamps, and URL-escaped doc IDs. |
-| `reports` | Preserve Touchpoint/Report documents and portfolio element documents currently stored in this container. |
+| `locks` | Preserve `scope`, `key`, `state`, holder, and expiry timestamps. |
+| `reports` | Preserve run report payloads. |
+| `touchpoints` | Preserve current review-surface payloads. |
 | `playbooks` | Preserve Playbook entry state, gates, issue specs, created issue/run refs, and integration strategy fields. |
 | `signals` | Preserve queued and processed signal documents, decisions, and failure reasons. |
 

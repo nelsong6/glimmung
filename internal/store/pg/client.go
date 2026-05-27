@@ -8,12 +8,7 @@
 // (`https://ossrdbms-aad.database.windows.net/.default`). Tokens expire roughly
 // every hour, so connections are recycled before that lifetime so pgx never
 // presents an expired credential. Schema-migration runner lives in this
-// package; per-table stores will be added in subsequent migration stages
-// (see docs/postgres-migration.md).
-//
-// Stage 2a scope: foundation only. This package exists, the pool can be
-// constructed, RunMigrations applies all 12 tables — but no consumer in
-// internal/server/ uses it yet. The runtime still reads/writes Cosmos.
+// package.
 package pg
 
 import (

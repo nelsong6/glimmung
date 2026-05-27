@@ -1,25 +1,16 @@
 # ============================================================================
 # Azure Database for PostgreSQL — Flexible Server
 # ============================================================================
-# Glimmung's durable store, replacing the `glimmung` database on the shared
-# `infra-cosmos-serverless` Cosmos account. Mirrors the tank-operator pattern
-# established in nelsong6/tank-operator#466 — same SKU shape, same AAD-via-UAMI
-# auth model, same break-glass-password-in-KV escape hatch.
-#
-# This file lands first (Stage 1 of docs/postgres-migration.md). The server
-# sits idle — no app connects to it — until the Stage 2 cutover PR swaps
-# `internal/store/cosmos/` for `internal/store/pg/` and deletes db.tf. Landing
-# Stage 1 by itself is independently safe.
+# Glimmung's durable store. Mirrors the tank-operator pattern established in
+# nelsong6/tank-operator#466: same SKU shape, same AAD-via-UAMI auth model,
+# same break-glass-password-in-KV escape hatch.
 #
 # Sized for glimmung's workload: B1ms (1 vCore burstable, 2 GiB RAM), single
 # AZ, no HA tier. With pgxpool MaxConns=6 across ~3 replicas, worst-case
 # concurrent connections sit ~18 — well under B1ms's default max_connections
-# of ~50. Estimated ~$15/mo flat, vs. the Cosmos RU spend on `run_events`
-# alone (see commit f62cd03 "Reduce Cosmos RU usage for native logs").
+# of ~50.
 #
-# pg_cron is preloaded so the Stage 2 migration code can schedule the
-# `run_events` 7-day TTL job that replaces Cosmos's stochastic
-# default_ttl=604800 background sweep with a deterministic daily DELETE.
+# pg_cron is preloaded so the app can schedule the `run_events` 7-day TTL job.
 # ============================================================================
 
 # Break-glass admin password. The glimmung pod never reads this; it
@@ -59,8 +50,7 @@ resource "azurerm_postgresql_flexible_server" "glimmung" {
   # Public endpoint, gated by AAD auth at the data plane and the
   # Azure-internal firewall rule below. VNet integration is a later
   # tightening if private-only access becomes a requirement; for now this
-  # matches tank-operator's Postgres shape and how `infra-cosmos-serverless`
-  # is exposed.
+  # matches tank-operator's Postgres shape.
   public_network_access_enabled = true
 
   authentication {
@@ -106,8 +96,7 @@ resource "azurerm_postgresql_flexible_server_database" "glimmung" {
 }
 
 # Firewall: allow Azure-internal traffic. The 0.0.0.0/0.0.0.0 magic rule
-# is the Flexible-Server equivalent of Cosmos's "allow Azure services" —
-# it whitelists traffic from any Azure resource in any subscription,
+# whitelists traffic from any Azure resource in any subscription,
 # gated by AAD auth at the data plane. AKS outbound flows through the
 # standard LB and reaches this server as Azure-internal.
 resource "azurerm_postgresql_flexible_server_firewall_rule" "allow_azure_internal" {
@@ -127,10 +116,8 @@ resource "azurerm_postgresql_flexible_server_firewall_rule" "allow_azure_interna
 # running there, rather than the postgres maintenance DB where the
 # cron extension installs its schema.
 #
-# Configuring all three here in Stage 1 means the one server restart
-# triggered by `shared_preload_libraries` happens before any app connects.
-# Stage 2 then just runs `CREATE EXTENSION pg_cron;` as part of its
-# RunMigrations step and schedules the run_events TTL job.
+# These settings allow RunMigrations to create pg_cron in the glimmung
+# database and schedule the run_events TTL job.
 
 resource "azurerm_postgresql_flexible_server_configuration" "azure_extensions" {
   name      = "azure.extensions"

@@ -14,10 +14,10 @@ browser memory.
 
 ## Sources Of Truth
 
-- Cosmos `issues` owns the canonical issue row and project-scoped issue number.
-- Cosmos `runs` owns run state, cycle numbering, phase/job/step ledgers,
+- Postgres `issues` owns the canonical issue row and project-scoped issue number.
+- Postgres `runs` owns run state, cycle numbering, phase/job/step ledgers,
   callback metadata, cost, validation URL, abort reason, and terminal state.
-- Cosmos `locks` owns issue and PR mutual exclusion.
+- Postgres `locks` owns issue and PR mutual exclusion.
 - Native job callbacks to `/v1/run-callbacks/{callback_token}/native/completed`
   own job completion input.
 - `docs/workflow-shape.md` owns run/cycle identity, workflow schema snapshots,
@@ -54,7 +54,7 @@ browser memory.
   than creating duplicate active runs.
 - Callback replay is idempotent at the job/cycle boundary.
 - Missing capacity does not launch executor work under an unclaimed lease.
-- A service restart must project existing run state from Cosmos rather than
+- A service restart must project existing run state from Postgres rather than
   losing queued, running, terminal, or callback-waiting state.
 - Terminal paths release issue/PR locks through durable store operations.
 

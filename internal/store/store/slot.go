@@ -12,10 +12,7 @@ import (
 	"github.com/nelsong6/glimmung/internal/server"
 )
 
-// slotDoc is the on-the-wire shape historically stored in the cosmos
-// `slots` container. Retained as the unmarshal target so the prior
-// payload shape (server.Slot wrapped with a cosmos document id)
-// continues to round-trip through pg's jsonb column unchanged.
+// slotDoc is the JSON payload stored in the pg slots table.
 type slotDoc struct {
 	ID string `json:"id"`
 	server.Slot
@@ -106,8 +103,8 @@ func (s *Store) ListSlotsByProject(ctx context.Context, project string) ([]serve
 		if err != nil {
 			return nil, err
 		}
-		// List path intentionally returns slots without an etag —
-		// matches the prior cosmos behavior + the SlotStore contract.
+		// List path intentionally returns slots without an etag, matching the
+		// SlotStore contract.
 		out = append(out, slot.WithETag(""))
 	}
 	return out, nil

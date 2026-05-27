@@ -34,8 +34,8 @@ type fakeLeaseStore struct {
 	// etag tracks the optimistic-concurrency cursor for the project doc.
 	// Bumped on every write; ReadProject captures the current value;
 	// SetProjectTestEnvironmentSlotStatusIfMatch returns ErrPreconditionFailed
-	// when the caller's etag is stale. Lets multi-replica cleanup-claim
-	// races be exercised in unit tests without a real Cosmos.
+	// when the caller's etag is stale. Lets multi-replica cleanup-claim races
+	// be exercised in unit tests without a real database.
 	etag int
 	// slots is the new per-row slot storage backing the SlotStore interface.
 	// Keyed by SlotDocID. Per-slot etag is tracked in slotEtags so
@@ -295,9 +295,8 @@ func (s *fakeLeaseStore) ListSlotHistory(_ context.Context, project string, slot
 // slotStatuses slice that existing tests still inspect. The state name
 // is translated back to the legacy vocabulary (provisioning→warming,
 // provisioned→ready, running→active) so test assertions written before
-// the rename keep passing during the cutover. After Stage 2 is fully
-// landed and tests have been updated to use the new state names, the
-// slotStatuses slice and this translator can be deleted.
+// the rename keep passing. Once those tests assert the SlotStore view
+// directly, the slotStatuses slice and this translator can be deleted.
 func (s *fakeLeaseStore) recordLegacySlotStatusLocked(slot Slot) {
 	// Skip the synthetic "unseeded" creates that show up via
 	// ensureSlotExists — old tests expect the legacy slotStatuses slice
@@ -530,8 +529,8 @@ func (s *fakeLeaseStore) SetProjectTestEnvironmentSlotStatus(_ context.Context, 
 // SetProjectTestEnvironmentSlotStatusIfMatch implements
 // ProjectTestEnvironmentSlotStatusClaimer for the fake. When `ifMatchEtag`
 // is non-empty and disagrees with the store's current etag, returns
-// ErrPreconditionFailed without mutating state — simulating the Cosmos
-// 412 path that makes the multi-replica cleanup-claim race safe.
+// ErrPreconditionFailed without mutating state, simulating the CAS path that
+// makes the multi-replica cleanup-claim race safe.
 func (s *fakeLeaseStore) SetProjectTestEnvironmentSlotStatusIfMatch(_ context.Context, project string, status TestEnvironmentSlotStatus, ifMatchEtag string) (Project, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

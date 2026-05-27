@@ -13,11 +13,11 @@ running, cleaning, and available explicit.
 
 ## Sources Of Truth
 
-- Cosmos `slots` owns per-slot lifecycle state.
-- Cosmos `slot_history` owns slot audit history.
-- Cosmos `projects` owns slot configuration only, such as count, DNS, Helm,
+- Postgres `slots` owns per-slot lifecycle state.
+- Postgres `slot_history` owns slot audit history.
+- Postgres `projects` owns slot configuration only, such as count, DNS, Helm,
   workload identity, and hot-swap metadata.
-- Cosmos `leases` owns active capacity claims and lease TTL.
+- Postgres `leases` owns active capacity claims and lease TTL.
 - Kubernetes owns actual preliminary and lease-scoped resources.
 - `docs/test-slot-lifecycle.md` owns slot terms and lifecycle behavior.
 - `docs/test-slot-hot-swap.md` owns hot-swap metadata shape and apply behavior.

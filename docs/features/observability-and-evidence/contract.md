@@ -65,7 +65,7 @@ half-updated dashboard.
 - Logs and events should include stable project, issue, run, cycle, phase, job,
   step, lease, slot, or workflow identifiers where relevant.
 - Failure classes should distinguish auth, validation, no capacity, callback,
-  Kubernetes, Cosmos, GitHub, and renderer failures when the feature crosses
+  Kubernetes, Postgres, GitHub, and renderer failures when the feature crosses
   those boundaries.
 - Operator dashboards or API responses should expose stale lock, stale run,
   and missing evidence conditions when those states affect user trust.

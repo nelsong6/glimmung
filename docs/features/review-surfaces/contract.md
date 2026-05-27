@@ -12,11 +12,11 @@ RunReports own factual per-run audit state.
 
 ## Sources Of Truth
 
-- Cosmos `issues` owns the work item state.
-- Cosmos `runs` and native events own per-run facts.
-- Cosmos `reports` physically stores Touchpoint state.
-- Cosmos `playbooks` owns ordered multi-issue planning and execution state.
-- Cosmos `signals` owns reviewer feedback and re-entry requests.
+- Postgres `issues` owns the work item state.
+- Postgres `runs` and native events own per-run facts.
+- Postgres `touchpoints` physically stores Touchpoint state.
+- Postgres `playbooks` owns ordered multi-issue planning and execution state.
+- Postgres `signals` owns reviewer feedback and re-entry requests.
 - GitHub PRs are syndication/review targets, not the canonical Glimmung issue
   or run record.
 - `docs/touchpoints-runreports-playbooks.md` owns object boundaries and

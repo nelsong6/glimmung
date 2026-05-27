@@ -21,8 +21,7 @@ type StateStore interface {
 	// currently held. Feeds StateSnapshot.InflightLocks so the SPA can
 	// derive its in-flight pulse from the SSE stream instead of
 	// polling /v1/issues + /v1/touchpoints. scope is the lock kind
-	// ("issue" or "pr") and matches the partition key of the locks
-	// container.
+	// ("issue" or "pr").
 	AnyLockHeld(ctx context.Context, scope string) (bool, error)
 }
 
@@ -41,10 +40,9 @@ type StateSnapshot struct {
 	InflightLocks InflightLocksSummary `json:"inflight_locks"`
 }
 
-// InflightLocksSummary carries the cheapest summary the SPA needs to
-// drive its in-flight indicator. Two single-partition Cosmos queries
-// populate it on every snapshot tick (one per scope), so the cost is
-// bounded.
+// InflightLocksSummary carries the cheapest summary the SPA needs to drive its
+// in-flight indicator. Two indexed lock lookups populate it on every snapshot
+// tick, one per scope.
 type InflightLocksSummary struct {
 	Issues bool `json:"issues"`
 	PRs    bool `json:"prs"`
@@ -241,12 +239,10 @@ func loadStateSnapshot(ctx context.Context, settings Settings, store ReadStore) 
 	if err != nil {
 		return StateSnapshot{}, stateSnapshotError{status: http.StatusInternalServerError, message: "list leases failed"}
 	}
-	// Inflight-lock summary feeds the SPA's nav pulse. A lookup error
-	// here is non-fatal — the SSE stream still delivers the rest of the
-	// snapshot — but it is observable via the per-query Cosmos metrics
-	// shipped in the observability stage. Treat an error as "no locks
-	// held" rather than failing the whole snapshot so a transient
-	// Cosmos hiccup does not blank the dashboard.
+	// Inflight-lock summary feeds the SPA's nav pulse. A lookup error here is
+	// non-fatal: the SSE stream still delivers the rest of the snapshot and
+	// Postgres query metrics expose the failure. Treat an error as "no locks
+	// held" rather than failing the whole snapshot.
 	inflight := InflightLocksSummary{}
 	if held, lerr := stateStore.AnyLockHeld(ctx, "issue"); lerr == nil {
 		inflight.Issues = held
@@ -333,7 +329,7 @@ func leaseToPublicForState(settings Settings, lease Lease) LeasePublic {
 	return public
 }
 
-// LeasePublicRefFromLease is the exported wrapper used by the cosmos store.
+// LeasePublicRefFromLease is the exported wrapper used by store adapters.
 func LeasePublicRefFromLease(lease Lease) string {
 	return leasePublicRef(lease)
 }
@@ -628,8 +624,8 @@ func projectTestSlotCount(_ Settings, project Project) int {
 // The legacy slot-status readers (testEnvironmentSlot* and the supporting
 // pointer/history helpers) that used to walk
 // project.metadata.native_standby_dns.slots have been removed. The
-// slot-storage rework (PR #518) split slot state into its own Cosmos
-// collection and the boot migration strips the embedded array.
+// slot-storage rework split slot state into its own table and the boot
+// migration strips the embedded array.
 // Production reads go through SlotStore.GetSlot / ListSlotsByProject;
 // legacy test fixtures are bridged into the new collection by the
 // fake's ListSlotsByProject.

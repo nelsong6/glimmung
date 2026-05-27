@@ -11,8 +11,8 @@ import (
 // the "Slot Status Field Contract" section of docs/test-slot-lifecycle.md).
 //
 // These names are part of the durable contract: they appear verbatim in
-// Cosmos documents and in the public state API. Renaming requires a
-// migration of every persisted doc. The retired names `warming`, `ready`,
+// Postgres payloads and in the public state API. Renaming requires a
+// migration of every persisted row. The retired names `warming`, `ready`,
 // `active` map to `provisioning`, `provisioned`, `running` respectively
 // per docs/test-slot-storage-rework.md.
 const (
@@ -39,14 +39,12 @@ var SlotStates = []string{
 }
 
 // Slot is the durable record for one capacity unit of one project. One
-// Cosmos document per slot, partition key = project, document id =
-// "<project>:<slot_index>".
+// Postgres row exists per (project, slot_index).
 //
 // The lease record (if any) referenced by ActiveLeaseRef lives in the
-// separate `leases` collection. Slot history (returns, lease churn) lives
-// in the `slot_history` collection. The slot doc itself is small and
-// per-row writable; cross-slot writes don't contend because each slot is
-// its own document.
+// separate `leases` table. Slot history (returns, lease churn) lives in the
+// `slot_history` table. The slot row itself is small and per-row writable;
+// cross-slot writes don't contend because each slot is its own row.
 type Slot struct {
 	Project        string     `json:"project"`
 	SlotIndex      int        `json:"slot_index"`
@@ -73,15 +71,14 @@ type Slot struct {
 	CleanupCompletedAt *time.Time `json:"cleanup_completed_at,omitempty"`
 	CleanupError       *string    `json:"cleanup_error,omitempty"`
 
-	// etag captures the Cosmos resource etag on this document. Empty when
-	// the slot came from a list query that doesn't expose per-row etags.
-	// Use SlotStore.UpdateIfMatch to perform CAS writes keyed on this.
+	// etag captures the store-provided CAS token on this row. Empty when the
+	// slot came from a list query that doesn't expose per-row etags. Use
+	// SlotStore.UpdateIfMatch to perform CAS writes keyed on this.
 	etag string `json:"-"`
 }
 
-// ETag returns the Cosmos resource etag captured by the read that produced
-// this Slot. Pass to SlotStore.UpdateIfMatch for optimistic-concurrency
-// writes.
+// ETag returns the store-provided CAS token captured by the read that produced
+// this Slot. Pass to SlotStore.UpdateIfMatch for optimistic-concurrency writes.
 func (s Slot) ETag() string { return s.etag }
 
 // WithETag returns a copy of s with `tag` as its captured etag. Used by
@@ -89,11 +86,11 @@ func (s Slot) ETag() string { return s.etag }
 // construct slots with synthetic etags.
 func (s Slot) WithETag(tag string) Slot { s.etag = tag; return s }
 
-// DocID returns the Cosmos document id for this slot.
+// DocID returns the stable JSON payload id for this slot.
 func (s Slot) DocID() string { return SlotDocID(s.Project, s.SlotIndex) }
 
-// SlotDocID is the canonical id format for a slot document. Project and
-// slot_index together are globally unique inside the slots collection.
+// SlotDocID is the canonical id format embedded in the slot payload. Project
+// and slot_index together are globally unique inside the slots table.
 func SlotDocID(project string, slotIndex int) string {
 	return fmt.Sprintf("%s:%d", project, slotIndex)
 }

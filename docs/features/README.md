@@ -31,7 +31,7 @@ depending on the risk.
 
 Add or expand a feature contract when a feature:
 
-- can show state that contradicts Cosmos, Kubernetes, GitHub, or callback
+- can show state that contradicts Postgres, Kubernetes, GitHub, or callback
   state;
 - crosses browser, MCP, workflow runner, database, Kubernetes, or GitHub
   boundaries;

@@ -124,10 +124,10 @@ Current ReportVersion -> TouchpointVersion, if versions remain useful
 New RunReport -> per-Run factual execution report
 ```
 
-Live API and frontend surfaces use Touchpoint and RunReport terminology. The
-Cosmos `reports` container remains the physical Touchpoint storage container;
-do not add Report-named routes, UI controls, runtime reads, aliases, or tests
-for terminology cleanup.
+Live API and frontend surfaces use Touchpoint and RunReport terminology.
+Postgres `touchpoints` is the physical Touchpoint storage table; do not add
+Report-named routes, UI controls, runtime reads, aliases, or tests for
+terminology cleanup.
 
 ## Playbooks And Touchpoints
 

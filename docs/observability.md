@@ -56,7 +56,7 @@ fully observable via `glimmung_decisions_total`.
 |---|---|---|---|
 | `glimmung_leases_acquired_total` | counter | `purpose`, `outcome` | `purpose` is one of: `dispatch`, `test_slot_checkout`. `outcome` is `granted`, `conflict`, or `error`. |
 | `glimmung_leases_released_total` | counter | `purpose`, `outcome` | `outcome` is `cancelled` (admin), `expired` (TTL fired), or `completed` (consumer release). |
-| `glimmung_leases_held` | gauge | `purpose` | Approximate. In-process delta of acquire/release; authoritative state lives in Cosmos. Per-purpose breakdown can drift because release sites do not always know the original acquire purpose; the total across purposes is correct. |
+| `glimmung_leases_held` | gauge | `purpose` | Approximate. In-process delta of acquire/release; authoritative state lives in Postgres. Per-purpose breakdown can drift because release sites do not always know the original acquire purpose; the total across purposes is correct. |
 | `glimmung_lease_acquire_wait_seconds` | histogram | `purpose`, `outcome` | Exponential buckets from 10ms to ~40s. |
 
 ### Hot-swap
