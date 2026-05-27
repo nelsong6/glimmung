@@ -735,7 +735,7 @@ export function IssueDetailView() {
 
 function IssueHeader({ detail, heading }: { detail: IssueDetail; heading: string }) {
   return (
-    <section className="project-hero">
+    <section className="project-hero issue-hero">
       <div className="project-hero-main">
         <div className="project-kicker mono">issue</div>
         <div className="issue-title-row">
@@ -750,28 +750,6 @@ function IssueHeader({ detail, heading }: { detail: IssueDetail; heading: string
           )}
         </div>
         <div className="project-repo mono">{heading}</div>
-      </div>
-      <div className="project-facts">
-        <div className="project-fact">
-          <span>project</span>
-          <strong>{detail.project}</strong>
-        </div>
-        <div className="project-fact">
-          <span>state</span>
-          <strong>{detail.state}</strong>
-        </div>
-        <div className="project-fact">
-          <span>labels</span>
-          <strong>{detail.labels.length}</strong>
-        </div>
-        <div className="project-fact">
-          <span>last cycle</span>
-          <strong>
-            {detail.last_run_number !== null
-              ? `cycle ${detail.last_run_number}`
-              : detail.last_run_state ?? "none"}
-          </strong>
-        </div>
       </div>
     </section>
   );
@@ -805,16 +783,24 @@ function IssueControlPlaneSummary({
   const pendingSignal = signals.find((signal) => signal.state === "pending" || signal.state === "processing") ?? null;
   const nextAction = projection?.next_action;
   const phaseSummary = run ? projectionPhaseSummary(run) : "no phases";
-  const jobCount = run?.phases.reduce((sum, phase) => sum + phase.jobs.length, 0) ?? 0;
-  const stepCount = run?.phases.reduce(
-    (sum, phase) => sum + phase.jobs.reduce((jobSum, job) => jobSum + job.steps.length, 0),
-    0,
-  ) ?? 0;
+  const runCount = projection?.runs.length ?? 0;
 
   if (!projection || !run) {
     return (
       <section className="issue-control-plane">
-        <div className="project-info">
+        <div className="project-info issue-control-grid" aria-label="issue run rollup">
+          <div className="row">
+            <span className="key">state</span>
+            <span className="val mono">{detail.state}</span>
+          </div>
+          <div className="row">
+            <span className="key">runs</span>
+            <span className="val mono">{runCount}</span>
+          </div>
+          <div className="row">
+            <span className="key">cost</span>
+            <span className="val mono">—</span>
+          </div>
           <div className="row">
             <span className="key">current</span>
             <span className="val mono">{detail.last_run_state ?? "no run"}</span>
@@ -830,29 +816,19 @@ function IssueControlPlaneSummary({
 
   return (
     <section className="issue-control-plane">
-      <div className="kpi-strip issue-kpis" aria-label="issue run rollup">
-        <div className="kpi">
-          <span className="k">runs</span>
-          <span className="v">{projection.runs.length}</span>
+      <div className="project-info issue-control-grid" aria-label="issue run rollup">
+        <div className="row">
+          <span className="key">state</span>
+          <span className="val mono">{detail.state}</span>
         </div>
-        <div className="kpi">
-          <span className="k">phases</span>
-          <span className="v">{run.phases.length}</span>
+        <div className="row">
+          <span className="key">runs</span>
+          <span className="val mono">{runCount}</span>
         </div>
-        <div className="kpi">
-          <span className="k">jobs</span>
-          <span className="v">{jobCount}</span>
+        <div className="row">
+          <span className="key">cost</span>
+          <span className="val mono">{Number.isFinite(run.cost_usd) ? `$${run.cost_usd.toFixed(2)}` : "—"}</span>
         </div>
-        <div className="kpi">
-          <span className="k">steps</span>
-          <span className="v">{stepCount}</span>
-        </div>
-        <div className="kpi">
-          <span className="k">cost</span>
-          <span className="v">${run.cost_usd.toFixed(2)}</span>
-        </div>
-      </div>
-      <div className="project-info issue-control-grid">
         <div className="row">
           <span className="key">current</span>
           <span className="val">

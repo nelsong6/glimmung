@@ -208,6 +208,7 @@ describe("IssueDetailView run execution graph", () => {
     expect(within(labels).getByText("ambient-effects")).toBeInTheDocument();
     expect(within(labels).getByText("in flight")).toBeInTheDocument();
     expect(document.querySelector(".project-hero > .dag-policy-rail")).not.toBeInTheDocument();
+    expect(document.querySelector(".issue-hero .project-facts")).not.toBeInTheDocument();
   });
 
   it("shows run history as flat run counts, base cycle values, and run-cycle ordinals", async () => {
@@ -420,7 +421,11 @@ describe("IssueDetailView run execution graph", () => {
     renderIssueDetail("/projects/ambience/issues/172/runs/7/cycles/1");
 
     const rollup = await screen.findByLabelText("issue run rollup");
+    expect(within(rollup).getByText("state")).toBeInTheDocument();
+    expect(within(rollup).getByText("runs")).toBeInTheDocument();
     expect(within(rollup).getByText("$13.95")).toBeInTheDocument();
+    expect(within(rollup).queryByText("jobs")).not.toBeInTheDocument();
+    expect(within(rollup).queryByText("steps")).not.toBeInTheDocument();
   });
 
   it("opens planned steps for a job before any attempt has started", async () => {
