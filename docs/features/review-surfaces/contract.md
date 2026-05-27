@@ -37,7 +37,8 @@ RunReports own factual per-run audit state.
 
 - A Touchpoint summarizes the current decision surface for exactly one Issue.
 - A RunReport reports facts for exactly one Run: attempts, cost, validation
-  URL, screenshots, abort reason, terminal status, and evidence.
+  URL, typed evidence, abort reason, terminal status, and evidence
+  requirements.
 - Reviewer feedback enters as signals and re-enters the run loop through
   durable issue/run state.
 - Merged Touchpoints close their Issue in the normal isolated-PR case.
@@ -60,8 +61,8 @@ RunReports own factual per-run audit state.
   for an operator to distinguish missing evidence, failed syndication, queued
   feedback, and failed rerun.
 - PR body generation should name issue/run refs and the Glimmung Touchpoint.
-  Review evidence, including screenshots, is stored and rendered by Glimmung
-  rather than copied into the GitHub PR body.
+  Review evidence, including WebM videos and screenshots, is stored and
+  rendered by Glimmung rather than copied into the GitHub PR body.
 - Signal drain logs should identify target repo/ref, source, kind, and outcome.
 
 ## Acceptance Checks

@@ -63,6 +63,12 @@ rejected before they can become the project runtime contract. Registrations with
 multiple entry phases, fan-in/fan-out phase dependencies, invalid cross-phase
 input refs, duplicate phase names, or duplicate job IDs are rejected too.
 
+Evidence requirements are snapshotted onto the Run at dispatch time. Workflow
+`default_requirements.required_evidence` and operator labels such as
+`evidence:video` or `evidence:animation` are inputs to that snapshot, but the
+stored Run requirements are the source of truth after dispatch. Later label
+edits do not change an in-flight evidence contract.
+
 Blank phase `kind` values default to `k8s_job`. Registered workflow phases must
 use `k8s_job`; any other executor kind is rejected before dispatch.
 
@@ -183,10 +189,12 @@ It is idempotent and uses the durable Run state as source of truth: it creates
 or reuses the GitHub PR, records `run.pr_number`, and ensures the Touchpoint
 linked to the Issue and Run. During that same call, Glimmung promotes review
 facts such as `validation_url` into canonical Run fields, normalizes run
-artifact evidence into Touchpoint evidence, and validates required screenshot
-artifacts before the Touchpoint is ready. GitHub PR bodies stay a syndicated
-pointer into Glimmung; screenshots and other review evidence belong on the
-Glimmung Touchpoint. Operators should use this endpoint when a Run already
+artifact evidence into Touchpoint evidence, and validates required typed
+evidence artifacts before the Touchpoint is ready. For browser-visible changes,
+WebM video is the baseline evidence kind; screenshots are supplemental
+final-state or thumbnail evidence. GitHub PR bodies stay a syndicated
+pointer into Glimmung; video, screenshots, and other review evidence belong on
+the Glimmung Touchpoint. Operators should use this endpoint when a Run already
 passed verification but an older or interrupted workflow did not materialize
 the review surface.
 

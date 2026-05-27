@@ -67,7 +67,7 @@ Touchpoint is the issue-level live summary and navigation page: what the
 human needs to inspect, approve, reject, or discuss now. Touchpoints are
 strictly one-to-one with Issues; repeated Runs, cycles, and PR
 updates revise the same Touchpoint rather than creating additional
-Touchpoints. A GitHub PR, validation URL, screenshots, generated design
+Touchpoints. A GitHub PR, validation URL, WebM videos, screenshots, generated design
 portfolio rows, logs, or artifacts can be linked from the Touchpoint as
 current evidence, but anything that must be retained per Run belongs in the
 Run and RunReport UI.
@@ -212,6 +212,7 @@ Azure DevOps:
 | ✓ checkout           | $ npm run build                           |
 | ✓ install            | ...                                       |
 | ▶ build              | error TS...                               |
+| · video              |                                           |
 | · screenshot         |                                           |
 +----------------------+-------------------------------------------+
 ```
@@ -270,6 +271,7 @@ should link to evidence and decision surfaces, while the Touchpoint
 should aggregate the things that need human attention:
 
 - validation URL,
+- WebM videos,
 - screenshots,
 - changed files or PR,
 - generated artifacts,

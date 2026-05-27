@@ -27,15 +27,16 @@ GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/report
 ```
 
 It is derived from the Run document and includes attempt summaries,
-cumulative cost, validation URL, screenshot markdown, abort reason, and the
-terminal timestamp when present.
+cumulative cost, validation URL, typed evidence, screenshot markdown kept only
+as migrated display content, abort reason, and the terminal timestamp when
+present.
 
 A RunReport may eventually include:
 
 - wall time and phase durations
 - total cost and per-phase or per-step cost
 - verification result
-- screenshots, artifacts, and validation URL
+- WebM videos, screenshots, artifacts, and validation URL
 - logs or native step summaries
 - decision outcome
 - abort or failure reason
@@ -95,6 +96,7 @@ The Touchpoint should behave like a compact checklist/dashboard and navigation
 hub for the current Issue decision. It may show:
 
 - validation URL
+- WebM videos
 - screenshots
 - changed files or PR-equivalent link
 - generated artifacts

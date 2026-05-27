@@ -22,6 +22,7 @@ type CompletionPayload struct {
 	VerificationStatus  string
 	VerificationReasons []string
 	EvidenceRefs        []string
+	Evidence            []EvidenceArtifact
 	CostUSD             float64
 	SummaryMarkdown     *string
 	ScreenshotsMarkdown *string
@@ -62,14 +63,15 @@ type NativeJobCompletionStore interface {
 
 // NativeRunCompletedRequest is the body for POST /run-callbacks/{token}/native/completed.
 type NativeRunCompletedRequest struct {
-	JobID               *string           `json:"job_id"`
-	Conclusion          string            `json:"conclusion"`
-	AttemptIndex        *int              `json:"attempt_index,omitempty"`
-	CostUSD             float64           `json:"cost_usd,omitempty"`
-	Verification        map[string]any    `json:"verification"`
-	ScreenshotsMarkdown *string           `json:"screenshots_markdown"`
-	SummaryMarkdown     *string           `json:"summary_markdown"`
-	Outputs             map[string]string `json:"outputs"`
+	JobID               *string            `json:"job_id"`
+	Conclusion          string             `json:"conclusion"`
+	AttemptIndex        *int               `json:"attempt_index,omitempty"`
+	CostUSD             float64            `json:"cost_usd,omitempty"`
+	Verification        map[string]any     `json:"verification"`
+	Evidence            []EvidenceArtifact `json:"evidence,omitempty"`
+	ScreenshotsMarkdown *string            `json:"screenshots_markdown"`
+	SummaryMarkdown     *string            `json:"summary_markdown"`
+	Outputs             map[string]string  `json:"outputs"`
 }
 
 // nativeRunCompletedByCallbackToken handles POST /v1/run-callbacks/{callback_token}/native/completed.
@@ -171,6 +173,8 @@ func completionPayloadFromNative(req NativeRunCompletedRequest) CompletionPayloa
 		PhaseOutputs:        req.Outputs,
 	}
 	extractVerification(req.Verification, &p)
+	p.Evidence = append(p.Evidence, req.Evidence...)
+	p.EvidenceRefs = appendMissingStrings(p.EvidenceRefs, EvidenceRefsFromArtifacts(req.Evidence)...)
 	return p
 }
 
@@ -192,6 +196,8 @@ func extractVerification(raw map[string]any, p *CompletionPayload) {
 		}
 	}
 	p.EvidenceRefs = stringSliceFromVerification(raw["evidence_refs"])
+	p.Evidence = EvidenceArtifactsFromVerificationPayload(raw)
+	p.EvidenceRefs = appendMissingStrings(p.EvidenceRefs, EvidenceRefsFromArtifacts(p.Evidence)...)
 }
 
 func stringSliceFromVerification(raw any) []string {
@@ -826,6 +832,7 @@ func dispatchRetry(
 		TargetPhaseName:      targetPhase.Name,
 		CarryForwardAttempts: carryForwardAttempts,
 		TriggerSource:        map[string]any{"kind": "recycle_policy", "recycled_from_run_id": run.ID, "failing_phase": failingPhase},
+		EvidenceRequirements: run.EvidenceRequirements,
 	})
 	if err != nil {
 		return fmt.Errorf("create recycle cycle: %w", err)
@@ -846,22 +853,23 @@ func dispatchRetry(
 		return fmt.Errorf("start recycle cycle: %w", err)
 	}
 	recycleRun := RunReplayData{
-		ID:                recycle.ID,
-		Project:           run.Project,
-		WorkflowName:      run.WorkflowName,
-		WorkflowSchemaRef: wf.SchemaRef,
-		CumulativeCostUSD: run.CumulativeCostUSD,
-		Budget:            run.Budget,
-		IssueNumber:       run.IssueNumber,
-		RunNumber:         &recycle.RunNumber,
-		CycleNumber:       &recycle.CycleNumber,
-		RunCycleNumber:    &recycle.RunCycle,
-		RunDisplayNumber:  &recycle.RunDisplay,
-		IssueRepo:         run.IssueRepo,
-		CallbackToken:     &recycle.CallbackToken,
-		IssueLockHolderID: run.IssueLockHolderID,
-		SlotLeaseRef:      &leaseRef,
-		EntrypointPhase:   &targetPhase.Name,
+		ID:                   recycle.ID,
+		Project:              run.Project,
+		WorkflowName:         run.WorkflowName,
+		WorkflowSchemaRef:    wf.SchemaRef,
+		CumulativeCostUSD:    run.CumulativeCostUSD,
+		Budget:               run.Budget,
+		IssueNumber:          run.IssueNumber,
+		RunNumber:            &recycle.RunNumber,
+		CycleNumber:          &recycle.CycleNumber,
+		RunCycleNumber:       &recycle.RunCycle,
+		RunDisplayNumber:     &recycle.RunDisplay,
+		IssueRepo:            run.IssueRepo,
+		CallbackToken:        &recycle.CallbackToken,
+		IssueLockHolderID:    run.IssueLockHolderID,
+		SlotLeaseRef:         &leaseRef,
+		EntrypointPhase:      &targetPhase.Name,
+		EvidenceRequirements: run.EvidenceRequirements,
 		Attempts: append(append([]RunAttemptData{}, recycle.CarryForwardAttempts...), RunAttemptData{
 			AttemptIndex: newAttemptIdx,
 			Phase:        targetPhase.Name,

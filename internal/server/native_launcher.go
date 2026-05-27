@@ -1210,6 +1210,11 @@ func nativeJobEnv(settings Settings, req NativeLaunchRequest, job NativeJobSpec,
 			env = appendLiteralEnv(env, seen, "GLIMMUNG_INPUT_"+envName(key), fmt.Sprint(phaseInputs[key]))
 		}
 	}
+	if rawRequirements := metadata["evidence_requirements"]; rawRequirements != nil {
+		if payload, err := json.Marshal(rawRequirements); err == nil && string(payload) != "null" {
+			env = appendLiteralEnv(env, seen, "GLIMMUNG_EVIDENCE_REQUIREMENTS_JSON", string(payload))
+		}
+	}
 	if settings.NativeRunnerPlaywrightEnabled {
 		if slotName, ok := metadata["native_slot_name"].(string); ok && slotName != "" {
 			endpoint := fmt.Sprintf("ws://%s.%s.svc.cluster.local:%s", playwrightResourceName(req.Lease.Project, slotName), slotName, settings.NativeRunnerPlaywrightPort)

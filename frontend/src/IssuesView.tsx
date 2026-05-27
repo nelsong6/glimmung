@@ -4,8 +4,8 @@
  * label round-trip required). Sources data live from `/v1/issues` per
  * mount; dispatch goes through `/v1/runs/dispatch`.
  *
- * Per #20: labels are *informational only* — surfaced as a row badge but
- * not used to gate dispatch. The dispatch button on each row is the
+ * Labels are surfaced as row badges and may contribute durable evidence
+ * requirements during dispatch. The dispatch button on each row is the
  * primitive trigger.
  *
  * Clicking an issue title navigates to the project-scoped Glimmung issue

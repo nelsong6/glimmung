@@ -299,6 +299,29 @@ func TestDispatchRunDispatchedNativeK8sJob(t *testing.T) {
 	}
 }
 
+func TestDispatchRunSnapshotsVideoEvidenceRequirementFromIssueLabel(t *testing.T) {
+	store := minimalDispatchStore()
+	store.issue.Labels = []string{"evidence:video"}
+	launcher := &fakeNativeLauncher{}
+	rec := httptest.NewRecorder()
+	newDispatchTestHandler(store, launcher).ServeHTTP(rec, dispatchRequest("proj", 1))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.runReq == nil || len(store.runReq.EvidenceRequirements) != 1 {
+		t.Fatalf("run request=%#v", store.runReq)
+	}
+	if store.runReq.EvidenceRequirements[0].Kind != "video" {
+		t.Fatalf("evidence requirements=%#v", store.runReq.EvidenceRequirements)
+	}
+	if store.leaseReq == nil || store.leaseReq.Metadata["evidence_requirements"] == nil {
+		t.Fatalf("lease metadata=%#v", store.leaseReq)
+	}
+	if len(launcher.req.Run.EvidenceRequirements) != 1 || launcher.req.Run.EvidenceRequirements[0].Kind != "video" {
+		t.Fatalf("launch run=%#v", launcher.req.Run)
+	}
+}
+
 func TestDispatchRunLaunchUsesPostCommitContext(t *testing.T) {
 	store := minimalDispatchStore()
 	launcher := &fakeNativeLauncher{}

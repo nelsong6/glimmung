@@ -1228,37 +1228,38 @@ type leaseDoc struct {
 }
 
 type runDoc struct {
-	ID                  string              `json:"id"`
-	Project             string              `json:"project"`
-	Workflow            string              `json:"workflow"`
-	WorkflowSchemaRef   string              `json:"workflow_schema_ref,omitempty"`
-	RunNumber           *int                `json:"run_number"`
-	RunCycleNumber      *int                `json:"run_cycle_number,omitempty"`
-	RunDisplayNumber    *string             `json:"run_display_number"`
-	ParentRunID         *string             `json:"parent_run_id"`
-	RootRunID           *string             `json:"root_run_id"`
-	OriginKind          *string             `json:"origin_kind"`
-	IsCycle             bool                `json:"is_cycle"`
-	CycleNumber         *int                `json:"cycle_number"`
-	IssueID             string              `json:"issue_id"`
-	IssueRepo           string              `json:"issue_repo"`
-	IssueNumber         int                 `json:"issue_number"`
-	PRNumber            *int                `json:"pr_number"`
-	State               string              `json:"state"`
-	QueueState          *string             `json:"queue_state,omitempty"`
-	AdmissionError      *string             `json:"admission_error,omitempty"`
-	SlotLeaseRef        *string             `json:"slot_lease_ref,omitempty"`
-	Attempts            []attemptDoc        `json:"attempts"`
-	PhaseExecutions     []phaseExecutionDoc `json:"phase_executions,omitempty"`
-	CumulativeCostUSD   float64             `json:"cumulative_cost_usd"`
-	Budget              *budgetDoc          `json:"budget,omitempty"`
-	ValidationURL       *string             `json:"validation_url"`
-	ScreenshotsMarkdown *string             `json:"screenshots_markdown"`
-	AbortReason         *string             `json:"abort_reason"`
-	EntrypointPhase     *string             `json:"entrypoint_phase,omitempty"`
-	TriggerSource       map[string]any      `json:"trigger_source"`
-	CreatedAt           string              `json:"created_at"`
-	UpdatedAt           string              `json:"updated_at"`
+	ID                   string                       `json:"id"`
+	Project              string                       `json:"project"`
+	Workflow             string                       `json:"workflow"`
+	WorkflowSchemaRef    string                       `json:"workflow_schema_ref,omitempty"`
+	RunNumber            *int                         `json:"run_number"`
+	RunCycleNumber       *int                         `json:"run_cycle_number,omitempty"`
+	RunDisplayNumber     *string                      `json:"run_display_number"`
+	ParentRunID          *string                      `json:"parent_run_id"`
+	RootRunID            *string                      `json:"root_run_id"`
+	OriginKind           *string                      `json:"origin_kind"`
+	IsCycle              bool                         `json:"is_cycle"`
+	CycleNumber          *int                         `json:"cycle_number"`
+	IssueID              string                       `json:"issue_id"`
+	IssueRepo            string                       `json:"issue_repo"`
+	IssueNumber          int                          `json:"issue_number"`
+	PRNumber             *int                         `json:"pr_number"`
+	State                string                       `json:"state"`
+	QueueState           *string                      `json:"queue_state,omitempty"`
+	AdmissionError       *string                      `json:"admission_error,omitempty"`
+	SlotLeaseRef         *string                      `json:"slot_lease_ref,omitempty"`
+	Attempts             []attemptDoc                 `json:"attempts"`
+	PhaseExecutions      []phaseExecutionDoc          `json:"phase_executions,omitempty"`
+	CumulativeCostUSD    float64                      `json:"cumulative_cost_usd"`
+	Budget               *budgetDoc                   `json:"budget,omitempty"`
+	ValidationURL        *string                      `json:"validation_url"`
+	ScreenshotsMarkdown  *string                      `json:"screenshots_markdown"`
+	EvidenceRequirements []server.EvidenceRequirement `json:"evidence_requirements,omitempty"`
+	AbortReason          *string                      `json:"abort_reason"`
+	EntrypointPhase      *string                      `json:"entrypoint_phase,omitempty"`
+	TriggerSource        map[string]any               `json:"trigger_source"`
+	CreatedAt            string                       `json:"created_at"`
+	UpdatedAt            string                       `json:"updated_at"`
 	// Fields used by mutation operations.
 	CallbackToken     *string `json:"callback_token,omitempty"`
 	IssueLockHolderID *string `json:"issue_lock_holder_id,omitempty"`
@@ -1389,10 +1390,11 @@ type nativeEventDoc struct {
 }
 
 type verificationDoc struct {
-	Status       string   `json:"status"`
-	Reasons      []string `json:"reasons"`
-	EvidenceRefs []string `json:"evidence_refs"`
-	CostUSD      float64  `json:"cost_usd"`
+	Status       string                    `json:"status"`
+	Reasons      []string                  `json:"reasons"`
+	EvidenceRefs []string                  `json:"evidence_refs"`
+	Evidence     []server.EvidenceArtifact `json:"evidence,omitempty"`
+	CostUSD      float64                   `json:"cost_usd"`
 }
 
 type phaseDoc struct {
@@ -1723,40 +1725,41 @@ func runReportFromDoc(doc runDoc, lineageByID map[string]string) server.RunRepor
 		}
 	}
 	return server.RunReport{
-		ID:                  doc.ID,
-		Ref:                 runRef + "/report",
-		Project:             doc.Project,
-		RunRef:              runRef,
-		RunNumber:           doc.RunNumber,
-		RunDisplayNumber:    optionalNonEmptyStringPtr(display),
-		ParentRunRef:        refPtr(lineageByID, parentID),
-		RootRunRef:          refPtr(lineageByID, rootID),
-		OriginKind:          emptyStringNil(originKind),
-		EntrypointPhase:     emptyStringNil(doc.EntrypointPhase),
-		TriggerSource:       mapOrEmpty(doc.TriggerSource),
-		IsCycle:             doc.IsCycle,
-		CycleNumber:         doc.CycleNumber,
-		RunCycleNumber:      doc.RunCycleNumber,
-		WorkflowSchemaRef:   doc.WorkflowSchemaRef,
-		QueueState:          emptyStringNil(doc.QueueState),
-		AdmissionError:      emptyStringNil(doc.AdmissionError),
-		SlotLeaseRef:        emptyStringNil(doc.SlotLeaseRef),
-		Workflow:            doc.Workflow,
-		IssueRef:            optionalNonEmptyStringPtr(publicids.IssueRef(doc.Project, positiveIssueNumberPtr(doc.IssueNumber))),
-		IssueRepo:           optionalNonEmptyStringPtr(doc.IssueRepo),
-		IssueNumber:         positiveIssueNumberPtr(doc.IssueNumber),
-		State:               firstNonEmpty(doc.State, "in_progress"),
-		CurrentPhase:        currentPhase,
-		AttemptsCount:       len(doc.Attempts),
-		PhaseExecutions:     runPhaseExecutionsFromDocs(doc.PhaseExecutions),
-		CumulativeCostUSD:   doc.CumulativeCostUSD,
-		ValidationURL:       emptyStringNil(doc.ValidationURL),
-		ScreenshotsMarkdown: emptyStringNil(doc.ScreenshotsMarkdown),
-		AbortReason:         emptyStringNil(doc.AbortReason),
-		StartedAt:           parseTimeOrNow(doc.CreatedAt),
-		CompletedAt:         completed,
-		UpdatedAt:           parseTimeOrNow(doc.UpdatedAt),
-		Attempts:            attempts,
+		ID:                   doc.ID,
+		Ref:                  runRef + "/report",
+		Project:              doc.Project,
+		RunRef:               runRef,
+		RunNumber:            doc.RunNumber,
+		RunDisplayNumber:     optionalNonEmptyStringPtr(display),
+		ParentRunRef:         refPtr(lineageByID, parentID),
+		RootRunRef:           refPtr(lineageByID, rootID),
+		OriginKind:           emptyStringNil(originKind),
+		EntrypointPhase:      emptyStringNil(doc.EntrypointPhase),
+		TriggerSource:        mapOrEmpty(doc.TriggerSource),
+		IsCycle:              doc.IsCycle,
+		CycleNumber:          doc.CycleNumber,
+		RunCycleNumber:       doc.RunCycleNumber,
+		WorkflowSchemaRef:    doc.WorkflowSchemaRef,
+		QueueState:           emptyStringNil(doc.QueueState),
+		AdmissionError:       emptyStringNil(doc.AdmissionError),
+		SlotLeaseRef:         emptyStringNil(doc.SlotLeaseRef),
+		Workflow:             doc.Workflow,
+		IssueRef:             optionalNonEmptyStringPtr(publicids.IssueRef(doc.Project, positiveIssueNumberPtr(doc.IssueNumber))),
+		IssueRepo:            optionalNonEmptyStringPtr(doc.IssueRepo),
+		IssueNumber:          positiveIssueNumberPtr(doc.IssueNumber),
+		State:                firstNonEmpty(doc.State, "in_progress"),
+		CurrentPhase:         currentPhase,
+		AttemptsCount:        len(doc.Attempts),
+		PhaseExecutions:      runPhaseExecutionsFromDocs(doc.PhaseExecutions),
+		CumulativeCostUSD:    doc.CumulativeCostUSD,
+		ValidationURL:        emptyStringNil(doc.ValidationURL),
+		ScreenshotsMarkdown:  emptyStringNil(doc.ScreenshotsMarkdown),
+		EvidenceRequirements: sliceOrEmpty(doc.EvidenceRequirements),
+		AbortReason:          emptyStringNil(doc.AbortReason),
+		StartedAt:            parseTimeOrNow(doc.CreatedAt),
+		CompletedAt:          completed,
+		UpdatedAt:            parseTimeOrNow(doc.UpdatedAt),
+		Attempts:             attempts,
 	}
 }
 
@@ -1813,11 +1816,13 @@ func runReportAttemptFromDoc(doc attemptDoc, lineageByID map[string]string) serv
 	if doc.Verification != nil {
 		verificationStatus = optionalNonEmptyStringPtr(doc.Verification.Status)
 		evidenceRefs = sliceOrEmpty(doc.Verification.EvidenceRefs)
+		evidenceRefs = appendMissingStrings(evidenceRefs, server.EvidenceRefsFromArtifacts(doc.Verification.Evidence)...)
 		if doc.CostUSD == nil {
 			cost = &doc.Verification.CostUSD
 		}
 	}
 	evidenceRefs = appendMissingStrings(evidenceRefs, evidenceRefsFromPhaseOutputs(doc.PhaseOutputs)...)
+	evidence := evidenceArtifactsForAttempt(doc)
 	if doc.CostUSD != nil {
 		cost = doc.CostUSD
 	}
@@ -1839,6 +1844,7 @@ func runReportAttemptFromDoc(doc attemptDoc, lineageByID map[string]string) serv
 		Conclusion:         emptyStringNil(doc.Conclusion),
 		VerificationStatus: verificationStatus,
 		EvidenceRefs:       evidenceRefs,
+		Evidence:           evidence,
 		SummaryMarkdown:    emptyStringNil(doc.SummaryMarkdown),
 		Decision:           emptyStringNil(doc.Decision),
 		CostUSD:            cost,
@@ -1856,6 +1862,7 @@ func runAttemptJobCompletionFromDoc(doc nativeJobCompletionDoc) server.RunAttemp
 		verificationStatus = optionalNonEmptyStringPtr(doc.Verification.Status)
 		verificationReasons = sliceOrEmpty(doc.Verification.Reasons)
 		evidenceRefs = sliceOrEmpty(doc.Verification.EvidenceRefs)
+		evidenceRefs = appendMissingStrings(evidenceRefs, server.EvidenceRefsFromArtifacts(doc.Verification.Evidence)...)
 	}
 	return server.RunAttemptJobCompletion{
 		JobID:               doc.JobID,
@@ -1864,9 +1871,57 @@ func runAttemptJobCompletionFromDoc(doc nativeJobCompletionDoc) server.RunAttemp
 		VerificationStatus:  verificationStatus,
 		VerificationReasons: verificationReasons,
 		EvidenceRefs:        evidenceRefs,
+		Evidence:            sliceOrEmpty(doc.VerificationEvidence()),
 		CostUSD:             doc.CostUSD,
 		PhaseOutputs:        mapStringOrEmpty(doc.PhaseOutputs),
 	}
+}
+
+func (doc nativeJobCompletionDoc) VerificationEvidence() []server.EvidenceArtifact {
+	if doc.Verification == nil {
+		return nil
+	}
+	return doc.Verification.Evidence
+}
+
+func evidenceArtifactsForAttempt(doc attemptDoc) []server.EvidenceArtifact {
+	out := make([]server.EvidenceArtifact, 0)
+	if doc.Verification != nil {
+		out = append(out, doc.Verification.Evidence...)
+	}
+	for _, artifact := range server.EvidenceArtifactsFromVerificationOutput(doc.PhaseOutputs["verification"]) {
+		artifact = evidenceArtifactWithSource(artifact, doc.Phase, doc.AttemptIndex)
+		out = appendEvidenceArtifact(out, artifact)
+	}
+	for i := range out {
+		out[i] = evidenceArtifactWithSource(out[i], doc.Phase, doc.AttemptIndex)
+	}
+	return out
+}
+
+func appendEvidenceArtifact(values []server.EvidenceArtifact, artifact server.EvidenceArtifact) []server.EvidenceArtifact {
+	ref := strings.TrimSpace(firstNonEmpty(artifact.Ref, artifact.ArtifactPath, artifact.URL))
+	if ref == "" {
+		return values
+	}
+	key := artifact.Kind + "\x00" + ref
+	for _, existing := range values {
+		existingRef := strings.TrimSpace(firstNonEmpty(existing.Ref, existing.ArtifactPath, existing.URL))
+		if existing.Kind+"\x00"+existingRef == key {
+			return values
+		}
+	}
+	return append(values, artifact)
+}
+
+func evidenceArtifactWithSource(artifact server.EvidenceArtifact, phase string, attemptIndex int) server.EvidenceArtifact {
+	if strings.TrimSpace(artifact.SourcePhase) == "" {
+		artifact.SourcePhase = phase
+	}
+	if artifact.SourceAttemptIndex == nil {
+		artifact.SourceAttemptIndex = &attemptIndex
+	}
+	return artifact
 }
 
 func evidenceRefsFromPhaseOutputs(outputs map[string]string) []string {
@@ -1880,7 +1935,7 @@ func evidenceRefsFromPhaseOutputs(outputs map[string]string) []string {
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 		return nil
 	}
-	return cleanStringRefs(payload.EvidenceRefs)
+	return appendMissingStrings(cleanStringRefs(payload.EvidenceRefs), server.EvidenceRefsFromArtifacts(server.EvidenceArtifactsFromVerificationOutput(raw))...)
 }
 
 func cleanStringRefs(values []string) []string {
@@ -3003,6 +3058,7 @@ func buildAttemptHistory(attempts []attemptDoc) []map[string]any {
 		if a.Verification != nil {
 			entry["verification_status"] = a.Verification.Status
 			entry["evidence_refs"] = a.Verification.EvidenceRefs
+			entry["evidence"] = a.Verification.Evidence
 		}
 		out = append(out, entry)
 	}
@@ -4619,8 +4675,10 @@ func runReplayDataFromDoc(doc runDoc) server.RunReplayData {
 		var verif *server.RunVerificationData
 		if a.Verification != nil {
 			verif = &server.RunVerificationData{
-				Status:  a.Verification.Status,
-				Reasons: a.Verification.Reasons,
+				Status:       a.Verification.Status,
+				Reasons:      a.Verification.Reasons,
+				EvidenceRefs: sliceOrEmpty(a.Verification.EvidenceRefs),
+				Evidence:     sliceOrEmpty(a.Verification.Evidence),
 			}
 		}
 		attempts = append(attempts, server.RunAttemptData{
@@ -4639,28 +4697,29 @@ func runReplayDataFromDoc(doc runDoc) server.RunReplayData {
 		bdg.Total = doc.Budget.Total
 	}
 	return server.RunReplayData{
-		ID:                  doc.ID,
-		Project:             doc.Project,
-		WorkflowName:        doc.Workflow,
-		WorkflowSchemaRef:   doc.WorkflowSchemaRef,
-		Attempts:            attempts,
-		CumulativeCostUSD:   doc.CumulativeCostUSD,
-		Budget:              bdg,
-		IssueNumber:         doc.IssueNumber,
-		RunNumber:           doc.RunNumber,
-		CycleNumber:         doc.CycleNumber,
-		RunCycleNumber:      doc.RunCycleNumber,
-		RunDisplayNumber:    doc.RunDisplayNumber,
-		IssueRepo:           doc.IssueRepo,
-		ValidationURL:       doc.ValidationURL,
-		ScreenshotsMarkdown: doc.ScreenshotsMarkdown,
-		CallbackToken:       doc.CallbackToken,
-		IssueLockHolderID:   doc.IssueLockHolderID,
-		PRNumber:            doc.PRNumber,
-		PRLockHolderID:      doc.PRLockHolderID,
-		SlotLeaseRef:        doc.SlotLeaseRef,
-		EntrypointPhase:     doc.EntrypointPhase,
-		TriggerSource:       mapOrEmpty(doc.TriggerSource),
+		ID:                   doc.ID,
+		Project:              doc.Project,
+		WorkflowName:         doc.Workflow,
+		WorkflowSchemaRef:    doc.WorkflowSchemaRef,
+		Attempts:             attempts,
+		CumulativeCostUSD:    doc.CumulativeCostUSD,
+		Budget:               bdg,
+		IssueNumber:          doc.IssueNumber,
+		RunNumber:            doc.RunNumber,
+		CycleNumber:          doc.CycleNumber,
+		RunCycleNumber:       doc.RunCycleNumber,
+		RunDisplayNumber:     doc.RunDisplayNumber,
+		IssueRepo:            doc.IssueRepo,
+		ValidationURL:        doc.ValidationURL,
+		ScreenshotsMarkdown:  doc.ScreenshotsMarkdown,
+		EvidenceRequirements: sliceOrEmpty(doc.EvidenceRequirements),
+		CallbackToken:        doc.CallbackToken,
+		IssueLockHolderID:    doc.IssueLockHolderID,
+		PRNumber:             doc.PRNumber,
+		PRLockHolderID:       doc.PRLockHolderID,
+		SlotLeaseRef:         doc.SlotLeaseRef,
+		EntrypointPhase:      doc.EntrypointPhase,
+		TriggerSource:        mapOrEmpty(doc.TriggerSource),
 	}
 }
 
@@ -5544,11 +5603,12 @@ func (s *Store) expectedNativeJobIDs(ctx context.Context, project, workflowName,
 
 func nativeJobCompletionDocFromPayload(jobID string, p server.CompletionPayload, completedAt string) nativeJobCompletionDoc {
 	var verification *verificationDoc
-	if p.VerificationStatus != "" {
+	if p.VerificationStatus != "" || len(p.EvidenceRefs) > 0 || len(p.Evidence) > 0 {
 		verification = &verificationDoc{
 			Status:       p.VerificationStatus,
 			Reasons:      sliceOrEmpty(p.VerificationReasons),
 			EvidenceRefs: sliceOrEmpty(p.EvidenceRefs),
+			Evidence:     sliceOrEmpty(p.Evidence),
 			CostUSD:      p.CostUSD,
 		}
 	}
@@ -6141,6 +6201,7 @@ func aggregateNativePhaseCompletion(expected []string, completions map[string]na
 	screenshots := make([]string, 0)
 	reasons := make([]string, 0)
 	evidenceRefs := make([]string, 0)
+	evidenceArtifacts := make([]server.EvidenceArtifact, 0)
 	conclusion := "success"
 	verificationStatus := ""
 	for _, id := range ids {
@@ -6168,6 +6229,10 @@ func aggregateNativePhaseCompletion(expected []string, completions map[string]na
 				}
 			}
 			evidenceRefs = appendMissingStrings(evidenceRefs, completion.Verification.EvidenceRefs...)
+			evidenceRefs = appendMissingStrings(evidenceRefs, server.EvidenceRefsFromArtifacts(completion.Verification.Evidence)...)
+			for _, artifact := range completion.Verification.Evidence {
+				evidenceArtifacts = appendEvidenceArtifact(evidenceArtifacts, artifact)
+			}
 		}
 	}
 	payload := server.CompletionPayload{
@@ -6175,6 +6240,7 @@ func aggregateNativePhaseCompletion(expected []string, completions map[string]na
 		VerificationStatus:  verificationStatus,
 		VerificationReasons: reasons,
 		EvidenceRefs:        evidenceRefs,
+		Evidence:            evidenceArtifacts,
 		CostUSD:             sumNativeJobCosts(completions),
 		PhaseOutputs:        phaseOutputs,
 	}
@@ -6255,11 +6321,12 @@ func (s *Store) StampRunCompletion(ctx context.Context, project, runID string, p
 			attempt["phase_outputs"] = p.PhaseOutputs
 			promoteRunReviewOutputsRaw(raw, p.PhaseOutputs)
 		}
-		if p.VerificationStatus != "" {
+		if p.VerificationStatus != "" || len(p.EvidenceRefs) > 0 || len(p.Evidence) > 0 {
 			attempt["verification"] = map[string]any{
 				"status":        p.VerificationStatus,
 				"reasons":       p.VerificationReasons,
 				"evidence_refs": sliceOrEmpty(p.EvidenceRefs),
+				"evidence":      sliceOrEmpty(p.Evidence),
 				"cost_usd":      p.CostUSD,
 			}
 		}
@@ -6553,32 +6620,33 @@ func (s *Store) CreateRun(ctx context.Context, req server.CreateRunRequest) (ser
 	}
 
 	doc := runDoc{
-		ID:                runID,
-		Project:           req.Project,
-		Workflow:          req.Workflow,
-		WorkflowSchemaRef: req.WorkflowSchemaRef,
-		RunNumber:         &runNumber,
-		CycleNumber:       &cycleNumber,
-		RunCycleNumber:    &runCycle,
-		RunDisplayNumber:  &runDisplay,
-		RootRunID:         &runID,
-		OriginKind:        &originKind,
-		IsCycle:           true,
-		IssueID:           req.IssueID,
-		IssueRepo:         req.IssueRepo,
-		IssueNumber:       req.IssueNumber,
-		State:             "queued",
-		QueueState:        &queueState,
-		SlotLeaseRef:      optionalNonEmptyStringPtr(req.SlotLeaseRef),
-		PhaseExecutions:   phaseExecutionDocsFromWorkflow(*wf, now, nil),
-		Budget:            budgetDoc,
-		Attempts:          []attemptDoc{},
-		CumulativeCostUSD: 0.0,
-		TriggerSource:     req.TriggerSource,
-		CallbackToken:     &callbackToken,
-		IssueLockHolderID: &req.IssueLockHolderID,
-		CreatedAt:         now,
-		UpdatedAt:         now,
+		ID:                   runID,
+		Project:              req.Project,
+		Workflow:             req.Workflow,
+		WorkflowSchemaRef:    req.WorkflowSchemaRef,
+		RunNumber:            &runNumber,
+		CycleNumber:          &cycleNumber,
+		RunCycleNumber:       &runCycle,
+		RunDisplayNumber:     &runDisplay,
+		RootRunID:            &runID,
+		OriginKind:           &originKind,
+		IsCycle:              true,
+		IssueID:              req.IssueID,
+		IssueRepo:            req.IssueRepo,
+		IssueNumber:          req.IssueNumber,
+		State:                "queued",
+		QueueState:           &queueState,
+		SlotLeaseRef:         optionalNonEmptyStringPtr(req.SlotLeaseRef),
+		PhaseExecutions:      phaseExecutionDocsFromWorkflow(*wf, now, nil),
+		Budget:               budgetDoc,
+		Attempts:             []attemptDoc{},
+		CumulativeCostUSD:    0.0,
+		EvidenceRequirements: sliceOrEmpty(req.EvidenceRequirements),
+		TriggerSource:        req.TriggerSource,
+		CallbackToken:        &callbackToken,
+		IssueLockHolderID:    &req.IssueLockHolderID,
+		CreatedAt:            now,
+		UpdatedAt:            now,
 	}
 
 	payload, err := json.Marshal(doc)
@@ -6658,6 +6726,15 @@ func carryForwardAttemptsFromDocs(docs []attemptDoc) []server.RunAttemptData {
 	return out
 }
 
+func firstEvidenceRequirements(values ...[]server.EvidenceRequirement) []server.EvidenceRequirement {
+	for _, value := range values {
+		if len(value) > 0 {
+			return value
+		}
+	}
+	return nil
+}
+
 func (s *Store) CreateRecycleCycle(ctx context.Context, req server.CreateRecycleCycleRequest) (server.CreatedRun, error) {
 	parent, _, err := s.readRunDoc(ctx, req.Parent.Project, req.Parent.ID)
 	if err != nil {
@@ -6732,36 +6809,37 @@ func (s *Store) CreateRecycleCycle(ctx context.Context, req server.CreateRecycle
 		return server.CreatedRun{}, err
 	}
 	doc := runDoc{
-		ID:                runID,
-		Project:           parent.Project,
-		Workflow:          parent.Workflow,
-		WorkflowSchemaRef: firstNonEmpty(req.WorkflowSchemaRef, parent.WorkflowSchemaRef),
-		RunNumber:         &runNumber,
-		CycleNumber:       &cycleNumber,
-		RunCycleNumber:    &runCycle,
-		RunDisplayNumber:  &runDisplay,
-		ParentRunID:       &parent.ID,
-		RootRunID:         &rootRunID,
-		OriginKind:        &originKind,
-		IsCycle:           true,
-		IssueID:           parent.IssueID,
-		IssueRepo:         parent.IssueRepo,
-		IssueNumber:       parent.IssueNumber,
-		PRNumber:          parent.PRNumber,
-		State:             "queued",
-		QueueState:        &queueState,
-		SlotLeaseRef:      parent.SlotLeaseRef,
-		EntrypointPhase:   optionalNonEmptyStringPtr(req.TargetPhaseName),
-		PhaseExecutions:   phaseExecutionDocsFromWorkflow(*wf, now, optionalNonEmptyStringPtr(req.TargetPhaseName)),
-		Budget:            parent.Budget,
-		Attempts:          carryForwardAttemptDocs(req.CarryForwardAttempts, *wf, now),
-		CumulativeCostUSD: parent.CumulativeCostUSD,
-		TriggerSource:     req.TriggerSource,
-		CallbackToken:     &callbackToken,
-		IssueLockHolderID: parent.IssueLockHolderID,
-		PRLockHolderID:    parent.PRLockHolderID,
-		CreatedAt:         now,
-		UpdatedAt:         now,
+		ID:                   runID,
+		Project:              parent.Project,
+		Workflow:             parent.Workflow,
+		WorkflowSchemaRef:    firstNonEmpty(req.WorkflowSchemaRef, parent.WorkflowSchemaRef),
+		RunNumber:            &runNumber,
+		CycleNumber:          &cycleNumber,
+		RunCycleNumber:       &runCycle,
+		RunDisplayNumber:     &runDisplay,
+		ParentRunID:          &parent.ID,
+		RootRunID:            &rootRunID,
+		OriginKind:           &originKind,
+		IsCycle:              true,
+		IssueID:              parent.IssueID,
+		IssueRepo:            parent.IssueRepo,
+		IssueNumber:          parent.IssueNumber,
+		PRNumber:             parent.PRNumber,
+		State:                "queued",
+		QueueState:           &queueState,
+		SlotLeaseRef:         parent.SlotLeaseRef,
+		EntrypointPhase:      optionalNonEmptyStringPtr(req.TargetPhaseName),
+		PhaseExecutions:      phaseExecutionDocsFromWorkflow(*wf, now, optionalNonEmptyStringPtr(req.TargetPhaseName)),
+		Budget:               parent.Budget,
+		Attempts:             carryForwardAttemptDocs(req.CarryForwardAttempts, *wf, now),
+		CumulativeCostUSD:    parent.CumulativeCostUSD,
+		EvidenceRequirements: sliceOrEmpty(firstEvidenceRequirements(req.EvidenceRequirements, parent.EvidenceRequirements)),
+		TriggerSource:        req.TriggerSource,
+		CallbackToken:        &callbackToken,
+		IssueLockHolderID:    parent.IssueLockHolderID,
+		PRLockHolderID:       parent.PRLockHolderID,
+		CreatedAt:            now,
+		UpdatedAt:            now,
 	}
 	payload, err := json.Marshal(doc)
 	if err != nil {

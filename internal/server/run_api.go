@@ -24,6 +24,7 @@ type RunReportAttempt struct {
 	Conclusion         *string                   `json:"conclusion"`
 	VerificationStatus *string                   `json:"verification_status"`
 	EvidenceRefs       []string                  `json:"evidence_refs"`
+	Evidence           []EvidenceArtifact        `json:"evidence"`
 	SummaryMarkdown    *string                   `json:"summary_markdown"`
 	Decision           *string                   `json:"decision"`
 	CostUSD            *float64                  `json:"cost_usd"`
@@ -69,51 +70,53 @@ type RunStepExecution struct {
 }
 
 type RunAttemptJobCompletion struct {
-	JobID               string            `json:"job_id"`
-	CompletedAt         *time.Time        `json:"completed_at"`
-	Conclusion          string            `json:"conclusion"`
-	VerificationStatus  *string           `json:"verification_status"`
-	VerificationReasons []string          `json:"verification_reasons"`
-	EvidenceRefs        []string          `json:"evidence_refs"`
-	CostUSD             float64           `json:"cost_usd"`
-	PhaseOutputs        map[string]string `json:"phase_outputs"`
+	JobID               string             `json:"job_id"`
+	CompletedAt         *time.Time         `json:"completed_at"`
+	Conclusion          string             `json:"conclusion"`
+	VerificationStatus  *string            `json:"verification_status"`
+	VerificationReasons []string           `json:"verification_reasons"`
+	EvidenceRefs        []string           `json:"evidence_refs"`
+	Evidence            []EvidenceArtifact `json:"evidence"`
+	CostUSD             float64            `json:"cost_usd"`
+	PhaseOutputs        map[string]string  `json:"phase_outputs"`
 }
 
 type RunReport struct {
-	ID                  string              `json:"-"`
-	Ref                 string              `json:"ref"`
-	Project             string              `json:"project"`
-	RunRef              string              `json:"run_ref"`
-	RunNumber           *int                `json:"run_number"`
-	RunDisplayNumber    *string             `json:"run_display_number"`
-	ParentRunRef        *string             `json:"parent_run_ref"`
-	RootRunRef          *string             `json:"root_run_ref"`
-	OriginKind          *string             `json:"origin_kind"`
-	EntrypointPhase     *string             `json:"entrypoint_phase"`
-	TriggerSource       map[string]any      `json:"-"`
-	IsCycle             bool                `json:"is_cycle"`
-	CycleNumber         *int                `json:"cycle_number"`
-	RunCycleNumber      *int                `json:"run_cycle_number"`
-	WorkflowSchemaRef   string              `json:"workflow_schema_ref"`
-	QueueState          *string             `json:"queue_state"`
-	AdmissionError      *string             `json:"admission_error"`
-	SlotLeaseRef        *string             `json:"slot_lease_ref"`
-	Workflow            string              `json:"workflow"`
-	IssueRef            *string             `json:"issue_ref"`
-	IssueRepo           *string             `json:"issue_repo"`
-	IssueNumber         *int                `json:"issue_number"`
-	State               string              `json:"state"`
-	CurrentPhase        *string             `json:"current_phase"`
-	AttemptsCount       int                 `json:"attempts_count"`
-	PhaseExecutions     []RunPhaseExecution `json:"phase_executions,omitempty"`
-	CumulativeCostUSD   float64             `json:"cumulative_cost_usd"`
-	ValidationURL       *string             `json:"validation_url"`
-	ScreenshotsMarkdown *string             `json:"screenshots_markdown"`
-	AbortReason         *string             `json:"abort_reason"`
-	StartedAt           time.Time           `json:"started_at"`
-	CompletedAt         *time.Time          `json:"completed_at"`
-	UpdatedAt           time.Time           `json:"updated_at"`
-	Attempts            []RunReportAttempt  `json:"attempts"`
+	ID                   string                `json:"-"`
+	Ref                  string                `json:"ref"`
+	Project              string                `json:"project"`
+	RunRef               string                `json:"run_ref"`
+	RunNumber            *int                  `json:"run_number"`
+	RunDisplayNumber     *string               `json:"run_display_number"`
+	ParentRunRef         *string               `json:"parent_run_ref"`
+	RootRunRef           *string               `json:"root_run_ref"`
+	OriginKind           *string               `json:"origin_kind"`
+	EntrypointPhase      *string               `json:"entrypoint_phase"`
+	TriggerSource        map[string]any        `json:"-"`
+	IsCycle              bool                  `json:"is_cycle"`
+	CycleNumber          *int                  `json:"cycle_number"`
+	RunCycleNumber       *int                  `json:"run_cycle_number"`
+	WorkflowSchemaRef    string                `json:"workflow_schema_ref"`
+	QueueState           *string               `json:"queue_state"`
+	AdmissionError       *string               `json:"admission_error"`
+	SlotLeaseRef         *string               `json:"slot_lease_ref"`
+	Workflow             string                `json:"workflow"`
+	IssueRef             *string               `json:"issue_ref"`
+	IssueRepo            *string               `json:"issue_repo"`
+	IssueNumber          *int                  `json:"issue_number"`
+	State                string                `json:"state"`
+	CurrentPhase         *string               `json:"current_phase"`
+	AttemptsCount        int                   `json:"attempts_count"`
+	PhaseExecutions      []RunPhaseExecution   `json:"phase_executions,omitempty"`
+	CumulativeCostUSD    float64               `json:"cumulative_cost_usd"`
+	ValidationURL        *string               `json:"validation_url"`
+	ScreenshotsMarkdown  *string               `json:"screenshots_markdown"`
+	EvidenceRequirements []EvidenceRequirement `json:"evidence_requirements"`
+	AbortReason          *string               `json:"abort_reason"`
+	StartedAt            time.Time             `json:"started_at"`
+	CompletedAt          *time.Time            `json:"completed_at"`
+	UpdatedAt            time.Time             `json:"updated_at"`
+	Attempts             []RunReportAttempt    `json:"attempts"`
 }
 
 func listProjectRuns(store ReadStore) http.HandlerFunc {

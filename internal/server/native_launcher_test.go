@@ -27,6 +27,10 @@ func TestNativeJobManifestIncludesRunnerCallbackEnv(t *testing.T) {
 				"native_slot_index":    "1",
 				"entrypoint_job_id":    "test",
 				"entrypoint_step_slug": "verify-ui",
+				"evidence_requirements": []EvidenceRequirement{{
+					Kind:  "video",
+					Label: "primary browser flow",
+				}},
 				"phase_inputs": map[string]any{
 					"target": "provision",
 				},
@@ -84,6 +88,9 @@ func TestNativeJobManifestIncludesRunnerCallbackEnv(t *testing.T) {
 	}
 	if env["GLIMMUNG_ENTRYPOINT_JOB_ID"] != "test" || env["GLIMMUNG_ENTRYPOINT_STEP_SLUG"] != "verify-ui" {
 		t.Fatalf("entrypoint env job=%q step=%q", env["GLIMMUNG_ENTRYPOINT_JOB_ID"], env["GLIMMUNG_ENTRYPOINT_STEP_SLUG"])
+	}
+	if !strings.Contains(env["GLIMMUNG_EVIDENCE_REQUIREMENTS_JSON"], `"kind":"video"`) {
+		t.Fatalf("evidence requirements env=%q", env["GLIMMUNG_EVIDENCE_REQUIREMENTS_JSON"])
 	}
 	if env["AZURE_SUBSCRIPTION_ID"] != "sub-123" {
 		t.Fatalf("job env=%q", env["AZURE_SUBSCRIPTION_ID"])

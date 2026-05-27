@@ -57,13 +57,42 @@ removed; app/runtime work is validated through Go tests and the frontend gate.
 
 ## Evidence
 
-The evidence form depends on what the change does. Do not blindly screenshot
-if the change has nothing visible.
+The evidence form depends on what the change does. Browser-visible work uses
+WebM video as the baseline evidence because it shows transitions, timing, and
+interaction state. Screenshots are still useful as final-state thumbnails, but
+they are supplemental unless the run's evidence requirements explicitly ask
+for screenshots.
+
+Before finishing, inspect the produced evidence enough to confirm it is not
+blank or unrelated. If `GLIMMUNG_EVIDENCE_REQUIREMENTS_JSON` is set, satisfy
+each non-optional requirement and mention any missing required artifact in
+`/workspace/evidence/notes.md`.
 
 ### Frontend dashboard change
 
 The validation env runs the full backend, so the dashboard is live. Hit the
 validation host directly:
+
+```sh
+node /workspace/repo/scripts/agent/capture-video.mjs \
+  --url "${VALIDATION_URL}/" \
+  --output /workspace/evidence/videos/dashboard.webm \
+  --manifest /workspace/evidence/videos/dashboard.json \
+  --wait-ms 6000
+```
+
+Use a click selector when the changed behavior needs interaction:
+
+```sh
+node /workspace/repo/scripts/agent/capture-video.mjs \
+  --url "${VALIDATION_URL}/projects/glimmung/issues/${ISSUE_NUMBER}/summary" \
+  --click "text=Request changes" \
+  --output /workspace/evidence/videos/interaction.webm \
+  --manifest /workspace/evidence/videos/interaction.json \
+  --wait-ms 6000
+```
+
+Pair a screenshot when the final static state is important:
 
 ```sh
 node /workspace/repo/scripts/agent/capture-screenshot.mjs \
@@ -72,8 +101,8 @@ node /workspace/repo/scripts/agent/capture-screenshot.mjs \
   --full-page --wait-ms 4000
 ```
 
-After capture, read the PNG to verify the change rendered as intended. If it
-looks wrong, debug and re-capture.
+After capture, check the WebM and any PNG metadata or playback to verify the
+change rendered as intended. If it looks wrong, debug and re-capture.
 
 For routes that require admin sign-in, an unauthenticated screenshot only shows
 the public surface. Note that in `notes.md` if it matters, and consider pairing
@@ -130,8 +159,12 @@ was invisible, write `notes.md` with reproduction steps and verification.
 
 ## What goes where
 
-- `/workspace/evidence/screenshots/*.png` - visual evidence, uploaded to blob
-  storage and embedded as images in the PR body.
+- `/workspace/evidence/videos/*.webm` - baseline browser evidence for visible
+  behavior, uploaded to artifact storage and rendered by Glimmung.
+- `/workspace/evidence/videos/*.json` - capture manifests with size/duration
+  metadata for the corresponding WebM.
+- `/workspace/evidence/screenshots/*.png` - final-state or thumbnail evidence,
+  uploaded to artifact storage and rendered by Glimmung.
 - `/workspace/evidence/validation-path.txt` - single line path the reviewer
   should open to see the change. Must start with `/`.
 - `/workspace/evidence/notes.md` - markdown text included verbatim at the top

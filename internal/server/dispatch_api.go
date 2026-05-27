@@ -54,6 +54,7 @@ type CreateRunRequest struct {
 	IssueLockHolderID       string
 	SlotLeaseRef            string
 	TriggerSource           map[string]any
+	EvidenceRequirements    []EvidenceRequirement
 }
 
 // CreatedRun holds the identifiers returned after creating a run document.
@@ -82,6 +83,7 @@ type CreateRecycleCycleRequest struct {
 	TargetPhaseName      string
 	CarryForwardAttempts []RunAttemptData
 	TriggerSource        map[string]any
+	EvidenceRequirements []EvidenceRequirement
 }
 
 // RunDispatchStore provides all store operations needed by the dispatch handler.
@@ -240,6 +242,7 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, nativeLaun
 		wfBudget = &c
 	}
 	resolvedBudget := budget.ResolveBudget(issue.Labels, wfBudget)
+	evidenceRequirements := dispatchEvidenceRequirements(wf, issue)
 
 	workflowFilename := initPhase.WorkflowFilename
 	if workflowFilename == "" {
@@ -262,11 +265,12 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, nativeLaun
 		Workflow:     &wf.Name,
 		Requirements: requirements,
 		Metadata: runCycleLeaseMetadata(RunReplayData{
-			Project:       req.Project,
-			WorkflowName:  wf.Name,
-			IssueNumber:   req.IssueNumber,
-			IssueRepo:     issueRepo,
-			TriggerSource: triggerSource,
+			Project:              req.Project,
+			WorkflowName:         wf.Name,
+			IssueNumber:          req.IssueNumber,
+			IssueRepo:            issueRepo,
+			TriggerSource:        triggerSource,
+			EvidenceRequirements: evidenceRequirements,
 		}, issue, issueRepo, initPhase.Name, 0, nil),
 	}, dispatchStore.AcquireLease)
 	if err != nil {
@@ -309,6 +313,7 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, nativeLaun
 		IssueLockHolderID:       holderID,
 		SlotLeaseRef:            initialLeaseRef,
 		TriggerSource:           triggerSource,
+		EvidenceRequirements:    evidenceRequirements,
 	})
 	if err != nil {
 		_, _ = dispatchStore.CancelLeaseByRef(ctx, req.Project, initialLeaseRef)
@@ -319,20 +324,21 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, nativeLaun
 
 	runRef := publicids.RunRef(req.Project, &issueNum, run.RunDisplay)
 	runData := RunReplayData{
-		ID:                run.ID,
-		Project:           req.Project,
-		WorkflowName:      wf.Name,
-		WorkflowSchemaRef: wf.SchemaRef,
-		IssueNumber:       req.IssueNumber,
-		RunNumber:         &run.RunNumber,
-		CycleNumber:       &run.CycleNumber,
-		RunCycleNumber:    &run.RunCycle,
-		RunDisplayNumber:  &run.RunDisplay,
-		IssueRepo:         issueRepo,
-		CallbackToken:     &run.CallbackToken,
-		IssueLockHolderID: &holderID,
-		SlotLeaseRef:      &initialLeaseRef,
-		TriggerSource:     triggerSource,
+		ID:                   run.ID,
+		Project:              req.Project,
+		WorkflowName:         wf.Name,
+		WorkflowSchemaRef:    wf.SchemaRef,
+		IssueNumber:          req.IssueNumber,
+		RunNumber:            &run.RunNumber,
+		CycleNumber:          &run.CycleNumber,
+		RunCycleNumber:       &run.RunCycle,
+		RunDisplayNumber:     &run.RunDisplay,
+		IssueRepo:            issueRepo,
+		CallbackToken:        &run.CallbackToken,
+		IssueLockHolderID:    &holderID,
+		SlotLeaseRef:         &initialLeaseRef,
+		TriggerSource:        triggerSource,
+		EvidenceRequirements: evidenceRequirements,
 	}
 	admission, err := admitRunCycle(ctx, dispatchStore, nativeLauncher, runData, wf, issue, issueRepo, LeasePurposeDispatch)
 	if err != nil {
@@ -356,6 +362,26 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, nativeLaun
 		Host:        admission.Host,
 		Detail:      admission.Detail,
 	}, nil
+}
+
+func dispatchEvidenceRequirements(wf *Workflow, issue IssueDispatchData) []EvidenceRequirement {
+	if wf == nil {
+		return EvidenceRequirementsFromIssueLabels(issue.Labels)
+	}
+	workflowRequirements := EvidenceRequirementsFromRaw(firstNonEmptyAny(
+		wf.DefaultRequirements["required_evidence"],
+		wf.DefaultRequirements["evidence_requirements"],
+	))
+	return MergeEvidenceRequirements(workflowRequirements, EvidenceRequirementsFromIssueLabels(issue.Labels))
+}
+
+func firstNonEmptyAny(values ...any) any {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
 }
 
 func workflowEntryPhase(phases []PhaseSpec) (PhaseSpec, bool) {

@@ -210,10 +210,14 @@ type RunProjectionAttempt struct {
 }
 
 type RunProjectionEvidence struct {
-	Kind  string  `json:"kind"`
-	Ref   string  `json:"ref"`
-	Label string  `json:"label"`
-	URL   *string `json:"url,omitempty"`
+	Kind         string  `json:"kind"`
+	Ref          string  `json:"ref"`
+	Label        string  `json:"label"`
+	URL          *string `json:"url,omitempty"`
+	ContentType  string  `json:"content_type,omitempty"`
+	SizeBytes    int64   `json:"size_bytes,omitempty"`
+	DurationMS   int     `json:"duration_ms,omitempty"`
+	ArtifactPath string  `json:"artifact_path,omitempty"`
 }
 
 type RunProjectionTouchpoint struct {
@@ -1844,23 +1848,54 @@ func projectionAttemptState(attempt RunReportAttempt) string {
 func runProjectionEvidence(run RunReport, touchpoints []TouchpointRow) []RunProjectionEvidence {
 	evidence := make([]RunProjectionEvidence, 0)
 	seen := map[string]bool{}
-	add := func(kind, ref, label string, url *string) {
+	add := func(item RunProjectionEvidence) {
+		item.Kind = firstNonEmpty(strings.TrimSpace(item.Kind), EvidenceKindArtifact)
+		item.Ref = strings.TrimSpace(item.Ref)
+		if item.Label == "" {
+			item.Label = evidenceLabel(item.Ref)
+		}
+		if item.Ref == "" || seen[item.Kind+"\x00"+item.Ref] {
+			return
+		}
+		seen[item.Kind+"\x00"+item.Ref] = true
+		evidence = append(evidence, item)
+	}
+	addRef := func(kind, ref, label string, url *string) {
 		ref = strings.TrimSpace(ref)
 		if ref == "" || seen[kind+"\x00"+ref] {
 			return
 		}
-		seen[kind+"\x00"+ref] = true
-		evidence = append(evidence, RunProjectionEvidence{Kind: kind, Ref: ref, Label: label, URL: url})
+		add(RunProjectionEvidence{Kind: kind, Ref: ref, Label: label, URL: url})
 	}
 	if run.ValidationURL != nil && *run.ValidationURL != "" {
-		add("validation", *run.ValidationURL, "validation", run.ValidationURL)
+		addRef("validation", *run.ValidationURL, "validation", run.ValidationURL)
 	}
 	for _, attempt := range run.Attempts {
+		for _, artifact := range attempt.Evidence {
+			ref := firstNonEmpty(strings.TrimSpace(artifact.Ref), strings.TrimSpace(artifact.ArtifactPath), strings.TrimSpace(artifact.URL))
+			if ref == "" {
+				continue
+			}
+			itemURL := strings.TrimSpace(artifact.URL)
+			if itemURL == "" && strings.TrimSpace(artifact.ArtifactPath) != "" {
+				itemURL = artifactURLForBlobName(artifact.ArtifactPath)
+			}
+			add(RunProjectionEvidence{
+				Kind:         firstNonEmpty(strings.TrimSpace(artifact.Kind), EvidenceKindForRef(ref)),
+				Ref:          ref,
+				Label:        firstNonEmpty(strings.TrimSpace(artifact.Label), evidenceLabel(ref)),
+				URL:          stringPointerOrNil(itemURL),
+				ContentType:  strings.TrimSpace(artifact.ContentType),
+				SizeBytes:    artifact.SizeBytes,
+				DurationMS:   artifact.DurationMS,
+				ArtifactPath: strings.TrimSpace(artifact.ArtifactPath),
+			})
+		}
 		for _, ref := range attempt.EvidenceRefs {
-			add("artifact", ref, evidenceLabel(ref), evidenceURL(ref))
+			addRef("artifact", ref, evidenceLabel(ref), evidenceURL(ref))
 		}
 		if attempt.LogArchiveURL != nil && *attempt.LogArchiveURL != "" {
-			add("log", *attempt.LogArchiveURL, "native events", evidenceURL(*attempt.LogArchiveURL))
+			addRef("log", *attempt.LogArchiveURL, "native events", evidenceURL(*attempt.LogArchiveURL))
 		}
 	}
 	for _, tp := range touchpoints {
@@ -1877,13 +1912,22 @@ func runProjectionEvidence(run RunReport, touchpoints []TouchpointRow) []RunProj
 			if itemURL == "" && strings.TrimSpace(item.ArtifactPath) != "" {
 				itemURL = artifactURLForBlobName(item.ArtifactPath)
 			}
-			add(firstNonEmpty(strings.TrimSpace(item.Kind), "artifact"), ref, label, stringPointerOrNil(itemURL))
+			add(RunProjectionEvidence{
+				Kind:         firstNonEmpty(strings.TrimSpace(item.Kind), EvidenceKindArtifact),
+				Ref:          ref,
+				Label:        label,
+				URL:          stringPointerOrNil(itemURL),
+				ContentType:  strings.TrimSpace(item.ContentType),
+				SizeBytes:    item.SizeBytes,
+				DurationMS:   item.DurationMS,
+				ArtifactPath: strings.TrimSpace(item.ArtifactPath),
+			})
 		}
 		if tp.HTMLURL != nil && *tp.HTMLURL != "" {
-			add("pull_request", *tp.HTMLURL, fmt.Sprintf("PR #%d", tp.PRNumber), tp.HTMLURL)
+			addRef("pull_request", *tp.HTMLURL, fmt.Sprintf("PR #%d", tp.PRNumber), tp.HTMLURL)
 		}
 		if tp.ValidationURL != nil && *tp.ValidationURL != "" {
-			add("validation", *tp.ValidationURL, "touchpoint validation", tp.ValidationURL)
+			addRef("validation", *tp.ValidationURL, "touchpoint validation", tp.ValidationURL)
 		}
 	}
 	return evidence
