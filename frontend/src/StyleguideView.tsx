@@ -135,6 +135,46 @@ const DESIGN_SYSTEM_ITEMS: PortfolioItem[] = [
     ),
   },
   {
+    id: "issue-header",
+    title: "Issue Header",
+    caption: "Issue title, inline labels, and durable issue facts",
+    render: () => (
+      <Specimen title="issue header">
+        <section className="project-hero">
+          <div className="project-hero-main">
+            <div className="project-kicker mono">issue</div>
+            <div className="issue-title-row">
+              <h2>Effect: Bog with rising methane bubbles</h2>
+              <div className="issue-title-pills" aria-label="issue labels">
+                <span className="pill info">ambient-effects</span>
+                <span className="pill busy">in flight</span>
+              </div>
+            </div>
+            <div className="project-repo mono">#171</div>
+          </div>
+          <div className="project-facts">
+            <div className="project-fact">
+              <span>project</span>
+              <strong>ambience</strong>
+            </div>
+            <div className="project-fact">
+              <span>state</span>
+              <strong>open</strong>
+            </div>
+            <div className="project-fact">
+              <span>labels</span>
+              <strong>1</strong>
+            </div>
+            <div className="project-fact">
+              <span>last cycle</span>
+              <strong>cycle 4</strong>
+            </div>
+          </div>
+        </section>
+      </Specimen>
+    ),
+  },
+  {
     id: "phase-graph-env-prep-recycle",
     title: "Phase Graph Env Prep Recycle",
     caption: "Entry recycle lanes from verification and touchpoint phases",

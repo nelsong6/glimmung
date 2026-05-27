@@ -1,7 +1,9 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -25,6 +27,68 @@ func TestHealthz(t *testing.T) {
 	}
 	if body["status"] != "ok" {
 		t.Fatalf("body=%#v, want status ok", body)
+	}
+}
+
+func TestReadyzRequiresReadStore(t *testing.T) {
+	handler := New(Settings{})
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body["detail"] != "read store not configured" {
+		t.Fatalf("body=%#v, want read store not configured", body)
+	}
+}
+
+func TestReadyzChecksReadStore(t *testing.T) {
+	handler := NewWithStore(Settings{}, readyzStore{})
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
+func TestReadyzRejectsUnreadableStore(t *testing.T) {
+	handler := NewWithStore(Settings{}, readyzErrorStore{})
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body["detail"] != "read store not ready" {
+		t.Fatalf("body=%#v, want read store not ready", body)
+	}
+}
+
+func TestReadyzRecoversStorePanic(t *testing.T) {
+	handler := NewWithStore(Settings{}, readyzPanicStore{})
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d, want %d", rec.Code, http.StatusServiceUnavailable)
 	}
 }
 
@@ -134,4 +198,30 @@ func writeFile(t *testing.T, path string, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
+}
+
+type readyzStore struct{}
+
+func (readyzStore) ListProjects(context.Context) ([]Project, error) {
+	return []Project{{Name: "glimmung"}}, nil
+}
+
+func (readyzStore) ListWorkflows(context.Context) ([]Workflow, error) {
+	return nil, nil
+}
+
+type readyzErrorStore struct {
+	readyzStore
+}
+
+func (readyzErrorStore) ListProjects(context.Context) ([]Project, error) {
+	return nil, errors.New("projects store not configured")
+}
+
+type readyzPanicStore struct {
+	readyzStore
+}
+
+func (readyzPanicStore) ListProjects(context.Context) ([]Project, error) {
+	panic("typed nil store")
 }

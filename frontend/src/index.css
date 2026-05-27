@@ -1699,6 +1699,22 @@ h2 .inline-action,
 .project-hero h2 {
   margin: 0;
 }
+.issue-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  min-width: 0;
+}
+.issue-title-row h2 {
+  min-width: 0;
+}
+.issue-title-pills {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
 .project-kicker {
   color: var(--fg-dimmer);
   font-size: 0.72rem;

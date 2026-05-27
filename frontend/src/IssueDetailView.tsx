@@ -729,7 +729,17 @@ function IssueHeader({ detail, heading }: { detail: IssueDetail; heading: string
     <section className="project-hero">
       <div className="project-hero-main">
         <div className="project-kicker mono">issue</div>
-        <h2>{detail.title}</h2>
+        <div className="issue-title-row">
+          <h2>{detail.title}</h2>
+          {(detail.labels.length > 0 || detail.issue_lock_held) && (
+            <div className="issue-title-pills" aria-label="issue labels">
+              {detail.labels.map((label) => (
+                <span className="pill info" key={label}>{label}</span>
+              ))}
+              {detail.issue_lock_held && <span className="pill busy">in flight</span>}
+            </div>
+          )}
+        </div>
         <div className="project-repo mono">{heading}</div>
       </div>
       <div className="project-facts">
@@ -754,14 +764,6 @@ function IssueHeader({ detail, heading }: { detail: IssueDetail; heading: string
           </strong>
         </div>
       </div>
-      {(detail.labels.length > 0 || detail.issue_lock_held) && (
-        <div className="dag-policy-rail" aria-label="issue labels">
-          {detail.labels.map((label) => (
-            <span className="pill info" key={label}>{label}</span>
-          ))}
-          {detail.issue_lock_held && <span className="pill busy">in flight</span>}
-        </div>
-      )}
     </section>
   );
 }
