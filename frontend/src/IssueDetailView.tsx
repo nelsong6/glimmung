@@ -727,7 +727,7 @@ export function IssueDetailView() {
 
 function IssueHeader({ detail, heading }: { detail: IssueDetail; heading: string }) {
   return (
-    <section className="project-hero">
+    <section className="project-hero issue-hero">
       <div className="project-hero-main">
         <div className="project-kicker mono">issue</div>
         <div className="issue-title-row">
@@ -742,28 +742,6 @@ function IssueHeader({ detail, heading }: { detail: IssueDetail; heading: string
           )}
         </div>
         <div className="project-repo mono">{heading}</div>
-      </div>
-      <div className="project-facts">
-        <div className="project-fact">
-          <span>project</span>
-          <strong>{detail.project}</strong>
-        </div>
-        <div className="project-fact">
-          <span>state</span>
-          <strong>{detail.state}</strong>
-        </div>
-        <div className="project-fact">
-          <span>labels</span>
-          <strong>{detail.labels.length}</strong>
-        </div>
-        <div className="project-fact">
-          <span>last cycle</span>
-          <strong>
-            {detail.last_run_number !== null
-              ? `cycle ${detail.last_run_number}`
-              : detail.last_run_state ?? "none"}
-          </strong>
-        </div>
       </div>
     </section>
   );

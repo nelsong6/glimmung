@@ -1684,6 +1684,9 @@ h2 .inline-action,
   padding: 18px 0 4px;
   border-bottom: 1px solid var(--border);
 }
+.issue-hero {
+  grid-template-columns: minmax(0, 1fr);
+}
 .project-hero h2 {
   margin: 0;
 }
@@ -1714,8 +1717,9 @@ h2 .inline-action,
   color: var(--fg-muted);
 }
 .project-facts {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(72px, auto));
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 10px;
 }
 .project-fact {
