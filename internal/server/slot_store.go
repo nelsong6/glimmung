@@ -5,15 +5,13 @@ import (
 	"time"
 )
 
-// SlotStore is the storage interface for the `slots` collection. Replaces
-// the embedded `project.metadata.native_standby_dns.slots[]` array per
-// docs/test-slot-storage-rework.md.
+// SlotStore is the storage interface for the `slots` table.
 //
 // Every mutation is a deliberate transition (see Slot.Mark* methods)
 // expressed through UpdateIfMatch. There is no "set status" or
 // "merge whole slot" primitive — Slot.Mark* + UpdateIfMatch is the only
-// write path. Cross-slot writes don't contend because each slot is its
-// own Cosmos document.
+// write path. Cross-slot writes don't contend because each slot is its own
+// row.
 type SlotStore interface {
 	// CreateSlot writes a new slot doc in `unseeded` state for the given
 	// project and slot index. Idempotent: if a doc already exists at
@@ -28,9 +26,9 @@ type SlotStore interface {
 	// for CAS writes.
 	GetSlot(ctx context.Context, project string, slotIndex int) (Slot, error)
 
-	// ListSlotsByProject returns all slot docs for the given project,
-	// ordered by slot_index ascending. Single-partition query; no etag
-	// on returned slots (point-read GetSlot if you need to CAS-write).
+	// ListSlotsByProject returns all slot docs for the given project, ordered by
+	// slot_index ascending. No etag on returned slots; point-read GetSlot if you
+	// need to CAS-write.
 	ListSlotsByProject(ctx context.Context, project string) ([]Slot, error)
 
 	// UpdateIfMatch performs a read-modify-write on the slot doc using
@@ -60,23 +58,22 @@ type SlotStore interface {
 // Replaces the in-doc `test_slot_return_history` array per
 // docs/test-slot-storage-rework.md.
 //
-// One Cosmos document per entry, partition key = project. The ID is a
-// uuid assigned at write time.
+// One Postgres row per entry. The ID is a uuid assigned at write time.
 type SlotHistoryEntry struct {
-	ID              string     `json:"id"`
-	Event           string     `json:"event"`
-	CreatedAt       time.Time  `json:"created_at"`
-	Project         string     `json:"project"`
-	SlotIndex       *int       `json:"slot_index,omitempty"`
-	SlotName        *string    `json:"slot_name,omitempty"`
-	LeaseRef        string     `json:"lease_ref"`
-	LeaseNumber     *int       `json:"lease_number,omitempty"`
-	LeaseRequester  *string    `json:"lease_requester,omitempty"`
-	CallerPodIP     *string    `json:"caller_pod_ip,omitempty"`
-	CallerSessionID *string    `json:"caller_session_id,omitempty"`
-	Source          string     `json:"source"`
-	Reason          *string    `json:"reason,omitempty"`
-	CleanupStarted  bool       `json:"cleanup_started"`
+	ID              string    `json:"id"`
+	Event           string    `json:"event"`
+	CreatedAt       time.Time `json:"created_at"`
+	Project         string    `json:"project"`
+	SlotIndex       *int      `json:"slot_index,omitempty"`
+	SlotName        *string   `json:"slot_name,omitempty"`
+	LeaseRef        string    `json:"lease_ref"`
+	LeaseNumber     *int      `json:"lease_number,omitempty"`
+	LeaseRequester  *string   `json:"lease_requester,omitempty"`
+	CallerPodIP     *string   `json:"caller_pod_ip,omitempty"`
+	CallerSessionID *string   `json:"caller_session_id,omitempty"`
+	Source          string    `json:"source"`
+	Reason          *string   `json:"reason,omitempty"`
+	CleanupStarted  bool      `json:"cleanup_started"`
 }
 
 // SlotHistoryStore is the storage interface for the `slot_history`

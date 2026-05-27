@@ -2506,7 +2506,7 @@ h2 .inline-action,
   color: var(--fg-faintest);
 }
 
-/* Upstream sync (`.glimmung/workflows/<name>.yaml` -> Cosmos).
+/* Upstream sync (`.glimmung/workflows/<name>.yaml` -> registered workflow).
    Pairs with /v1/projects/{project}/workflows/{name}/{upstream,sync}. */
 .upstream-sync {
   margin: 8px 0 16px;

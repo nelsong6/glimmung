@@ -12,11 +12,9 @@ import (
 	"github.com/nelsong6/glimmung/internal/server"
 )
 
-// LocksStore is the Postgres-backed implementation of the lock primitive
-// that previously lived on cosmos.Store. Replaces the Cosmos id-uniqueness
-// + ETag IfMatch dance with a single atomic INSERT ... ON CONFLICT DO
-// UPDATE statement, which is the natural shape for mutual exclusion with
-// expiration in Postgres.
+// LocksStore is the Postgres-backed implementation of the lock primitive. It
+// uses a single atomic INSERT ... ON CONFLICT DO UPDATE statement, which is
+// the natural shape for mutual exclusion with expiration in Postgres.
 //
 // The `locks` table is provisioned in pg/migrations.go:
 //
@@ -29,18 +27,13 @@ import (
 //	  acquired_at timestamptz DEFAULT now(),
 //	  PRIMARY KEY (scope, key)
 //	)
-//
-// Stage 2i deletes the matching methods + helpers from cosmos.Store; until
-// then cosmos.Store retains the `locks *azcosmos.ContainerClient` field
-// only to support the one-shot Migrate call below.
 type LocksStore struct {
 	pool *pgxpool.Pool
 }
 
 // LockState describes a held lock as seen by readers. Returned by
-// ListHeldByScope and used by cosmos.Store.ListIssues / ListTouchpoints
-// during the transition window to populate the per-row IssueLockHeld
-// display flag.
+// ListHeldByScope and used by Store.ListIssues / ListTouchpoints
+// to populate the per-row IssueLockHeld display flag.
 type LockState struct {
 	Scope     string
 	Key       string
@@ -56,7 +49,7 @@ func NewLocksStore(pool *pgxpool.Pool) *LocksStore {
 }
 
 // ClaimLock atomically claims a lock keyed by (scope, key) for holderID
-// with a TTL of ttlSeconds. Mirrors the cosmos.Store.ClaimLock contract:
+// with a TTL of ttlSeconds. Mirrors the Store.ClaimLock contract:
 //   - returns nil if newly claimed or taken over from an expired/released
 //     prior holder
 //   - returns *server.AlreadyRunningError if currently held by another
@@ -65,10 +58,8 @@ func NewLocksStore(pool *pgxpool.Pool) *LocksStore {
 //
 // The whole acquire is one statement. No read-modify-write race window;
 // no retry loop required. metadata is accepted for signature parity with
-// cosmos.Store.ClaimLock but is currently ignored — the Cosmos doc shape
-// stored it for diagnostic display and nothing relied on it for control
-// flow. If a future caller needs metadata on the Postgres row, add a
-// `metadata jsonb` column to the locks table and persist it here.
+// Store.ClaimLock but is currently ignored; lock control flow only depends
+// on scope, key, holder, state, and expiry.
 func (s *LocksStore) ClaimLock(ctx context.Context, scope, key, holderID string, ttlSeconds int, _ map[string]any) error {
 	if s == nil || s.pool == nil {
 		return fmt.Errorf("locks store not configured")
@@ -118,14 +109,14 @@ func (s *LocksStore) ClaimLock(ctx context.Context, scope, key, holderID string,
 }
 
 // ClaimIssueLock is the convenience wrapper for the per-issue dispatch
-// lock. Matches the cosmos.Store contract exactly.
+// lock. Matches the Store contract exactly.
 func (s *LocksStore) ClaimIssueLock(ctx context.Context, project string, issueNumber int, holderID string, ttlSeconds int) error {
 	return s.ClaimLock(ctx, "issue", issueKey(project, issueNumber), holderID, ttlSeconds, nil)
 }
 
 // ReleaseLock releases the lock if it's currently held by holderID.
-// Returns true if the release happened. Mirrors the cosmos contract:
-// best-effort, no error returned even if the row isn't found.
+// Returns true if the release happened. Release is best-effort: no error is
+// returned when the row is absent.
 func (s *LocksStore) ReleaseLock(ctx context.Context, scope, key, holderID string) bool {
 	if s == nil || s.pool == nil {
 		return false
@@ -171,10 +162,8 @@ func (s *LocksStore) AnyLockHeld(ctx context.Context, scope string) (bool, error
 }
 
 // ListHeldByScope returns all currently-held (and unexpired) locks for a
-// given scope, keyed by lock key. Used by cosmos.Store.ListIssues and
-// cosmos.Store.ListTouchpoints during the migration window to populate
-// per-row "lock held" display flags. After Stage 2e/2g moves those
-// methods to pg, this is the only read path for held locks.
+// given scope, keyed by lock key. Used by Store.ListIssues and
+// Store.ListTouchpoints to populate per-row "lock held" display flags.
 func (s *LocksStore) ListHeldByScope(ctx context.Context, scope string) (map[string]LockState, error) {
 	if s == nil || s.pool == nil {
 		return map[string]LockState{}, nil
@@ -214,7 +203,7 @@ func (s *LocksStore) ListHeldByScope(ctx context.Context, scope string) (map[str
 }
 
 // IssueLockHeld is the per-(project, issue_number) lookup used by
-// cosmos.Store's per-row check in ListIssues. Kept as a narrow API so
+// Store's per-row check in ListIssues. Kept as a narrow API so
 // callers don't need to know about the issueKey() encoding.
 func (s *LocksStore) IssueLockHeld(ctx context.Context, project string, issueNumber int) (bool, error) {
 	if s == nil || s.pool == nil {
@@ -258,10 +247,7 @@ func (s *LocksStore) PRLockHeld(ctx context.Context, repo string, prNumber int) 
 	return held, nil
 }
 
-// issueKey encodes a (project, issueNumber) pair as the lock key, exactly
-// matching the encoding the cosmos store used. Keeping the same encoding
-// means migrated rows from cosmos line up with new claims from pg without
-// any key rewriting.
+// issueKey encodes a (project, issueNumber) pair as the lock key.
 func issueKey(project string, issueNumber int) string {
 	return fmt.Sprintf("%s#%d", project, issueNumber)
 }

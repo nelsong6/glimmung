@@ -95,7 +95,7 @@ func (s *SlotsStore) ListByProject(ctx context.Context, project string) ([]SlotR
 // Create inserts a new slot row. If (project, slot_index) already
 // exists, returns ErrSlotAlreadyExists; the caller is expected to
 // fall back to Get to fetch the existing row (CreateSlot is
-// idempotent at the cosmos.Store layer).
+// idempotent at the Store layer).
 func (s *SlotsStore) Create(ctx context.Context, row SlotRow) (SlotRow, error) {
 	if s == nil || s.pool == nil {
 		return SlotRow{}, fmt.Errorf("slots store not configured")

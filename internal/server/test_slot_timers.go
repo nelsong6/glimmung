@@ -16,8 +16,8 @@ import (
 //
 // Storage is in-process and not durable. On glimmung restart the map is
 // empty; recovery is the responsibility of RecoverInFlightTestSlots, which
-// walks Cosmos once at startup and re-arms a timer for every still-claimed
-// test-slot lease (computing remaining TTL from AssignedAt).
+// walks durable lease state once at startup and re-arms a timer for every
+// still-claimed test-slot lease (computing remaining TTL from AssignedAt).
 //
 // This design replaces the 15-second polling reconciler that previously
 // detected expired leases. The "event" the cleanup pathway responds to is the

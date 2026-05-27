@@ -412,9 +412,8 @@ function Layout() {
   // The "needs attention" nav dot derives from snap.inflight_locks,
   // which the server pushes on every SSE snapshot tick. The 20-second
   // poll of /v1/issues + /v1/touchpoints that previously fed this
-  // boolean was deleted in the Cosmos query contract Stage 3 — it
-  // forced a cross-project fan-out on every tick only to compute a
-  // single bool. See docs/cosmos-partition-strategy.md.
+  // boolean was deleted because it forced unnecessary cross-project work on
+  // every tick only to compute a single bool.
   const inflightIssues = Boolean(snap?.inflight_locks?.issues || snap?.inflight_locks?.prs);
 
   const ctx: LayoutContext = {

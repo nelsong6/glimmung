@@ -14,7 +14,7 @@ Glimmung shape.
 
 ## Design Stance
 
-- **Runtime source of truth:** Cosmos workflow registrations remain the runtime
+- **Runtime source of truth:** Postgres workflow registrations remain the runtime
   contract. Repository workflow files are import/sync inputs, not what dispatch
   reads.
 - **Execution layer:** Glimmung-managed phases run as Kubernetes Jobs. Another

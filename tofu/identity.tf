@@ -4,8 +4,7 @@
 # Glimmung previously reused `infra-shared-identity` (provisioned in
 # infra-bootstrap) via a per-app federated credential keyed on
 # `system:serviceaccount:glimmung:infra-shared`. That shared identity holds
-# Cosmos Data Contributor at *account* scope, Key Vault Secrets User on the
-# whole vault, and Storage Blob Data Contributor at subscription scope.
+# broad data-plane roles shared across opted-in apps.
 #
 # Glimmung-owned identities live in the `glimmung` resource group:
 # - `glimmung-identity` for the API/dashboard pod

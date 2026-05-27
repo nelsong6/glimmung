@@ -180,6 +180,13 @@ func TestIssueGraphByNumberBuildsRunAttemptAndTouchpointNodes(t *testing.T) {
 			State:        "ready",
 			HTMLURL:      stringPtr("https://github.com/nelsong6/glimmung/pull/452"),
 			LinkedRunRef: stringPtr(runRef),
+			Evidence: []TouchpointEvidence{{
+				Kind:         "screenshot",
+				Ref:          "blob://artifacts/runs/glimmung/run-1/screenshots/default.png",
+				Label:        "default",
+				URL:          "/v1/artifacts/runs/glimmung/run-1/screenshots/default.png",
+				ArtifactPath: "runs/glimmung/run-1/screenshots/default.png",
+			}},
 		}},
 		signals: []GraphSignal{{
 			ID:         "sig-1",
@@ -247,6 +254,7 @@ func TestIssueGraphByNumberBuildsRunAttemptAndTouchpointNodes(t *testing.T) {
 	assertProjectionEvidence(t, graph.Projection.Runs[0], "validation", "https://preview.example")
 	assertProjectionEvidence(t, graph.Projection.Runs[0], "artifact", "blob://artifacts/glimmung/17/verification.json")
 	assertProjectionEvidence(t, graph.Projection.Runs[0], "log", "blob://artifacts/glimmung/17/native.log")
+	assertProjectionEvidence(t, graph.Projection.Runs[0], "screenshot", "blob://artifacts/runs/glimmung/run-1/screenshots/default.png")
 	assertProjectionEvidence(t, graph.Projection.Runs[0], "pull_request", "https://github.com/nelsong6/glimmung/pull/452")
 	if len(graph.Projection.Signals) != 1 || graph.Projection.Signals[0].Kind != "reject" {
 		t.Fatalf("projection signals=%#v", graph.Projection.Signals)

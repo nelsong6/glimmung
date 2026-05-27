@@ -23,55 +23,57 @@ type TouchpointListFilter struct {
 }
 
 type TouchpointRow struct {
-	Ref                  string  `json:"ref"`
-	Project              string  `json:"project"`
-	Repo                 string  `json:"repo"`
-	PRNumber             int     `json:"pr_number"`
-	PRBranch             *string `json:"pr_branch"`
-	Title                string  `json:"title"`
-	State                string  `json:"state"`
-	Merged               bool    `json:"merged"`
-	HTMLURL              *string `json:"html_url"`
-	LinkedIssueRef       *string `json:"linked_issue_ref"`
-	LinkedRunRef         *string `json:"linked_run_ref"`
-	IssueNumber          *int    `json:"issue_number"`
-	RunRef               *string `json:"run_ref"`
-	RunState             *string `json:"run_state"`
-	ValidationURL        *string `json:"validation_url"`
-	SessionLaunchURL     *string `json:"session_launch_url"`
-	RunAttempts          int     `json:"run_attempts"`
-	RunCumulativeCostUSD float64 `json:"run_cumulative_cost_usd"`
-	PRLockHeld           bool    `json:"pr_lock_held"`
+	Ref                  string               `json:"ref"`
+	Project              string               `json:"project"`
+	Repo                 string               `json:"repo"`
+	PRNumber             int                  `json:"pr_number"`
+	PRBranch             *string              `json:"pr_branch"`
+	Title                string               `json:"title"`
+	State                string               `json:"state"`
+	Merged               bool                 `json:"merged"`
+	HTMLURL              *string              `json:"html_url"`
+	LinkedIssueRef       *string              `json:"linked_issue_ref"`
+	LinkedRunRef         *string              `json:"linked_run_ref"`
+	IssueNumber          *int                 `json:"issue_number"`
+	RunRef               *string              `json:"run_ref"`
+	RunState             *string              `json:"run_state"`
+	ValidationURL        *string              `json:"validation_url"`
+	SessionLaunchURL     *string              `json:"session_launch_url"`
+	RunAttempts          int                  `json:"run_attempts"`
+	RunCumulativeCostUSD float64              `json:"run_cumulative_cost_usd"`
+	PRLockHeld           bool                 `json:"pr_lock_held"`
+	Evidence             []TouchpointEvidence `json:"evidence"`
 }
 
 type TouchpointDetail struct {
-	Ref                  string           `json:"ref"`
-	Project              string           `json:"project"`
-	Repo                 string           `json:"repo"`
-	PRNumber             int              `json:"pr_number"`
-	PRBranch             *string          `json:"pr_branch"`
-	Title                string           `json:"title"`
-	Body                 string           `json:"body"`
-	State                string           `json:"state"`
-	Merged               bool             `json:"merged"`
-	BaseRef              string           `json:"base_ref"`
-	HeadSHA              string           `json:"head_sha"`
-	HTMLURL              *string          `json:"html_url"`
-	LinkedIssueRef       *string          `json:"linked_issue_ref"`
-	LinkedRunRef         *string          `json:"linked_run_ref"`
-	IssueNumber          *int             `json:"issue_number"`
-	IssueTitle           *string          `json:"issue_title"`
-	RunRef               *string          `json:"run_ref"`
-	RunState             *string          `json:"run_state"`
-	ValidationURL        *string          `json:"validation_url"`
-	ScreenshotsMarkdown  *string          `json:"screenshots_markdown"`
-	SessionLaunchURL     *string          `json:"session_launch_url"`
-	RunAttempts          int              `json:"run_attempts"`
-	RunCumulativeCostUSD float64          `json:"run_cumulative_cost_usd"`
-	RunAttemptHistory    []map[string]any `json:"run_attempt_history"`
-	Comments             []map[string]any `json:"comments"`
-	Reviews              []map[string]any `json:"reviews"`
-	PRLockHeld           bool             `json:"pr_lock_held"`
+	Ref                  string               `json:"ref"`
+	Project              string               `json:"project"`
+	Repo                 string               `json:"repo"`
+	PRNumber             int                  `json:"pr_number"`
+	PRBranch             *string              `json:"pr_branch"`
+	Title                string               `json:"title"`
+	Body                 string               `json:"body"`
+	State                string               `json:"state"`
+	Merged               bool                 `json:"merged"`
+	BaseRef              string               `json:"base_ref"`
+	HeadSHA              string               `json:"head_sha"`
+	HTMLURL              *string              `json:"html_url"`
+	LinkedIssueRef       *string              `json:"linked_issue_ref"`
+	LinkedRunRef         *string              `json:"linked_run_ref"`
+	IssueNumber          *int                 `json:"issue_number"`
+	IssueTitle           *string              `json:"issue_title"`
+	RunRef               *string              `json:"run_ref"`
+	RunState             *string              `json:"run_state"`
+	ValidationURL        *string              `json:"validation_url"`
+	ScreenshotsMarkdown  *string              `json:"screenshots_markdown"`
+	SessionLaunchURL     *string              `json:"session_launch_url"`
+	RunAttempts          int                  `json:"run_attempts"`
+	RunCumulativeCostUSD float64              `json:"run_cumulative_cost_usd"`
+	RunAttemptHistory    []map[string]any     `json:"run_attempt_history"`
+	Comments             []map[string]any     `json:"comments"`
+	Reviews              []map[string]any     `json:"reviews"`
+	PRLockHeld           bool                 `json:"pr_lock_held"`
+	Evidence             []TouchpointEvidence `json:"evidence"`
 }
 
 type TouchpointCreate struct {
@@ -86,20 +88,33 @@ type TouchpointCreate struct {
 	HTMLURL        string
 	LinkedIssueRef string
 	LinkedRunRef   string
+	Evidence       []TouchpointEvidence
+	EvidenceSet    bool
 }
 
 type TouchpointCreateRequest struct {
-	Project        string  `json:"project"`
-	Repo           string  `json:"repo"`
-	Number         int     `json:"number"`
-	Title          string  `json:"title"`
-	Branch         string  `json:"branch"`
-	Body           string  `json:"body"`
-	BaseRef        string  `json:"base_ref"`
-	HeadSHA        string  `json:"head_sha"`
-	HTMLURL        string  `json:"html_url"`
-	LinkedIssueRef *string `json:"linked_issue_ref"`
-	LinkedRunRef   *string `json:"linked_run_ref"`
+	Project        string               `json:"project"`
+	Repo           string               `json:"repo"`
+	Number         int                  `json:"number"`
+	Title          string               `json:"title"`
+	Branch         string               `json:"branch"`
+	Body           string               `json:"body"`
+	BaseRef        string               `json:"base_ref"`
+	HeadSHA        string               `json:"head_sha"`
+	HTMLURL        string               `json:"html_url"`
+	LinkedIssueRef *string              `json:"linked_issue_ref"`
+	LinkedRunRef   *string              `json:"linked_run_ref"`
+	Evidence       []TouchpointEvidence `json:"evidence,omitempty"`
+}
+
+type TouchpointEvidence struct {
+	Kind               string `json:"kind"`
+	Ref                string `json:"ref"`
+	Label              string `json:"label"`
+	URL                string `json:"url,omitempty"`
+	ArtifactPath       string `json:"artifact_path,omitempty"`
+	SourcePhase        string `json:"source_phase,omitempty"`
+	SourceAttemptIndex *int   `json:"source_attempt_index,omitempty"`
 }
 
 func listTouchpoints(store ReadStore) http.HandlerFunc {
@@ -195,6 +210,10 @@ func createTouchpoint(store ReadStore) http.HandlerFunc {
 			BaseRef: firstNonEmpty(body.BaseRef, "main"),
 			HeadSHA: body.HeadSHA,
 			HTMLURL: body.HTMLURL,
+		}
+		if len(body.Evidence) > 0 {
+			req.Evidence = body.Evidence
+			req.EvidenceSet = true
 		}
 		if body.LinkedIssueRef != nil {
 			req.LinkedIssueRef = *body.LinkedIssueRef

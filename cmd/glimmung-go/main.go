@@ -15,6 +15,7 @@ import (
 	"github.com/nelsong6/glimmung/internal/auth"
 	azureclient "github.com/nelsong6/glimmung/internal/azure"
 	githubclient "github.com/nelsong6/glimmung/internal/github"
+	"github.com/nelsong6/glimmung/internal/metrics"
 	"github.com/nelsong6/glimmung/internal/server"
 	artifactstore "github.com/nelsong6/glimmung/internal/store/artifacts"
 	pgstore "github.com/nelsong6/glimmung/internal/store/pg"
@@ -22,10 +23,9 @@ import (
 )
 
 // runtimeStore is the combined store passed to the HTTP server and the
-// background reconcilers. It embeds the data-access wrapper (which now
-// delegates every R/W to per-cluster pg.*Store fields after the
-// Postgres migration) plus the Postgres-backed LocksStore. Go field
-// promotion gives the wrapper the union of both method sets.
+// background reconcilers. It embeds the data-access wrapper plus the
+// Postgres-backed LocksStore. Go field promotion gives the wrapper the
+// union of both method sets.
 type runtimeStore struct {
 	*glimmungstore.Store
 	*pgstore.LocksStore
@@ -35,17 +35,10 @@ func main() {
 	settings := server.SettingsFromEnv()
 	store, err := glimmungstore.NewFromSettings(settings)
 	if err != nil {
-		log.Printf("cosmos read store disabled: %v", err)
+		log.Printf("runtime store initialization failed: %v", err)
 	}
-	// Stage 2a foundation: construct the Postgres pool and apply schema
-	// migrations. No internal/server/ consumer reads from this pool yet —
-	// the runtime still uses the cosmos store above. Stages 2b through 2h
-	// cut interface clusters over one at a time; 2i deletes the cosmos
-	// store entirely. See docs/postgres-migration.md.
-	//
-	// Skipping pool construction when POSTGRES_HOST is unset preserves
-	// local-dev ergonomics (no Postgres dependency until you set the env
-	// var) and matches tank-operator's pgstore degraded-stub pattern.
+	// Construct the Postgres pool and apply schema migrations before the
+	// HTTP server starts. Postgres is the only durable runtime store.
 	var pgPool *pgstore.Pool
 	if settings.PostgresHost != "" && settings.PostgresDatabase != "" && settings.PostgresUsername != "" {
 		cred, credErr := azidentity.NewDefaultAzureCredential(nil)
@@ -54,13 +47,11 @@ func main() {
 		} else {
 			poolCtx, poolCancel := context.WithTimeout(context.Background(), 20*time.Second)
 			pool, poolErr := pgstore.NewPool(poolCtx, pgstore.Config{
-				Host:       settings.PostgresHost,
-				Database:   settings.PostgresDatabase,
-				Username:   settings.PostgresUsername,
-				Credential: cred,
-				// QueryMetrics intentionally nil for Stage 2a — the
-				// tracer becomes a no-op until 2b wires up the
-				// Prometheus collector in internal/metrics.
+				Host:         settings.PostgresHost,
+				Database:     settings.PostgresDatabase,
+				Username:     settings.PostgresUsername,
+				Credential:   cred,
+				QueryMetrics: metrics.PostgresQueryMetrics{},
 			})
 			poolCancel()
 			if poolErr != nil {
@@ -81,25 +72,11 @@ func main() {
 	} else {
 		log.Printf("postgres pool disabled: POSTGRES_HOST/POSTGRES_DATABASE/POSTGRES_USER not all set")
 	}
-	// Stage 2b: construct the Postgres LocksStore, run the one-shot
-	// idempotent migration that copies every cosmos lock document into
-	// the pg `locks` table, inject the LocksStore into cosmos.Store so
-	// its lock-reading methods (ListIssues / ListTouchpoints /
-	// GetIssueDetailByNumber / touchpoint detail) read from pg, and
-	// build the combined runtime store the reconcilers consume.
-	//
-	// `rt` is the only argument every consumer (server.New*, reconcilers,
-	// recovery sweep) should receive going forward. Passing the raw
-	// cosmos.Store would re-introduce the (now-deleted) cosmos lock
-	// methods to the interface fulfillment check and would fail to
-	// compile against any interface that includes ClaimLock etc.
+	// Build the combined runtime store. The wrapper owns the domain-shaped
+	// methods and the embedded LocksStore supplies the lock primitive methods
+	// required by server interfaces.
 	var rt *runtimeStore
 	if store != nil && pgPool != nil {
-		// Stage 3 cleanup: every R/W cluster has migrated to Postgres.
-		// Each pg.*Store is constructed and SET on cosmos.Store so the
-		// runtime store the HTTP server consumes is wired from t=0.
-		// The one-shot cosmos->pg Migrate goroutines that previously
-		// ran here are gone — there is no Cosmos source to read from.
 		pgLocks := pgstore.NewLocksStore(pgPool)
 		store.SetPGLocks(pgLocks)
 
@@ -138,7 +115,7 @@ func main() {
 
 		rt = &runtimeStore{Store: store, LocksStore: pgLocks}
 	} else {
-		log.Printf("runtime store disabled: cosmos store and postgres pool both required (store=%v pgPool=%v)", store != nil, pgPool != nil)
+		log.Printf("runtime store disabled: store wrapper and postgres pool both required (store=%v pgPool=%v)", store != nil, pgPool != nil)
 	}
 
 	artifacts, err := artifactstore.NewFromSettings(settings)
@@ -165,12 +142,9 @@ func main() {
 	}
 	nativeLauncher := server.NewKubernetesNativeLauncher(settings)
 	if store != nil {
-		// One-shot slot-storage migration: copy any project's legacy
-		// `metadata.native_standby_dns.slots[]` array into the new
-		// `slots` collection, then strip the legacy array. Idempotent —
-		// re-running on every boot is safe. Blocks HTTP server start
-		// so readiness doesn't go live while readers might see a
-		// partially-migrated store.
+		// One-shot slot-storage cleanup: copy any project's embedded
+		// `metadata.native_standby_dns.slots[]` array into `slots`, then
+		// strip the embedded array before readiness goes live.
 		migrationCtx, cancelMigration := context.WithTimeout(context.Background(), 60*time.Second)
 		summary, err := server.MigrateProjectSlotsIntoCollection(migrationCtx, store)
 		cancelMigration()
@@ -180,10 +154,7 @@ func main() {
 		}
 		log.Printf("slot-storage migration ok: %s", summary)
 	}
-	// Background reconcilers consume the combined runtime store (rt) so
-	// they get both the cosmos-backed durable methods AND the pg-backed
-	// lock methods. cosmos.Store alone no longer satisfies these
-	// interfaces (Stage 2b deleted its lock methods).
+	// Background reconcilers consume the combined runtime store.
 	if rt != nil {
 		server.StartSignalDrainReconciler(context.Background(), rt, nativeLauncher, log.Printf)
 		server.StartRunQueueReconciler(context.Background(), rt, nativeLauncher, log.Printf)

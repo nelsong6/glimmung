@@ -18,16 +18,16 @@ Glimmung is a Go service with a Vite + React dashboard:
   dispatch/callback routes, touchpoints, playbooks, signals, webhooks, and
   static frontend serving.
 - `internal/ops/agentops/` - reusable functions behind the agent ops CLI.
-- `internal/store/cosmos/` - Cosmos persistence boundary and live-smoke
-  coverage for app data paths.
+- `internal/store/store/` and `internal/store/pg/` - Postgres-backed
+  persistence boundary for app data paths.
 - `internal/domain/` - budget, decision, paths, phase refs, and public IDs.
 - `frontend/` - Vite + React dashboard. Live SSE state, MSAL sign-in, admin
   panel for project/workflow/host registration.
 - `k8s/` - prod Helm chart. ArgoCD-synced from main. Plus `k8s/issue/`, the
   per-issue validation chart whose Deployment, Service, and HTTPRoute are named
   after the release.
-- `tofu/` - Cosmos database + containers, Glimmung-owned managed identities,
-  native-runner artifact storage, Entra app reg.
+- `tofu/` - Postgres, Glimmung-owned managed identities, native-runner artifact
+  storage, Entra app reg.
 - `Dockerfile` - multi-stage: node frontend build -> Go backend.
 
 Re-read `README.md` and any `CLAUDE.md` files before making non-trivial
@@ -116,7 +116,7 @@ Not visible through the dashboard. Write `notes.md` explaining:
 
 - What changed in the data path.
 - How a reviewer should verify it.
-- Any operational concern, such as in-flight leases or Cosmos shape changes.
+- Any operational concern, such as in-flight leases or Postgres schema changes.
 
 ### Tofu or chart change
 
@@ -145,8 +145,8 @@ was invisible, write `notes.md` with reproduction steps and verification.
 - Do not commit PNGs. Evidence is outside the repo working tree by design.
 - Keep diffs focused. Add comments only where context is not obvious from the
   code.
-- The validation env shares the prod Cosmos DB. Any write-side change you
-  exercise in the agent run will affect prod data. Prefer read-side
+- The validation env shares the prod Postgres database. Any write-side change
+  you exercise in the agent run will affect prod data. Prefer read-side
   verification or use a unit test if your change involves writes.
 - If the issue is ambiguous, pick the most concrete interpretation and note
   open questions in the commit message or `notes.md`.

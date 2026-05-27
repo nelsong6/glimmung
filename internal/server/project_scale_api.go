@@ -23,10 +23,7 @@ type ProjectTestEnvironmentScaler interface {
 // go through SlotStore.UpdateIfMatch which carries its own per-row
 // etag CAS. See docs/test-slot-lifecycle.md.
 
-// ProjectReader exposes a single-doc read that captures the Cosmos etag on
-// the returned Project (Project.ETag()). Still used by callers doing
-// optimistic-concurrency writes against the project doc itself (e.g.,
-// scale handlers updating count).
+// ProjectReader exposes a single project read.
 type ProjectReader interface {
 	ReadProject(ctx context.Context, project string) (Project, error)
 }
@@ -367,8 +364,8 @@ func slotsAboveCountFromStore(ctx context.Context, store ReadStore, project stri
 
 // mergeRemovedSlots dedups by slot index, preferring entries with a
 // non-empty slot_name. Used by the PATCH-count handler so the slot-removal
-// set is the union of legacy-array view and new-collection view during the
-// migration window.
+// set includes both stored slots and embedded slots still being stripped by
+// the one-shot cleanup.
 func mergeRemovedSlots(a, b []TestEnvironmentSlotStatus) []TestEnvironmentSlotStatus {
 	byIndex := map[int]TestEnvironmentSlotStatus{}
 	for _, s := range a {

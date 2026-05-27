@@ -15,12 +15,6 @@ import (
 // `IF NOT EXISTS` semantics — there is no version table. This matches the
 // pattern tank-operator's pgstore established.
 //
-// Stage 2a scope: every table this migration ships exists, but no
-// internal/server/ caller writes to or reads from any of them. The
-// runtime still reads/writes Cosmos. Subsequent stages cut over per
-// interface cluster, each one populated by an idempotent Migrate step
-// that copies the matching Cosmos container into the Postgres table.
-//
 // Schema design notes per table are in docs/postgres-migration.md.
 var schemaMigrations = []string{
 	// ------------------------------------------------------------------
@@ -32,12 +26,9 @@ var schemaMigrations = []string{
 	`CREATE EXTENSION IF NOT EXISTS pg_cron`,
 
 	// ------------------------------------------------------------------
-	// projects — low-cardinality reference data. Cosmos partition key was
-	// `/name`; Postgres uses name as the PK and stores the rest as jsonb
+	// projects — low-cardinality reference data. Name is the primary key and
+	// the rest is stored as jsonb
 	// for forward compatibility with whatever shape future fields take.
-	// Cosmos doc shape lives in projectDoc (internal/store/cosmos);
-	// Stage 2-d's per-column extraction will be informed by what the
-	// existing server-package consumers read.
 	// ------------------------------------------------------------------
 	`CREATE TABLE IF NOT EXISTS projects (
 		name              text PRIMARY KEY,
@@ -48,9 +39,8 @@ var schemaMigrations = []string{
 	)`,
 
 	// ------------------------------------------------------------------
-	// workflows — Cosmos partition by `/project`; one row per
-	// (project, name). The workflow-schema documents that Cosmos stores
-	// alongside workflows (kind='workflow_schema') get their own table
+	// workflows — one row per (project, name). Workflow-schema documents get
+	// their own table
 	// rather than sharing a discriminator column, because the read paths
 	// are distinct (workflow CRUD vs. schema lookup).
 	// ------------------------------------------------------------------
@@ -73,9 +63,8 @@ var schemaMigrations = []string{
 	)`,
 
 	// ------------------------------------------------------------------
-	// leases — Cosmos partition by `/project`. The callback_token is a
-	// uuid the native runner presents; the existing code path looks
-	// leases up by token, so it gets a real index.
+	// leases — the callback_token is a uuid the native runner presents; the
+	// existing code path looks leases up by token, so it gets a real index.
 	// ------------------------------------------------------------------
 	`CREATE TABLE IF NOT EXISTS leases (
 		id                text PRIMARY KEY,
@@ -93,9 +82,8 @@ var schemaMigrations = []string{
 		WHERE callback_token <> ''`,
 
 	// ------------------------------------------------------------------
-	// runs — Cosmos partition by `/project`. One doc per (project,
-	// issue_number) accumulating attempts; project is the leading column
-	// for the same per-project query locality.
+	// runs — one row per run, with project as the leading key for per-project
+	// query locality.
 	// ------------------------------------------------------------------
 	`CREATE TABLE IF NOT EXISTS runs (
 		id                text NOT NULL,
@@ -113,12 +101,9 @@ var schemaMigrations = []string{
 		ON runs (project, updated_at DESC)`,
 
 	// ------------------------------------------------------------------
-	// run_events — Cosmos partition by `/project`, default_ttl=7d. The
-	// primary key matches the natural (run_id, attempt_index, job_id,
-	// seq) so idempotent insert via ON CONFLICT DO NOTHING replaces the
-	// current 409-and-accept-replay path in cosmos.go. TTL is handled by
-	// pg_cron scheduled in this same migration block (below) rather
-	// than Cosmos's stochastic background sweep.
+	// run_events — the primary key matches the natural (run_id,
+	// attempt_index, job_id, seq) event identity. TTL is handled by pg_cron
+	// scheduled in this same migration block.
 	// ------------------------------------------------------------------
 	`CREATE TABLE IF NOT EXISTS run_events (
 		run_id            text NOT NULL,
@@ -135,21 +120,16 @@ var schemaMigrations = []string{
 		ON run_events (project, created_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS run_events_ordered
 		ON run_events (run_id, attempt_index, seq)`,
-	// Stage 2c column additions for the rich nativeEventDoc shape
-	// previously held in Cosmos JSON. Decomposing into typed columns
-	// instead of jsonb so the `event` filter, `phase` rendering, and
-	// per-job `step_slug` queries can use real indexes if/when they
-	// grow. Per-pod startup applies these idempotently.
+	// Rich nativeEventDoc fields use typed columns so `event`, `phase`, and
+	// per-job `step_slug` queries can use real indexes if they grow.
 	`ALTER TABLE run_events ADD COLUMN IF NOT EXISTS phase text NOT NULL DEFAULT ''`,
 	`ALTER TABLE run_events ADD COLUMN IF NOT EXISTS step_slug text NOT NULL DEFAULT ''`,
 	`ALTER TABLE run_events ADD COLUMN IF NOT EXISTS message text NOT NULL DEFAULT ''`,
 	`ALTER TABLE run_events ADD COLUMN IF NOT EXISTS exit_code int`,
 	`ALTER TABLE run_events ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}'::jsonb`,
 
-	// Stage 2d additions: github_repo and created_at columns surfaced
-	// from project payload jsonb for indexed lookups; test_lease_defaults
-	// table for the global TTL settings the cosmos store kept inside the
-	// `projects` container as a sentinel doc.
+	// github_repo and created_at columns are surfaced from project payload
+	// jsonb for indexed lookups; test_lease_defaults owns global TTL settings.
 	`ALTER TABLE projects ADD COLUMN IF NOT EXISTS github_repo text NOT NULL DEFAULT ''`,
 	`CREATE TABLE IF NOT EXISTS test_lease_defaults (
 		id                          text PRIMARY KEY,
@@ -159,10 +139,7 @@ var schemaMigrations = []string{
 		updated_at                  timestamptz NOT NULL DEFAULT now()
 	)`,
 
-	// Stage 2j: portfolios — replaces cosmos portfolio_element docs that
-	// shared the `reports` container under kind='portfolio_element'.
-	// Postgres splits them out; each (project, route, element_id) is
-	// unique.
+	// portfolios — each (project, route, element_id) is unique.
 	`CREATE TABLE IF NOT EXISTS portfolios (
 		project    text NOT NULL,
 		route      text NOT NULL,
@@ -175,22 +152,15 @@ var schemaMigrations = []string{
 	`CREATE INDEX IF NOT EXISTS portfolios_by_project_updated
 		ON portfolios (project, updated_at DESC)`,
 
-	// Stage 2j-fix: clean up 627 mis-typed rows that landed in
-	// `reports` because the buggy ListAllReportDocsForMigration read
-	// from the cosmos reports container (which actually holds
-	// touchpoints, not reports). Filter by `repo` field presence —
-	// touchpointDoc carries a `repo` field; legitimate report docs
-	// (which don't exist yet anywhere) wouldn't. After this DELETE
-	// the fixed ListAllTouchpointDocsForMigration populates
-	// `touchpoints` correctly on the next idempotent migration run.
+	// Clean up mis-typed rows that landed in `reports` before touchpoints had
+	// their own table. Filter by `repo` field presence: touchpoint payloads
+	// carry a repo field; report payloads do not.
 	`DELETE FROM reports WHERE payload ? 'repo'`,
 
 	// ------------------------------------------------------------------
-	// locks — replaces the Cosmos id-uniqueness primitive. Acquire uses
-	// the atomic "INSERT ... ON CONFLICT DO UPDATE WHERE state='released'
-	// OR expires_at < now()" pattern documented in
-	// docs/postgres-migration.md. Release filters on holder_id, replacing
-	// the ETag IfMatch round-trip.
+	// locks — acquire uses the atomic "INSERT ... ON CONFLICT DO UPDATE WHERE
+	// state='released' OR expires_at < now()" pattern documented in
+	// docs/postgres-migration.md. Release filters on holder_id.
 	// ------------------------------------------------------------------
 	`CREATE TABLE IF NOT EXISTS locks (
 		scope             text NOT NULL,
@@ -206,9 +176,8 @@ var schemaMigrations = []string{
 		WHERE state = 'held'`,
 
 	// ------------------------------------------------------------------
-	// signals — webhook signal queue. Cosmos partition by `/target_repo`;
-	// per-repo drain query stays single-index-scan with the same leading
-	// column.
+	// signals — webhook signal queue. Per-repo drain is a single index scan
+	// with target_repo as the leading column.
 	// ------------------------------------------------------------------
 	`CREATE TABLE IF NOT EXISTS signals (
 		id                text PRIMARY KEY,
@@ -222,10 +191,9 @@ var schemaMigrations = []string{
 		WHERE processed_at IS NULL`,
 
 	// ------------------------------------------------------------------
-	// issues — first-class glimmung issue model. Cosmos partition by
-	// `/project`; issue_number is per-project unique. Comments are
-	// stored in a child table so they can be patched without
-	// read-modify-write of the entire issue document.
+	// issues — first-class glimmung issue model. issue_number is per-project
+	// unique. Comments live in a child table so they can be patched without
+	// rewriting the entire issue payload.
 	// ------------------------------------------------------------------
 	`CREATE TABLE IF NOT EXISTS issues (
 		project           text NOT NULL,
@@ -252,9 +220,8 @@ var schemaMigrations = []string{
 		ON issue_comments (project, issue_number, created_at)`,
 
 	// ------------------------------------------------------------------
-	// issue_counters — per-project next-issue-number allocator. Replaces
-	// the cosmos __counter:issue-number:<project> document. next_number
-	// stores the value to allocate on the NEXT CreateIssue call; on each
+	// issue_counters — per-project next-issue-number allocator. next_number
+	// stores the value to allocate on the next CreateIssue call; on each
 	// allocation the row is incremented and the prior value is returned.
 	// First write seeds from MAX(number) + 1 of existing rows.
 	// ------------------------------------------------------------------
@@ -265,9 +232,7 @@ var schemaMigrations = []string{
 
 	// ------------------------------------------------------------------
 	// lease_counters — per-project next-lease-number allocator. Same
-	// shape as issue_counters; replaces the cosmos
-	// __counter:lease-number:<project> document with its ETag retry
-	// loop. Seeded from MAX(payload->>'leaseNumber'::int) + 1 across
+	// shape as issue_counters. Seeded from MAX(payload->>'leaseNumber'::int) + 1 across
 	// existing leases on first call per-project.
 	// ------------------------------------------------------------------
 	`CREATE TABLE IF NOT EXISTS lease_counters (
@@ -276,8 +241,7 @@ var schemaMigrations = []string{
 	)`,
 
 	// ------------------------------------------------------------------
-	// playbooks — Cosmos partition by `/project`. Operator-authored
-	// batches of issue specs.
+	// playbooks — operator-authored batches of issue specs.
 	// ------------------------------------------------------------------
 	`CREATE TABLE IF NOT EXISTS playbooks (
 		project           text NOT NULL,
@@ -289,8 +253,8 @@ var schemaMigrations = []string{
 	)`,
 
 	// ------------------------------------------------------------------
-	// reports — Cosmos partition by `/project`. Run reports keyed by id,
-	// project leads the index for per-project list queries.
+	// reports — run reports keyed by id; project leads the index for
+	// per-project list queries.
 	// ------------------------------------------------------------------
 	`CREATE TABLE IF NOT EXISTS reports (
 		id                text PRIMARY KEY,
@@ -304,10 +268,8 @@ var schemaMigrations = []string{
 		ON reports (project, issue_number, updated_at DESC)`,
 
 	// ------------------------------------------------------------------
-	// slots — added by glimmung#518. Cosmos partition by `/project`;
-	// doc id is "<project>:<slot_index>", which here becomes the
-	// composite primary key. Per-slot writes don't contend because each
-	// slot is its own row.
+	// slots — project and slot_index form the composite primary key. Per-slot
+	// writes don't contend because each slot is its own row.
 	// ------------------------------------------------------------------
 	`CREATE TABLE IF NOT EXISTS slots (
 		project           text NOT NULL,
@@ -318,10 +280,9 @@ var schemaMigrations = []string{
 	)`,
 
 	// ------------------------------------------------------------------
-	// slot_history — append-only test-slot return history. uuid id
-	// assigned at write time; queries are project-scoped and typically
-	// filter by slot_index. Mirrors the index strategy from the Cosmos
-	// container.
+	// slot_history — append-only test-slot return history. uuid id assigned
+	// at write time; queries are project-scoped and typically filter by
+	// slot_index.
 	// ------------------------------------------------------------------
 	`CREATE TABLE IF NOT EXISTS slot_history (
 		id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -334,9 +295,8 @@ var schemaMigrations = []string{
 		ON slot_history (project, slot_index, created_at DESC)`,
 
 	// ------------------------------------------------------------------
-	// touchpoints — operator-visible per-issue activity. Cosmos uses a
-	// touchpoint document; per-project lookups + per-issue single reads
-	// are the dominant access pattern.
+	// touchpoints — operator-visible per-issue activity. Per-project lookups
+	// and per-issue single reads are the dominant access pattern.
 	// ------------------------------------------------------------------
 	`CREATE TABLE IF NOT EXISTS touchpoints (
 		project           text NOT NULL,
@@ -356,10 +316,6 @@ var schemaMigrations = []string{
 // configuration `cron.database_name = glimmung` (set in tofu/postgres.tf)
 // routes the job into this database so the DELETE runs against the
 // right table.
-//
-// Stage 2c is when `run_events` actually starts receiving rows; the cron
-// job ships in Stage 2a so the schedule exists from day one. Until then
-// it's a no-op DELETE against an empty table.
 var cronJobs = []string{
 	`SELECT cron.schedule(
 		'run_events_ttl',

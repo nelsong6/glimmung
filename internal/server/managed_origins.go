@@ -229,8 +229,8 @@ func (s ManagedOriginService) readToken() (string, error) {
 }
 
 // managedAuthOriginsFromProject extracts the opt-in flag, derives the slot
-// wildcard base (`native_standby_dns.record_base`), and resolves the
-// project key (Cosmos partition key) to use in the auth admin URL.
+// wildcard base (`native_standby_dns.record_base`), and resolves the project
+// key to use in the auth admin URL.
 //
 // Both snake_case (canonical) and camelCase (legacy) metadata keys are
 // accepted to match the rest of glimmung's Project metadata handling.

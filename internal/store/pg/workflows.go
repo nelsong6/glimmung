@@ -11,27 +11,21 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// WorkflowsStore is the Postgres-backed workflows + workflow_schemas
-// store. Foundation only this stage (2f); Stage 2g cuts the public
-// cosmos.Store workflow methods over to delegate to this.
-//
-// The cosmos `workflows` container held both kind='workflow' and
-// kind='workflow_schema' docs differentiated by the embedded `kind`
-// field. Postgres splits them into two real tables provisioned in
-// Stage 2a's pg/migrations.go.
+// WorkflowsStore is the Postgres-backed workflows + workflow_schemas store.
+// Workflow registrations and immutable schema snapshots live in separate
+// tables.
 type WorkflowsStore struct {
 	pool *pgxpool.Pool
 }
 
-// WorkflowRow is the per-project, per-name workflow row. Payload is the
-// rest of the cosmos workflow doc (phases, pr, budget, metadata, etc.)
-// stored as jsonb so this package doesn't reimplement every sub-type
-// marshaler.
+// WorkflowRow is the per-project, per-name workflow row. Payload stores the
+// phase graph, PR policy, budget, metadata, and other workflow fields as jsonb
+// so this package does not reimplement every sub-type marshaler.
 type WorkflowRow struct {
 	Project   string
 	Name      string
 	SchemaRef string
-	Payload   []byte // raw JSON of the cosmos workflowDoc
+	Payload   []byte // raw workflow JSON payload
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }

@@ -16,8 +16,8 @@ type IssuesStore struct {
 	pool *pgxpool.Pool
 }
 
-// IssueRow is the per-(project, number) issue. The full cosmos
-// issueDoc shape (minus comments) is stored as jsonb payload.
+// IssueRow is the per-(project, number) issue. The issue payload is stored as
+// jsonb; comments live in issue_comments.
 type IssueRow struct {
 	Project    string
 	Number     int
@@ -45,9 +45,8 @@ func NewIssuesStore(pool *pgxpool.Pool) *IssuesStore {
 }
 
 // List returns issue rows, optionally scoped by project. The caller
-// filters further (state, workflow, etc.) in Go because the payload
-// is jsonb and the cosmos call site already does in-memory sorting +
-// run-cross-join. Issues are returned in no particular order; the
+// filters further (state, workflow, etc.) in Go because the payload is jsonb.
+// Issues are returned in no particular order; the
 // caller is expected to apply its own ordering.
 func (s *IssuesStore) List(ctx context.Context, project string) ([]IssueRow, error) {
 	if s == nil || s.pool == nil {
@@ -78,11 +77,9 @@ func (s *IssuesStore) List(ctx context.Context, project string) ([]IssueRow, err
 	return out, nil
 }
 
-// GetByPayloadID looks up a single issue by the legacy cosmos doc id
-// (payload->>'id'). Migration preserved that field on every row, so
-// touchpoint / playbook entries that still reference issues by their
-// cosmos UUID can resolve them. The (project, number) primary key is
-// the preferred lookup; this exists only for legacy ref paths.
+// GetByPayloadID looks up a single issue by payload->>'id'. The
+// (project, number) primary key is the preferred lookup, but some persisted
+// touchpoint and playbook payloads carry the issue id.
 func (s *IssuesStore) GetByPayloadID(ctx context.Context, project, id string) (IssueRow, error) {
 	if s == nil || s.pool == nil {
 		return IssueRow{}, fmt.Errorf("issues store not configured")
@@ -426,4 +423,3 @@ func (s *IssuesStore) DeleteComment(ctx context.Context, id string) error {
 	}
 	return nil
 }
-

@@ -265,6 +265,7 @@ func (s *fakeCompletionStore) EnsureTouchpoint(_ context.Context, req Touchpoint
 		PRNumber: req.Number,
 		Title:    req.Title,
 		State:    "ready",
+		Evidence: req.Evidence,
 	}, nil
 }
 
@@ -370,7 +371,7 @@ func newCompletionHandler(store *fakeCompletionStore, nativeLauncher NativeLaunc
 
 func newPRTouchpointHandler(store *fakeCompletionStore, prClient PullRequestClient) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/pr-touchpoint", nativePRTouchpointByCallbackToken(store, prClient))
+	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/pr-touchpoint", nativePRTouchpointByCallbackToken(store, prClient, nil))
 	return mux
 }
 
@@ -663,6 +664,111 @@ func TestFinalizeRunTouchpointByNumberEnsuresPRAndTouchpoint(t *testing.T) {
 	}
 	if store.touchpointReq == nil || store.touchpointReq.LinkedIssueRef != "proj#7" || store.touchpointReq.LinkedRunRef != "proj#7/runs/1" {
 		t.Fatalf("touchpoint req=%#v", store.touchpointReq)
+	}
+}
+
+func TestFinalizeRunTouchpointByNumberPersistsStructuredScreenshotEvidence(t *testing.T) {
+	store := &fakeCompletionStore{tokenRunID: "run-1", tokenProject: "proj", tokenRef: "proj#7/runs/1"}
+	store.run = runDataForCompletion("verify")
+	store.run.ScreenshotsMarkdown = stringPtr("![old](https://example.test/old.png)")
+	store.run.Attempts = []RunAttemptData{
+		{
+			AttemptIndex: 0,
+			Phase:        "plan",
+			Completed:    true,
+			Decision:     string(decision.Advance),
+			PhaseOutputs: map[string]string{
+				"test_plan": `{"required_evidence":[{"id":"default","kind":"screenshot","url_path":"/dev/demo","must_show":"default render"}]}`,
+			},
+		},
+		{
+			AttemptIndex: 1,
+			Phase:        "verify",
+			Completed:    true,
+			Conclusion:   "success",
+			Decision:     string(decision.Advance),
+			PhaseOutputs: map[string]string{
+				"branch_name":  "issue-7-run-1",
+				"verification": `{"status":"pass","evidence_refs":["screenshots/default.png"]}`,
+			},
+		},
+	}
+	store.wf = prWorkflowForCompletion("verify")
+	prClient := &fakePullRequestClient{}
+	artifacts := &fakeArtifactStore{artifact: Artifact{Body: []byte("png"), ContentType: "image/png"}}
+	handler := NewWithRuntimeClients(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, prClient, nil, artifacts)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/projects/proj/issues/7/runs/1/touchpoint/finalize", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.touchpointReq == nil || len(store.touchpointReq.Evidence) != 1 {
+		t.Fatalf("touchpoint evidence=%#v", store.touchpointReq)
+	}
+	ev := store.touchpointReq.Evidence[0]
+	if ev.Kind != "screenshot" || ev.ArtifactPath != "runs/proj/run-1/screenshots/default.png" {
+		t.Fatalf("evidence=%#v", ev)
+	}
+	if ev.URL != "/v1/artifacts/runs/proj/run-1/screenshots/default.png" || ev.Ref != "blob://artifacts/runs/proj/run-1/screenshots/default.png" {
+		t.Fatalf("evidence URLs=%#v", ev)
+	}
+	if ev.SourceAttemptIndex == nil || *ev.SourceAttemptIndex != 1 || ev.SourcePhase != "verify" {
+		t.Fatalf("evidence source=%#v", ev)
+	}
+	if len(artifacts.downloads) != 1 || artifacts.downloads[0] != "runs/proj/run-1/screenshots/default.png" {
+		t.Fatalf("artifact downloads=%#v", artifacts.downloads)
+	}
+	if strings.Contains(prClient.req.Body, "![") {
+		t.Fatalf("PR body should not include image markdown: %s", prClient.req.Body)
+	}
+}
+
+func TestFinalizeRunTouchpointByNumberRejectsMissingRequiredScreenshotArtifact(t *testing.T) {
+	store := &fakeCompletionStore{tokenRunID: "run-1", tokenProject: "proj", tokenRef: "proj#7/runs/1"}
+	store.run = runDataForCompletion("verify")
+	store.run.Attempts = []RunAttemptData{
+		{
+			AttemptIndex: 0,
+			Phase:        "plan",
+			Completed:    true,
+			Decision:     string(decision.Advance),
+			PhaseOutputs: map[string]string{
+				"test_plan": `{"required_evidence":[{"id":"default","kind":"screenshot","url_path":"/dev/demo","must_show":"default render"}]}`,
+			},
+		},
+		{
+			AttemptIndex: 1,
+			Phase:        "verify",
+			Completed:    true,
+			Conclusion:   "success",
+			Decision:     string(decision.Advance),
+			PhaseOutputs: map[string]string{
+				"branch_name":  "issue-7-run-1",
+				"verification": `{"status":"pass","evidence_refs":["screenshots/default.png"]}`,
+			},
+		},
+	}
+	store.wf = prWorkflowForCompletion("verify")
+	prClient := &fakePullRequestClient{}
+	handler := NewWithRuntimeClients(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, prClient, nil, &fakeArtifactStore{err: ErrArtifactNotFound})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/projects/proj/issues/7/runs/1/touchpoint/finalize", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "screenshot artifact not found") {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+	if prClient.req.Repo != "" || store.touchpointReq != nil {
+		t.Fatalf("unexpected side effects pr=%#v touchpoint=%#v", prClient.req, store.touchpointReq)
 	}
 }
 
@@ -993,7 +1099,7 @@ func TestNativeRunCompletedByCallbackTokenCycleOrdinalCountsRecycleAttempts(t *t
 }
 
 func TestNativeRunCompletedByCallbackTokenStampError(t *testing.T) {
-	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj", stampErr: errors.New("cosmos unavailable")}
+	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj", stampErr: errors.New("store unavailable")}
 	store.run = runDataForCompletion("impl")
 	rec := httptest.NewRecorder()
 	newCompletionHandler(store, nil).ServeHTTP(rec, nativeCompletionRequest("tok", completedJob("impl", "success", nil, nil)))

@@ -12,11 +12,11 @@ RunReports own factual per-run audit state.
 
 ## Sources Of Truth
 
-- Cosmos `issues` owns the work item state.
-- Cosmos `runs` and native events own per-run facts.
-- Cosmos `reports` physically stores Touchpoint state.
-- Cosmos `playbooks` owns ordered multi-issue planning and execution state.
-- Cosmos `signals` owns reviewer feedback and re-entry requests.
+- Postgres `issues` owns the work item state.
+- Postgres `runs` and native events own per-run facts.
+- Postgres `touchpoints` physically stores Touchpoint state.
+- Postgres `playbooks` owns ordered multi-issue planning and execution state.
+- Postgres `signals` owns reviewer feedback and re-entry requests.
 - GitHub PRs are syndication/review targets, not the canonical Glimmung issue
   or run record.
 - `docs/touchpoints-runreports-playbooks.md` owns object boundaries and
@@ -59,8 +59,9 @@ RunReports own factual per-run audit state.
 - Touchpoint, RunReport, signal, and Playbook APIs should expose enough state
   for an operator to distinguish missing evidence, failed syndication, queued
   feedback, and failed rerun.
-- PR body generation should name issue/run refs, validation URL, and evidence
-  refs when available.
+- PR body generation should name issue/run refs and the Glimmung Touchpoint.
+  Review evidence, including screenshots, is stored and rendered by Glimmung
+  rather than copied into the GitHub PR body.
 - Signal drain logs should identify target repo/ref, source, kind, and outcome.
 
 ## Acceptance Checks

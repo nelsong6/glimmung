@@ -107,8 +107,7 @@ func (s *TouchpointsStore) FindByLinkedIssueID(ctx context.Context, project, lin
 }
 
 // FindByRepoNumber returns the touchpoint with the given (repo, number)
-// regardless of project. Cosmos used (repo, number) as a
-// cross-partition idempotency key in EnsureTouchpoint's fallback path.
+// regardless of project.
 func (s *TouchpointsStore) FindByRepoNumber(ctx context.Context, repo string, number int) (TouchpointRow, error) {
 	if s == nil || s.pool == nil {
 		return TouchpointRow{}, fmt.Errorf("touchpoints store not configured")
@@ -151,10 +150,9 @@ func (s *TouchpointsStore) GetByProjectAndPR(ctx context.Context, project string
 	return out, nil
 }
 
-// Create inserts a new touchpoint row. Returns the inserted row, or
-// the existing row on conflict (which the cosmos EnsureTouchpoint
-// path handles separately — Create is reserved for the explicit
-// "create new" branch of that function).
+// Create inserts a new touchpoint row. Returns the inserted row, or the
+// existing row on conflict. Create is reserved for the explicit "create new"
+// branch of EnsureTouchpoint.
 func (s *TouchpointsStore) Create(ctx context.Context, row TouchpointRow) (TouchpointRow, error) {
 	if s == nil || s.pool == nil {
 		return TouchpointRow{}, fmt.Errorf("touchpoints store not configured")
@@ -225,4 +223,3 @@ func (s *TouchpointsStore) PatchPayload(ctx context.Context, project string, prN
 	}
 	return out, nil
 }
-

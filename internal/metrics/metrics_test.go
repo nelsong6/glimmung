@@ -26,11 +26,8 @@ var expectedMetrics = []string{
 	"glimmung_lease_acquire_wait_seconds",
 	"glimmung_hot_swap_outcomes_total",
 	"glimmung_hot_swap_duration_seconds",
-	"glimmung_cosmos_queries_total",
-	"glimmung_cosmos_query_duration_seconds",
-	"glimmung_cosmos_query_ru_charge_total",
-	"glimmung_cosmos_fanout_partitions_total",
-	"glimmung_cosmos_query_plan_error_total",
+	"glimmung_pg_queries_total",
+	"glimmung_pg_query_duration_seconds",
 	"glimmung_unavailable_total",
 }
 
@@ -46,9 +43,8 @@ func TestHandlerServesAllRegisteredMetrics(t *testing.T) {
 	RecordLeaseAcquire("dispatch", "granted", 100*time.Millisecond)
 	RecordLeaseReleased("dispatch", "completed")
 	RecordRunCreated("test-workflow")
-	RecordCosmosQuery("reports", CosmosQueryModeSingle, 5*time.Millisecond, 2.5, CosmosQueryOutcomeSuccess, false)
-	RecordCosmosQuery("reports", CosmosQueryModeFanout, 25*time.Millisecond, 18.0, CosmosQueryOutcomeError, true)
-	RecordCosmosFanoutPartition("reports")
+	RecordPostgresQuery("select_reports", "ok", 5*time.Millisecond)
+	RecordPostgresQuery("insert_runs", "error", 25*time.Millisecond)
 	RecordUnavailable("POST /v1/test-slots/checkout", "test_slot_saturation")
 	// HTTP layer needs a request through the middleware.
 	mux := http.NewServeMux()
@@ -98,42 +94,25 @@ func TestRecordDecisionIncrementsCounterAndBudgetBreaches(t *testing.T) {
 	}
 }
 
-// RecordCosmosQuery feeds five families that operators rely on for the
-// Cosmos query layer; this test pins the wiring so a refactor cannot
-// silently drop one. The query-plan-error counter is what the original
-// /v1/touchpoints 5xx-per-minute bug would have surfaced on; we exercise
-// the queryPlanErr=true branch specifically.
-func TestRecordCosmosQueryWiresEveryFamily(t *testing.T) {
-	const container = "test-container"
+// RecordPostgresQuery feeds the Postgres query counter and duration
+// histogram. The operation and outcome labels are bounded by the pgx
+// tracer, and this test pins the exported metric wiring.
+func TestRecordPostgresQueryWiresEveryFamily(t *testing.T) {
+	const operation = "select_runs"
 
-	successBefore := testutil.ToFloat64(cosmosQueriesTotal.WithLabelValues(container, CosmosQueryModeSingle, CosmosQueryOutcomeSuccess))
-	errorBefore := testutil.ToFloat64(cosmosQueriesTotal.WithLabelValues(container, CosmosQueryModeFanout, CosmosQueryOutcomeError))
-	ruBefore := testutil.ToFloat64(cosmosQueryRuChargeTotal.WithLabelValues(container, CosmosQueryModeSingle))
-	planErrBefore := testutil.ToFloat64(cosmosQueryPlanErrorTotal.WithLabelValues(container))
-	partsBefore := testutil.ToFloat64(cosmosFanoutPartitionsTotal.WithLabelValues(container))
+	okBefore := testutil.ToFloat64(postgresQueriesTotal.WithLabelValues(operation, "ok"))
+	errorBefore := testutil.ToFloat64(postgresQueriesTotal.WithLabelValues(operation, "error"))
 
-	RecordCosmosQuery(container, CosmosQueryModeSingle, 7*time.Millisecond, 3.25, CosmosQueryOutcomeSuccess, false)
-	RecordCosmosQuery(container, CosmosQueryModeFanout, 42*time.Millisecond, 0, CosmosQueryOutcomeError, true)
-	RecordCosmosFanoutPartition(container)
-	RecordCosmosFanoutPartition(container)
+	RecordPostgresQuery(operation, "ok", 7*time.Millisecond)
+	RecordPostgresQuery(operation, "error", 42*time.Millisecond)
 
-	if got := testutil.ToFloat64(cosmosQueriesTotal.WithLabelValues(container, CosmosQueryModeSingle, CosmosQueryOutcomeSuccess)) - successBefore; got != 1 {
-		t.Errorf("queries_total{success,single} delta = %v, want 1", got)
+	if got := testutil.ToFloat64(postgresQueriesTotal.WithLabelValues(operation, "ok")) - okBefore; got != 1 {
+		t.Errorf("queries_total{ok} delta = %v, want 1", got)
 	}
-	if got := testutil.ToFloat64(cosmosQueriesTotal.WithLabelValues(container, CosmosQueryModeFanout, CosmosQueryOutcomeError)) - errorBefore; got != 1 {
-		t.Errorf("queries_total{error,fanout} delta = %v, want 1", got)
+	if got := testutil.ToFloat64(postgresQueriesTotal.WithLabelValues(operation, "error")) - errorBefore; got != 1 {
+		t.Errorf("queries_total{error} delta = %v, want 1", got)
 	}
-	if got := testutil.ToFloat64(cosmosQueryRuChargeTotal.WithLabelValues(container, CosmosQueryModeSingle)) - ruBefore; got != 3.25 {
-		t.Errorf("ru_charge{single} delta = %v, want 3.25", got)
-	}
-	if got := testutil.ToFloat64(cosmosQueryPlanErrorTotal.WithLabelValues(container)) - planErrBefore; got != 1 {
-		t.Errorf("query_plan_error_total delta = %v, want 1", got)
-	}
-	if got := testutil.ToFloat64(cosmosFanoutPartitionsTotal.WithLabelValues(container)) - partsBefore; got != 2 {
-		t.Errorf("fanout_partitions_total delta = %v, want 2", got)
-	}
-	// Histogram observed at least one sample.
-	if testutil.CollectAndCount(cosmosQueryDurationSeconds) == 0 {
+	if testutil.CollectAndCount(postgresQueryDurationSeconds) == 0 {
 		t.Error("query_duration_seconds histogram has no samples")
 	}
 }
@@ -154,17 +133,13 @@ func TestRecordUnavailableIncrementsCounter(t *testing.T) {
 	}
 }
 
-// RU charge below or equal to zero should not increment the RU counter
-// (some Cosmos responses do not populate the header; passing 0 must not
-// drift the counter). This is the pointer-vs-value gotcha that the test
-// pins down so a sloppy refactor cannot reintroduce it.
-func TestRecordCosmosQueryIgnoresZeroRuCharge(t *testing.T) {
-	const container = "zero-ru-test"
-	before := testutil.ToFloat64(cosmosQueryRuChargeTotal.WithLabelValues(container, CosmosQueryModeSingle))
-	RecordCosmosQuery(container, CosmosQueryModeSingle, 1*time.Millisecond, 0, CosmosQueryOutcomeSuccess, false)
-	after := testutil.ToFloat64(cosmosQueryRuChargeTotal.WithLabelValues(container, CosmosQueryModeSingle))
-	if after != before {
-		t.Errorf("ru_charge_total moved on 0 charge: %v -> %v", before, after)
+func TestPostgresQueryMetricsAdapterRecordsQuery(t *testing.T) {
+	const operation = "update_runs"
+	before := testutil.ToFloat64(postgresQueriesTotal.WithLabelValues(operation, "ok"))
+	PostgresQueryMetrics{}.RecordQuery(operation, "ok", time.Millisecond)
+	after := testutil.ToFloat64(postgresQueriesTotal.WithLabelValues(operation, "ok"))
+	if after-before != 1 {
+		t.Errorf("adapter did not record query: delta=%v, want 1", after-before)
 	}
 }
 

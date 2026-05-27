@@ -23,7 +23,7 @@ type Settings struct {
 	Port string
 	// Postgres connection settings. The pool is constructed in
 	// cmd/glimmung-go/main.go and RunMigrations applies the schema.
-	// All R/W now flows through pg per the Cosmos->Postgres migration.
+	// All durable runtime reads and writes flow through Postgres.
 	PostgresHost                       string
 	PostgresDatabase                   string
 	PostgresUsername                   string
@@ -299,7 +299,7 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	mux.HandleFunc("GET /v1/projects/{project}/workflows/{name}/upstream", getWorkflowUpstream(store, ghClient))
 	mux.Handle("POST /v1/projects/{project}/workflows/{name}/sync", requireAdmin(adminAuthenticator, http.HandlerFunc(syncWorkflow(store, ghClient))))
 	mux.Handle("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/abort", requireAdmin(adminAuthenticator, http.HandlerFunc(abortRunByNumber(store))))
-	mux.Handle("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/touchpoint/finalize", requireAdmin(adminAuthenticator, http.HandlerFunc(finalizeRunTouchpointByNumber(store, prClient))))
+	mux.Handle("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/touchpoint/finalize", requireAdmin(adminAuthenticator, http.HandlerFunc(finalizeRunTouchpointByNumber(store, prClient, artifactStore))))
 	mux.HandleFunc("GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/events", nativeRunEventsByNumber(store))
 	mux.HandleFunc("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/events", nativeRunEventWriteByNumber(store))
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/events", nativeRunEventWriteByCallbackToken(store))
@@ -307,7 +307,7 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	mux.HandleFunc("GET /v1/run-callbacks/{callback_token}/native/status", nativeRunStatusByCallbackToken(store))
 	mux.HandleFunc("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/github-token", nativeGitHubTokenByNumber(store, nativeTokenMinter))
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/github-token", nativeGitHubTokenByCallbackToken(store, nativeTokenMinter))
-	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/pr-touchpoint", nativePRTouchpointByCallbackToken(store, prClient))
+	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/pr-touchpoint", nativePRTouchpointByCallbackToken(store, prClient, artifactStore))
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/completed", nativeRunCompletedByCallbackToken(store, nativeLauncher))
 	mux.Handle("POST /v1/test-slots/checkout", requireAdmin(adminAuthenticator, http.HandlerFunc(checkoutTestSlot(settings, store, testSlotPreparer, nativeTokenMinter))))
 	mux.Handle("POST /v1/test-slots/return", requireAdmin(adminAuthenticator, http.HandlerFunc(returnTestSlot(store, testSlotPreparer, nativeTokenMinter))))

@@ -18,10 +18,10 @@ import (
 // ErrPreconditionFailed.
 type fakeSlotStore struct {
 	mu      sync.Mutex
-	slots   map[string]Slot              // keyed by SlotDocID
-	etags   map[string]int               // keyed by SlotDocID; current generation
+	slots   map[string]Slot               // keyed by SlotDocID
+	etags   map[string]int                // keyed by SlotDocID; current generation
 	history map[string][]SlotHistoryEntry // keyed by project
-	nextID  int                          // for synthetic history entry ids when caller leaves blank
+	nextID  int                           // for synthetic history entry ids when caller leaves blank
 }
 
 func newFakeSlotStore() *fakeSlotStore {
@@ -217,9 +217,8 @@ func TestFakeSlotStoreUpdateIfMatchSurfacesPrecondition(t *testing.T) {
 	// always succeeds; the race-simulating test would need the fake to
 	// expose the read-then-write seam explicitly. For Stage 1 we accept
 	// that the fake's CAS is logical-only and document the limit; the
-	// real cosmos integration test (live_smoke_test.go) covers
-	// genuine 412 behavior. This test just confirms the fake doesn't
-	// return ErrPreconditionFailed when it shouldn't.
+	// real Postgres store covers genuine CAS behavior. This test just confirms
+	// the fake doesn't return ErrPreconditionFailed when it shouldn't.
 	_, err := store.UpdateIfMatch(context.Background(), "p", 1, func(s Slot) (Slot, error) {
 		return s.MarkProvisioning(fixedTime)
 	})

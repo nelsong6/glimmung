@@ -6,10 +6,9 @@ implementation is wrong and should be migrated.
 
 ## Storage
 
-Slot state lives in its own Cosmos collection (`slots`), one document
-per slot, partition key `project`, document id `<project>:<slot_index>`.
-Cross-slot writes do not contend because each slot is its own
-document. Audit history lives in a sibling `slot_history` collection.
+Slot state lives in its own Postgres table (`slots`), one row per
+`(project, slot_index)`. Cross-slot writes do not contend because each slot is
+its own row. Audit history lives in a sibling `slot_history` table.
 The project doc carries configuration only (count, github_repo,
 helm config, etc.) — *not* slot state.
 
@@ -176,7 +175,7 @@ queue-size changes.
 
 `extend_test_slot_lease` wraps `POST /v1/test-slots/extend`. It updates the
 claimed lease's durable `ttl_seconds` and re-arms the in-process expiry timer
-from the Cosmos lease row. The endpoint requires `extend_seconds` and either a
+from the Postgres lease row. The endpoint requires `extend_seconds` and either a
 slot selector (`slot_index` or `slot_name`) or the Tank session id that owns the
 checkout. When both are present, the session id must match the lease requester
 metadata. Extension is rejected after the current durable deadline has passed or
@@ -246,13 +245,13 @@ fallback.
 
 The TTL timer is the design choice that lets the lifecycle stay event-driven
 without losing auto-expiry. Polling the lease list every N seconds to ask
-"are any leases expired yet?" would burn Cosmos reads forever and is the
+"are any leases expired yet?" would burn database reads forever and is the
 lazy version of what a deadline-bound timer expresses directly. A timer
 firing at `assigned_at + ttl_seconds` is the same shape as an HTTP request
 arriving: it's the event we wanted, delivered when we wanted it.
 
 Timer state is in-process and not durable. Recovery is the responsibility of
-`RecoverInFlightTestSlots`: on every process boot it walks Cosmos once and
+`RecoverInFlightTestSlots`: on every process boot it walks durable lease state once and
 re-arms an `AfterFunc` for every still-`claimed` test-slot lease, computing
 remaining duration from the durable `assigned_at + ttl_seconds`. A deadline
 that has already passed fires cleanup immediately. After this one-shot pass
@@ -359,7 +358,7 @@ The lifecycle does not require a single replica. During rolling deploys,
 node drains, or future horizontal scaling, every running pod independently
 arms a TTL timer for every claimed lease and runs its own
 `RecoverInFlightTestSlots` sweep on startup. Concurrency safety is
-straightforward because each slot is its own Cosmos document:
+straightforward because each slot is its own Postgres row:
 
 1. **Per-row etag CAS.** Every slot mutation goes through
    `SlotStore.UpdateIfMatch`, which reads the slot doc with its etag,
@@ -549,7 +548,7 @@ The slot system is not complete until all of these are true:
   of the activation that produced them, and once defensively during the
   startup recovery sweep for any slot found in `active`.
 - Dashboard slot rows expose enough activation and cleanup metadata to debug
-  stuck work without querying Cosmos directly. State for an unseeded slot is
+  stuck work without querying Postgres directly. State for an unseeded slot is
   empty in the API and labeled "unseeded" in the UI — neither layer
   synthesizes "warming" as a placeholder, which would lie about durable
   state.

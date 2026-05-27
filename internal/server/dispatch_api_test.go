@@ -352,7 +352,7 @@ func TestDispatchRunNativeDispatchFailed(t *testing.T) {
 
 func TestDispatchRunCreateRunFailReleasesLock(t *testing.T) {
 	store := minimalDispatchStore()
-	store.runErr = errors.New("cosmos unavailable")
+	store.runErr = errors.New("store unavailable")
 	rec := httptest.NewRecorder()
 	newDispatchTestHandler(store, &fakeNativeLauncher{}).ServeHTTP(rec, dispatchRequest("proj", 1))
 	if rec.Code != http.StatusInternalServerError {

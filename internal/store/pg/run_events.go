@@ -12,32 +12,20 @@ import (
 )
 
 // RunEventsStore is the Postgres-backed event log for glimmung's native
-// runner. Replaces cosmos.Store.runEvents (the `run_events` container)
-// per Stage 2c of docs/postgres-migration.md.
-//
-// The schema lives in pg/migrations.go (Stage 2a) and gets extended
-// here via additional ALTER TABLE entries that are idempotent.
+// runner.
 //
 // Idempotent insert uses `INSERT ... ON CONFLICT DO NOTHING` against the
-// natural primary key (run_id, attempt_index, job_id, seq). Stage 2c
-// preserves the cosmos contract: a duplicate write with the same PK and
-// the same payload is accepted as a no-op; a duplicate write with the
-// same PK and a different payload returns ErrConflict.
+// natural primary key (run_id, attempt_index, job_id, seq). A duplicate write
+// with the same PK and same payload is accepted as a no-op; a duplicate write
+// with the same PK and a different payload returns ErrConflict.
 //
 // run_events ages out via the pg_cron `run_events_ttl` job scheduled in
-// pg/migrations.go (daily DELETE of rows older than 7 days), which
-// replaces the Cosmos `default_ttl = 604800` stochastic background sweep.
-// Stage 2c is the first sub-stage that puts rows into the table, so the
-// cron's first non-trivial DELETE happens 7 days after this lands.
+// pg/migrations.go: a daily DELETE of rows older than 7 days.
 type RunEventsStore struct {
 	pool *pgxpool.Pool
 }
 
-// RunEventRow is the row shape used to insert/return events. Mirrors the
-// fields cosmos.Store used in nativeEventDoc; the runtime conversion
-// happens in cosmos.Store's RecordNativeEventByID / ListNativeEventsByID
-// helpers (which decompose / recompose between the cosmos-shaped doc and
-// this row).
+// RunEventRow is the row shape used to insert/return native runner events.
 type RunEventRow struct {
 	RunID        string
 	AttemptIndex int
@@ -55,7 +43,7 @@ type RunEventRow struct {
 
 // ErrRunEventConflict signals that an event with the same primary key
 // already exists in the table but with a different payload. Mirrors the
-// cosmos.Store behavior (server.ErrConflict) which the public API
+// Store behavior (server.ErrConflict) which the public API
 // (RecordNativeEventByID) propagates to its caller.
 var ErrRunEventConflict = errors.New("run event conflict: same primary key, different payload")
 
@@ -71,7 +59,7 @@ func NewRunEventsStore(pool *pgxpool.Pool) *RunEventsStore {
 //   - created=false, err=ErrRunEventConflict → same PK, different payload
 //   - created=false, err=<other> → pool / serialization error
 //
-// Callers that need to mutate other state (e.g. cosmos.Store.applyNative
+// Callers that need to mutate other state (e.g. Store.applyNative
 // EventExecutionState) should gate that work on `created == true`.
 func (s *RunEventsStore) Insert(ctx context.Context, row RunEventRow) (bool, error) {
 	if s == nil || s.pool == nil {
@@ -220,9 +208,9 @@ func scanRunEventRow(rows pgx.Rows) (RunEventRow, error) {
 	return row, nil
 }
 
-// sameEvent matches the equality contract the cosmos event store used: identical
-// content along every business-relevant field (PK is implied because
-// the conflict-comparison path only fires for matching PKs).
+// sameEvent matches identical content along every business-relevant field. The
+// primary key is implied because conflict comparison only fires for matching
+// PKs.
 func sameEvent(a, b RunEventRow) bool {
 	if a.Project != b.Project ||
 		a.Event != b.Event ||

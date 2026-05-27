@@ -4,7 +4,7 @@
 //
 // CONTEXT
 //
-// PR #518 split slot state into its own Cosmos collection. PR #525 added
+// PR #518 split slot state into its own durable collection/table. PR #525 added
 // the cancel-await activation contract + error→cleaning recovery. The
 // embedded `project.metadata.native_standby_dns.slots[]` array became a
 // dead field, stripped at boot by MigrateProjectSlotsIntoCollection.
@@ -22,7 +22,7 @@
 //      migrate to a typed seeder; production callers must go.
 //
 //   B. PATCH-count's writeback to standbyDNS["slots"] in
-//      internal/store/cosmos/cosmos.go. Dual-write to a dead field that
+//      the active store layer. Dual-write to a dead field that
 //      the next boot strips. Pure violation.
 //
 //   C. Legacy state-name aliases in switch arms (e.g.,

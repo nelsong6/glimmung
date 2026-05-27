@@ -439,7 +439,7 @@ func TestScaleProjectTestEnvironmentsRequiresLeaseVisibilityWhenRemovingSlots(t 
 	store := &fakeProjectScalerStore{
 		fakeReadStore: fakeReadStore{projects: []Project{project}},
 		project:       project,
-		leaseErr:      errors.New("cosmos unavailable"),
+		leaseErr:      errors.New("store unavailable"),
 	}
 	handler := newHandler(
 		Settings{},

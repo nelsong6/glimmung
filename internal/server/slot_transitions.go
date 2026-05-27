@@ -35,8 +35,7 @@ func slotHistoryStoreFromReadStore(store ReadStore) SlotHistoryStore {
 
 // errSlotStoreNotConfigured surfaces from slot-transition helpers when
 // the store isn't wired with SlotStore. This is a real production-time
-// failure mode (someone disabled the cosmos store) — the helpers log it
-// loudly rather than silently no-op.
+// failure mode; the helpers log it loudly rather than silently no-op.
 var errSlotStoreNotConfigured = errors.New("slot store not configured")
 
 // markSlotProvisioning transitions a slot from unseeded to provisioning.

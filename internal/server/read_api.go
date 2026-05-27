@@ -24,18 +24,13 @@ type Project struct {
 	ArgoCDApp  string         `json:"argocd_app"`
 	Metadata   map[string]any `json:"metadata"`
 	CreatedAt  time.Time      `json:"created_at"`
-	// etag carries the Cosmos resource etag for callers that need to do
-	// optimistic-concurrency writes (etag-conditional ReplaceItem). Populated
-	// by point reads (ReadProject); zero from list queries that don't expose
-	// per-row etags. Not serialized — it's an implementation artifact, not
-	// part of the project's public shape.
+	// etag carries an optional store-provided CAS token. Empty for the
+	// Postgres runtime path.
 	etag string `json:"-"`
 }
 
-// ETag exposes the resource etag captured by the store on the read that
-// produced this Project. Use it to perform CAS writes via
-// ProjectTestEnvironmentSlotStatusClaimer. Empty when the project came from
-// a list query that doesn't carry per-row etags.
+// ETag exposes the store-provided CAS token captured by the read that produced
+// this Project. Empty when the current store path does not provide one.
 func (p Project) ETag() string { return p.etag }
 
 // WithETag returns a copy of the project with `tag` as its captured etag.

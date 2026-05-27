@@ -57,7 +57,7 @@ Any number of `work` phases between prepare and testing — that's
 where the actual implementation happens.
 
 The mandatory-phase and linear-topology enforcement is active in the Go workflow
-writer, sync path, and Cosmos upsert path. Registrations that miss the entry
+writer, sync path, and Postgres upsert path. Registrations that miss the entry
 phase, a `verify: true` testing phase, or an always-run cleanup phase are
 rejected before they can become the project runtime contract. Registrations with
 multiple entry phases, fan-in/fan-out phase dependencies, invalid cross-phase
@@ -179,9 +179,13 @@ The same finalizer is also exposed as an admin repair/control endpoint:
 `POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/touchpoint/finalize`.
 It is idempotent and uses the durable Run state as source of truth: it creates
 or reuses the GitHub PR, records `run.pr_number`, and ensures the Touchpoint
-linked to the Issue and Run. Operators should use this endpoint when a Run
-already passed verification but an older or interrupted workflow did not
-materialize the review surface.
+linked to the Issue and Run. During that same call, Glimmung normalizes run
+artifact evidence into Touchpoint evidence and validates required screenshot
+artifacts before the Touchpoint is ready. GitHub PR bodies stay a syndicated
+pointer into Glimmung; screenshots and other review evidence belong on the
+Glimmung Touchpoint. Operators should use this endpoint when a Run already
+passed verification but an older or interrupted workflow did not materialize
+the review surface.
 
 ## Naming convention
 
@@ -199,7 +203,7 @@ with these names pre-filled.
 
 ## Runtime source of truth
 
-Cosmos workflow registrations are the runtime source of truth. The
+Postgres workflow registrations are the runtime source of truth. The
 `.glimmung/workflows/<name>.yaml` upstream endpoints remain an import/sync
 convenience for older desired-state flows, but dispatch reads the registered
 workflow document, not a consumer repository file.
