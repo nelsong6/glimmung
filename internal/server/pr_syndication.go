@@ -126,76 +126,99 @@ func nativePRTouchpointByCallbackToken(store ReadStore, prClient PullRequestClie
 
 func finalizeRunTouchpointByNumber(store ReadStore, prClient PullRequestClient, artifactStore ArtifactStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		finalizeStore, ok := store.(runTouchpointFinalizeStore)
-		if !ok || finalizeStore == nil {
-			writeProblem(w, http.StatusServiceUnavailable, "touchpoint finalizer store not configured")
-			return
-		}
-		if prClient == nil {
-			writeProblem(w, http.StatusServiceUnavailable, "pull request client not configured")
-			return
-		}
-		project := r.PathValue("project")
-		issueNumber, ok := positivePathInt(w, r, "issue_number")
-		if !ok {
-			return
-		}
 		runNumber := strings.TrimSpace(r.PathValue("run_number"))
 		if runNumber == "" {
 			writeProblem(w, http.StatusBadRequest, "run_number required")
 			return
 		}
-		runID, _, err := finalizeStore.ReadRunIDForNumber(r.Context(), project, issueNumber, runNumber)
-		if errors.Is(err, ErrNotFound) {
-			writeProblem(w, http.StatusNotFound, "run not found")
-			return
-		}
-		if err != nil {
-			writeInternalError(w, r, err, "read run failed")
-			return
-		}
-		run, err := finalizeStore.ReadRunForReplay(r.Context(), project, runID)
-		if errors.Is(err, ErrNotFound) {
-			writeProblem(w, http.StatusNotFound, "run not found")
-			return
-		}
-		if err != nil {
-			writeInternalError(w, r, err, "read run failed")
-			return
-		}
-		wf, err := workflowForRun(r.Context(), finalizeStore, run)
-		if err != nil {
-			writeInternalError(w, r, err, "read workflow failed")
-			return
-		}
-		if wf == nil || !wf.PR.Enabled {
-			writeProblem(w, http.StatusConflict, "workflow PR primitive is disabled")
-			return
-		}
-		if ready, reason := prPrimitiveReadyForRun(wf, run); !ready {
-			writeProblem(w, http.StatusConflict, reason)
-			return
-		}
-		if strings.TrimSpace(run.IssueRepo) == "" {
-			writeProblem(w, http.StatusUnprocessableEntity, "run has no issue_repo")
-			return
-		}
-		if prBranchForRun(run) == "" {
-			writeProblem(w, http.StatusUnprocessableEntity, "run did not emit a branch_name output")
-			return
-		}
-		result, err := materializePRPrimitive(r.Context(), finalizeStore, prClient, artifactStore, run)
-		if err != nil {
-			var validationErr ValidationError
-			if errors.As(err, &validationErr) {
-				writeProblem(w, http.StatusUnprocessableEntity, validationErr.Message)
-				return
-			}
-			writeInternalError(w, r, err, "finalize touchpoint failed")
-			return
-		}
-		writeJSON(w, http.StatusOK, result)
+		finalizeRunTouchpoint(w, r, store, prClient, artifactStore, runNumber)
 	}
+}
+
+func finalizeRunCycleTouchpointByNumber(store ReadStore, prClient PullRequestClient, artifactStore ArtifactStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		runNumber := strings.TrimSpace(r.PathValue("run_number"))
+		if runNumber == "" {
+			writeProblem(w, http.StatusBadRequest, "run_number required")
+			return
+		}
+		if strings.Contains(runNumber, ".") {
+			writeProblem(w, http.StatusBadRequest, "run_number must be the base run number when cycle_number is present")
+			return
+		}
+		cycleNumber, ok := positivePathInt(w, r, "cycle_number")
+		if !ok {
+			return
+		}
+		finalizeRunTouchpoint(w, r, store, prClient, artifactStore, fmt.Sprintf("%s.%d", runNumber, cycleNumber))
+	}
+}
+
+func finalizeRunTouchpoint(w http.ResponseWriter, r *http.Request, store ReadStore, prClient PullRequestClient, artifactStore ArtifactStore, runNumber string) {
+	finalizeStore, ok := store.(runTouchpointFinalizeStore)
+	if !ok || finalizeStore == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "touchpoint finalizer store not configured")
+		return
+	}
+	if prClient == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "pull request client not configured")
+		return
+	}
+	project := r.PathValue("project")
+	issueNumber, ok := positivePathInt(w, r, "issue_number")
+	if !ok {
+		return
+	}
+	runID, _, err := finalizeStore.ReadRunIDForNumber(r.Context(), project, issueNumber, runNumber)
+	if errors.Is(err, ErrNotFound) {
+		writeProblem(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if err != nil {
+		writeInternalError(w, r, err, "read run failed")
+		return
+	}
+	run, err := finalizeStore.ReadRunForReplay(r.Context(), project, runID)
+	if errors.Is(err, ErrNotFound) {
+		writeProblem(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if err != nil {
+		writeInternalError(w, r, err, "read run failed")
+		return
+	}
+	wf, err := workflowForRun(r.Context(), finalizeStore, run)
+	if err != nil {
+		writeInternalError(w, r, err, "read workflow failed")
+		return
+	}
+	if wf == nil || !wf.PR.Enabled {
+		writeProblem(w, http.StatusConflict, "workflow PR primitive is disabled")
+		return
+	}
+	if ready, reason := prPrimitiveReadyForRun(wf, run); !ready {
+		writeProblem(w, http.StatusConflict, reason)
+		return
+	}
+	if strings.TrimSpace(run.IssueRepo) == "" {
+		writeProblem(w, http.StatusUnprocessableEntity, "run has no issue_repo")
+		return
+	}
+	if prBranchForRun(run) == "" {
+		writeProblem(w, http.StatusUnprocessableEntity, "run did not emit a branch_name output; if this is a recycled run, finalize the cycle route /runs/{run_number}/cycles/{cycle_number}/touchpoint/finalize")
+		return
+	}
+	result, err := materializePRPrimitive(r.Context(), finalizeStore, prClient, artifactStore, run)
+	if err != nil {
+		var validationErr ValidationError
+		if errors.As(err, &validationErr) {
+			writeProblem(w, http.StatusUnprocessableEntity, validationErr.Message)
+			return
+		}
+		writeInternalError(w, r, err, "finalize touchpoint failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func prPrimitiveReadyForRun(wf *Workflow, run RunReplayData) (bool, string) {
@@ -306,13 +329,7 @@ func materializePRPrimitive(ctx context.Context, store prPrimitiveStore, prClien
 }
 
 func prBranchForRun(run RunReplayData) string {
-	if value := phaseOutput(run, "branch_name"); value != "" {
-		return value
-	}
-	if run.RunDisplayNumber != nil && strings.TrimSpace(*run.RunDisplayNumber) != "" && run.IssueNumber > 0 {
-		return fmt.Sprintf("issue-%d-run-%s", run.IssueNumber, strings.TrimSpace(*run.RunDisplayNumber))
-	}
-	return ""
+	return phaseOutput(run, "branch_name")
 }
 
 func phaseOutput(run RunReplayData, key string) string {

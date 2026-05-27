@@ -300,6 +300,7 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	mux.Handle("POST /v1/projects/{project}/workflows/{name}/sync", requireAdmin(adminAuthenticator, http.HandlerFunc(syncWorkflow(store, ghClient))))
 	mux.Handle("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/abort", requireAdmin(adminAuthenticator, http.HandlerFunc(abortRunByNumber(store))))
 	mux.Handle("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/touchpoint/finalize", requireAdmin(adminAuthenticator, http.HandlerFunc(finalizeRunTouchpointByNumber(store, prClient, artifactStore))))
+	mux.Handle("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/cycles/{cycle_number}/touchpoint/finalize", requireAdmin(adminAuthenticator, http.HandlerFunc(finalizeRunCycleTouchpointByNumber(store, prClient, artifactStore))))
 	mux.HandleFunc("GET /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/events", nativeRunEventsByNumber(store))
 	mux.HandleFunc("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/native/events", nativeRunEventWriteByNumber(store))
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/events", nativeRunEventWriteByCallbackToken(store))

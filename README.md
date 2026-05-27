@@ -169,6 +169,7 @@ surface.
 | GET    | `/v1/touchpoints`                 | Touchpoint index across registered projects (GitHub PR syndication metadata + linked Issue/Run state). |
 | GET    | `/v1/projects/{project}/issues/{n}/touchpoint` | Canonical live Touchpoint summary for one Glimmung Issue. |
 | POST   | `/v1/projects/{project}/issues/{issue_number}/runs/{run_number}/touchpoint/finalize` | Admin/idempotent finalizer for a review-ready Run: creates or reuses the GitHub PR, links `run.pr_number`, and ensures the Touchpoint. |
+| POST   | `/v1/projects/{project}/issues/{issue_number}/runs/{run_number}/cycles/{cycle_number}/touchpoint/finalize` | Admin/idempotent finalizer for a review-ready cycle Run, matching the UI run-cycle URL shape. |
 | POST   | `/v1/signals`                     | Enqueue a Signal. PR signals use GitHub coordinates only: `{target_type:"pr", target_repo:"owner/repo", target_ref:"42", source:"glimmung_ui", payload:{kind:"reject", feedback:"..."}}`. |
 | POST   | `/v1/signals/drain`               | Admin drain endpoint for queued signals; production also runs the Go signal drain loop in-process. |
 

@@ -19,10 +19,11 @@ import (
 type fakeCompletionStore struct {
 	fakeReadStore
 
-	tokenRunID   string
-	tokenProject string
-	tokenRef     string
-	tokenErr     error
+	tokenRunID    string
+	tokenProject  string
+	tokenRef      string
+	tokenErr      error
+	readRunNumber string
 
 	abortResult AbortRunResult
 	abortErr    error
@@ -74,7 +75,8 @@ func (s *fakeCompletionStore) ReadRunIDForCallbackToken(context.Context, string)
 	return s.tokenRunID, s.tokenProject, s.tokenRef, nil
 }
 
-func (s *fakeCompletionStore) ReadRunIDForNumber(_ context.Context, project string, _ int, _ string) (string, string, error) {
+func (s *fakeCompletionStore) ReadRunIDForNumber(_ context.Context, project string, _ int, runNumber string) (string, string, error) {
+	s.readRunNumber = runNumber
 	if s.tokenErr != nil {
 		return "", "", s.tokenErr
 	}
@@ -667,6 +669,40 @@ func TestFinalizeRunTouchpointByNumberEnsuresPRAndTouchpoint(t *testing.T) {
 	}
 }
 
+func TestFinalizeRunTouchpointByCycleNumberEnsuresPRAndTouchpoint(t *testing.T) {
+	store := &fakeCompletionStore{tokenRunID: "run-1", tokenProject: "proj", tokenRef: "proj#7/runs/1.2"}
+	store.run = runDataForCompletion("impl")
+	runDisplay := "1.2"
+	runCycle := 2
+	store.run.RunDisplayNumber = &runDisplay
+	store.run.RunCycleNumber = &runCycle
+	store.run.Attempts[0].Completed = true
+	store.run.Attempts[0].Conclusion = "success"
+	store.run.Attempts[0].Decision = string(decision.Advance)
+	store.run.Attempts[0].PhaseOutputs = map[string]string{"branch_name": "issue-7-run-1.2"}
+	store.wf = prWorkflowForCompletion("impl")
+	prClient := &fakePullRequestClient{}
+	handler := NewWithRuntimeClients(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, prClient, nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/projects/proj/issues/7/runs/1/cycles/2/touchpoint/finalize", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.readRunNumber != "1.2" {
+		t.Fatalf("read run number=%q, want 1.2", store.readRunNumber)
+	}
+	if prClient.req.Head != "issue-7-run-1.2" {
+		t.Fatalf("PR head=%q, want issue-7-run-1.2", prClient.req.Head)
+	}
+	if store.touchpointReq == nil || store.touchpointReq.LinkedRunRef != "proj#7/runs/1.2" {
+		t.Fatalf("touchpoint req=%#v", store.touchpointReq)
+	}
+}
+
 func TestFinalizeRunTouchpointByNumberPersistsStructuredScreenshotEvidence(t *testing.T) {
 	store := &fakeCompletionStore{tokenRunID: "run-1", tokenProject: "proj", tokenRef: "proj#7/runs/1"}
 	store.run = runDataForCompletion("verify")
@@ -797,8 +833,6 @@ func TestFinalizeRunTouchpointByNumberRejectsAbortPath(t *testing.T) {
 func TestFinalizeRunTouchpointByNumberRequiresBranchOutput(t *testing.T) {
 	store := &fakeCompletionStore{tokenRunID: "run-1", tokenProject: "proj"}
 	store.run = runDataForCompletion("impl")
-	store.run.RunNumber = nil
-	store.run.RunDisplayNumber = nil
 	store.run.Attempts[0].Completed = true
 	store.run.Attempts[0].Conclusion = "success"
 	store.run.Attempts[0].Decision = string(decision.Advance)
@@ -816,6 +850,9 @@ func TestFinalizeRunTouchpointByNumberRequiresBranchOutput(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "branch_name") {
 		t.Fatalf("body=%s", rec.Body.String())
+	}
+	if prClient.req.Repo != "" || store.touchpointReq != nil {
+		t.Fatalf("unexpected side effects pr=%#v touchpoint=%#v", prClient.req, store.touchpointReq)
 	}
 }
 

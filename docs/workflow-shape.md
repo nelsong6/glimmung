@@ -177,6 +177,8 @@ The workflow owns the placement and job id; Glimmung owns the implementation. If
 
 The same finalizer is also exposed as an admin repair/control endpoint:
 `POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/touchpoint/finalize`.
+For recycled runs, use the cycle-addressable form that matches the UI URL:
+`POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/cycles/{cycle_number}/touchpoint/finalize`.
 It is idempotent and uses the durable Run state as source of truth: it creates
 or reuses the GitHub PR, records `run.pr_number`, and ensures the Touchpoint
 linked to the Issue and Run. During that same call, Glimmung normalizes run
