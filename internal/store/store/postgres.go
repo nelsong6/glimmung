@@ -4897,6 +4897,24 @@ func (s *Store) LinkRunPullRequest(ctx context.Context, project, runID string, p
 	return err
 }
 
+func (s *Store) NormalizeRunReviewFacts(ctx context.Context, project, runID string, facts server.RunReviewFacts) (server.RunReplayData, error) {
+	if facts.ValidationURL == nil || strings.TrimSpace(*facts.ValidationURL) == "" {
+		return s.ReadRunForReplay(ctx, project, runID)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	err := s.mutateRunRaw(ctx, project, runID, func(_ runDoc, raw map[string]any) (bool, error) {
+		changed := promoteRunReviewOutputRaw(raw, "validation_url", *facts.ValidationURL)
+		if changed {
+			raw["updated_at"] = now
+		}
+		return changed, nil
+	})
+	if err != nil {
+		return server.RunReplayData{}, err
+	}
+	return s.ReadRunForReplay(ctx, project, runID)
+}
+
 // ---- RunMutationStore implementation ----
 
 // ReadRunIDForNumber resolves an issue-scoped run number to (runID, runRef).
@@ -5209,9 +5227,42 @@ func applyNativePhaseOutputSetRaw(raw map[string]any, attempt attemptDoc, event 
 		attemptMap["phase_outputs"] = outputs
 		attempts[i] = attemptMap
 		raw["attempts"] = attempts
+		promoteRunReviewOutputRaw(raw, key, value)
 		return nil
 	}
 	return nil
+}
+
+func promoteRunReviewOutputsRaw(raw map[string]any, outputs map[string]string) bool {
+	changed := false
+	for key, value := range outputs {
+		if promoteRunReviewOutputRaw(raw, key, value) {
+			changed = true
+		}
+	}
+	return changed
+}
+
+func promoteRunReviewOutputRaw(raw map[string]any, key, value string) bool {
+	switch strings.TrimSpace(key) {
+	case "validation_url":
+		return setRunReviewStringRaw(raw, "validation_url", value)
+	default:
+		return false
+	}
+}
+
+func setRunReviewStringRaw(raw map[string]any, key, value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	current, _ := raw[key].(string)
+	if strings.TrimSpace(current) == value {
+		return false
+	}
+	raw[key] = value
+	return true
 }
 
 func attemptIndexFromRaw(attempt map[string]any) int {
@@ -6202,6 +6253,7 @@ func (s *Store) StampRunCompletion(ctx context.Context, project, runID string, p
 		}
 		if p.PhaseOutputs != nil {
 			attempt["phase_outputs"] = p.PhaseOutputs
+			promoteRunReviewOutputsRaw(raw, p.PhaseOutputs)
 		}
 		if p.VerificationStatus != "" {
 			attempt["verification"] = map[string]any{
