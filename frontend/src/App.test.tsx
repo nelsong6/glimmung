@@ -9,7 +9,7 @@ import {
   CONNECTION_STALE_AFTER_MS,
   connectionStateFromSnapshotClock,
 } from "./App";
-import { installMockFetch } from "./mockApi";
+import { installMockFetch, isMockMode } from "./mockApi";
 
 afterEach(() => {
   sessionStorage.clear();
@@ -25,6 +25,18 @@ describe("connection status", () => {
     expect(connectionStateFromSnapshotClock(lastSeen + CONNECTION_STALE_AFTER_MS - 1, startedAt, lastSeen)).toBe("live");
     expect(connectionStateFromSnapshotClock(lastSeen + CONNECTION_STALE_AFTER_MS, startedAt, lastSeen)).toBe("stale");
     expect(connectionStateFromSnapshotClock(lastSeen + CONNECTION_DEAD_AFTER_MS, startedAt, lastSeen)).toBe("dead");
+  });
+});
+
+describe("mock mode", () => {
+  it("does not persist mock mode onto ordinary paths", () => {
+    window.history.pushState({}, "", "/?mock=1");
+    expect(isMockMode()).toBe(true);
+
+    sessionStorage.setItem("glimmung.mock.enabled", "1");
+    window.history.pushState({}, "", "/");
+
+    expect(isMockMode()).toBe(false);
   });
 });
 

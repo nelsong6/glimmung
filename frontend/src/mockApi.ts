@@ -3,22 +3,15 @@ type MockResponseInit = {
   headers?: HeadersInit;
 };
 
-const MOCK_SESSION_KEY = "glimmung.mock.enabled";
-
 const nowIso = (offsetMs = 0) => new Date(Date.now() + offsetMs).toISOString();
 const ago = (minutes: number) => nowIso(-minutes * 60 * 1000);
 
 export function isMockMode(): boolean {
   const params = new URLSearchParams(window.location.search);
   if (params.get("mock") === "0") {
-    sessionStorage.removeItem(MOCK_SESSION_KEY);
     return false;
   }
-  if (params.get("mock") === "1" || window.location.pathname.startsWith("/_mock")) {
-    sessionStorage.setItem(MOCK_SESSION_KEY, "1");
-    return true;
-  }
-  return sessionStorage.getItem(MOCK_SESSION_KEY) === "1";
+  return params.get("mock") === "1" || window.location.pathname.startsWith("/_mock");
 }
 
 export function mockAccount() {

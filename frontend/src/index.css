@@ -939,7 +939,7 @@
 }
 .content {
   flex: 1;
-  padding: 24px 32px;
+  padding: 0 32px 24px;
   min-width: 0;
 }
 
@@ -1026,17 +1026,17 @@ tr.eligible td.mono:first-child {
   position: relative;
   display: inline-flex;
   align-items: center;
-  margin-left: 12px;
-  height: 18px;
-  padding: 0 8px 0 9px;
+  margin-left: 0;
+  height: 16px;
+  padding: 0 7px 0 8px;
   font-family: var(--font-mono);
-  font-size: 0.7rem;
+  font-size: 0.66rem;
   font-weight: 400;
   letter-spacing: 0.04em;
   text-transform: lowercase;
   line-height: 1;
   white-space: nowrap;
-  clip-path: polygon(6px 0, 100% 0, 100% 100%, 0 100%, 0 6px);
+  clip-path: polygon(5px 0, 100% 0, 100% 100%, 0 100%, 0 5px);
   isolation: isolate;
   --pill-rail: var(--border-strong);
   --pill-edge: var(--border);
@@ -1053,7 +1053,7 @@ tr.eligible td.mono:first-child {
     linear-gradient(to top,    var(--pill-edge) 0 1px, transparent 1px),
     linear-gradient(to bottom, var(--pill-edge) 0 1px, transparent 1px),
     linear-gradient(to left,   var(--pill-edge) 0 1px, transparent 1px),
-    linear-gradient(135deg, transparent 0 calc(8.49px - 1px), var(--pill-edge) calc(8.49px - 1px) 8.49px, transparent 8.49px);
+    linear-gradient(135deg, transparent 0 calc(7.07px - 1px), var(--pill-edge) calc(7.07px - 1px) 7.07px, transparent 7.07px);
   background-repeat: no-repeat;
   background-size: 100% 100%;
   pointer-events: none;
@@ -1078,25 +1078,35 @@ tr.eligible td.mono:first-child {
   --pill-fg:   var(--state-danger-fg);
 }
 
-header {
+.app-header,
+.portfolio-inner-header,
+.frontpage-header {
   display: flex;
   align-items: center;
-  gap: 24px;
-  margin-bottom: 0;
-  padding-bottom: 16px;
+  gap: 18px;
+  min-height: 42px;
+  padding-bottom: 0;
   border-bottom: 1px solid var(--border);
+}
+.app-header h1,
+.portfolio-inner-header h1,
+.frontpage-header h1 {
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1;
+  letter-spacing: 0;
 }
 .header-left {
   flex: 1;
   min-width: 0;
   display: flex;
-  align-items: baseline;
-  gap: 16px;
+  align-items: center;
+  gap: 14px;
 }
 .header-title {
   display: flex;
-  align-items: baseline;
-  gap: 12px;
+  align-items: center;
+  gap: 8px;
   flex-shrink: 0;
 }
 .title-link {
@@ -1108,14 +1118,15 @@ header {
 }
 .header-right {
   flex-shrink: 0;
-  padding-top: 4px;
 }
 .epigraph {
+  display: inline-flex;
+  align-items: center;
   min-width: 0;
   font-style: italic;
-  color: var(--fg-dimmest);
+  color: var(--fg-dim);
   font-size: 0.8rem;
-  line-height: 1;
+  line-height: 1.1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1133,14 +1144,14 @@ header {
   position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  height: 30px;
-  padding: 0 12px 0 11px;
+  gap: 7px;
+  height: 24px;
+  padding: 0 10px 0 9px;
   background: var(--bg-deep);
   color: var(--fg);
   font-family: var(--font-mono);
-  font-size: 0.78rem;
-  clip-path: polygon(8px 0, 100% 0, 100% 100%, 0 100%, 0 8px);
+  font-size: 0.72rem;
+  clip-path: polygon(6px 0, 100% 0, 100% 100%, 0 100%, 0 6px);
   isolation: isolate;
 }
 .user-id::before {
@@ -1150,7 +1161,7 @@ header {
     linear-gradient(to top,    var(--border) 0 1px, transparent 1px),
     linear-gradient(to bottom, var(--border) 0 1px, transparent 1px),
     linear-gradient(to left,   var(--border) 0 1px, transparent 1px),
-    linear-gradient(135deg, transparent 0 calc(11.31px - 1px), var(--border) calc(11.31px - 1px) 11.31px, transparent 11.31px);
+    linear-gradient(135deg, transparent 0 calc(8.49px - 1px), var(--border) calc(8.49px - 1px) 8.49px, transparent 8.49px);
   background-repeat: no-repeat;
   background-size: 100% 100%;
   pointer-events: none;
@@ -1159,8 +1170,8 @@ header {
 .user-id > * { position: relative; z-index: 2; }
 .user-id .user-dot {
   display: inline-block;
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
   border-radius: 999px;
   background: var(--state-success-fg);
 }
@@ -1806,8 +1817,9 @@ h2 .inline-action,
 }
 
 .app-breadcrumb {
-  margin-top: 14px;
-  padding: 0 14px 12px;
+  min-height: 34px;
+  margin-top: 0;
+  padding: 0;
   border-bottom: 1px solid var(--border);
 }
 .breadcrumb-segment {
