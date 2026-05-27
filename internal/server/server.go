@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/nelsong6/glimmung/internal/metrics"
 )
@@ -210,6 +211,7 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
+	mux.HandleFunc("GET /readyz", readyz(store))
 	mux.Handle("GET /metrics", metrics.Handler())
 	mux.HandleFunc("GET /v1/config", publicConfig(settings))
 	mux.HandleFunc("GET /v1/auth/me", authMe(authResolver))
@@ -334,6 +336,32 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 
 func healthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func readyz(store ReadStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "read store not configured")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if !readStoreReady(ctx, store) {
+			writeUnavailable(w, r, "read store not ready", "read_store_not_ready")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	}
+}
+
+func readStoreReady(ctx context.Context, store ReadStore) (ready bool) {
+	defer func() {
+		if recover() != nil {
+			ready = false
+		}
+	}()
+	_, err := store.ListProjects(ctx)
+	return err == nil
 }
 
 // publicConfig serves /v1/config — read by the frontend on boot to discover
