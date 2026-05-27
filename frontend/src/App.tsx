@@ -1031,10 +1031,6 @@ function ProjectView({
     return <div className="empty">Project {projectName || "(missing)"} was not found.</div>;
   }
 
-  const workflows = snap.workflows
-    .filter((w) => w.project === project.name)
-    .slice()
-    .sort((a, b) => a.name.localeCompare(b.name));
   const active = snap.active_leases.filter((l) => l.project === project.name);
   const testLeases = active.filter((l) => leaseKind(l) === "test");
   const agentLeases = active.filter((l) => leaseKind(l) === "agent");
@@ -1066,10 +1062,6 @@ function ProjectView({
           </div>
         </div>
         <div className="project-facts">
-          <div className="project-fact">
-            <span>workflows</span>
-            <strong>{workflows.length}</strong>
-          </div>
           <div className="project-fact">
             <span>active</span>
             <strong>{active.length}</strong>

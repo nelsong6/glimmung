@@ -208,6 +208,7 @@ describe("IssueDetailView run execution graph", () => {
     expect(within(labels).getByText("ambient-effects")).toBeInTheDocument();
     expect(within(labels).getByText("in flight")).toBeInTheDocument();
     expect(document.querySelector(".project-hero > .dag-policy-rail")).not.toBeInTheDocument();
+    expect(document.querySelector(".issue-hero .project-facts")).not.toBeInTheDocument();
   });
 
   it("shows run history as flat run counts, base cycle values, and run-cycle ordinals", async () => {
