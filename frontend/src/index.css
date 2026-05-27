@@ -1566,9 +1566,6 @@ h2 .inline-action,
   gap: 12px;
   margin: 16px 0 12px;
 }
-.issue-kpis {
-  margin-bottom: 0;
-}
 .issue-control-grid .val {
   min-width: 0;
   overflow-wrap: anywhere;
@@ -1729,6 +1726,9 @@ h2 .inline-action,
   display: grid;
   grid-template-columns: repeat(4, minmax(72px, auto));
   gap: 10px;
+}
+.project-facts.issue-facts {
+  grid-template-columns: repeat(3, minmax(72px, auto));
 }
 .project-fact {
   min-width: 72px;

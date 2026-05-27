@@ -207,7 +207,14 @@ describe("IssueDetailView run execution graph", () => {
     const labels = within(titleRow as HTMLElement).getByLabelText("issue labels");
     expect(within(labels).getByText("ambient-effects")).toBeInTheDocument();
     expect(within(labels).getByText("in flight")).toBeInTheDocument();
+    const facts = await screen.findByLabelText("issue facts");
+    expect(within(facts).getByText("state")).toBeInTheDocument();
+    expect(within(facts).getByText("runs")).toBeInTheDocument();
+    expect(within(facts).getByText("cost")).toBeInTheDocument();
+    expect(within(facts).queryByText("project")).not.toBeInTheDocument();
+    expect(within(facts).queryByText("labels")).not.toBeInTheDocument();
     expect(document.querySelector(".project-hero > .dag-policy-rail")).not.toBeInTheDocument();
+    expect(document.querySelector(".issue-kpis")).not.toBeInTheDocument();
   });
 
   it("shows run history as flat run counts, base cycle values, and run-cycle ordinals", async () => {
@@ -383,7 +390,7 @@ describe("IssueDetailView run execution graph", () => {
     expect(screen.getAllByText("$2.3456").length).toBeGreaterThanOrEqual(2);
   });
 
-  it("uses the selected run projection for the current run rollup cost", async () => {
+  it("uses the selected run projection for the issue summary cost", async () => {
     const selectedProjection = {
       ...runProjection,
       runs: [{
@@ -419,8 +426,9 @@ describe("IssueDetailView run execution graph", () => {
 
     renderIssueDetail("/projects/ambience/issues/172/runs/7/cycles/1");
 
-    const rollup = await screen.findByLabelText("issue run rollup");
-    expect(within(rollup).getByText("$13.95")).toBeInTheDocument();
+    const facts = await screen.findByLabelText("issue facts");
+    expect(within(facts).getByText("$13.95")).toBeInTheDocument();
+    expect(screen.queryByLabelText("issue run rollup")).not.toBeInTheDocument();
   });
 
   it("opens planned steps for a job before any attempt has started", async () => {

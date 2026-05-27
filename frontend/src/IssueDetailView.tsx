@@ -631,7 +631,12 @@ export function IssueDetailView() {
         <div className="empty">Loading…</div>
       ) : detail ? (
         <>
-          <IssueHeader detail={detail} heading={heading} />
+          <IssueHeader
+            detail={detail}
+            graph={graph}
+            heading={heading}
+            selectedRunProjection={runProjection?.runs[0] ?? null}
+          />
 
           <IssueControlPlaneSummary
             graph={graph}
@@ -733,7 +738,25 @@ export function IssueDetailView() {
   );
 }
 
-function IssueHeader({ detail, heading }: { detail: IssueDetail; heading: string }) {
+function IssueHeader({
+  detail,
+  graph,
+  heading,
+  selectedRunProjection,
+}: {
+  detail: IssueDetail;
+  graph: IssueGraph | null;
+  heading: string;
+  selectedRunProjection: RunProjectionRun | null;
+}) {
+  const projection = graph?.projection ?? null;
+  const latestRun = latestProjectionRun(projection);
+  const run = selectedRunProjection && latestRun && selectedRunProjection.run_ref === latestRun.run_ref
+    ? selectedRunProjection
+    : latestRun;
+  const runCount = projection?.runs.length ?? detail.last_run_number ?? 0;
+  const stateLabel = run?.state ?? detail.last_run_state ?? detail.state;
+
   return (
     <section className="project-hero">
       <div className="project-hero-main">
@@ -751,26 +774,18 @@ function IssueHeader({ detail, heading }: { detail: IssueDetail; heading: string
         </div>
         <div className="project-repo mono">{heading}</div>
       </div>
-      <div className="project-facts">
-        <div className="project-fact">
-          <span>project</span>
-          <strong>{detail.project}</strong>
-        </div>
+      <div className="project-facts issue-facts" aria-label="issue facts">
         <div className="project-fact">
           <span>state</span>
-          <strong>{detail.state}</strong>
+          <strong>{stateLabel}</strong>
         </div>
         <div className="project-fact">
-          <span>labels</span>
-          <strong>{detail.labels.length}</strong>
+          <span>runs</span>
+          <strong>{runCount}</strong>
         </div>
         <div className="project-fact">
-          <span>last cycle</span>
-          <strong>
-            {detail.last_run_number !== null
-              ? `cycle ${detail.last_run_number}`
-              : detail.last_run_state ?? "none"}
-          </strong>
+          <span>cost</span>
+          <strong>{run ? `$${run.cost_usd.toFixed(2)}` : "$0.00"}</strong>
         </div>
       </div>
     </section>
@@ -805,11 +820,6 @@ function IssueControlPlaneSummary({
   const pendingSignal = signals.find((signal) => signal.state === "pending" || signal.state === "processing") ?? null;
   const nextAction = projection?.next_action;
   const phaseSummary = run ? projectionPhaseSummary(run) : "no phases";
-  const jobCount = run?.phases.reduce((sum, phase) => sum + phase.jobs.length, 0) ?? 0;
-  const stepCount = run?.phases.reduce(
-    (sum, phase) => sum + phase.jobs.reduce((jobSum, job) => jobSum + job.steps.length, 0),
-    0,
-  ) ?? 0;
 
   if (!projection || !run) {
     return (
@@ -830,28 +840,6 @@ function IssueControlPlaneSummary({
 
   return (
     <section className="issue-control-plane">
-      <div className="kpi-strip issue-kpis" aria-label="issue run rollup">
-        <div className="kpi">
-          <span className="k">runs</span>
-          <span className="v">{projection.runs.length}</span>
-        </div>
-        <div className="kpi">
-          <span className="k">phases</span>
-          <span className="v">{run.phases.length}</span>
-        </div>
-        <div className="kpi">
-          <span className="k">jobs</span>
-          <span className="v">{jobCount}</span>
-        </div>
-        <div className="kpi">
-          <span className="k">steps</span>
-          <span className="v">{stepCount}</span>
-        </div>
-        <div className="kpi">
-          <span className="k">cost</span>
-          <span className="v">${run.cost_usd.toFixed(2)}</span>
-        </div>
-      </div>
       <div className="project-info issue-control-grid">
         <div className="row">
           <span className="key">current</span>
