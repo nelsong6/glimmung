@@ -1726,8 +1726,9 @@ h2 .inline-action,
   color: var(--fg-muted);
 }
 .project-facts {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(72px, auto));
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 10px;
 }
 .project-fact {
