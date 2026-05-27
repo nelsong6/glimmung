@@ -2412,7 +2412,6 @@ function ProjectionPipelineDag({
           name: job.name ?? job.id,
           state: job.state,
           reason: job.reason,
-          cost_usd: job.cost_usd ?? null,
           selection: { phase: phase.name, job: job.id, step: preferredProjectionStepSlug(job) },
         }))
       : (graphPhase.jobs && graphPhase.jobs.length > 0
@@ -2423,7 +2422,6 @@ function ProjectionPipelineDag({
           name: job.name ?? job.id,
           state: phase?.state ?? "not_started",
           reason: phase?.reason ?? null,
-          cost_usd: null,
           selection: { phase: graphPhase.name, job: job.id, step: "job" },
         }));
     return (
@@ -2444,9 +2442,6 @@ function ProjectionPipelineDag({
               </div>
               <div className="dag-node-state">
                 <span className={`pill ${graphStatePill(job.state)}`}>{formatGraphState(job.state)}</span>
-                {job.cost_usd !== null && (
-                  <span className="dag-node-cost mono">{formatUsd4(job.cost_usd)}</span>
-                )}
               </div>
               {job.reason && <div className="dag-node-meta dim mono">{job.reason}</div>}
             </button>

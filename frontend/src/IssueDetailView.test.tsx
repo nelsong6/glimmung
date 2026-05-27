@@ -341,7 +341,7 @@ describe("IssueDetailView run execution graph", () => {
     expect(await screen.findByText(/cloning repo/)).toBeInTheDocument();
   });
 
-  it("surfaces completed job cost on the run graph and selected job panel", async () => {
+  it("surfaces completed job cost in the selected job log section", async () => {
     const selectedProjection = {
       ...runProjection,
       runs: [{
@@ -373,9 +373,8 @@ describe("IssueDetailView run execution graph", () => {
 
     renderIssueDetail("/projects/ambience/issues/172/runs/7/cycles/1");
 
-    const graphCost = await screen.findByText("$2.3456", { selector: ".dag-node-cost" });
-    expect(graphCost).toBeInTheDocument();
     const jobLabel = await screen.findByText("Environment prep");
+    expect(screen.queryByText("$2.3456", { selector: ".dag-node-cost" })).not.toBeInTheDocument();
     const jobButton = jobLabel.closest("button");
     if (!jobButton) throw new Error("missing graph job button");
     await userEvent.click(jobButton);
