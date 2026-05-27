@@ -1120,11 +1120,13 @@ tr.eligible td.mono:first-child {
   flex-shrink: 0;
 }
 .epigraph {
+  display: inline-flex;
+  align-items: center;
   min-width: 0;
   font-style: italic;
   color: var(--fg-dim);
-  font-size: 0.72rem;
-  line-height: 1;
+  font-size: 0.8rem;
+  line-height: 1.1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
