@@ -633,14 +633,6 @@ export function IssueDetailView() {
         <>
           <IssueHeader detail={detail} heading={heading} />
 
-          <IssueControlPlaneSummary
-            graph={graph}
-            detail={detail}
-            selectedRunProjection={runProjection?.runs[0] ?? null}
-            onOpenRuns={() => setTab("runs")}
-            onOpenTouchpoint={() => setTab("touchpoint")}
-          />
-
           <div className="dashboard-nav" aria-label="issue sections">
             <TabButton current={tab} value="summary" onSelect={selectTab}>
               summary
@@ -771,152 +763,6 @@ function IssueHeader({ detail, heading }: { detail: IssueDetail; heading: string
               ? `cycle ${detail.last_run_number}`
               : detail.last_run_state ?? "none"}
           </strong>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function IssueControlPlaneSummary({
-  graph,
-  detail,
-  selectedRunProjection,
-  onOpenRuns,
-  onOpenTouchpoint,
-}: {
-  graph: IssueGraph | null;
-  detail: IssueDetail;
-  selectedRunProjection: RunProjectionRun | null;
-  onOpenRuns: () => void;
-  onOpenTouchpoint: () => void;
-}) {
-  const projection = graph?.projection;
-  const projectionTouchpoints = projection?.touchpoints ?? [];
-  const latestRun = latestProjectionRun(projection);
-  const run = selectedRunProjection && latestRun && selectedRunProjection.run_ref === latestRun.run_ref
-    ? selectedRunProjection
-    : latestRun;
-  const activePhase = run?.phases.find((phase) => phase.state === "active") ?? null;
-  const touchpoint = projectionTouchpoints.find((tp) => touchpointNeedsDecision(tp))
-    ?? projectionTouchpoints[projectionTouchpoints.length - 1]
-    ?? null;
-  const touchpointFallback = run && (run.state === "aborted" || run.state === "failed") ? "none" : "pending";
-  const signals = projection?.signals ?? [];
-  const pendingSignal = signals.find((signal) => signal.state === "pending" || signal.state === "processing") ?? null;
-  const nextAction = projection?.next_action;
-  const phaseSummary = run ? projectionPhaseSummary(run) : "no phases";
-  const jobCount = run?.phases.reduce((sum, phase) => sum + phase.jobs.length, 0) ?? 0;
-  const stepCount = run?.phases.reduce(
-    (sum, phase) => sum + phase.jobs.reduce((jobSum, job) => jobSum + job.steps.length, 0),
-    0,
-  ) ?? 0;
-
-  if (!projection || !run) {
-    return (
-      <section className="issue-control-plane">
-        <div className="project-info">
-          <div className="row">
-            <span className="key">current</span>
-            <span className="val mono">{detail.last_run_state ?? "no run"}</span>
-          </div>
-          <div className="row">
-            <span className="key">next</span>
-            <span className="val">new run</span>
-          </div>
-        </div>
-      </section>
-    );
-  }
-
-  return (
-    <section className="issue-control-plane">
-      <div className="kpi-strip issue-kpis" aria-label="issue run rollup">
-        <div className="kpi">
-          <span className="k">runs</span>
-          <span className="v">{projection.runs.length}</span>
-        </div>
-        <div className="kpi">
-          <span className="k">phases</span>
-          <span className="v">{run.phases.length}</span>
-        </div>
-        <div className="kpi">
-          <span className="k">jobs</span>
-          <span className="v">{jobCount}</span>
-        </div>
-        <div className="kpi">
-          <span className="k">steps</span>
-          <span className="v">{stepCount}</span>
-        </div>
-        <div className="kpi">
-          <span className="k">cost</span>
-          <span className="v">${run.cost_usd.toFixed(2)}</span>
-        </div>
-      </div>
-      <div className="project-info issue-control-grid">
-        <div className="row">
-          <span className="key">current</span>
-          <span className="val">
-            <button type="button" className="link mono" onClick={onOpenRuns}>
-              {projectionRunLabel(run)}
-            </button>{" "}
-            <span className={`pill ${runStatePill(run.state)}`}>{run.state}</span>
-          </span>
-        </div>
-        <div className="row">
-          <span className="key">phase</span>
-          <span className="val mono">{activePhase ? `${activePhase.name} active` : phaseSummary}</span>
-        </div>
-        <div className="row">
-          <span className="key">evidence</span>
-          <span className="val">
-            {run.evidence.length > 0 ? (
-              <span className="evidence-list">
-                {run.evidence.slice(0, 4).map((item) => (
-                  item.url ? (
-                    <a key={`${item.kind}:${item.ref}`} href={item.url} target="_blank" rel="noreferrer">
-                      {item.label}
-                    </a>
-                  ) : (
-                    <span key={`${item.kind}:${item.ref}`} className="mono dim">{item.label}</span>
-                  )
-                ))}
-                {run.evidence.length > 4 && <span className="mono dim">+{run.evidence.length - 4}</span>}
-              </span>
-            ) : (
-              <span className="dim">none yet</span>
-            )}
-          </span>
-        </div>
-        <div className="row">
-          <span className="key">touchpoint</span>
-          <span className="val">
-            {touchpoint ? (
-              <>
-                <button type="button" className="link mono" onClick={onOpenTouchpoint}>
-                  PR #{touchpoint.pr_number}
-                </button>{" "}
-                <span className={`pill ${projectionStatePill(touchpoint.state)}`}>{touchpoint.state}</span>
-              </>
-            ) : (
-              <span className="dim">{touchpointFallback}</span>
-            )}
-          </span>
-        </div>
-        <div className="row">
-          <span className="key">feedback</span>
-          <span className="val">
-            {pendingSignal ? (
-              <span className={`pill ${pendingSignal.state === "processing" ? "busy" : "info"}`}>
-                {pendingSignal.state}
-              </span>
-            ) : (
-              <span className="dim">clear</span>
-            )}
-          </span>
-        </div>
-        <div className="row">
-          <span className="key">next</span>
-          <span className="val mono">{nextAction?.label ?? "no action"}</span>
         </div>
       </div>
     </section>
@@ -3217,21 +3063,6 @@ function countProjectionPhases(run: RunProjectionRun) {
   );
 }
 
-function projectionPhaseSummary(run: RunProjectionRun): string {
-  if (run.phases.length === 0) return "no phases";
-  const active = run.phases.find((phase) => phase.state === "active" || phase.state === "dispatching");
-  if (active) return `${active.name} ${active.state}`;
-  const failed = run.phases.filter((phase) => phase.state === "failed");
-  if (failed.length === 1) return `${failed[0].name} failed`;
-  if (failed.length > 1) return `${failed.length} failed`;
-  const counts = countProjectionPhases(run);
-  const parts: string[] = [];
-  if (counts.succeeded > 0) parts.push(`${counts.succeeded} done`);
-  if (counts.skipped > 0) parts.push(`${counts.skipped} skipped`);
-  if (counts.pending > 0) parts.push(`${counts.pending} not started`);
-  return parts.length > 0 ? parts.join(" / ") : `${run.phases.length} done`;
-}
-
 function dispatchResultLabel(state: string): string {
   switch (state) {
     case "dispatched":
@@ -3268,13 +3099,6 @@ function formatGraphState(state: string): string {
 
 function touchpointNeedsDecision(tp: RunProjectionTouchpoint): boolean {
   return ["ready", "needs_review", "open", "review_required"].includes(tp.state);
-}
-
-function projectionStatePill(state: string): string {
-  if (state === "ready" || state === "needs_review" || state === "open" || state === "review_required") return "busy";
-  if (state === "merged" || state === "approved" || state === "closed") return "free";
-  if (state === "failed" || state === "needs_work") return "drain";
-  return "info";
 }
 
 function prNumberFromNode(node: GraphNode | null): number | null {

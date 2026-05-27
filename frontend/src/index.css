@@ -1561,18 +1561,6 @@ h2 .inline-action,
   color: #d4d4d4;
   overflow-wrap: anywhere;
 }
-.issue-control-plane {
-  display: grid;
-  gap: 12px;
-  margin: 16px 0 12px;
-}
-.issue-kpis {
-  margin-bottom: 0;
-}
-.issue-control-grid .val {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
 .touchpoint-evidence-list {
   margin: 10px 0 12px;
 }
