@@ -457,7 +457,7 @@ function Layout() {
   return (
     <div className="layout">
       <main className="content">
-        <header>
+        <header className="app-header">
           <div className="header-left">
             <div className="header-title">
               <h1>glimmung</h1>
@@ -504,7 +504,7 @@ function Layout() {
             ) : (
               <button
                 type="button"
-                className="gb primary"
+                className="gb sm primary"
                 onClick={async () => {
                   try {
                     setAccount(await signIn());
