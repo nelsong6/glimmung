@@ -2176,7 +2176,16 @@ h2 .inline-action,
   color: var(--fg);
 }
 .dag-node-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
   font-size: 0.8rem;
+}
+.dag-node-cost {
+  color: var(--fg-dim);
+  font-size: 0.72rem;
+  white-space: nowrap;
 }
 .dag-node-meta {
   font-size: 0.72rem;

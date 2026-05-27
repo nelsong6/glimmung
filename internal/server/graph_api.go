@@ -179,6 +179,7 @@ type RunProjectionJob struct {
 	K8sJobName  *string             `json:"k8s_job_name,omitempty"`
 	Conclusion  *string             `json:"conclusion,omitempty"`
 	CompletedAt *string             `json:"completed_at,omitempty"`
+	CostUSD     *float64            `json:"cost_usd,omitempty"`
 	Steps       []RunProjectionStep `json:"steps"`
 }
 
@@ -797,6 +798,7 @@ func attemptGraphJobs(attempt RunReportAttempt, workflow Workflow) []map[string]
 				"started_at":   attempt.DispatchedAt,
 				"completed_at": completedAt,
 				"conclusion":   conclusion,
+				"cost_usd":     completionCostPtr(completions[jobID]),
 				"steps":        steps,
 			})
 		}
@@ -818,6 +820,7 @@ func attemptGraphJobs(attempt RunReportAttempt, workflow Workflow) []map[string]
 				"started_at":   attempt.DispatchedAt,
 				"completed_at": completedAt,
 				"conclusion":   conclusion,
+				"cost_usd":     completionCostPtr(completions[jobID]),
 				"steps": []map[string]any{{
 					"step_id":      "job",
 					"slug":         "job",
@@ -1418,7 +1421,8 @@ func runProjectionJobsForExecution(
 func runProjectionJobsFromExecutions(executions []RunJobExecution, completions map[string]RunAttemptJobCompletion) []RunProjectionJob {
 	jobs := make([]RunProjectionJob, 0, len(executions))
 	for _, execution := range executions {
-		completion := completions[execution.ID]
+		jobID := firstNonEmpty(execution.ID, "job")
+		completion := completions[jobID]
 		conclusion := stringPointerOrNil(completion.Conclusion)
 		completedAt := execution.CompletedAt
 		if completedAt == nil {
@@ -1435,13 +1439,14 @@ func runProjectionJobsFromExecutions(executions []RunJobExecution, completions m
 			})
 		}
 		jobs = append(jobs, RunProjectionJob{
-			ID:          firstNonEmpty(execution.ID, "job"),
+			ID:          jobID,
 			Name:        execution.Name,
 			State:       projectionExecutionState(execution.State),
 			Reason:      execution.Reason,
 			K8sJobName:  execution.K8sJobName,
 			Conclusion:  conclusion,
 			CompletedAt: completedAt,
+			CostUSD:     completionCostPtr(completion),
 			Steps:       steps,
 		})
 	}
@@ -1629,6 +1634,7 @@ func runProjectionJobs(phase PhaseSpec, phaseState string, phaseReason *string, 
 			Reason:      reason,
 			Conclusion:  conclusion,
 			CompletedAt: completedAt,
+			CostUSD:     completionCostPtr(jobCompletions[jobID]),
 			Steps: []RunProjectionStep{{
 				Slug:  "workflow-run",
 				Title: stringPointerOrNil("Workflow run"),
@@ -1665,10 +1671,18 @@ func runProjectionJobs(phase PhaseSpec, phaseState string, phaseReason *string, 
 			Reason:      reason,
 			Conclusion:  conclusion,
 			CompletedAt: completedAt,
+			CostUSD:     completionCostPtr(jobCompletions[jobID]),
 			Steps:       steps,
 		})
 	}
 	return jobs
+}
+
+func completionCostPtr(completion RunAttemptJobCompletion) *float64 {
+	if completion.JobID == "" {
+		return nil
+	}
+	return &completion.CostUSD
 }
 
 func latestJobCompletionsByJob(attempts []RunReportAttempt) map[string]RunAttemptJobCompletion {
