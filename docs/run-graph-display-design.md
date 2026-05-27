@@ -322,7 +322,11 @@ graph `nodes` / `edges` metadata.
 
 Each projected Run carries a `topology` object derived from the workflow
 schema referenced by that run or cycle. Execution fields such as phase, job,
-step state, logs, evidence, and cost are then painted onto that topology.
+step state, logs, evidence, and cost are then painted onto that topology. Cost
+comes from the durable run completion ledger; projection code does not reparse
+native log lines to infer completion cost. Historical zero-cost rows are
+repaired into the ledger with `glimmung-repair-native-costs` while the durable
+events still exist.
 Recycle/request-changes arrows belong to topology, not to execution status,
 so the run execution surface does not need a separate metadata fallback to
 discover them.

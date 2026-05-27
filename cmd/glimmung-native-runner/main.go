@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/nelsong6/glimmung/internal/domain/agentcost"
 )
 
 const (
@@ -69,6 +71,7 @@ type nativeRunner struct {
 	completion       completionMetadata
 	githubTokenCache *githubTokenResult
 	mu               sync.Mutex
+	costUSD          float64
 }
 
 type nativeEventRequest struct {
@@ -86,6 +89,7 @@ type completedRequest struct {
 	JobID               string            `json:"job_id"`
 	Conclusion          string            `json:"conclusion"`
 	AttemptIndex        *int              `json:"attempt_index,omitempty"`
+	CostUSD             float64           `json:"cost_usd,omitempty"`
 	Verification        map[string]any    `json:"verification,omitempty"`
 	ScreenshotsMarkdown *string           `json:"screenshots_markdown,omitempty"`
 	SummaryMarkdown     *string           `json:"summary_markdown,omitempty"`
@@ -253,8 +257,8 @@ func (r *nativeRunner) executeStep(ctx context.Context, step stepSpec, outputFil
 	wg.Add(2)
 	go r.streamLogs(ctx, &wg, step.Slug, "stdout", stdout)
 	go r.streamLogs(ctx, &wg, step.Slug, "stderr", stderr)
-	waitErr := cmd.Wait()
 	wg.Wait()
+	waitErr := cmd.Wait()
 	if waitErr == nil {
 		return 0, nil
 	}
@@ -286,6 +290,7 @@ func (r *nativeRunner) streamLogs(ctx context.Context, wg *sync.WaitGroup, stepS
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
+		r.observeLogCost(line)
 		if stream == "stderr" {
 			fmt.Fprintln(os.Stderr, line)
 		} else {
@@ -424,6 +429,7 @@ func (r *nativeRunner) complete(ctx context.Context, conclusion, summary string)
 		JobID:        r.cfg.JobID,
 		Conclusion:   conclusion,
 		AttemptIndex: r.cfg.AttemptIndex,
+		CostUSD:      r.observedCostUSD(),
 		Outputs:      r.outputs,
 	}
 	if len(r.completion.Verification) > 0 {
@@ -438,6 +444,22 @@ func (r *nativeRunner) complete(ctx context.Context, conclusion, summary string)
 		req.SummaryMarkdown = &summary
 	}
 	return r.postJSON(ctx, r.cfg.CompletedURL, req, nil)
+}
+
+func (r *nativeRunner) observeLogCost(line string) {
+	cost, ok := agentcost.FromJSONLogLine(line)
+	if !ok {
+		return
+	}
+	r.mu.Lock()
+	r.costUSD += cost
+	r.mu.Unlock()
+}
+
+func (r *nativeRunner) observedCostUSD() float64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.costUSD
 }
 
 func (r *nativeRunner) collectCompletionMetadata(path string) error {

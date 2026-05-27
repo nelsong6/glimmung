@@ -627,6 +627,7 @@ export function IssueDetailView() {
           <IssueControlPlaneSummary
             graph={graph}
             detail={detail}
+            selectedRunProjection={runProjection?.runs[0] ?? null}
             onOpenRuns={() => setTab("runs")}
             onOpenTouchpoint={() => setTab("touchpoint")}
           />
@@ -768,17 +769,22 @@ function IssueHeader({ detail, heading }: { detail: IssueDetail; heading: string
 function IssueControlPlaneSummary({
   graph,
   detail,
+  selectedRunProjection,
   onOpenRuns,
   onOpenTouchpoint,
 }: {
   graph: IssueGraph | null;
   detail: IssueDetail;
+  selectedRunProjection: RunProjectionRun | null;
   onOpenRuns: () => void;
   onOpenTouchpoint: () => void;
 }) {
   const projection = graph?.projection;
   const projectionTouchpoints = projection?.touchpoints ?? [];
-  const run = latestProjectionRun(projection);
+  const latestRun = latestProjectionRun(projection);
+  const run = selectedRunProjection && latestRun && selectedRunProjection.run_ref === latestRun.run_ref
+    ? selectedRunProjection
+    : latestRun;
   const activePhase = run?.phases.find((phase) => phase.state === "active") ?? null;
   const touchpoint = projectionTouchpoints.find((tp) => touchpointNeedsDecision(tp))
     ?? projectionTouchpoints[projectionTouchpoints.length - 1]

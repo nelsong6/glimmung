@@ -315,6 +315,46 @@ describe("IssueDetailView run execution graph", () => {
     expect(await screen.findByText(/cloning repo/)).toBeInTheDocument();
   });
 
+  it("uses the selected run projection for the current run rollup cost", async () => {
+    const selectedProjection = {
+      ...runProjection,
+      runs: [{
+        ...runProjection.runs[0],
+        cost_usd: 13.9496,
+      }],
+    };
+    const broadProjection = {
+      ...runProjection,
+      runs: [{
+        ...runProjection.runs[0],
+        cost_usd: 0,
+      }],
+    };
+    const broadGraph = {
+      ...issueGraph,
+      projection: broadProjection,
+    };
+
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string"
+          ? new URL(input, "https://glimmung.test")
+          : input instanceof URL
+            ? input
+            : new URL(input.url);
+      if (url.pathname === "/v1/issues/by-number/ambience/172") return json(issueDetail);
+      if (url.pathname === "/v1/issues/by-number/ambience/172/graph") return json(broadGraph);
+      if (url.pathname === "/v1/projects/ambience/issues/172/runs/7/cycles/1/graph") return json(selectedProjection);
+      if (url.pathname === "/v1/workflows") return json([]);
+      throw new Error(`unhandled fetch ${url.pathname}`);
+    }));
+
+    renderIssueDetail("/projects/ambience/issues/172/runs/7/cycles/1");
+
+    const rollup = await screen.findByLabelText("issue run rollup");
+    expect(within(rollup).getByText("$13.95")).toBeInTheDocument();
+  });
+
   it("opens planned steps for a job before any attempt has started", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url =
