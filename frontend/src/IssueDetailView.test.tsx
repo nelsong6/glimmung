@@ -341,6 +341,48 @@ describe("IssueDetailView run execution graph", () => {
     expect(await screen.findByText(/cloning repo/)).toBeInTheDocument();
   });
 
+  it("surfaces completed job cost in the selected job log section", async () => {
+    const selectedProjection = {
+      ...runProjection,
+      runs: [{
+        ...runProjection.runs[0],
+        phases: runProjection.runs[0].phases.map((phase) => phase.name === "env-prep"
+          ? {
+              ...phase,
+              jobs: phase.jobs.map((job) => job.id === "env-prep"
+                ? { ...job, state: "succeeded", cost_usd: 2.3456 }
+                : job),
+            }
+          : phase),
+      }],
+    };
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string"
+          ? new URL(input, "https://glimmung.test")
+          : input instanceof URL
+            ? input
+            : new URL(input.url);
+      if (url.pathname === "/v1/issues/by-number/ambience/172") return json(issueDetail);
+      if (url.pathname === "/v1/issues/by-number/ambience/172/graph") return json(issueGraph);
+      if (url.pathname === "/v1/projects/ambience/issues/172/runs/7/cycles/1/graph") return json(selectedProjection);
+      if (url.pathname === "/v1/workflows") return json([]);
+      if (url.pathname === "/v1/projects/ambience/issues/172/runs/7.1/native/events") return json(nativeEvents);
+      throw new Error(`unhandled fetch ${url.pathname}`);
+    }));
+
+    renderIssueDetail("/projects/ambience/issues/172/runs/7/cycles/1");
+
+    const jobLabel = await screen.findByText("Environment prep");
+    expect(screen.queryByText("$2.3456", { selector: ".dag-node-cost" })).not.toBeInTheDocument();
+    const jobButton = jobLabel.closest("button");
+    if (!jobButton) throw new Error("missing graph job button");
+    await userEvent.click(jobButton);
+
+    expect(await screen.findByText("job cost")).toBeInTheDocument();
+    expect(screen.getAllByText("$2.3456").length).toBeGreaterThanOrEqual(2);
+  });
+
   it("uses the selected run projection for the current run rollup cost", async () => {
     const selectedProjection = {
       ...runProjection,

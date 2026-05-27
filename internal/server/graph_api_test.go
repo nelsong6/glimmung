@@ -168,6 +168,7 @@ func TestIssueGraphByNumberBuildsRunAttemptAndTouchpointNodes(t *testing.T) {
 					CompletedAt:        &now,
 					Conclusion:         "success",
 					VerificationStatus: stringPtr("pass"),
+					CostUSD:            0.8125,
 				}},
 			}},
 		}},
@@ -243,6 +244,9 @@ func TestIssueGraphByNumberBuildsRunAttemptAndTouchpointNodes(t *testing.T) {
 	}
 	if envPhase.Jobs[0].Conclusion == nil || *envPhase.Jobs[0].Conclusion != "success" || envPhase.Jobs[0].CompletedAt == nil {
 		t.Fatalf("env-prep job completion=%#v", envPhase.Jobs[0])
+	}
+	if envPhase.Jobs[0].CostUSD == nil || *envPhase.Jobs[0].CostUSD != 0.8125 {
+		t.Fatalf("env-prep job cost=%#v", envPhase.Jobs[0].CostUSD)
 	}
 	if len(envPhase.Jobs[0].Steps) != 1 || envPhase.Jobs[0].Steps[0].Slug != "checkout" {
 		t.Fatalf("env-prep job steps=%#v", envPhase.Jobs[0].Steps)
@@ -654,6 +658,12 @@ func TestRunCycleGraphProjectionShowsCarriedForwardEntrypointInputs(t *testing.T
 				Conclusion:   stringPtr("success"),
 				Decision:     stringPtr("advance"),
 				PhaseOutputs: map[string]string{"validation_url": "https://slot.example"},
+				JobCompletions: []RunAttemptJobCompletion{{
+					JobID:       "env-prep",
+					CompletedAt: &completedAt,
+					Conclusion:  "success",
+					CostUSD:     0.25,
+				}},
 			}},
 		}},
 	}
@@ -668,6 +678,9 @@ func TestRunCycleGraphProjectionShowsCarriedForwardEntrypointInputs(t *testing.T
 	}
 	if envPhase.Jobs[0].State != "succeeded" || envPhase.Jobs[0].Reason == nil || *envPhase.Jobs[0].Reason != "carried_forward" {
 		t.Fatalf("env-prep job projection=%#v", envPhase.Jobs[0])
+	}
+	if envPhase.Jobs[0].CostUSD == nil || *envPhase.Jobs[0].CostUSD != 0.25 {
+		t.Fatalf("env-prep job cost=%#v", envPhase.Jobs[0].CostUSD)
 	}
 	if !envPhase.Attempts[0].CarryForward {
 		t.Fatalf("carry_forward not projected: %#v", envPhase.Attempts[0])

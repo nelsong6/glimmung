@@ -145,6 +145,7 @@ type RunProjectionPhase = {
     k8s_job_name?: string | null;
     conclusion?: string | null;
     completed_at?: string | null;
+    cost_usd?: number | null;
     steps: Array<{ slug: string; title?: string | null; state: string; reason?: string | null; exit_code?: number | null }>;
   }>;
   attempts: Array<{
@@ -270,6 +271,7 @@ type NativeAttemptJob = {
   job_id: string;
   name?: string | null;
   state?: string | null;
+  cost_usd?: number | null;
   steps: NativeAttemptStep[];
 };
 
@@ -2560,6 +2562,7 @@ function ProjectionInspector({
   const nativeJob = selectedJob ? projectionJobToNativeJob(selectedJob) : null;
   const runNumber = run.run_display_number ?? (run.run_number ? `${run.run_number}.${run.run_cycle_number ?? 1}` : null);
   const dispatchFailureDetail = projectionDispatchFailureDetail(run, phase, selectedJob);
+  const selectedJobCost = selectedJob?.cost_usd ?? null;
   return (
     <div className="run-panel">
       <div className="run-panel-header">
@@ -2581,6 +2584,11 @@ function ProjectionInspector({
         {selectedJob && (
           <div>
             <span className="key">job</span> <span className="mono">{selectedJob.id}</span>
+          </div>
+        )}
+        {selectedJobCost !== null && (
+          <div>
+            <span className="key">job cost</span> <span className="mono">{formatUsd4(selectedJobCost)}</span>
           </div>
         )}
         {selectedJob?.k8s_job_name && (
@@ -2676,6 +2684,7 @@ function projectionJobToNativeJob(job: RunProjectionPhase["jobs"][number]): Nati
     job_id: job.id,
     name: job.name,
     state: job.state,
+    cost_usd: job.cost_usd ?? null,
     steps: job.steps.map((step) => ({
       slug: step.slug,
       title: step.title,
@@ -3547,6 +3556,9 @@ function NativeJobInspector({
                     <span className={`pill ${nativeStatePill(job.state ?? "")}`}>
                       {job.state || "not run"}
                     </span>
+                    {job.cost_usd !== null && job.cost_usd !== undefined && (
+                      <span className="mono dim">{formatUsd4(job.cost_usd)}</span>
+                    )}
                   </div>
                 )}
                 <button
@@ -3621,6 +3633,9 @@ function PlannedNativeJobInspector({
                     <span className={`pill ${nativeStatePill(refJob.state ?? "")}`}>
                       {refJob.state || "not run"}
                     </span>
+                    {refJob.cost_usd !== null && refJob.cost_usd !== undefined && (
+                      <span className="mono dim">{formatUsd4(refJob.cost_usd)}</span>
+                    )}
                   </div>
                 )}
                 <button
@@ -3970,6 +3985,7 @@ function nativeAttemptJobs(x: unknown): NativeAttemptJob[] {
       job_id: jobId,
       name: stringOrNull(raw.name),
       state: stringOrNull(raw.state),
+      cost_usd: numberOrNull(raw.cost_usd),
       steps,
     }];
   });
@@ -3985,6 +4001,10 @@ function nativeStatePill(state: string): string {
 
 function numberOrNull(x: unknown): number | null {
   return typeof x === "number" && Number.isFinite(x) ? x : null;
+}
+
+function formatUsd4(value: number): string {
+  return `$${value.toFixed(4)}`;
 }
 
 function stringOrNull(x: unknown): string | null {
