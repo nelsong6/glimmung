@@ -571,6 +571,44 @@ func TestCompletionPayloadFromNativeExtractsEvidenceRefs(t *testing.T) {
 	}
 }
 
+func TestCompletionPayloadFromNativeExtractsTypedVideoEvidence(t *testing.T) {
+	id := "verify"
+	req := NativeRunCompletedRequest{
+		JobID:      &id,
+		Conclusion: "success",
+		Verification: map[string]any{
+			"status": "pass",
+			"evidence": []any{map[string]any{
+				"kind":         "video",
+				"ref":          "videos/dashboard.webm",
+				"label":        "dashboard flow",
+				"content_type": "video/webm",
+				"duration_ms":  6000,
+			}},
+		},
+		Evidence: []EvidenceArtifact{{
+			Kind:  "screenshot",
+			Ref:   "screenshots/final.png",
+			Label: "final state",
+		}},
+	}
+
+	payload := completionPayloadFromNative(req)
+
+	if payload.VerificationStatus != "pass" {
+		t.Fatalf("verification=%#v", payload)
+	}
+	if len(payload.Evidence) != 2 {
+		t.Fatalf("evidence=%#v", payload.Evidence)
+	}
+	if payload.Evidence[0].Kind != "video" || payload.Evidence[0].DurationMS != 6000 {
+		t.Fatalf("video evidence=%#v", payload.Evidence[0])
+	}
+	if strings.Join(payload.EvidenceRefs, ",") != "videos/dashboard.webm,screenshots/final.png" {
+		t.Fatalf("evidence_refs=%#v", payload.EvidenceRefs)
+	}
+}
+
 func TestNativeRunCompletedByCallbackTokenMissingPRPrimitiveLinkAborts(t *testing.T) {
 	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
 	store.run = runDataForCompletion("cleanup")
@@ -829,6 +867,65 @@ func TestFinalizeRunTouchpointByNumberPersistsStructuredScreenshotEvidence(t *te
 	}
 }
 
+func TestFinalizeRunTouchpointByNumberPersistsRequiredVideoEvidence(t *testing.T) {
+	store := &fakeCompletionStore{tokenRunID: "run-1", tokenProject: "proj", tokenRef: "proj#7/runs/1"}
+	store.run = runDataForCompletion("verify")
+	store.run.EvidenceRequirements = []EvidenceRequirement{{
+		ID:              "primary-flow",
+		Kind:            "video",
+		Label:           "primary browser flow",
+		DurationSeconds: 6,
+	}}
+	store.run.Attempts = []RunAttemptData{
+		{
+			AttemptIndex: 0,
+			Phase:        "verify",
+			Completed:    true,
+			Conclusion:   "success",
+			Decision:     string(decision.Advance),
+			Verification: &RunVerificationData{
+				Status: "pass",
+				Evidence: []EvidenceArtifact{{
+					Kind:        "video",
+					Ref:         "videos/dashboard.webm",
+					Label:       "dashboard flow",
+					ContentType: "video/webm",
+					DurationMS:  6000,
+				}},
+			},
+			PhaseOutputs: map[string]string{
+				"branch_name": "issue-7-run-1",
+			},
+		},
+	}
+	store.wf = prWorkflowForCompletion("verify")
+	prClient := &fakePullRequestClient{}
+	artifacts := &fakeArtifactStore{artifact: Artifact{Body: []byte("webm"), ContentType: "video/webm"}}
+	handler := NewWithRuntimeClients(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, prClient, nil, artifacts)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/projects/proj/issues/7/runs/1/touchpoint/finalize", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.touchpointReq == nil || len(store.touchpointReq.Evidence) != 1 {
+		t.Fatalf("touchpoint evidence=%#v", store.touchpointReq)
+	}
+	ev := store.touchpointReq.Evidence[0]
+	if ev.Kind != "video" || ev.ArtifactPath != "runs/proj/run-1/videos/dashboard.webm" || ev.DurationMS != 6000 {
+		t.Fatalf("evidence=%#v", ev)
+	}
+	if ev.URL != "/v1/artifacts/runs/proj/run-1/videos/dashboard.webm" {
+		t.Fatalf("evidence URL=%#v", ev)
+	}
+	if len(artifacts.downloads) != 1 || artifacts.downloads[0] != "runs/proj/run-1/videos/dashboard.webm" {
+		t.Fatalf("artifact downloads=%#v", artifacts.downloads)
+	}
+}
+
 func TestFinalizeRunTouchpointByNumberRejectsMissingRequiredScreenshotArtifact(t *testing.T) {
 	store := &fakeCompletionStore{tokenRunID: "run-1", tokenProject: "proj", tokenRef: "proj#7/runs/1"}
 	store.run = runDataForCompletion("verify")
@@ -866,7 +963,7 @@ func TestFinalizeRunTouchpointByNumberRejectsMissingRequiredScreenshotArtifact(t
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "screenshot artifact not found") {
+	if !strings.Contains(rec.Body.String(), "evidence artifact not found") {
 		t.Fatalf("body=%s", rec.Body.String())
 	}
 	if prClient.req.Repo != "" || store.touchpointReq != nil {

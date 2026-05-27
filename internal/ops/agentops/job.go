@@ -6,7 +6,7 @@ const AgentBashScript = `set -euo pipefail
 # (the clone root) so git add -A does not pick PNGs/notes up. Workflow extracts
 # /workspace/evidence from pod stdout via base64-tar markers emitted at the end
 # of this script.
-mkdir -p /workspace/evidence/screenshots
+mkdir -p /workspace/evidence/screenshots /workspace/evidence/videos
 
 # Seed claude state with placeholder credentials so claude never tries to
 # refresh, project trust, and onboarding flags so it boots straight into the run.

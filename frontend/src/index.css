@@ -1624,6 +1624,36 @@ h2 .inline-action,
   gap: 12px;
   width: 100%;
 }
+.evidence-video-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+  width: 100%;
+  margin-bottom: 12px;
+}
+.evidence-video {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.evidence-video video {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+.evidence-video-caption {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+}
+.evidence-video-caption a {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .evidence-shot {
   display: grid;
   gap: 6px;

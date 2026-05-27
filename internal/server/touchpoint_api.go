@@ -107,15 +107,7 @@ type TouchpointCreateRequest struct {
 	Evidence       []TouchpointEvidence `json:"evidence,omitempty"`
 }
 
-type TouchpointEvidence struct {
-	Kind               string `json:"kind"`
-	Ref                string `json:"ref"`
-	Label              string `json:"label"`
-	URL                string `json:"url,omitempty"`
-	ArtifactPath       string `json:"artifact_path,omitempty"`
-	SourcePhase        string `json:"source_phase,omitempty"`
-	SourceAttemptIndex *int   `json:"source_attempt_index,omitempty"`
-}
+type TouchpointEvidence = EvidenceArtifact
 
 func listTouchpoints(store ReadStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

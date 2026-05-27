@@ -86,20 +86,33 @@ type nativeEventRequest struct {
 }
 
 type completedRequest struct {
-	JobID               string            `json:"job_id"`
-	Conclusion          string            `json:"conclusion"`
-	AttemptIndex        *int              `json:"attempt_index,omitempty"`
-	CostUSD             float64           `json:"cost_usd,omitempty"`
-	Verification        map[string]any    `json:"verification,omitempty"`
-	ScreenshotsMarkdown *string           `json:"screenshots_markdown,omitempty"`
-	SummaryMarkdown     *string           `json:"summary_markdown,omitempty"`
-	Outputs             map[string]string `json:"outputs"`
+	JobID               string             `json:"job_id"`
+	Conclusion          string             `json:"conclusion"`
+	AttemptIndex        *int               `json:"attempt_index,omitempty"`
+	CostUSD             float64            `json:"cost_usd,omitempty"`
+	Verification        map[string]any     `json:"verification,omitempty"`
+	Evidence            []evidenceArtifact `json:"evidence,omitempty"`
+	ScreenshotsMarkdown *string            `json:"screenshots_markdown,omitempty"`
+	SummaryMarkdown     *string            `json:"summary_markdown,omitempty"`
+	Outputs             map[string]string  `json:"outputs"`
 }
 
 type completionMetadata struct {
-	Verification        map[string]any `json:"verification"`
-	ScreenshotsMarkdown string         `json:"screenshots_markdown"`
-	SummaryMarkdown     string         `json:"summary_markdown"`
+	Verification        map[string]any     `json:"verification"`
+	Evidence            []evidenceArtifact `json:"evidence"`
+	ScreenshotsMarkdown string             `json:"screenshots_markdown"`
+	SummaryMarkdown     string             `json:"summary_markdown"`
+}
+
+type evidenceArtifact struct {
+	Kind         string `json:"kind"`
+	Ref          string `json:"ref"`
+	Label        string `json:"label"`
+	URL          string `json:"url,omitempty"`
+	ArtifactPath string `json:"artifact_path,omitempty"`
+	ContentType  string `json:"content_type,omitempty"`
+	SizeBytes    int64  `json:"size_bytes,omitempty"`
+	DurationMS   int    `json:"duration_ms,omitempty"`
 }
 
 type githubTokenResult struct {
@@ -435,6 +448,9 @@ func (r *nativeRunner) complete(ctx context.Context, conclusion, summary string)
 	if len(r.completion.Verification) > 0 {
 		req.Verification = r.completion.Verification
 	}
+	if len(r.completion.Evidence) > 0 {
+		req.Evidence = r.completion.Evidence
+	}
 	if strings.TrimSpace(r.completion.ScreenshotsMarkdown) != "" {
 		req.ScreenshotsMarkdown = &r.completion.ScreenshotsMarkdown
 	}
@@ -480,6 +496,9 @@ func (r *nativeRunner) collectCompletionMetadata(path string) error {
 	}
 	if len(metadata.Verification) > 0 {
 		r.completion.Verification = metadata.Verification
+	}
+	if len(metadata.Evidence) > 0 {
+		r.completion.Evidence = metadata.Evidence
 	}
 	if strings.TrimSpace(metadata.ScreenshotsMarkdown) != "" {
 		r.completion.ScreenshotsMarkdown = metadata.ScreenshotsMarkdown

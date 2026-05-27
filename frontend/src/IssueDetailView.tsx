@@ -173,6 +173,10 @@ type RunProjectionEvidence = {
   ref: string;
   label: string;
   url?: string | null;
+  content_type?: string | null;
+  size_bytes?: number;
+  duration_ms?: number;
+  artifact_path?: string | null;
 };
 
 type RunProjectionTouchpoint = {
@@ -190,6 +194,9 @@ type RunProjectionTouchpoint = {
     label: string;
     url?: string | null;
     artifact_path?: string | null;
+    content_type?: string | null;
+    size_bytes?: number;
+    duration_ms?: number;
   }>;
 };
 
@@ -2802,9 +2809,12 @@ function TouchpointTab({
   const evidenceRepo = projectedTouchpoint?.repo ?? repo ?? stringOrNull(latestPrMeta.repo);
   const validationUrl = projectedRun?.validation_url ?? projectedTouchpoint?.validation_url ?? stringOrNull(latestMeta.validation_url);
   const projectionEvidence = projectedRun?.evidence ?? [];
+  const structuredVideos = projectionEvidence.filter(isInlineVideoEvidence);
   const structuredScreenshots = projectionEvidence.filter(isInlineScreenshotEvidence);
   const listedEvidence = projectionEvidence.filter((item) => (
-    !isInlineScreenshotEvidence(item)
+    !isInlineVideoEvidence(item)
+    && !isInlineScreenshotEvidence(item)
+    && !(structuredVideos.length > 0 && isRawVideoArtifact(item))
     && !(structuredScreenshots.length > 0 && isRawScreenshotArtifact(item))
   ));
   const hasCurrentEvidence = prNumber !== null || Boolean(validationUrl) || projectionEvidence.length > 0;
@@ -2892,6 +2902,7 @@ function TouchpointTab({
       {(projectionEvidence.length > 0 || !hasCurrentEvidence) && (
         <>
           <h2>Evidence</h2>
+          {structuredVideos.length > 0 && <StructuredVideoEvidence items={structuredVideos} />}
           {structuredScreenshots.length > 0 && <StructuredScreenshotEvidence items={structuredScreenshots} />}
           {listedEvidence.length > 0 && (
             <div className="project-info touchpoint-evidence-list">
@@ -3581,8 +3592,37 @@ function StructuredScreenshotEvidence({ items }: { items: RunProjectionEvidence[
   );
 }
 
+function StructuredVideoEvidence({ items }: { items: RunProjectionEvidence[] }) {
+  return (
+    <div className="evidence-video-gallery">
+      {items.map((item) => (
+        <div key={`${item.kind}:${item.ref}`} className="evidence-video">
+          <video src={item.url ?? item.ref} controls preload="metadata" />
+          <div className="evidence-video-caption">
+            <a className="mono" href={item.url ?? item.ref} target="_blank" rel="noreferrer">
+              {item.label}
+            </a>
+            {item.duration_ms ? (
+              <span className="dim mono">{Math.round(item.duration_ms / 1000)}s</span>
+            ) : null}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function isInlineVideoEvidence(item: RunProjectionEvidence): boolean {
+  return item.kind === "video" && Boolean(item.url);
+}
+
 function isInlineScreenshotEvidence(item: RunProjectionEvidence): boolean {
   return item.kind === "screenshot" && Boolean(item.url);
+}
+
+function isRawVideoArtifact(item: RunProjectionEvidence): boolean {
+  if (item.kind !== "artifact") return false;
+  return /\.(webm|mp4|mov|m4v)$/i.test(item.ref.split(/[?#]/)[0] ?? "");
 }
 
 function isRawScreenshotArtifact(item: RunProjectionEvidence): boolean {

@@ -41,9 +41,10 @@ half-updated dashboard.
   break.
 - Native jobs emit enough ordered events to reconstruct what ran and why it
   passed, failed, waited, or timed out.
-- RunReports surface validation URL, screenshots, attempt summaries, cost, and
-  terminal state when those facts exist.
-- Frontend-visible changes have browser or screenshot evidence; invisible
+- RunReports surface validation URL, typed evidence artifacts, attempt
+  summaries, cost, and terminal state when those facts exist.
+- Frontend-visible changes have WebM browser evidence by default; screenshots
+  are supplemental final-state or thumbnail evidence. Invisible
   backend changes have tests, logs, API output, or notes that prove the data
   path.
 - CI and live-smoke checks fail loudly on contract violations rather than
@@ -53,6 +54,10 @@ half-updated dashboard.
 
 - Missing evidence should be visible as missing evidence, not silently treated
   as success.
+- Promoted Touchpoint evidence is retained as the current review surface.
+  Historical Run evidence remains scoped to the RunReport; if artifact cleanup
+  expires it later, the UI must render an explicit unavailable/expired state
+  rather than silently dropping the evidence row.
 - Event pruning or archiving should leave an archive reference or explicit
   unavailable state.
 - Screenshot failure should not hide backend test results, and backend test
@@ -78,5 +83,7 @@ half-updated dashboard.
 - New metrics or debug paths avoid unbounded labels and document their failure
   mode.
 - Screenshot-page changes update `frontend/screenshot-pages.json`.
+- Video evidence capture changes exercise `scripts/agent/capture-video.mjs`,
+  typed evidence validation, and Touchpoint/run display.
 - Evidence capture changes are exercised against a validation URL or by focused
   unit/integration tests when a live environment is not appropriate.

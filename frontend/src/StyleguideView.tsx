@@ -99,7 +99,7 @@ const DESIGN_SYSTEM_ITEMS: PortfolioItem[] = [
           <div className="row">
             <span className="key">summary</span>
             <span className="val">
-              <pre className="evidence-notes">Implemented the requested touchpoint behavior and captured the validation path, screenshot evidence, and native event log for review.</pre>
+              <pre className="evidence-notes">Implemented the requested touchpoint behavior and captured the validation path, WebM evidence, final-state screenshot, and native event log for review.</pre>
             </span>
           </div>
           <div className="row">
@@ -109,7 +109,8 @@ const DESIGN_SYSTEM_ITEMS: PortfolioItem[] = [
           <div className="row">
             <span className="key">evidence</span>
             <span className="val evidence-list">
-              <a href="/">dashboard</a>
+              <a href="/">dashboard.webm</a>
+              <a href="/">dashboard.png</a>
               <a href="/">native events</a>
               <a href="/">summary.md</a>
             </span>
@@ -598,7 +599,7 @@ const DESIGN_FILE_ITEMS: PortfolioItem[] = [
                   <span>5 steps</span>
                 </button>
                 <button type="button" className="run-graph-node pending">
-                  <strong>screenshot</strong>
+                  <strong>video evidence</strong>
                   <span>queued</span>
                 </button>
               </div>

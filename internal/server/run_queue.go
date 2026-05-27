@@ -397,6 +397,9 @@ func runCycleLeaseMetadata(run RunReplayData, issue IssueDispatchData, issueRepo
 	if run.IssueLockHolderID != nil && *run.IssueLockHolderID != "" {
 		metadata["issue_lock_holder_id"] = *run.IssueLockHolderID
 	}
+	if len(run.EvidenceRequirements) > 0 {
+		metadata["evidence_requirements"] = run.EvidenceRequirements
+	}
 	if len(phaseInputs) > 0 {
 		metadata["phase_inputs"] = phaseInputs
 	}
