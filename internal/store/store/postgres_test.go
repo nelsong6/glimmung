@@ -49,10 +49,29 @@ func TestApplyNativePhaseOutputSetRawStoresAndRejectsDuplicateKeys(t *testing.T)
 	if outputs["validation_url"] != "https://preview.example" {
 		t.Fatalf("outputs=%#v", outputs)
 	}
+	if raw["validation_url"] != "https://preview.example" {
+		t.Fatalf("validation_url was not promoted: %#v", raw)
+	}
 
 	err := applyNativePhaseOutputSetRaw(raw, attempt, event)
 	if err == nil || !strings.Contains(err.Error(), "already set") {
 		t.Fatalf("duplicate error=%v", err)
+	}
+}
+
+func TestPromoteRunReviewOutputsRaw(t *testing.T) {
+	raw := map[string]any{}
+	if !promoteRunReviewOutputsRaw(raw, map[string]string{"validation_url": " https://slot.example "}) {
+		t.Fatalf("expected validation_url promotion")
+	}
+	if raw["validation_url"] != "https://slot.example" {
+		t.Fatalf("raw=%#v", raw)
+	}
+	if promoteRunReviewOutputsRaw(raw, map[string]string{"validation_url": "https://slot.example"}) {
+		t.Fatalf("same validation_url should be a no-op")
+	}
+	if promoteRunReviewOutputsRaw(raw, map[string]string{"other": "value", "validation_url": ""}) {
+		t.Fatalf("unsupported or empty outputs should be a no-op")
 	}
 }
 

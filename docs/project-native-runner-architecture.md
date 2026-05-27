@@ -280,9 +280,11 @@ read-time fallback.
 Step commands set phase outputs by appending either `key=value` lines or JSON
 objects to `$GLIMMUNG_OUTPUT_FILE`. The runner rejects duplicate keys locally
 and the server persists `phase_output_set` events into the attempt's
-`phase_outputs` immediately. The current persisted output value shape remains
-`map[string]string`; richer typed output records and artifact refs are the next
-state-model increment.
+`phase_outputs` immediately. Review-surface outputs that have canonical Run
+fields, such as `validation_url`, are also promoted into those fields as
+durable state instead of being recovered through read-time fallback logic. The
+current persisted output value shape remains `map[string]string`; richer typed
+output records and artifact refs are the next state-model increment.
 
 ## Done Standard
 

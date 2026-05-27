@@ -58,11 +58,13 @@ type fakeCompletionStore struct {
 
 	recycleReq *CreateRecycleCycleRequest
 
-	issue         IssueDispatchData
-	linkPRNumber  int
-	linkPRErr     error
-	touchpointReq *TouchpointCreate
-	touchpointErr error
+	issue          IssueDispatchData
+	reviewFacts    *RunReviewFacts
+	reviewFactsErr error
+	linkPRNumber   int
+	linkPRErr      error
+	touchpointReq  *TouchpointCreate
+	touchpointErr  error
 }
 
 func (s *fakeCompletionStore) ReadRunIDForCallbackToken(context.Context, string) (string, string, string, error) {
@@ -245,6 +247,23 @@ func (s *fakeCompletionStore) ReadIssueForDispatch(context.Context, string, int)
 		return IssueDispatchData{ID: "issue-7", Title: "Fix thing", Body: "body"}, nil
 	}
 	return s.issue, nil
+}
+
+func (s *fakeCompletionStore) NormalizeRunReviewFacts(_ context.Context, _, _ string, facts RunReviewFacts) (RunReplayData, error) {
+	s.reviewFacts = &facts
+	if s.reviewFactsErr != nil {
+		return RunReplayData{}, s.reviewFactsErr
+	}
+	if s.run == nil {
+		return RunReplayData{}, ErrNotFound
+	}
+	if facts.ValidationURL != nil {
+		value := strings.TrimSpace(*facts.ValidationURL)
+		if value != "" {
+			s.run.ValidationURL = &value
+		}
+	}
+	return *s.run, nil
 }
 
 func (s *fakeCompletionStore) LinkRunPullRequest(_ context.Context, _, _ string, prNumber int) error {
@@ -581,7 +600,7 @@ func TestNativePRTouchpointByCallbackTokenEnsuresPRAndTouchpoint(t *testing.T) {
 	store.run.Attempts[0].Completed = true
 	store.run.Attempts[0].Conclusion = "success"
 	store.run.Attempts[0].Decision = string(decision.Advance)
-	store.run.Attempts[0].PhaseOutputs = map[string]string{"branch_name": "issue-7-run-1"}
+	store.run.Attempts[0].PhaseOutputs = map[string]string{"branch_name": "issue-7-run-1", "validation_url": "https://preview.example"}
 	store.wf = prWorkflowForCompletion("impl")
 	prClient := &fakePullRequestClient{}
 
@@ -603,6 +622,9 @@ func TestNativePRTouchpointByCallbackTokenEnsuresPRAndTouchpoint(t *testing.T) {
 	}
 	if store.linkPRNumber != 123 {
 		t.Fatalf("linked pr=%d, want 123", store.linkPRNumber)
+	}
+	if store.reviewFacts == nil || store.reviewFacts.ValidationURL == nil || *store.reviewFacts.ValidationURL != "https://preview.example" {
+		t.Fatalf("review facts=%#v", store.reviewFacts)
 	}
 	if store.touchpointReq == nil || store.touchpointReq.Number != 123 || store.touchpointReq.LinkedIssueRef != "proj#7" || store.touchpointReq.LinkedRunRef != "proj#7/runs/1" {
 		t.Fatalf("touchpoint req=%#v", store.touchpointReq)
@@ -700,6 +722,50 @@ func TestFinalizeRunTouchpointByCycleNumberEnsuresPRAndTouchpoint(t *testing.T) 
 	}
 	if store.touchpointReq == nil || store.touchpointReq.LinkedRunRef != "proj#7/runs/1.2" {
 		t.Fatalf("touchpoint req=%#v", store.touchpointReq)
+	}
+}
+
+func TestFinalizeRunTouchpointByNumberNormalizesValidationURL(t *testing.T) {
+	store := &fakeCompletionStore{tokenRunID: "run-1", tokenProject: "proj", tokenRef: "proj#7/runs/1"}
+	store.run = runDataForCompletion("impl")
+	store.run.Attempts = []RunAttemptData{
+		{
+			AttemptIndex: 0,
+			Phase:        "env-prep",
+			Completed:    true,
+			Conclusion:   "success",
+			Decision:     string(decision.Advance),
+			PhaseOutputs: map[string]string{"validation_url": "https://preview.example"},
+		},
+		{
+			AttemptIndex: 1,
+			Phase:        "impl",
+			Completed:    true,
+			Conclusion:   "success",
+			Decision:     string(decision.Advance),
+			PhaseOutputs: map[string]string{"branch_name": "issue-7-run-1"},
+		},
+	}
+	store.wf = prWorkflowForCompletion("impl")
+	prClient := &fakePullRequestClient{}
+	handler := NewWithRuntimeClients(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin"}}, prClient, nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/projects/proj/issues/7/runs/1/touchpoint/finalize", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.reviewFacts == nil || store.reviewFacts.ValidationURL == nil || *store.reviewFacts.ValidationURL != "https://preview.example" {
+		t.Fatalf("review facts=%#v", store.reviewFacts)
+	}
+	if store.run.ValidationURL == nil || *store.run.ValidationURL != "https://preview.example" {
+		t.Fatalf("run validation_url=%#v", store.run.ValidationURL)
+	}
+	if store.touchpointReq == nil {
+		t.Fatal("touchpoint was not ensured")
 	}
 }
 

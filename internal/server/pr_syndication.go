@@ -37,6 +37,7 @@ type PullRequest struct {
 
 type prPrimitiveStore interface {
 	ReadIssueForDispatch(ctx context.Context, project string, issueNumber int) (IssueDispatchData, error)
+	NormalizeRunReviewFacts(ctx context.Context, project, runID string, facts RunReviewFacts) (RunReplayData, error)
 	LinkRunPullRequest(ctx context.Context, project, runID string, prNumber int) error
 	EnsureTouchpoint(ctx context.Context, req TouchpointCreate) (TouchpointDetail, error)
 }
@@ -61,6 +62,10 @@ type PRPrimitiveResult struct {
 	TouchpointRef  string `json:"touchpoint_ref,omitempty"`
 	LinkedIssueRef string `json:"linked_issue_ref,omitempty"`
 	LinkedRunRef   string `json:"linked_run_ref,omitempty"`
+}
+
+type RunReviewFacts struct {
+	ValidationURL *string
 }
 
 func nativePRTouchpointByCallbackToken(store ReadStore, prClient PullRequestClient, artifactStore ArtifactStore) http.HandlerFunc {
@@ -108,6 +113,11 @@ func nativePRTouchpointByCallbackToken(store ReadStore, prClient PullRequestClie
 		prStore, ok := any(completionStore).(prPrimitiveStore)
 		if !ok || prStore == nil {
 			writeProblem(w, http.StatusServiceUnavailable, "PR primitive store not configured")
+			return
+		}
+		run, err = normalizeRunReviewFacts(r.Context(), prStore, run)
+		if err != nil {
+			writeInternalError(w, r, err, "normalize run review facts failed")
 			return
 		}
 		result, err := materializePRPrimitive(r.Context(), prStore, prClient, artifactStore, run)
@@ -204,6 +214,12 @@ func finalizeRunTouchpoint(w http.ResponseWriter, r *http.Request, store ReadSto
 		writeProblem(w, http.StatusUnprocessableEntity, "run has no issue_repo")
 		return
 	}
+	normalized, err := normalizeRunReviewFacts(r.Context(), finalizeStore, run)
+	if err != nil {
+		writeInternalError(w, r, err, "normalize run review facts failed")
+		return
+	}
+	run = normalized
 	if prBranchForRun(run) == "" {
 		writeProblem(w, http.StatusUnprocessableEntity, "run did not emit a branch_name output; if this is a recycled run, finalize the cycle route /runs/{run_number}/cycles/{cycle_number}/touchpoint/finalize")
 		return
@@ -330,6 +346,37 @@ func materializePRPrimitive(ctx context.Context, store prPrimitiveStore, prClien
 
 func prBranchForRun(run RunReplayData) string {
 	return phaseOutput(run, "branch_name")
+}
+
+func normalizeRunReviewFacts(ctx context.Context, store prPrimitiveStore, run RunReplayData) (RunReplayData, error) {
+	facts := runReviewFactsForRun(run)
+	if !facts.hasValues() {
+		return run, nil
+	}
+	return store.NormalizeRunReviewFacts(ctx, run.Project, run.ID, facts)
+}
+
+func runReviewFactsForRun(run RunReplayData) RunReviewFacts {
+	validationURL := ""
+	if run.ValidationURL != nil {
+		validationURL = strings.TrimSpace(*run.ValidationURL)
+	}
+	if validationURL == "" {
+		validationURL = phaseOutput(run, "validation_url")
+	}
+	return RunReviewFacts{ValidationURL: stringPtrFromTrimmed(validationURL)}
+}
+
+func (f RunReviewFacts) hasValues() bool {
+	return f.ValidationURL != nil && strings.TrimSpace(*f.ValidationURL) != ""
+}
+
+func stringPtrFromTrimmed(value string) *string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return &value
 }
 
 func phaseOutput(run RunReplayData, key string) string {

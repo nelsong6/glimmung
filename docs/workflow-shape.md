@@ -181,8 +181,9 @@ For recycled runs, use the cycle-addressable form that matches the UI URL:
 `POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/cycles/{cycle_number}/touchpoint/finalize`.
 It is idempotent and uses the durable Run state as source of truth: it creates
 or reuses the GitHub PR, records `run.pr_number`, and ensures the Touchpoint
-linked to the Issue and Run. During that same call, Glimmung normalizes run
-artifact evidence into Touchpoint evidence and validates required screenshot
+linked to the Issue and Run. During that same call, Glimmung promotes review
+facts such as `validation_url` into canonical Run fields, normalizes run
+artifact evidence into Touchpoint evidence, and validates required screenshot
 artifacts before the Touchpoint is ready. GitHub PR bodies stay a syndicated
 pointer into Glimmung; screenshots and other review evidence belong on the
 Glimmung Touchpoint. Operators should use this endpoint when a Run already
