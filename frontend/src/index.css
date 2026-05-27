@@ -1122,7 +1122,7 @@ tr.eligible td.mono:first-child {
 .epigraph {
   min-width: 0;
   font-style: italic;
-  color: var(--fg-dimmest);
+  color: var(--fg-dim);
   font-size: 0.72rem;
   line-height: 1;
   overflow: hidden;
