@@ -3,12 +3,29 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
-import { App } from "./App";
+import {
+  App,
+  CONNECTION_DEAD_AFTER_MS,
+  CONNECTION_STALE_AFTER_MS,
+  connectionStateFromSnapshotClock,
+} from "./App";
 import { installMockFetch } from "./mockApi";
 
 afterEach(() => {
   sessionStorage.clear();
   window.history.pushState({}, "", "/");
+});
+
+describe("connection status", () => {
+  it("keeps transient SSE reconnects out of the dead state", () => {
+    const startedAt = 10_000;
+    const lastSeen = startedAt + 2_000;
+
+    expect(connectionStateFromSnapshotClock(startedAt + 1_000, startedAt, 0)).toBe("stale");
+    expect(connectionStateFromSnapshotClock(lastSeen + CONNECTION_STALE_AFTER_MS - 1, startedAt, lastSeen)).toBe("live");
+    expect(connectionStateFromSnapshotClock(lastSeen + CONNECTION_STALE_AFTER_MS, startedAt, lastSeen)).toBe("stale");
+    expect(connectionStateFromSnapshotClock(lastSeen + CONNECTION_DEAD_AFTER_MS, startedAt, lastSeen)).toBe("dead");
+  });
 });
 
 describe("test environment slots", () => {
