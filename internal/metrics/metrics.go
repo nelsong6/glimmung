@@ -424,6 +424,78 @@ func RecordAuthRomaineLifeRequest(role, result string) {
 	authRomaineLifeRequestsTotal.WithLabelValues(safeLabel(role), safeLabel(result)).Inc()
 }
 
+// --- Inspections -------------------------------------------------------------
+//
+// Records the outcome of POST /v1/inspections (write side) and the
+// lease-cleanup sweep (delete side). Label sets are closed enums per
+// docs/observability.md; project, slot, lease, session, and request ids
+// must never land in a label here.
+
+var (
+	inspectionsWrittenTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "glimmung_inspections_written_total",
+			Help: "Successful POST /v1/inspections records, labelled by scope (lease-scoped today; run-scoped is a documented follow-up).",
+		},
+		[]string{"scope"},
+	)
+	inspectionsWriteErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "glimmung_inspections_write_errors_total",
+			Help: "Failed POST /v1/inspections requests, labelled by the phase that failed (parse, prefix, upload_report, upload_screenshot, ledger, lease).",
+		},
+		[]string{"phase"},
+	)
+	inspectionsSweptTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "glimmung_inspections_swept_total",
+			Help: "Lease-cleanup sweep outcomes, labelled by the artifact piece (row, blob_report, blob_screenshot) and whether the underlying delete succeeded.",
+		},
+		[]string{"piece", "outcome"},
+	)
+)
+
+// Inspection scope label values.
+const (
+	InspectionScopeLease = "lease"
+	InspectionScopeRun   = "run"
+)
+
+// Inspection write-error phase label values.
+const (
+	InspectionWritePhaseParse            = "parse"
+	InspectionWritePhasePrefix           = "prefix"
+	InspectionWritePhaseUploadReport     = "upload_report"
+	InspectionWritePhaseUploadScreenshot = "upload_screenshot"
+	InspectionWritePhaseLedger           = "ledger"
+	InspectionWritePhaseLease            = "lease"
+)
+
+// Inspection sweep label values.
+const (
+	InspectionSweepPieceRow        = "row"
+	InspectionSweepPieceReport     = "blob_report"
+	InspectionSweepPieceScreenshot = "blob_screenshot"
+	InspectionSweepOutcomeOK       = "ok"
+	InspectionSweepOutcomeError    = "error"
+)
+
+// RecordInspectionWritten counts one successful inspection upload.
+func RecordInspectionWritten(scope string) {
+	inspectionsWrittenTotal.WithLabelValues(safeLabel(scope)).Inc()
+}
+
+// RecordInspectionWriteError counts one failed inspection upload by phase.
+func RecordInspectionWriteError(phase string) {
+	inspectionsWriteErrorsTotal.WithLabelValues(safeLabel(phase)).Inc()
+}
+
+// RecordInspectionSwept counts one piece of the lease-cleanup sweep
+// (a deleted ledger row or a deleted blob), partitioned by ok/error.
+func RecordInspectionSwept(piece, outcome string) {
+	inspectionsSweptTotal.WithLabelValues(safeLabel(piece), safeLabel(outcome)).Inc()
+}
+
 // --- Registration ------------------------------------------------------------
 //
 // k8s Job apply/terminal metrics are not in V1: the dispatch path emits a
@@ -455,6 +527,9 @@ func init() {
 		authRomaineLifeRequestsTotal,
 		testSlotActivationCancelledTotal,
 		testSlotCleanupClaimTotal,
+		inspectionsWrittenTotal,
+		inspectionsWriteErrorsTotal,
+		inspectionsSweptTotal,
 	)
 }
 

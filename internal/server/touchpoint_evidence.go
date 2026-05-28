@@ -172,7 +172,7 @@ func artifactBlobNameForEvidence(run RunReplayData, artifact EvidenceArtifact) (
 	artifactPath, ok := artifactPathFromEvidenceRef(ref)
 	if !ok {
 		artifactPath = strings.TrimSpace(ref)
-		if strings.HasPrefix(artifactPath, "screenshots/") || strings.HasPrefix(artifactPath, "videos/") || strings.HasPrefix(artifactPath, "evidence/") {
+		if strings.HasPrefix(artifactPath, "screenshots/") || strings.HasPrefix(artifactPath, "videos/") || strings.HasPrefix(artifactPath, "evidence/") || strings.HasPrefix(artifactPath, "inspections/") {
 			if strings.TrimSpace(run.Project) == "" || strings.TrimSpace(run.ID) == "" {
 				return "", false
 			}

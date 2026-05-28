@@ -18,6 +18,17 @@ type ArtifactStore interface {
 	Download(ctx context.Context, blobName string) (Artifact, error)
 }
 
+// ArtifactWriter is the subset of artifact-store operations needed by handlers
+// that produce new artifacts (currently inspections; runner evidence still
+// writes via the agent-runner stdout side-channel pending the convergence
+// follow-up tracked in glimmung#143). Concrete stores wired into the runtime
+// (`internal/store/artifacts.Store`) satisfy both ArtifactStore and
+// ArtifactWriter; tests can pass narrower fakes.
+type ArtifactWriter interface {
+	Upload(ctx context.Context, blobName string, body []byte, contentType string) (int64, error)
+	Delete(ctx context.Context, blobName string) error
+}
+
 func readArtifact(store ArtifactStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
@@ -76,7 +87,8 @@ func servingArtifactBlobName(blobPath string) (string, bool) {
 	}
 	if !strings.HasPrefix(blobName, "runs/") &&
 		!strings.HasPrefix(blobName, "issues/") &&
-		!strings.HasPrefix(blobName, "reports/") {
+		!strings.HasPrefix(blobName, "reports/") &&
+		!strings.HasPrefix(blobName, "inspections/") {
 		return "", false
 	}
 	return blobName, true

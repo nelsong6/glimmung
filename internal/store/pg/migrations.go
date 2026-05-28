@@ -308,6 +308,35 @@ var schemaMigrations = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS touchpoints_by_project_updated
 		ON touchpoints (project, updated_at DESC)`,
+
+	// ------------------------------------------------------------------
+	// slot_inspections — durable ledger for free (lease-scoped) inspections
+	// uploaded through POST /v1/inspections. Run-bound inspections (caller
+	// in a Run context) are tracked by existing Run evidence machinery and
+	// are not indexed here. Sweep runs at lease-cleanup time, keyed by
+	// lease_id. Idempotent inserts are deduplicated by (lease_id, request_id)
+	// when X-Inspection-Request-Id is supplied.
+	// ------------------------------------------------------------------
+	`CREATE TABLE IF NOT EXISTS slot_inspections (
+		id                       text PRIMARY KEY,
+		project                  text NOT NULL,
+		slot                     text NOT NULL DEFAULT '',
+		lease_id                 text NOT NULL,
+		session_id               text NOT NULL DEFAULT '',
+		request_id               text NOT NULL DEFAULT '',
+		blob_prefix              text NOT NULL,
+		report_blob_path         text NOT NULL,
+		screenshot_blob_path     text NOT NULL,
+		screenshot_content_type  text NOT NULL DEFAULT 'image/png',
+		byte_size_screenshot     bigint NOT NULL DEFAULT 0,
+		byte_size_report         bigint NOT NULL DEFAULT 0,
+		created_at               timestamptz NOT NULL DEFAULT now()
+	)`,
+	`CREATE INDEX IF NOT EXISTS slot_inspections_by_lease
+		ON slot_inspections (lease_id)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS slot_inspections_by_request
+		ON slot_inspections (lease_id, request_id)
+		WHERE request_id <> ''`,
 }
 
 // cronJobs are scheduled after the table migrations succeed. Each

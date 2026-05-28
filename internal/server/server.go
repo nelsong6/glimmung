@@ -207,6 +207,11 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	if len(artifactStores) > 0 {
 		artifactStore = artifactStores[0]
 	}
+	if writer, ok := artifactStore.(ArtifactWriter); ok {
+		SetInspectionSweepArtifactWriter(writer)
+	} else {
+		SetInspectionSweepArtifactWriter(nil)
+	}
 	var nativeTokenMinter NativeGitHubTokenMinter
 	if m, ok := ghClient.(NativeGitHubTokenMinter); ok {
 		nativeTokenMinter = m
@@ -323,6 +328,22 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/pr-touchpoint", nativePRTouchpointByCallbackToken(store, prClient, artifactStore))
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/pr-merge", nativePRMergeByCallbackToken(store, prClient))
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/completed", nativeRunCompletedByCallbackToken(store, nativeLauncher))
+	if stateStore, ok := store.(StateStore); ok {
+		if inspectionStore, ok := store.(SlotInspectionStore); ok {
+			var artifactWriter ArtifactWriter
+			if w, ok := artifactStore.(ArtifactWriter); ok {
+				artifactWriter = w
+			}
+			mux.Handle(
+				"POST /v1/inspections",
+				requireAdmin(adminAuthenticator, createInspection(createInspectionDeps{
+					store:         inspectionStore,
+					leases:        newInspectionLeaseResolver(stateStore),
+					artifactWrite: artifactWriter,
+				})),
+			)
+		}
+	}
 	mux.Handle("POST /v1/test-slots/checkout", requireAdmin(adminAuthenticator, http.HandlerFunc(checkoutTestSlot(settings, store, testSlotPreparer, nativeTokenMinter))))
 	mux.Handle("POST /v1/test-slots/return", requireAdmin(adminAuthenticator, http.HandlerFunc(returnTestSlot(store, testSlotPreparer, nativeTokenMinter))))
 	mux.Handle("POST /v1/test-slots/extend", requireAdmin(adminAuthenticator, http.HandlerFunc(extendTestSlotLease(store, testSlotPreparer))))

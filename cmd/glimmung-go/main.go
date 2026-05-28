@@ -113,6 +113,9 @@ func main() {
 		pgLeases := pgstore.NewLeasesStore(pgPool)
 		store.SetPGLeases(pgLeases)
 
+		pgSlotInspections := pgstore.NewSlotInspectionsStore(pgPool)
+		store.SetPGSlotInspections(pgSlotInspections)
+
 		rt = &runtimeStore{Store: store, LocksStore: pgLocks}
 	} else {
 		log.Printf("runtime store disabled: store wrapper and postgres pool both required (store=%v pgPool=%v)", store != nil, pgPool != nil)
