@@ -155,15 +155,13 @@ own recycle policy, or its own budget separately from the verifier.
 
 ## PR touchpoint primitive
 
-Workflows with `pr.enabled: true` must declare exactly one native job with
-`primitive: pr_touchpoint`, and that job must live in an `always` phase. The
-usual shape is to place it beside environment teardown so PR creation and
-touchpoint linking are visible in native job logs while cleanup runs:
+Every Glimmung workflow ends in a human-reviewed PR — there is no opt-out.
+Workflows must declare exactly one native job with `primitive: pr_touchpoint`,
+and that job must live in an `always` phase. The usual shape is to place it
+beside environment teardown so PR creation and touchpoint linking are visible
+in native job logs while cleanup runs:
 
 ```yaml
-pr:
-  enabled: true
-
 phases:
   - name: cleanup
     kind: k8s_job
@@ -178,8 +176,11 @@ phases:
 
 The job is Glimmung-supplied. Registration canonicalizes the declared job into
 the managed native runner step that calls Glimmung's PR/touchpoint finalizer.
-The workflow owns the placement and job id; Glimmung owns the implementation. If
-`pr.enabled` is false, declaring this primitive is invalid.
+The workflow owns the placement and job id; Glimmung owns the implementation.
+The historical `pr.enabled` toggle was deleted: there was no documented product
+scenario for `pr.enabled: false` and per migration-policy unused toggles are
+deletion targets, not design options. The `pr.recycle_policy` setting remains
+and configures the reject-signal recycle target.
 
 The same finalizer is also exposed as an admin repair/control endpoint:
 `POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/touchpoint/finalize`.

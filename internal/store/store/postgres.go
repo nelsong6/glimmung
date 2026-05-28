@@ -554,9 +554,6 @@ func (s *Store) PatchWorkflow(ctx context.Context, project string, name string, 
 		return server.Workflow{}, err
 	}
 	reg := workflowRegisterFromDoc(doc)
-	if req.PREnabled != nil {
-		reg.PR.Enabled = *req.PREnabled
-	}
 	if req.BudgetTotal != nil {
 		reg.Budget.Total = *req.BudgetTotal
 	}
@@ -2254,7 +2251,7 @@ func nativeCheckoutDocFromSpec(checkout server.NativeCheckoutSpec) nativeCheckou
 }
 
 func prDocFromSpec(pr server.PrPrimitive) prDoc {
-	return prDoc{Enabled: pr.Enabled, RecyclePolicy: recyclePolicyDocFromSpec(pr.RecyclePolicy)}
+	return prDoc{RecyclePolicy: recyclePolicyDocFromSpec(pr.RecyclePolicy)}
 }
 
 func recyclePolicyDocFromSpec(policy *server.RecyclePolicy) *recyclePolicyDoc {
@@ -2453,7 +2450,7 @@ func nativeCheckoutFromDoc(doc nativeCheckoutDoc) server.NativeCheckoutSpec {
 }
 
 func prFromDoc(doc prDoc) server.PrPrimitive {
-	return server.PrPrimitive{Enabled: doc.Enabled, RecyclePolicy: recyclePolicyFromDoc(doc.RecyclePolicy)}
+	return server.PrPrimitive{RecyclePolicy: recyclePolicyFromDoc(doc.RecyclePolicy)}
 }
 
 func recyclePolicyFromDoc(doc *recyclePolicyDoc) *server.RecyclePolicy {
@@ -6521,6 +6518,40 @@ func (s *Store) AppendRunAttempt(ctx context.Context, project, runID, phase, pha
 		return 0, err
 	}
 	return nextIdx, nil
+}
+
+// StampLatestAttemptSkipped marks the latest attempt on a run as completed
+// with conclusion="skipped" and decision="advance" without launching any
+// jobs. Used when an always-run phase with SkipWhenPreserveTestEnv is
+// dispatched against a run whose preserve_test_env snapshot is true: the
+// phase appears in run history with a deliberate "skipped" outcome and the
+// workflow advances past it like a success. The skip is durable in the
+// attempt record so projections render the dedicated "skipped" pill.
+func (s *Store) StampLatestAttemptSkipped(ctx context.Context, project, runID string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := s.pgRuns.PatchPayload(ctx, project, runID, func(raw map[string]any) error {
+		attempts, _ := raw["attempts"].([]any)
+		if len(attempts) == 0 {
+			return fmt.Errorf("run has no attempts to stamp")
+		}
+		last, ok := attempts[len(attempts)-1].(map[string]any)
+		if !ok {
+			return fmt.Errorf("malformed attempt record")
+		}
+		skipped := "skipped"
+		advance := "advance"
+		last["conclusion"] = skipped
+		last["decision"] = advance
+		last["completed_at"] = now
+		attempts[len(attempts)-1] = last
+		raw["attempts"] = attempts
+		raw["updated_at"] = now
+		return nil
+	})
+	if errors.Is(err, pgstore.ErrRunNotFound) {
+		return server.ErrNotFound
+	}
+	return err
 }
 
 func (s *Store) StartRunCycle(ctx context.Context, req server.StartRunCycleRequest) (int, error) {

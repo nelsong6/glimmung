@@ -52,6 +52,7 @@ type RunCompletionStore interface {
 	SetRunTerminalState(ctx context.Context, project, runID, state string, abortReason *string) (AbortRunResult, error)
 	SetRunReviewRequired(ctx context.Context, project, runID string) error
 	SetRunInProgress(ctx context.Context, project, runID string) error
+	StampLatestAttemptSkipped(ctx context.Context, project, runID string) error
 	CreateRecycleCycle(ctx context.Context, req CreateRecycleCycleRequest) (CreatedRun, error)
 	AppendRunAttempt(ctx context.Context, project, runID, phase, phaseKind, workflowFilename string) (int, error)
 	StartRunCycle(ctx context.Context, req StartRunCycleRequest) (int, error)
@@ -350,9 +351,24 @@ func processRunCompletion(
 				PRLockReleased:    result.PRLockReleased,
 			}
 		}
-		// Mark run passed (or review_required if PR primitive enabled).
+		// Terminal state set depends on workflow shape:
+		// - Gated workflows (have a touchpoint_gate phase) park at the gate
+		//   via dispatchForwardPhase; reaching this code path means the gate
+		//   was approved + cleanup_final ran. Terminal state: passed.
+		// - Workflows without a touchpoint_gate phase (unmigrated) keep the
+		//   pre-gate behavior: terminal state review_required until the
+		//   project's workflow is updated to the gated shape. This is a
+		//   transitional accommodation, not a permanent fallback — every
+		//   workflow is expected to migrate to the gated shape.
+		hasGate := false
+		for _, phase := range wf.Phases {
+			if workflowPhaseKind(phase.Kind) == workflowKindTouchpointGate {
+				hasGate = true
+				break
+			}
+		}
 		state := "passed"
-		if wf.PR.Enabled {
+		if !hasGate {
 			if run.PRNumber == nil || *run.PRNumber < 1 {
 				abortReason := "PR primitive: touchpoint job completed without linking a PR"
 				return markRunAborted(ctx, w, r, store, nativeLauncher, run, runRef, decision.AbortMalformed, abortReason)
@@ -755,6 +771,32 @@ func dispatchForwardPhase(
 	if phaseKind == workflowKindTouchpointGate {
 		if err := store.SetRunReviewRequired(ctx, run.Project, run.ID); err != nil {
 			return fmt.Errorf("set review_required: %w", err)
+		}
+		return nil
+	}
+	// Skip-when-preserve: an always-run phase (typically cleanup_early)
+	// flagged with SkipWhenPreserveTestEnv is appended as a synthesized
+	// "skipped" attempt instead of launching its jobs, whenever the run's
+	// preserve_test_env snapshot is true. The attempt is durable so run
+	// history shows the deliberate skip. After stamping the skip we
+	// recursively dispatch the next ready phase — control flows forward
+	// through the workflow within this single handler invocation, so the
+	// touchpoint phase can run, then touchpoint_gate parks at review.
+	if targetPhase.SkipWhenPreserveTestEnv && run.PreserveTestEnv {
+		if _, err := store.AppendRunAttempt(ctx, run.Project, run.ID, targetPhase.Name, phaseKind, workflowFilename); err != nil {
+			return fmt.Errorf("append skipped attempt: %w", err)
+		}
+		if err := store.StampLatestAttemptSkipped(ctx, run.Project, run.ID); err != nil {
+			return fmt.Errorf("stamp skipped attempt: %w", err)
+		}
+		updated, err := store.ReadRunForReplay(ctx, run.Project, run.ID)
+		if err != nil {
+			return fmt.Errorf("re-read run after skip: %w", err)
+		}
+		for _, next := range allReadyDispatchTargets(wf, updated, decision.Advance) {
+			if err := dispatchForwardPhase(ctx, store, nativeLauncher, updated, wf, next); err != nil {
+				return err
+			}
 		}
 		return nil
 	}

@@ -155,7 +155,6 @@ func replayRunDecisionByNumber(store ReadStore) http.HandlerFunc {
 		var decisionWorkflow decision.Workflow
 		var serverPhases []PhaseSpec
 		var budgetTotal float64
-		var prEnabled bool
 		var workflowSource string
 
 		if req.OverrideWorkflow != nil {
@@ -165,7 +164,6 @@ func replayRunDecisionByNumber(store ReadStore) http.HandlerFunc {
 			if budgetTotal <= 0 {
 				budgetTotal = budget.DefaultConfig().Total
 			}
-			prEnabled = req.OverrideWorkflow.PR.Enabled
 			workflowSource = "override"
 		} else {
 			wf, err := workflowForReplay(r.Context(), replayStore, run)
@@ -181,7 +179,6 @@ func replayRunDecisionByNumber(store ReadStore) http.HandlerFunc {
 			serverPhases = wf.Phases
 			decisionWorkflow = serverPhasesToDecisionWorkflow(serverPhases)
 			budgetTotal = wf.Budget.Total
-			prEnabled = wf.PR.Enabled
 			if run.WorkflowSchemaRef != "" {
 				workflowSource = "schema"
 			} else {
@@ -260,7 +257,11 @@ func replayRunDecisionByNumber(store ReadStore) http.HandlerFunc {
 						next := decisionWorkflow.Phases[i+1].Name
 						result.WouldAdvanceToPhase = &next
 					} else {
-						result.WouldOpenPR = prEnabled
+						// Last phase advanced — every Glimmung workflow ends
+						// in a human-reviewed PR, so a successful advance off
+						// the final phase means the touchpoint PR is the
+						// terminal review surface.
+						result.WouldOpenPR = true
 					}
 					break
 				}

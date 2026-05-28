@@ -47,6 +47,8 @@ type fakeCompletionStore struct {
 	reviewRequiredErr   error
 	inProgressCalls     int
 	inProgressErr       error
+	skippedStampCalls   int
+	skippedStampErr     error
 
 	appendIdx   int
 	appendErr   error
@@ -162,6 +164,11 @@ func (s *fakeCompletionStore) SetRunReviewRequired(_ context.Context, _, _ strin
 func (s *fakeCompletionStore) SetRunInProgress(_ context.Context, _, _ string) error {
 	s.inProgressCalls++
 	return s.inProgressErr
+}
+
+func (s *fakeCompletionStore) StampLatestAttemptSkipped(_ context.Context, _, _ string) error {
+	s.skippedStampCalls++
+	return s.skippedStampErr
 }
 
 func (s *fakeCompletionStore) AppendRunAttempt(_ context.Context, _, _, phase, phaseKind, workflowFilename string) (int, error) {
@@ -450,7 +457,6 @@ func singlePhaseWorkflowForCompletion(name string, verify bool) *Workflow {
 
 func prWorkflowForCompletion(name string) *Workflow {
 	wf := singlePhaseWorkflowForCompletion(name, false)
-	wf.PR.Enabled = true
 	wf.Phases = append(wf.Phases, PhaseSpec{
 		Name:      "cleanup",
 		Kind:      "k8s_job",
@@ -467,6 +473,7 @@ func runDataForCompletion(phase string) *RunReplayData {
 	leaseRef := "proj/leases/proj-1/1"
 	runNumber := 1
 	runDisplay := "1"
+	prNumber := 99
 	return &RunReplayData{
 		ID:               "run-1",
 		Project:          "proj",
@@ -477,6 +484,7 @@ func runDataForCompletion(phase string) *RunReplayData {
 		RunDisplayNumber: &runDisplay,
 		CallbackToken:    &callback,
 		SlotLeaseRef:     &leaseRef,
+		PRNumber:         &prNumber,
 		Attempts: []RunAttemptData{
 			{AttemptIndex: 0, Phase: phase, Conclusion: "failure"},
 		},
@@ -684,6 +692,9 @@ func TestCompletionPayloadFromNativeExtractsTypedVideoEvidence(t *testing.T) {
 func TestNativeRunCompletedByCallbackTokenMissingPRPrimitiveLinkAborts(t *testing.T) {
 	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
 	store.run = runDataForCompletion("cleanup")
+	// The fixture defaults a PR number; this test specifically exercises
+	// the "no PR was linked" abort path so clear it.
+	store.run.PRNumber = nil
 	store.run.Attempts = []RunAttemptData{
 		{AttemptIndex: 0, Phase: "impl", Conclusion: "success", Decision: string(decision.Advance), Completed: true, PhaseOutputs: map[string]string{"branch_name": "issue-7-run-1"}},
 		{AttemptIndex: 1, Phase: "cleanup", Conclusion: "failure"},
@@ -1252,7 +1263,7 @@ func TestNativeRunCompletedByCallbackTokenCleanupAfterAbortKeepsRunAborted(t *te
 	store.wf = &Workflow{
 		Project: "proj",
 		Name:    "wf",
-		PR:      PrPrimitive{Enabled: true},
+		PR:      PrPrimitive{},
 		Budget:  budget.Config{Total: 25},
 		Phases: []PhaseSpec{
 			{Name: "env-prep", Kind: "k8s_job", Jobs: []NativeJobSpec{{ID: "env-prep"}}},
