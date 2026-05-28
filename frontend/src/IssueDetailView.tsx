@@ -127,7 +127,6 @@ type RunProjectionRun = {
 
 type RunProjectionTopology = RunProjectionTopologySource & {
   default_entry: { target: string; active: boolean; kind: string } | null;
-  terminal: { kind: string; enabled: boolean };
 };
 
 type RunProjectionPhase = {
@@ -243,7 +242,7 @@ type Workflow = {
   project: string;
   name: string;
   phases: WorkflowPhase[];
-  pr: { enabled: boolean; recycle_policy: WorkflowRecyclePolicy | null };
+  pr: { recycle_policy: WorkflowRecyclePolicy | null };
   workflow_filename: string | null;
   workflow_ref: string | null;
   default_requirements: Record<string, unknown>;
@@ -266,6 +265,7 @@ type WorkflowJob = {
   id: string;
   name?: string | null;
   image?: string;
+  primitive?: string;
 };
 
 type WorkflowRecyclePolicy = {
@@ -713,7 +713,6 @@ export function IssueDetailView() {
                 selectedRunWorkflow={selectedWorkflowRunWorkflow}
                 selectedRunRequested={Boolean(params.workflowRunId)}
                 onBackToDefinition={() => selectWorkflowRun(null)}
-                onOpenTouchpoint={() => setTab("touchpoint")}
               />
             )}
             {tab === "touchpoint" && (
@@ -1059,7 +1058,6 @@ export function RunViewer({
   onConfirmAbort,
   selectedRunId,
   onBackToRuns,
-  onOpenTouchpoint,
   actionsVisible = true,
 }: {
   graph: IssueGraph | null;
@@ -1078,7 +1076,6 @@ export function RunViewer({
   onConfirmAbort: (runNumber: string) => void;
   selectedRunId: string | null;
   onBackToRuns: () => void;
-  onOpenTouchpoint: () => void;
   actionsVisible?: boolean;
 }) {
   // Pick the run we're painting. Caller-selected wins; fall back to
@@ -1253,7 +1250,6 @@ export function RunViewer({
         workflow={workflow}
         selectedNodeId={drillNodeId}
         onSelectNode={setDrillNodeId}
-        onOpenTouchpoint={onOpenTouchpoint}
       />
       <DrillIn
         nodeId={drillNodeId}
@@ -1286,7 +1282,6 @@ function DefinitionDag({
       {graphModel && (
         <PhaseGraph
           phases={graphModel.phases}
-          prEnabled={graphModel.prEnabled}
           dagClassName="dag-definition"
           ariaLabel="workflow definition"
           entryArrows={graphModel.entryArrows}
@@ -1322,14 +1317,12 @@ function PipelineDag({
   workflow,
   selectedNodeId,
   onSelectNode,
-  onOpenTouchpoint,
 }: {
   run: GraphNode;
   graph: IssueGraph;
   workflow: Workflow | null;
   selectedNodeId: string | null;
   onSelectNode: (id: string | null) => void;
-  onOpenTouchpoint: () => void;
 }) {
   const phaseRollups = useMemo(() => phaseNodesForRun(graph, run), [graph, run]);
   const rollupByName = useMemo(() => {
@@ -1364,22 +1357,6 @@ function PipelineDag({
   const activeEntry = stringOrNull(meta.entrypoint_phase)
     ?? graphModel.phases[0]?.name
     ?? null;
-  const touchpointId = stringOrNull(meta.touchpoint_ref);
-  const touchpointState = stringOrNull(meta.touchpoint_state);
-  const touchpointTitle = stringOrNull(meta.touchpoint_title);
-  const primitiveState = stringOrNull(meta.pr_primitive_state);
-  const primitiveError = stringOrNull(meta.pr_primitive_error);
-  const prNumber = numberOrNull(meta.pr_number);
-  const prBranch = stringOrNull(meta.pr_branch);
-  const touchpointClass = primitiveState === "failed"
-    ? "failed"
-    : touchpointId || prNumber
-      ? "opened"
-      : "pending";
-  const touchpointStatus = primitiveState === "failed"
-    ? "failed"
-    : touchpointState ?? (prNumber ? `#${prNumber}` : prBranch ? prBranch : "pending");
-
   // Render-phase callback paints the phase's current job/attempt state.
   // The visible phase container ref is wired on PhaseGraph itself so
   // entry/recycle arrows target the phase surface, not this child job.
@@ -1454,35 +1431,11 @@ function PipelineDag({
     );
   };
 
-  const renderTouchpoint = () => (
-    <button
-      type="button"
-      className={`dag-node dag-node-pr ${touchpointClass}${selectedNodeId === "pr" ? " selected" : ""}`}
-      onClick={() => {
-        if (primitiveState === "failed") {
-          onSelectNode(selectedNodeId === "pr" ? null : "pr");
-        } else {
-          onOpenTouchpoint();
-        }
-      }}
-      aria-pressed={selectedNodeId === "pr"}
-    >
-      <div className="dag-node-label">touchpoint</div>
-      <div className="dag-node-state mono">{touchpointStatus}</div>
-      {touchpointTitle && <div className="dag-node-meta dim mono">{touchpointTitle}</div>}
-      {!touchpointTitle && primitiveError && (
-        <div className="dag-node-meta dim mono">prepare failed</div>
-      )}
-    </button>
-  );
-
   return (
     <div className="dag-wrap">
       <PhaseGraph
         phases={graphModel.phases}
-        prEnabled={graphModel.prEnabled}
         renderPhase={renderPhase}
-        renderTouchpoint={renderTouchpoint}
         ariaLabel="pipeline"
         entryPhaseName={activeEntry}
         entryArrows={graphModel.entryArrows}
@@ -1994,7 +1947,6 @@ function RunsPane({
         selectedStepId={selectedStepId}
         onBackToRuns={() => onSelectRun(null)}
         onSelectNode={(selection) => onSelectProjectionNode(selectedRunProjection, selection)}
-        onOpenTouchpoint={onOpenTouchpoint}
       />
     );
   }
@@ -2150,7 +2102,6 @@ function RunExecutionView({
   selectedStepId,
   onBackToRuns,
   onSelectNode,
-  onOpenTouchpoint,
 }: {
   run: RunProjectionRun;
   project: string;
@@ -2161,7 +2112,6 @@ function RunExecutionView({
   selectedStepId: string | null;
   onBackToRuns: () => void;
   onSelectNode: (selection: ProjectionSelection) => void;
-  onOpenTouchpoint: () => void;
 }) {
   const inspectorRef = useRef<HTMLDivElement | null>(null);
   const selectedPhase = selectedPhaseId
@@ -2198,7 +2148,6 @@ function RunExecutionView({
         run={run}
         selectedKey={selectedKey}
         onSelectNode={onSelectNode}
-        onOpenTouchpoint={onOpenTouchpoint}
       />
       <div ref={inspectorRef}>
         {selectedPhase ? (
@@ -2224,12 +2173,10 @@ function ProjectionPipelineDag({
   run,
   selectedKey,
   onSelectNode,
-  onOpenTouchpoint,
 }: {
   run: RunProjectionRun;
   selectedKey: string | null;
   onSelectNode: (selection: ProjectionSelection) => void;
-  onOpenTouchpoint: () => void;
 }) {
   const executionPhaseByName = useMemo(() => {
     const phasesByName = new Map<string, RunProjectionPhase>();
@@ -2283,25 +2230,13 @@ function ProjectionPipelineDag({
       </>
     );
   };
-  const renderTouchpoint = () => (
-    <button
-      type="button"
-      className="dag-node dag-node-pr"
-      onClick={onOpenTouchpoint}
-    >
-      <div className="dag-node-label">touchpoint</div>
-      <div className="dag-node-state mono">PR</div>
-    </button>
-  );
   return (
     <div className="dag-wrap">
       <PhaseGraph
         phases={graphModel.phases}
         renderPhase={renderPhase}
-        renderTouchpoint={renderTouchpoint}
         ariaLabel="run execution"
         entryPhaseName={run.current_phase ?? null}
-        prEnabled={graphModel.prEnabled}
         entryArrows={graphModel.entryArrows}
         recycleArrows={graphModel.recycleArrows}
       />
@@ -2537,7 +2472,6 @@ function WorkflowPane({
   selectedRunWorkflow,
   selectedRunRequested,
   onBackToDefinition,
-  onOpenTouchpoint,
 }: {
   graph: IssueGraph | null;
   graphAvailable: boolean;
@@ -2548,7 +2482,6 @@ function WorkflowPane({
   selectedRunWorkflow: Workflow | null;
   selectedRunRequested: boolean;
   onBackToDefinition: () => void;
-  onOpenTouchpoint: () => void;
 }) {
   if (!graphAvailable) {
     return (
@@ -2595,7 +2528,6 @@ function WorkflowPane({
           onConfirmAbort={() => undefined}
           selectedRunId={runIdFromNode(selectedRun)}
           onBackToRuns={onBackToDefinition}
-          onOpenTouchpoint={onOpenTouchpoint}
           actionsVisible={false}
         />
       </>

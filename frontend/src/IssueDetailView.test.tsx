@@ -55,18 +55,24 @@ const runProjection = {
         always: false,
         depends_on: [],
         jobs: [{ id: "env-prep", name: "Environment prep" }],
-      }, {
-        name: "agent-execute",
-        kind: "k8s_job",
-        verify: false,
-        always: false,
-        depends_on: ["env-prep"],
-        jobs: [{ id: "agent", name: "Run agent" }],
-      }],
-      default_entry: { target: "env-prep", active: true, kind: "default" },
-      terminal: { kind: "touchpoint", enabled: true },
-      recycle_arrows: [{
-        source: "touchpoint",
+	      }, {
+	        name: "agent-execute",
+	        kind: "k8s_job",
+	        verify: false,
+	        always: false,
+	        depends_on: ["env-prep"],
+	        jobs: [{ id: "agent", name: "Run agent" }],
+	      }, {
+	        name: "touchpoint",
+	        kind: "k8s_job",
+	        verify: false,
+	        always: true,
+	        depends_on: ["agent-execute"],
+	        jobs: [{ id: "pr-touchpoint", name: "PR touchpoint" }],
+	      }],
+	      default_entry: { target: "env-prep", active: true, kind: "default" },
+	      recycle_arrows: [{
+	        source: "touchpoint",
         target: "env-prep",
         trigger: "changes_requested",
         max_attempts: 3,
@@ -108,17 +114,33 @@ const runProjection = {
       verify: false,
       always: false,
       depends_on: ["env-prep"],
-      jobs: [{
-        id: "agent",
-        name: "Run agent",
-        state: "not_started",
+	      jobs: [{
+	        id: "agent",
+	        name: "Run agent",
+	        state: "not_started",
         steps: [
           { slug: "checkout", title: "Checkout workspace", state: "not_started" },
           { slug: "run-agent", title: "Run agent", state: "not_started" },
         ],
-      }],
-      attempts: [],
-    }],
+	      }],
+	      attempts: [],
+	    }, {
+	      name: "touchpoint",
+	      kind: "k8s_job",
+	      state: "not_started",
+	      verify: false,
+	      always: true,
+	      depends_on: ["agent-execute"],
+	      jobs: [{
+	        id: "pr-touchpoint",
+	        name: "PR touchpoint",
+	        state: "not_started",
+	        steps: [
+	          { slug: "ensure-pr-touchpoint", title: "Ensure PR touchpoint", state: "not_started" },
+	        ],
+	      }],
+	      attempts: [],
+	    }],
   }],
 };
 

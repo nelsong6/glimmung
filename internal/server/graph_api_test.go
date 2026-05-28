@@ -373,9 +373,6 @@ func TestRunCycleGraphProjectionUsesCanonicalStateAndNativeActivity(t *testing.T
 		got[1].DependsOn[0] != "env-prep" {
 		t.Fatalf("projection topology phases=%#v", got)
 	}
-	if got := projection.Runs[0].Topology.Terminal; got.Kind != "touchpoint" || !got.Enabled {
-		t.Fatalf("projection topology terminal=%#v", got)
-	}
 	envPhase := assertProjectionPhase(t, projection.Runs[0], "env-prep")
 	if envPhase.State != "active" || envPhase.Jobs[0].State != "active" || envPhase.Jobs[0].Steps[0].State != "active" {
 		t.Fatalf("env-prep projection=%#v", envPhase)
@@ -402,6 +399,13 @@ func TestWorkflowTopologyForRunMarksRecycleOriginArrowActive(t *testing.T) {
 					On:          []string{"verify_fail"},
 					LandsAt:     "env-prep",
 				},
+			},
+			{
+				Name:      "review-surface",
+				Kind:      "k8s_job",
+				DependsOn: []string{"evidence-gate"},
+				Always:    true,
+				Jobs:      []NativeJobSpec{{ID: "pr-touchpoint", Primitive: JobPrimitivePRTouchpoint}},
 			},
 		},
 		PR: PrPrimitive{
@@ -447,6 +451,13 @@ func TestWorkflowTopologyForRunMarksTouchpointRecycleOriginArrowActive(t *testin
 					LandsAt:     "env-prep",
 				},
 			},
+			{
+				Name:      "review-surface",
+				Kind:      "k8s_job",
+				DependsOn: []string{"evidence-gate"},
+				Always:    true,
+				Jobs:      []NativeJobSpec{{ID: "pr-touchpoint", Primitive: JobPrimitivePRTouchpoint}},
+			},
 		},
 		PR: PrPrimitive{
 			RecyclePolicy: &RecyclePolicy{
@@ -466,12 +477,15 @@ func TestWorkflowTopologyForRunMarksTouchpointRecycleOriginArrowActive(t *testin
 	if len(topology.RecycleArrows) != 2 {
 		t.Fatalf("recycle arrows=%#v", topology.RecycleArrows)
 	}
+	if topology.RecycleArrows[1].Source != "review-surface" {
+		t.Fatalf("touchpoint recycle source=%q, want registered touchpoint phase", topology.RecycleArrows[1].Source)
+	}
 	if topology.RecycleArrows[0].Active || !topology.RecycleArrows[1].Active {
 		t.Fatalf("recycle arrows active=%#v, want only touchpoint recycle active", topology.RecycleArrows)
 	}
 }
 
-func TestWorkflowTopologyForRunKeepsManualEntryActiveForDispatch(t *testing.T) {
+func TestWorkflowTopologyForRunKeepsDefaultEntryActiveForDispatch(t *testing.T) {
 	workflow := Workflow{
 		Project: "ambience",
 		Name:    "default",

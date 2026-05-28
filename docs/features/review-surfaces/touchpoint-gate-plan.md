@@ -38,10 +38,10 @@ prepare → work → testing → cleanup_early → touchpoint → touchpoint_gat
   is a no-op success that still records the cleanup decision in the
   run history.
 
-The `pr.enabled` workflow toggle is removed. There is no documented product
-scenario for `pr.enabled=false` and per migration-policy unused toggles are
-deletion targets, not design options. After stage 1, every registered workflow
-either matches the required shape or is rejected at registration time.
+The historical PR opt-out workflow toggle is removed. There is no documented
+product scenario for PR-less workflows and per migration-policy unused toggles
+are deletion targets, not design options. After stage 1, every registered
+workflow either matches the required shape or is rejected at registration time.
 
 ## Sources of truth (additions)
 
@@ -90,7 +90,7 @@ In flight in this branch.
    (immutable snapshot captured at dispatch).
 4. Tighten registered workflow validation to the required shape and reject
    anything else.
-5. Delete `pr.enabled` field, its conditional validations, and its tests.
+5. Delete the PR opt-out field, its conditional validations, and its tests.
 6. No runtime gate behavior yet. The `touchpoint_gate` phase, when dispatched,
    currently behaves as an always-run no-op; gate semantics arrive in stage 3.
 
@@ -144,7 +144,7 @@ next dispatch. There is no auto-migration.
 - A side-effect approve handler that merges, closes, and releases outside
   the phase graph. Per workflow-inspiration the phase graph stays the
   durable orchestration surface.
-- Preserving the `pr.enabled` toggle for unknown callers. Unknown callers
+- Preserving the PR opt-out toggle for unknown callers. Unknown callers
   are unsupported per migration-policy.
 - Replacing the existing PR feedback recycle path. Reject continues to use
   the signal-drain dispatch path that exists today.

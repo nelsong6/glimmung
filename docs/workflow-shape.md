@@ -177,8 +177,8 @@ phases:
 The job is Glimmung-supplied. Registration canonicalizes the declared job into
 the managed native runner step that calls Glimmung's PR/touchpoint finalizer.
 The workflow owns the placement and job id; Glimmung owns the implementation.
-The historical `pr.enabled` toggle was deleted: there was no documented product
-scenario for `pr.enabled: false` and per migration-policy unused toggles are
+The historical PR opt-out toggle was deleted: there was no documented product
+scenario for PR-less workflows and per migration-policy unused toggles are
 deletion targets, not design options. The `pr.recycle_policy` setting remains
 and configures the reject-signal recycle target.
 

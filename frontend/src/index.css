@@ -2051,16 +2051,6 @@ h2 .inline-action,
   stroke: var(--state-success-fg);
   fill: var(--state-success-fg);
 }
-.dag-rf .react-flow__edge.dag-rf-manual-entry .react-flow__edge-path,
-.dag-rf .react-flow__edge.dag-rf-manual-entry marker path {
-  stroke: var(--state-info-fg);
-  fill: var(--state-info-fg);
-}
-.dag-rf .react-flow__edge.dag-rf-manual-entry.active .react-flow__edge-path,
-.dag-rf .react-flow__edge.dag-rf-manual-entry.active marker path {
-  stroke: var(--state-success-fg);
-  fill: var(--state-success-fg);
-}
 .dag-rf .react-flow__edge marker path {
   fill: var(--fg-dimmer);
   stroke: var(--fg-dimmer);
@@ -2072,23 +2062,6 @@ h2 .inline-action,
 .dag-rf-entry-source {
   width: 1px;
   height: 1px;
-}
-.dag-rf-entry-label {
-  position: absolute;
-  padding: 2px 6px;
-  background: color-mix(in srgb, var(--surface) 92%, var(--bg));
-  border: 1px solid color-mix(in srgb, var(--state-info-fg) 45%, var(--border));
-  border-radius: 3px;
-  color: var(--fg-dim);
-  font-family: var(--font-mono);
-  font-size: 0.64rem;
-  line-height: 1.25;
-  pointer-events: none;
-  white-space: nowrap;
-}
-.dag-rf-entry-label.active {
-  border-color: color-mix(in srgb, var(--state-success-fg) 55%, var(--border));
-  color: var(--fg);
 }
 .dag-entry,
 .dag-node {
@@ -2239,11 +2212,6 @@ h2 .inline-action,
   flex: 0 0 44px;
   overflow: visible;
   user-select: none;
-}
-.dag-terminal {
-  position: relative;
-  z-index: 1;
-  display: flex;
 }
 .dag-advance-layer {
   position: absolute;
