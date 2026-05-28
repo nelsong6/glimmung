@@ -21,6 +21,12 @@ type RunReplayStore interface {
 }
 
 // RunReplayData is the minimal run state required by the decision engine replay and completion handling.
+//
+// PreserveTestEnv is the immutable snapshot of the originating issue's
+// preserve_test_env flag at dispatch time. The cleanup_early phase consults
+// this field to decide whether to execute (false, the default) or return
+// `skipped` so the validation environment stays alive through the
+// touchpoint gate.
 type RunReplayData struct {
 	ID                   string
 	Project              string
@@ -45,6 +51,8 @@ type RunReplayData struct {
 	SlotLeaseRef         *string
 	EntrypointPhase      *string
 	TriggerSource        map[string]any
+	PreserveTestEnv      bool
+	State                string
 }
 
 // RunAttemptData holds one attempt's decision-engine-relevant fields.

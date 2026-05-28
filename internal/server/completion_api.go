@@ -50,6 +50,8 @@ type RunCompletionStore interface {
 	StampRunCompletion(ctx context.Context, project, runID string, p CompletionPayload) (RunReplayData, error)
 	StampRunDecision(ctx context.Context, project, runID, decision string) error
 	SetRunTerminalState(ctx context.Context, project, runID, state string, abortReason *string) (AbortRunResult, error)
+	SetRunReviewRequired(ctx context.Context, project, runID string) error
+	SetRunInProgress(ctx context.Context, project, runID string) error
 	CreateRecycleCycle(ctx context.Context, req CreateRecycleCycleRequest) (CreatedRun, error)
 	AppendRunAttempt(ctx context.Context, project, runID, phase, phaseKind, workflowFilename string) (int, error)
 	StartRunCycle(ctx context.Context, req StartRunCycleRequest) (int, error)
@@ -363,6 +365,14 @@ func processRunCompletion(
 			return nil
 		}
 		advancePlaybooksForTerminalRun(ctx, store, nativeLauncher, project, runID)
+		if state == "passed" {
+			// A gated run reached terminal "passed" by going through the
+			// touchpoint_gate (the only way a gated workflow advances is
+			// through approve → pr_merge). Close the issue so the
+			// review-surfaces contract invariant "Merged Touchpoints close
+			// their Issue in the normal isolated-PR case" holds.
+			closeIssueOnGatedTerminal(ctx, store, wf, run)
+		}
 		return &RunCallbackResult{
 			RunRef:            runRef,
 			Decision:          &verdictStr,
@@ -483,6 +493,42 @@ func markRunAborted(
 	}
 }
 
+// closeIssueOnGatedTerminal flips the issue to state=closed when a workflow
+// that includes a touchpoint_gate phase reaches terminal "passed." That
+// state is only reachable by going through the gate (approve → pr_merge →
+// cleanup), so the merge has happened and the issue should reflect it.
+// Non-gated workflows leave their issue state alone — those workflows don't
+// own the merge decision and may have other reviewers in the loop.
+//
+// Best-effort: a failure to close the issue is logged but doesn't roll back
+// the run's terminal state. The admin endpoint or a follow-up PATCH can
+// reconcile by hand.
+func closeIssueOnGatedTerminal(ctx context.Context, store RunCompletionStore, wf *Workflow, run RunReplayData) {
+	if wf == nil || run.IssueNumber <= 0 {
+		return
+	}
+	hasGate := false
+	for _, phase := range wf.Phases {
+		if workflowPhaseKind(phase.Kind) == workflowKindTouchpointGate {
+			hasGate = true
+			break
+		}
+	}
+	if !hasGate {
+		return
+	}
+	issueStore, ok := any(store).(IssueStore)
+	if !ok || issueStore == nil {
+		return
+	}
+	closed := "closed"
+	_, _ = issueStore.PatchIssueByNumber(ctx, IssuePatch{
+		Project: run.Project,
+		Number:  run.IssueNumber,
+		State:   &closed,
+	})
+}
+
 func advancePlaybooksForTerminalRun(ctx context.Context, store RunCompletionStore, nativeLauncher NativeLauncher, project, runID string) {
 	pbStore, ok := store.(PlaybookRunStore)
 	if !ok || pbStore == nil {
@@ -586,7 +632,7 @@ func completedAdvancePhases(run RunReplayData) map[string]bool {
 		if isAbortDecision(attempt.Decision) {
 			continue
 		}
-		if attempt.Decision == "" && attempt.Completed && attempt.Conclusion == "success" {
+		if attempt.Decision == "" && attempt.Completed && decision.IsAdvanceConclusion(attempt.Conclusion) {
 			advanced[phase] = true
 		}
 	}
@@ -698,6 +744,19 @@ func dispatchForwardPhase(
 	substituted, err := substituteCompletionPhaseInputs(targetPhase, run)
 	if err != nil {
 		return err
+	}
+	// Touchpoint gate: the workflow has reached a human-decision boundary.
+	// Do NOT append an attempt and do NOT launch jobs. Set the run to the
+	// non-terminal review_required sub-state and return. The gate is
+	// released by an approve signal in the signal drain, which calls back
+	// into dispatchTouchpointGateApprove to append the attempt and launch
+	// the pr_merge primitive. review_required does NOT release issue/PR
+	// locks — the run is still in flight, just parked at the human gate.
+	if phaseKind == workflowKindTouchpointGate {
+		if err := store.SetRunReviewRequired(ctx, run.Project, run.ID); err != nil {
+			return fmt.Errorf("set review_required: %w", err)
+		}
+		return nil
 	}
 	newAttemptIdx, err := store.AppendRunAttempt(ctx, run.Project, run.ID, targetPhase.Name, phaseKind, workflowFilename)
 	if err != nil {

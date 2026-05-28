@@ -14,6 +14,7 @@ import (
 
 type PullRequestClient interface {
 	EnsurePullRequest(ctx context.Context, req PullRequestEnsureRequest) (PullRequest, error)
+	MergePullRequest(ctx context.Context, req PullRequestMergeRequest) (PullRequestMergeResult, error)
 }
 
 type PullRequestEnsureRequest struct {
@@ -33,6 +34,25 @@ type PullRequest struct {
 	HeadSHA string
 	HTMLURL string
 	State   string
+}
+
+// PullRequestMergeRequest carries the parameters for an idempotent merge.
+type PullRequestMergeRequest struct {
+	Repo        string
+	Number      int
+	CommitTitle string
+	MergeMethod string
+}
+
+// PullRequestMergeResult records the outcome of MergePullRequest. When
+// AlreadyMerged is true the PR was merged on a prior call and the request
+// is a no-op success.
+type PullRequestMergeResult struct {
+	Number         int
+	HTMLURL        string
+	State          string
+	MergeCommitSHA string
+	AlreadyMerged  bool
 }
 
 type prPrimitiveStore interface {
@@ -62,6 +82,23 @@ type PRPrimitiveResult struct {
 	TouchpointRef  string `json:"touchpoint_ref,omitempty"`
 	LinkedIssueRef string `json:"linked_issue_ref,omitempty"`
 	LinkedRunRef   string `json:"linked_run_ref,omitempty"`
+}
+
+// PRMergeResult is the response body for the pr-merge endpoint.
+//
+// Status is one of:
+//   - "merged"          — Glimmung performed the merge in this call.
+//   - "already_merged"  — the PR was merged on a prior call; idempotent
+//                         no-op success.
+//
+// Non-success outcomes are surfaced as a problem response (4xx/5xx) rather
+// than this body.
+type PRMergeResult struct {
+	Status         string `json:"status"`
+	Repo           string `json:"repo,omitempty"`
+	PRNumber       int    `json:"pr_number,omitempty"`
+	HTMLURL        string `json:"html_url,omitempty"`
+	MergeCommitSHA string `json:"merge_commit_sha,omitempty"`
 }
 
 type RunReviewFacts struct {
@@ -132,6 +169,162 @@ func nativePRTouchpointByCallbackToken(store ReadStore, prClient PullRequestClie
 		}
 		writeJSON(w, http.StatusOK, result)
 	}
+}
+
+// nativePRMergeByCallbackToken handles
+// POST /v1/run-callbacks/{callback_token}/native/pr-merge — the endpoint
+// the managed pr_merge primitive curl's into during its run step. The
+// endpoint is idempotent: a second call after the PR is already merged
+// returns status "already_merged" without contacting GitHub for a write.
+func nativePRMergeByCallbackToken(store ReadStore, prClient PullRequestClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		completionStore, ok := store.(RunCompletionStore)
+		if !ok || completionStore == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "completion store not configured")
+			return
+		}
+		runID, project, _, err := completionStore.ReadRunIDForCallbackToken(r.Context(), r.PathValue("callback_token"))
+		if errors.Is(err, ErrNotFound) {
+			writeProblem(w, http.StatusNotFound, "run callback token not found")
+			return
+		}
+		if err != nil {
+			writeInternalError(w, r, err, "read run by callback token failed")
+			return
+		}
+		run, err := completionStore.ReadRunForReplay(r.Context(), project, runID)
+		if errors.Is(err, ErrNotFound) {
+			writeProblem(w, http.StatusNotFound, "run not found")
+			return
+		}
+		if err != nil {
+			writeInternalError(w, r, err, "read run failed")
+			return
+		}
+		result, err := mergeRunPullRequest(r.Context(), prClient, run)
+		if err != nil {
+			var validationErr ValidationError
+			if errors.As(err, &validationErr) {
+				writeProblem(w, http.StatusUnprocessableEntity, validationErr.Message)
+				return
+			}
+			writeInternalError(w, r, err, "merge pull request failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+	}
+}
+
+// mergeRunPullRequest performs the idempotent merge for a run's linked PR.
+// The run must have run.PRNumber set; otherwise the caller is asking to
+// merge a PR that doesn't exist yet, which is a validation error.
+func mergeRunPullRequest(ctx context.Context, prClient PullRequestClient, run RunReplayData) (PRMergeResult, error) {
+	if prClient == nil {
+		return PRMergeResult{}, fmt.Errorf("pull request client not configured")
+	}
+	if run.PRNumber == nil || *run.PRNumber < 1 {
+		return PRMergeResult{}, ValidationError{Message: "run has no linked PR to merge"}
+	}
+	repo := strings.TrimSpace(run.IssueRepo)
+	if repo == "" {
+		return PRMergeResult{}, ValidationError{Message: "run is missing issue_repo; cannot resolve target repo for merge"}
+	}
+	out, err := prClient.MergePullRequest(ctx, PullRequestMergeRequest{
+		Repo:        repo,
+		Number:      *run.PRNumber,
+		MergeMethod: "merge",
+		CommitTitle: fmt.Sprintf("Glimmung touchpoint approve: %s", runRefFromData(run)),
+	})
+	if err != nil {
+		return PRMergeResult{}, err
+	}
+	status := "merged"
+	if out.AlreadyMerged {
+		status = "already_merged"
+	}
+	return PRMergeResult{
+		Status:         status,
+		Repo:           repo,
+		PRNumber:       out.Number,
+		HTMLURL:        out.HTMLURL,
+		MergeCommitSHA: out.MergeCommitSHA,
+	}, nil
+}
+
+// mergeRunTouchpointByNumber handles
+// POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/touchpoint/merge
+// — admin operator endpoint mirroring the touchpoint/finalize shape.
+// Idempotent. Useful for triggering an approve action from the API or for
+// repairing a stuck gate.
+func mergeRunTouchpointByNumber(store ReadStore, prClient PullRequestClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		runNumber := strings.TrimSpace(r.PathValue("run_number"))
+		if runNumber == "" {
+			writeProblem(w, http.StatusBadRequest, "run_number required")
+			return
+		}
+		mergeRunTouchpoint(w, r, store, prClient, runNumber)
+	}
+}
+
+func mergeRunCycleTouchpointByNumber(store ReadStore, prClient PullRequestClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		runNumber := strings.TrimSpace(r.PathValue("run_number"))
+		if runNumber == "" {
+			writeProblem(w, http.StatusBadRequest, "run_number required")
+			return
+		}
+		if strings.Contains(runNumber, ".") {
+			writeProblem(w, http.StatusBadRequest, "run_number must be the base run number when cycle_number is present")
+			return
+		}
+		cycleNumber, ok := positivePathInt(w, r, "cycle_number")
+		if !ok {
+			return
+		}
+		mergeRunTouchpoint(w, r, store, prClient, fmt.Sprintf("%s.%d", runNumber, cycleNumber))
+	}
+}
+
+func mergeRunTouchpoint(w http.ResponseWriter, r *http.Request, store ReadStore, prClient PullRequestClient, runNumber string) {
+	finalizeStore, ok := store.(runTouchpointFinalizeStore)
+	if !ok || finalizeStore == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "run touchpoint finalize store not configured")
+		return
+	}
+	issueNumber, ok := positivePathInt(w, r, "issue_number")
+	if !ok {
+		return
+	}
+	runID, _, err := finalizeStore.ReadRunIDForNumber(r.Context(), r.PathValue("project"), issueNumber, runNumber)
+	if errors.Is(err, ErrNotFound) {
+		writeProblem(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if err != nil {
+		writeInternalError(w, r, err, "read run by number failed")
+		return
+	}
+	run, err := finalizeStore.ReadRunForReplay(r.Context(), r.PathValue("project"), runID)
+	if errors.Is(err, ErrNotFound) {
+		writeProblem(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if err != nil {
+		writeInternalError(w, r, err, "read run failed")
+		return
+	}
+	result, err := mergeRunPullRequest(r.Context(), prClient, run)
+	if err != nil {
+		var validationErr ValidationError
+		if errors.As(err, &validationErr) {
+			writeProblem(w, http.StatusUnprocessableEntity, validationErr.Message)
+			return
+		}
+		writeInternalError(w, r, err, "merge pull request failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func finalizeRunTouchpointByNumber(store ReadStore, prClient PullRequestClient, artifactStore ArtifactStore) http.HandlerFunc {
@@ -259,7 +452,7 @@ func prPrimitiveReadyForRun(wf *Workflow, run RunReplayData) (bool, string) {
 	if latestPrimary.Decision == string(decision.Advance) {
 		return true, ""
 	}
-	if latestPrimary.Decision == "" && latestPrimary.Completed && latestPrimary.Conclusion == "success" {
+	if latestPrimary.Decision == "" && latestPrimary.Completed && decision.IsAdvanceConclusion(latestPrimary.Conclusion) {
 		return true, ""
 	}
 	return false, "latest primary phase has not advanced"

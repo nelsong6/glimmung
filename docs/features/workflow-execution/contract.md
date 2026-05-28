@@ -27,7 +27,10 @@ after registration changes.
 ## Migration Rules
 
 - Do not make repo workflow files the dispatch source of truth.
-- Do not register executor kinds other than `k8s_job`.
+- Do not register executor kinds other than `k8s_job` or `touchpoint_gate`.
+  `touchpoint_gate` phases must declare exactly one `pr_merge` primitive job
+  and no other jobs; the `pr_merge` primitive must live inside a
+  `touchpoint_gate` phase and nowhere else.
 - Do not add phase fan-in, fan-out, job-level dependencies, or non-linear DAG
   behavior without replacing this contract.
 - Do not allow project-owned arbitrary gate jobs to stand in for the managed

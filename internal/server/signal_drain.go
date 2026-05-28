@@ -60,6 +60,7 @@ var signalDrainWake atomic.Value // stores func()
 
 const (
 	triageDispatch              = "dispatch_triage"
+	triageReleaseGate           = "release_touchpoint_gate"
 	triageIgnore                = "ignore"
 	triageAbortNoRun            = "abort_no_run"
 	triageAbortBudgetAttempts   = "abort_budget_attempts"
@@ -136,6 +137,14 @@ func DrainSignals(ctx context.Context, store ReadStore, nativeLauncher NativeLau
 
 		if decision.Decision == triageDispatch {
 			if err := dispatchTriage(ctx, drainStore, nativeLauncher, signal, decision); err != nil {
+				_ = drainStore.MarkSignalFailed(ctx, signal, err.Error())
+				drainStore.ReleaseLock(ctx, scope, key, holderID)
+				result.Failed++
+				continue
+			}
+		}
+		if decision.Decision == triageReleaseGate {
+			if err := releaseTouchpointGate(ctx, drainStore, nativeLauncher, decision); err != nil {
 				_ = drainStore.MarkSignalFailed(ctx, signal, err.Error())
 				drainStore.ReleaseLock(ctx, scope, key, holderID)
 				result.Failed++
@@ -226,7 +235,36 @@ func decideTriageSignal(ctx context.Context, store SignalDrainStore, signal Queu
 	if err != nil {
 		return triageDecisionResult{}, err
 	}
-	if wf == nil || wf.PR.RecyclePolicy == nil {
+	if wf == nil {
+		return triageDecisionResult{Decision: triageIgnore}, nil
+	}
+
+	// approve: release the touchpoint_gate by launching its pr_merge job.
+	// The run must be parked at the gate (review_required) and the workflow
+	// must declare a touchpoint_gate phase for the approve to be actionable.
+	// Approve is idempotent — a second approve while the merge is in flight
+	// or already complete is a safe no-op surfaced as "ignore."
+	if signalIsApprove(signal) {
+		gate := phaseSpecByName(wf.Phases, "")
+		for _, phase := range wf.Phases {
+			if workflowPhaseKind(phase.Kind) == workflowKindTouchpointGate {
+				p := phase
+				gate = &p
+				break
+			}
+		}
+		if gate == nil {
+			return triageDecisionResult{Decision: triageIgnore, Detail: stringPtr("workflow has no touchpoint_gate phase; approve has nothing to release")}, nil
+		}
+		return triageDecisionResult{
+			Decision: triageReleaseGate,
+			Run:      run,
+			Workflow: wf,
+			Target:   gate,
+		}, nil
+	}
+
+	if wf.PR.RecyclePolicy == nil {
 		return triageDecisionResult{Decision: triageIgnore}, nil
 	}
 	target := phaseSpecByName(wf.Phases, wf.PR.RecyclePolicy.LandsAt)
@@ -261,12 +299,17 @@ func decideTriageSignal(ctx context.Context, store SignalDrainStore, signal Queu
 func triageActionable(signal QueuedSignal) bool {
 	switch signal.Source {
 	case "glimmung_ui":
-		return stringValue(signal.Payload["kind"]) == "reject"
+		kind := stringValue(signal.Payload["kind"])
+		return kind == "reject" || kind == "approve"
 	case "gh_review":
 		return stringValue(signal.Payload["state"]) == "changes_requested" && strings.TrimSpace(stringValue(signal.Payload["body"])) != ""
 	default:
 		return false
 	}
+}
+
+func signalIsApprove(signal QueuedSignal) bool {
+	return signal.Source == "glimmung_ui" && stringValue(signal.Payload["kind"]) == "approve"
 }
 
 func triageFeedbackText(signal QueuedSignal) string {
@@ -299,6 +342,86 @@ func triageAbortExplanation(decision string, signal QueuedSignal, run RunReplayD
 	default:
 		return "Triage aborted: " + decision
 	}
+}
+
+// releaseTouchpointGate launches the pr_merge job for a parked touchpoint_gate
+// phase in response to an approve signal. The run state transitions from
+// review_required → in_progress before the launch so the dispatch path
+// sees a normal in-progress run. If the run is not in fact parked at
+// review_required this is a safe no-op (the approve arrived too late or
+// twice; idempotent).
+func releaseTouchpointGate(ctx context.Context, store SignalDrainStore, nativeLauncher NativeLauncher, decision triageDecisionResult) error {
+	if decision.Run.State != "review_required" {
+		// Not parked at the gate (already advanced, already merged, or
+		// recycled by a competing reject). Treat approve as a benign no-op.
+		return nil
+	}
+	completionStore, ok := any(store).(RunCompletionStore)
+	if !ok || completionStore == nil {
+		return fmt.Errorf("approve drain requires the RunCompletionStore surface")
+	}
+	if decision.Target == nil {
+		return fmt.Errorf("approve drain missing target gate phase")
+	}
+	if decision.Workflow == nil {
+		return fmt.Errorf("approve drain missing workflow")
+	}
+	if err := completionStore.SetRunInProgress(ctx, decision.Run.Project, decision.Run.ID); err != nil {
+		return fmt.Errorf("transition run to in_progress: %w", err)
+	}
+	if err := launchTouchpointGateMerge(ctx, completionStore, nativeLauncher, decision.Run, decision.Workflow, *decision.Target); err != nil {
+		return fmt.Errorf("launch touchpoint gate: %w", err)
+	}
+	return nil
+}
+
+// launchTouchpointGateMerge appends a fresh attempt for the gate phase and
+// launches its pr_merge job. The merge job calls back into the standard
+// completion endpoint, so the workflow advances to cleanup automatically
+// once GitHub returns.
+func launchTouchpointGateMerge(
+	ctx context.Context,
+	store RunCompletionStore,
+	nativeLauncher NativeLauncher,
+	run RunReplayData,
+	wf *Workflow,
+	gate PhaseSpec,
+) error {
+	if nativeLauncher == nil {
+		return fmt.Errorf("no native launcher configured")
+	}
+	phaseKind := workflowPhaseKind(gate.Kind)
+	if phaseKind != workflowKindTouchpointGate {
+		return fmt.Errorf("expected touchpoint_gate phase, got kind=%q", phaseKind)
+	}
+	workflowFilename := gate.WorkflowFilename
+	if workflowFilename == "" {
+		workflowFilename = fmt.Sprintf("%s:%s", phaseKind, gate.Name)
+	}
+	newAttemptIdx, err := store.AppendRunAttempt(ctx, run.Project, run.ID, gate.Name, phaseKind, workflowFilename)
+	if err != nil {
+		return fmt.Errorf("append gate attempt: %w", err)
+	}
+	lease, err := leaseForRunPhase(ctx, store, run, gate.Name, newAttemptIdx, nil)
+	if err != nil {
+		return fmt.Errorf("read lease for gate: %w", err)
+	}
+	if lease.State != "claimed" {
+		return fmt.Errorf("native lease was not claimed")
+	}
+	canonical := CanonicalNativePhase(gate)
+	started := runWithAttempt(run, newAttemptIdx, gate.Name)
+	launched, err := launchCommittedNativePhase(ctx, nativeLauncher, NativeLaunchRequest{
+		Lease:    lease,
+		Workflow: *wf,
+		Phase:    canonical,
+		Run:      started,
+	})
+	if err != nil {
+		return fmt.Errorf("native dispatch: %w", err)
+	}
+	_ = recordLaunchedNativeJobs(ctx, store, started, canonical, launched)
+	return nil
 }
 
 func dispatchTriage(ctx context.Context, store SignalDrainStore, nativeLauncher NativeLauncher, signal QueuedSignal, decision triageDecisionResult) error {

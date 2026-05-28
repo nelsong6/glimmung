@@ -12,13 +12,15 @@ import (
 
 type fakeIssueStore struct {
 	fakeReadStore
-	detail  IssueDetail
-	rows    []IssueRow
-	err     error
-	project string
-	number  int
-	filter  IssueListFilter
-	archive IssueArchive
+	detail     IssueDetail
+	rows       []IssueRow
+	err        error
+	project    string
+	number     int
+	filter     IssueListFilter
+	archive    IssueArchive
+	lastCreate IssueCreate
+	lastPatch  IssuePatch
 }
 
 func (s *fakeIssueStore) ListIssues(_ context.Context, filter IssueListFilter) ([]IssueRow, error) {
@@ -49,19 +51,24 @@ func (s *fakeIssueStore) ArchiveIssueByNumber(_ context.Context, req IssueArchiv
 }
 
 func (s *fakeIssueStore) CreateIssue(_ context.Context, req IssueCreate) (IssueDetail, error) {
+	s.lastCreate = req
 	if s.err != nil {
 		return IssueDetail{}, s.err
 	}
-	return IssueDetail{Project: req.Project, Title: req.Title, Body: req.Body, State: "open"}, nil
+	return IssueDetail{Project: req.Project, Title: req.Title, Body: req.Body, State: "open", PreserveTestEnv: req.PreserveTestEnv}, nil
 }
 
 func (s *fakeIssueStore) PatchIssueByNumber(_ context.Context, req IssuePatch) (IssueDetail, error) {
+	s.lastPatch = req
 	if s.err != nil {
 		return IssueDetail{}, s.err
 	}
 	detail := s.detail
 	if req.Title != nil {
 		detail.Title = *req.Title
+	}
+	if req.PreserveTestEnv != nil {
+		detail.PreserveTestEnv = *req.PreserveTestEnv
 	}
 	return detail, nil
 }
@@ -257,6 +264,63 @@ func TestCreateIssueValidatesBody(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("body=%q status=%d response=%s", body, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+func TestPatchIssueSetsPreserveTestEnv(t *testing.T) {
+	store := &fakeIssueStore{detail: IssueDetail{Ref: "glimmung#17", Project: "glimmung", Number: intPtr(17), Title: "Old title", State: "open"}}
+	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin", Email: "admin@example.com"}})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/v1/issues/by-number/glimmung/17", strings.NewReader(`{"preserve_test_env":true}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.lastPatch.PreserveTestEnv == nil || *store.lastPatch.PreserveTestEnv != true {
+		t.Fatalf("lastPatch.PreserveTestEnv=%v, want true ptr", store.lastPatch.PreserveTestEnv)
+	}
+	if !strings.Contains(rec.Body.String(), `"preserve_test_env":true`) {
+		t.Fatalf("body=%s, want preserve_test_env=true in response", rec.Body.String())
+	}
+}
+
+func TestPatchIssueLeavesPreserveTestEnvAlone(t *testing.T) {
+	store := &fakeIssueStore{detail: IssueDetail{Ref: "glimmung#17", Project: "glimmung", Number: intPtr(17), Title: "Old", State: "open", PreserveTestEnv: true}}
+	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin", Email: "admin@example.com"}})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/v1/issues/by-number/glimmung/17", strings.NewReader(`{"title":"Renamed"}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.lastPatch.PreserveTestEnv != nil {
+		t.Fatalf("PATCH omitting preserve_test_env should leave it nil; got %v", *store.lastPatch.PreserveTestEnv)
+	}
+}
+
+func TestCreateIssueAcceptsPreserveTestEnv(t *testing.T) {
+	store := &fakeIssueStore{}
+	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{user: auth.User{Sub: "admin", Email: "admin@example.com"}})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/issues", strings.NewReader(`{"project":"glimmung","title":"keep env alive","preserve_test_env":true}`))
+	req.Header.Set("Authorization", "Bearer admin")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !store.lastCreate.PreserveTestEnv {
+		t.Fatalf("lastCreate.PreserveTestEnv=false, want true")
+	}
+	if !strings.Contains(rec.Body.String(), `"preserve_test_env":true`) {
+		t.Fatalf("body=%s, want preserve_test_env=true", rec.Body.String())
 	}
 }
 

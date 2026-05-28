@@ -1526,6 +1526,8 @@ func projectionPhaseState(run RunReport, phaseName string, attempts []RunReportA
 		switch *latest.Conclusion {
 		case "success":
 			return "succeeded"
+		case "skipped":
+			return "skipped"
 		case "cancelled", "failure", "timed_out":
 			return "failed"
 		}
@@ -1534,7 +1536,7 @@ func projectionPhaseState(run RunReport, phaseName string, attempts []RunReportA
 }
 
 func projectionRunTerminal(run RunReport) bool {
-	return run.State != "" && run.State != "in_progress"
+	return run.State != "" && run.State != "in_progress" && run.State != "review_required"
 }
 
 func projectionRunFailedTerminal(run RunReport) bool {
@@ -1838,6 +1840,8 @@ func projectionAttemptState(attempt RunReportAttempt) string {
 		switch *attempt.Conclusion {
 		case "success":
 			return "succeeded"
+		case "skipped":
+			return "skipped"
 		case "cancelled", "failure", "timed_out":
 			return "failed"
 		}
@@ -2256,7 +2260,11 @@ func projectionNextAction(runs []RunProjectionRun, touchpoints []RunProjectionTo
 }
 
 func runStateIsActive(state string) bool {
-	return state == "in_progress" || state == "pending" || state == "queued"
+	// review_required is an in-progress sub-state: the run is parked at a
+	// touchpoint_gate waiting for a human signal. The lease may still be
+	// alive (preserve_test_env=true) and the run continues to advance once
+	// approve fires the gate, so projections must not treat it as terminal.
+	return state == "in_progress" || state == "pending" || state == "queued" || state == "review_required"
 }
 
 func touchpointNeedsDecision(tp RunProjectionTouchpoint) bool {
@@ -2282,6 +2290,8 @@ func workflowRunStepState(attempt RunReportAttempt) string {
 			switch *attempt.Conclusion {
 			case "success":
 				return "succeeded"
+			case "skipped":
+				return "skipped"
 			case "cancelled", "failure", "timed_out":
 				return "failed"
 			}

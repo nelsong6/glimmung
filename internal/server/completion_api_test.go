@@ -43,6 +43,11 @@ type fakeCompletionStore struct {
 	terminalState  string
 	terminalReason *string
 
+	reviewRequiredCalls int
+	reviewRequiredErr   error
+	inProgressCalls     int
+	inProgressErr       error
+
 	appendIdx   int
 	appendErr   error
 	appendPhase string
@@ -147,6 +152,16 @@ func (s *fakeCompletionStore) SetRunTerminalState(_ context.Context, _, _ string
 	s.terminalState = state
 	s.terminalReason = abortReason
 	return s.terminalResult, s.terminalErr
+}
+
+func (s *fakeCompletionStore) SetRunReviewRequired(_ context.Context, _, _ string) error {
+	s.reviewRequiredCalls++
+	return s.reviewRequiredErr
+}
+
+func (s *fakeCompletionStore) SetRunInProgress(_ context.Context, _, _ string) error {
+	s.inProgressCalls++
+	return s.inProgressErr
 }
 
 func (s *fakeCompletionStore) AppendRunAttempt(_ context.Context, _, _, phase, phaseKind, workflowFilename string) (int, error) {
@@ -291,9 +306,13 @@ func (s *fakeCompletionStore) EnsureTouchpoint(_ context.Context, req Touchpoint
 }
 
 type fakePullRequestClient struct {
-	req PullRequestEnsureRequest
-	pr  PullRequest
-	err error
+	req        PullRequestEnsureRequest
+	pr         PullRequest
+	err        error
+	mergeReq   PullRequestMergeRequest
+	mergeRes   PullRequestMergeResult
+	mergeErr   error
+	mergeCalls int
 }
 
 func (c *fakePullRequestClient) EnsurePullRequest(_ context.Context, req PullRequestEnsureRequest) (PullRequest, error) {
@@ -314,6 +333,24 @@ func (c *fakePullRequestClient) EnsurePullRequest(_ context.Context, req PullReq
 		}
 	}
 	return c.pr, nil
+}
+
+func (c *fakePullRequestClient) MergePullRequest(_ context.Context, req PullRequestMergeRequest) (PullRequestMergeResult, error) {
+	c.mergeReq = req
+	c.mergeCalls++
+	if c.mergeErr != nil {
+		return PullRequestMergeResult{}, c.mergeErr
+	}
+	if c.mergeRes.Number == 0 {
+		c.mergeRes = PullRequestMergeResult{
+			Number:         req.Number,
+			HTMLURL:        "https://github.com/" + req.Repo + "/pull/" + strconv.Itoa(req.Number),
+			State:          "closed",
+			MergeCommitSHA: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+			AlreadyMerged:  false,
+		}
+	}
+	return c.mergeRes, nil
 }
 
 func (c *fakePullRequestClient) FetchWorkflowFile(context.Context, string, string, string) ([]byte, int, error) {
@@ -521,6 +558,41 @@ func TestNativeRunCompletedByCallbackTokenAdvancePassed(t *testing.T) {
 	}
 	if result.PhaseComplete == nil || !*result.PhaseComplete {
 		t.Fatalf("phase_complete=%v", result.PhaseComplete)
+	}
+}
+
+func TestNativeRunCompletedByCallbackTokenAdvanceOnSkipped(t *testing.T) {
+	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
+	store.run = runDataForCompletion("impl")
+	store.wf = singlePhaseWorkflowForCompletion("impl", false)
+	store.terminalResult = AbortRunResult{State: "passed", RunRef: "proj#7/runs/1"}
+	rec := httptest.NewRecorder()
+	newCompletionHandler(store, nil).ServeHTTP(rec, nativeCompletionRequest("tok", completedJob("impl", "skipped", nil, nil)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	result := readCallbackResult(t, rec)
+	if result.Decision == nil || *result.Decision != "advance" {
+		got := "<nil>"
+		if result.Decision != nil {
+			got = *result.Decision
+		}
+		t.Fatalf("decision=%q, want advance for skipped conclusion", got)
+	}
+}
+
+func TestIsAdvanceConclusion(t *testing.T) {
+	advance := []string{"success", "skipped"}
+	hold := []string{"", "failure", "cancelled", "timed_out", "fail", "error"}
+	for _, c := range advance {
+		if !decision.IsAdvanceConclusion(c) {
+			t.Errorf("decision.IsAdvanceConclusion(%q)=false, want true", c)
+		}
+	}
+	for _, c := range hold {
+		if decision.IsAdvanceConclusion(c) {
+			t.Errorf("decision.IsAdvanceConclusion(%q)=true, want false", c)
+		}
 	}
 }
 

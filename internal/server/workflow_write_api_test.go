@@ -280,6 +280,99 @@ func TestValidateWorkflowRegisterRequiresPRTouchpointInAlwaysPhase(t *testing.T)
 	}
 }
 
+func TestValidateWorkflowRegisterAcceptsTouchpointGatePhase(t *testing.T) {
+	req := WorkflowRegister{
+		Project: "ambience",
+		Name:    "agent-run",
+		PR:      PrPrimitive{Enabled: true},
+		Phases: []PhaseSpec{
+			{Name: "prep", Jobs: []NativeJobSpec{{ID: "prep"}}},
+			{Name: "verify", Verify: true, DependsOn: []string{"prep"}, Jobs: []NativeJobSpec{{ID: "verify"}}},
+			{Name: "touchpoint_gate", Kind: "touchpoint_gate", DependsOn: []string{"verify"}, Jobs: []NativeJobSpec{{ID: "pr-merge", Primitive: JobPrimitivePRMerge}}},
+			{Name: "cleanup", Always: true, DependsOn: []string{"touchpoint_gate"}, Jobs: []NativeJobSpec{{ID: "cleanup"}, {ID: "publish-pr", Primitive: JobPrimitivePRTouchpoint}}},
+		},
+	}
+	normalizeWorkflowRegister(&req)
+
+	if err := ValidateWorkflowRegister(req); err != nil {
+		t.Fatalf("ValidateWorkflowRegister err=%v, want nil for valid touchpoint_gate shape", err)
+	}
+}
+
+func TestValidateWorkflowRegisterRejectsTouchpointGateWithoutMergeJob(t *testing.T) {
+	req := WorkflowRegister{
+		Project: "ambience",
+		Name:    "agent-run",
+		Phases: []PhaseSpec{
+			{Name: "prep", Jobs: []NativeJobSpec{{ID: "prep"}}},
+			{Name: "verify", Verify: true, DependsOn: []string{"prep"}, Jobs: []NativeJobSpec{{ID: "verify"}}},
+			{Name: "touchpoint_gate", Kind: "touchpoint_gate", DependsOn: []string{"verify"}},
+			{Name: "cleanup", Always: true, DependsOn: []string{"touchpoint_gate"}, Jobs: []NativeJobSpec{{ID: "cleanup"}}},
+		},
+	}
+	normalizeWorkflowRegister(&req)
+
+	err := ValidateWorkflowRegister(req)
+	if err == nil || !strings.Contains(err.Error(), "must declare exactly one job with primitive \"pr_merge\"") {
+		t.Fatalf("ValidateWorkflowRegister err=%v, want missing-pr_merge error", err)
+	}
+}
+
+func TestValidateWorkflowRegisterRejectsPRMergeOutsideGate(t *testing.T) {
+	req := WorkflowRegister{
+		Project: "ambience",
+		Name:    "agent-run",
+		Phases: []PhaseSpec{
+			{Name: "prep", Jobs: []NativeJobSpec{{ID: "prep"}, {ID: "rogue-merge", Primitive: JobPrimitivePRMerge}}},
+			{Name: "verify", Verify: true, DependsOn: []string{"prep"}, Jobs: []NativeJobSpec{{ID: "verify"}}},
+			{Name: "cleanup", Always: true, DependsOn: []string{"verify"}, Jobs: []NativeJobSpec{{ID: "cleanup"}}},
+		},
+	}
+	normalizeWorkflowRegister(&req)
+
+	err := ValidateWorkflowRegister(req)
+	if err == nil || !strings.Contains(err.Error(), "must live inside a touchpoint_gate phase") {
+		t.Fatalf("ValidateWorkflowRegister err=%v, want pr_merge-outside-gate error", err)
+	}
+}
+
+func TestValidateWorkflowRegisterRejectsTouchpointGateMarkedVerify(t *testing.T) {
+	req := WorkflowRegister{
+		Project: "ambience",
+		Name:    "agent-run",
+		Phases: []PhaseSpec{
+			{Name: "prep", Jobs: []NativeJobSpec{{ID: "prep"}}},
+			{Name: "touchpoint_gate", Kind: "touchpoint_gate", Verify: true, DependsOn: []string{"prep"}},
+			{Name: "verify", Verify: true, DependsOn: []string{"touchpoint_gate"}, Jobs: []NativeJobSpec{{ID: "verify"}}},
+			{Name: "cleanup", Always: true, DependsOn: []string{"verify"}, Jobs: []NativeJobSpec{{ID: "cleanup"}}},
+		},
+	}
+	normalizeWorkflowRegister(&req)
+
+	err := ValidateWorkflowRegister(req)
+	if err == nil || !strings.Contains(err.Error(), "cannot also be the verify phase") {
+		t.Fatalf("ValidateWorkflowRegister err=%v, want verify-conflict error", err)
+	}
+}
+
+func TestValidateWorkflowRegisterRejectsUnknownPhaseKind(t *testing.T) {
+	req := WorkflowRegister{
+		Project: "ambience",
+		Name:    "agent-run",
+		Phases: []PhaseSpec{
+			{Name: "prep", Kind: "mystery_kind", Jobs: []NativeJobSpec{{ID: "prep"}}},
+			{Name: "verify", Verify: true, DependsOn: []string{"prep"}, Jobs: []NativeJobSpec{{ID: "verify"}}},
+			{Name: "cleanup", Always: true, DependsOn: []string{"verify"}, Jobs: []NativeJobSpec{{ID: "cleanup"}}},
+		},
+	}
+	// deliberately do NOT call normalizeWorkflowRegister so the unknown kind survives.
+
+	err := ValidateWorkflowRegister(req)
+	if err == nil || !strings.Contains(err.Error(), "not one of") {
+		t.Fatalf("ValidateWorkflowRegister err=%v, want unknown-kind error", err)
+	}
+}
+
 func TestValidateWorkflowRegisterRejectsUnknownJobPrimitive(t *testing.T) {
 	req := WorkflowRegister{
 		Project: "ambience",
