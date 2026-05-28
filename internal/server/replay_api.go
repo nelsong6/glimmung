@@ -52,6 +52,7 @@ type RunReplayData struct {
 	EntrypointPhase      *string
 	TriggerSource        map[string]any
 	PreserveTestEnv      bool
+	State                string
 }
 
 // RunAttemptData holds one attempt's decision-engine-relevant fields.

@@ -4731,6 +4731,7 @@ func runReplayDataFromDoc(doc runDoc) server.RunReplayData {
 		EntrypointPhase:      doc.EntrypointPhase,
 		TriggerSource:        mapOrEmpty(doc.TriggerSource),
 		PreserveTestEnv:      doc.PreserveTestEnv,
+		State:                doc.State,
 	}
 }
 
@@ -6394,6 +6395,45 @@ func (s *Store) StampRunDecision(ctx context.Context, project, runID, decision s
 		return server.ErrNotFound
 	}
 	return err
+}
+
+// SetRunReviewRequired puts a run into the review_required sub-state. This is
+// NOT a terminal transition: the run is parked at a touchpoint_gate phase
+// waiting for an approve signal. Locks stay held; the slot lease may still
+// be alive (preserve_test_env). The run advances to true terminal only after
+// the gate is released (approve) or the workflow is aborted.
+func (s *Store) SetRunReviewRequired(ctx context.Context, project, runID string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := s.pgRuns.PatchPayload(ctx, project, runID, func(raw map[string]any) error {
+		raw["state"] = "review_required"
+		delete(raw, "queue_state")
+		raw["updated_at"] = now
+		return nil
+	}); err != nil {
+		if errors.Is(err, pgstore.ErrRunNotFound) {
+			return server.ErrNotFound
+		}
+		return err
+	}
+	return nil
+}
+
+// SetRunInProgress flips a run out of the review_required sub-state back to
+// in_progress, used when an approve signal releases a touchpoint_gate and the
+// pr_merge job is about to launch.
+func (s *Store) SetRunInProgress(ctx context.Context, project, runID string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := s.pgRuns.PatchPayload(ctx, project, runID, func(raw map[string]any) error {
+		raw["state"] = "in_progress"
+		raw["updated_at"] = now
+		return nil
+	}); err != nil {
+		if errors.Is(err, pgstore.ErrRunNotFound) {
+			return server.ErrNotFound
+		}
+		return err
+	}
+	return nil
 }
 
 // SetRunTerminalState sets the run's state (passed, review_required, or aborted) and

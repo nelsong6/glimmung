@@ -43,6 +43,11 @@ type fakeCompletionStore struct {
 	terminalState  string
 	terminalReason *string
 
+	reviewRequiredCalls int
+	reviewRequiredErr   error
+	inProgressCalls     int
+	inProgressErr       error
+
 	appendIdx   int
 	appendErr   error
 	appendPhase string
@@ -147,6 +152,16 @@ func (s *fakeCompletionStore) SetRunTerminalState(_ context.Context, _, _ string
 	s.terminalState = state
 	s.terminalReason = abortReason
 	return s.terminalResult, s.terminalErr
+}
+
+func (s *fakeCompletionStore) SetRunReviewRequired(_ context.Context, _, _ string) error {
+	s.reviewRequiredCalls++
+	return s.reviewRequiredErr
+}
+
+func (s *fakeCompletionStore) SetRunInProgress(_ context.Context, _, _ string) error {
+	s.inProgressCalls++
+	return s.inProgressErr
 }
 
 func (s *fakeCompletionStore) AppendRunAttempt(_ context.Context, _, _, phase, phaseKind, workflowFilename string) (int, error) {

@@ -50,6 +50,8 @@ type RunCompletionStore interface {
 	StampRunCompletion(ctx context.Context, project, runID string, p CompletionPayload) (RunReplayData, error)
 	StampRunDecision(ctx context.Context, project, runID, decision string) error
 	SetRunTerminalState(ctx context.Context, project, runID, state string, abortReason *string) (AbortRunResult, error)
+	SetRunReviewRequired(ctx context.Context, project, runID string) error
+	SetRunInProgress(ctx context.Context, project, runID string) error
 	CreateRecycleCycle(ctx context.Context, req CreateRecycleCycleRequest) (CreatedRun, error)
 	AppendRunAttempt(ctx context.Context, project, runID, phase, phaseKind, workflowFilename string) (int, error)
 	StartRunCycle(ctx context.Context, req StartRunCycleRequest) (int, error)
@@ -699,16 +701,22 @@ func dispatchForwardPhase(
 	if err != nil {
 		return err
 	}
+	// Touchpoint gate: the workflow has reached a human-decision boundary.
+	// Do NOT append an attempt and do NOT launch jobs. Set the run to the
+	// non-terminal review_required sub-state and return. The gate is
+	// released by an approve signal in the signal drain, which calls back
+	// into dispatchTouchpointGateApprove to append the attempt and launch
+	// the pr_merge primitive. review_required does NOT release issue/PR
+	// locks — the run is still in flight, just parked at the human gate.
+	if phaseKind == workflowKindTouchpointGate {
+		if err := store.SetRunReviewRequired(ctx, run.Project, run.ID); err != nil {
+			return fmt.Errorf("set review_required: %w", err)
+		}
+		return nil
+	}
 	newAttemptIdx, err := store.AppendRunAttempt(ctx, run.Project, run.ID, targetPhase.Name, phaseKind, workflowFilename)
 	if err != nil {
 		return fmt.Errorf("append forward attempt: %w", err)
-	}
-	// touchpoint_gate phases launch no jobs; the run parks at the attempt and
-	// advances when the signal-drain triage (kind=approve) dispatches the
-	// pr_merge primitive. Until that wiring lands (stage 3), the run sits
-	// here indefinitely. There is no lease/launcher path for a gate phase.
-	if phaseKind == workflowKindTouchpointGate {
-		return nil
 	}
 	lease, err := leaseForRunPhase(ctx, store, run, targetPhase.Name, newAttemptIdx, substituted)
 	if err != nil {
