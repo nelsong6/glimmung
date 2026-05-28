@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -16,25 +17,45 @@ type RunDispatchTimeoutStore interface {
 	AbortRunByID(ctx context.Context, project, runID, reason string) (AbortRunResult, error)
 }
 
+// activeJobFailureGracePeriod gives the native runner a small window after
+// k8s marks a Job terminally Failed before the reconciler synthesizes a
+// completion. The completion callback may already be in flight; without a
+// grace period we race and double-complete. 60s is well inside the runner's
+// http retry budget.
+const activeJobFailureGracePeriod = 60 * time.Second
+
 func StartRunDispatchTimeoutReconciler(ctx context.Context, settings Settings, store ReadStore, nativeLauncher NativeLauncher, logf func(string, ...any)) {
 	timeout := time.Duration(settings.NativeRunnerDispatchTimeoutSeconds) * time.Second
-	if timeout <= 0 {
+	timeoutStore, _ := store.(RunDispatchTimeoutStore)
+	jobStatusGetter, _ := nativeLauncher.(NativeJobStatusGetter)
+	if timeout <= 0 && jobStatusGetter == nil {
 		return
 	}
-	timeoutStore, ok := store.(RunDispatchTimeoutStore)
-	if !ok || timeoutStore == nil {
+	if timeoutStore == nil {
 		return
 	}
+	namespace := strings.TrimSpace(settings.NativeRunnerNamespace)
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for {
-			expired, err := ExpireRunDispatchTimeouts(ctx, timeoutStore, nativeLauncher, timeout, time.Now().UTC())
-			if err != nil && logf != nil {
-				logf("run dispatch-timeout reconcile failed: %v", err)
+			if timeout > 0 {
+				expired, err := ExpireRunDispatchTimeouts(ctx, timeoutStore, nativeLauncher, timeout, time.Now().UTC())
+				if err != nil && logf != nil {
+					logf("run dispatch-timeout reconcile failed: %v", err)
+				}
+				if expired > 0 && logf != nil {
+					logf("run dispatch-timeout reconciled expired=%d", expired)
+				}
 			}
-			if expired > 0 && logf != nil {
-				logf("run dispatch-timeout reconciled expired=%d", expired)
+			if jobStatusGetter != nil && namespace != "" {
+				completed, err := ExpireFailedActiveJobs(ctx, timeoutStore, nativeLauncher, jobStatusGetter, namespace, activeJobFailureGracePeriod, time.Now().UTC())
+				if err != nil && logf != nil {
+					logf("run active-job failure reconcile failed: %v", err)
+				}
+				if completed > 0 && logf != nil {
+					logf("run active-job failure reconciled completed=%d", completed)
+				}
 			}
 			select {
 			case <-ctx.Done():
@@ -212,4 +233,145 @@ func phaseDispatchTime(phase RunPhaseExecution) (time.Time, bool) {
 		}
 	}
 	return time.Time{}, false
+}
+
+// ExpireFailedActiveJobs walks in-progress runs and, for each active job
+// whose backing k8s Job has terminally failed without a completion callback,
+// synthesizes a failed completion through the same path the native runner
+// would have used. Without this, a runner pod killed mid-step (DeadlineExceeded,
+// OOM, eviction) leaves the run permanently "in_progress" with the phase
+// showing as "active" — invisible to dashboards and gates, and impossible for
+// the verify-loop budget to retry. See run-execution-reconciler design notes.
+func ExpireFailedActiveJobs(ctx context.Context, store RunDispatchTimeoutStore, nativeLauncher NativeLauncher, statusGetter NativeJobStatusGetter, namespace string, grace time.Duration, now time.Time) (int, error) {
+	if statusGetter == nil {
+		return 0, nil
+	}
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return 0, nil
+	}
+	completionStore, _ := any(store).(RunCompletionStore)
+	jobStore, _ := any(store).(NativeJobCompletionStore)
+	if completionStore == nil || jobStore == nil {
+		return 0, nil
+	}
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		return 0, err
+	}
+	completed := 0
+	for _, project := range projects {
+		name := firstNonEmpty(project.Name, project.ID)
+		if name == "" {
+			continue
+		}
+		runs, err := store.ListProjectRuns(ctx, name, 500)
+		if err != nil {
+			return completed, err
+		}
+		for _, run := range runs {
+			if run.State != "in_progress" || run.ID == "" {
+				continue
+			}
+			n, err := reconcileFailedActiveJobsForRun(ctx, completionStore, jobStore, nativeLauncher, statusGetter, run, namespace, grace, now)
+			if err != nil {
+				return completed, err
+			}
+			completed += n
+		}
+	}
+	return completed, nil
+}
+
+func reconcileFailedActiveJobsForRun(ctx context.Context, completionStore RunCompletionStore, jobStore NativeJobCompletionStore, nativeLauncher NativeLauncher, statusGetter NativeJobStatusGetter, run RunReport, namespace string, grace time.Duration, now time.Time) (int, error) {
+	completed := 0
+	for _, phase := range run.PhaseExecutions {
+		// Only "active" phases can have jobs stuck without callbacks.
+		// "dispatching" is handled by ExpireRunDispatchTimeouts.
+		if phase.State != "active" {
+			continue
+		}
+		for _, job := range phase.Jobs {
+			if job.State != "active" {
+				continue
+			}
+			if job.K8sJobName == nil || strings.TrimSpace(*job.K8sJobName) == "" {
+				continue
+			}
+			ready, conclusion, summary, err := evaluateActiveJobFailure(ctx, statusGetter, namespace, *job.K8sJobName, grace, now)
+			if err != nil {
+				return completed, err
+			}
+			if !ready {
+				continue
+			}
+			jobID := job.ID
+			payload := CompletionPayload{
+				JobID:           &jobID,
+				Conclusion:      conclusion,
+				SummaryMarkdown: &summary,
+			}
+			result, err := jobStore.RecordNativeJobCompletion(ctx, run.Project, run.ID, payload)
+			if err != nil {
+				return completed, err
+			}
+			completed++
+			if result.CompletionReady {
+				if _, err := processSyntheticRunCompletion(ctx, completionStore, nativeLauncher, run.Project, run.ID, result.PhasePayload); err != nil {
+					return completed, err
+				}
+			}
+		}
+	}
+	return completed, nil
+}
+
+// evaluateActiveJobFailure asks k8s for the Job's status and, if it is past
+// the grace period and terminally failed (or has been garbage-collected from
+// k8s entirely), returns the synthetic completion conclusion plus a summary
+// the dashboard can render.
+func evaluateActiveJobFailure(ctx context.Context, statusGetter NativeJobStatusGetter, namespace, name string, grace time.Duration, now time.Time) (bool, string, string, error) {
+	status, err := statusGetter.GetNativeJobStatus(ctx, namespace, name)
+	if err != nil {
+		return false, "", "", err
+	}
+	if !status.Found {
+		// k8s no longer has the Job (TTL-collected). The run lost its
+		// execution surface and cannot be observed further — fail it so
+		// the verify loop or cleanup phase can run.
+		summary := fmt.Sprintf("native job %q was garbage-collected from kubernetes without a completion callback", name)
+		return true, "failed", summary, nil
+	}
+	if status.IsTerminallySucceeded() && !status.IsTerminallyFailed() {
+		// Pod ran to completion but the callback was lost. Surface as
+		// failed so the run leaves "in_progress"; cleanup phases still
+		// run and a human can decide. We prefer this over silently
+		// marking success because evidence/verification fields would
+		// otherwise be missing.
+		if grace > 0 && !status.TerminalTime().IsZero() && now.Sub(status.TerminalTime()) < grace {
+			return false, "", "", nil
+		}
+		summary := fmt.Sprintf("native job %q completed in kubernetes but its completion callback was never received", name)
+		return true, "failed", summary, nil
+	}
+	if !status.IsTerminallyFailed() {
+		return false, "", "", nil
+	}
+	if grace > 0 && !status.TerminalTime().IsZero() && now.Sub(status.TerminalTime()) < grace {
+		return false, "", "", nil
+	}
+	reason := status.FailureReason()
+	message := status.FailureMessage()
+	conclusion := "failed"
+	switch reason {
+	case "DeadlineExceeded", "BackoffLimitExceeded":
+		// BackoffLimitExceeded with backoffLimit=0 most often comes from
+		// a pod hitting activeDeadlineSeconds first; either way the runner
+		// was killed without surfacing test evidence. Tag as timed_out so
+		// dashboards distinguish wallclock kills from a runner-reported
+		// failure.
+		conclusion = "timed_out"
+	}
+	summary := fmt.Sprintf("native job %q ended with kubernetes condition Failed=true reason=%q: %s", name, reason, strings.TrimSpace(message))
+	return true, conclusion, summary, nil
 }
