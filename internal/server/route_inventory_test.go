@@ -79,6 +79,7 @@ var expectedGoRoutes = []string{
 	"POST /v1/run-callbacks/{callback_token}/native/pr-touchpoint",
 	"POST /v1/run-callbacks/{callback_token}/native/pr-merge",
 	"POST /v1/run-callbacks/{callback_token}/native/completed",
+	"POST /v1/inspections",
 	"POST /v1/test-slots/checkout",
 	"POST /v1/test-slots/return",
 	"POST /v1/test-slots/extend",

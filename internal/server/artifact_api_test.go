@@ -52,6 +52,7 @@ func TestReadArtifactRejectsUnscopedAndDotDotPaths(t *testing.T) {
 	for _, path := range []string{
 		"/v1/artifacts/private/secret.png",
 		"/v1/artifacts/runs/glimmung/../secret.png",
+		"/v1/artifacts/inspections/../escape.png",
 	} {
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
@@ -81,6 +82,24 @@ func TestReadArtifactMapsStoreErrors(t *testing.T) {
 				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 			}
 		})
+	}
+}
+
+func TestReadArtifactServesInspectionPrefix(t *testing.T) {
+	store := &fakeArtifactStore{artifact: Artifact{Body: []byte("inspection-png"), ContentType: "image/png"}}
+	handler := NewWithDependencies(Settings{}, nil, nil, store)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/artifacts/inspections/lease-1/insp-1/screenshot.png", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != "inspection-png" {
+		t.Fatalf("body=%q", rec.Body.String())
+	}
+	if len(store.downloads) != 1 || store.downloads[0] != "inspections/lease-1/insp-1/screenshot.png" {
+		t.Fatalf("downloads=%#v", store.downloads)
 	}
 }
 

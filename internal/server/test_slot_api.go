@@ -976,6 +976,7 @@ func cleanupTestSlotRuntime(parent context.Context, store ReadStore, preparer Te
 		}
 		wakeRunQueue("")
 	}
+	sweepLeaseInspections(context.Background(), store, lease, logf)
 	if _, statusErr := setLeaseSlotCleanupFinished(context.Background(), store, project, lease, testSlotStateReady, nil); statusErr != nil && logf != nil {
 		logf("record test-slot cleanup success failed project=%s lease=%s: %v", lease.Project, LeasePublicRefFromLease(lease), statusErr)
 	}

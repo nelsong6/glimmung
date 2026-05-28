@@ -56,6 +56,11 @@ running, cleaning, and available explicit.
   into the selected leased slot, restarts as configured, records history on
   every outcome, and extends short leases to the configured minimum remaining
   TTL.
+- Lease cleanup is the single retention boundary for free
+  (lease-scoped) inspections produced by `POST /v1/inspections`. The
+  cleanup goroutine deletes every matching `slot_inspections` row and the
+  underlying `report.json` + `screenshot.png` blobs. See
+  [Observability And Evidence capabilities → durable-inspections](../observability-and-evidence/capabilities.md).
 
 ## Failure And Recovery
 

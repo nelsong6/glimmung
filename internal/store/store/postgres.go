@@ -61,6 +61,10 @@ type Store struct {
 
 	// pgLeases owns native lease rows and lease counters.
 	pgLeases *pgstore.LeasesStore
+
+	// pgSlotInspections owns the durable ledger for free
+	// (lease-scoped) inspections uploaded through POST /v1/inspections.
+	pgSlotInspections *pgstore.SlotInspectionsStore
 }
 
 // SetPGLocks injects the Postgres-backed lock store. Called once at
@@ -133,6 +137,88 @@ func (s *Store) SetPGTouchpoints(touchpoints *pgstore.TouchpointsStore) {
 // SetPGLeases injects the Postgres-backed leases store.
 func (s *Store) SetPGLeases(leases *pgstore.LeasesStore) {
 	s.pgLeases = leases
+}
+
+// SetPGSlotInspections injects the Postgres-backed slot_inspections store.
+func (s *Store) SetPGSlotInspections(slotInspections *pgstore.SlotInspectionsStore) {
+	s.pgSlotInspections = slotInspections
+}
+
+// InsertSlotInspection records a free (lease-scoped) inspection.
+func (s *Store) InsertSlotInspection(ctx context.Context, row server.SlotInspectionRecord) (server.SlotInspectionRecord, error) {
+	if s == nil || s.pgSlotInspections == nil {
+		return server.SlotInspectionRecord{}, errors.New("slot_inspections store not configured")
+	}
+	written, err := s.pgSlotInspections.Insert(ctx, pgstore.SlotInspectionRow{
+		ID:                    row.ID,
+		Project:               row.Project,
+		Slot:                  row.Slot,
+		LeaseID:               row.LeaseID,
+		SessionID:             row.SessionID,
+		RequestID:             row.RequestID,
+		BlobPrefix:            row.BlobPrefix,
+		ReportBlobPath:        row.ReportBlobPath,
+		ScreenshotBlobPath:    row.ScreenshotBlobPath,
+		ScreenshotContentType: row.ScreenshotContentType,
+		ByteSizeScreenshot:    row.ByteSizeScreenshot,
+		ByteSizeReport:        row.ByteSizeReport,
+	})
+	if err != nil {
+		return server.SlotInspectionRecord{}, err
+	}
+	return slotInspectionRecordFromPGRow(written), nil
+}
+
+// LookupSlotInspectionByRequest returns a prior inspection if the same
+// (lease_id, request_id) pair has already been recorded. Server-side
+// idempotency for POST /v1/inspections.
+func (s *Store) LookupSlotInspectionByRequest(ctx context.Context, leaseID, requestID string) (server.SlotInspectionRecord, error) {
+	if s == nil || s.pgSlotInspections == nil {
+		return server.SlotInspectionRecord{}, server.ErrSlotInspectionNotFound
+	}
+	row, err := s.pgSlotInspections.LookupByRequest(ctx, leaseID, requestID)
+	if err != nil {
+		if errors.Is(err, pgstore.ErrSlotInspectionNotFound) {
+			return server.SlotInspectionRecord{}, server.ErrSlotInspectionNotFound
+		}
+		return server.SlotInspectionRecord{}, err
+	}
+	return slotInspectionRecordFromPGRow(row), nil
+}
+
+// DeleteSlotInspectionsByLease drops every ledger row for the lease and
+// returns them so the sweep can delete the underlying blobs. Idempotent.
+func (s *Store) DeleteSlotInspectionsByLease(ctx context.Context, leaseID string) ([]server.SlotInspectionRecord, error) {
+	if s == nil || s.pgSlotInspections == nil {
+		return nil, nil
+	}
+	rows, err := s.pgSlotInspections.DeleteByLease(ctx, leaseID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]server.SlotInspectionRecord, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, slotInspectionRecordFromPGRow(row))
+	}
+	return out, nil
+}
+
+func slotInspectionRecordFromPGRow(row pgstore.SlotInspectionRow) server.SlotInspectionRecord {
+	return server.SlotInspectionRecord{
+		ID:                    row.ID,
+		Project:               row.Project,
+		Slot:                  row.Slot,
+		LeaseID:               row.LeaseID,
+		SessionID:             row.SessionID,
+		RequestID:             row.RequestID,
+		BlobPrefix:            row.BlobPrefix,
+		ReportBlobPath:        row.ReportBlobPath,
+		ScreenshotBlobPath:    row.ScreenshotBlobPath,
+		ScreenshotContentType: row.ScreenshotContentType,
+		ByteSizeScreenshot:    row.ByteSizeScreenshot,
+		ByteSizeReport:        row.ByteSizeReport,
+		CreatedAt:             row.CreatedAt,
+	}
 }
 
 // leaseDocFromPayload decodes a lease payload into the internal helper shape.
