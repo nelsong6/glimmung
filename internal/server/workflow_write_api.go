@@ -346,24 +346,27 @@ func ValidateWorkflowRegister(req WorkflowRegister) error {
 			touchpointGateCount++
 		}
 	}
-	missing := make([]string, 0, 2)
+	missing := make([]string, 0, 4)
 	if !hasTesting {
 		missing = append(missing, "verify")
 	}
 	if !hasCleanup {
 		missing = append(missing, "always-run cleanup")
 	}
+	if touchpointGateCount == 0 {
+		missing = append(missing, "touchpoint_gate")
+	}
+	if prTouchpointJobs == 0 {
+		missing = append(missing, "pr_touchpoint primitive")
+	}
 	if len(missing) > 0 {
 		return ValidationError{Message: "workflow " + req.Name + " is missing required phases: " + strings.Join(missing, ", ")}
 	}
 	if touchpointGateCount > 1 {
-		return ValidationError{Message: fmt.Sprintf("workflow %s declares %d touchpoint_gate phases; exactly one is allowed", req.Name, touchpointGateCount)}
-	}
-	if touchpointGateCount == 1 && prTouchpointJobs != 1 {
-		return ValidationError{Message: fmt.Sprintf("workflow %s has a touchpoint_gate and must declare exactly one %q job primitive in an always-run phase (got %d)", req.Name, JobPrimitivePRTouchpoint, prTouchpointJobs)}
+		return ValidationError{Message: fmt.Sprintf("workflow %s declares %d touchpoint_gate phases; exactly one is required", req.Name, touchpointGateCount)}
 	}
 	if prTouchpointJobs > 1 {
-		return ValidationError{Message: fmt.Sprintf("workflow %s declares %d %q primitives; exactly one is allowed", req.Name, prTouchpointJobs, JobPrimitivePRTouchpoint)}
+		return ValidationError{Message: fmt.Sprintf("workflow %s declares %d %q primitives; exactly one is required", req.Name, prTouchpointJobs, JobPrimitivePRTouchpoint)}
 	}
 	if err := phaserefs.Validate(phaseRefs); err != nil {
 		return ValidationError{Message: err.Error()}

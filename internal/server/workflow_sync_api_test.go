@@ -70,24 +70,45 @@ phases:
   - name: entry
     kind: k8s_job
     workflow_filename: run.yaml
-    verify: false
-    always: false
     depends_on: []
-    jobs: []
+    jobs:
+      - id: entry
   - name: test
     kind: k8s_job
     workflow_filename: verify.yaml
     verify: true
-    always: false
     depends_on: [entry]
-    jobs: []
-  - name: cleanup
+    jobs:
+      - id: test
+  - name: cleanup_early
     kind: k8s_job
-    workflow_filename: cleanup.yaml
-    verify: false
+    workflow_filename: cleanup_early.yaml
     always: true
+    skip_when_preserve_test_env: true
     depends_on: [test]
-    jobs: []
+    jobs:
+      - id: cleanup-early
+  - name: touchpoint
+    kind: k8s_job
+    workflow_filename: touchpoint.yaml
+    always: true
+    depends_on: [cleanup_early]
+    jobs:
+      - id: pr-touchpoint
+        primitive: pr_touchpoint
+  - name: touchpoint_gate
+    kind: touchpoint_gate
+    depends_on: [touchpoint]
+    jobs:
+      - id: pr-merge
+        primitive: pr_merge
+  - name: cleanup_final
+    kind: k8s_job
+    workflow_filename: cleanup_final.yaml
+    always: true
+    depends_on: [touchpoint_gate]
+    jobs:
+      - id: cleanup-final
 `)
 
 var nativeWorkflowYAMLOmittedKind = []byte(`
@@ -95,17 +116,40 @@ phases:
   - name: entry
     workflow_filename: run.yaml
     depends_on: []
-    jobs: []
+    jobs:
+      - id: entry
   - name: test
     workflow_filename: verify.yaml
     verify: true
     depends_on: [entry]
-    jobs: []
-  - name: cleanup
-    workflow_filename: cleanup.yaml
+    jobs:
+      - id: test
+  - name: cleanup_early
+    workflow_filename: cleanup_early.yaml
     always: true
+    skip_when_preserve_test_env: true
     depends_on: [test]
-    jobs: []
+    jobs:
+      - id: cleanup-early
+  - name: touchpoint
+    workflow_filename: touchpoint.yaml
+    always: true
+    depends_on: [cleanup_early]
+    jobs:
+      - id: pr-touchpoint
+        primitive: pr_touchpoint
+  - name: touchpoint_gate
+    kind: touchpoint_gate
+    depends_on: [touchpoint]
+    jobs:
+      - id: pr-merge
+        primitive: pr_merge
+  - name: cleanup_final
+    workflow_filename: cleanup_final.yaml
+    always: true
+    depends_on: [touchpoint_gate]
+    jobs:
+      - id: cleanup-final
 `)
 
 func TestGetWorkflowUpstream(t *testing.T) {
@@ -189,8 +233,11 @@ func TestSyncWorkflowDefaultsOmittedKindsToK8sJob(t *testing.T) {
 		t.Fatalf("expected workflow to be upserted")
 	}
 	for _, phase := range store.upserted.Phases {
-		if phase.Kind != "k8s_job" {
-			t.Fatalf("phase %q kind=%q, want k8s_job", phase.Name, phase.Kind)
+		// touchpoint_gate is its own valid kind (introduced by the
+		// gated-workflow migration); the omitted-kind default only
+		// applies to non-gate phases.
+		if phase.Kind != "k8s_job" && phase.Kind != "touchpoint_gate" {
+			t.Fatalf("phase %q kind=%q, want k8s_job or touchpoint_gate", phase.Name, phase.Kind)
 		}
 	}
 }
@@ -226,11 +273,12 @@ phases:
 }
 
 func TestSyncWorkflowAlreadyInSync(t *testing.T) {
-	phases := []PhaseSpec{
-		{Name: "entry", Kind: "k8s_job", WorkflowFilename: "run.yaml", WorkflowRef: "main", Inputs: map[string]string{}, Outputs: []string{}, DependsOn: []string{}, Jobs: []NativeJobSpec{}},
-		{Name: "test", Kind: "k8s_job", WorkflowFilename: "verify.yaml", Verify: true, WorkflowRef: "main", Inputs: map[string]string{}, Outputs: []string{}, DependsOn: []string{"entry"}, Jobs: []NativeJobSpec{}},
-		{Name: "cleanup", Kind: "k8s_job", WorkflowFilename: "cleanup.yaml", Always: true, WorkflowRef: "main", Inputs: map[string]string{}, Outputs: []string{}, DependsOn: []string{"test"}, Jobs: []NativeJobSpec{}},
+	parsed, err := parseWorkflowYAML(exampleWorkflowYAML, "myproject", "agent-run", "k8s_job")
+	if err != nil {
+		t.Fatalf("parseWorkflowYAML setup: %v", err)
 	}
+	normalizeWorkflowRegister(&parsed)
+	phases := parsed.Phases
 	existing := Workflow{
 		Project:             "myproject",
 		Name:                "agent-run",
@@ -265,8 +313,8 @@ func TestParseWorkflowYAML(t *testing.T) {
 	if reg.Project != "testproject" || reg.Name != "my-workflow" {
 		t.Fatalf("project/name not filled in: %+v", reg)
 	}
-	if len(reg.Phases) != 3 {
-		t.Fatalf("expected 3 phases, got %d", len(reg.Phases))
+	if len(reg.Phases) != 6 {
+		t.Fatalf("expected 6 phases, got %d", len(reg.Phases))
 	}
 }
 

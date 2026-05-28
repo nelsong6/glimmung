@@ -251,7 +251,10 @@ func playbookTestWorkflowPhases() []PhaseSpec {
 	return []PhaseSpec{
 		{Name: "prep", Kind: "k8s_job", Jobs: []NativeJobSpec{{ID: "prep"}}},
 		{Name: "verify", Kind: "k8s_job", Verify: true, DependsOn: []string{"prep"}, Jobs: []NativeJobSpec{{ID: "verify"}}},
-		{Name: "cleanup", Kind: "k8s_job", Always: true, DependsOn: []string{"verify"}, Jobs: []NativeJobSpec{{ID: "cleanup"}}},
+		{Name: "cleanup_early", Kind: "k8s_job", Always: true, SkipWhenPreserveTestEnv: true, DependsOn: []string{"verify"}, Jobs: []NativeJobSpec{{ID: "cleanup-early"}}},
+		{Name: "touchpoint", Kind: "k8s_job", Always: true, DependsOn: []string{"cleanup_early"}, Jobs: []NativeJobSpec{{ID: "pr-touchpoint", Primitive: JobPrimitivePRTouchpoint, Managed: true}}},
+		{Name: "touchpoint_gate", Kind: "touchpoint_gate", DependsOn: []string{"touchpoint"}, Jobs: []NativeJobSpec{{ID: "pr-merge", Primitive: JobPrimitivePRMerge, Managed: true}}},
+		{Name: "cleanup_final", Kind: "k8s_job", Always: true, DependsOn: []string{"touchpoint_gate"}, Jobs: []NativeJobSpec{{ID: "cleanup-final"}}},
 	}
 }
 

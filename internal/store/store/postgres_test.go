@@ -446,14 +446,19 @@ func TestNormalizeWorkflowRegisterForProjectDefaultsToK8sJob(t *testing.T) {
 		Phases: []server.PhaseSpec{
 			{Name: "prepare"},
 			{Name: "test", Verify: true, DependsOn: []string{"prepare"}},
-			{Name: "cleanup", Always: true, DependsOn: []string{"test"}},
+			{Name: "cleanup_early", Always: true, SkipWhenPreserveTestEnv: true, DependsOn: []string{"test"}, Jobs: []server.NativeJobSpec{{ID: "cleanup-early"}}},
+			{Name: "touchpoint", Always: true, DependsOn: []string{"cleanup_early"}, Jobs: []server.NativeJobSpec{{ID: "pr-touchpoint", Primitive: "pr_touchpoint"}}},
+			{Name: "touchpoint_gate", Kind: "touchpoint_gate", DependsOn: []string{"touchpoint"}, Jobs: []server.NativeJobSpec{{ID: "pr-merge", Primitive: "pr_merge"}}},
+			{Name: "cleanup_final", Always: true, DependsOn: []string{"touchpoint_gate"}, Jobs: []server.NativeJobSpec{{ID: "cleanup-final"}}},
 		},
 	}
 	normalizeWorkflowRegister(&req)
 
 	for _, phase := range req.Phases {
-		if phase.Kind != "k8s_job" {
-			t.Fatalf("phase %q kind=%q, want k8s_job", phase.Name, phase.Kind)
+		// touchpoint_gate is the second valid kind alongside k8s_job
+		// (introduced by the gated-workflow migration).
+		if phase.Kind != "k8s_job" && phase.Kind != "touchpoint_gate" {
+			t.Fatalf("phase %q kind=%q, want k8s_job or touchpoint_gate", phase.Name, phase.Kind)
 		}
 	}
 	if err := validateWorkflowRegister(req); err != nil {

@@ -604,7 +604,13 @@ func TestIsAdvanceConclusion(t *testing.T) {
 	}
 }
 
-func TestNativeRunCompletedByCallbackTokenAdvanceReviewRequired(t *testing.T) {
+func TestNativeRunCompletedByCallbackTokenAdvancePostMergeToPassed(t *testing.T) {
+	// After the touchpoint_gate has been released and pr_merge + final
+	// cleanup have run, completion routing reaches the terminal-state
+	// setter and marks the run "passed" (not the historical
+	// "review_required"; review_required is now a non-terminal sub-state
+	// set by dispatchForwardPhase when the gate is reached, not by the
+	// completion path).
 	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
 	store.run = runDataForCompletion("cleanup")
 	store.run.Attempts = []RunAttemptData{
@@ -614,7 +620,7 @@ func TestNativeRunCompletedByCallbackTokenAdvanceReviewRequired(t *testing.T) {
 	prNumber := 123
 	store.run.PRNumber = &prNumber
 	store.wf = prWorkflowForCompletion("impl")
-	store.terminalResult = AbortRunResult{State: "review_required", RunRef: "proj#7/runs/1"}
+	store.terminalResult = AbortRunResult{State: "passed", RunRef: "proj#7/runs/1"}
 	rec := httptest.NewRecorder()
 	newCompletionHandler(store, nil).ServeHTTP(rec, nativeCompletionRequest("tok", completedJob(PRTouchpointJobID, "success", nil, map[string]string{"pr_number": "123"})))
 	if rec.Code != http.StatusOK {
@@ -623,8 +629,8 @@ func TestNativeRunCompletedByCallbackTokenAdvanceReviewRequired(t *testing.T) {
 	if got := readCallbackResult(t, rec).Decision; got == nil || *got != "advance" {
 		t.Fatalf("decision=%v", got)
 	}
-	if store.terminalState != "review_required" {
-		t.Fatalf("terminal state=%q, want review_required", store.terminalState)
+	if store.terminalState != "passed" {
+		t.Fatalf("terminal state=%q, want passed", store.terminalState)
 	}
 }
 
