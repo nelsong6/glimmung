@@ -351,30 +351,17 @@ func processRunCompletion(
 				PRLockReleased:    result.PRLockReleased,
 			}
 		}
-		// Terminal state set depends on workflow shape:
-		// - Gated workflows (have a touchpoint_gate phase) park at the gate
-		//   via dispatchForwardPhase; reaching this code path means the gate
-		//   was approved + cleanup_final ran. Terminal state: passed.
-		// - Workflows without a touchpoint_gate phase (unmigrated) keep the
-		//   pre-gate behavior: terminal state review_required until the
-		//   project's workflow is updated to the gated shape. This is a
-		//   transitional accommodation, not a permanent fallback — every
-		//   workflow is expected to migrate to the gated shape.
-		hasGate := false
-		for _, phase := range wf.Phases {
-			if workflowPhaseKind(phase.Kind) == workflowKindTouchpointGate {
-				hasGate = true
-				break
-			}
+		// Every workflow ends at the touchpoint_gate. Reaching this code
+		// path means the gate was approved, the pr_merge primitive ran,
+		// and cleanup_final completed. Terminal state is always "passed";
+		// the issue is closed downstream by closeIssueOnGatedTerminal.
+		// Reaching this with no linked PR is malformed: the pr_touchpoint
+		// primitive in the touchpoint phase should have set run.PRNumber.
+		if run.PRNumber == nil || *run.PRNumber < 1 {
+			abortReason := "PR primitive: touchpoint job completed without linking a PR"
+			return markRunAborted(ctx, w, r, store, nativeLauncher, run, runRef, decision.AbortMalformed, abortReason)
 		}
 		state := "passed"
-		if !hasGate {
-			if run.PRNumber == nil || *run.PRNumber < 1 {
-				abortReason := "PR primitive: touchpoint job completed without linking a PR"
-				return markRunAborted(ctx, w, r, store, nativeLauncher, run, runRef, decision.AbortMalformed, abortReason)
-			}
-			state = "review_required"
-		}
 		result, err := store.SetRunTerminalState(ctx, project, runID, state, nil)
 		if err != nil {
 			writeInternalError(w, r, err, "mark run terminal failed")
