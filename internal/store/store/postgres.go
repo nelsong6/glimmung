@@ -1417,6 +1417,7 @@ type phaseDoc struct {
 	EvidenceVerificationGate bool              `json:"evidenceVerificationGate"`
 	DependsOn                []string          `json:"dependsOn"`
 	Jobs                     []nativeJobDoc    `json:"jobs"`
+	SkipWhenPreserveTestEnv  bool              `json:"skipWhenPreserveTestEnv,omitempty"`
 }
 
 type recyclePolicyDoc struct {
@@ -2196,6 +2197,7 @@ func phaseDocFromSpec(phase server.PhaseSpec) phaseDoc {
 		EvidenceVerificationGate: phase.EvidenceVerificationGate,
 		DependsOn:                sliceOrEmpty(phase.DependsOn),
 		Jobs:                     jobs,
+		SkipWhenPreserveTestEnv:  phase.SkipWhenPreserveTestEnv,
 	}
 }
 
@@ -2395,6 +2397,7 @@ func phaseFromDoc(doc phaseDoc) server.PhaseSpec {
 		EvidenceVerificationGate: doc.EvidenceVerificationGate,
 		DependsOn:                sliceOrEmpty(doc.DependsOn),
 		Jobs:                     jobs,
+		SkipWhenPreserveTestEnv:  doc.SkipWhenPreserveTestEnv,
 	}
 }
 
