@@ -44,6 +44,7 @@ type IssueDetail = {
   last_run_number: number | null;
   last_run_state: string | null;
   issue_lock_held: boolean;
+  preserve_test_env: boolean;
 };
 
 type IssueComment = {
@@ -739,12 +740,13 @@ function IssueHeader({ detail, heading }: { detail: IssueDetail; heading: string
         <div className="project-kicker mono">issue</div>
         <div className="issue-title-row">
           <h2>{detail.title}</h2>
-          {(detail.labels.length > 0 || detail.issue_lock_held) && (
+          {(detail.labels.length > 0 || detail.issue_lock_held || detail.preserve_test_env) && (
             <div className="issue-title-pills" aria-label="issue labels">
               {detail.labels.map((label) => (
                 <span className="pill info" key={label}>{label}</span>
               ))}
               {detail.issue_lock_held && <span className="pill busy">in flight</span>}
+              {detail.preserve_test_env && <span className="pill info" title="test env stays alive through touchpoint review">preserve env</span>}
             </div>
           )}
         </div>
@@ -2772,6 +2774,12 @@ function TouchpointTab({
     | { kind: "submitted"; signalId: string }
     | { kind: "error"; message: string }
   >({ kind: "idle" });
+  const [approve, setApprove] = useState<
+    | { kind: "idle" }
+    | { kind: "submitting" }
+    | { kind: "submitted"; signalId: string }
+    | { kind: "error"; message: string }
+  >({ kind: "idle" });
 
   if (!graphAvailable) {
     return (
@@ -2818,7 +2826,33 @@ function TouchpointTab({
     && !(structuredScreenshots.length > 0 && isRawScreenshotArtifact(item))
   ));
   const hasCurrentEvidence = prNumber !== null || Boolean(validationUrl) || projectionEvidence.length > 0;
-  const canReject = signedIn && isAdmin && !pendingSignal && prNumber !== null && Boolean(evidenceRepo) && reject.kind !== "submitting";
+  const canReject = signedIn && isAdmin && !pendingSignal && prNumber !== null && Boolean(evidenceRepo) && reject.kind !== "submitting" && approve.kind !== "submitting";
+  const canApprove = signedIn && isAdmin && !pendingSignal && prNumber !== null && Boolean(evidenceRepo) && approve.kind !== "submitting" && reject.kind !== "submitting";
+
+  const submitApprove = async () => {
+    if (prNumber === null || !evidenceRepo) return;
+    setApprove({ kind: "submitting" });
+    try {
+      const r = await authedFetch("/v1/signals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          target_type: "pr",
+          target_repo: evidenceRepo,
+          target_ref: String(prNumber),
+          source: "glimmung_ui",
+          payload: { kind: "approve" },
+        }),
+      });
+      if (!r.ok) throw new Error(`/v1/signals -> ${r.status}: ${await r.text()}`);
+      const sig = await r.json() as { ref?: string };
+      setApprove({ kind: "submitted", signalId: sig.ref ?? "signal" });
+      onSubmitted();
+      window.setTimeout(onSubmitted, 3000);
+    } catch (e) {
+      setApprove({ kind: "error", message: e instanceof Error ? e.message : String(e) });
+    }
+  };
 
   const submitReject = async () => {
     if (!feedback.trim() || prNumber === null || !evidenceRepo) return;
@@ -2927,6 +2961,27 @@ function TouchpointTab({
           )}
         </>
       )}
+
+      <h2>Approve</h2>
+      <p className="dim">merges the PR idempotently, releases the test slot, closes the issue.</p>
+      <div className="review-actions">
+        <button
+          type="button"
+          className="link"
+          onClick={() => void submitApprove()}
+          disabled={!canApprove}
+          title={!signedIn ? "sign in" : !isAdmin ? "admin only" : undefined}
+        >
+          {approve.kind === "submitting" ? "queueing..." : !signedIn ? "sign in" : !isAdmin ? "admin only" : "approve"}
+        </button>
+        {pendingSignal && <span className="dim mono">decision already queued</span>}
+        {approve.kind === "submitted" && (
+          <span className="pill free">queued {approve.signalId.slice(0, 8)}</span>
+        )}
+        {approve.kind === "error" && (
+          <span className="pill drain" title={approve.message}>error</span>
+        )}
+      </div>
 
       <h2>Request changes</h2>
       <textarea
@@ -3899,6 +3954,7 @@ function IssueEditForm({
   const [body, setBody] = useState(detail.body);
   const [labels, setLabels] = useState(detail.labels.join(", "));
   const [state, setState] = useState(detail.state);
+  const [preserveTestEnv, setPreserveTestEnv] = useState(detail.preserve_test_env);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -3924,6 +3980,7 @@ function IssueEditForm({
           body,
           labels: labelList,
           state,
+          preserve_test_env: preserveTestEnv,
         }),
       });
       if (!r.ok) {
@@ -3963,6 +4020,14 @@ function IssueEditForm({
           <option value="open">open</option>
           <option value="closed">closed</option>
         </select>
+      </label>
+      <label style={{ flexDirection: "row", alignItems: "center", gap: "0.5rem" }}>
+        <input
+          type="checkbox"
+          checked={preserveTestEnv}
+          onChange={(e) => setPreserveTestEnv(e.target.checked)}
+        />
+        <span>preserve test env through touchpoint review</span>
       </label>
       {error && <div className="error">{error}</div>}
       <div style={{ display: "flex", gap: "0.5rem" }}>
