@@ -40,8 +40,18 @@ RunReports own factual per-run audit state.
   URL, typed evidence, abort reason, terminal status, and evidence
   requirements.
 - Reviewer feedback enters as signals and re-enters the run loop through
-  durable issue/run state.
-- Merged Touchpoints close their Issue in the normal isolated-PR case.
+  durable issue/run state. Both `payload.kind: "approve"` and
+  `payload.kind: "reject"` are first-class glimmung_ui signal kinds; approve
+  releases a workflow's `touchpoint_gate` to merge, reject recycles via the
+  configured `pr.recycle_policy`.
+- A run sitting at a `touchpoint_gate` has Run state `review_required`. That
+  state is non-terminal: locks stay held, the slot may be alive, projections
+  treat the run as active, and the run advances forward when approve fires.
+- Merged Touchpoints close their Issue in the normal isolated-PR case. When
+  a workflow declares a `touchpoint_gate` phase, the run reaches terminal
+  `passed` only by going through `approve → pr_merge → cleanup_final`, and
+  the originating Issue transitions to state `closed` on that terminal
+  transition.
 - Playbook integration strategy controls where entries land and when a final
   review surface is required.
 

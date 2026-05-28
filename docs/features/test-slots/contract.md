@@ -47,6 +47,11 @@ running, cleaning, and available explicit.
   available again.
 - TTL updates and extensions update durable lease state and re-arm timers from
   the durable deadline.
+- When the originating Issue has `preserve_test_env=true`, the workflow's
+  early cleanup phase reports conclusion `skipped` instead of executing.
+  The lease stays alive through the human review gate so the reviewer can
+  poke at the live build, and the final cleanup phase tears it down after
+  approve, reject, or abort releases the gate.
 - Hot swap reads `metadata.test_slot_hot_swap`, builds from `git_ref`, copies
   into the selected leased slot, restarts as configured, records history on
   every outcome, and extends short leases to the configured minimum remaining

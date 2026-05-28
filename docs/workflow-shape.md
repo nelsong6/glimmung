@@ -198,6 +198,99 @@ the Glimmung Touchpoint. Operators should use this endpoint when a Run already
 passed verification but an older or interrupted workflow did not materialize
 the review surface.
 
+## Human review gate (touchpoint_gate)
+
+Workflows that want a reviewer to confirm a touchpoint before merging declare a
+`touchpoint_gate` phase between testing and cleanup. The gate has exactly one
+managed job with `primitive: pr_merge`; Glimmung canonicalizes that job into
+the runner step that performs the idempotent merge.
+
+```yaml
+phases:
+  - name: prepare
+    kind: k8s_job
+    jobs:
+      - id: env-prep
+
+  - name: work
+    kind: k8s_job
+    depends_on: [prepare]
+    jobs:
+      - id: impl
+
+  - name: testing
+    kind: k8s_job
+    verify: true
+    depends_on: [work]
+    jobs:
+      - id: testing
+
+  - name: cleanup_early
+    kind: k8s_job
+    always: true
+    depends_on: [testing]
+    jobs:
+      - id: env-destroy
+
+  - name: touchpoint
+    kind: k8s_job
+    always: true
+    depends_on: [cleanup_early]
+    jobs:
+      - id: pr-touchpoint
+        primitive: pr_touchpoint
+
+  - name: touchpoint_gate
+    kind: touchpoint_gate
+    depends_on: [touchpoint]
+    jobs:
+      - id: pr-merge
+        primitive: pr_merge
+
+  - name: cleanup_final
+    kind: k8s_job
+    always: true
+    depends_on: [touchpoint_gate]
+    jobs:
+      - id: env-destroy-final
+```
+
+Runtime behavior:
+
+- When the workflow advances into the gate, Glimmung sets the Run state to
+  `review_required` and does NOT launch the gate's job. `review_required` is
+  an in-progress sub-state — locks stay held and the slot may still be alive
+  if the issue had `preserve_test_env=true`. Projections treat it as active.
+- The signal bus carries the reviewer's decision:
+  - `payload.kind: "approve"` releases the gate. Glimmung flips the Run back
+    to `in_progress`, appends an attempt for the gate phase, and launches the
+    managed `pr_merge` job. The job calls back through the normal completion
+    callback, the workflow advances to `cleanup_final`, and the Run terminates
+    `passed`. The Issue is closed on that terminal transition.
+  - `payload.kind: "reject"` follows today's PR-feedback recycle path: a new
+    cycle is created landing at the workflow's configured `pr.recycle_policy`
+    target.
+- The `pr_merge` primitive is idempotent. A second approve when the PR is
+  already merged returns `status: already_merged` and is a benign no-op.
+
+The cleanup-execution split:
+
+- `cleanup_early` runs as a normal always-run cleanup phase. If the issue has
+  `preserve_test_env=true`, the runner emits conclusion `"skipped"` for the
+  env-destroy job; the phase still advances and the run history shows the
+  deliberate skip. With `preserve_test_env=false` (the default) the env is
+  torn down here, before the reviewer sees the touchpoint.
+- `cleanup_final` always runs and always actually-runs (it is the catch-all
+  teardown after merge or abort). When `cleanup_early` already destroyed the
+  validation environment, `cleanup_final` is a no-op success that still
+  records the cleanup decision in the run history.
+
+The `pr_merge` primitive is also exposed as an admin repair/control endpoint:
+`POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/touchpoint/merge`
+(and the cycle-addressable form). Idempotent; uses the durable Run state as
+source of truth. Useful for triggering an approve from the API or repairing
+a stuck gate.
+
 ## Naming convention
 
 The reference names for the four mandatory phases are:

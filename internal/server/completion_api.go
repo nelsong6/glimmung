@@ -365,6 +365,14 @@ func processRunCompletion(
 			return nil
 		}
 		advancePlaybooksForTerminalRun(ctx, store, nativeLauncher, project, runID)
+		if state == "passed" {
+			// A gated run reached terminal "passed" by going through the
+			// touchpoint_gate (the only way a gated workflow advances is
+			// through approve → pr_merge). Close the issue so the
+			// review-surfaces contract invariant "Merged Touchpoints close
+			// their Issue in the normal isolated-PR case" holds.
+			closeIssueOnGatedTerminal(ctx, store, wf, run)
+		}
 		return &RunCallbackResult{
 			RunRef:            runRef,
 			Decision:          &verdictStr,
@@ -483,6 +491,42 @@ func markRunAborted(
 		IssueLockReleased: result.IssueLockReleased,
 		PRLockReleased:    result.PRLockReleased,
 	}
+}
+
+// closeIssueOnGatedTerminal flips the issue to state=closed when a workflow
+// that includes a touchpoint_gate phase reaches terminal "passed." That
+// state is only reachable by going through the gate (approve → pr_merge →
+// cleanup), so the merge has happened and the issue should reflect it.
+// Non-gated workflows leave their issue state alone — those workflows don't
+// own the merge decision and may have other reviewers in the loop.
+//
+// Best-effort: a failure to close the issue is logged but doesn't roll back
+// the run's terminal state. The admin endpoint or a follow-up PATCH can
+// reconcile by hand.
+func closeIssueOnGatedTerminal(ctx context.Context, store RunCompletionStore, wf *Workflow, run RunReplayData) {
+	if wf == nil || run.IssueNumber <= 0 {
+		return
+	}
+	hasGate := false
+	for _, phase := range wf.Phases {
+		if workflowPhaseKind(phase.Kind) == workflowKindTouchpointGate {
+			hasGate = true
+			break
+		}
+	}
+	if !hasGate {
+		return
+	}
+	issueStore, ok := any(store).(IssueStore)
+	if !ok || issueStore == nil {
+		return
+	}
+	closed := "closed"
+	_, _ = issueStore.PatchIssueByNumber(ctx, IssuePatch{
+		Project: run.Project,
+		Number:  run.IssueNumber,
+		State:   &closed,
+	})
 }
 
 func advancePlaybooksForTerminalRun(ctx context.Context, store RunCompletionStore, nativeLauncher NativeLauncher, project, runID string) {
