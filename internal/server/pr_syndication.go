@@ -135,8 +135,8 @@ func nativePRTouchpointByCallbackToken(store ReadStore, prClient PullRequestClie
 			writeInternalError(w, r, err, "read workflow failed")
 			return
 		}
-		if wf == nil || !wf.PR.Enabled {
-			writeJSON(w, http.StatusOK, PRPrimitiveResult{Status: "skipped", Reason: "workflow PR primitive is disabled"})
+		if wf == nil {
+			writeJSON(w, http.StatusOK, PRPrimitiveResult{Status: "skipped", Reason: "workflow not found for run"})
 			return
 		}
 		if ready, reason := prPrimitiveReadyForRun(wf, run); !ready {
@@ -395,8 +395,8 @@ func finalizeRunTouchpoint(w http.ResponseWriter, r *http.Request, store ReadSto
 		writeInternalError(w, r, err, "read workflow failed")
 		return
 	}
-	if wf == nil || !wf.PR.Enabled {
-		writeProblem(w, http.StatusConflict, "workflow PR primitive is disabled")
+	if wf == nil {
+		writeProblem(w, http.StatusConflict, "workflow not found for run")
 		return
 	}
 	if ready, reason := prPrimitiveReadyForRun(wf, run); !ready {

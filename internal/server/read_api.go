@@ -64,6 +64,14 @@ type PhaseSpec struct {
 	EvidenceVerificationGate bool              `json:"evidence_verification_gate"`
 	DependsOn                []string          `json:"depends_on"`
 	Jobs                     []NativeJobSpec   `json:"jobs"`
+	// SkipWhenPreserveTestEnv flags an always-run phase as conditional.
+	// When the originating Issue's preserve_test_env flag is true (and
+	// thus the Run's PreserveTestEnv snapshot is true), Glimmung
+	// synthesizes a "skipped" attempt for this phase instead of
+	// launching its jobs. The workflow advances past the skipped phase
+	// like a success. Used to gate the early cleanup phase so the
+	// validation environment stays alive through the touchpoint gate.
+	SkipWhenPreserveTestEnv bool `json:"skip_when_preserve_test_env,omitempty"`
 }
 
 type RecyclePolicy struct {
@@ -105,8 +113,12 @@ type NativeCheckoutSpec struct {
 	Path string `json:"path,omitempty"`
 }
 
+// PrPrimitive declares the workflow's PR recycle policy. Every Glimmung
+// workflow ends in a human-reviewed PR — there is no opt-out — so the
+// previous "enabled" toggle has been removed per migration-policy: there
+// was no documented product scenario for a workflow without a PR, so the
+// flag was a compatibility surface rather than a real choice.
 type PrPrimitive struct {
-	Enabled       bool           `json:"enabled"`
 	RecyclePolicy *RecyclePolicy `json:"recycle_policy"`
 }
 

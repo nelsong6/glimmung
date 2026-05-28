@@ -127,7 +127,7 @@ func TestIssueGraphByNumberBuildsRunAttemptAndTouchpointNodes(t *testing.T) {
 				},
 				{Name: "agent-execute", DependsOn: []string{"env-prep"}},
 			},
-			PR: PrPrimitive{Enabled: true},
+			PR: PrPrimitive{},
 		}}},
 		issue: IssueDetail{
 			Ref:     "glimmung#17",
@@ -302,7 +302,7 @@ func TestRunCycleGraphProjectionUsesCanonicalStateAndNativeActivity(t *testing.T
 					Jobs: []NativeJobSpec{{ID: "agent"}},
 				},
 			},
-			PR: PrPrimitive{Enabled: true},
+			PR: PrPrimitive{},
 		}}},
 		issue: IssueDetail{
 			Ref:     "glimmung#17",
@@ -405,7 +405,6 @@ func TestWorkflowTopologyForRunMarksRecycleOriginArrowActive(t *testing.T) {
 			},
 		},
 		PR: PrPrimitive{
-			Enabled: true,
 			RecyclePolicy: &RecyclePolicy{
 				MaxAttempts: 3,
 				On:          []string{"changes_requested"},
@@ -450,7 +449,6 @@ func TestWorkflowTopologyForRunMarksTouchpointRecycleOriginArrowActive(t *testin
 			},
 		},
 		PR: PrPrimitive{
-			Enabled: true,
 			RecyclePolicy: &RecyclePolicy{
 				MaxAttempts: 3,
 				On:          []string{"changes_requested"},
@@ -478,7 +476,7 @@ func TestWorkflowTopologyForRunKeepsManualEntryActiveForDispatch(t *testing.T) {
 		Project: "ambience",
 		Name:    "default",
 		Phases:  []PhaseSpec{{Name: "env-prep", Kind: "k8s_job"}},
-		PR:      PrPrimitive{Enabled: true},
+		PR:      PrPrimitive{},
 	}
 	origin := "dispatch"
 

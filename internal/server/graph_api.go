@@ -1107,7 +1107,9 @@ func workflowTopologyFromWorkflow(workflow Workflow) RunProjectionTopology {
 			Kind:        "touchpoint_recycle",
 		})
 	}
-	topology.Terminal.Enabled = workflow.PR.Enabled
+	// Every workflow ends in a human-reviewed PR; the terminal review
+	// surface is always enabled in the projection.
+	topology.Terminal.Enabled = true
 	return topology
 }
 

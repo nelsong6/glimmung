@@ -208,7 +208,7 @@ func TestCanonicalWorkflowCanonicalizesDeclaredPRTouchpointPrimitive(t *testing.
 	wf := Workflow{
 		Project: "ambience",
 		Name:    "agent-run",
-		PR:      PrPrimitive{Enabled: true},
+		PR:      PrPrimitive{},
 		Phases: []PhaseSpec{
 			{Name: "work", Jobs: []NativeJobSpec{{ID: "work"}}},
 			{Name: "cleanup", Always: true, DependsOn: []string{"work"}, Jobs: []NativeJobSpec{
@@ -242,15 +242,16 @@ func TestCanonicalWorkflowCanonicalizesDeclaredPRTouchpointPrimitive(t *testing.
 	}
 }
 
-func TestValidateWorkflowRegisterRequiresDeclaredPRTouchpointWhenPREnabled(t *testing.T) {
+func TestValidateWorkflowRegisterRequiresPRTouchpoint(t *testing.T) {
 	req := WorkflowRegister{
 		Project: "ambience",
 		Name:    "agent-run",
-		PR:      PrPrimitive{Enabled: true},
+		PR:      PrPrimitive{},
 		Phases: []PhaseSpec{
 			{Name: "prep", Jobs: []NativeJobSpec{{ID: "prep"}}},
 			{Name: "verify", Verify: true, DependsOn: []string{"prep"}, Jobs: []NativeJobSpec{{ID: "verify"}}},
-			{Name: "cleanup", Always: true, DependsOn: []string{"verify"}, Jobs: []NativeJobSpec{{ID: "cleanup"}}},
+			{Name: "touchpoint_gate", Kind: "touchpoint_gate", DependsOn: []string{"verify"}, Jobs: []NativeJobSpec{{ID: "pr-merge", Primitive: JobPrimitivePRMerge}}},
+			{Name: "cleanup", Always: true, DependsOn: []string{"touchpoint_gate"}, Jobs: []NativeJobSpec{{ID: "cleanup"}}},
 		},
 	}
 	normalizeWorkflowRegister(&req)
@@ -265,11 +266,12 @@ func TestValidateWorkflowRegisterRequiresPRTouchpointInAlwaysPhase(t *testing.T)
 	req := WorkflowRegister{
 		Project: "ambience",
 		Name:    "agent-run",
-		PR:      PrPrimitive{Enabled: true},
+		PR:      PrPrimitive{},
 		Phases: []PhaseSpec{
 			{Name: "prep", Jobs: []NativeJobSpec{{ID: "prep"}}},
 			{Name: "verify", Verify: true, DependsOn: []string{"prep"}, Jobs: []NativeJobSpec{{ID: "publish-pr", Primitive: JobPrimitivePRTouchpoint}}},
-			{Name: "cleanup", Always: true, DependsOn: []string{"verify"}, Jobs: []NativeJobSpec{{ID: "cleanup"}}},
+			{Name: "touchpoint_gate", Kind: "touchpoint_gate", DependsOn: []string{"verify"}, Jobs: []NativeJobSpec{{ID: "pr-merge", Primitive: JobPrimitivePRMerge}}},
+			{Name: "cleanup", Always: true, DependsOn: []string{"touchpoint_gate"}, Jobs: []NativeJobSpec{{ID: "cleanup"}}},
 		},
 	}
 	normalizeWorkflowRegister(&req)
@@ -280,11 +282,34 @@ func TestValidateWorkflowRegisterRequiresPRTouchpointInAlwaysPhase(t *testing.T)
 	}
 }
 
+func TestValidateWorkflowRegisterAllowsMultiplePrTouchpointInDifferentAlwaysPhases(t *testing.T) {
+	// Two pr_touchpoint primitives is invalid even without a gate.
+	req := WorkflowRegister{
+		Project: "ambience",
+		Name:    "agent-run",
+		PR:      PrPrimitive{},
+		Phases: []PhaseSpec{
+			{Name: "prep", Jobs: []NativeJobSpec{{ID: "prep"}}},
+			{Name: "verify", Verify: true, DependsOn: []string{"prep"}, Jobs: []NativeJobSpec{{ID: "verify"}}},
+			{Name: "cleanup", Always: true, DependsOn: []string{"verify"}, Jobs: []NativeJobSpec{
+				{ID: "publish-pr-a", Primitive: JobPrimitivePRTouchpoint},
+				{ID: "publish-pr-b", Primitive: JobPrimitivePRTouchpoint},
+			}},
+		},
+	}
+	normalizeWorkflowRegister(&req)
+
+	err := ValidateWorkflowRegister(req)
+	if err == nil || !strings.Contains(err.Error(), "exactly one is allowed") {
+		t.Fatalf("ValidateWorkflowRegister err=%v, want multiple-pr_touchpoint error", err)
+	}
+}
+
 func TestValidateWorkflowRegisterAcceptsTouchpointGatePhase(t *testing.T) {
 	req := WorkflowRegister{
 		Project: "ambience",
 		Name:    "agent-run",
-		PR:      PrPrimitive{Enabled: true},
+		PR:      PrPrimitive{},
 		Phases: []PhaseSpec{
 			{Name: "prep", Jobs: []NativeJobSpec{{ID: "prep"}}},
 			{Name: "verify", Verify: true, DependsOn: []string{"prep"}, Jobs: []NativeJobSpec{{ID: "verify"}}},
@@ -501,7 +526,7 @@ func TestRegisterWorkflowRejectsEvidenceGateWithoutVerifyProducer(t *testing.T) 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "testing") {
+	if !strings.Contains(rec.Body.String(), "verify") {
 		t.Fatalf("body=%s", rec.Body.String())
 	}
 }
@@ -526,7 +551,7 @@ func TestRegisterWorkflowRejectsBadPhaseInputRef(t *testing.T) {
 func TestPatchWorkflowRequiresAdmin(t *testing.T) {
 	handler := NewWithDependencies(Settings{}, &fakeWorkflowWriteStore{}, nil)
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/v1/workflows/ambience/agent-run", strings.NewReader(`{"pr_enabled":true}`)))
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/v1/workflows/ambience/agent-run", strings.NewReader(`{"budget_total":50}`)))
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d, want 503", rec.Code)
@@ -543,7 +568,7 @@ func TestPatchWorkflowPatchesAndReturnsWorkflow(t *testing.T) {
 	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{})
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPatch, "/v1/workflows/ambience/agent-run", strings.NewReader(`{"pr_enabled":true,"budget_total":50}`))
+	req := httptest.NewRequest(http.MethodPatch, "/v1/workflows/ambience/agent-run", strings.NewReader(`{"budget_total":50}`))
 	req.Header.Set("Authorization", "Bearer token")
 	handler.ServeHTTP(rec, req)
 
@@ -552,9 +577,6 @@ func TestPatchWorkflowPatchesAndReturnsWorkflow(t *testing.T) {
 	}
 	if store.project != "ambience" || store.name != "agent-run" {
 		t.Fatalf("project=%q name=%q", store.project, store.name)
-	}
-	if store.patchReq.PREnabled == nil || *store.patchReq.PREnabled != true {
-		t.Fatalf("pr_enabled=%v", store.patchReq.PREnabled)
 	}
 	if store.patchReq.BudgetTotal == nil || *store.patchReq.BudgetTotal != 50 {
 		t.Fatalf("budget_total=%v", store.patchReq.BudgetTotal)

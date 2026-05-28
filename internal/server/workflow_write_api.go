@@ -54,8 +54,11 @@ type WorkflowPatchStore interface {
 	PatchWorkflow(ctx context.Context, project string, name string, req WorkflowPatchRequest) (Workflow, error)
 }
 
+// WorkflowPatchRequest carries the live rollout knobs that can change
+// without re-registering the workflow's structural shape. Today only
+// the budget is patchable; the historical pr_enabled toggle was deleted
+// per migration-policy.
 type WorkflowPatchRequest struct {
-	PREnabled   *bool    `json:"pr_enabled"`
 	BudgetTotal *float64 `json:"budget_total"`
 }
 
@@ -257,6 +260,20 @@ func ValidateWorkflowRegister(req WorkflowRegister) error {
 				return ValidationError{Message: fmt.Sprintf("workflow %s always phase %q cannot declare inputs; cleanup must be abort-safe", req.Name, name)}
 			}
 		}
+		if phase.SkipWhenPreserveTestEnv {
+			if !phase.Always {
+				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q sets skip_when_preserve_test_env but is not an always-run phase; the skip is only meaningful for cleanup phases", req.Name, name)}
+			}
+			if phase.Verify {
+				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q cannot set both verify and skip_when_preserve_test_env", req.Name, name)}
+			}
+			if phase.EvidenceVerificationGate {
+				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q cannot set both evidence_verification_gate and skip_when_preserve_test_env", req.Name, name)}
+			}
+			if workflowPhaseKind(phase.Kind) == workflowKindTouchpointGate {
+				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q is a touchpoint_gate and cannot also be skip_when_preserve_test_env", req.Name, name)}
+			}
+		}
 		if workflowPhaseKind(phase.Kind) == workflowKindTouchpointGate {
 			if phase.Verify {
 				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q is a touchpoint_gate and cannot also be the verify phase", req.Name, name)}
@@ -323,22 +340,30 @@ func ValidateWorkflowRegister(req WorkflowRegister) error {
 			Outputs: phase.Outputs,
 		})
 	}
-	if !hasTesting || !hasCleanup {
-		missing := make([]string, 0, 2)
-		if !hasTesting {
-			missing = append(missing, "testing")
+	touchpointGateCount := 0
+	for _, phase := range req.Phases {
+		if workflowPhaseKind(phase.Kind) == workflowKindTouchpointGate {
+			touchpointGateCount++
 		}
-		if !hasCleanup {
-			missing = append(missing, "cleanup")
-		}
+	}
+	missing := make([]string, 0, 2)
+	if !hasTesting {
+		missing = append(missing, "verify")
+	}
+	if !hasCleanup {
+		missing = append(missing, "always-run cleanup")
+	}
+	if len(missing) > 0 {
 		return ValidationError{Message: "workflow " + req.Name + " is missing required phases: " + strings.Join(missing, ", ")}
 	}
-	if req.PR.Enabled {
-		if prTouchpointJobs != 1 {
-			return ValidationError{Message: fmt.Sprintf("workflow %s has pr.enabled=true and must declare exactly one %q job primitive in an always phase", req.Name, JobPrimitivePRTouchpoint)}
-		}
-	} else if prTouchpointJobs > 0 {
-		return ValidationError{Message: fmt.Sprintf("workflow %s declares %q job primitive but pr.enabled is false", req.Name, JobPrimitivePRTouchpoint)}
+	if touchpointGateCount > 1 {
+		return ValidationError{Message: fmt.Sprintf("workflow %s declares %d touchpoint_gate phases; exactly one is allowed", req.Name, touchpointGateCount)}
+	}
+	if touchpointGateCount == 1 && prTouchpointJobs != 1 {
+		return ValidationError{Message: fmt.Sprintf("workflow %s has a touchpoint_gate and must declare exactly one %q job primitive in an always-run phase (got %d)", req.Name, JobPrimitivePRTouchpoint, prTouchpointJobs)}
+	}
+	if prTouchpointJobs > 1 {
+		return ValidationError{Message: fmt.Sprintf("workflow %s declares %d %q primitives; exactly one is allowed", req.Name, prTouchpointJobs, JobPrimitivePRTouchpoint)}
 	}
 	if err := phaserefs.Validate(phaseRefs); err != nil {
 		return ValidationError{Message: err.Error()}
