@@ -259,7 +259,7 @@ func prPrimitiveReadyForRun(wf *Workflow, run RunReplayData) (bool, string) {
 	if latestPrimary.Decision == string(decision.Advance) {
 		return true, ""
 	}
-	if latestPrimary.Decision == "" && latestPrimary.Completed && latestPrimary.Conclusion == "success" {
+	if latestPrimary.Decision == "" && latestPrimary.Completed && decision.IsAdvanceConclusion(latestPrimary.Conclusion) {
 		return true, ""
 	}
 	return false, "latest primary phase has not advanced"

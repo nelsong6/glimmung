@@ -91,7 +91,7 @@ func Decide(run Run, workflow Workflow, attemptIndex ...int) (decision RunDecisi
 	}
 
 	if phaseSpec.EvidenceVerificationGate {
-		if last.Conclusion == "success" {
+		if IsAdvanceConclusion(last.Conclusion) {
 			return Advance, nil
 		}
 		if run.CumulativeCostUSD >= run.Budget.Total {
@@ -108,14 +108,14 @@ func Decide(run Run, workflow Workflow, attemptIndex ...int) (decision RunDecisi
 	}
 
 	if !phaseSpec.Verify {
-		if last.Conclusion == "success" {
+		if IsAdvanceConclusion(last.Conclusion) {
 			return Advance, nil
 		}
 		return AbortMalformed, nil
 	}
 
 	if next, ok := nextPhaseAfter(workflow, phaseSpec.Name); ok && next.EvidenceVerificationGate {
-		if last.Conclusion == "success" {
+		if IsAdvanceConclusion(last.Conclusion) {
 			return Advance, nil
 		}
 		return AbortMalformed, nil
@@ -256,4 +256,19 @@ func contains(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+// IsAdvanceConclusion reports whether a phase conclusion should be treated
+// as a forward-advance signal by the decision engine. "success" is the
+// canonical advance; "skipped" advances exactly like success and is emitted
+// by phases that were scheduled but deliberately did not execute (for
+// example, the early cleanup phase when the issue's preserve_test_env flag
+// is set so the validation environment stays alive through review).
+func IsAdvanceConclusion(conclusion string) bool {
+	switch conclusion {
+	case "success", "skipped":
+		return true
+	default:
+		return false
+	}
 }

@@ -524,6 +524,41 @@ func TestNativeRunCompletedByCallbackTokenAdvancePassed(t *testing.T) {
 	}
 }
 
+func TestNativeRunCompletedByCallbackTokenAdvanceOnSkipped(t *testing.T) {
+	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
+	store.run = runDataForCompletion("impl")
+	store.wf = singlePhaseWorkflowForCompletion("impl", false)
+	store.terminalResult = AbortRunResult{State: "passed", RunRef: "proj#7/runs/1"}
+	rec := httptest.NewRecorder()
+	newCompletionHandler(store, nil).ServeHTTP(rec, nativeCompletionRequest("tok", completedJob("impl", "skipped", nil, nil)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	result := readCallbackResult(t, rec)
+	if result.Decision == nil || *result.Decision != "advance" {
+		got := "<nil>"
+		if result.Decision != nil {
+			got = *result.Decision
+		}
+		t.Fatalf("decision=%q, want advance for skipped conclusion", got)
+	}
+}
+
+func TestIsAdvanceConclusion(t *testing.T) {
+	advance := []string{"success", "skipped"}
+	hold := []string{"", "failure", "cancelled", "timed_out", "fail", "error"}
+	for _, c := range advance {
+		if !decision.IsAdvanceConclusion(c) {
+			t.Errorf("decision.IsAdvanceConclusion(%q)=false, want true", c)
+		}
+	}
+	for _, c := range hold {
+		if decision.IsAdvanceConclusion(c) {
+			t.Errorf("decision.IsAdvanceConclusion(%q)=true, want false", c)
+		}
+	}
+}
+
 func TestNativeRunCompletedByCallbackTokenAdvanceReviewRequired(t *testing.T) {
 	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
 	store.run = runDataForCompletion("cleanup")

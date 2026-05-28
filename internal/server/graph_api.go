@@ -1526,6 +1526,8 @@ func projectionPhaseState(run RunReport, phaseName string, attempts []RunReportA
 		switch *latest.Conclusion {
 		case "success":
 			return "succeeded"
+		case "skipped":
+			return "skipped"
 		case "cancelled", "failure", "timed_out":
 			return "failed"
 		}
@@ -1838,6 +1840,8 @@ func projectionAttemptState(attempt RunReportAttempt) string {
 		switch *attempt.Conclusion {
 		case "success":
 			return "succeeded"
+		case "skipped":
+			return "skipped"
 		case "cancelled", "failure", "timed_out":
 			return "failed"
 		}
@@ -2282,6 +2286,8 @@ func workflowRunStepState(attempt RunReportAttempt) string {
 			switch *attempt.Conclusion {
 			case "success":
 				return "succeeded"
+			case "skipped":
+				return "skipped"
 			case "cancelled", "failure", "timed_out":
 				return "failed"
 			}

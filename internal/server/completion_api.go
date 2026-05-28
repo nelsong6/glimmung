@@ -586,7 +586,7 @@ func completedAdvancePhases(run RunReplayData) map[string]bool {
 		if isAbortDecision(attempt.Decision) {
 			continue
 		}
-		if attempt.Decision == "" && attempt.Completed && attempt.Conclusion == "success" {
+		if attempt.Decision == "" && attempt.Completed && decision.IsAdvanceConclusion(attempt.Conclusion) {
 			advanced[phase] = true
 		}
 	}
