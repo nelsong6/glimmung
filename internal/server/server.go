@@ -362,9 +362,18 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	mux.Handle("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/replay", requireAdmin(adminAuthenticator, http.HandlerFunc(replayRunDecisionByNumber(store))))
 	mux.Handle("POST /v1/runs/dispatch", requireAdmin(adminAuthenticator, http.HandlerFunc(dispatchRunHandler(store, nativeLauncher))))
 	mux.HandleFunc("POST /v1/webhook/github", githubWebhook(settings))
+	// Per-run OpenGraph image: public, unauthenticated SVG card matching
+	// the SPA's run-URL shape so unfurlers (Discord, Slack, etc.) get a
+	// scrapeable picture of the run's phase graph. See og_run.go.
+	mux.HandleFunc(
+		"GET /og/runs/{project}/{issue_number}/{run_number}",
+		runOGImage(store),
+	)
 	if staticRoots(settings).enabled() {
 		mux.HandleFunc("GET /assets/", serveAsset(settings))
-		mux.HandleFunc("GET /", serveSPA(settings))
+		// serveSPAWithOG falls back to serveSPA for non-run paths and any
+		// run path it can't enrich. See og_run.go.
+		mux.HandleFunc("GET /", serveSPAWithOG(settings, store))
 	}
 	return metrics.Middleware(rejectUnsafeArtifactPaths(mux))
 }
