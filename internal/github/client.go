@@ -173,6 +173,93 @@ func (c *Client) EnsurePullRequest(ctx context.Context, req PullRequestEnsureReq
 	return PullRequest{}, err
 }
 
+// PullRequestMergeRequest carries the parameters for an idempotent merge.
+type PullRequestMergeRequest struct {
+	Repo        string
+	Number      int
+	CommitTitle string
+	MergeMethod string // "merge" | "squash" | "rebase"; defaults to "merge".
+}
+
+// PullRequestMergeResult records the outcome of an attempt at merging.
+//
+// AlreadyMerged is true when the PR was already merged on GitHub when the
+// request arrived; the operation is a no-op success in that case.
+type PullRequestMergeResult struct {
+	Number        int
+	HTMLURL       string
+	State         string
+	MergeCommitSHA string
+	AlreadyMerged bool
+}
+
+// MergePullRequest idempotently merges the target PR.
+//
+// The flow:
+//  1. GET /repos/{repo}/pulls/{number} — if pull.merged is true, return
+//     AlreadyMerged=true. Treat that as a successful no-op.
+//  2. PUT /repos/{repo}/pulls/{number}/merge — perform the merge.
+//
+// GitHub returns 405 Method Not Allowed when a PR isn't mergeable (open
+// blocking review, failing required check, conflicts). The error is bubbled
+// up so the caller can decide whether to retry or surface the reason.
+func (c *Client) MergePullRequest(ctx context.Context, req PullRequestMergeRequest) (PullRequestMergeResult, error) {
+	req.Repo = strings.TrimSpace(req.Repo)
+	if req.Repo == "" {
+		return PullRequestMergeResult{}, fmt.Errorf("repo is required")
+	}
+	if req.Number < 1 {
+		return PullRequestMergeResult{}, fmt.Errorf("pull request number must be a positive integer")
+	}
+	method := strings.TrimSpace(strings.ToLower(req.MergeMethod))
+	switch method {
+	case "", "merge":
+		method = "merge"
+	case "squash", "rebase":
+	default:
+		return PullRequestMergeResult{}, fmt.Errorf("merge_method must be one of merge, squash, rebase; got %q", req.MergeMethod)
+	}
+
+	// 1. Idempotency probe: is the PR already merged?
+	getURL := fmt.Sprintf("https://api.github.com/repos/%s/pulls/%d", req.Repo, req.Number)
+	var current githubPullRequestDetail
+	if err := c.githubJSON(ctx, http.MethodGet, getURL, nil, &current); err != nil {
+		return PullRequestMergeResult{}, fmt.Errorf("read pull request: %w", err)
+	}
+	if current.Merged {
+		return PullRequestMergeResult{
+			Number:         current.Number,
+			HTMLURL:        current.HTMLURL,
+			State:          current.State,
+			MergeCommitSHA: current.MergeCommitSHA,
+			AlreadyMerged:  true,
+		}, nil
+	}
+
+	// 2. Perform the merge.
+	mergeURL := fmt.Sprintf("https://api.github.com/repos/%s/pulls/%d/merge", req.Repo, req.Number)
+	body := map[string]any{
+		"merge_method": method,
+	}
+	if title := strings.TrimSpace(req.CommitTitle); title != "" {
+		body["commit_title"] = title
+	}
+	var resp githubMergeResponse
+	if err := c.githubJSON(ctx, http.MethodPut, mergeURL, body, &resp); err != nil {
+		return PullRequestMergeResult{}, fmt.Errorf("merge pull request: %w", err)
+	}
+	if !resp.Merged {
+		return PullRequestMergeResult{}, fmt.Errorf("GitHub merge returned merged=false: %s", strings.TrimSpace(resp.Message))
+	}
+	return PullRequestMergeResult{
+		Number:         req.Number,
+		HTMLURL:        current.HTMLURL,
+		State:          "closed",
+		MergeCommitSHA: resp.SHA,
+		AlreadyMerged:  false,
+	}, nil
+}
+
 func (c *Client) findOpenPullRequest(ctx context.Context, repo, head string) (PullRequest, bool, error) {
 	owner, _, ok := strings.Cut(repo, "/")
 	if !ok || owner == "" {
@@ -263,6 +350,24 @@ type githubPullRequest struct {
 	Base struct {
 		Ref string `json:"ref"`
 	} `json:"base"`
+}
+
+// githubPullRequestDetail extends githubPullRequest with the merged/merge_commit
+// fields returned by GET /repos/{repo}/pulls/{number}; the list endpoint
+// doesn't return them and the create endpoint returns merged=false always.
+type githubPullRequestDetail struct {
+	Number         int    `json:"number"`
+	HTMLURL        string `json:"html_url"`
+	State          string `json:"state"`
+	Merged         bool   `json:"merged"`
+	MergeCommitSHA string `json:"merge_commit_sha"`
+}
+
+// githubMergeResponse is the response shape of PUT pulls/{number}/merge.
+type githubMergeResponse struct {
+	SHA     string `json:"sha"`
+	Merged  bool   `json:"merged"`
+	Message string `json:"message"`
 }
 
 func pullRequestFromGitHub(pr githubPullRequest) PullRequest {

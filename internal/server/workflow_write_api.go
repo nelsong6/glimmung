@@ -258,9 +258,6 @@ func ValidateWorkflowRegister(req WorkflowRegister) error {
 			}
 		}
 		if workflowPhaseKind(phase.Kind) == workflowKindTouchpointGate {
-			if len(phase.Jobs) > 0 {
-				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q is a touchpoint_gate and must declare zero jobs", req.Name, name)}
-			}
 			if phase.Verify {
 				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q is a touchpoint_gate and cannot also be the verify phase", req.Name, name)}
 			}
@@ -272,6 +269,9 @@ func ValidateWorkflowRegister(req WorkflowRegister) error {
 			}
 			if phase.RecyclePolicy != nil {
 				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q is a touchpoint_gate and cannot declare a recycle_policy; reject is handled by the workflow-level pr.recycle_policy", req.Name, name)}
+			}
+			if len(phase.Jobs) != 1 || strings.TrimSpace(phase.Jobs[0].Primitive) != JobPrimitivePRMerge {
+				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q is a touchpoint_gate and must declare exactly one job with primitive %q", req.Name, name, JobPrimitivePRMerge)}
 			}
 		}
 		if len(phase.Jobs) > 0 {
@@ -291,6 +291,10 @@ func ValidateWorkflowRegister(req WorkflowRegister) error {
 					prTouchpointJobs++
 					if !phase.Always {
 						return ValidationError{Message: fmt.Sprintf("workflow %s phase %q job %q primitive %q must be in an always phase", req.Name, name, job.ID, JobPrimitivePRTouchpoint)}
+					}
+				case JobPrimitivePRMerge:
+					if workflowPhaseKind(phase.Kind) != workflowKindTouchpointGate {
+						return ValidationError{Message: fmt.Sprintf("workflow %s phase %q job %q primitive %q must live inside a touchpoint_gate phase", req.Name, name, job.ID, JobPrimitivePRMerge)}
 					}
 				default:
 					return ValidationError{Message: fmt.Sprintf("workflow %s phase %q job %q declares unknown primitive %q", req.Name, name, job.ID, job.Primitive)}

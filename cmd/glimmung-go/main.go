@@ -267,6 +267,25 @@ func (a *gitHubClientAdapter) EnsurePullRequest(ctx context.Context, req server.
 	}, nil
 }
 
+func (a *gitHubClientAdapter) MergePullRequest(ctx context.Context, req server.PullRequestMergeRequest) (server.PullRequestMergeResult, error) {
+	result, err := a.client.MergePullRequest(ctx, githubclient.PullRequestMergeRequest{
+		Repo:        req.Repo,
+		Number:      req.Number,
+		CommitTitle: req.CommitTitle,
+		MergeMethod: req.MergeMethod,
+	})
+	if err != nil {
+		return server.PullRequestMergeResult{}, err
+	}
+	return server.PullRequestMergeResult{
+		Number:         result.Number,
+		HTMLURL:        result.HTMLURL,
+		State:          result.State,
+		MergeCommitSHA: result.MergeCommitSHA,
+		AlreadyMerged:  result.AlreadyMerged,
+	}, nil
+}
+
 func buildGitHubClient(settings server.Settings) server.WorkflowSyncClient {
 	if settings.GitHubAppID == "" || settings.GitHubAppInstallationID == "" || settings.GitHubAppPrivateKey == "" {
 		return nil

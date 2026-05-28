@@ -288,7 +288,7 @@ func TestValidateWorkflowRegisterAcceptsTouchpointGatePhase(t *testing.T) {
 		Phases: []PhaseSpec{
 			{Name: "prep", Jobs: []NativeJobSpec{{ID: "prep"}}},
 			{Name: "verify", Verify: true, DependsOn: []string{"prep"}, Jobs: []NativeJobSpec{{ID: "verify"}}},
-			{Name: "touchpoint_gate", Kind: "touchpoint_gate", DependsOn: []string{"verify"}},
+			{Name: "touchpoint_gate", Kind: "touchpoint_gate", DependsOn: []string{"verify"}, Jobs: []NativeJobSpec{{ID: "pr-merge", Primitive: JobPrimitivePRMerge}}},
 			{Name: "cleanup", Always: true, DependsOn: []string{"touchpoint_gate"}, Jobs: []NativeJobSpec{{ID: "cleanup"}, {ID: "publish-pr", Primitive: JobPrimitivePRTouchpoint}}},
 		},
 	}
@@ -299,22 +299,40 @@ func TestValidateWorkflowRegisterAcceptsTouchpointGatePhase(t *testing.T) {
 	}
 }
 
-func TestValidateWorkflowRegisterRejectsTouchpointGateWithJobs(t *testing.T) {
+func TestValidateWorkflowRegisterRejectsTouchpointGateWithoutMergeJob(t *testing.T) {
 	req := WorkflowRegister{
 		Project: "ambience",
 		Name:    "agent-run",
 		Phases: []PhaseSpec{
 			{Name: "prep", Jobs: []NativeJobSpec{{ID: "prep"}}},
 			{Name: "verify", Verify: true, DependsOn: []string{"prep"}, Jobs: []NativeJobSpec{{ID: "verify"}}},
-			{Name: "touchpoint_gate", Kind: "touchpoint_gate", DependsOn: []string{"verify"}, Jobs: []NativeJobSpec{{ID: "rogue", Image: "x:latest"}}},
+			{Name: "touchpoint_gate", Kind: "touchpoint_gate", DependsOn: []string{"verify"}},
 			{Name: "cleanup", Always: true, DependsOn: []string{"touchpoint_gate"}, Jobs: []NativeJobSpec{{ID: "cleanup"}}},
 		},
 	}
 	normalizeWorkflowRegister(&req)
 
 	err := ValidateWorkflowRegister(req)
-	if err == nil || !strings.Contains(err.Error(), "must declare zero jobs") {
-		t.Fatalf("ValidateWorkflowRegister err=%v, want zero-jobs error", err)
+	if err == nil || !strings.Contains(err.Error(), "must declare exactly one job with primitive \"pr_merge\"") {
+		t.Fatalf("ValidateWorkflowRegister err=%v, want missing-pr_merge error", err)
+	}
+}
+
+func TestValidateWorkflowRegisterRejectsPRMergeOutsideGate(t *testing.T) {
+	req := WorkflowRegister{
+		Project: "ambience",
+		Name:    "agent-run",
+		Phases: []PhaseSpec{
+			{Name: "prep", Jobs: []NativeJobSpec{{ID: "prep"}, {ID: "rogue-merge", Primitive: JobPrimitivePRMerge}}},
+			{Name: "verify", Verify: true, DependsOn: []string{"prep"}, Jobs: []NativeJobSpec{{ID: "verify"}}},
+			{Name: "cleanup", Always: true, DependsOn: []string{"verify"}, Jobs: []NativeJobSpec{{ID: "cleanup"}}},
+		},
+	}
+	normalizeWorkflowRegister(&req)
+
+	err := ValidateWorkflowRegister(req)
+	if err == nil || !strings.Contains(err.Error(), "must live inside a touchpoint_gate phase") {
+		t.Fatalf("ValidateWorkflowRegister err=%v, want pr_merge-outside-gate error", err)
 	}
 }
 

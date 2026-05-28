@@ -7,8 +7,11 @@ const (
 	EvidenceGateStepSlug = "evaluate-verdict"
 	PRTouchpointJobID    = "pr-touchpoint"
 	PRTouchpointStepSlug = "ensure-pr-touchpoint"
+	PRMergeJobID         = "pr-merge"
+	PRMergeStepSlug      = "merge-pull-request"
 
 	JobPrimitivePRTouchpoint = "pr_touchpoint"
+	JobPrimitivePRMerge      = "pr_merge"
 )
 
 const evidenceGateRunScript = `set -Eeuo pipefail
@@ -28,6 +31,45 @@ if [ "${status}" = "pass" ]; then
 fi
 exit 1
 	`
+
+const prMergeRunScript = `set -Eeuo pipefail
+if [ -z "${GLIMMUNG_PR_MERGE_URL:-}" ]; then
+  echo "GLIMMUNG_PR_MERGE_URL is not configured" >&2
+  exit 2
+fi
+echo "Merging PR for ${GLIMMUNG_RUN_REF:-unknown run}"
+response="$(mktemp)"
+status="$(curl -sS -o "${response}" -w '%{http_code}' -X POST "${GLIMMUNG_PR_MERGE_URL}")" || {
+  code="$?"
+  echo "PR merge request failed with curl exit ${code}" >&2
+  exit "${code}"
+}
+cat "${response}" | jq .
+if [ "${status}" -lt 200 ] || [ "${status}" -ge 300 ]; then
+  echo "PR merge request returned HTTP ${status}" >&2
+  exit 1
+fi
+result_status="$(jq -r '.status // empty' "${response}")"
+case "${result_status}" in
+  merged)
+    echo "PR merged: $(jq -r '.merge_commit_sha // ""' "${response}")"
+    ;;
+  already_merged)
+    echo "PR was already merged (idempotent success)"
+    ;;
+  *)
+    echo "PR merge returned unexpected status '${result_status}'" >&2
+    exit 2
+    ;;
+esac
+pr_number="$(jq -r '.pr_number // empty' "${response}")"
+merge_commit="$(jq -r '.merge_commit_sha // empty' "${response}")"
+{
+  if [ -n "${pr_number}" ]; then printf 'pr_number=%s\n' "${pr_number}"; fi
+  if [ -n "${merge_commit}" ]; then printf 'merge_commit_sha=%s\n' "${merge_commit}"; fi
+  printf 'merge_status=%s\n' "${result_status}"
+} >>"${GLIMMUNG_OUTPUT_FILE}"
+`
 
 const prTouchpointRunScript = `set -Eeuo pipefail
 if [ -z "${GLIMMUNG_PR_TOUCHPOINT_URL:-}" ]; then
@@ -99,6 +141,8 @@ func CanonicalNativeJob(job NativeJobSpec) NativeJobSpec {
 	switch strings.TrimSpace(job.Primitive) {
 	case JobPrimitivePRTouchpoint:
 		return canonicalPRTouchpointJob(&job)
+	case JobPrimitivePRMerge:
+		return canonicalPRMergeJob(&job)
 	default:
 		return job
 	}
@@ -131,6 +175,38 @@ func canonicalEvidenceGateJob(phase PhaseSpec) NativeJobSpec {
 			Title: &title,
 			Type:  "run",
 			Run:   evidenceGateRunScript,
+			Shell: "bash",
+		}},
+	}
+}
+
+func canonicalPRMergeJob(existing *NativeJobSpec) NativeJobSpec {
+	jobID := PRMergeJobID
+	name := "PR merge"
+	timeout := 120
+	if existing != nil {
+		if id := strings.TrimSpace(existing.ID); id != "" {
+			jobID = id
+		}
+		if existing.Name != nil && strings.TrimSpace(*existing.Name) != "" {
+			name = strings.TrimSpace(*existing.Name)
+		}
+		if existing.TimeoutSeconds != nil && *existing.TimeoutSeconds > 0 {
+			timeout = *existing.TimeoutSeconds
+		}
+	}
+	title := "Idempotently merge the touchpoint PR"
+	return NativeJobSpec{
+		ID:             jobID,
+		Name:           &name,
+		Primitive:      JobPrimitivePRMerge,
+		Managed:        true,
+		TimeoutSeconds: &timeout,
+		Steps: []NativeStepSpec{{
+			Slug:  PRMergeStepSlug,
+			Title: &title,
+			Type:  "run",
+			Run:   prMergeRunScript,
 			Shell: "bash",
 		}},
 	}

@@ -291,9 +291,13 @@ func (s *fakeCompletionStore) EnsureTouchpoint(_ context.Context, req Touchpoint
 }
 
 type fakePullRequestClient struct {
-	req PullRequestEnsureRequest
-	pr  PullRequest
-	err error
+	req        PullRequestEnsureRequest
+	pr         PullRequest
+	err        error
+	mergeReq   PullRequestMergeRequest
+	mergeRes   PullRequestMergeResult
+	mergeErr   error
+	mergeCalls int
 }
 
 func (c *fakePullRequestClient) EnsurePullRequest(_ context.Context, req PullRequestEnsureRequest) (PullRequest, error) {
@@ -314,6 +318,24 @@ func (c *fakePullRequestClient) EnsurePullRequest(_ context.Context, req PullReq
 		}
 	}
 	return c.pr, nil
+}
+
+func (c *fakePullRequestClient) MergePullRequest(_ context.Context, req PullRequestMergeRequest) (PullRequestMergeResult, error) {
+	c.mergeReq = req
+	c.mergeCalls++
+	if c.mergeErr != nil {
+		return PullRequestMergeResult{}, c.mergeErr
+	}
+	if c.mergeRes.Number == 0 {
+		c.mergeRes = PullRequestMergeResult{
+			Number:         req.Number,
+			HTMLURL:        "https://github.com/" + req.Repo + "/pull/" + strconv.Itoa(req.Number),
+			State:          "closed",
+			MergeCommitSHA: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+			AlreadyMerged:  false,
+		}
+	}
+	return c.mergeRes, nil
 }
 
 func (c *fakePullRequestClient) FetchWorkflowFile(context.Context, string, string, string) ([]byte, int, error) {
