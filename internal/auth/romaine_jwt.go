@@ -164,7 +164,18 @@ func (v *RomaineLifeJWTVerifier) Decode(ctx context.Context, tokenString string)
 	iss, _ := claims["iss"].(string)
 	if iss != v.issuer {
 		metrics.RecordAuthRomaineLifeRequest("unknown", metrics.AuthOutcomeDeniedIssuer)
-		return User{}, AuthError{Status: http.StatusUnauthorized, Message: "unexpected issuer: " + iss}
+		message := "unexpected issuer: " + iss
+		if looksLikeKubernetesSAIssuer(iss, claims) {
+			// Common mistake: a session pod presents its projected
+			// /var/run/secrets/auth.romaine.life/token directly as
+			// Bearer here. That file is a k8s SA token bound for
+			// exchange, not an auth.romaine.life-issued JWT. The
+			// caller needs to POST it to
+			// {auth_base}/api/auth/exchange/k8s first and present
+			// the returned `token`. See nelsong6/auth's README.
+			message += " (looks like a k8s SA token — exchange it at POST {auth_base}/api/auth/exchange/k8s and present the returned `token` as Bearer)"
+		}
+		return User{}, AuthError{Status: http.StatusUnauthorized, Message: message}
 	}
 
 	if v.expectedAudience != "" {
@@ -236,6 +247,23 @@ func audienceContains(raw any, want string) bool {
 func stringClaim(claims jwt.MapClaims, name string) string {
 	value, _ := claims[name].(string)
 	return value
+}
+
+// looksLikeKubernetesSAIssuer returns true when a token's issuer + claim
+// shape match the projected k8s ServiceAccount tokens we see in cluster
+// (Azure AKS OIDC issuer + a `kubernetes.io` claim that no
+// auth.romaine.life-minted JWT would carry). Used only to attach a
+// targeted hint to the "unexpected issuer" error; never as a code path.
+func looksLikeKubernetesSAIssuer(iss string, claims jwt.MapClaims) bool {
+	if _, ok := claims["kubernetes.io"].(map[string]any); !ok {
+		return false
+	}
+	switch {
+	case strings.Contains(iss, "oic.prod-aks.azure.com"),
+		strings.Contains(iss, "kubernetes.default"):
+		return true
+	}
+	return false
 }
 
 // jwksCache holds the public keys glimmung uses to verify

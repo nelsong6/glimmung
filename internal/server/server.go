@@ -58,6 +58,16 @@ type Settings struct {
 	// AuthRomaineLifeTokenPath is the path to a projected k8s
 	// ServiceAccount token with audience = AuthRomaineLifeBaseURL. The
 	// chart mounts this at /var/run/secrets/auth.romaine.life/token.
+	//
+	// The mounted token is NOT a Glimmung-acceptable bearer JWT — it is
+	// a k8s SA token whose only legitimate use is as Authorization
+	// against auth.romaine.life itself (ManagedOriginService uses it to
+	// call /api/admin/origins/ here). To obtain a JWT that Glimmung's
+	// RomaineLifeJWTVerifier accepts (role=service, signed by
+	// auth.romaine.life's JWKS), exchange this SA token at
+	//   POST {AuthRomaineLifeBaseURL}/api/auth/exchange/k8s
+	// and present the returned `token` as the Bearer on Glimmung
+	// requests. The exchange is documented in nelsong6/auth's README.
 	AuthRomaineLifeTokenPath string
 	GitHubAppID              string
 	GitHubAppInstallationID  string

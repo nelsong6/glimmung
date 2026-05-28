@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -202,6 +203,47 @@ func TestRomaineLifeJWTVerifierRejectsWrongIssuer(t *testing.T) {
 	var authErr AuthError
 	if !errors.As(err, &authErr) || authErr.Status != http.StatusUnauthorized {
 		t.Fatalf("err=%v, want AuthError 401", err)
+	}
+}
+
+func TestRomaineLifeJWTVerifierHintsAtExchangeWhenK8sSATokenPresented(t *testing.T) {
+	f := newRomaineJWKSFixture(t)
+	v := NewRomaineLifeJWTVerifierForTesting(f.issuer(), f.jwksURL(), f.server.Client())
+	claims := adminClaims("https://westus2.oic.prod-aks.azure.com/2236b5e4-81d2-4d82-bde5-17b1037999ea/5aced6d5-4299-421b-84a9-6638aebbf4f0/")
+	claims["kubernetes.io"] = map[string]any{
+		"namespace": "tank-operator-sessions",
+		"serviceaccount": map[string]any{
+			"name": "claude-session",
+		},
+	}
+	token := f.sign(claims)
+
+	_, _, err := v.Resolve(context.Background(), token)
+	if err == nil {
+		t.Fatal("expected error for k8s SA token")
+	}
+	var authErr AuthError
+	if !errors.As(err, &authErr) || authErr.Status != http.StatusUnauthorized {
+		t.Fatalf("err=%v, want AuthError 401", err)
+	}
+	if !strings.Contains(authErr.Message, "/api/auth/exchange/k8s") {
+		t.Fatalf("err=%q, want exchange hint", authErr.Message)
+	}
+}
+
+func TestRomaineLifeJWTVerifierWrongIssuerWithoutK8sClaimHasNoHint(t *testing.T) {
+	f := newRomaineJWKSFixture(t)
+	v := NewRomaineLifeJWTVerifierForTesting(f.issuer(), f.jwksURL(), f.server.Client())
+	claims := adminClaims("https://impostor.example")
+	token := f.sign(claims)
+
+	_, _, err := v.Resolve(context.Background(), token)
+	var authErr AuthError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("err=%v, want AuthError", err)
+	}
+	if strings.Contains(authErr.Message, "/api/auth/exchange/k8s") {
+		t.Fatalf("err=%q, should not include exchange hint for plain wrong-issuer token", authErr.Message)
 	}
 }
 
