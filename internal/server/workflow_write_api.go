@@ -12,7 +12,25 @@ import (
 	"github.com/nelsong6/glimmung/internal/domain/phaserefs"
 )
 
-const workflowKindNativeK8sJob = "k8s_job"
+const (
+	workflowKindNativeK8sJob   = "k8s_job"
+	workflowKindTouchpointGate = "touchpoint_gate"
+)
+
+// validPhaseKinds is the closed set of phase kinds Glimmung dispatches.
+//
+// k8s_job — the default executor. Phases of this kind launch one or more
+// Kubernetes Jobs in parallel; phase completion is callback-driven.
+//
+// touchpoint_gate — the human-decision phase between testing and final
+// cleanup. The phase launches no jobs and advances only when an `approve`
+// signal arrives on the signal bus (or a `reject` signal recycles the run
+// through the normal PR-feedback path). Required exactly once in every
+// workflow registered after this change.
+var validPhaseKinds = map[string]bool{
+	workflowKindNativeK8sJob:   true,
+	workflowKindTouchpointGate: true,
+}
 
 type WorkflowRegisterStore interface {
 	UpsertWorkflow(ctx context.Context, req WorkflowRegister) (Workflow, error)
@@ -239,6 +257,23 @@ func ValidateWorkflowRegister(req WorkflowRegister) error {
 				return ValidationError{Message: fmt.Sprintf("workflow %s always phase %q cannot declare inputs; cleanup must be abort-safe", req.Name, name)}
 			}
 		}
+		if workflowPhaseKind(phase.Kind) == workflowKindTouchpointGate {
+			if len(phase.Jobs) > 0 {
+				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q is a touchpoint_gate and must declare zero jobs", req.Name, name)}
+			}
+			if phase.Verify {
+				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q is a touchpoint_gate and cannot also be the verify phase", req.Name, name)}
+			}
+			if phase.Always {
+				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q is a touchpoint_gate and cannot also be an always-run cleanup phase", req.Name, name)}
+			}
+			if phase.EvidenceVerificationGate {
+				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q is a touchpoint_gate and cannot also be an evidence_verification_gate", req.Name, name)}
+			}
+			if phase.RecyclePolicy != nil {
+				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q is a touchpoint_gate and cannot declare a recycle_policy; reject is handled by the workflow-level pr.recycle_policy", req.Name, name)}
+			}
+		}
 		if len(phase.Jobs) > 0 {
 			seenJobs := map[string]int{}
 			for j, job := range phase.Jobs {
@@ -349,10 +384,10 @@ func workflowPhaseKind(kind string) string {
 }
 
 func validateNativeWorkflowKind(kind string) error {
-	if workflowPhaseKind(kind) == workflowKindNativeK8sJob {
+	if validPhaseKinds[workflowPhaseKind(kind)] {
 		return nil
 	}
-	return ValidationError{Message: "workflow phases must use kind='k8s_job'"}
+	return ValidationError{Message: fmt.Sprintf("workflow phase kind %q is not one of [k8s_job, touchpoint_gate]", workflowPhaseKind(kind))}
 }
 
 func projectRequiresNativeWorkflows(project Project) bool {

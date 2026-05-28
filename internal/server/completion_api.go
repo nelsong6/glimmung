@@ -703,6 +703,13 @@ func dispatchForwardPhase(
 	if err != nil {
 		return fmt.Errorf("append forward attempt: %w", err)
 	}
+	// touchpoint_gate phases launch no jobs; the run parks at the attempt and
+	// advances when the signal-drain triage (kind=approve) dispatches the
+	// pr_merge primitive. Until that wiring lands (stage 3), the run sits
+	// here indefinitely. There is no lease/launcher path for a gate phase.
+	if phaseKind == workflowKindTouchpointGate {
+		return nil
+	}
 	lease, err := leaseForRunPhase(ctx, store, run, targetPhase.Name, newAttemptIdx, substituted)
 	if err != nil {
 		return fmt.Errorf("read lease for forward phase: %w", err)
