@@ -14,7 +14,6 @@ export type WorkflowGraphSource = {
   name: string;
   phases: WorkflowGraphPhase[];
   pr: {
-    enabled: boolean;
     recycle_policy?: RecyclePolicy | null;
   };
   workflow_filename?: string | null;
@@ -24,7 +23,6 @@ export type WorkflowGraphSource = {
 
 export type WorkflowGraphModel = {
   phases: PhaseGraphPhase[];
-  prEnabled: boolean;
   entryArrows: EntryArrow[];
   recycleArrows: RecycleArrow[];
 };
@@ -33,7 +31,6 @@ export type RunProjectionTopologySource = {
   phases: PhaseGraphPhase[];
   default_entry?: { target: string; active: boolean; kind: string } | null;
   recycle_arrows: RecycleArrow[];
-  terminal: { kind?: string; enabled: boolean };
 };
 
 function phaseRecycleArrow(phase: WorkflowGraphPhase, active: boolean): RecycleArrow | null {
@@ -48,10 +45,14 @@ function phaseRecycleArrow(phase: WorkflowGraphPhase, active: boolean): RecycleA
   };
 }
 
-function touchpointRecycleArrow(policy: RecyclePolicy | null | undefined, active: boolean): RecycleArrow | null {
-  if (!policy) return null;
+function touchpointRecycleArrow(
+  policy: RecyclePolicy | null | undefined,
+  source: string | null,
+  active: boolean,
+): RecycleArrow | null {
+  if (!policy || !source) return null;
   return {
-    source: "touchpoint",
+    source,
     target: policy.lands_at,
     trigger: policy.on.join(" / "),
     max_attempts: policy.max_attempts,
@@ -60,15 +61,20 @@ function touchpointRecycleArrow(policy: RecyclePolicy | null | undefined, active
   };
 }
 
-function manualTriggerEntryArrow(phases: PhaseGraphPhase[]): EntryArrow[] {
+function defaultEntryArrow(phases: PhaseGraphPhase[]): EntryArrow[] {
   const firstPhase = phases.find((phase) => phase.name !== "");
   if (!firstPhase) return [];
   return [{
     target: firstPhase.name,
-    label: "manual trigger",
     active: false,
-    kind: "manual_trigger",
+    kind: "default",
   }];
+}
+
+function prTouchpointPhaseName(phases: WorkflowGraphPhase[]): string | null {
+  return phases.find((phase) =>
+    phase.jobs?.some((job) => job.primitive === "pr_touchpoint"),
+  )?.name ?? null;
 }
 
 function topologyEntryArrow(
@@ -77,15 +83,9 @@ function topologyEntryArrow(
   if (!entry?.target) return [];
   return [{
     target: entry.target,
-    label: entryLabel(entry.kind),
     active: entry.active,
     kind: entry.kind,
   }];
-}
-
-function entryLabel(kind: string): string {
-  if (kind === "" || kind === "default" || kind === "manual_trigger") return "manual trigger";
-  return kind.replace(/_/g, " ");
 }
 
 export function workflowToPhaseGraphModel(
@@ -106,19 +106,20 @@ export function workflowToPhaseGraphModel(
       id: job.id,
       name: job.name,
       image: job.image,
+      primitive: job.primitive,
     })),
   }));
+  const touchpointPhase = prTouchpointPhaseName(workflow.phases);
   return {
     phases,
-    prEnabled: workflow.pr.enabled,
-    entryArrows: manualTriggerEntryArrow(phases),
+    entryArrows: defaultEntryArrow(phases),
     recycleArrows: [
       ...workflow.phases.flatMap((phase) => {
         const arrow = phaseRecycleArrow(phase, active);
         return arrow ? [arrow] : [];
       }),
       ...(() => {
-        const arrow = touchpointRecycleArrow(workflow.pr.recycle_policy, active);
+        const arrow = touchpointRecycleArrow(workflow.pr.recycle_policy, touchpointPhase, active);
         return arrow ? [arrow] : [];
       })(),
     ],
@@ -137,7 +138,6 @@ export function runTopologyToPhaseGraphModel(topology: RunProjectionTopologySour
   }));
   return {
     phases,
-    prEnabled: topology.terminal.enabled,
     entryArrows: topologyEntryArrow(topology.default_entry),
     recycleArrows: topology.recycle_arrows,
   };

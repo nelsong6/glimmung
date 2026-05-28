@@ -7,7 +7,7 @@ import {
 } from "./workflowGraphModel";
 
 describe("workflowToPhaseGraphModel", () => {
-  it("maps workflow phases without leaking recycle policy fields into graph phases", () => {
+  it("maps registered phases without leaking recycle policy fields into graph phases", () => {
     const workflow: WorkflowGraphSource = {
       name: "issue-agent",
       phases: [
@@ -27,14 +27,14 @@ describe("workflowToPhaseGraphModel", () => {
           },
         },
         {
-          name: "verification",
+          name: "touchpoint",
           kind: "k8s_job",
           always: true,
-          evidence_verification_gate: true,
           depends_on: ["implementation"],
+          jobs: [{ id: "pr-touchpoint", name: "PR touchpoint", primitive: "pr_touchpoint" }],
         },
       ],
-      pr: { enabled: true },
+      pr: { recycle_policy: null },
     };
 
     expect(workflowToPhaseGraphModel(workflow, { recycleActive: true })).toEqual({
@@ -47,26 +47,24 @@ describe("workflowToPhaseGraphModel", () => {
           evidence_verification_gate: undefined,
           depends_on: [],
           jobs: [
-            { id: "plan", name: "plan", image: undefined },
-            { id: "implement", name: "implement", image: "runner:latest" },
+            { id: "plan", name: "plan", image: undefined, primitive: undefined },
+            { id: "implement", name: "implement", image: "runner:latest", primitive: undefined },
           ],
         },
         {
-          name: "verification",
+          name: "touchpoint",
           kind: "k8s_job",
           verify: undefined,
           always: true,
-          evidence_verification_gate: true,
+          evidence_verification_gate: undefined,
           depends_on: ["implementation"],
-          jobs: [],
+          jobs: [{ id: "pr-touchpoint", name: "PR touchpoint", image: undefined, primitive: "pr_touchpoint" }],
         },
       ],
-      prEnabled: true,
       entryArrows: [{
         target: "implementation",
-        label: "manual trigger",
         active: false,
-        kind: "manual_trigger",
+        kind: "default",
       }],
       recycleArrows: [
         {
@@ -81,38 +79,7 @@ describe("workflowToPhaseGraphModel", () => {
     });
   });
 
-  it("preserves an empty phase list when a workflow definition has no phases", () => {
-    const workflow: WorkflowGraphSource = {
-      name: "native-workflow",
-      phases: [],
-      pr: {
-        enabled: false,
-        recycle_policy: {
-          max_attempts: 3,
-          on: ["changes_requested"],
-          lands_at: "implementation",
-        },
-      },
-    };
-
-    expect(workflowToPhaseGraphModel(workflow)).toEqual({
-      phases: [],
-      prEnabled: false,
-      entryArrows: [],
-      recycleArrows: [
-        {
-          source: "touchpoint",
-          target: "implementation",
-          trigger: "changes_requested",
-          max_attempts: 3,
-          active: false,
-          kind: "touchpoint_recycle",
-        },
-      ],
-    });
-  });
-
-  it("keeps explicit recycle targets that return to the entry phase", () => {
+  it("sources pr recycle arrows from the registered pr_touchpoint phase", () => {
     const workflow: WorkflowGraphSource = {
       name: "ambience",
       phases: [
@@ -128,9 +95,15 @@ describe("workflowToPhaseGraphModel", () => {
             lands_at: "env-prep",
           },
         },
+        {
+          name: "review-surface",
+          kind: "k8s_job",
+          always: true,
+          depends_on: ["evidence-gate"],
+          jobs: [{ id: "pr-touchpoint", primitive: "pr_touchpoint" }],
+        },
       ],
       pr: {
-        enabled: true,
         recycle_policy: {
           max_attempts: 3,
           on: ["changes_requested"],
@@ -142,9 +115,8 @@ describe("workflowToPhaseGraphModel", () => {
     const model = workflowToPhaseGraphModel(workflow);
     expect(model.entryArrows).toEqual([{
       target: "env-prep",
-      label: "manual trigger",
       active: false,
-      kind: "manual_trigger",
+      kind: "default",
     }]);
     expect(model.recycleArrows).toEqual([
       {
@@ -156,7 +128,7 @@ describe("workflowToPhaseGraphModel", () => {
         kind: "phase_recycle",
       },
       {
-        source: "touchpoint",
+        source: "review-surface",
         target: "env-prep",
         trigger: "changes_requested",
         max_attempts: 3,
@@ -180,16 +152,15 @@ describe("runTopologyToPhaseGraphModel", () => {
           jobs: [{ id: "prepare", name: "Prepare env" }],
         },
         {
-          name: "agent-execute",
+          name: "touchpoint",
           kind: "k8s_job",
-          verify: true,
-          always: false,
+          verify: false,
+          always: true,
           depends_on: ["env-prep"],
-          jobs: [{ id: "agent", name: null, image: "agent:latest" }],
+          jobs: [{ id: "pr-touchpoint", name: "PR touchpoint" }],
         },
       ],
       default_entry: { target: "env-prep", active: true, kind: "default" },
-      terminal: { kind: "touchpoint", enabled: true },
       recycle_arrows: [{
         source: "touchpoint",
         target: "env-prep",
@@ -209,18 +180,16 @@ describe("runTopologyToPhaseGraphModel", () => {
           jobs: [{ id: "prepare", name: "Prepare env", image: undefined }],
         },
         {
-          name: "agent-execute",
+          name: "touchpoint",
           kind: "k8s_job",
-          verify: true,
-          always: false,
+          verify: false,
+          always: true,
           depends_on: ["env-prep"],
-          jobs: [{ id: "agent", name: "agent", image: "agent:latest" }],
+          jobs: [{ id: "pr-touchpoint", name: "PR touchpoint", image: undefined }],
         },
       ],
-      prEnabled: true,
       entryArrows: [{
         target: "env-prep",
-        label: "manual trigger",
         active: true,
         kind: "default",
       }],

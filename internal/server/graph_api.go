@@ -120,7 +120,6 @@ type RunProjectionTopology struct {
 	Phases        []RunProjectionTopologyPhase `json:"phases"`
 	DefaultEntry  *RunProjectionDefaultEntry   `json:"default_entry"`
 	RecycleArrows []RunProjectionRecycle       `json:"recycle_arrows"`
-	Terminal      RunProjectionTerminal        `json:"terminal"`
 }
 
 type RunProjectionTopologyPhase struct {
@@ -143,11 +142,6 @@ type RunProjectionDefaultEntry struct {
 	Target string `json:"target"`
 	Active bool   `json:"active"`
 	Kind   string `json:"kind"`
-}
-
-type RunProjectionTerminal struct {
-	Kind    string `json:"kind"`
-	Enabled bool   `json:"enabled"`
 }
 
 type RunProjectionRecycle struct {
@@ -1061,7 +1055,6 @@ func workflowTopologyFromWorkflow(workflow Workflow) RunProjectionTopology {
 	topology := RunProjectionTopology{
 		Phases:        []RunProjectionTopologyPhase{},
 		RecycleArrows: []RunProjectionRecycle{},
-		Terminal:      RunProjectionTerminal{Kind: "touchpoint", Enabled: false},
 	}
 	if workflow.Name == "" {
 		return topology
@@ -1098,19 +1091,29 @@ func workflowTopologyFromWorkflow(workflow Workflow) RunProjectionTopology {
 		topology.DefaultEntry = &RunProjectionDefaultEntry{Target: topology.Phases[0].Name, Active: true, Kind: "default"}
 	}
 	if workflow.PR.RecyclePolicy != nil {
-		topology.RecycleArrows = append(topology.RecycleArrows, RunProjectionRecycle{
-			Source:      "touchpoint",
-			Target:      workflow.PR.RecyclePolicy.LandsAt,
-			Trigger:     strings.Join(workflow.PR.RecyclePolicy.On, " / "),
-			MaxAttempts: workflow.PR.RecyclePolicy.MaxAttempts,
-			Active:      false,
-			Kind:        "touchpoint_recycle",
-		})
+		if source := workflowPRTouchpointPhaseName(workflow); source != "" {
+			topology.RecycleArrows = append(topology.RecycleArrows, RunProjectionRecycle{
+				Source:      source,
+				Target:      workflow.PR.RecyclePolicy.LandsAt,
+				Trigger:     strings.Join(workflow.PR.RecyclePolicy.On, " / "),
+				MaxAttempts: workflow.PR.RecyclePolicy.MaxAttempts,
+				Active:      false,
+				Kind:        "touchpoint_recycle",
+			})
+		}
 	}
-	// Every workflow ends in a human-reviewed PR; the terminal review
-	// surface is always enabled in the projection.
-	topology.Terminal.Enabled = true
 	return topology
+}
+
+func workflowPRTouchpointPhaseName(workflow Workflow) string {
+	for _, phase := range workflow.Phases {
+		for _, job := range phase.Jobs {
+			if strings.TrimSpace(job.Primitive) == JobPrimitivePRTouchpoint {
+				return phase.Name
+			}
+		}
+	}
+	return ""
 }
 
 func applyRunTopologyActivity(topology *RunProjectionTopology, run RunReport) {
@@ -1121,7 +1124,7 @@ func applyRunTopologyActivity(topology *RunProjectionTopology, run RunReport) {
 		topology.RecycleArrows[idx].Active = false
 	}
 	if topology.DefaultEntry != nil {
-		topology.DefaultEntry.Active = runActivatesManualEntry(run)
+		topology.DefaultEntry.Active = runActivatesDefaultEntry(run)
 	}
 	selector, ok := activeRecycleSelector(run)
 	if !ok {
@@ -1153,13 +1156,13 @@ func activeRecycleSelector(run RunReport) (recycleSelector, bool) {
 		}
 		return recycleSelector{Kind: "phase_recycle", Source: source}, true
 	case "pr_feedback":
-		return recycleSelector{Kind: "touchpoint_recycle", Source: "touchpoint"}, true
+		return recycleSelector{Kind: "touchpoint_recycle"}, true
 	default:
 		return recycleSelector{}, false
 	}
 }
 
-func runActivatesManualEntry(run RunReport) bool {
+func runActivatesDefaultEntry(run RunReport) bool {
 	switch strings.TrimSpace(stringValueOrEmpty(run.OriginKind)) {
 	case "recycle_policy", "pr_feedback":
 		return false

@@ -178,7 +178,7 @@ const DESIGN_SYSTEM_ITEMS: PortfolioItem[] = [
   {
     id: "phase-graph-env-prep-recycle",
     title: "Phase Graph Env Prep Recycle",
-    caption: "Entry recycle lanes from verification and touchpoint phases",
+    caption: "Entry recycle lanes from verification and the registered touchpoint phase",
     initialOpen: true,
     render: () => (
       <Specimen title="phase graph env prep recycle">
@@ -188,16 +188,15 @@ const DESIGN_SYSTEM_ITEMS: PortfolioItem[] = [
             phases={[
               { name: "env-prep", kind: "k8s_job", jobs: [{ id: "env-prep", name: "Environment prep" }] },
               { name: "llm-work", kind: "k8s_job", depends_on: ["env-prep"], jobs: [{ id: "llm-work", name: "LLM work" }] },
-              { name: "llm-verify", kind: "k8s_job", verify: true, depends_on: ["llm-work"], jobs: [{ id: "llm-verify", name: "LLM verify" }] },
-              { name: "evidence-gate", kind: "k8s_job", evidence_verification_gate: true, depends_on: ["llm-verify"], jobs: [{ id: "evidence-gate", name: "Evidence gate" }] },
-              { name: "env-destroy", kind: "k8s_job", always: true, depends_on: ["evidence-gate"], jobs: [{ id: "env-destroy", name: "Environment destroy" }] },
-            ]}
-            prEnabled
-            entryArrows={[{
+	              { name: "llm-verify", kind: "k8s_job", verify: true, depends_on: ["llm-work"], jobs: [{ id: "llm-verify", name: "LLM verify" }] },
+	              { name: "evidence-gate", kind: "k8s_job", evidence_verification_gate: true, depends_on: ["llm-verify"], jobs: [{ id: "evidence-gate", name: "Evidence gate" }] },
+	              { name: "env-destroy", kind: "k8s_job", always: true, depends_on: ["evidence-gate"], jobs: [{ id: "env-destroy", name: "Environment destroy" }] },
+	              { name: "touchpoint", kind: "k8s_job", always: true, depends_on: ["env-destroy"], jobs: [{ id: "pr-touchpoint", name: "PR touchpoint", primitive: "pr_touchpoint" }] },
+	            ]}
+	            entryArrows={[{
               target: "env-prep",
-              label: "manual trigger",
               active: false,
-              kind: "manual_trigger",
+              kind: "default",
             }]}
             recycleArrows={[
               {

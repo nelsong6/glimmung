@@ -132,10 +132,10 @@ type NativeJobSpec = {
   id: string;
   name?: string | null;
   image?: string;
+  primitive?: string;
 };
 
 type PrPrimitiveSpec = {
-  enabled: boolean;
   recycle_policy: RecyclePolicy | null;
 };
 
@@ -1257,24 +1257,15 @@ function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
     );
   };
 
-  const renderTouchpoint = () => (
-    <div className="dag-node dag-node-definition dag-node-pr">
-      <div className="dag-node-label">touchpoint</div>
-      <div className="dag-node-meta dim mono">PR primitive</div>
-    </div>
-  );
-
   return (
     <section>
       <h2>Workflow graph</h2>
       <div className="dag-wrap">
         <PhaseGraph
           phases={graphModel.phases}
-          prEnabled={graphModel.prEnabled}
           dagClassName="dag-definition"
           ariaLabel={`${workflow.name} workflow graph`}
           renderPhase={renderPhase}
-          renderTouchpoint={renderTouchpoint}
           entryArrows={graphModel.entryArrows}
           recycleArrows={graphModel.recycleArrows}
         />
@@ -2033,7 +2024,6 @@ function ProjectRunView({
   issueNumber,
   runId,
 }: LayoutContext & { projectName: string; issueNumber: number | null; runId: string }) {
-  const navigate = useNavigate();
   const location = useLocation();
   const [liveReport, setLiveReport] = useState<RunReport | null>(null);
   const [liveError, setLiveError] = useState<string | null>(null);
@@ -2196,11 +2186,6 @@ function ProjectRunView({
         onConfirmAbort={() => undefined}
         selectedRunId={run.id}
         onBackToRuns={() => undefined}
-        onOpenTouchpoint={() => {
-          if (run.issue_number) {
-            navigate(`/projects/${encodeURIComponent(project.name)}/issues/${run.issue_number}/touchpoint`);
-          }
-        }}
         actionsVisible={false}
       />
     </div>

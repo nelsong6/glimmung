@@ -56,7 +56,7 @@ type WorkflowPatchStore interface {
 
 // WorkflowPatchRequest carries the live rollout knobs that can change
 // without re-registering the workflow's structural shape. Today only
-// the budget is patchable; the historical pr_enabled toggle was deleted
+// the budget is patchable; the historical PR opt-out toggle was deleted
 // per migration-policy.
 type WorkflowPatchRequest struct {
 	BudgetTotal *float64 `json:"budget_total"`
