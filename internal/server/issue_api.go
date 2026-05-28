@@ -68,20 +68,21 @@ type IssueComment struct {
 }
 
 type IssueDetail struct {
-	Ref           string         `json:"ref"`
-	Project       string         `json:"project"`
-	Repo          *string        `json:"repo"`
-	Number        *int           `json:"number"`
-	Title         string         `json:"title"`
-	Body          string         `json:"body"`
-	State         string         `json:"state"`
-	Labels        []string       `json:"labels"`
-	HTMLURL       *string        `json:"html_url"`
-	Comments      []IssueComment `json:"comments"`
-	LastRunRef    *string        `json:"last_run_ref"`
-	LastRunNumber *int           `json:"last_run_number"`
-	LastRunState  *string        `json:"last_run_state"`
-	IssueLockHeld bool           `json:"issue_lock_held"`
+	Ref              string         `json:"ref"`
+	Project          string         `json:"project"`
+	Repo             *string        `json:"repo"`
+	Number           *int           `json:"number"`
+	Title            string         `json:"title"`
+	Body             string         `json:"body"`
+	State            string         `json:"state"`
+	Labels           []string       `json:"labels"`
+	HTMLURL          *string        `json:"html_url"`
+	Comments         []IssueComment `json:"comments"`
+	LastRunRef       *string        `json:"last_run_ref"`
+	LastRunNumber    *int           `json:"last_run_number"`
+	LastRunState     *string        `json:"last_run_state"`
+	IssueLockHeld    bool           `json:"issue_lock_held"`
+	PreserveTestEnv  bool           `json:"preserve_test_env"`
 }
 
 func listIssues(store ReadStore) http.HandlerFunc {
@@ -181,21 +182,29 @@ func archiveIssueByNumber(store ReadStore, action string) http.HandlerFunc {
 
 // IssueCreate is the store-level request for creating a new issue.
 type IssueCreate struct {
-	Project  string
-	Title    string
-	Body     string
-	Labels   []string
-	Workflow *string
+	Project         string
+	Title           string
+	Body            string
+	Labels          []string
+	Workflow        *string
+	PreserveTestEnv bool
 }
 
 // IssuePatch is the store-level request for patching an issue.
+//
+// PreserveTestEnv is a pointer so a PATCH that omits the field leaves the
+// existing value alone. When set, it toggles whether the run's early cleanup
+// phase executes (false: tear down at end of run, the default) or returns
+// `skipped` so the validation environment stays alive through the touchpoint
+// gate (true: preserve through review).
 type IssuePatch struct {
-	Project string
-	Number  int
-	Title   *string
-	Body    *string
-	Labels  *[]string
-	State   *string
+	Project         string
+	Number          int
+	Title           *string
+	Body            *string
+	Labels          *[]string
+	State           *string
+	PreserveTestEnv *bool
 }
 
 // IssueCommentAdd is the store-level request for adding a comment.
@@ -225,18 +234,20 @@ type IssueCommentDelete struct {
 // HTTP request bodies
 
 type IssueCreateRequest struct {
-	Project  string   `json:"project"`
-	Title    string   `json:"title"`
-	Body     string   `json:"body"`
-	Labels   []string `json:"labels"`
-	Workflow *string  `json:"workflow"`
+	Project         string   `json:"project"`
+	Title           string   `json:"title"`
+	Body            string   `json:"body"`
+	Labels          []string `json:"labels"`
+	Workflow        *string  `json:"workflow"`
+	PreserveTestEnv bool     `json:"preserve_test_env"`
 }
 
 type IssuePatchRequest struct {
-	Title  *string   `json:"title"`
-	Body   *string   `json:"body"`
-	Labels *[]string `json:"labels"`
-	State  *string   `json:"state"`
+	Title           *string   `json:"title"`
+	Body            *string   `json:"body"`
+	Labels          *[]string `json:"labels"`
+	State           *string   `json:"state"`
+	PreserveTestEnv *bool     `json:"preserve_test_env"`
 }
 
 type IssueCommentRequest struct {
@@ -264,11 +275,12 @@ func createIssue(store ReadStore) http.HandlerFunc {
 			return
 		}
 		detail, err := issueStore.CreateIssue(r.Context(), IssueCreate{
-			Project:  body.Project,
-			Title:    body.Title,
-			Body:     body.Body,
-			Labels:   body.Labels,
-			Workflow: body.Workflow,
+			Project:         body.Project,
+			Title:           body.Title,
+			Body:            body.Body,
+			Labels:          body.Labels,
+			Workflow:        body.Workflow,
+			PreserveTestEnv: body.PreserveTestEnv,
 		})
 		var validationErr ValidationError
 		switch {
@@ -301,12 +313,13 @@ func patchIssueByNumber(store ReadStore) http.HandlerFunc {
 			return
 		}
 		detail, err := issueStore.PatchIssueByNumber(r.Context(), IssuePatch{
-			Project: r.PathValue("project"),
-			Number:  number,
-			Title:   body.Title,
-			Body:    body.Body,
-			Labels:  body.Labels,
-			State:   body.State,
+			Project:         r.PathValue("project"),
+			Number:          number,
+			Title:           body.Title,
+			Body:            body.Body,
+			Labels:          body.Labels,
+			State:           body.State,
+			PreserveTestEnv: body.PreserveTestEnv,
 		})
 		var validationErr ValidationError
 		switch {

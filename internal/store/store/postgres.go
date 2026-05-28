@@ -869,9 +869,10 @@ func (s *Store) CreateIssue(ctx context.Context, req server.IssueCreate) (server
 		Metadata: issueMetadataDoc{
 			Workflow: req.Workflow,
 		},
-		Comments:  []issueCommentDoc{},
-		CreatedAt: now,
-		UpdatedAt: now,
+		Comments:        []issueCommentDoc{},
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		PreserveTestEnv: req.PreserveTestEnv,
 	}
 	// Comments live in their own table; strip before marshaling payload.
 	stripped := doc
@@ -926,6 +927,9 @@ func (s *Store) PatchIssueByNumber(ctx context.Context, req server.IssuePatch) (
 					delete(payload, "closed_at")
 				}
 			}
+		}
+		if req.PreserveTestEnv != nil {
+			payload["preserve_test_env"] = *req.PreserveTestEnv
 		}
 		payload["updated_at"] = now
 		return nil
@@ -1264,6 +1268,10 @@ type runDoc struct {
 	CallbackToken     *string `json:"callback_token,omitempty"`
 	IssueLockHolderID *string `json:"issue_lock_holder_id,omitempty"`
 	PRLockHolderID    *string `json:"pr_lock_holder_id,omitempty"`
+	// PreserveTestEnv is the immutable snapshot of the originating issue's
+	// flag at dispatch time. Default false. The cleanup_early phase
+	// consults this to decide execute vs `skipped`.
+	PreserveTestEnv bool `json:"preserve_test_env,omitempty"`
 }
 
 type phaseExecutionDoc struct {
@@ -1303,18 +1311,19 @@ type stepExecutionDoc struct {
 }
 
 type issueDoc struct {
-	ID        string            `json:"id"`
-	Number    int               `json:"number"`
-	Project   string            `json:"project"`
-	Title     string            `json:"title"`
-	Body      string            `json:"body"`
-	Labels    []string          `json:"labels"`
-	State     string            `json:"state"`
-	Metadata  issueMetadataDoc  `json:"metadata"`
-	Comments  []issueCommentDoc `json:"comments"`
-	CreatedAt string            `json:"created_at"`
-	UpdatedAt string            `json:"updated_at"`
-	ClosedAt  *string           `json:"closed_at,omitempty"`
+	ID              string            `json:"id"`
+	Number          int               `json:"number"`
+	Project         string            `json:"project"`
+	Title           string            `json:"title"`
+	Body            string            `json:"body"`
+	Labels          []string          `json:"labels"`
+	State           string            `json:"state"`
+	Metadata        issueMetadataDoc  `json:"metadata"`
+	Comments        []issueCommentDoc `json:"comments"`
+	CreatedAt       string            `json:"created_at"`
+	UpdatedAt       string            `json:"updated_at"`
+	ClosedAt        *string           `json:"closed_at,omitempty"`
+	PreserveTestEnv bool              `json:"preserve_test_env,omitempty"`
 }
 
 type issueMetadataDoc struct {
@@ -1551,16 +1560,17 @@ func issueDetailFromDoc(doc issueDoc) server.IssueDetail {
 	}
 	number := doc.Number
 	return server.IssueDetail{
-		Ref:      publicids.IssueRef(doc.Project, &number),
-		Project:  doc.Project,
-		Repo:     nil,
-		Number:   &number,
-		Title:    doc.Title,
-		Body:     doc.Body,
-		State:    firstNonEmpty(doc.State, "open"),
-		Labels:   sliceOrEmpty(doc.Labels),
-		HTMLURL:  nil,
-		Comments: comments,
+		Ref:             publicids.IssueRef(doc.Project, &number),
+		Project:         doc.Project,
+		Repo:            nil,
+		Number:          &number,
+		Title:           doc.Title,
+		Body:            doc.Body,
+		State:           firstNonEmpty(doc.State, "open"),
+		Labels:          sliceOrEmpty(doc.Labels),
+		HTMLURL:         nil,
+		Comments:        comments,
+		PreserveTestEnv: doc.PreserveTestEnv,
 	}
 }
 
@@ -4720,6 +4730,7 @@ func runReplayDataFromDoc(doc runDoc) server.RunReplayData {
 		SlotLeaseRef:         doc.SlotLeaseRef,
 		EntrypointPhase:      doc.EntrypointPhase,
 		TriggerSource:        mapOrEmpty(doc.TriggerSource),
+		PreserveTestEnv:      doc.PreserveTestEnv,
 	}
 }
 
@@ -6552,10 +6563,11 @@ func (s *Store) ReadIssueForDispatch(ctx context.Context, project string, issueN
 		labels = []string{}
 	}
 	return server.IssueDispatchData{
-		ID:     doc.ID,
-		Title:  doc.Title,
-		Body:   doc.Body,
-		Labels: labels,
+		ID:              doc.ID,
+		Title:           doc.Title,
+		Body:            doc.Body,
+		Labels:          labels,
+		PreserveTestEnv: doc.PreserveTestEnv,
 	}, nil
 }
 
@@ -6645,6 +6657,7 @@ func (s *Store) CreateRun(ctx context.Context, req server.CreateRunRequest) (ser
 		TriggerSource:        req.TriggerSource,
 		CallbackToken:        &callbackToken,
 		IssueLockHolderID:    &req.IssueLockHolderID,
+		PreserveTestEnv:      req.PreserveTestEnv,
 		CreatedAt:            now,
 		UpdatedAt:            now,
 	}
@@ -6838,6 +6851,7 @@ func (s *Store) CreateRecycleCycle(ctx context.Context, req server.CreateRecycle
 		CallbackToken:        &callbackToken,
 		IssueLockHolderID:    parent.IssueLockHolderID,
 		PRLockHolderID:       parent.PRLockHolderID,
+		PreserveTestEnv:      parent.PreserveTestEnv,
 		CreatedAt:            now,
 		UpdatedAt:            now,
 	}

@@ -33,13 +33,21 @@ func (e *AlreadyRunningError) Unwrap() error { return ErrAlreadyRunning }
 
 // IssueDispatchData holds the minimal issue fields needed to build dispatch metadata.
 type IssueDispatchData struct {
-	ID     string
-	Title  string
-	Body   string
-	Labels []string
+	ID              string
+	Title           string
+	Body            string
+	Labels          []string
+	PreserveTestEnv bool
 }
 
 // CreateRunRequest carries all parameters for creating a new run document.
+//
+// PreserveTestEnv is an immutable snapshot of the originating issue's
+// preserve_test_env flag at dispatch time. The cleanup_early phase reads
+// this snapshot to decide whether to execute (false, the default) or
+// return `skipped` so the validation environment stays alive through the
+// touchpoint gate. A later edit to the issue's flag does not change an
+// in-flight run, just like budget and evidence requirements.
 type CreateRunRequest struct {
 	Project                 string
 	Workflow                string
@@ -55,6 +63,7 @@ type CreateRunRequest struct {
 	SlotLeaseRef            string
 	TriggerSource           map[string]any
 	EvidenceRequirements    []EvidenceRequirement
+	PreserveTestEnv         bool
 }
 
 // CreatedRun holds the identifiers returned after creating a run document.
@@ -314,6 +323,7 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, nativeLaun
 		SlotLeaseRef:            initialLeaseRef,
 		TriggerSource:           triggerSource,
 		EvidenceRequirements:    evidenceRequirements,
+		PreserveTestEnv:         issue.PreserveTestEnv,
 	})
 	if err != nil {
 		_, _ = dispatchStore.CancelLeaseByRef(ctx, req.Project, initialLeaseRef)
