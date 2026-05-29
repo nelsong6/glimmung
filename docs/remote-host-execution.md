@@ -160,7 +160,7 @@ authkey=$(curl -fsS -X POST \
 tailscaled --tun=userspace-networking --statedir="${GLIMMUNG_WORKING_DIR}/ts" \
   --socket="${GLIMMUNG_WORKING_DIR}/ts.sock" &
 tailscale --socket="${GLIMMUNG_WORKING_DIR}/ts.sock" up \
-  --authkey="${authkey}" --ephemeral --hostname="glimmung-${GLIMMUNG_RUN_REF}"
+  --authkey="${authkey}" --hostname="glimmung-${GLIMMUNG_RUN_REF}"
 
 # 5. Resolve the remote host's tailnet IP, then SSH in.
 host_ip=$(tailscale --socket="${GLIMMUNG_WORKING_DIR}/ts.sock" status --json | jq -r '...')
