@@ -81,11 +81,104 @@ type WorkflowPatchStore interface {
 }
 
 // WorkflowPatchRequest carries the live rollout knobs that can change
-// without re-registering the workflow's structural shape. Today only
-// the budget is patchable; the historical PR opt-out toggle was deleted
-// per migration-policy.
+// without re-registering the workflow's structural shape by hand. The
+// budget total and the recycle-policy attempt counts are patchable; the
+// historical PR opt-out toggle was deleted per migration-policy.
+//
+// Recycle counts are not structural shape: `on` and `lands_at` describe
+// where a recycle lane lands and what fires it (the topology), while
+// `max_attempts` is the guard-rail dial on that lane. Scaling the dial
+// is the common operator need ("give this verify loop one more try"),
+// so it gets a first-class patch surface that still flows through
+// UpsertWorkflow — every change mints a new immutable schema and moves
+// the logical pointer forward, exactly like a full re-registration.
 type WorkflowPatchRequest struct {
 	BudgetTotal *float64 `json:"budget_total"`
+	// RecycleMaxAttempts scales the attempt count on existing recycle
+	// lanes. Each entry targets a phase by name, or the workflow-level
+	// PR reject lane via the sentinel target "pr". Targets without an
+	// existing recycle policy are rejected: a count cannot conjure the
+	// structural `on`/`lands_at` a lane needs.
+	RecycleMaxAttempts []RecycleMaxAttemptsPatch `json:"recycle_max_attempts,omitempty"`
+}
+
+// RecyclePatchTargetPR is the sentinel RecycleMaxAttemptsPatch.Target
+// that addresses the workflow-level PR reject recycle lane
+// (pr.recycle_policy) rather than a named phase.
+const RecyclePatchTargetPR = "pr"
+
+// MinRecycleMaxAttempts is the floor for a recycle lane's attempt count.
+// A lane must permit at least one attempt; zero would mean "never run
+// this phase," which is expressed by removing the lane, not by scaling
+// it to zero.
+const MinRecycleMaxAttempts = 1
+
+// MaxRecycleMaxAttempts is the ceiling. The verify loop is a token-spend
+// surface (every retry costs money), and the cumulative cost budget is
+// the primary ceiling; this attempt cap is a coarse second guard rail.
+// Values past this are almost certainly a typo and would let a single
+// run grind far past any reasonable retry budget before the cost ceiling
+// catches it.
+const MaxRecycleMaxAttempts = 20
+
+// RecycleMaxAttemptsPatch scales the attempt count on one recycle lane.
+type RecycleMaxAttemptsPatch struct {
+	Target      string `json:"target"`
+	MaxAttempts int    `json:"max_attempts"`
+}
+
+// ApplyRecycleMaxAttemptsPatches mutates reg in place, scaling the
+// max_attempts on the addressed recycle lanes. It validates each patch
+// and returns a ValidationError (HTTP 400) for bad input: an unknown
+// target, a target whose lane does not exist, an out-of-range count, or
+// a duplicate target in the same request.
+func ApplyRecycleMaxAttemptsPatches(reg *WorkflowRegister, patches []RecycleMaxAttemptsPatch) error {
+	if len(patches) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	for _, patch := range patches {
+		target := strings.TrimSpace(patch.Target)
+		if target == "" {
+			return ValidationError{Message: "recycle_max_attempts entry is missing target"}
+		}
+		if _, dup := seen[target]; dup {
+			return ValidationError{Message: fmt.Sprintf("recycle_max_attempts target %q is repeated", target)}
+		}
+		seen[target] = struct{}{}
+		if patch.MaxAttempts < MinRecycleMaxAttempts || patch.MaxAttempts > MaxRecycleMaxAttempts {
+			return ValidationError{Message: fmt.Sprintf(
+				"recycle_max_attempts target %q max_attempts=%d is out of range [%d, %d]",
+				target, patch.MaxAttempts, MinRecycleMaxAttempts, MaxRecycleMaxAttempts,
+			)}
+		}
+		policy, err := recycleLaneForTarget(reg, target)
+		if err != nil {
+			return err
+		}
+		policy.MaxAttempts = patch.MaxAttempts
+	}
+	return nil
+}
+
+// recycleLaneForTarget returns the recycle policy a patch addresses, or a
+// ValidationError when the target is unknown or carries no recycle lane.
+func recycleLaneForTarget(reg *WorkflowRegister, target string) (*RecyclePolicy, error) {
+	if target == RecyclePatchTargetPR {
+		if reg.PR.RecyclePolicy == nil {
+			return nil, ValidationError{Message: "recycle_max_attempts target \"pr\" has no recycle policy to scale"}
+		}
+		return reg.PR.RecyclePolicy, nil
+	}
+	for i := range reg.Phases {
+		if reg.Phases[i].Name == target {
+			if reg.Phases[i].RecyclePolicy == nil {
+				return nil, ValidationError{Message: fmt.Sprintf("recycle_max_attempts target phase %q has no recycle policy to scale", target)}
+			}
+			return reg.Phases[i].RecyclePolicy, nil
+		}
+	}
+	return nil, ValidationError{Message: fmt.Sprintf("recycle_max_attempts target phase %q does not exist", target)}
 }
 
 func registerWorkflow(store ReadStore) http.HandlerFunc {
@@ -145,6 +238,10 @@ func patchWorkflow(store ReadStore) http.HandlerFunc {
 		workflow, err := patcher.PatchWorkflow(r.Context(), project, name, req)
 		if errors.Is(err, ErrNotFound) {
 			writeProblem(w, http.StatusNotFound, "workflow "+project+"."+name+" not found")
+			return
+		}
+		if validationErr, ok := err.(ValidationError); ok {
+			writeProblem(w, http.StatusBadRequest, validationErr.Message)
 			return
 		}
 		if err != nil {

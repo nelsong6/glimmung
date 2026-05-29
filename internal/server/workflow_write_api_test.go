@@ -625,6 +625,131 @@ func TestPatchWorkflowStoreErrorsReturn500(t *testing.T) {
 	}
 }
 
+func TestPatchWorkflowDecodesRecycleMaxAttempts(t *testing.T) {
+	store := &fakeWorkflowWriteStore{workflow: Workflow{
+		ID:      "agent-run",
+		Project: "ambience",
+		Name:    "agent-run",
+	}}
+	handler := NewWithDependencies(Settings{}, store, fakeAdminAuthenticator{})
+
+	rec := httptest.NewRecorder()
+	body := `{"recycle_max_attempts":[{"target":"evidence-gate","max_attempts":5},{"target":"pr","max_attempts":2}]}`
+	req := httptest.NewRequest(http.MethodPatch, "/v1/workflows/ambience/agent-run", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer token")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(store.patchReq.RecycleMaxAttempts) != 2 {
+		t.Fatalf("recycle_max_attempts=%v", store.patchReq.RecycleMaxAttempts)
+	}
+	if store.patchReq.RecycleMaxAttempts[0] != (RecycleMaxAttemptsPatch{Target: "evidence-gate", MaxAttempts: 5}) {
+		t.Fatalf("patch[0]=%v", store.patchReq.RecycleMaxAttempts[0])
+	}
+	if store.patchReq.RecycleMaxAttempts[1] != (RecycleMaxAttemptsPatch{Target: RecyclePatchTargetPR, MaxAttempts: 2}) {
+		t.Fatalf("patch[1]=%v", store.patchReq.RecycleMaxAttempts[1])
+	}
+}
+
+func TestPatchWorkflowMapsValidationErrorTo400(t *testing.T) {
+	handler := NewWithDependencies(
+		Settings{},
+		&fakeWorkflowWriteStore{err: ValidationError{Message: "bad recycle target"}},
+		fakeAdminAuthenticator{},
+	)
+	rec := httptest.NewRecorder()
+	body := `{"recycle_max_attempts":[{"target":"nope","max_attempts":2}]}`
+	req := httptest.NewRequest(http.MethodPatch, "/v1/workflows/ambience/agent-run", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer token")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400 body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func recycleTestRegister() WorkflowRegister {
+	return WorkflowRegister{
+		Project: "ambience",
+		Name:    "agent-run",
+		Phases: []PhaseSpec{
+			{Name: "prepare"},
+			{Name: "evidence-gate", RecyclePolicy: &RecyclePolicy{MaxAttempts: 3, On: []string{"verify_fail"}, LandsAt: "prepare"}},
+		},
+		PR: PrPrimitive{RecyclePolicy: &RecyclePolicy{MaxAttempts: 3, On: []string{"pr_review_changes_requested"}, LandsAt: "prepare"}},
+	}
+}
+
+func TestApplyRecycleMaxAttemptsPatchesScalesPhaseAndPR(t *testing.T) {
+	reg := recycleTestRegister()
+	err := ApplyRecycleMaxAttemptsPatches(&reg, []RecycleMaxAttemptsPatch{
+		{Target: "evidence-gate", MaxAttempts: 5},
+		{Target: RecyclePatchTargetPR, MaxAttempts: 1},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := reg.Phases[1].RecyclePolicy.MaxAttempts; got != 5 {
+		t.Fatalf("phase max_attempts=%d, want 5", got)
+	}
+	if got := reg.PR.RecyclePolicy.MaxAttempts; got != 1 {
+		t.Fatalf("pr max_attempts=%d, want 1", got)
+	}
+	// Structural fields must be untouched.
+	if reg.Phases[1].RecyclePolicy.LandsAt != "prepare" || len(reg.Phases[1].RecyclePolicy.On) != 1 {
+		t.Fatalf("structural fields mutated: %+v", reg.Phases[1].RecyclePolicy)
+	}
+}
+
+func TestApplyRecycleMaxAttemptsPatchesRejectsBadInput(t *testing.T) {
+	cases := []struct {
+		name  string
+		patch RecycleMaxAttemptsPatch
+	}{
+		{"unknown phase", RecycleMaxAttemptsPatch{Target: "ghost", MaxAttempts: 2}},
+		{"phase without policy", RecycleMaxAttemptsPatch{Target: "prepare", MaxAttempts: 2}},
+		{"zero attempts", RecycleMaxAttemptsPatch{Target: "evidence-gate", MaxAttempts: 0}},
+		{"over ceiling", RecycleMaxAttemptsPatch{Target: "evidence-gate", MaxAttempts: MaxRecycleMaxAttempts + 1}},
+		{"empty target", RecycleMaxAttemptsPatch{Target: "", MaxAttempts: 2}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := recycleTestRegister()
+			err := ApplyRecycleMaxAttemptsPatches(&reg, []RecycleMaxAttemptsPatch{tc.patch})
+			if _, ok := err.(ValidationError); !ok {
+				t.Fatalf("err=%v, want ValidationError", err)
+			}
+			// A rejected request must not mutate the register.
+			if reg.Phases[1].RecyclePolicy.MaxAttempts != 3 {
+				t.Fatalf("phase mutated despite rejection: %d", reg.Phases[1].RecyclePolicy.MaxAttempts)
+			}
+		})
+	}
+}
+
+func TestApplyRecycleMaxAttemptsPatchesRejectsDuplicateTarget(t *testing.T) {
+	reg := recycleTestRegister()
+	err := ApplyRecycleMaxAttemptsPatches(&reg, []RecycleMaxAttemptsPatch{
+		{Target: "evidence-gate", MaxAttempts: 4},
+		{Target: "evidence-gate", MaxAttempts: 5},
+	})
+	if _, ok := err.(ValidationError); !ok {
+		t.Fatalf("err=%v, want ValidationError", err)
+	}
+}
+
+func TestApplyRecycleMaxAttemptsPatchesNoopOnEmpty(t *testing.T) {
+	reg := recycleTestRegister()
+	if err := ApplyRecycleMaxAttemptsPatches(&reg, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reg.Phases[1].RecyclePolicy.MaxAttempts != 3 {
+		t.Fatalf("phase mutated: %d", reg.Phases[1].RecyclePolicy.MaxAttempts)
+	}
+}
+
 func TestDeleteWorkflowRequiresAdmin(t *testing.T) {
 	handler := NewWithDependencies(Settings{}, &fakeWorkflowWriteStore{}, nil)
 	rec := httptest.NewRecorder()
