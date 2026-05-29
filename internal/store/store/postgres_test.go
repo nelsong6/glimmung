@@ -22,6 +22,35 @@ func TestNativeEventAttemptIndexAcceptsExplicitOrMetadataValue(t *testing.T) {
 	}
 }
 
+func TestTerminalStateReleasesSlotLease(t *testing.T) {
+	cases := []struct {
+		name            string
+		state           string
+		preserveTestEnv bool
+		want            bool
+	}{
+		// An aborted run tears everything down and releases the slot lease
+		// regardless of preserve_test_env — this is the teardown-then-abort
+		// path that previously stranded the lease "claimed".
+		{name: "aborted releases", state: "aborted", preserveTestEnv: false, want: true},
+		{name: "aborted releases even when preserve set", state: "aborted", preserveTestEnv: true, want: true},
+		// A passed run releases unless preserve_test_env keeps the env alive.
+		{name: "passed releases", state: "passed", preserveTestEnv: false, want: true},
+		{name: "passed preserves when preserve set", state: "passed", preserveTestEnv: true, want: false},
+		// Non-terminal / non-slot states never release here.
+		{name: "review_required does not release", state: "review_required", preserveTestEnv: false, want: false},
+		{name: "recycled does not release", state: "recycled", preserveTestEnv: false, want: false},
+		{name: "empty state does not release", state: "", preserveTestEnv: false, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := terminalStateReleasesSlotLease(tc.state, tc.preserveTestEnv); got != tc.want {
+				t.Fatalf("terminalStateReleasesSlotLease(%q, %t)=%t, want %t", tc.state, tc.preserveTestEnv, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestNativeJobExecutionStateVerificationControl(t *testing.T) {
 	completion := nativeJobCompletionDoc{
 		Conclusion:   "success",

@@ -654,7 +654,8 @@ func TestNativeRunCompletedByCallbackTokenAbortRunsTeardownThenAborts(t *testing
 		{AttemptIndex: 1, Phase: "cleanup", Conclusion: "failure"},
 	}
 	store.wf = abortWorkflowWithCleanup("env-prep")
-	store.terminalResult = AbortRunResult{State: "aborted", RunRef: "proj#7/runs/1"}
+	slotReleased := true
+	store.terminalResult = AbortRunResult{State: "aborted", RunRef: "proj#7/runs/1", SlotLeaseReleased: &slotReleased}
 	rec := httptest.NewRecorder()
 	newCompletionHandler(store, nil).ServeHTTP(rec, nativeCompletionRequest("tok",
 		completedJob("cleanup", "success", nil, nil)))
@@ -666,6 +667,13 @@ func TestNativeRunCompletedByCallbackTokenAbortRunsTeardownThenAborts(t *testing
 	}
 	if store.terminalReason == nil || !strings.Contains(*store.terminalReason, "host_unavailable") {
 		t.Fatalf("terminal reason=%v, want the original primary abort_reason", store.terminalReason)
+	}
+	// The slot lease released by the terminal-abort transition must surface on
+	// the callback result so operators see the scarce host-pinned slot freed —
+	// the teardown-then-abort path previously left it stranded "claimed".
+	result := readCallbackResult(t, rec)
+	if result.SlotLeaseReleased == nil || !*result.SlotLeaseReleased {
+		t.Fatalf("slot_lease_released=%v, want true on terminal abort", result.SlotLeaseReleased)
 	}
 }
 

@@ -38,6 +38,7 @@ type RunCallbackResult struct {
 	Decision          *string  `json:"decision"`
 	IssueLockReleased *bool    `json:"issue_lock_released"`
 	PRLockReleased    *bool    `json:"pr_lock_released"`
+	SlotLeaseReleased *bool    `json:"slot_lease_released,omitempty"`
 	PhaseComplete     *bool    `json:"phase_complete,omitempty"`
 	CompletedJobIDs   []string `json:"completed_job_ids,omitempty"`
 	PendingJobIDs     []string `json:"pending_job_ids,omitempty"`

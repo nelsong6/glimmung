@@ -474,6 +474,7 @@ func processRunCompletion(
 				Decision:          &verdictStr,
 				IssueLockReleased: result.IssueLockReleased,
 				PRLockReleased:    result.PRLockReleased,
+				SlotLeaseReleased: result.SlotLeaseReleased,
 			}
 		}
 		// Every workflow ends at the touchpoint_gate. Reaching this code
@@ -506,6 +507,7 @@ func processRunCompletion(
 			Decision:          &verdictStr,
 			IssueLockReleased: result.IssueLockReleased,
 			PRLockReleased:    result.PRLockReleased,
+			SlotLeaseReleased: result.SlotLeaseReleased,
 		}
 
 	default: // abort_budget_attempts, abort_budget_cost, abort_malformed
@@ -539,6 +541,7 @@ func processRunCompletion(
 			Decision:          &verdictStr,
 			IssueLockReleased: result.IssueLockReleased,
 			PRLockReleased:    result.PRLockReleased,
+			SlotLeaseReleased: result.SlotLeaseReleased,
 		}
 	}
 }
@@ -618,6 +621,7 @@ func markRunAborted(
 		Decision:          &verdictStr,
 		IssueLockReleased: result.IssueLockReleased,
 		PRLockReleased:    result.PRLockReleased,
+		SlotLeaseReleased: result.SlotLeaseReleased,
 	}
 }
 
