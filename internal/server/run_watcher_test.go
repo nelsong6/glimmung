@@ -26,22 +26,23 @@ func writeTempSAToken(t *testing.T) string {
 }
 
 func TestWatchPathIncludesLabelSelectorAndBookmarks(t *testing.T) {
-	w := &k8sJobWatcher{}
-	got := w.watchPath("12345")
-	if !strings.Contains(got, "watch=true") {
-		t.Fatalf("missing watch=true: %s", got)
+	outer := &k8sJobWatcher{labelSelector: watchOuterSelector}
+	got := outer.watchPath("12345")
+	for _, want := range []string{"watch=true", "allowWatchBookmarks=true", "resourceVersion=12345", "labelSelector="} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q: %s", want, got)
+		}
 	}
-	if !strings.Contains(got, "allowWatchBookmarks=true") {
-		t.Fatalf("missing allowWatchBookmarks: %s", got)
+	// The outer selector pins both managed-by=glimmung and the
+	// native-job=true qualifier that distinguishes phase Jobs from
+	// test-slot installer Jobs (which also carry managed-by=glimmung).
+	if !strings.Contains(got, "managed-by%3Dglimmung") || !strings.Contains(got, "native-job%3Dtrue") {
+		t.Fatalf("outer selector missing phase-Job filters: %s", got)
 	}
-	if !strings.Contains(got, "resourceVersion=12345") {
-		t.Fatalf("missing resourceVersion: %s", got)
-	}
-	if !strings.Contains(got, "labelSelector=") {
-		t.Fatalf("missing labelSelector: %s", got)
-	}
-	if !strings.Contains(got, "glimmung") || !strings.Contains(got, "glimmung-inner") {
-		t.Fatalf("labelSelector doesn't cover both kinds: %s", got)
+	inner := &k8sJobWatcher{labelSelector: watchInnerSelector}
+	gotInner := inner.watchPath("12345")
+	if !strings.Contains(gotInner, "managed-by%3Dglimmung-inner") {
+		t.Fatalf("inner selector missing managed-by=glimmung-inner: %s", gotInner)
 	}
 }
 
@@ -223,6 +224,7 @@ func TestWatchListAndSyncDispatchesTerminalJobsAndReturnsResourceVersion(t *test
 	launcher := &fakeNativeLauncher{}
 
 	wch := &k8sJobWatcher{
+		watcherDeps: watcherDeps{
 		settings: Settings{
 			K8sAPIHost:     srv.URL,
 			K8sSATokenPath: tokenPath,
@@ -234,6 +236,8 @@ func TestWatchListAndSyncDispatchesTerminalJobsAndReturnsResourceVersion(t *test
 		nativeLauncher:  launcher,
 		statusGetter:    &fakeJobStatusGetter{},
 		namespace:       "glimmung-runs",
+		},
+		labelSelector: watchOuterSelector,
 	}
 	rv, err := wch.listAndSync(context.Background())
 	if err != nil {
@@ -336,6 +340,7 @@ func TestWatchStreamDispatchesModifiedTerminalEvent(t *testing.T) {
 	}
 	events := newInnerJobEventStore(listStore)
 	wch := &k8sJobWatcher{
+		watcherDeps: watcherDeps{
 		settings: Settings{
 			K8sAPIHost:     srv.URL,
 			K8sSATokenPath: tokenPath,
@@ -347,6 +352,8 @@ func TestWatchStreamDispatchesModifiedTerminalEvent(t *testing.T) {
 		nativeLauncher:  &fakeNativeLauncher{},
 		statusGetter:    &fakeJobStatusGetter{},
 		namespace:       "glimmung-runs",
+		},
+		labelSelector: watchOuterSelector,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -374,10 +381,13 @@ func TestWatchHandlesGoneResponse(t *testing.T) {
 	tokenPath := writeTempSAToken(t)
 
 	wch := &k8sJobWatcher{
+		watcherDeps: watcherDeps{
 		settings: Settings{
 			K8sAPIHost:     srv.URL,
 			K8sSATokenPath: tokenPath,
 		},
+		},
+		labelSelector: watchOuterSelector,
 	}
 	err := wch.watch(context.Background(), "stale")
 	if err != errWatchGone {
