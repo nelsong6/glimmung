@@ -145,14 +145,12 @@ externalSecret:
     - envVar: POSTGRES_DATABASE
       kvKey: glimmung-pg-database
     # Remote-host execution primitives (docs/remote-host-execution.md).
-    # The SSH CA private key signs short-TTL OpenSSH user certs for
-    # orchestrator pods reaching project-pinned hosts. Tailscale
-    # auth-key mints flow through the OIDC federation path against
-    # auth.romaine.life — no KV-resident Tailscale OAuth secret is
-    # needed. The endpoint fails closed (HTTP 503) when the CA key is
-    # empty so missing values do not silently bypass the cert mint.
-    - envVar: GLIMMUNG_SSH_CA_PRIVATE_KEY
-      kvKey: glimmung-ssh-ca-private-key
+    # glimmung holds NO SSH CA private material: auth.romaine.life is the
+    # sole SSH CA issuer. The ssh-cert callback is a gateway that proves
+    # glimmung's identity with the projected SA token (audience-pinned to
+    # auth.romaine.life, mounted below) and asks auth to sign the cert.
+    # Tailscale auth-key mints flow through the same OIDC federation path
+    # — no KV-resident SSH CA key or Tailscale OAuth secret is needed.
 
 # Remote-host execution primitives (docs/remote-host-execution.md).
 # Identifies the Tailscale "Trust credentials → OIDC" entry that pins

@@ -21,12 +21,16 @@ type SSHCertRequest struct {
 }
 
 // SSHCertResponse carries the signed certificate and its validity
-// window back to the orchestrator.
+// window back to the orchestrator. The certificate is signed by
+// auth.romaine.life (the sole SSH CA issuer); glimmung is a gateway that
+// derives the principal/key_id and relays auth's signed result. The
+// consumer (`scripts/glimmung-native/*.sh`) reads only `.certificate`;
+// the rest is surfaced for diagnosis. auth does not return a
+// `valid_after`, so neither does glimmung.
 type SSHCertResponse struct {
 	Certificate string    `json:"certificate"`
 	Principals  []string  `json:"principals"`
 	KeyID       string    `json:"key_id"`
-	ValidAfter  time.Time `json:"valid_after"`
 	ValidBefore time.Time `json:"valid_before"`
 }
 
@@ -62,10 +66,10 @@ type runCallbackTokenReader interface {
 // This mirrors how `github-token`, `pr-touchpoint`, `pr-merge`, and
 // `completed` are surfaced to phase scripts — the lease's own callback
 // token never reaches phase pods.
-func mintRunCallbackSSHCert(store ReadStore, signer *CertSigner) http.HandlerFunc {
+func mintRunCallbackSSHCert(store ReadStore, exchanger *SSHCertExchanger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if signer == nil {
-			writeProblem(w, http.StatusServiceUnavailable, "ssh ca is not configured")
+		if exchanger == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "ssh cert gateway is not configured")
 			return
 		}
 		reader, ok := store.(runCallbackTokenReader)
@@ -81,29 +85,45 @@ func mintRunCallbackSSHCert(store ReadStore, signer *CertSigner) http.HandlerFun
 		if !ok {
 			return
 		}
-		userKey, err := ParseUserPublicKey(body.PublicKey)
-		if err != nil {
-			writeProblem(w, http.StatusBadRequest, err.Error())
+		publicKey := strings.TrimSpace(body.PublicKey)
+		if publicKey == "" {
+			writeProblem(w, http.StatusBadRequest, "public_key required")
 			return
 		}
 		principal := remoteHostPrincipalForProject(project)
 		keyID := fmt.Sprintf("glimmung-run:%s/%s", project, runID)
-		now := time.Now().UTC()
-		cert, marshaled, err := signer.SignUserCert(userKey, keyID, []string{principal}, now)
+		result, err := exchanger.Exchange(r.Context(), publicKey, keyID, []string{principal})
 		if err != nil {
-			if errors.Is(err, errSSHCAUnconfigured) {
-				writeProblem(w, http.StatusServiceUnavailable, "ssh ca is not configured")
+			if errors.Is(err, errSSHCertGatewayUnconfigured) {
+				writeProblem(w, http.StatusServiceUnavailable, "ssh cert gateway is not configured")
 				return
 			}
-			writeInternalError(w, r, err, "sign ssh cert failed")
+			var upstream *sshCertUpstreamError
+			if errors.As(err, &upstream) {
+				// Faithfully propagate auth.romaine.life's decision: a 400
+				// (bad principal/extension/ttl/public_key) is the caller's
+				// fault and must surface as a 400; a 503 (auth has no CA
+				// key) surfaces as a 503; anything else is an upstream
+				// fault surfaced as a 502. Never mask a caller error as a
+				// server error or vice versa.
+				switch {
+				case upstream.status == http.StatusBadRequest:
+					writeProblem(w, http.StatusBadRequest, "auth.romaine.life rejected the ssh-cert request: "+upstream.body)
+				case upstream.status == http.StatusServiceUnavailable:
+					writeProblem(w, http.StatusServiceUnavailable, "auth.romaine.life ssh ca is not configured")
+				default:
+					writeProblem(w, http.StatusBadGateway, fmt.Sprintf("auth.romaine.life ssh-cert exchange failed (status %d)", upstream.status))
+				}
+				return
+			}
+			writeInternalError(w, r, err, "ssh-cert exchange failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, SSHCertResponse{
-			Certificate: strings.TrimRight(string(marshaled), "\n"),
-			Principals:  []string{principal},
-			KeyID:       keyID,
-			ValidAfter:  time.Unix(int64(cert.ValidAfter), 0).UTC(),
-			ValidBefore: time.Unix(int64(cert.ValidBefore), 0).UTC(),
+			Certificate: result.Certificate,
+			Principals:  result.Principals,
+			KeyID:       result.KeyID,
+			ValidBefore: result.ValidBefore,
 		})
 	}
 }
