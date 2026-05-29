@@ -50,12 +50,14 @@ Contract impact:
 Evidence:
 - `internal/server/inspection_api_test.go` — write-contract, idempotent
   retry, ledger rollback, missing-part rejection, invalid-JSON, missing
-  lease.
+  lease, GET-by-id detail shape, GET-by-id 404 for missing, list with
+  no filter / lease filter / project filter / invalid-limit rejection.
 - `internal/server/inspection_sweep_test.go` — lease-cleanup deletes
   rows and blobs; no-rows no-op; nil-store no-crash.
 - `internal/server/artifact_api_test.go` — `inspections/` prefix served;
   `inspections/../escape` rejected.
-- `internal/server/route_inventory_test.go` — new `POST /v1/inspections`
-  route registered in the expected order.
+- `internal/server/route_inventory_test.go` — `POST /v1/inspections`,
+  `GET /v1/inspections`, and `GET /v1/inspections/{inspection_id}`
+  routes registered in the expected order.
 - Follow-up: run-scoped inspection prefix (`runs/<project>/<run>/inspections/...`)
   once leases carry a stable `run_id`. Tracked under glimmung#143.

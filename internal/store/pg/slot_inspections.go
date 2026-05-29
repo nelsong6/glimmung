@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -113,6 +114,96 @@ func (s *SlotInspectionsStore) LookupByRequest(ctx context.Context, leaseID, req
 	}
 	if err != nil {
 		return SlotInspectionRow{}, fmt.Errorf("slot_inspections: lookup: %w", err)
+	}
+	return out, nil
+}
+
+// GetByID returns the row identified by id, or ErrSlotInspectionNotFound
+// if no row matches. Used by GET /v1/inspections/{id}.
+func (s *SlotInspectionsStore) GetByID(ctx context.Context, id string) (SlotInspectionRow, error) {
+	if s == nil || s.pool == nil {
+		return SlotInspectionRow{}, fmt.Errorf("slot_inspections store not configured")
+	}
+	const sql = `
+		SELECT id, project, slot, lease_id, session_id, request_id,
+			blob_prefix, report_blob_path, screenshot_blob_path,
+			screenshot_content_type, byte_size_screenshot, byte_size_report,
+			created_at
+		FROM slot_inspections
+		WHERE id = $1
+	`
+	var out SlotInspectionRow
+	err := s.pool.QueryRow(ctx, sql, id).Scan(
+		&out.ID, &out.Project, &out.Slot, &out.LeaseID, &out.SessionID, &out.RequestID,
+		&out.BlobPrefix, &out.ReportBlobPath, &out.ScreenshotBlobPath,
+		&out.ScreenshotContentType, &out.ByteSizeScreenshot, &out.ByteSizeReport,
+		&out.CreatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SlotInspectionRow{}, ErrSlotInspectionNotFound
+	}
+	if err != nil {
+		return SlotInspectionRow{}, fmt.Errorf("slot_inspections: get: %w", err)
+	}
+	return out, nil
+}
+
+// List returns rows newest-first, narrowed by the supplied filter.
+// Project and LeaseID filters are AND-combined; empty strings mean "no
+// filter on this dimension." Limit defaults to 50 when <= 0 and is
+// capped at 200 to keep list responses bounded.
+func (s *SlotInspectionsStore) List(ctx context.Context, project, leaseID string, limit int) ([]SlotInspectionRow, error) {
+	if s == nil || s.pool == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	args := []any{}
+	where := []string{}
+	if strings.TrimSpace(project) != "" {
+		args = append(args, project)
+		where = append(where, fmt.Sprintf("project = $%d", len(args)))
+	}
+	if strings.TrimSpace(leaseID) != "" {
+		args = append(args, leaseID)
+		where = append(where, fmt.Sprintf("lease_id = $%d", len(args)))
+	}
+	args = append(args, limit)
+	sqlText := `
+		SELECT id, project, slot, lease_id, session_id, request_id,
+			blob_prefix, report_blob_path, screenshot_blob_path,
+			screenshot_content_type, byte_size_screenshot, byte_size_report,
+			created_at
+		FROM slot_inspections
+	`
+	if len(where) > 0 {
+		sqlText += " WHERE " + strings.Join(where, " AND ")
+	}
+	sqlText += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d", len(args))
+	rows, err := s.pool.Query(ctx, sqlText, args...)
+	if err != nil {
+		return nil, fmt.Errorf("slot_inspections: list: %w", err)
+	}
+	defer rows.Close()
+	out := []SlotInspectionRow{}
+	for rows.Next() {
+		var row SlotInspectionRow
+		if err := rows.Scan(
+			&row.ID, &row.Project, &row.Slot, &row.LeaseID, &row.SessionID, &row.RequestID,
+			&row.BlobPrefix, &row.ReportBlobPath, &row.ScreenshotBlobPath,
+			&row.ScreenshotContentType, &row.ByteSizeScreenshot, &row.ByteSizeReport,
+			&row.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("slot_inspections: scan list: %w", err)
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("slot_inspections: iterate list: %w", err)
 	}
 	return out, nil
 }

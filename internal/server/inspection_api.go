@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -355,6 +356,128 @@ func createInspection(deps createInspectionDeps) http.HandlerFunc {
 
 		metrics.RecordInspectionWritten(metrics.InspectionScopeLease)
 		writeJSON(w, http.StatusOK, inspectionResponseFromRecord(written))
+	}
+}
+
+// inspectionDetailResponse is the wire shape for GET /v1/inspections/{id}.
+// It carries the full ledger row alongside the URLs the read surface
+// already exposes via the inspectionResponse summary.
+type inspectionDetailResponse struct {
+	InspectionID          string `json:"inspection_id"`
+	Project               string `json:"project"`
+	Slot                  string `json:"slot"`
+	LeaseID               string `json:"lease_id"`
+	SessionID             string `json:"session_id"`
+	RequestID             string `json:"request_id,omitempty"`
+	BlobPrefix            string `json:"blob_prefix"`
+	ReportURL             string `json:"report_url"`
+	ScreenshotURL         string `json:"screenshot_url"`
+	ScreenshotContentType string `json:"screenshot_content_type"`
+	ByteSizeScreenshot    int64  `json:"byte_size_screenshot"`
+	ByteSizeReport        int64  `json:"byte_size_report"`
+	Scope                 string `json:"scope"`
+	ScopeRef              string `json:"scope_ref"`
+	CreatedAt             string `json:"created_at"`
+}
+
+// inspectionListResponse wraps a slice of detail responses so future
+// fields (cursor, total counts, etc.) can be added without breaking the
+// wire shape.
+type inspectionListResponse struct {
+	Inspections []inspectionDetailResponse `json:"inspections"`
+}
+
+func inspectionDetailFromRecord(r SlotInspectionRecord) inspectionDetailResponse {
+	return inspectionDetailResponse{
+		InspectionID:          r.ID,
+		Project:               r.Project,
+		Slot:                  r.Slot,
+		LeaseID:               r.LeaseID,
+		SessionID:             r.SessionID,
+		RequestID:             r.RequestID,
+		BlobPrefix:            r.BlobPrefix,
+		ReportURL:             "/v1/artifacts/" + r.ReportBlobPath,
+		ScreenshotURL:         "/v1/artifacts/" + r.ScreenshotBlobPath,
+		ScreenshotContentType: r.ScreenshotContentType,
+		ByteSizeScreenshot:    r.ByteSizeScreenshot,
+		ByteSizeReport:        r.ByteSizeReport,
+		Scope:                 metrics.InspectionScopeLease,
+		ScopeRef:              r.LeaseID,
+		CreatedAt:             r.CreatedAt.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+// getInspectionByID is the GET /v1/inspections/{id} handler. Returns
+// 404 when the ledger has no row with that id — including after a
+// lease-cleanup sweep already removed the row and its blobs, which
+// keeps the read surface honest about durability.
+func getInspectionByID(store SlotInspectionStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "slot_inspections store not configured")
+			return
+		}
+		id := strings.TrimSpace(r.PathValue("inspection_id"))
+		if id == "" {
+			writeProblem(w, http.StatusBadRequest, "inspection_id required")
+			return
+		}
+		record, err := store.GetSlotInspectionByID(r.Context(), id)
+		if err != nil {
+			if errors.Is(err, ErrSlotInspectionNotFound) {
+				writeProblem(w, http.StatusNotFound, "inspection not found")
+				return
+			}
+			writeInternalError(w, r, err, "read inspection failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, inspectionDetailFromRecord(record))
+	}
+}
+
+// listInspections is the GET /v1/inspections handler. Filters:
+//
+//   - ?project=<name>
+//   - ?lease=<lease_id>
+//   - ?limit=<n>   (1..200, default 50)
+//
+// Run-bound inspections are not surfaced here in V1 — they live under
+// `runs/<project>/<run>/inspections/<id>/...` and flow through the
+// existing Run evidence machinery instead of slot_inspections. When the
+// run-scoped path lands, this list will continue to enumerate only the
+// free (lease-scoped) inspections; the run view exposes its own
+// inspections through the existing Run report surface.
+func listInspections(store SlotInspectionStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "slot_inspections store not configured")
+			return
+		}
+		q := r.URL.Query()
+		filter := SlotInspectionFilter{
+			Project: strings.TrimSpace(q.Get("project")),
+			LeaseID: strings.TrimSpace(q.Get("lease")),
+		}
+		if raw := strings.TrimSpace(q.Get("limit")); raw != "" {
+			parsed, parseErr := strconv.Atoi(raw)
+			if parseErr != nil || parsed <= 0 {
+				writeProblem(w, http.StatusBadRequest, "limit must be a positive integer")
+				return
+			}
+			filter.Limit = parsed
+		}
+		records, err := store.ListSlotInspections(r.Context(), filter)
+		if err != nil {
+			writeInternalError(w, r, err, "list inspections failed")
+			return
+		}
+		body := inspectionListResponse{
+			Inspections: make([]inspectionDetailResponse, 0, len(records)),
+		}
+		for _, record := range records {
+			body.Inspections = append(body.Inspections, inspectionDetailFromRecord(record))
+		}
+		writeJSON(w, http.StatusOK, body)
 	}
 }
 

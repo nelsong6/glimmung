@@ -359,6 +359,14 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 				artifactWriter = w
 			}
 			mux.Handle(
+				"GET /v1/inspections",
+				requireAdmin(adminAuthenticator, listInspections(inspectionStore)),
+			)
+			mux.Handle(
+				"GET /v1/inspections/{inspection_id}",
+				requireAdmin(adminAuthenticator, getInspectionByID(inspectionStore)),
+			)
+			mux.Handle(
 				"POST /v1/inspections",
 				requireAdmin(adminAuthenticator, createInspection(createInspectionDeps{
 					store:         inspectionStore,

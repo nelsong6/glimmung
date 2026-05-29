@@ -46,6 +46,29 @@ func (s *inspectionSweepFakeStore) DeleteSlotInspectionsByLease(_ context.Contex
 	return out, nil
 }
 
+func (s *inspectionSweepFakeStore) GetSlotInspectionByID(_ context.Context, id string) (SlotInspectionRecord, error) {
+	for _, row := range s.rows {
+		if row.ID == id {
+			return row, nil
+		}
+	}
+	return SlotInspectionRecord{}, ErrSlotInspectionNotFound
+}
+
+func (s *inspectionSweepFakeStore) ListSlotInspections(_ context.Context, filter SlotInspectionFilter) ([]SlotInspectionRecord, error) {
+	out := []SlotInspectionRecord{}
+	for _, row := range s.rows {
+		if filter.Project != "" && row.Project != filter.Project {
+			continue
+		}
+		if filter.LeaseID != "" && row.LeaseID != filter.LeaseID {
+			continue
+		}
+		out = append(out, row)
+	}
+	return out, nil
+}
+
 func TestSweepLeaseInspectionsDeletesRowsAndBlobs(t *testing.T) {
 	prevWriter := inspectionSweepArtifactWriter()
 	t.Cleanup(func() { SetInspectionSweepArtifactWriter(prevWriter) })
