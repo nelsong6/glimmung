@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/nelsong6/glimmung/internal/metrics"
 )
 
 const defaultRunDispatchTimeoutSeconds = 600
@@ -298,7 +300,7 @@ func reconcileFailedActiveJobsForRun(ctx context.Context, completionStore RunCom
 			if job.K8sJobName == nil || strings.TrimSpace(*job.K8sJobName) == "" {
 				continue
 			}
-			ready, conclusion, summary, err := evaluateActiveJobFailure(ctx, statusGetter, namespace, *job.K8sJobName, grace, now)
+			ready, conclusion, terminalReason, summary, err := evaluateActiveJobFailure(ctx, statusGetter, namespace, *job.K8sJobName, grace, now)
 			if err != nil {
 				return completed, err
 			}
@@ -310,12 +312,14 @@ func reconcileFailedActiveJobsForRun(ctx context.Context, completionStore RunCom
 				JobID:           &jobID,
 				Conclusion:      conclusion,
 				SummaryMarkdown: &summary,
+				TerminalReason:  terminalReason,
 			}
 			result, err := jobStore.RecordNativeJobCompletion(ctx, run.Project, run.ID, payload)
 			if err != nil {
 				return completed, err
 			}
 			completed++
+			metrics.RecordRunPhaseJobTerminal(conclusion, NormalizeJobTerminalReason(terminalReason))
 			if result.CompletionReady {
 				if _, err := processSyntheticRunCompletion(ctx, completionStore, nativeLauncher, run.Project, run.ID, result.PhasePayload); err != nil {
 					return completed, err
@@ -328,19 +332,19 @@ func reconcileFailedActiveJobsForRun(ctx context.Context, completionStore RunCom
 
 // evaluateActiveJobFailure asks k8s for the Job's status and, if it is past
 // the grace period and terminally failed (or has been garbage-collected from
-// k8s entirely), returns the synthetic completion conclusion plus a summary
-// the dashboard can render.
-func evaluateActiveJobFailure(ctx context.Context, statusGetter NativeJobStatusGetter, namespace, name string, grace time.Duration, now time.Time) (bool, string, string, error) {
+// k8s entirely), returns the synthetic completion conclusion, the
+// JobTerminalReason* enum value, and a summary the dashboard can render.
+func evaluateActiveJobFailure(ctx context.Context, statusGetter NativeJobStatusGetter, namespace, name string, grace time.Duration, now time.Time) (bool, string, string, string, error) {
 	status, err := statusGetter.GetNativeJobStatus(ctx, namespace, name)
 	if err != nil {
-		return false, "", "", err
+		return false, "", "", "", err
 	}
 	if !status.Found {
 		// k8s no longer has the Job (TTL-collected). The run lost its
 		// execution surface and cannot be observed further — fail it so
 		// the verify loop or cleanup phase can run.
 		summary := fmt.Sprintf("native job %q was garbage-collected from kubernetes without a completion callback", name)
-		return true, "failed", summary, nil
+		return true, "failed", JobTerminalReasonPodGone, summary, nil
 	}
 	if status.IsTerminallySucceeded() && !status.IsTerminallyFailed() {
 		// Pod ran to completion but the callback was lost. Surface as
@@ -349,29 +353,37 @@ func evaluateActiveJobFailure(ctx context.Context, statusGetter NativeJobStatusG
 		// marking success because evidence/verification fields would
 		// otherwise be missing.
 		if grace > 0 && !status.TerminalTime().IsZero() && now.Sub(status.TerminalTime()) < grace {
-			return false, "", "", nil
+			return false, "", "", "", nil
 		}
 		summary := fmt.Sprintf("native job %q completed in kubernetes but its completion callback was never received", name)
-		return true, "failed", summary, nil
+		return true, "failed", JobTerminalReasonCallbackLost, summary, nil
 	}
 	if !status.IsTerminallyFailed() {
-		return false, "", "", nil
+		return false, "", "", "", nil
 	}
 	if grace > 0 && !status.TerminalTime().IsZero() && now.Sub(status.TerminalTime()) < grace {
-		return false, "", "", nil
+		return false, "", "", "", nil
 	}
 	reason := status.FailureReason()
 	message := status.FailureMessage()
 	conclusion := "failed"
+	terminalReason := JobTerminalReasonJobFailed
 	switch reason {
-	case "DeadlineExceeded", "BackoffLimitExceeded":
-		// BackoffLimitExceeded with backoffLimit=0 most often comes from
-		// a pod hitting activeDeadlineSeconds first; either way the runner
-		// was killed without surfacing test evidence. Tag as timed_out so
-		// dashboards distinguish wallclock kills from a runner-reported
-		// failure.
+	case "DeadlineExceeded":
+		// kubelet killed the pod for hitting activeDeadlineSeconds.
+		// Tag as timed_out so dashboards distinguish wallclock kills
+		// from a runner-reported failure.
 		conclusion = "timed_out"
+		terminalReason = JobTerminalReasonDeadlineExceeded
+	case "BackoffLimitExceeded":
+		// With backoffLimit=0 this usually means the pod itself hit a
+		// terminal failure (DeadlineExceeded at the pod level, OOM,
+		// crash). The Job controller surfaces it as
+		// BackoffLimitExceeded. Treated as timed_out for the same
+		// reason as DeadlineExceeded — runner had no chance to report.
+		conclusion = "timed_out"
+		terminalReason = JobTerminalReasonBackoffExceeded
 	}
 	summary := fmt.Sprintf("native job %q ended with kubernetes condition Failed=true reason=%q: %s", name, reason, strings.TrimSpace(message))
-	return true, conclusion, summary, nil
+	return true, conclusion, terminalReason, summary, nil
 }

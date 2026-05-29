@@ -525,15 +525,37 @@ func RecordRunInnerJobRegistered(intent string) {
 	runInnerJobsRegisteredTotal.WithLabelValues(safeLabel(intent)).Inc()
 }
 
-// --- Registration ------------------------------------------------------------
+// --- Native phase job terminal ----------------------------------------------
 //
-// k8s Job apply/terminal metrics are not in V1: the dispatch path emits a
-// Job and forgets — terminal state propagates back asynchronously via
-// callbacks and pod log polling, with no single in-process site that owns
-// "the Job is now terminal." Wiring them correctly needs the run-callback
-// surface to grow a job-terminal signal first. The Job apply step is
-// already observable via the lease metric (every apply is preceded by an
-// AcquireLease) so the queue side stays visible without these.
+// The V1 deferral named in docs/observability.md ("k8s Job apply/terminal
+// metrics") is now actionable: glimmung#621's run-execution reconciler is
+// the single in-process site that owns "the Job is now terminal" for the
+// path where the runner never delivered a callback. Combined with the
+// runner-driven completion callback site, every terminal-job event funnels
+// through one of those two callers, so a per-terminal counter is
+// well-defined.
+//
+// Label cardinality:
+//   - conclusion: closed enum {success | failure | timed_out | cancelled}
+//   - reason: closed enum from server.JobTerminalReason* — callers feed
+//     server.NormalizeJobTerminalReason so an unexpected string collapses
+//     to "unknown" rather than expanding the label set.
+
+var runPhaseJobTerminalTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "glimmung_run_phase_job_terminal_total",
+		Help: "Native phase Jobs that reached a terminal state, labelled by conclusion (success | failure | timed_out | cancelled) and a closed-enum reason (deadline_exceeded | backoff_exceeded | pod_gone | callback_lost | job_failed | verification_failed | verification_error | timeout | cancelled | unknown | empty for success).",
+	},
+	[]string{"conclusion", "reason"},
+)
+
+// RecordRunPhaseJobTerminal counts one terminal native-job event. The
+// conclusion should be one of success/failure/timed_out/cancelled; the
+// reason must already be normalised through server.NormalizeJobTerminalReason
+// so the metric label cardinality stays bounded.
+func RecordRunPhaseJobTerminal(conclusion, reason string) {
+	runPhaseJobTerminalTotal.WithLabelValues(safeLabel(conclusion), safeLabel(reason)).Inc()
+}
 
 func init() {
 	registry.MustRegister(
@@ -560,6 +582,7 @@ func init() {
 		inspectionsWriteErrorsTotal,
 		inspectionsSweptTotal,
 		runInnerJobsRegisteredTotal,
+		runPhaseJobTerminalTotal,
 	)
 }
 
