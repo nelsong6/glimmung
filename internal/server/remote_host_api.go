@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,7 +14,7 @@ import (
 // SSHCertRequest is the orchestrator-submitted public key plus any
 // options the server is willing to honor. Principal selection is
 // intentionally not in this struct: it is derived server-side from the
-// lease's project so a caller in possession of a callback token cannot
+// run's project so a caller in possession of a callback token cannot
 // rebrand the cert for a different project's host.
 type SSHCertRequest struct {
 	PublicKey string `json:"public_key"`
@@ -29,39 +30,51 @@ type SSHCertResponse struct {
 	ValidBefore time.Time `json:"valid_before"`
 }
 
-// remoteHostPrincipalForProject returns the cert principal a lease
+// remoteHostPrincipalForProject returns the cert principal a run
 // belonging to the given project is allowed to use. The principal is
 // not caller-supplied — possession of the callback token already
-// proves the orchestrator owns the lease, the lease pins the project,
-// and the project pins the principal. One degree of freedom, no more.
+// proves the orchestrator owns the run, the run pins the project, and
+// the project pins the principal. One degree of freedom, no more.
 func remoteHostPrincipalForProject(project string) string {
 	return strings.TrimSpace(project) + "-agent"
 }
 
-// remoteHostTagForProject returns the Tailscale tag a lease belonging
-// to the given project is allowed to mint orchestrator auth keys under.
+// remoteHostTagForProject returns the Tailscale tag a run belonging to
+// the given project is allowed to mint orchestrator auth keys under.
 func remoteHostTagForProject(project string) string {
 	return "tag:" + strings.TrimSpace(project) + "-orchestrator"
 }
 
-func mintLeaseCallbackSSHCert(store ReadStore, signer *CertSigner) http.HandlerFunc {
+// runCallbackTokenReader is the narrow read surface the remote-host
+// handlers need — just the token→(runID, project) lookup. It is
+// satisfied by RunCompletionStore (the heavyweight interface used by
+// the completion handlers), and by anything else that implements the
+// single method. Keeping it narrow lets test doubles avoid stubbing
+// methods they don't exercise.
+type runCallbackTokenReader interface {
+	ReadRunIDForCallbackToken(ctx context.Context, token string) (string, string, string, error)
+}
+
+// mintRunCallbackSSHCert is the run-callback variant of the remote-host
+// SSH cert mint. Phase pods carry the run's per-attempt token at
+// `$GLIMMUNG_ATTEMPT_TOKEN` and consume the URL Glimmung pre-bakes into
+// `$GLIMMUNG_SSH_CERT_URL` (`/v1/run-callbacks/{callback_token}/native/ssh-cert`).
+// This mirrors how `github-token`, `pr-touchpoint`, `pr-merge`, and
+// `completed` are surfaced to phase scripts — the lease's own callback
+// token never reaches phase pods.
+func mintRunCallbackSSHCert(store ReadStore, signer *CertSigner) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if signer == nil {
 			writeProblem(w, http.StatusServiceUnavailable, "ssh ca is not configured")
 			return
 		}
-		callbackStore, ok := store.(LeaseCallbackReadStore)
-		if !ok || callbackStore == nil {
-			writeProblem(w, http.StatusServiceUnavailable, "lease callback store not configured")
+		reader, ok := store.(runCallbackTokenReader)
+		if !ok || reader == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "run callback store not configured")
 			return
 		}
-		lease, ok := readClaimedLeaseByCallbackToken(w, r, callbackStore)
+		runID, project, ok := readRunForRemoteHost(w, r, reader)
 		if !ok {
-			return
-		}
-		project := strings.TrimSpace(lease.Project)
-		if project == "" {
-			writeProblem(w, http.StatusConflict, "lease has no project; cannot derive principal")
 			return
 		}
 		body, ok := decodeSSHCertRequest(w, r)
@@ -74,7 +87,7 @@ func mintLeaseCallbackSSHCert(store ReadStore, signer *CertSigner) http.HandlerF
 			return
 		}
 		principal := remoteHostPrincipalForProject(project)
-		keyID := fmt.Sprintf("glimmung-lease:%s/%s", project, lease.ID)
+		keyID := fmt.Sprintf("glimmung-run:%s/%s", project, runID)
 		now := time.Now().UTC()
 		cert, marshaled, err := signer.SignUserCert(userKey, keyID, []string{principal}, now)
 		if err != nil {
@@ -95,24 +108,22 @@ func mintLeaseCallbackSSHCert(store ReadStore, signer *CertSigner) http.HandlerF
 	}
 }
 
-func mintLeaseCallbackTailscaleAuthKey(store ReadStore, minter *TailscaleAuthKeyMinter) http.HandlerFunc {
+// mintRunCallbackTailscaleAuthKey is the run-callback variant of the
+// Tailscale auth-key mint. Same auth model as
+// `mintRunCallbackSSHCert`; the tag is derived from the run's project.
+func mintRunCallbackTailscaleAuthKey(store ReadStore, minter *TailscaleAuthKeyMinter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if minter == nil {
 			writeProblem(w, http.StatusServiceUnavailable, "tailscale auth-key minter is not configured")
 			return
 		}
-		callbackStore, ok := store.(LeaseCallbackReadStore)
-		if !ok || callbackStore == nil {
-			writeProblem(w, http.StatusServiceUnavailable, "lease callback store not configured")
+		reader, ok := store.(runCallbackTokenReader)
+		if !ok || reader == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "run callback store not configured")
 			return
 		}
-		lease, ok := readClaimedLeaseByCallbackToken(w, r, callbackStore)
+		_, project, ok := readRunForRemoteHost(w, r, reader)
 		if !ok {
-			return
-		}
-		project := strings.TrimSpace(lease.Project)
-		if project == "" {
-			writeProblem(w, http.StatusConflict, "lease has no project; cannot derive tag")
 			return
 		}
 		tag := remoteHostTagForProject(project)
@@ -129,34 +140,31 @@ func mintLeaseCallbackTailscaleAuthKey(store ReadStore, minter *TailscaleAuthKey
 	}
 }
 
-// readClaimedLeaseByCallbackToken resolves a callback token to a Lease,
-// emitting the right HTTP error and returning ok=false on any failure
-// path so handlers stay flat. A lease that resolves but isn't in
-// `claimed` state is treated as a 409 — the same shape heartbeat uses
-// for an inactive lease.
-func readClaimedLeaseByCallbackToken(w http.ResponseWriter, r *http.Request, store LeaseCallbackReadStore) (Lease, bool) {
+// readRunForRemoteHost resolves the run-callback token to a (runID,
+// project) tuple suitable for KeyId construction and project-derived
+// principal/tag selection. Validation matches the existing run-callback
+// shape: ErrNotFound → 404, anything else internal.
+func readRunForRemoteHost(w http.ResponseWriter, r *http.Request, store runCallbackTokenReader) (string, string, bool) {
 	token := strings.TrimSpace(r.PathValue("callback_token"))
 	if token == "" {
 		writeProblem(w, http.StatusBadRequest, "callback_token required")
-		return Lease{}, false
+		return "", "", false
 	}
-	lease, err := store.ReadLeaseByCallbackToken(r.Context(), token)
-	switch {
-	case errors.Is(err, ErrNotFound):
-		writeProblem(w, http.StatusNotFound, "lease callback token not found")
-		return Lease{}, false
-	case errors.Is(err, ErrConflict):
-		writeProblem(w, http.StatusConflict, "lease callback token is ambiguous")
-		return Lease{}, false
-	case err != nil:
-		writeInternalError(w, r, err, "read lease callback failed")
-		return Lease{}, false
+	runID, project, _, err := store.ReadRunIDForCallbackToken(context.Background(), token)
+	if errors.Is(err, ErrNotFound) {
+		writeProblem(w, http.StatusNotFound, "run callback token not found")
+		return "", "", false
 	}
-	if lease.State != "claimed" {
-		writeProblem(w, http.StatusConflict, "lease is not claimed")
-		return Lease{}, false
+	if err != nil {
+		writeInternalError(w, r, err, "read run by callback token failed")
+		return "", "", false
 	}
-	return lease, true
+	project = strings.TrimSpace(project)
+	if project == "" {
+		writeProblem(w, http.StatusConflict, "run has no project; cannot derive remote-host identity")
+		return "", "", false
+	}
+	return runID, project, true
 }
 
 // decodeSSHCertRequest tolerates an empty body but rejects any unknown

@@ -1465,6 +1465,14 @@ func nativeJobEnv(settings Settings, req NativeLaunchRequest, job NativeJobSpec,
 		{"name": "GLIMMUNG_GITHUB_TOKEN_URL", "value": baseURL + nativePath + "/github-token"},
 		{"name": "GLIMMUNG_PR_TOUCHPOINT_URL", "value": baseURL + nativePath + "/pr-touchpoint"},
 		{"name": "GLIMMUNG_PR_MERGE_URL", "value": baseURL + nativePath + "/pr-merge"},
+		// Remote-host execution primitives (docs/remote-host-execution.md).
+		// The phase script POSTs a freshly-generated public key to the
+		// ssh-cert URL and POSTs an empty body to the tailscale-authkey
+		// URL. Same auth model as the other run-callback URLs above —
+		// callback token is baked into the path; X-Glimmung-Attempt-Token
+		// header carries the secret.
+		{"name": "GLIMMUNG_SSH_CERT_URL", "value": baseURL + nativePath + "/ssh-cert"},
+		{"name": "GLIMMUNG_TAILSCALE_AUTHKEY_URL", "value": baseURL + nativePath + "/tailscale-authkey"},
 		{"name": "GLIMMUNG_ATTEMPT_TOKEN", "valueFrom": map[string]any{"secretKeyRef": map[string]any{"name": secretName, "key": "attempt-token"}}},
 	}
 	seen := envNameSet(env)

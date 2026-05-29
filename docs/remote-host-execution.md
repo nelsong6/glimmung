@@ -21,10 +21,12 @@ safely.
 ## Threat model
 
 The orchestrator Job pod is already authenticated to glimmung through the
-lease's callback token — the same possession-is-proof token that authorizes
-`POST /v1/lease-callbacks/{callback_token}/heartbeat` and
-`/release`. That token bounds every credential glimmung mints under this
-contract to a single lease.
+run's per-attempt callback token — the same possession-is-proof token that
+authorizes `POST /v1/run-callbacks/{callback_token}/native/completed`,
+`…/github-token`, `…/pr-touchpoint`, and `…/pr-merge`. That token bounds
+every credential glimmung mints under this contract to a single run
+attempt. The lease's own callback token is intentionally not exposed to
+phase pods.
 
 There are no long-lived credentials deposited on the remote host. Trust
 anchors only:
@@ -44,25 +46,30 @@ Glimmung holds the corresponding private material:
 Per run, glimmung produces:
 
 - A 10-minute OpenSSH user certificate over the orchestrator's freshly
-  generated public key, with `KeyId = glimmung-lease:<project>/<lease_id>` for
+  generated public key, with `KeyId = glimmung-run:<project>/<run_id>` for
   audit and a single project-derived `principal`.
 - A single-use, pre-authorized, ephemeral Tailscale auth key tagged
   `tag:<project>-orchestrator`, with a 15-minute expiry on the unconsumed
   key. The resulting tailnet node is `ephemeral` so it disappears shortly
   after the Job pod disconnects.
 
-When the lease ends — release, expiry, cancel, or terminal completion — the
-certificate and auth key are already expired or unusable. No revocation step
-is required for correctness.
+When the run terminates — success, abort, or fail — the certificate and auth
+key are already expired or unusable. No revocation step is required for
+correctness.
 
 ## HTTP surface
 
-Both endpoints share the existing `/v1/lease-callbacks/{callback_token}/...`
-family. The callback token is the only credential the orchestrator presents;
-glimmung resolves it to a lease row, requires `state=claimed`, derives the
-project, and mints credentials scoped to that project.
+Both endpoints share the existing `/v1/run-callbacks/{callback_token}/native/*`
+family, alongside `github-token`, `pr-touchpoint`, `pr-merge`, and
+`completed`. Glimmung's native launcher pre-bakes the full URLs for the
+phase script as `GLIMMUNG_SSH_CERT_URL` and `GLIMMUNG_TAILSCALE_AUTHKEY_URL`
+env vars (the callback token is already baked into the path; the secret
+attempt token rides as the `X-Glimmung-Attempt-Token` header).
 
-### `POST /v1/lease-callbacks/{callback_token}/ssh-cert`
+Glimmung resolves the token to a run + project, derives the principal/tag
+from the project, and mints credentials scoped to that project.
+
+### `POST /v1/run-callbacks/{callback_token}/native/ssh-cert`
 
 Sign a short-TTL OpenSSH user certificate over a caller-supplied public key.
 
@@ -78,7 +85,7 @@ Response body:
 {
   "certificate": "ssh-ed25519-cert-v01@openssh.com AAAA...",
   "principals": ["spirelens-agent"],
-  "key_id": "glimmung-lease:spirelens/lse_01J...",
+  "key_id": "glimmung-run:spirelens/run_01J...",
   "valid_after": "2026-05-29T17:32:00Z",
   "valid_before": "2026-05-29T17:42:00Z"
 }
@@ -86,8 +93,8 @@ Response body:
 
 Failure modes:
 
-- `404 not found` — callback token does not resolve to a lease.
-- `409 conflict` — lease is not in `claimed` state.
+- `404 not found` — callback token does not resolve to a run.
+- `409 conflict` — run has no project recorded.
 - `400 bad request` — public key is empty or unparsable.
 - `503 service unavailable` — glimmung has no SSH CA private key configured.
 
@@ -99,7 +106,7 @@ serves as the audit anchor.
 Permissions on the certificate are limited to `permit-pty`. Port forwarding,
 agent forwarding, X11, and `user-rc` are not permitted.
 
-### `POST /v1/lease-callbacks/{callback_token}/tailscale-authkey`
+### `POST /v1/run-callbacks/{callback_token}/native/tailscale-authkey`
 
 Mint a single-use, pre-authorized, ephemeral Tailscale auth key.
 
@@ -117,12 +124,12 @@ Response body:
 
 Failure modes:
 
-- `404 not found` — callback token does not resolve to a lease.
-- `409 conflict` — lease is not in `claimed` state.
+- `404 not found` — callback token does not resolve to a run.
+- `409 conflict` — run has no project recorded.
 - `502 bad gateway` (wrapped as `500 internal error`) — Tailscale's API
   rejected the request or was unreachable.
-- `503 service unavailable` — glimmung has no Tailscale OAuth credentials
-  configured.
+- `503 service unavailable` — glimmung has no Tailscale OIDC trust
+  credential configured.
 
 The tag is derived as `tag:<project>-orchestrator`. The tag must be declared
 in the tenant's Tailscale ACL and the OAuth client must own it; tenant ACLs
@@ -135,17 +142,19 @@ A typical `env-prep.sh` step on a remote-host-backed project looks like:
 
 ```bash
 # 1. Generate a one-shot ed25519 keypair on the pod.
-ssh-keygen -t ed25519 -N "" -f "${GLIMMUNG_WORKING_DIR}/id_ed25519" -C "lease=${GLIMMUNG_LEASE_REF}"
+ssh-keygen -t ed25519 -N "" -f "${GLIMMUNG_WORKING_DIR}/id_ed25519" -C "run=${GLIMMUNG_RUN_REF}"
 
 # 2. Ask glimmung to sign it.
 cert=$(curl -fsS -X POST -H "Content-Type: application/json" \
+  -H "X-Glimmung-Attempt-Token: ${GLIMMUNG_ATTEMPT_TOKEN}" \
   -d "$(jq -nc --arg pk "$(cat ${GLIMMUNG_WORKING_DIR}/id_ed25519.pub)" '{public_key:$pk}')" \
-  "${GLIMMUNG_BASE}/v1/lease-callbacks/${GLIMMUNG_CALLBACK_TOKEN}/ssh-cert" | jq -r .certificate)
+  "${GLIMMUNG_SSH_CERT_URL}" | jq -r .certificate)
 printf '%s' "$cert" > "${GLIMMUNG_WORKING_DIR}/id_ed25519-cert.pub"
 
 # 3. Ask glimmung for a Tailscale auth key.
-authkey=$(curl -fsS -X POST "${GLIMMUNG_BASE}/v1/lease-callbacks/${GLIMMUNG_CALLBACK_TOKEN}/tailscale-authkey" \
-  | jq -r .authkey)
+authkey=$(curl -fsS -X POST \
+  -H "X-Glimmung-Attempt-Token: ${GLIMMUNG_ATTEMPT_TOKEN}" \
+  "${GLIMMUNG_TAILSCALE_AUTHKEY_URL}" | jq -r .authkey)
 
 # 4. Bring up Tailscale in userspace networking mode.
 tailscaled --tun=userspace-networking --statedir="${GLIMMUNG_WORKING_DIR}/ts" \
