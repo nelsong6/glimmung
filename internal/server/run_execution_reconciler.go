@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -57,6 +58,15 @@ func StartRunDispatchTimeoutReconciler(ctx context.Context, settings Settings, s
 				}
 				if completed > 0 && logf != nil {
 					logf("run active-job failure reconciled completed=%d", completed)
+				}
+			}
+			if jobStatusGetter != nil {
+				emitted, err := ExpireInnerJobTerminations(ctx, timeoutStore, jobStatusGetter, activeJobFailureGracePeriod, time.Now().UTC())
+				if err != nil && logf != nil {
+					logf("inner-job termination reconcile failed: %v", err)
+				}
+				if emitted > 0 && logf != nil {
+					logf("inner-job termination reconciled emitted=%d", emitted)
 				}
 			}
 			select {
@@ -386,4 +396,190 @@ func evaluateActiveJobFailure(ctx context.Context, statusGetter NativeJobStatusG
 	}
 	summary := fmt.Sprintf("native job %q ended with kubernetes condition Failed=true reason=%q: %s", name, reason, strings.TrimSpace(message))
 	return true, conclusion, terminalReason, summary, nil
+}
+
+// ExpireInnerJobTerminations walks every in-progress run's
+// inner_jobs[] and, for each child still active whose k8s Job has
+// terminally succeeded or failed past the grace period, emits an
+// inner_job_terminated event. The event flows through the same
+// applyNativeEventToExecutionsRaw path runner-emitted events use; the
+// run-report API then surfaces the terminal state and reason on the
+// inner-Job row.
+//
+// This is the watcher half of inner-Job Stage 2. The registration
+// half (inner_job_registered) is runner-emitted from the marker parser
+// (glimmung#625); this terminator half is reconciler-emitted because
+// only glimmung has the cluster-wide kube read access to observe the
+// child Job's status conditions across slot namespaces.
+//
+// Idempotency: a seq deterministically derived from the inner Job's
+// identity means the same termination emitted twice collides on the
+// docID and the second write is silently dropped. The next reconciler
+// tick sees the inner Job in state=succeeded/failed and skips it.
+func ExpireInnerJobTerminations(ctx context.Context, store RunDispatchTimeoutStore, statusGetter NativeJobStatusGetter, grace time.Duration, now time.Time) (int, error) {
+	if statusGetter == nil {
+		return 0, nil
+	}
+	eventStore, ok := any(store).(NativeRunStore)
+	if !ok || eventStore == nil {
+		return 0, nil
+	}
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		return 0, err
+	}
+	emitted := 0
+	for _, project := range projects {
+		name := firstNonEmpty(project.Name, project.ID)
+		if name == "" {
+			continue
+		}
+		runs, err := store.ListProjectRuns(ctx, name, 500)
+		if err != nil {
+			return emitted, err
+		}
+		for _, run := range runs {
+			if run.State != "in_progress" || run.ID == "" {
+				continue
+			}
+			for _, phase := range run.PhaseExecutions {
+				for _, ij := range phase.InnerJobs {
+					if ij.State != "" && ij.State != "active" {
+						continue
+					}
+					if strings.TrimSpace(ij.Namespace) == "" || strings.TrimSpace(ij.JobName) == "" {
+						continue
+					}
+					event, ok, err := buildInnerJobTermination(ctx, statusGetter, phase.Name, ij, grace, now)
+					if err != nil {
+						// RBAC / transient errors: skip this child
+						// on this tick; the next tick retries.
+						continue
+					}
+					if !ok {
+						continue
+					}
+					if _, err := eventStore.RecordNativeEventByID(ctx, run.Project, run.ID, event); err != nil {
+						if errors.Is(err, ErrConflict) {
+							// Already emitted — idempotent success.
+							continue
+						}
+						return emitted, err
+					}
+					emitted++
+				}
+			}
+		}
+	}
+	return emitted, nil
+}
+
+// buildInnerJobTermination polls the inner Job's k8s status and, if
+// terminal past the grace period, constructs the inner_job_terminated
+// event the store applies via applyNativeEventToExecutionsRaw.
+func buildInnerJobTermination(ctx context.Context, statusGetter NativeJobStatusGetter, phaseName string, ij InnerJobRef, grace time.Duration, now time.Time) (NativeRunEventRequest, bool, error) {
+	status, err := statusGetter.GetNativeJobStatus(ctx, ij.Namespace, ij.JobName)
+	if err != nil {
+		return NativeRunEventRequest{}, false, err
+	}
+	var state, reason, completedAt string
+	switch {
+	case !status.Found:
+		// Inner Job TTL'd or externally deleted. No terminal time to
+		// grace-defer on; treat as failed/pod_gone immediately.
+		state = "failed"
+		reason = JobTerminalReasonPodGone
+		completedAt = now.UTC().Format(time.RFC3339Nano)
+	case status.IsTerminallySucceeded() && !status.IsTerminallyFailed():
+		if grace > 0 && !status.TerminalTime().IsZero() && now.Sub(status.TerminalTime()) < grace {
+			return NativeRunEventRequest{}, false, nil
+		}
+		state = "succeeded"
+		reason = ""
+		completedAt = formatTerminalTime(status.TerminalTime(), now)
+	case status.IsTerminallyFailed():
+		if grace > 0 && !status.TerminalTime().IsZero() && now.Sub(status.TerminalTime()) < grace {
+			return NativeRunEventRequest{}, false, nil
+		}
+		state = "failed"
+		reason = mapK8sFailedReasonToInnerJobReason(status.FailureReason())
+		completedAt = formatTerminalTime(status.TerminalTime(), now)
+	default:
+		return NativeRunEventRequest{}, false, nil
+	}
+	parentJobID := ij.ParentJobID
+	var parentStepSlug *string
+	if ij.ParentStepSlug != nil && *ij.ParentStepSlug != "" {
+		slug := *ij.ParentStepSlug
+		parentStepSlug = &slug
+	}
+	return NativeRunEventRequest{
+		JobID:    parentJobID,
+		Seq:      innerJobTerminationSeq(ij),
+		Event:    "inner_job_terminated",
+		StepSlug: parentStepSlug,
+		Metadata: map[string]any{
+			"namespace":    ij.Namespace,
+			"job_name":     ij.JobName,
+			"state":        state,
+			"reason":       reason,
+			"completed_at": completedAt,
+			"phase":        phaseName,
+		},
+	}, true, nil
+}
+
+// innerJobTerminationSeq derives a deterministic seq from the inner
+// Job's identity so the docID (runID::attemptIndex::jobID::seq)
+// dedupes re-emissions across reconciler ticks and process restarts.
+// The hash collapses (namespace, job_name) which uniquely identifies
+// the inner Job in the cluster. Reconciler seqs start at 2^30 to leave
+// runner seqs (which start at 1) plenty of room with no risk of
+// collision.
+func innerJobTerminationSeq(ij InnerJobRef) int {
+	h := fnvHash64(ij.Namespace + "/" + ij.JobName + "::termination")
+	const (
+		cap31           = 1<<31 - 1
+		reconcilerBase  = 1 << 30
+		reconcilerRange = cap31 - reconcilerBase
+	)
+	return reconcilerBase + int(h%uint64(reconcilerRange))
+}
+
+// fnvHash64 is FNV-1a 64-bit. Inlined here to avoid adding a hash/fnv
+// import just for one helper.
+func fnvHash64(s string) uint64 {
+	const (
+		offset64 uint64 = 14695981039346656037
+		prime64  uint64 = 1099511628211
+	)
+	h := offset64
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= prime64
+	}
+	return h
+}
+
+// formatTerminalTime returns the RFC3339Nano string for the Job's
+// terminal time. Falls back to "now" when the k8s status didn't carry
+// a completion timestamp (rare, mostly TTL-collected paths).
+func formatTerminalTime(terminal, now time.Time) string {
+	if terminal.IsZero() {
+		return now.UTC().Format(time.RFC3339Nano)
+	}
+	return terminal.UTC().Format(time.RFC3339Nano)
+}
+
+// mapK8sFailedReasonToInnerJobReason mirrors the outer reconciler's
+// k8s reason -> JobTerminalReason* mapping for inner Jobs.
+func mapK8sFailedReasonToInnerJobReason(k8sReason string) string {
+	switch k8sReason {
+	case "DeadlineExceeded":
+		return JobTerminalReasonDeadlineExceeded
+	case "BackoffLimitExceeded":
+		return JobTerminalReasonBackoffExceeded
+	default:
+		return JobTerminalReasonJobFailed
+	}
 }
