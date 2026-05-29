@@ -933,3 +933,111 @@ func serverIssueRowForTest(ref string, state string) server.IssueRow {
 		LastRunState: &state,
 	}
 }
+
+func TestAppendInnerJobRegistrationDeduplicates(t *testing.T) {
+	phase := map[string]any{"name": "verify"}
+	doc := nativeEventDoc{
+		JobID:    "llm-verify",
+		Event:    "inner_job_registered",
+		StepSlug: "run-verification",
+		Metadata: map[string]any{
+			"namespace": "ambience-slot-3",
+			"job_name":  "agent-ve-2",
+			"intent":    "verification_agent",
+			"label":     "verify-agent",
+		},
+		CreatedAt: "2026-05-29T01:00:00Z",
+	}
+
+	appendInnerJobRegistration(phase, doc)
+	appendInnerJobRegistration(phase, doc) // idempotent replay
+
+	innerJobs, _ := phase["inner_jobs"].([]any)
+	if len(innerJobs) != 1 {
+		t.Fatalf("inner_jobs=%d, want 1 after dedupe", len(innerJobs))
+	}
+	first := innerJobs[0].(map[string]any)
+	if first["namespace"] != "ambience-slot-3" || first["job_name"] != "agent-ve-2" {
+		t.Fatalf("inner job=%#v", first)
+	}
+	if first["intent"] != "verification_agent" {
+		t.Fatalf("intent=%q", first["intent"])
+	}
+	if first["state"] != "active" {
+		t.Fatalf("initial state=%q, want active", first["state"])
+	}
+	if first["parent_step_slug"] != "run-verification" {
+		t.Fatalf("parent_step_slug=%q", first["parent_step_slug"])
+	}
+}
+
+func TestUpdateInnerJobTerminationMatchesExistingRegistration(t *testing.T) {
+	phase := map[string]any{"name": "verify"}
+	regDoc := nativeEventDoc{
+		JobID:    "llm-verify",
+		Event:    "inner_job_registered",
+		StepSlug: "run-verification",
+		Metadata: map[string]any{
+			"namespace": "ambience-slot-3",
+			"job_name":  "agent-ve-2",
+			"intent":    "verification_agent",
+		},
+		CreatedAt: "2026-05-29T01:00:00Z",
+	}
+	appendInnerJobRegistration(phase, regDoc)
+
+	termDoc := nativeEventDoc{
+		JobID: "llm-verify",
+		Event: "inner_job_terminated",
+		Metadata: map[string]any{
+			"namespace":    "ambience-slot-3",
+			"job_name":     "agent-ve-2",
+			"state":        "succeeded",
+			"reason":       "",
+			"completed_at": "2026-05-29T01:05:00Z",
+		},
+		CreatedAt: "2026-05-29T01:05:05Z",
+	}
+	updateInnerJobTermination(phase, termDoc)
+
+	innerJobs, _ := phase["inner_jobs"].([]any)
+	if len(innerJobs) != 1 {
+		t.Fatalf("inner_jobs=%d, want 1", len(innerJobs))
+	}
+	ref := innerJobs[0].(map[string]any)
+	if ref["state"] != "succeeded" {
+		t.Fatalf("state=%q, want succeeded", ref["state"])
+	}
+	if ref["completed_at"] != "2026-05-29T01:05:00Z" {
+		t.Fatalf("completed_at=%q", ref["completed_at"])
+	}
+}
+
+func TestUpdateInnerJobTerminationSynthesizesStubWhenUnregistered(t *testing.T) {
+	phase := map[string]any{"name": "verify"}
+	termDoc := nativeEventDoc{
+		JobID: "llm-verify",
+		Event: "inner_job_terminated",
+		Metadata: map[string]any{
+			"namespace":    "ambience-slot-3",
+			"job_name":     "agent-zombie",
+			"state":        "failed",
+			"reason":       "deadline_exceeded",
+			"completed_at": "2026-05-29T01:05:00Z",
+		},
+		CreatedAt: "2026-05-29T01:05:05Z",
+	}
+	updateInnerJobTermination(phase, termDoc)
+
+	innerJobs, _ := phase["inner_jobs"].([]any)
+	if len(innerJobs) != 1 {
+		t.Fatalf("inner_jobs=%d, want stub", len(innerJobs))
+	}
+	stub := innerJobs[0].(map[string]any)
+	if stub["state"] != "failed" || stub["reason"] != "deadline_exceeded" {
+		t.Fatalf("stub=%#v", stub)
+	}
+	if stub["intent"] != "unknown" {
+		t.Fatalf("stub intent=%q, want unknown", stub["intent"])
+	}
+}

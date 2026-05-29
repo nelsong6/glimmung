@@ -163,6 +163,7 @@ type RunProjectionPhase struct {
 	DependsOn []string               `json:"depends_on"`
 	Jobs      []RunProjectionJob     `json:"jobs"`
 	Attempts  []RunProjectionAttempt `json:"attempts"`
+	InnerJobs []InnerJobRef          `json:"inner_jobs,omitempty"`
 }
 
 type RunProjectionJob struct {
@@ -1330,6 +1331,7 @@ func projectionPhaseFromExecution(execution RunPhaseExecution, spec PhaseSpec, a
 		DependsOn: sliceOrEmpty(spec.DependsOn),
 		Jobs:      jobs,
 		Attempts:  runProjectionAttempts(attempts),
+		InnerJobs: execution.InnerJobs,
 	}
 }
 

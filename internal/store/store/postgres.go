@@ -1408,6 +1408,26 @@ type phaseExecutionDoc struct {
 	StartedAt    *string           `json:"started_at,omitempty"`
 	CompletedAt  *string           `json:"completed_at,omitempty"`
 	Jobs         []jobExecutionDoc `json:"jobs"`
+	InnerJobs    []innerJobDoc     `json:"inner_jobs,omitempty"`
+}
+
+// innerJobDoc is the persisted shape of a registered child k8s Job
+// the runner observed on the event stream (inner_job_registered) and
+// optionally a terminal observation from the reconciler
+// (inner_job_terminated). Keyed by (namespace, job_name); de-duped on
+// registration replay. See docs/inner-job-observation.md stage 2.
+type innerJobDoc struct {
+	ParentJobID    string  `json:"parent_job_id"`
+	ParentStepSlug *string `json:"parent_step_slug,omitempty"`
+	Namespace      string  `json:"namespace"`
+	JobName        string  `json:"job_name"`
+	Intent         string  `json:"intent"`
+	Label          string  `json:"label,omitempty"`
+	Selector       string  `json:"selector,omitempty"`
+	RegisteredAt   string  `json:"registered_at"`
+	State          string  `json:"state,omitempty"`
+	Reason         string  `json:"reason,omitempty"`
+	CompletedAt    *string `json:"completed_at,omitempty"`
 }
 
 type jobExecutionDoc struct {
@@ -1906,6 +1926,7 @@ func runReportFromDoc(doc runDoc, lineageByID map[string]string) server.RunRepor
 func runPhaseExecutionsFromDocs(docs []phaseExecutionDoc) []server.RunPhaseExecution {
 	out := make([]server.RunPhaseExecution, 0, len(docs))
 	for _, doc := range docs {
+		innerJobs := innerJobRefsFromDoc(doc.InnerJobs)
 		jobs := make([]server.RunJobExecution, 0, len(doc.Jobs))
 		for _, job := range doc.Jobs {
 			steps := make([]server.RunStepExecution, 0, len(job.Steps))
@@ -1944,7 +1965,32 @@ func runPhaseExecutionsFromDocs(docs []phaseExecutionDoc) []server.RunPhaseExecu
 			StartedAt:    emptyStringNil(doc.StartedAt),
 			CompletedAt:  emptyStringNil(doc.CompletedAt),
 			Jobs:         jobs,
+			InnerJobs:    innerJobs,
 		})
+	}
+	return out
+}
+
+func innerJobRefsFromDoc(docs []innerJobDoc) []server.InnerJobRef {
+	if len(docs) == 0 {
+		return nil
+	}
+	out := make([]server.InnerJobRef, 0, len(docs))
+	for _, d := range docs {
+		ref := server.InnerJobRef{
+			ParentJobID:    d.ParentJobID,
+			ParentStepSlug: emptyStringNil(d.ParentStepSlug),
+			Namespace:      d.Namespace,
+			JobName:        d.JobName,
+			Intent:         firstNonEmpty(d.Intent, "unknown"),
+			Label:          d.Label,
+			Selector:       d.Selector,
+			RegisteredAt:   d.RegisteredAt,
+			State:          d.State,
+			Reason:         d.Reason,
+			CompletedAt:    emptyStringNil(d.CompletedAt),
+		}
+		out = append(out, ref)
 	}
 	return out
 }
@@ -6019,6 +6065,21 @@ func applyNativeEventToExecutionsRaw(raw map[string]any, attempt attemptDoc, eve
 		if !ok || stringValue(phase["name"]) != attempt.Phase {
 			continue
 		}
+		// inner_job_registered and inner_job_terminated maintain a
+		// phase-level inner_jobs[] view derived from the event
+		// stream. See docs/inner-job-observation.md stage 2.
+		switch event.Event {
+		case "inner_job_registered":
+			appendInnerJobRegistration(phase, event)
+			phases[i] = phase
+			raw["phase_executions"] = phases
+			return
+		case "inner_job_terminated":
+			updateInnerJobTermination(phase, event)
+			phases[i] = phase
+			raw["phase_executions"] = phases
+			return
+		}
 		if state := stringValue(phase["state"]); state == "dispatching" || state == "not_started" {
 			phase["state"] = "active"
 			phase["started_at"] = now
@@ -6084,6 +6145,125 @@ func applyNativeEventToExecutionsRaw(raw map[string]any, attempt attemptDoc, eve
 		break
 	}
 	raw["phase_executions"] = phases
+}
+
+// appendInnerJobRegistration is the inner_job_registered event handler.
+// The marker carries the child Job's namespace + name + intent; we
+// store one InnerJobRef per (namespace, job_name) and de-duplicate
+// idempotently (the runner's at-least-once event delivery can replay
+// the same registration). Parent attribution comes from the event's
+// job_id (the outer phase Job) and step_slug (the parent step that
+// emitted the marker).
+func appendInnerJobRegistration(phase map[string]any, event nativeEventDoc) {
+	namespace := stringValue(event.Metadata["namespace"])
+	jobName := stringValue(event.Metadata["job_name"])
+	if namespace == "" || jobName == "" {
+		return
+	}
+	existing, _ := phase["inner_jobs"].([]any)
+	for i, raw := range existing {
+		ref, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if stringValue(ref["namespace"]) == namespace && stringValue(ref["job_name"]) == jobName {
+			// Idempotent — registration replay is a no-op. We do
+			// refresh the parent attribution in case the runner now
+			// reports a step_slug it didn't before.
+			ref["parent_job_id"] = event.JobID
+			if event.StepSlug != "" {
+				ref["parent_step_slug"] = event.StepSlug
+			}
+			existing[i] = ref
+			phase["inner_jobs"] = existing
+			return
+		}
+	}
+	entry := map[string]any{
+		"parent_job_id": event.JobID,
+		"namespace":     namespace,
+		"job_name":      jobName,
+		"intent":        firstNonEmpty(stringValue(event.Metadata["intent"]), "unknown"),
+		"state":         "active",
+		"registered_at": event.CreatedAt,
+	}
+	if event.StepSlug != "" {
+		entry["parent_step_slug"] = event.StepSlug
+	}
+	if label := stringValue(event.Metadata["label"]); label != "" {
+		entry["label"] = label
+	}
+	if selector := stringValue(event.Metadata["selector"]); selector != "" {
+		entry["selector"] = selector
+	}
+	phase["inner_jobs"] = append(existing, entry)
+}
+
+// updateInnerJobTermination is the inner_job_terminated event handler.
+// The reconciler emits this event when it observes a child Job's
+// `.status.conditions[]` transition to Complete=True / Failed=True.
+// The event metadata carries:
+//   - namespace, job_name (key)
+//   - state (succeeded | failed | unknown)
+//   - reason (closed-enum JobTerminalReason*)
+//   - completed_at (RFC3339Nano)
+//
+// Idempotent: re-applying the same termination is a no-op. Inner-Job
+// records that do not match are ignored — termination without a prior
+// registration is treated as the registration having been dropped
+// (rare, the marker is at-least-once delivered) so we synthesize a
+// minimal stub instead of losing the signal entirely.
+func updateInnerJobTermination(phase map[string]any, event nativeEventDoc) {
+	namespace := stringValue(event.Metadata["namespace"])
+	jobName := stringValue(event.Metadata["job_name"])
+	if namespace == "" || jobName == "" {
+		return
+	}
+	state := stringValue(event.Metadata["state"])
+	if state == "" {
+		state = "unknown"
+	}
+	reason := stringValue(event.Metadata["reason"])
+	completedAt := stringValue(event.Metadata["completed_at"])
+	if completedAt == "" {
+		completedAt = event.CreatedAt
+	}
+	existing, _ := phase["inner_jobs"].([]any)
+	for i, raw := range existing {
+		ref, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if stringValue(ref["namespace"]) != namespace || stringValue(ref["job_name"]) != jobName {
+			continue
+		}
+		ref["state"] = state
+		if reason != "" {
+			ref["reason"] = reason
+		}
+		ref["completed_at"] = completedAt
+		existing[i] = ref
+		phase["inner_jobs"] = existing
+		return
+	}
+	// Termination without a prior registration: synthesize a stub so
+	// the signal isn't lost.
+	stub := map[string]any{
+		"parent_job_id": event.JobID,
+		"namespace":     namespace,
+		"job_name":      jobName,
+		"intent":        "unknown",
+		"state":         state,
+		"completed_at":  completedAt,
+		"registered_at": event.CreatedAt,
+	}
+	if reason != "" {
+		stub["reason"] = reason
+	}
+	if event.StepSlug != "" {
+		stub["parent_step_slug"] = event.StepSlug
+	}
+	phase["inner_jobs"] = append(existing, stub)
 }
 
 func markJobCompletionInExecutionsRaw(raw map[string]any, phaseName, jobID, state, reason, completedAt string) {

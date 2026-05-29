@@ -43,10 +43,11 @@ export function lokiExploreUrl(
   config: GlimmungConfig | null,
   k8sJobName: string | null | undefined,
   range: LokiLinkRange = {},
+  namespaceOverride?: string | null,
 ): string | null {
   if (!config) return null;
   const base = (config.grafana_base_url ?? "").replace(/\/+$/, "");
-  const namespace = (config.native_runner_namespace ?? "").trim();
+  const namespace = (namespaceOverride ?? config.native_runner_namespace ?? "").trim();
   const datasource = (config.grafana_loki_datasource ?? "loki").trim();
   const pod = (k8sJobName ?? "").trim();
   if (!base || !namespace || !pod) return null;
