@@ -22,6 +22,7 @@ import { Link, useLocation, useNavigate, useOutletContext, useParams } from "rea
 import { authedFetch, currentConfig } from "./auth";
 import { lokiExploreUrl } from "./grafanaLinks";
 import { PhaseGraph, type PhaseGraphPhase } from "./PhaseGraph";
+import { RecyclePolicyPanel } from "./RecyclePolicyPanel";
 import { issueRunSelectionPath } from "./routes";
 import {
   runTopologyToPhaseGraphModel,
@@ -420,6 +421,7 @@ export function IssueDetailView() {
   const [graph, setGraph] = useState<IssueGraph | null>(null);
   const [runProjection, setRunProjection] = useState<RunGraphProjection | null>(null);
   const [projectWorkflows, setProjectWorkflows] = useState<Workflow[]>([]);
+  const [workflowRefreshTick, setWorkflowRefreshTick] = useState(0);
 
   // Resolve the URL run-number slug to the internal graph node ID so RunViewer
   // can look it up. Null while graph is loading; tab is still "runs" via params.runId.
@@ -637,7 +639,7 @@ export function IssueDetailView() {
     return () => {
       cancelled = true;
     };
-  }, [detail?.project]);
+  }, [detail?.project, workflowRefreshTick]);
 
   // While the run tab is open and a run is actually in flight, poll
   // detail+graph so DAG nodes fill in as conclusions / verification /
@@ -736,6 +738,9 @@ export function IssueDetailView() {
                 selectedRunWorkflow={selectedWorkflowRunWorkflow}
                 selectedRunRequested={Boolean(params.workflowRunId)}
                 onBackToDefinition={() => selectWorkflowRun(null)}
+                signedIn={signedIn}
+                isAdmin={isAdmin}
+                onWorkflowChanged={() => setWorkflowRefreshTick((t) => t + 1)}
               />
             )}
             {tab === "touchpoint" && (
@@ -2597,6 +2602,9 @@ function WorkflowPane({
   selectedRunWorkflow,
   selectedRunRequested,
   onBackToDefinition,
+  signedIn,
+  isAdmin,
+  onWorkflowChanged,
 }: {
   graph: IssueGraph | null;
   graphAvailable: boolean;
@@ -2607,6 +2615,9 @@ function WorkflowPane({
   selectedRunWorkflow: Workflow | null;
   selectedRunRequested: boolean;
   onBackToDefinition: () => void;
+  signedIn: boolean;
+  isAdmin: boolean;
+  onWorkflowChanged: () => void;
 }) {
   if (!graphAvailable) {
     return (
@@ -2664,6 +2675,14 @@ function WorkflowPane({
         <h2>Workflow definition</h2>
       </div>
       <DefinitionDag workflow={currentWorkflow} project={project} />
+      {currentWorkflow && (
+        <RecyclePolicyPanel
+          workflow={currentWorkflow}
+          signedIn={signedIn}
+          isAdmin={isAdmin}
+          onSaved={onWorkflowChanged}
+        />
+      )}
     </section>
   );
 }

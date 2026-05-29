@@ -8,6 +8,7 @@ import { PortfolioView } from "./PortfolioView";
 import { TouchpointsView } from "./TouchpointsView";
 import { StyleguideView } from "./StyleguideView";
 import { PhaseGraph, type PhaseGraphPhase } from "./PhaseGraph";
+import { RecyclePolicyPanel } from "./RecyclePolicyPanel";
 import { workflowToPhaseGraphModel } from "./workflowGraphModel";
 import { resolveProjectWorkflow } from "./workflowLookup";
 import { authedFetch, currentAccount, initAuth, signIn, signOut, type Account } from "./auth";
@@ -1192,6 +1193,7 @@ function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
 function ProjectWorkflowView({
   snap,
   signedIn,
+  isAdmin,
   projectName,
   workflowName,
 }: LayoutContext & { projectName: string; workflowName: string }) {
@@ -1238,6 +1240,8 @@ function ProjectWorkflowView({
       </section>
 
       <WorkflowDefinitionGraph workflow={workflow} />
+
+      <RecyclePolicyPanel workflow={workflow} signedIn={signedIn} isAdmin={isAdmin} />
 
       <h2>Current work</h2>
       <CurrentWorkTable leases={currentWork} emptyText={`No active work for ${workflow.name}.`} />

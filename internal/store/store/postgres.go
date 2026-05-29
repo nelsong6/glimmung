@@ -685,6 +685,9 @@ func (s *Store) PatchWorkflow(ctx context.Context, project string, name string, 
 	if req.BudgetTotal != nil {
 		reg.Budget.Total = *req.BudgetTotal
 	}
+	if err := server.ApplyRecycleMaxAttemptsPatches(&reg, req.RecycleMaxAttempts); err != nil {
+		return server.Workflow{}, err
+	}
 	return s.UpsertWorkflow(ctx, reg)
 }
 
