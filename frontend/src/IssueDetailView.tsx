@@ -242,7 +242,7 @@ type NativeRunEvent = {
   phase: string;
   job_id: string;
   seq: number;
-  event: "step_started" | "log" | "step_completed" | "step_skipped" | "step_failed";
+  event: string;
   step_slug: string;
   message: string;
   exit_code: number | null;
@@ -257,6 +257,22 @@ type NativeRunEventsResponse = {
   job_id: string | null;
   events: NativeRunEvent[];
   archive_url: string | null;
+};
+
+type NativeLogViewMode = "transcript" | "raw";
+
+type AgentTranscriptEntry = {
+  id: string;
+  kind: "assistant" | "tool_call" | "tool_result" | "result" | "reasoning" | "raw";
+  seq: number;
+  createdAt: string;
+  title: string;
+  text?: string;
+  toolName?: string;
+  toolUseId?: string;
+  input?: unknown;
+  raw?: unknown;
+  costUsd?: number | null;
 };
 
 type Workflow = {
@@ -3392,6 +3408,7 @@ function NativeJobInspector({
     [selectedStepSlug, stepRefs],
   );
   const [selectedKey, setSelectedKey] = useState<string | null>(defaultSelection);
+  const [viewMode, setViewMode] = useState<NativeLogViewMode>("transcript");
   const selected = stepRefs.find((step) => step.key === selectedKey) ?? stepRefs[0] ?? null;
 
   useEffect(() => {
@@ -3429,6 +3446,10 @@ function NativeJobInspector({
     };
   }, [project, runId, issueNumber, runNumber, attemptIndex, defaultSelection, live, selectedJobId]);
 
+  useEffect(() => {
+    setViewMode("transcript");
+  }, [selectedKey]);
+
   if (error) {
     return (
       <div className="native-log-panel">
@@ -3447,6 +3468,11 @@ function NativeJobInspector({
         && (event.step_slug === selected.step.slug || (event.event === "log" && !event.step_slug))
       ))
     : events;
+  const transcriptEntries = selected && nativeStepIsLlm(selected.step)
+    ? agentTranscriptEntries(selectedEvents)
+    : [];
+  const transcriptAvailable = Boolean(selected && nativeStepIsLlm(selected.step) && transcriptEntries.length > 0);
+  const activeViewMode: NativeLogViewMode = transcriptAvailable ? viewMode : "raw";
   return (
     <div className="native-inspector">
       <div className="native-inspector-head">
@@ -3457,16 +3483,36 @@ function NativeJobInspector({
             {live ? " · live" : ""}
           </span>
         </div>
-        {(logs.archive_url || archiveUrl) && (
-          <a
-            className="mono"
-            href={`/v1/artifacts/${artifactPathFromUrl(logs.archive_url || archiveUrl || "")}`}
-            target="_blank"
-            rel="noreferrer"
-          >
-            archive
-          </a>
-        )}
+        <div className="native-inspector-actions">
+          {transcriptAvailable && (
+            <div className="native-view-toggle" role="group" aria-label="native log view">
+              <button
+                type="button"
+                aria-pressed={activeViewMode === "transcript"}
+                onClick={() => setViewMode("transcript")}
+              >
+                transcript
+              </button>
+              <button
+                type="button"
+                aria-pressed={activeViewMode === "raw"}
+                onClick={() => setViewMode("raw")}
+              >
+                raw
+              </button>
+            </div>
+          )}
+          {(logs.archive_url || archiveUrl) && (
+            <a
+              className="mono"
+              href={`/v1/artifacts/${artifactPathFromUrl(logs.archive_url || archiveUrl || "")}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              archive
+            </a>
+          )}
+        </div>
       </div>
       <div className="step-log-layout native-step-log-layout">
         <aside className="step-list" aria-label="native job steps">
@@ -3509,12 +3555,76 @@ function NativeJobInspector({
             ))
           )}
         </aside>
-        <pre className="step-terminal native-step-terminal">
-          {selected
-            ? nativeTerminalText(selected.job, selected.step, selectedEvents)
-            : nativeTerminalText(null, null, events)}
-        </pre>
+        {activeViewMode === "transcript" ? (
+          <AgentTranscriptView entries={transcriptEntries} />
+        ) : (
+          <pre className="step-terminal native-step-terminal">
+            {selected
+              ? nativeTerminalText(selected.job, selected.step, selectedEvents)
+              : nativeTerminalText(null, null, events)}
+          </pre>
+        )}
       </div>
+    </div>
+  );
+}
+
+function AgentTranscriptView({ entries }: { entries: AgentTranscriptEntry[] }) {
+  return (
+    <div className="agent-transcript" aria-label="agent transcript">
+      {entries.map((entry) => {
+        if (entry.kind === "assistant") {
+          return (
+            <article key={entry.id} className="agent-transcript-entry assistant">
+              <div className="agent-transcript-entry-head">
+                <strong>{entry.title}</strong>
+                <span className="mono dim">#{entry.seq}</span>
+              </div>
+              <div className="agent-transcript-text">{entry.text}</div>
+            </article>
+          );
+        }
+        if (entry.kind === "result") {
+          return (
+            <article key={entry.id} className="agent-transcript-entry result">
+              <div className="agent-transcript-entry-head">
+                <strong>{entry.title}</strong>
+                <span className="mono dim">#{entry.seq}</span>
+              </div>
+              <div className="agent-transcript-result">
+                {entry.costUsd !== null && entry.costUsd !== undefined && (
+                  <span className="mono">{formatUsd4(entry.costUsd)}</span>
+                )}
+                {entry.text && <span>{entry.text}</span>}
+              </div>
+            </article>
+          );
+        }
+        if (entry.kind === "reasoning") {
+          return (
+            <article key={entry.id} className="agent-transcript-entry reasoning">
+              <div className="agent-transcript-entry-head">
+                <strong>{entry.title}</strong>
+                <span className="mono dim">#{entry.seq}</span>
+              </div>
+              <div className="agent-transcript-muted">{entry.text}</div>
+            </article>
+          );
+        }
+        const body = entry.kind === "tool_call"
+          ? formatAgentJson(entry.input ?? entry.raw)
+          : entry.text ?? formatAgentJson(entry.raw);
+        return (
+          <details key={entry.id} className={`agent-transcript-entry ${entry.kind}`}>
+            <summary>
+              <span>{entry.title}</span>
+              {entry.toolName && <strong>{entry.toolName}</strong>}
+              <span className="mono dim">#{entry.seq}</span>
+            </summary>
+            <pre>{body}</pre>
+          </details>
+        );
+      })}
     </div>
   );
 }
@@ -3697,6 +3807,347 @@ function nativeEventLine(event: NativeRunEvent): string {
   if (!event.message) return `${prefix}${suffix}`;
   if (event.event === "log") return event.message;
   return `${prefix}: ${event.message}${suffix}`;
+}
+
+function agentTranscriptEntries(events: NativeRunEvent[]): AgentTranscriptEntry[] {
+  const entries: AgentTranscriptEntry[] = [];
+  const toolNamesById = new Map<string, string>();
+  events.forEach((event) => {
+    if (event.event !== "log") return;
+    const payloads = parseAgentLogPayloads(event.message);
+    if (payloads.length === 0) {
+      entries.push({
+        id: `raw-${event.seq}`,
+        kind: "raw",
+        seq: event.seq,
+        createdAt: event.created_at,
+        title: logStreamTitle(event),
+        text: event.message,
+      });
+      return;
+    }
+    const before = entries.length;
+    payloads.forEach((payload, index) => {
+      appendAgentPayloadEntries(entries, event, payload, index, toolNamesById);
+    });
+    if (entries.length === before) {
+      entries.push({
+        id: `raw-${event.seq}`,
+        kind: "raw",
+        seq: event.seq,
+        createdAt: event.created_at,
+        title: "json event",
+        raw: payloads.length === 1 ? payloads[0] : payloads,
+      });
+    }
+  });
+  return entries;
+}
+
+function appendAgentPayloadEntries(
+  entries: AgentTranscriptEntry[],
+  event: NativeRunEvent,
+  payload: unknown,
+  payloadIndex: number,
+  toolNamesById: Map<string, string>,
+) {
+  const obj = recordValue(payload);
+  if (!obj) {
+    entries.push({
+      id: `raw-${event.seq}-${payloadIndex}`,
+      kind: "raw",
+      seq: event.seq,
+      createdAt: event.created_at,
+      title: "json value",
+      raw: payload,
+    });
+    return;
+  }
+
+  const type = stringValue(obj.type);
+  if (type === "assistant") {
+    const message = recordValue(obj.message);
+    const content = arrayValue(message?.content);
+    content.forEach((block, blockIndex) => {
+      const blockObj = recordValue(block);
+      if (!blockObj) return;
+      const blockType = stringValue(blockObj.type);
+      if (blockType === "text") {
+        entries.push({
+          id: `assistant-${event.seq}-${payloadIndex}-${blockIndex}`,
+          kind: "assistant",
+          seq: event.seq,
+          createdAt: event.created_at,
+          title: "assistant",
+          text: stringValue(blockObj.text) ?? "",
+        });
+        return;
+      }
+      if (blockType === "tool_use") {
+        const id = stringValue(blockObj.id);
+        const name = stringValue(blockObj.name) ?? "tool";
+        if (id) toolNamesById.set(id, name);
+        entries.push({
+          id: `tool-call-${event.seq}-${payloadIndex}-${blockIndex}`,
+          kind: "tool_call",
+          seq: event.seq,
+          createdAt: event.created_at,
+          title: "tool call",
+          toolName: name,
+          toolUseId: id ?? undefined,
+          input: blockObj.input,
+        });
+        return;
+      }
+      if (blockType === "thinking") {
+        entries.push({
+          id: `reasoning-${event.seq}-${payloadIndex}-${blockIndex}`,
+          kind: "reasoning",
+          seq: event.seq,
+          createdAt: event.created_at,
+          title: "reasoning",
+          text: "Thinking/signature content hidden in transcript view. Open raw to inspect the original event.",
+        });
+        return;
+      }
+      entries.push({
+        id: `assistant-raw-${event.seq}-${payloadIndex}-${blockIndex}`,
+        kind: "raw",
+        seq: event.seq,
+        createdAt: event.created_at,
+        title: blockType ? `assistant ${blockType}` : "assistant block",
+        raw: blockObj,
+      });
+    });
+    return;
+  }
+
+  if (type === "user") {
+    const message = recordValue(obj.message);
+    const content = arrayValue(message?.content);
+    content.forEach((block, blockIndex) => {
+      const blockObj = recordValue(block);
+      if (!blockObj) return;
+      const blockType = stringValue(blockObj.type);
+      if (blockType === "tool_result") {
+        const toolUseId = stringValue(blockObj.tool_use_id);
+        const toolName = toolUseId ? toolNamesById.get(toolUseId) : undefined;
+        entries.push({
+          id: `tool-result-${event.seq}-${payloadIndex}-${blockIndex}`,
+          kind: "tool_result",
+          seq: event.seq,
+          createdAt: event.created_at,
+          title: "tool result",
+          toolName,
+          toolUseId: toolUseId ?? undefined,
+          text: toolResultText(blockObj.content),
+        });
+        return;
+      }
+      if (blockType === "text") {
+        entries.push({
+          id: `user-text-${event.seq}-${payloadIndex}-${blockIndex}`,
+          kind: "raw",
+          seq: event.seq,
+          createdAt: event.created_at,
+          title: "user text",
+          text: stringValue(blockObj.text) ?? "",
+        });
+        return;
+      }
+      entries.push({
+        id: `user-raw-${event.seq}-${payloadIndex}-${blockIndex}`,
+        kind: "raw",
+        seq: event.seq,
+        createdAt: event.created_at,
+        title: blockType ? `user ${blockType}` : "user block",
+        raw: blockObj,
+      });
+    });
+    return;
+  }
+
+  if (type === "result") {
+    entries.push({
+      id: `result-${event.seq}-${payloadIndex}`,
+      kind: "result",
+      seq: event.seq,
+      createdAt: event.created_at,
+      title: "result",
+      costUsd: numberValue(obj.total_cost_usd) ?? numberValue(obj.cost_usd),
+      text: resultSummaryText(obj),
+      raw: obj,
+    });
+    return;
+  }
+
+  if (type === "system") {
+    entries.push({
+      id: `system-${event.seq}-${payloadIndex}`,
+      kind: "raw",
+      seq: event.seq,
+      createdAt: event.created_at,
+      title: stringValue(obj.subtype) ? `system ${stringValue(obj.subtype)}` : "system event",
+      raw: obj,
+    });
+    return;
+  }
+
+  entries.push({
+    id: `json-${event.seq}-${payloadIndex}`,
+    kind: "raw",
+    seq: event.seq,
+    createdAt: event.created_at,
+    title: type ? `${type} event` : "json event",
+    raw: obj,
+  });
+}
+
+function parseAgentLogPayloads(message: string): unknown[] {
+  const trimmed = message.trim();
+  if (!trimmed) return [];
+  try {
+    return [JSON.parse(trimmed) as unknown];
+  } catch {
+    const chunks = balancedJsonChunks(trimmed);
+    return chunks.flatMap((chunk) => {
+      try {
+        return [JSON.parse(chunk) as unknown];
+      } catch {
+        return [];
+      }
+    });
+  }
+}
+
+function balancedJsonChunks(input: string): string[] {
+  const chunks: string[] = [];
+  const stack: string[] = [];
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < input.length; index += 1) {
+    const ch = input[index];
+    if (start === -1) {
+      if (ch === "{" || ch === "[") {
+        start = index;
+        stack.push(ch);
+      }
+      continue;
+    }
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === "\"") {
+      inString = true;
+      continue;
+    }
+    if (ch === "{" || ch === "[") {
+      stack.push(ch);
+      continue;
+    }
+    if (ch === "}" || ch === "]") {
+      const opener = stack.pop();
+      if (!opener || (opener === "{" && ch !== "}") || (opener === "[" && ch !== "]")) {
+        start = -1;
+        stack.length = 0;
+        continue;
+      }
+      if (stack.length === 0) {
+        chunks.push(input.slice(start, index + 1));
+        start = -1;
+      }
+    }
+  }
+  return chunks;
+}
+
+function toolResultText(value: unknown): string {
+  const text = contentText(value);
+  const parsed = parseJsonString(text);
+  const parsedObj = recordValue(parsed);
+  if (parsedObj) {
+    const sections = ["stdout", "stderr", "output", "content"]
+      .map((key) => {
+        const section = stringValue(parsedObj[key]);
+        return section ? `# ${key}\n${section}` : "";
+      })
+      .filter(Boolean);
+    if (sections.length > 0) return sections.join("\n\n");
+  }
+  return text;
+}
+
+function contentText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return value.map((item) => {
+      const obj = recordValue(item);
+      if (!obj) return String(item);
+      if (stringValue(obj.type) === "text") return stringValue(obj.text) ?? "";
+      return formatAgentJson(obj);
+    }).filter(Boolean).join("\n\n");
+  }
+  return formatAgentJson(value);
+}
+
+function resultSummaryText(obj: Record<string, unknown>): string {
+  const subtype = stringValue(obj.subtype);
+  const durationMs = numberValue(obj.duration_ms);
+  const pieces = [
+    subtype,
+    durationMs !== null ? `${Math.round(durationMs / 1000)}s` : null,
+  ].filter(Boolean);
+  return pieces.join(" · ");
+}
+
+function parseJsonString(text: string): unknown {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function formatAgentJson(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function logStreamTitle(event: NativeRunEvent): string {
+  const stream = stringValue(event.metadata?.stream);
+  return stream ? `${stream} log` : "log";
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function arrayValue(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function StructuredScreenshotEvidence({ items }: { items: RunProjectionEvidence[] }) {

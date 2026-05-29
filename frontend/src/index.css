@@ -2397,6 +2397,9 @@ h2 .inline-action,
   align-items: baseline;
   gap: 10px;
 }
+.native-inspector-actions {
+  justify-content: flex-end;
+}
 .native-inspector-head .key {
   color: #888;
   text-transform: uppercase;
@@ -2439,6 +2442,118 @@ h2 .inline-action,
 .native-step-terminal {
   max-height: 420px;
   white-space: pre-wrap;
+}
+.native-view-toggle {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+.native-view-toggle button {
+  min-height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-right: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg-muted);
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+.native-view-toggle button:last-child {
+  border-right: 0;
+}
+.native-view-toggle button[aria-pressed="true"] {
+  background: var(--surface-hover);
+  color: var(--fg);
+}
+.agent-transcript {
+  min-height: 100%;
+  max-height: 420px;
+  overflow: auto;
+  padding: 14px;
+  background: #050507;
+  color: var(--fg-muted);
+}
+.agent-transcript-entry {
+  margin: 0 0 10px;
+  border: 1px solid color-mix(in srgb, var(--border) 78%, #333);
+  border-radius: 6px;
+  background: #0b0b0e;
+}
+.agent-transcript-entry:last-child {
+  margin-bottom: 0;
+}
+.agent-transcript-entry-head,
+.agent-transcript-entry summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 8px 10px;
+}
+.agent-transcript-entry summary {
+  cursor: pointer;
+}
+.agent-transcript-entry strong {
+  color: var(--fg);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+.agent-transcript-entry summary > span:first-child,
+.agent-transcript-entry-head strong {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.agent-transcript-entry summary > strong {
+  text-transform: none;
+  letter-spacing: 0;
+}
+.agent-transcript-entry .mono {
+  margin-left: auto;
+  font-size: 0.7rem;
+}
+.agent-transcript-text,
+.agent-transcript-muted,
+.agent-transcript-result {
+  padding: 0 10px 10px;
+  white-space: pre-wrap;
+  font-size: 0.84rem;
+  line-height: 1.55;
+}
+.agent-transcript-muted {
+  color: var(--fg-dimmer);
+}
+.agent-transcript-result {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.agent-transcript-entry pre {
+  margin: 0;
+  padding: 0 10px 10px;
+  overflow: auto;
+  color: #b8b8b8;
+  background: transparent;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.agent-transcript-entry.assistant {
+  border-left: 2px solid var(--state-info-fg);
+}
+.agent-transcript-entry.tool_call {
+  border-left: 2px solid var(--state-busy-fg);
+}
+.agent-transcript-entry.tool_result {
+  border-left: 2px solid var(--state-success-fg);
+}
+.agent-transcript-entry.reasoning {
+  border-left: 2px solid var(--border);
 }
 
 .test-lease-defaults {

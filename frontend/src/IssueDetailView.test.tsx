@@ -207,6 +207,111 @@ const nativeEvents = {
   ],
 };
 
+const agentNativeEvents = {
+  project: "ambience",
+  run_ref: "ambience#172/runs/7.1",
+  attempt_index: 0,
+  job_id: "agent",
+  archive_url: null,
+  events: [
+    {
+      project: "ambience",
+      run_ref: "ambience#172/runs/7.1",
+      attempt_index: 0,
+      phase: "agent-execute",
+      job_id: "agent",
+      seq: 1,
+      event: "log",
+      step_slug: "run-agent",
+      message: JSON.stringify({ type: "system", subtype: "init", cwd: "/workspace" }),
+      exit_code: null,
+      metadata: { stream: "stdout" },
+      created_at: "2026-05-20T17:24:10.000Z",
+    },
+    {
+      project: "ambience",
+      run_ref: "ambience#172/runs/7.1",
+      attempt_index: 0,
+      phase: "agent-execute",
+      job_id: "agent",
+      seq: 2,
+      event: "log",
+      step_slug: "run-agent",
+      message: JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [
+            { type: "text", text: "I will inspect the file." },
+            { type: "tool_use", id: "toolu_1", name: "Read", input: { file_path: "src/App.tsx" } },
+          ],
+        },
+      }),
+      exit_code: null,
+      metadata: { stream: "stdout" },
+      created_at: "2026-05-20T17:24:11.000Z",
+    },
+    {
+      project: "ambience",
+      run_ref: "ambience#172/runs/7.1",
+      attempt_index: 0,
+      phase: "agent-execute",
+      job_id: "agent",
+      seq: 3,
+      event: "log",
+      step_slug: "run-agent",
+      message: JSON.stringify({
+        type: "user",
+        message: {
+          content: [{
+            type: "tool_result",
+            tool_use_id: "toolu_1",
+            content: JSON.stringify({ stdout: "line one\nline two" }),
+          }],
+        },
+      }),
+      exit_code: null,
+      metadata: { stream: "stdout" },
+      created_at: "2026-05-20T17:24:12.000Z",
+    },
+    {
+      project: "ambience",
+      run_ref: "ambience#172/runs/7.1",
+      attempt_index: 0,
+      phase: "agent-execute",
+      job_id: "agent",
+      seq: 4,
+      event: "log",
+      step_slug: "run-agent",
+      message: JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [
+            { type: "thinking", signature: "very-large-signature" },
+            { type: "text", text: "Done." },
+          ],
+        },
+      }),
+      exit_code: null,
+      metadata: { stream: "stdout" },
+      created_at: "2026-05-20T17:24:13.000Z",
+    },
+    {
+      project: "ambience",
+      run_ref: "ambience#172/runs/7.1",
+      attempt_index: 0,
+      phase: "agent-execute",
+      job_id: "agent",
+      seq: 5,
+      event: "log",
+      step_slug: "run-agent",
+      message: JSON.stringify({ type: "result", subtype: "success", duration_ms: 1250, total_cost_usd: 0.0123 }),
+      exit_code: null,
+      metadata: { stream: "stdout" },
+      created_at: "2026-05-20T17:24:14.000Z",
+    },
+  ],
+};
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -449,6 +554,87 @@ describe("IssueDetailView run execution graph", () => {
 
     expect(await screen.findByText("job cost")).toBeInTheDocument();
     expect(screen.getAllByText("$2.3456").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("renders LLM native step JSON as a transcript while keeping raw logs available", async () => {
+    const agentProjection = {
+      ...runProjection,
+      runs: [{
+        ...runProjection.runs[0],
+        current_phase: "agent-execute",
+        phases: runProjection.runs[0].phases.map((phase) => {
+          if (phase.name === "env-prep") {
+            return {
+              ...phase,
+              state: "succeeded",
+              jobs: phase.jobs.map((job) => ({
+                ...job,
+                state: "succeeded",
+                steps: job.steps.map((step) => ({ ...step, state: "succeeded" })),
+              })),
+            };
+          }
+          if (phase.name === "agent-execute") {
+            return {
+              ...phase,
+              state: "active",
+              jobs: phase.jobs.map((job) => ({
+                ...job,
+                state: "active",
+                steps: job.steps.map((step) => ({
+                  ...step,
+                  state: step.slug === "run-agent" ? "active" : "succeeded",
+                })),
+              })),
+              attempts: [{
+                attempt_index: 0,
+                state: "active",
+                conclusion: null,
+                verification_status: null,
+                decision: null,
+                log_archive_url: null,
+                evidence_refs: [],
+                job_completions: [],
+              }],
+            };
+          }
+          return phase;
+        }),
+      }],
+    };
+    const agentGraph = { ...issueGraph, projection: agentProjection };
+
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string"
+          ? new URL(input, "https://glimmung.test")
+          : input instanceof URL
+            ? input
+            : new URL(input.url);
+      if (url.pathname === "/v1/issues/by-number/ambience/172") return json(issueDetail);
+      if (url.pathname === "/v1/issues/by-number/ambience/172/graph") return json(agentGraph);
+      if (url.pathname === "/v1/projects/ambience/issues/172/runs/7/cycles/1/graph") return json(agentProjection);
+      if (url.pathname === "/v1/workflows") return json([]);
+      if (url.pathname === "/v1/projects/ambience/issues/172/runs/7.1/native/events") return json(agentNativeEvents);
+      throw new Error(`unhandled fetch ${url.pathname}`);
+    }));
+
+    renderIssueDetail("/projects/ambience/issues/172/runs/7/cycles/1/phases/agent-execute/jobs/agent/steps/run-agent");
+
+    expect(await screen.findByLabelText("agent transcript")).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "native log view" })).toBeInTheDocument();
+    expect(screen.getByText("I will inspect the file.")).toBeInTheDocument();
+    expect(screen.getAllByText("Read").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText(/Thinking\/signature content hidden/)).toBeInTheDocument();
+
+    const toolResultSummary = screen.getByText("tool result").closest("summary");
+    if (!toolResultSummary) throw new Error("missing tool result summary");
+    await userEvent.click(toolResultSummary);
+    expect(screen.getByText(/line two/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "raw" }));
+    expect(screen.getByText((content) => content.includes("\"tool_use\""))).toBeInTheDocument();
+    expect(screen.getByText((content) => content.includes("\\nline two"))).toBeInTheDocument();
   });
 
   it("omits the issue run rollup panel between the header and tabs", async () => {
