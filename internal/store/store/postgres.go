@@ -5346,6 +5346,24 @@ func (s *Store) AbortRunByID(ctx context.Context, project, runID, reason string)
 	}, nil
 }
 
+// terminalStateReleasesSlotLease reports whether a run reaching the given true
+// terminal state should release its slot lease. An aborted run always releases
+// (it tears everything down, matching AbortRunByID). A passed run releases
+// unless preserve_test_env intentionally keeps the environment — and its slot
+// lease — alive for post-run inspection. Any other state is not a slot-lease
+// release point: review_required is non-terminal (the lease may still be alive
+// at a parked gate), and recycled runs never held a slot lease of their own.
+func terminalStateReleasesSlotLease(state string, preserveTestEnv bool) bool {
+	switch state {
+	case "aborted":
+		return true
+	case "passed":
+		return !preserveTestEnv
+	default:
+		return false
+	}
+}
+
 func (s *Store) releaseRunSlotLease(ctx context.Context, doc runDoc) *bool {
 	ref := strings.TrimSpace(stringOrEmpty(doc.SlotLeaseRef))
 	if ref == "" {
@@ -6911,6 +6929,18 @@ func (s *Store) SetRunTerminalState(ctx context.Context, project, runID, state s
 		prLockReleased = &released
 	}
 
+	// Glimmung owns slot-lease release at true terminal. An aborted run tears
+	// everything down, so the slot lease is released unconditionally — the same
+	// release the admin AbortRunByID path performs. A passed run releases its
+	// slot lease too, unless preserve_test_env keeps the environment (and its
+	// lease) alive for post-run inspection. Without this, a run that settles
+	// terminal through the completion teardown-then-abort path leaves its slot
+	// lease "claimed" forever, stranding a host-pinned, scarce slot.
+	var slotLeaseReleased *bool
+	if terminalStateReleasesSlotLease(state, doc.PreserveTestEnv) {
+		slotLeaseReleased = s.releaseRunSlotLease(ctx, doc)
+	}
+
 	return server.AbortRunResult{
 		State:             state,
 		RunRef:            runRef,
@@ -6918,6 +6948,7 @@ func (s *Store) SetRunTerminalState(ctx context.Context, project, runID, state s
 		RunDisplayNumber:  doc.RunDisplayNumber,
 		IssueLockReleased: issueLockReleased,
 		PRLockReleased:    prLockReleased,
+		SlotLeaseReleased: slotLeaseReleased,
 	}, nil
 }
 
