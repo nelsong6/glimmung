@@ -351,6 +351,8 @@ var schemaMigrations = []string{
 		ON slot_inspections (run_id)
 		WHERE run_id <> ''`,
 
+	`ALTER TABLE workflow_schemas ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()`,
+
 	// Workflow phases used to encode teardown scheduling with `always`.
 	// Keep stored workflow JSON on the current run_on/purpose contract so
 	// runtime reads do not need legacy compatibility paths.
