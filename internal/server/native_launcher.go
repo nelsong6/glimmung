@@ -45,6 +45,15 @@ type NativeJobStatusGetter interface {
 	GetNativeJobStatus(ctx context.Context, namespace, name string) (NativeJobStatus, error)
 }
 
+// NativeJobLogsFetcher exposes a bounded read of a phase Job's pod
+// stdout so the run-execution reconciler can capture logs into the
+// artifact store on terminal transitions. Stage 3 of the inner-Job
+// observation contract — the durable counterpart to the Grafana
+// Explore deep-link, retained past Loki's window.
+type NativeJobLogsFetcher interface {
+	GetNativeJobLogs(ctx context.Context, namespace, jobName string, maxBytes int64) ([]byte, error)
+}
+
 // NativeJobStatus is the small subset of batch/v1 Job status the reconciler
 // needs to decide whether to synthesize a completion. Zero value (Found=false)
 // means the Job has been garbage-collected from k8s; callers treat that as
@@ -1053,6 +1062,118 @@ func (l *KubernetesNativeLauncher) GetNativeJobStatus(ctx context.Context, names
 		return NativeJobStatus{}, err
 	}
 	return parseNativeJobStatus(job), nil
+}
+
+// GetNativeJobLogs reads a bounded slice of the named Job's pod
+// stdout. Used by the run-execution reconciler to capture logs into
+// the artifact store on terminal transitions (inner-Job observation
+// contract, stage 3). Returns the empty slice with a nil error when:
+//
+//   - the Job has no pods registered (TTL'd already, no kubelet
+//     materialised a pod for it, etc), or
+//   - the pod's logs are server-side empty.
+//
+// Errors are returned for transport / RBAC failures so the caller can
+// decide whether to retry on the next reconciler tick.
+//
+// The kube-apiserver applies tailLines server-side; the LimitReader on
+// the response stream is a defense against an apiserver implementation
+// that ignores the parameter or against a pod whose lines are
+// individually enormous (base64 evidence tarballs in the original
+// ambience#170 case were exactly that shape).
+func (l *KubernetesNativeLauncher) GetNativeJobLogs(ctx context.Context, namespace, jobName string, maxBytes int64) ([]byte, error) {
+	if strings.TrimSpace(namespace) == "" || strings.TrimSpace(jobName) == "" {
+		return nil, fmt.Errorf("namespace and jobName are required")
+	}
+	if maxBytes <= 0 {
+		maxBytes = defaultInnerJobLogsMaxBytes
+	}
+	podName, err := l.lookupSinglePodForJob(ctx, namespace, jobName)
+	if err != nil {
+		return nil, err
+	}
+	if podName == "" {
+		return nil, nil
+	}
+	// Kubernetes log endpoint streams plain text, not JSON, so we
+	// bypass request() (which json-decodes) and drive the HTTP request
+	// here. tailLines caps server-side; the LimitReader caps client-side.
+	logPath := "/api/v1/namespaces/" + url.PathEscape(namespace) + "/pods/" + url.PathEscape(podName) + "/log?tailLines=20000&timestamps=true&previous=false"
+	body, status, err := l.getRaw(ctx, logPath, maxBytes)
+	if err != nil {
+		if status == http.StatusNotFound {
+			// Pod GC'd between the lookup and the log read.
+			return nil, nil
+		}
+		return nil, err
+	}
+	return body, nil
+}
+
+const (
+	// defaultInnerJobLogsMaxBytes is the per-Job cap on log capture.
+	// 8 MiB fits a long-running agent's stdout including a few base64
+	// evidence tarballs and stays well below typical apiserver
+	// response-size limits. Operators tuning lower should set the
+	// caller's maxBytes; tuning higher is rarely useful since the
+	// dashboard renders the artifact via download anyway.
+	defaultInnerJobLogsMaxBytes int64 = 8 << 20
+)
+
+// lookupSinglePodForJob resolves a Job's pod name by querying the
+// kubelet's pod LIST for a `job-name=` label match. Returns the empty
+// string when no pod exists for the Job (TTL race or unscheduled).
+func (l *KubernetesNativeLauncher) lookupSinglePodForJob(ctx context.Context, namespace, jobName string) (string, error) {
+	listPath := "/api/v1/namespaces/" + url.PathEscape(namespace) + "/pods?labelSelector=job-name%3D" + url.QueryEscape(jobName)
+	status, decoded, err := l.request(ctx, http.MethodGet, listPath, nil)
+	if err != nil {
+		if status == http.StatusNotFound {
+			return "", nil
+		}
+		return "", err
+	}
+	items := anySlice(decoded["items"])
+	if len(items) == 0 {
+		return "", nil
+	}
+	first := anyMap(items[0])
+	metadata := anyMap(first["metadata"])
+	return strings.TrimSpace(mapStringValueOrEmpty(metadata, "name")), nil
+}
+
+// getRaw GETs the given kube apiserver path and returns up to
+// maxBytes of the response body. Mirrors request()'s auth handling
+// but does not json-decode; used for the streaming pod log endpoint.
+func (l *KubernetesNativeLauncher) getRaw(ctx context.Context, path string, maxBytes int64) ([]byte, int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(l.Settings.K8sAPIHost, "/")+path, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	token, err := os.ReadFile(l.Settings.K8sSATokenPath)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
+	client := l.HTTPClient
+	if client == nil {
+		// Log reads can be slow (apiserver streams from kubelet).
+		// 30s is generous but bounded.
+		client = &http.Client{Timeout: 30 * time.Second, Transport: l.transport()}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, resp.StatusCode, fmt.Errorf("kubernetes GET %s returned %d: %s", path, resp.StatusCode, strings.TrimSpace(string(errBody)))
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes))
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+	return body, resp.StatusCode, nil
 }
 
 // parseNativeJobStatus pulls the reconciler-relevant fields out of a

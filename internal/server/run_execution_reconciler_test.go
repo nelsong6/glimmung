@@ -705,7 +705,7 @@ func TestExpireInnerJobTerminationsEmitsForTerminalSucceededJob(t *testing.T) {
 	}
 	events := newInnerJobEventStore(listStore)
 
-	emitted, err := ExpireInnerJobTerminations(context.Background(), events, statusGetter, nil, time.Minute, now)
+	emitted, err := ExpireInnerJobTerminations(context.Background(), events, statusGetter, nil, nil, nil, time.Minute, now, nil)
 	if err != nil {
 		t.Fatalf("ExpireInnerJobTerminations: %v", err)
 	}
@@ -730,7 +730,7 @@ func TestExpireInnerJobTerminationsEmitsForTerminalSucceededJob(t *testing.T) {
 	}
 
 	// Re-running the reconciler must not emit a duplicate event.
-	emitted2, _ := ExpireInnerJobTerminations(context.Background(), events, statusGetter, nil, time.Minute, now)
+	emitted2, _ := ExpireInnerJobTerminations(context.Background(), events, statusGetter, nil, nil, nil, time.Minute, now, nil)
 	if emitted2 != 0 {
 		t.Fatalf("re-emission count=%d, want 0 (idempotency)", emitted2)
 	}
@@ -774,7 +774,7 @@ func TestExpireInnerJobTerminationsEmitsForFailedConditionWithMappedReason(t *te
 	}
 	events := newInnerJobEventStore(listStore)
 
-	emitted, err := ExpireInnerJobTerminations(context.Background(), events, statusGetter, nil, time.Minute, now)
+	emitted, err := ExpireInnerJobTerminations(context.Background(), events, statusGetter, nil, nil, nil, time.Minute, now, nil)
 	if err != nil {
 		t.Fatalf("ExpireInnerJobTerminations: %v", err)
 	}
@@ -818,7 +818,7 @@ func TestExpireInnerJobTerminationsSkipsAlreadyTerminatedAndStillActive(t *testi
 	}
 	events := newInnerJobEventStore(listStore)
 
-	emitted, err := ExpireInnerJobTerminations(context.Background(), events, statusGetter, nil, time.Minute, now)
+	emitted, err := ExpireInnerJobTerminations(context.Background(), events, statusGetter, nil, nil, nil, time.Minute, now, nil)
 	if err != nil {
 		t.Fatalf("ExpireInnerJobTerminations: %v", err)
 	}
@@ -990,7 +990,7 @@ func TestBuildInnerJobTerminationStampsLogArchiveURL(t *testing.T) {
 		GrafanaBaseURL:        "https://grafana.romaine.life",
 		GrafanaLokiDatasource: "loki",
 	}}
-	event, ok, err := buildInnerJobTermination(context.Background(), statusGetter, "llm-verify", ij, urlBuilder, time.Minute, now)
+	event, ok, err := buildInnerJobTermination(context.Background(), statusGetter, nil, nil, "proj", "r1", "llm-verify", ij, urlBuilder, time.Minute, now, nil)
 	if err != nil {
 		t.Fatalf("buildInnerJobTermination: %v", err)
 	}
@@ -1006,5 +1006,161 @@ func TestBuildInnerJobTerminationStampsLogArchiveURL(t *testing.T) {
 	}
 	if !strings.Contains(url, "ambience-slot-3") {
 		t.Fatalf("url missing namespace: %q", url)
+	}
+}
+
+// fakeJobLogsFetcher returns canned bytes for GetNativeJobLogs.
+type fakeJobLogsFetcher struct {
+	body  []byte
+	err   error
+	calls int
+}
+
+func (f *fakeJobLogsFetcher) GetNativeJobLogs(_ context.Context, _, _ string, _ int64) ([]byte, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.body, nil
+}
+
+// captureArtifactWriter records uploaded blobs in-memory.
+type captureArtifactWriter struct {
+	blobs map[string][]byte
+	err   error
+}
+
+func newCaptureArtifactWriter() *captureArtifactWriter {
+	return &captureArtifactWriter{blobs: map[string][]byte{}}
+}
+
+func (w *captureArtifactWriter) Upload(_ context.Context, blobName string, body []byte, _ string) (int64, error) {
+	if w.err != nil {
+		return 0, w.err
+	}
+	cp := make([]byte, len(body))
+	copy(cp, body)
+	w.blobs[blobName] = cp
+	return int64(len(body)), nil
+}
+
+func (w *captureArtifactWriter) Delete(_ context.Context, blobName string) error {
+	delete(w.blobs, blobName)
+	return nil
+}
+
+func TestCaptureInnerJobLogsUploadsToArtifactPath(t *testing.T) {
+	fetcher := &fakeJobLogsFetcher{body: []byte("hello world\nverified ok\n")}
+	writer := newCaptureArtifactWriter()
+	got := captureInnerJobLogs(context.Background(), fetcher, writer, "ambience", "run-42", "ambience-slot-3", "agent-ve-2", nil)
+	want := "/v1/artifacts/runs/ambience/run-42/inner_jobs/ambience-slot-3/agent-ve-2.log"
+	if got != want {
+		t.Fatalf("artifact url=%q, want %q", got, want)
+	}
+	if string(writer.blobs["runs/ambience/run-42/inner_jobs/ambience-slot-3/agent-ve-2.log"]) != "hello world\nverified ok\n" {
+		t.Fatalf("uploaded blob mismatch: %q", string(writer.blobs["runs/ambience/run-42/inner_jobs/ambience-slot-3/agent-ve-2.log"]))
+	}
+	if fetcher.calls != 1 {
+		t.Fatalf("fetcher.calls=%d, want 1", fetcher.calls)
+	}
+}
+
+func TestCaptureInnerJobLogsFallsBackWhenWriterUnconfigured(t *testing.T) {
+	fetcher := &fakeJobLogsFetcher{body: []byte("logs")}
+	if got := captureInnerJobLogs(context.Background(), fetcher, nil, "p", "r", "ns", "j", nil); got != "" {
+		t.Fatalf("expected empty fallback, got %q", got)
+	}
+}
+
+func TestCaptureInnerJobLogsFallsBackWhenFetcherEmpty(t *testing.T) {
+	fetcher := &fakeJobLogsFetcher{body: nil}
+	writer := newCaptureArtifactWriter()
+	if got := captureInnerJobLogs(context.Background(), fetcher, writer, "p", "r", "ns", "j", nil); got != "" {
+		t.Fatalf("expected empty fallback when no body, got %q", got)
+	}
+	if len(writer.blobs) != 0 {
+		t.Fatalf("did not expect any blob upload: %#v", writer.blobs)
+	}
+}
+
+func TestBuildInnerJobTerminationPrefersArtifactOverGrafanaURL(t *testing.T) {
+	now := time.Date(2026, 5, 29, 1, 30, 0, 0, time.UTC)
+	terminal := now.Add(-5 * time.Minute)
+	statusGetter := &fakeJobStatusGetter{
+		statuses: map[string]NativeJobStatus{
+			"agent-ve-2": {
+				Found:              true,
+				Succeeded:          1,
+				CompletionTime:     terminal,
+				LastTransitionTime: terminal,
+				Conditions: []NativeJobCondition{
+					{Type: "Complete", Status: "True", LastTransitionTime: terminal},
+				},
+			},
+		},
+	}
+	fetcher := &fakeJobLogsFetcher{body: []byte("kernel says hi\n")}
+	writer := newCaptureArtifactWriter()
+	urlBuilder := settingsLogArchiveURLBuilder{settings: Settings{
+		GrafanaBaseURL:        "https://grafana.romaine.life",
+		GrafanaLokiDatasource: "loki",
+	}}
+	ij := InnerJobRef{
+		ParentJobID:  "llm-verify",
+		Namespace:    "ambience-slot-3",
+		JobName:      "agent-ve-2",
+		Intent:       "verification_agent",
+		State:        "active",
+		RegisteredAt: "2026-05-29T01:00:00Z",
+	}
+	event, ok, err := buildInnerJobTermination(context.Background(), statusGetter, fetcher, writer, "ambience", "run-42", "llm-verify", ij, urlBuilder, time.Minute, now, nil)
+	if err != nil || !ok {
+		t.Fatalf("buildInnerJobTermination ok=%t err=%v", ok, err)
+	}
+	url, _ := event.Metadata["log_archive_url"].(string)
+	if !strings.HasPrefix(url, "/v1/artifacts/runs/ambience/run-42/inner_jobs/") {
+		t.Fatalf("expected artifact URL, got %q", url)
+	}
+	if strings.HasPrefix(url, "https://grafana.romaine.life") {
+		t.Fatal("expected artifact URL to win over Grafana fallback")
+	}
+}
+
+func TestBuildInnerJobTerminationFallsBackToGrafanaWhenCaptureFails(t *testing.T) {
+	now := time.Date(2026, 5, 29, 1, 30, 0, 0, time.UTC)
+	terminal := now.Add(-5 * time.Minute)
+	statusGetter := &fakeJobStatusGetter{
+		statuses: map[string]NativeJobStatus{
+			"agent-ve-2": {
+				Found:              true,
+				Succeeded:          1,
+				CompletionTime:     terminal,
+				LastTransitionTime: terminal,
+				Conditions: []NativeJobCondition{
+					{Type: "Complete", Status: "True", LastTransitionTime: terminal},
+				},
+			},
+		},
+	}
+	urlBuilder := settingsLogArchiveURLBuilder{settings: Settings{
+		GrafanaBaseURL:        "https://grafana.romaine.life",
+		GrafanaLokiDatasource: "loki",
+	}}
+	ij := InnerJobRef{
+		ParentJobID:  "llm-verify",
+		Namespace:    "ambience-slot-3",
+		JobName:      "agent-ve-2",
+		Intent:       "verification_agent",
+		State:        "active",
+		RegisteredAt: "2026-05-29T01:00:00Z",
+	}
+	// No fetcher + no writer => capture short-circuits, urlBuilder wins.
+	event, ok, err := buildInnerJobTermination(context.Background(), statusGetter, nil, nil, "ambience", "run-42", "llm-verify", ij, urlBuilder, time.Minute, now, nil)
+	if err != nil || !ok {
+		t.Fatalf("buildInnerJobTermination ok=%t err=%v", ok, err)
+	}
+	url, _ := event.Metadata["log_archive_url"].(string)
+	if !strings.HasPrefix(url, "https://grafana.romaine.life/explore?") {
+		t.Fatalf("expected Grafana fallback, got %q", url)
 	}
 }
