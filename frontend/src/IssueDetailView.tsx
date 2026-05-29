@@ -3659,14 +3659,18 @@ function AgentTranscriptView({ entries }: { entries: AgentTranscriptEntry[] }) {
           );
         }
         if (entry.kind === "reasoning") {
+          const body = [
+            entry.text,
+            entry.raw ? formatAgentJson(entry.raw) : "",
+          ].filter(Boolean).join("\n\n");
           return (
-            <article key={entry.id} className="agent-transcript-entry reasoning">
-              <div className="agent-transcript-entry-head">
-                <strong>{entry.title}</strong>
+            <details key={entry.id} className="agent-transcript-entry reasoning">
+              <summary>
+                <span>{entry.title}</span>
                 <span className="mono dim">#{entry.seq}</span>
-              </div>
-              <div className="agent-transcript-muted">{entry.text}</div>
-            </article>
+              </summary>
+              <pre>{body}</pre>
+            </details>
           );
         }
         const body = entry.kind === "tool_call"
@@ -3958,13 +3962,18 @@ function appendAgentPayloadEntries(
         return;
       }
       if (blockType === "thinking") {
+        const thinking = stringValue(blockObj.thinking)?.trim() ?? "";
+        const signature = stringValue(blockObj.signature)?.trim() ?? "";
         entries.push({
           id: `reasoning-${event.seq}-${payloadIndex}-${blockIndex}`,
           kind: "reasoning",
           seq: event.seq,
           createdAt: event.created_at,
-          title: "reasoning",
-          text: "Thinking/signature content hidden in transcript view. Open raw to inspect the original event.",
+          title: thinking ? "reasoning" : signature ? "reasoning signature" : "reasoning",
+          text: thinking || (signature
+            ? "No readable thinking text; provider emitted a signature only."
+            : "No readable thinking text was emitted."),
+          raw: blockObj,
         });
         return;
       }

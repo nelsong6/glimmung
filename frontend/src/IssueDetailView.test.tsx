@@ -625,7 +625,11 @@ describe("IssueDetailView run execution graph", () => {
     expect(screen.getByRole("group", { name: "native log view" })).toBeInTheDocument();
     expect(screen.getByText("I will inspect the file.")).toBeInTheDocument();
     expect(screen.getAllByText("Read").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText(/Thinking\/signature content hidden/)).toBeInTheDocument();
+    const reasoningSummary = screen.getByText("reasoning signature").closest("summary");
+    if (!reasoningSummary) throw new Error("missing reasoning signature summary");
+    await userEvent.click(reasoningSummary);
+    expect(screen.getByText(/No readable thinking text/)).toBeInTheDocument();
+    expect(screen.getByText((content) => content.includes("very-large-signature"))).toBeInTheDocument();
 
     const toolResultSummary = screen.getByText("tool result").closest("summary");
     if (!toolResultSummary) throw new Error("missing tool result summary");
