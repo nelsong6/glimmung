@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -43,12 +44,13 @@ type fakeCompletionStore struct {
 	terminalState  string
 	terminalReason *string
 
-	reviewRequiredCalls int
-	reviewRequiredErr   error
-	inProgressCalls     int
-	inProgressErr       error
-	skippedStampCalls   int
-	skippedStampErr     error
+	parkGateCalls      int
+	parkGateErr        error
+	releaseGateCalls   int
+	releaseGateAttempt int
+	releaseGateErr     error
+	skippedStampCalls  int
+	skippedStampErr    error
 
 	appendIdx   int
 	appendErr   error
@@ -156,14 +158,19 @@ func (s *fakeCompletionStore) SetRunTerminalState(_ context.Context, _, _ string
 	return s.terminalResult, s.terminalErr
 }
 
-func (s *fakeCompletionStore) SetRunReviewRequired(_ context.Context, _, _ string) error {
-	s.reviewRequiredCalls++
-	return s.reviewRequiredErr
+func (s *fakeCompletionStore) ParkRunAtReviewGate(_ context.Context, _, _, phase, phaseKind, workflowFilename string) (int, error) {
+	s.parkGateCalls++
+	s.appendPhase = phase
+	s.appendKind = phaseKind
+	s.appendFile = workflowFilename
+	return s.appendIdx, s.parkGateErr
 }
 
-func (s *fakeCompletionStore) SetRunInProgress(_ context.Context, _, _ string) error {
-	s.inProgressCalls++
-	return s.inProgressErr
+func (s *fakeCompletionStore) ReleaseReviewGate(_ context.Context, _, _, phase string, attemptIndex int) error {
+	s.releaseGateCalls++
+	s.appendPhase = phase
+	s.releaseGateAttempt = attemptIndex
+	return s.releaseGateErr
 }
 
 func (s *fakeCompletionStore) StampLatestAttemptSkipped(_ context.Context, _, _ string) error {
@@ -469,6 +476,38 @@ func prWorkflowForCompletion(name string) *Workflow {
 	return &canonical
 }
 
+func gatedPRWorkflowForCompletion(name string) *Workflow {
+	wf := singlePhaseWorkflowForCompletion(name, false)
+	wf.Phases = append(wf.Phases,
+		PhaseSpec{
+			Name:      "touchpoint",
+			Kind:      "k8s_job",
+			RunOn:     PhaseRunOnSuccess,
+			Purpose:   PhasePurposeReviewTouchpoint,
+			DependsOn: []string{name},
+			Jobs:      []NativeJobSpec{{ID: PRTouchpointJobID, Primitive: JobPrimitivePRTouchpoint}},
+		},
+		PhaseSpec{
+			Name:      "touchpoint_gate",
+			Kind:      "k8s_job",
+			RunOn:     PhaseRunOnSuccess,
+			Purpose:   PhasePurposeReviewGate,
+			DependsOn: []string{"touchpoint"},
+			Jobs:      []NativeJobSpec{{ID: PRMergeJobID, Primitive: JobPrimitivePRMerge}},
+		},
+		PhaseSpec{
+			Name:      "cleanup_final",
+			Kind:      "k8s_job",
+			RunOn:     PhaseRunOnAlways,
+			Purpose:   PhasePurposeTeardown,
+			DependsOn: []string{"touchpoint_gate"},
+			Jobs:      []NativeJobSpec{{ID: "cleanup-final", Image: "runner:latest"}},
+		},
+	)
+	canonical := CanonicalWorkflow(*wf)
+	return &canonical
+}
+
 func abortWorkflowWithCleanup(primary string) *Workflow {
 	wf := singlePhaseWorkflowForCompletion(primary, false)
 	wf.Phases = append(wf.Phases, PhaseSpec{
@@ -722,6 +761,155 @@ func TestNativeRunCompletedByCallbackTokenAdvancePostMergeToPassed(t *testing.T)
 	}
 }
 
+func TestNativeRunCompletedByCallbackTokenTouchpointGateMergeDispatchesFinalCleanup(t *testing.T) {
+	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
+	store.run = runDataForCompletion("touchpoint_gate")
+	store.run.Attempts = []RunAttemptData{
+		{AttemptIndex: 0, Phase: "impl", Conclusion: "success", Decision: string(decision.Advance), Completed: true, PhaseOutputs: map[string]string{"branch_name": "issue-7-run-1"}},
+		{AttemptIndex: 1, Phase: "touchpoint", Conclusion: "success", Decision: string(decision.Advance), Completed: true, PhaseOutputs: map[string]string{"pr_number": "99"}},
+		{AttemptIndex: 2, Phase: "touchpoint_gate", Conclusion: "failure"},
+	}
+	store.wf = gatedPRWorkflowForCompletion("impl")
+	store.leaseResult = Lease{State: "claimed"}
+	launcher := &fakeNativeLauncher{}
+
+	rec := httptest.NewRecorder()
+	newCompletionHandler(store, launcher).ServeHTTP(rec, nativeCompletionRequest("tok",
+		completedJob(PRMergeJobID, "success", nil, map[string]string{"merge_status": "merged"})))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	result := readCallbackResult(t, rec)
+	if result.Decision == nil || *result.Decision != "advance_phase" {
+		t.Fatalf("decision=%v, want advance_phase", result.Decision)
+	}
+	if store.appendPhase != "cleanup_final" || store.appendKind != "k8s_job" {
+		t.Fatalf("appended phase=(%q,%q), want cleanup_final/k8s_job", store.appendPhase, store.appendKind)
+	}
+	if !launcher.called || launcher.req.Phase.Name != "cleanup_final" {
+		t.Fatalf("launcher called=%t phase=%q", launcher.called, launcher.req.Phase.Name)
+	}
+	if store.terminalState != "" {
+		t.Fatalf("terminal state=%q, want non-terminal before final cleanup completes", store.terminalState)
+	}
+}
+
+func TestNativeRunCompletedByCallbackTokenTouchpointParksReviewGateAttempt(t *testing.T) {
+	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
+	store.run = runDataForCompletion("touchpoint")
+	store.run.Attempts = []RunAttemptData{
+		{AttemptIndex: 0, Phase: "impl", Conclusion: "success", Decision: string(decision.Advance), Completed: true, PhaseOutputs: map[string]string{"branch_name": "issue-7-run-1"}},
+		{AttemptIndex: 1, Phase: "touchpoint", Conclusion: "failure"},
+	}
+	store.wf = gatedPRWorkflowForCompletion("impl")
+	launcher := &fakeNativeLauncher{}
+
+	rec := httptest.NewRecorder()
+	newCompletionHandler(store, launcher).ServeHTTP(rec, nativeCompletionRequest("tok",
+		completedJob(PRTouchpointJobID, "success", nil, map[string]string{"pr_number": "99"})))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	result := readCallbackResult(t, rec)
+	if result.Decision == nil || *result.Decision != "advance_phase" {
+		t.Fatalf("decision=%v, want advance_phase", result.Decision)
+	}
+	if store.parkGateCalls != 1 || store.appendPhase != "touchpoint_gate" || store.appendKind != "k8s_job" {
+		t.Fatalf("park calls=%d phase=(%q,%q), want touchpoint_gate/k8s_job", store.parkGateCalls, store.appendPhase, store.appendKind)
+	}
+	if launcher.called {
+		t.Fatalf("review gate should park without launching jobs")
+	}
+}
+
+func TestNativeRunCompletedByCallbackTokenTouchpointGateFailureDispatchesFinalCleanup(t *testing.T) {
+	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
+	store.run = runDataForCompletion("touchpoint_gate")
+	store.run.Attempts = []RunAttemptData{
+		{AttemptIndex: 0, Phase: "impl", Conclusion: "success", Decision: string(decision.Advance), Completed: true, PhaseOutputs: map[string]string{"branch_name": "issue-7-run-1"}},
+		{AttemptIndex: 1, Phase: "touchpoint", Conclusion: "success", Decision: string(decision.Advance), Completed: true, PhaseOutputs: map[string]string{"pr_number": "99"}},
+		{AttemptIndex: 2, Phase: "touchpoint_gate", Conclusion: "failure"},
+	}
+	store.wf = gatedPRWorkflowForCompletion("impl")
+	store.leaseResult = Lease{State: "claimed"}
+	launcher := &fakeNativeLauncher{}
+
+	rec := httptest.NewRecorder()
+	newCompletionHandler(store, launcher).ServeHTTP(rec, nativeCompletionRequest("tok",
+		completedJob(PRMergeJobID, "failure", nil, nil)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	result := readCallbackResult(t, rec)
+	if result.Decision == nil || *result.Decision != "advance_phase" {
+		t.Fatalf("decision=%v, want advance_phase", result.Decision)
+	}
+	if store.appendPhase != "cleanup_final" || store.appendKind != "k8s_job" {
+		t.Fatalf("appended phase=(%q,%q), want cleanup_final/k8s_job", store.appendPhase, store.appendKind)
+	}
+	if !launcher.called || launcher.req.Phase.Name != "cleanup_final" {
+		t.Fatalf("launcher called=%t phase=%q", launcher.called, launcher.req.Phase.Name)
+	}
+}
+
+func TestNativeRunCompletedByCallbackTokenTouchpointGateFailureAfterCleanupAborts(t *testing.T) {
+	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
+	store.run = runDataForCompletion("cleanup_final")
+	store.run.Attempts = []RunAttemptData{
+		{AttemptIndex: 0, Phase: "impl", Conclusion: "success", Decision: string(decision.Advance), Completed: true, PhaseOutputs: map[string]string{"branch_name": "issue-7-run-1"}},
+		{AttemptIndex: 1, Phase: "touchpoint", Conclusion: "success", Decision: string(decision.Advance), Completed: true, PhaseOutputs: map[string]string{"pr_number": "99"}},
+		{AttemptIndex: 2, Phase: "touchpoint_gate", Conclusion: "failure", Decision: string(decision.AbortMalformed), Completed: true},
+		{AttemptIndex: 3, Phase: "cleanup_final", Conclusion: "failure"},
+	}
+	store.wf = gatedPRWorkflowForCompletion("impl")
+	store.terminalResult = AbortRunResult{State: "aborted", RunRef: "proj#7/runs/1"}
+
+	rec := httptest.NewRecorder()
+	newCompletionHandler(store, nil).ServeHTTP(rec, nativeCompletionRequest("tok",
+		completedJob("cleanup-final", "success", nil, nil)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.terminalState != "aborted" {
+		t.Fatalf("terminal state=%q, want aborted", store.terminalState)
+	}
+}
+
+func TestLaunchTouchpointGateMergeReleasesParkedAttempt(t *testing.T) {
+	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
+	run := runDataForCompletion("touchpoint_gate")
+	run.State = "review_required"
+	run.Attempts = []RunAttemptData{
+		{AttemptIndex: 0, Phase: "impl", Conclusion: "success", Decision: string(decision.Advance), Completed: true},
+		{AttemptIndex: 1, Phase: "touchpoint", Conclusion: "success", Decision: string(decision.Advance), Completed: true},
+		{AttemptIndex: 2, Phase: "touchpoint_gate"},
+	}
+	store.leaseResult = Lease{State: "claimed", Metadata: map[string]any{}}
+	wf := gatedPRWorkflowForCompletion("impl")
+	gate := phaseSpecByName(wf.Phases, "touchpoint_gate")
+	if gate == nil {
+		t.Fatal("missing gate")
+	}
+	launcher := &fakeNativeLauncher{}
+
+	if err := launchTouchpointGateMerge(context.Background(), store, launcher, *run, wf, *gate); err != nil {
+		t.Fatalf("launchTouchpointGateMerge: %v", err)
+	}
+	if store.releaseGateCalls != 1 || store.releaseGateAttempt != 2 {
+		t.Fatalf("release calls=%d attempt=%d, want attempt 2", store.releaseGateCalls, store.releaseGateAttempt)
+	}
+	if !launcher.called || launcher.req.Phase.Name != "touchpoint_gate" {
+		t.Fatalf("launcher request=%#v", launcher.req)
+	}
+	if got := fmt.Sprint(launcher.req.Lease.Metadata["attempt_index"]); got != "2" {
+		t.Fatalf("attempt_index metadata=%q, want 2", got)
+	}
+}
+
 func TestCompletionPayloadFromNativeExtractsEvidenceRefs(t *testing.T) {
 	id := "verify"
 	req := NativeRunCompletedRequest{
@@ -843,6 +1031,29 @@ func TestNativePRTouchpointByCallbackTokenEnsuresPRAndTouchpoint(t *testing.T) {
 	}
 	if store.touchpointReq == nil || store.touchpointReq.Number != 123 || store.touchpointReq.LinkedIssueRef != "proj#7" || store.touchpointReq.LinkedRunRef != "proj#7/runs/1" {
 		t.Fatalf("touchpoint req=%#v", store.touchpointReq)
+	}
+}
+
+func TestMergeRunPullRequestUsesSquash(t *testing.T) {
+	prNumber := 263
+	run := runDataForCompletion("touchpoint_gate")
+	run.IssueRepo = "owner/repo"
+	run.PRNumber = &prNumber
+	prClient := &fakePullRequestClient{}
+
+	result, err := mergeRunPullRequest(context.Background(), prClient, *run)
+
+	if err != nil {
+		t.Fatalf("mergeRunPullRequest: %v", err)
+	}
+	if result.Status != "merged" || result.PRNumber != prNumber {
+		t.Fatalf("result=%#v", result)
+	}
+	if prClient.mergeReq.MergeMethod != "squash" {
+		t.Fatalf("merge method=%q, want squash", prClient.mergeReq.MergeMethod)
+	}
+	if !strings.Contains(prClient.mergeReq.CommitTitle, "Glimmung touchpoint approve:") {
+		t.Fatalf("commit title=%q", prClient.mergeReq.CommitTitle)
 	}
 }
 
@@ -1414,7 +1625,7 @@ func TestAllReadyDispatchTargetsAbortPathSkipsReviewPhases(t *testing.T) {
 		{Name: "evidence-gate", EvidenceVerificationGate: true, Purpose: PhasePurposeEvidenceGate, DependsOn: []string{"verify"}},
 		{Name: "cleanup_early", RunOn: PhaseRunOnAlways, Purpose: PhasePurposeTeardown, DependsOn: []string{"evidence-gate"}},
 		{Name: "touchpoint", RunOn: PhaseRunOnSuccess, Purpose: PhasePurposeReviewTouchpoint, DependsOn: []string{"cleanup_early"}, Jobs: []NativeJobSpec{{ID: PRTouchpointJobID, Primitive: JobPrimitivePRTouchpoint}}},
-		{Name: "touchpoint_gate", Kind: "touchpoint_gate", RunOn: PhaseRunOnSuccess, Purpose: PhasePurposeReviewGate, DependsOn: []string{"touchpoint"}},
+		{Name: "touchpoint_gate", Kind: "k8s_job", RunOn: PhaseRunOnSuccess, Purpose: PhasePurposeReviewGate, DependsOn: []string{"touchpoint"}},
 		{Name: "cleanup_final", RunOn: PhaseRunOnAlways, Purpose: PhasePurposeTeardown, DependsOn: []string{"touchpoint_gate"}},
 	}}
 	run := RunReplayData{Attempts: []RunAttemptData{

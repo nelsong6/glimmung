@@ -5376,7 +5376,8 @@ func (s *Store) releaseRunSlotLease(ctx context.Context, doc runDoc) *bool {
 
 // ---- NativeRunStore implementation ----
 
-// GetNativeRunStatusByID returns the native run status for the latest in-progress k8s_job attempt.
+// GetNativeRunStatusByID returns the native run status for the latest
+// in-progress k8s_job attempt.
 func (s *Store) GetNativeRunStatusByID(ctx context.Context, project, runID string) (server.NativeRunStatusResponse, error) {
 	doc, _, err := s.readRunDoc(ctx, project, runID)
 	if err != nil {
@@ -6030,6 +6031,95 @@ func (s *Store) RecordNativeJobsDispatched(ctx context.Context, project, runID, 
 	})
 }
 
+func nextAttemptIndexRaw(attempts []any) int {
+	nextIdx := len(attempts)
+	if len(attempts) > 0 {
+		if last, ok := attempts[len(attempts)-1].(map[string]any); ok {
+			if ai, ok := last["attempt_index"].(float64); ok {
+				nextIdx = int(ai) + 1
+			}
+		}
+	}
+	return nextIdx
+}
+
+func markPhaseReviewRequiredRaw(raw map[string]any, phaseName, phaseKind, now string) {
+	phases, ok := raw["phase_executions"].([]any)
+	if !ok {
+		phases = []any{}
+	}
+	found := false
+	for i, value := range phases {
+		phase, ok := value.(map[string]any)
+		if !ok || stringValue(phase["name"]) != phaseName {
+			continue
+		}
+		found = true
+		phase["kind"] = firstNonEmpty(phaseKind, "k8s_job")
+		phase["state"] = "active"
+		phase["dispatched_at"] = now
+		phase["started_at"] = now
+		delete(phase, "completed_at")
+		delete(phase, "reason")
+		jobs, _ := phase["jobs"].([]any)
+		for j, jobValue := range jobs {
+			job, ok := jobValue.(map[string]any)
+			if !ok {
+				continue
+			}
+			if state := stringValue(job["state"]); state == "" || state == "dispatching" || state == "active" {
+				job["state"] = "not_started"
+			}
+			delete(job, "dispatched_at")
+			delete(job, "started_at")
+			delete(job, "completed_at")
+			delete(job, "reason")
+			steps, _ := job["steps"].([]any)
+			for k, stepValue := range steps {
+				step, ok := stepValue.(map[string]any)
+				if !ok {
+					continue
+				}
+				if state := stringValue(step["state"]); state == "" || state == "dispatching" || state == "active" {
+					step["state"] = "not_started"
+				}
+				delete(step, "started_at")
+				delete(step, "completed_at")
+				delete(step, "reason")
+				steps[k] = step
+			}
+			job["steps"] = steps
+			jobs[j] = job
+		}
+		phase["jobs"] = jobs
+		phases[i] = phase
+		break
+	}
+	if !found {
+		phases = append(phases, map[string]any{
+			"name":          phaseName,
+			"kind":          firstNonEmpty(phaseKind, "k8s_job"),
+			"state":         "active",
+			"created_at":    now,
+			"dispatched_at": now,
+			"started_at":    now,
+			"jobs": []any{map[string]any{
+				"id":         phaseName,
+				"name":       phaseName,
+				"state":      "not_started",
+				"created_at": now,
+				"steps": []any{map[string]any{
+					"slug":       "workflow-run",
+					"title":      "Workflow run",
+					"state":      "not_started",
+					"created_at": now,
+				}},
+			}},
+		})
+	}
+	raw["phase_executions"] = phases
+}
+
 func markPhaseDispatchingRaw(raw map[string]any, phaseName, phaseKind, now string) {
 	phases, ok := raw["phase_executions"].([]any)
 	if !ok {
@@ -6042,6 +6132,7 @@ func markPhaseDispatchingRaw(raw map[string]any, phaseName, phaseKind, now strin
 			continue
 		}
 		found = true
+		phase["kind"] = firstNonEmpty(phaseKind, "k8s_job")
 		phase["state"] = "dispatching"
 		phase["dispatched_at"] = now
 		delete(phase, "reason")
@@ -6849,43 +6940,76 @@ func (s *Store) StampRunDecision(ctx context.Context, project, runID, decision s
 	return err
 }
 
-// SetRunReviewRequired puts a run into the review_required sub-state. This is
-// NOT a terminal transition: the run is parked at a touchpoint_gate phase
-// waiting for an approve signal. Locks stay held; the slot lease may still
-// be alive (preserve_test_env). The run advances to true terminal only after
-// the gate is released (approve) or the workflow is aborted.
-func (s *Store) SetRunReviewRequired(ctx context.Context, project, runID string) error {
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := s.pgRuns.PatchPayload(ctx, project, runID, func(raw map[string]any) error {
+// ParkRunAtReviewGate appends the durable review-gate attempt and puts the run
+// into the review_required sub-state without launching the gate's pr_merge job.
+// This is not terminal: locks stay held and approve later releases this exact
+// attempt through ReleaseReviewGate.
+func (s *Store) ParkRunAtReviewGate(ctx context.Context, project, runID, phase, phaseKind, workflowFilename string) (int, error) {
+	var nextIdx int
+	_, err := s.pgRuns.PatchPayload(ctx, project, runID, func(raw map[string]any) error {
+		attempts, _ := raw["attempts"].([]any)
+		nextIdx = nextAttemptIndexRaw(attempts)
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		newAttempt := map[string]any{
+			"attempt_index":     nextIdx,
+			"phase":             phase,
+			"phase_kind":        phaseKind,
+			"workflow_filename": workflowFilename,
+			"dispatched_at":     now,
+		}
+		raw["attempts"] = append(attempts, newAttempt)
 		raw["state"] = "review_required"
 		delete(raw, "queue_state")
+		markPhaseReviewRequiredRaw(raw, phase, phaseKind, now)
 		raw["updated_at"] = now
 		return nil
-	}); err != nil {
-		if errors.Is(err, pgstore.ErrRunNotFound) {
-			return server.ErrNotFound
-		}
-		return err
+	})
+	if errors.Is(err, pgstore.ErrRunNotFound) {
+		return 0, server.ErrNotFound
 	}
-	return nil
+	if err != nil {
+		return 0, err
+	}
+	return nextIdx, nil
 }
 
-// SetRunInProgress flips a run out of the review_required sub-state back to
-// in_progress, used when an approve signal releases a touchpoint_gate and the
-// pr_merge job is about to launch.
-func (s *Store) SetRunInProgress(ctx context.Context, project, runID string) error {
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := s.pgRuns.PatchPayload(ctx, project, runID, func(raw map[string]any) error {
+// ReleaseReviewGate flips a parked review gate back to in_progress and marks
+// the existing gate attempt as dispatching so the managed pr_merge k8s job can
+// use the ordinary native status/completion path.
+func (s *Store) ReleaseReviewGate(ctx context.Context, project, runID, phase string, attemptIndex int) error {
+	var conflict error
+	_, err := s.pgRuns.PatchPayload(ctx, project, runID, func(raw map[string]any) error {
+		if stringValue(raw["state"]) != "review_required" {
+			conflict = server.ErrConflict
+			return errAbortPatch
+		}
+		attempts, _ := raw["attempts"].([]any)
+		if attemptIndex < 0 || attemptIndex >= len(attempts) {
+			conflict = server.ErrConflict
+			return errAbortPatch
+		}
+		attempt, ok := attempts[attemptIndex].(map[string]any)
+		if !ok || stringValue(attempt["phase"]) != phase || stringValue(attempt["completed_at"]) != "" {
+			conflict = server.ErrConflict
+			return errAbortPatch
+		}
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		attempt["phase_kind"] = "k8s_job"
+		attempt["dispatched_at"] = now
+		attempts[attemptIndex] = attempt
+		raw["attempts"] = attempts
 		raw["state"] = "in_progress"
+		markPhaseDispatchingRaw(raw, phase, "k8s_job", now)
 		raw["updated_at"] = now
 		return nil
-	}); err != nil {
-		if errors.Is(err, pgstore.ErrRunNotFound) {
-			return server.ErrNotFound
-		}
-		return err
+	})
+	if conflict != nil {
+		return conflict
 	}
-	return nil
+	if errors.Is(err, pgstore.ErrRunNotFound) {
+		return server.ErrNotFound
+	}
+	return err
 }
 
 // SetRunTerminalState sets the run's state (passed or aborted) and best-effort

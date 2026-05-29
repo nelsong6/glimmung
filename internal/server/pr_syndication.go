@@ -101,6 +101,8 @@ type PRMergeResult struct {
 	MergeCommitSHA string `json:"merge_commit_sha,omitempty"`
 }
 
+const touchpointMergeMethod = "squash"
+
 type RunReviewFacts struct {
 	ValidationURL *string
 }
@@ -232,7 +234,7 @@ func mergeRunPullRequest(ctx context.Context, prClient PullRequestClient, run Ru
 	out, err := prClient.MergePullRequest(ctx, PullRequestMergeRequest{
 		Repo:        repo,
 		Number:      *run.PRNumber,
-		MergeMethod: "merge",
+		MergeMethod: touchpointMergeMethod,
 		CommitTitle: fmt.Sprintf("Glimmung touchpoint approve: %s", runRefFromData(run)),
 	})
 	if err != nil {

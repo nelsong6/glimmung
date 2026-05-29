@@ -228,6 +228,52 @@ func TestExecutionRawHelpersDriveCanonicalState(t *testing.T) {
 	}
 }
 
+func TestReviewGateRawHelpersParkThenReleaseK8sJob(t *testing.T) {
+	waitingAt := "2026-05-20T12:00:00Z"
+	releasedAt := "2026-05-20T12:05:00Z"
+	raw := map[string]any{
+		"phase_executions": []any{
+			map[string]any{
+				"name":       "touchpoint_gate",
+				"kind":       "k8s_job",
+				"state":      "not_started",
+				"created_at": waitingAt,
+				"jobs": []any{map[string]any{
+					"id":         "pr-merge",
+					"state":      "not_started",
+					"created_at": waitingAt,
+					"steps": []any{map[string]any{
+						"slug":       "merge-pull-request",
+						"state":      "not_started",
+						"created_at": waitingAt,
+					}},
+				}},
+			},
+		},
+	}
+
+	markPhaseReviewRequiredRaw(raw, "touchpoint_gate", "k8s_job", waitingAt)
+	gate := rawPhase(t, raw, "touchpoint_gate")
+	if got := stringValue(gate["state"]); got != "active" {
+		t.Fatalf("gate waiting state=%q, want active", got)
+	}
+	if got := stringValue(rawJob(t, gate, "pr-merge")["state"]); got != "not_started" {
+		t.Fatalf("merge job waiting state=%q, want not_started", got)
+	}
+
+	markPhaseDispatchingRaw(raw, "touchpoint_gate", "k8s_job", releasedAt)
+	gate = rawPhase(t, raw, "touchpoint_gate")
+	if got := stringValue(gate["state"]); got != "dispatching" {
+		t.Fatalf("gate released state=%q, want dispatching", got)
+	}
+	if got := stringValue(gate["dispatched_at"]); got != releasedAt {
+		t.Fatalf("gate dispatched_at=%q, want %q", got, releasedAt)
+	}
+	if got := stringValue(rawJob(t, gate, "pr-merge")["state"]); got != "dispatching" {
+		t.Fatalf("merge job released state=%q, want dispatching", got)
+	}
+}
+
 func TestJobCompletionFailurePreservesUnstartedSteps(t *testing.T) {
 	now := "2026-05-25T04:26:41Z"
 	raw := map[string]any{
@@ -495,17 +541,15 @@ func TestNormalizeWorkflowRegisterForProjectDefaultsToK8sJob(t *testing.T) {
 			{Name: "test", Verify: true, DependsOn: []string{"prepare"}},
 			{Name: "cleanup_early", RunOn: server.PhaseRunOnAlways, Purpose: server.PhasePurposeTeardown, SkipWhenPreserveTestEnv: true, DependsOn: []string{"test"}, Jobs: []server.NativeJobSpec{{ID: "cleanup-early"}}},
 			{Name: "touchpoint", RunOn: server.PhaseRunOnSuccess, Purpose: server.PhasePurposeReviewTouchpoint, DependsOn: []string{"cleanup_early"}, Jobs: []server.NativeJobSpec{{ID: "pr-touchpoint", Primitive: "pr_touchpoint"}}},
-			{Name: "touchpoint_gate", Kind: "touchpoint_gate", DependsOn: []string{"touchpoint"}, Jobs: []server.NativeJobSpec{{ID: "pr-merge", Primitive: "pr_merge"}}},
+			{Name: "touchpoint_gate", Kind: "k8s_job", Purpose: server.PhasePurposeReviewGate, DependsOn: []string{"touchpoint"}, Jobs: []server.NativeJobSpec{{ID: "pr-merge", Primitive: "pr_merge"}}},
 			{Name: "cleanup_final", RunOn: server.PhaseRunOnAlways, Purpose: server.PhasePurposeTeardown, DependsOn: []string{"touchpoint_gate"}, Jobs: []server.NativeJobSpec{{ID: "cleanup-final"}}},
 		},
 	}
 	normalizeWorkflowRegister(&req)
 
 	for _, phase := range req.Phases {
-		// touchpoint_gate is the second valid kind alongside k8s_job
-		// (introduced by the gated-workflow migration).
-		if phase.Kind != "k8s_job" && phase.Kind != "touchpoint_gate" {
-			t.Fatalf("phase %q kind=%q, want k8s_job or touchpoint_gate", phase.Name, phase.Kind)
+		if phase.Kind != "k8s_job" {
+			t.Fatalf("phase %q kind=%q, want k8s_job", phase.Name, phase.Kind)
 		}
 	}
 	if err := validateWorkflowRegister(req); err != nil {
