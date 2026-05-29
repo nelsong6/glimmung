@@ -31,6 +31,14 @@ type RunDispatchTimeoutStore interface {
 // http retry budget.
 const activeJobFailureGracePeriod = 60 * time.Second
 
+// reconcilerCadence is the periodic tick interval of the reconciler
+// after the cluster-wide Watch took over as primary detection. 1h is
+// far above any normal reconnect-and-recover window for the Watch but
+// short enough to keep observability budgets predictable. Operators
+// who want faster recovery should fix the Watch path rather than tune
+// this knob.
+const reconcilerCadence = 1 * time.Hour
+
 // LogArchiveURLBuilder mints a Grafana Explore URL pointing at the
 // cluster Loki datasource for the given pod + time window. The
 // reconciler invokes it when synthesizing a terminal completion so the
@@ -200,7 +208,12 @@ func StartRunDispatchTimeoutReconciler(ctx context.Context, settings Settings, s
 	namespace := strings.TrimSpace(settings.NativeRunnerNamespace)
 	urlBuilder := settingsLogArchiveURLBuilder{settings: settings}
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		// Reconciler cadence: 1h. After the cluster-wide k8s Watch
+		// (run_watcher.go) became primary detection, this reconciler
+		// drops to belt-and-braces. Sustained non-zero
+		// glimmung_run_reconciler_caught_total is the alert signal
+		// that the Watch path is broken.
+		ticker := time.NewTicker(reconcilerCadence)
 		defer ticker.Stop()
 		for {
 			if timeout > 0 {
@@ -502,6 +515,7 @@ func reconcileFailedActiveJobsForRun(ctx context.Context, completionStore RunCom
 			}
 			completed++
 			metrics.RecordRunPhaseJobTerminal(conclusion, NormalizeJobTerminalReason(terminalReason))
+			metrics.RecordRunReconcilerCaught("outer")
 			if result.CompletionReady {
 				if _, err := processSyntheticRunCompletion(ctx, completionStore, nativeLauncher, run.Project, run.ID, result.PhasePayload); err != nil {
 					return completed, err
@@ -639,6 +653,7 @@ func ExpireInnerJobTerminations(ctx context.Context, store RunDispatchTimeoutSto
 						return emitted, err
 					}
 					emitted++
+					metrics.RecordRunReconcilerCaught("inner")
 				}
 			}
 		}

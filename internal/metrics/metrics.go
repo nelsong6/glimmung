@@ -557,6 +557,60 @@ func RecordRunPhaseJobTerminal(conclusion, reason string) {
 	runPhaseJobTerminalTotal.WithLabelValues(safeLabel(conclusion), safeLabel(reason)).Inc()
 }
 
+// --- Native job watcher (primary detection) ---------------------------------
+//
+// glimmung's terminal-Job detection moved from a 30s polling
+// reconciler to a cluster-wide k8s Watch (run_watcher.go). The three
+// metrics below make the Watch's behaviour observable so the answer
+// to "why did this transition fire at time T" is grounded in event
+// data, not in a tick that happened to hit.
+//
+//   - run_watch_events_total: one row per event the Watch consumed.
+//   - run_watch_disconnected_seconds: gauge holding seconds since the
+//     last successful Watch event. Sustained non-zero means the
+//     reconciler-as-belt-and-braces is carrying detection.
+//   - run_reconciler_caught_total: one row per synthesis the
+//     reconciler fired. In a healthy system this stays near zero;
+//     sustained non-zero is the alert signal.
+
+var (
+	runWatchEventsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "glimmung_run_watch_events_total",
+			Help: "Native-Job Watch events consumed by the cluster-wide watcher. kind is outer | inner | control; action is added | modified | deleted | bookmark | list_sync | synthesized_added | synthesized_modified | synthesized_list_sync | list_error | stream_error | resource_version_gone | decode_error | unknown_type | error.",
+		},
+		[]string{"kind", "action"},
+	)
+	runWatchDisconnectedSeconds = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "glimmung_run_watch_disconnected_seconds",
+		Help: "Seconds since the cluster-wide native-Job Watch last received any event (including bookmarks). Zero when connected. Sustained non-zero means the polling reconciler is carrying detection.",
+	})
+	runReconcilerCaughtTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "glimmung_run_reconciler_caught_total",
+			Help: "Native-Job terminations the periodic reconciler synthesized. Healthy systems keep this near zero; sustained non-zero is the alert signal that the Watch is dropping events.",
+		},
+		[]string{"kind"},
+	)
+)
+
+// RecordRunWatchEvent counts one Watch event by Job kind + action.
+// Both labels are closed enums maintained alongside run_watcher.go.
+func RecordRunWatchEvent(kind, action string) {
+	runWatchEventsTotal.WithLabelValues(safeLabel(kind), safeLabel(action)).Inc()
+}
+
+// SetRunWatchDisconnectedSeconds sets the disconnect-duration gauge.
+func SetRunWatchDisconnectedSeconds(seconds float64) {
+	runWatchDisconnectedSeconds.Set(seconds)
+}
+
+// RecordRunReconcilerCaught counts one terminal-Job synthesis fired
+// by the periodic reconciler. kind is outer | inner.
+func RecordRunReconcilerCaught(kind string) {
+	runReconcilerCaughtTotal.WithLabelValues(safeLabel(kind)).Inc()
+}
+
 func init() {
 	registry.MustRegister(
 		collectors.NewGoCollector(),
@@ -583,6 +637,9 @@ func init() {
 		inspectionsSweptTotal,
 		runInnerJobsRegisteredTotal,
 		runPhaseJobTerminalTotal,
+		runWatchEventsTotal,
+		runWatchDisconnectedSeconds,
+		runReconcilerCaughtTotal,
 	)
 }
 

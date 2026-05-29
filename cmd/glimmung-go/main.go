@@ -194,6 +194,7 @@ func main() {
 		server.StartSignalDrainReconciler(context.Background(), rt, nativeLauncher, log.Printf)
 		server.StartRunQueueReconciler(context.Background(), rt, nativeLauncher, log.Printf)
 		server.StartRunDispatchTimeoutReconciler(context.Background(), settings, rt, nativeLauncher, log.Printf)
+		server.StartNativeJobWatcher(context.Background(), settings, rt, nativeLauncher, log.Printf)
 		if nativeMinter, ok := ghClient.(server.NativeGitHubTokenMinter); ok {
 			// One-shot recovery sweep at startup: re-arm per-lease TTL
 			// timers, resume in-flight warming/activating/cleaning work, and
