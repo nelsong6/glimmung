@@ -96,7 +96,7 @@ func (s fakeGraphStore) RecordNativeEventByID(context.Context, string, string, N
 	return NativeRunEventResult{}, ErrUnsupported
 }
 
-func (s fakeGraphStore) ListNativeEventsByID(context.Context, string, string, *int, *string, *int, *int) (NativeRunLogsResponse, error) {
+func (s fakeGraphStore) ListNativeEventsByID(context.Context, string, string, *int, *string, *string, *int, *int) (NativeRunLogsResponse, error) {
 	return s.nativeLogs, nil
 }
 

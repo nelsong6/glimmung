@@ -2169,12 +2169,10 @@ function RunExecutionView({
     : selectedPhase
       ? `phase:${selectedPhase.name}`
       : null;
-  const selectedRouteKey = [selectedPhaseId, selectedJobId, selectedStepId].filter(Boolean).join(":");
-
   useEffect(() => {
     if (!selectedPhaseId) return;
     inspectorRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
-  }, [selectedPhaseId, selectedRouteKey]);
+  }, [selectedPhaseId, selectedJobId]);
 
   return (
     <>
@@ -3414,16 +3412,20 @@ function NativeJobInspector({
   const [pageCursors, setPageCursors] = useState<number[]>([]);
   const pageAfterSeq = pageCursors[pageCursors.length - 1] ?? null;
   const selected = stepRefs.find((step) => step.key === selectedKey) ?? stepRefs[0] ?? null;
+  const selectedStepSlugForEvents = selected?.step.slug ?? null;
+
+  useEffect(() => {
+    setSelectedKey(defaultSelection);
+  }, [defaultSelection]);
 
   useEffect(() => {
     setPageCursors([]);
-  }, [project, runId, issueNumber, runNumber, attemptIndex, selectedJobId, defaultSelection]);
+  }, [project, runId, issueNumber, runNumber, attemptIndex, selectedJobId, selectedStepSlugForEvents]);
 
   useEffect(() => {
     let cancelled = false;
     setLogs(null);
     setError(null);
-    setSelectedKey(defaultSelection);
     const base = runNumber && issueNumber !== null
       ? nativeRunApiBaseForNumber(project, issueNumber, runNumber)
       : nativeRunApiBase(project, runId);
@@ -3434,8 +3436,9 @@ function NativeJobInspector({
       };
     }
     const jobParam = selectedJobId ? `&job_id=${encodeURIComponent(selectedJobId)}` : "";
+    const stepParam = selectedStepSlugForEvents ? `&step_slug=${encodeURIComponent(selectedStepSlugForEvents)}` : "";
     const cursorParam = pageAfterSeq !== null ? `&after_seq=${pageAfterSeq}` : "";
-    const url = `${base}/events?attempt_index=${attemptIndex}&limit=${NATIVE_EVENT_PAGE_LIMIT}${jobParam}${cursorParam}`;
+    const url = `${base}/events?attempt_index=${attemptIndex}&limit=${NATIVE_EVENT_PAGE_LIMIT}${jobParam}${stepParam}${cursorParam}`;
     const load = () => {
       fetch(url)
       .then(async (res) => {
@@ -3453,7 +3456,7 @@ function NativeJobInspector({
       cancelled = true;
       if (timer !== null) window.clearInterval(timer);
     };
-  }, [project, runId, issueNumber, runNumber, attemptIndex, defaultSelection, live, selectedJobId, pageAfterSeq]);
+  }, [project, runId, issueNumber, runNumber, attemptIndex, live, selectedJobId, selectedStepSlugForEvents, pageAfterSeq]);
 
   useEffect(() => {
     setViewMode("transcript");
@@ -3480,10 +3483,10 @@ function NativeJobInspector({
         && (event.step_slug === selected.step.slug || (event.event === "log" && !event.step_slug))
       ))
     : events;
-  const transcriptEntries = selected && nativeSelectionIsLlm(selected.job, selected.step)
+  const transcriptEntries = selected && nativeSelectionUsesTranscript(selected.job, selected.step)
     ? agentTranscriptEntries(selectedEvents)
     : [];
-  const transcriptAvailable = Boolean(selected && nativeSelectionIsLlm(selected.job, selected.step) && transcriptEntries.length > 0);
+  const transcriptAvailable = Boolean(selected && nativeSelectionUsesTranscript(selected.job, selected.step) && transcriptEntries.length > 0);
   const activeViewMode: NativeLogViewMode = transcriptAvailable ? viewMode : "raw";
   return (
     <div className="native-inspector">
@@ -3820,7 +3823,7 @@ function nativeTerminalText(
   const heading = job && step
     ? [`# ${job.name || job.job_id}`, `$ step ${step.slug}`]
     : ["# native events"];
-  if (job && step && nativeSelectionIsLlm(job, step)) {
+  if (job && step && nativeSelectionUsesTranscript(job, step)) {
     heading.push("# llm step");
   }
   const stepMessage = step?.message ? [`# ${step.message}`] : [];
@@ -4234,8 +4237,14 @@ function isRawScreenshotArtifact(item: RunProjectionEvidence): boolean {
   return /\.(png|jpe?g|webp|gif)$/i.test(item.ref.split(/[?#]/)[0] ?? "");
 }
 
-function nativeSelectionIsLlm(job: NativeAttemptJob | null, step: NativeAttemptStep): boolean {
+function nativeSelectionUsesTranscript(job: NativeAttemptJob | null, step: NativeAttemptStep): boolean {
   if (nativeStepLooksLlm(step)) return true;
+  if (!nativeJobLooksLlm(job)) return false;
+  const marker = `${step.slug} ${step.title ?? ""}`.toLowerCase();
+  return step.slug.startsWith("run-") || marker.startsWith("run ");
+}
+
+function nativeJobLooksLlm(job: NativeAttemptJob | null): boolean {
   const marker = [
     job?.job_id ?? "",
     job?.name ?? "",

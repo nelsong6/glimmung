@@ -5589,7 +5589,7 @@ func attemptIndexFromRaw(attempt map[string]any) int {
 }
 
 // ListNativeEventsByID returns ordered native events for a run.
-func (s *Store) ListNativeEventsByID(ctx context.Context, project, runID string, attemptIndex *int, jobID *string, afterSeq *int, limit *int) (server.NativeRunLogsResponse, error) {
+func (s *Store) ListNativeEventsByID(ctx context.Context, project, runID string, attemptIndex *int, jobID *string, stepSlug *string, afterSeq *int, limit *int) (server.NativeRunLogsResponse, error) {
 	// Validate that the run exists first.
 	doc, _, err := s.readRunDoc(ctx, project, runID)
 	if err != nil {
@@ -5600,7 +5600,7 @@ func (s *Store) ListNativeEventsByID(ctx context.Context, project, runID string,
 	// sort order (attempt_index, job_id, seq, created_at) so no
 	// post-sort is needed. Optional attemptIndex/jobID/limit are
 	// pushed down to SQL.
-	rows, err := s.pgRunEvents.List(ctx, runID, attemptIndex, jobID, afterSeq, limit)
+	rows, err := s.pgRunEvents.List(ctx, runID, attemptIndex, jobID, stepSlug, afterSeq, limit)
 	if err != nil {
 		return server.NativeRunLogsResponse{}, err
 	}

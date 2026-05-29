@@ -112,12 +112,12 @@ func (s *RunEventsStore) Insert(ctx context.Context, row RunEventRow) (bool, err
 }
 
 // List returns events for runID, optionally filtered by attemptIndex,
-// jobID, and an exclusive seq cursor. It is ordered by
+// jobID, stepSlug, and an exclusive seq cursor. It is ordered by
 // (attempt_index, job_id, seq, created_at). If limit is non-nil and
 // positive, the slice is truncated to that many rows.
 //
 // The result is the canonical sort order; callers don't need to re-sort.
-func (s *RunEventsStore) List(ctx context.Context, runID string, attemptIndex *int, jobID *string, afterSeq *int, limit *int) ([]RunEventRow, error) {
+func (s *RunEventsStore) List(ctx context.Context, runID string, attemptIndex *int, jobID *string, stepSlug *string, afterSeq *int, limit *int) ([]RunEventRow, error) {
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("run events store not configured")
 	}
@@ -142,6 +142,11 @@ func (s *RunEventsStore) List(ctx context.Context, runID string, attemptIndex *i
 	if jobID != nil {
 		sql += fmt.Sprintf(" AND job_id = $%d", idx)
 		args = append(args, *jobID)
+		idx++
+	}
+	if stepSlug != nil {
+		sql += fmt.Sprintf(" AND (step_slug = $%d OR (event = 'log' AND step_slug = ''))", idx)
+		args = append(args, *stepSlug)
 		idx++
 	}
 	if afterSeq != nil {

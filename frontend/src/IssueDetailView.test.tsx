@@ -637,6 +637,54 @@ describe("IssueDetailView run execution graph", () => {
     expect(screen.getByText((content) => content.includes("\\nline two"))).toBeInTheDocument();
   });
 
+  it("keeps non-agent steps in an LLM job on the raw terminal view", async () => {
+    const agentProjection = activeAgentProjection();
+    const agentGraph = { ...issueGraph, projection: agentProjection };
+    const checkoutNativeEvents = {
+      ...agentNativeEvents,
+      events: [{
+        project: "ambience",
+        run_ref: "ambience#172/runs/7.1",
+        attempt_index: 0,
+        phase: "agent-execute",
+        job_id: "agent",
+        seq: 1,
+        event: "log",
+        step_slug: "checkout",
+        message: "{",
+        exit_code: null,
+        metadata: { stream: "stdout" },
+        created_at: "2026-05-20T17:24:10.000Z",
+      }],
+    };
+
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string"
+          ? new URL(input, "https://glimmung.test")
+          : input instanceof URL
+            ? input
+            : new URL(input.url);
+      if (url.pathname === "/v1/issues/by-number/ambience/172") return json(issueDetail);
+      if (url.pathname === "/v1/issues/by-number/ambience/172/graph") return json(agentGraph);
+      if (url.pathname === "/v1/projects/ambience/issues/172/runs/7/cycles/1/graph") return json(agentProjection);
+      if (url.pathname === "/v1/workflows") return json([]);
+      if (url.pathname === "/v1/projects/ambience/issues/172/runs/7.1/native/events") return json(checkoutNativeEvents);
+      throw new Error(`unhandled fetch ${url.pathname}`);
+    }));
+
+    renderIssueDetail("/projects/ambience/issues/172/runs/7/cycles/1/phases/agent-execute/jobs/agent/steps/checkout");
+
+    expect(await screen.findByText((content, element) => (
+      element?.tagName === "PRE" && content.includes("$ step checkout")
+    ))).toBeInTheDocument();
+    expect(screen.queryByLabelText("agent transcript")).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "native log view" })).not.toBeInTheDocument();
+    expect(screen.getByText((content, element) => (
+      element?.tagName === "PRE" && content.includes("{")
+    ))).toBeInTheDocument();
+  });
+
   it("pages native events in fixed batches without accumulating prior rows", async () => {
     const agentProjection = activeAgentProjection();
     const agentGraph = { ...issueGraph, projection: agentProjection };

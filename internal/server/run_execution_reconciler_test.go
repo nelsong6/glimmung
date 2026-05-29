@@ -619,7 +619,7 @@ func (s *innerJobEventStore) GetNativeRunStatusByID(_ context.Context, _, _ stri
 	return NativeRunStatusResponse{}, nil
 }
 
-func (s *innerJobEventStore) ListNativeEventsByID(_ context.Context, _, _ string, _ *int, _ *string, _ *int, _ *int) (NativeRunLogsResponse, error) {
+func (s *innerJobEventStore) ListNativeEventsByID(_ context.Context, _, _ string, _ *int, _ *string, _ *string, _ *int, _ *int) (NativeRunLogsResponse, error) {
 	return NativeRunLogsResponse{}, nil
 }
 
