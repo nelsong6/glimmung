@@ -6929,7 +6929,6 @@ func (s *Store) SetRunTerminalState(ctx context.Context, project, runID, state s
 		released := s.pgLocks.ReleaseLock(ctx, "pr", fmt.Sprintf("%s#%d", doc.IssueRepo, *doc.PRNumber), *doc.PRLockHolderID)
 		prLockReleased = &released
 	}
-	slotLeaseReleased := s.releaseRunSlotLease(ctx, doc)
 
 	// Glimmung owns slot-lease release at true terminal. An aborted run tears
 	// everything down, so the slot lease is released unconditionally — the same
