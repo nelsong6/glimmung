@@ -42,11 +42,18 @@ const (
 	// the same cluster-wide Watch.
 	watchManagedByInner = "glimmung-inner"
 
-	// watchLabelSelector is the apiserver labelSelector that scopes
-	// the Watch to glimmung-managed Jobs only. Cluster-wide so inner
-	// Jobs in slot namespaces flow through the same connection.
-	watchLabelSelector = "app.kubernetes.io/managed-by in (" +
-		watchManagedByOuter + "," + watchManagedByInner + ")"
+	// watchOuterSelector scopes one of the two Watch goroutines to
+	// glimmung's own phase Jobs in glimmung-runs. The native-job=true
+	// label is set by nativeJobManifest on every phase Job and is the
+	// signal that distinguishes them from test-slot installer Jobs
+	// (which also carry managed-by=glimmung but aren't run-bound).
+	watchOuterSelector = "app.kubernetes.io/managed-by=" + watchManagedByOuter +
+		",glimmung.romaine.life/native-job=true"
+
+	// watchInnerSelector scopes the second Watch to inner agent Jobs
+	// ambience labels managed-by=glimmung-inner. They live in slot
+	// namespaces; the apiserver returns them on a cluster-wide Watch.
+	watchInnerSelector = "app.kubernetes.io/managed-by=" + watchManagedByInner
 
 	// watchInitialBackoff / watchMaxBackoff bound the reconnect cadence
 	// after a transport error or a Gone response. The first reconnect
@@ -92,7 +99,7 @@ func StartNativeJobWatcher(ctx context.Context, settings Settings, store ReadSto
 	logsFetcher, _ := nativeLauncher.(NativeJobLogsFetcher)
 	urlBuilder := settingsLogArchiveURLBuilder{settings: settings}
 
-	w := &k8sJobWatcher{
+	common := watcherDeps{
 		settings:        settings,
 		store:           timeoutStore,
 		completionStore: completionStore,
@@ -105,11 +112,13 @@ func StartNativeJobWatcher(ctx context.Context, settings Settings, store ReadSto
 		namespace:       strings.TrimSpace(settings.NativeRunnerNamespace),
 		logf:            logf,
 	}
-	go w.run(ctx)
+	go (&k8sJobWatcher{watcherDeps: common, labelSelector: watchOuterSelector}).run(ctx)
+	go (&k8sJobWatcher{watcherDeps: common, labelSelector: watchInnerSelector}).run(ctx)
 }
 
-// k8sJobWatcher is the production Watch loop.
-type k8sJobWatcher struct {
+// watcherDeps groups the common dependencies shared by both Watch
+// goroutines so neither carries a duplicated 11-field constructor.
+type watcherDeps struct {
 	settings        Settings
 	store           RunDispatchTimeoutStore
 	completionStore RunCompletionStore
@@ -121,6 +130,14 @@ type k8sJobWatcher struct {
 	urlBuilder      LogArchiveURLBuilder
 	namespace       string
 	logf            func(string, ...any)
+}
+
+// k8sJobWatcher is one of the two production Watch loops (one per
+// labelSelector). The shared deps come from watcherDeps; labelSelector
+// distinguishes which kind of Job this goroutine sees.
+type k8sJobWatcher struct {
+	watcherDeps
+	labelSelector string
 
 	// lastEventAt is updated atomically every time the Watch
 	// successfully receives an event (any kind, including BOOKMARK).
@@ -524,14 +541,14 @@ func (w *k8sJobWatcher) findInnerJobOwner(ctx context.Context, namespace, jobNam
 // listPath / watchPath are split for testability.
 func (w *k8sJobWatcher) listPath() string {
 	q := url.Values{}
-	q.Set("labelSelector", watchLabelSelector)
+	q.Set("labelSelector", w.labelSelector)
 	return "/apis/batch/v1/jobs?" + q.Encode()
 }
 
 func (w *k8sJobWatcher) watchPath(resourceVersion string) string {
 	q := url.Values{}
 	q.Set("watch", "true")
-	q.Set("labelSelector", watchLabelSelector)
+	q.Set("labelSelector", w.labelSelector)
 	q.Set("resourceVersion", resourceVersion)
 	q.Set("allowWatchBookmarks", "true")
 	q.Set("timeoutSeconds", fmt.Sprintf("%d", watchTimeoutSeconds))
