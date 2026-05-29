@@ -142,13 +142,22 @@ PR with its own data-plumbing requirement:
   `run_cost_usd`): require the run's created-at timestamp and cumulative
   cost at every `SetRunTerminalState` caller. Plumbing them through is a
   refactor, not a metric addition.
-- **k8s Job apply/terminal metrics**: dispatch fires a Job and forgets;
-  terminal state propagates back through callbacks with no single
-  in-process site that owns "the Job is now terminal." The lease metric
-  covers the queue side until the run-callback surface grows a
-  job-terminal signal. Stage 1 of that wiring is the run-execution
-  reconciler in glimmung#621; the deferred terminal-job counter is
-  scoped to that PR. Inner Jobs spawned by phase scripts (see
+- **k8s Job apply/terminal metrics** (wired): glimmung#621's
+  run-execution reconciler and the runner-driven completion callback
+  site are now the two callers that emit
+  `glimmung_run_phase_job_terminal_total{conclusion, reason}`. Reason is
+  the closed enum `JobTerminalReason*` from `internal/server`
+  (`deadline_exceeded` / `backoff_exceeded` / `pod_gone` /
+  `callback_lost` / `job_failed` / `verification_failed` /
+  `verification_error` / `timeout` / `cancelled` / `unknown` / empty
+  for success); callers normalise through `server.NormalizeJobTerminalReason`
+  so unexpected strings collapse to `unknown`. The companion
+  `CompletionPayload.TerminalReason` also stamps
+  `RunJobExecution.Reason` on the run report so the dashboard shows
+  the precise failure mode instead of a generic conclusion. Apply-side
+  counters remain deferred — the lease metric still covers the queue
+  side.
+  Inner Jobs spawned by phase scripts (see
   `docs/inner-job-observation.md`) are covered separately by
   `glimmung_run_inner_jobs_registered_total{intent}`.
 - **OpenTelemetry traces**: separate decision; metrics alone cover the

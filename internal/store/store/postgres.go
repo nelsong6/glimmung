@@ -1504,6 +1504,11 @@ type nativeJobCompletionDoc struct {
 	ScreenshotsMarkdown *string           `json:"screenshots_markdown,omitempty"`
 	CostUSD             float64           `json:"cost_usd,omitempty"`
 	PhaseOutputs        map[string]string `json:"phase_outputs,omitempty"`
+	// TerminalReason is the closed-enum reason the caller has already
+	// derived (e.g. reconciler maps k8s Failed condition reason
+	// "DeadlineExceeded" to "deadline_exceeded"). Empty means the
+	// store derives the reason from Conclusion as before.
+	TerminalReason string `json:"terminal_reason,omitempty"`
 }
 
 type nativeEventDoc struct {
@@ -5805,10 +5810,31 @@ func nativeJobCompletionDocFromPayload(jobID string, p server.CompletionPayload,
 		ScreenshotsMarkdown: p.ScreenshotsMarkdown,
 		CostUSD:             p.CostUSD,
 		PhaseOutputs:        stringMapOrEmpty(p.PhaseOutputs),
+		TerminalReason:      server.NormalizeJobTerminalReason(p.TerminalReason),
 	}
 }
 
 func nativeJobExecutionStateAndReason(completion nativeJobCompletionDoc) (string, string) {
+	state, fallbackReason := genericNativeJobStateAndReason(completion)
+	// Caller-supplied TerminalReason takes precedence over the
+	// conclusion-based fallback so RunJobExecution.Reason carries the
+	// precise failure mode (e.g. "deadline_exceeded") rather than a
+	// generic "timeout" when the reconciler synthesizes a completion
+	// from k8s Failed condition data. The empty sentinel means
+	// "succeeded — no reason text"; we never overwrite the verification
+	// reasons either since the caller's structured reason supersedes
+	// the fallback.
+	if completion.TerminalReason != "" && completion.TerminalReason != server.JobTerminalReasonSucceeded {
+		return state, completion.TerminalReason
+	}
+	return state, fallbackReason
+}
+
+// genericNativeJobStateAndReason is the historical conclusion +
+// verification mapping that runner-driven completions have always used.
+// It is split out so the precedence policy lives in one place
+// (nativeJobExecutionStateAndReason).
+func genericNativeJobStateAndReason(completion nativeJobCompletionDoc) (string, string) {
 	if completion.Verification != nil {
 		switch completion.Verification.Status {
 		case "pass":

@@ -13,6 +13,7 @@ import (
 	"github.com/nelsong6/glimmung/internal/domain/decision"
 	"github.com/nelsong6/glimmung/internal/domain/phaserefs"
 	"github.com/nelsong6/glimmung/internal/domain/publicids"
+	"github.com/nelsong6/glimmung/internal/metrics"
 )
 
 // CompletionPayload carries the completion data to stamp on a run attempt.
@@ -28,6 +29,83 @@ type CompletionPayload struct {
 	ScreenshotsMarkdown *string
 	PhaseOutputs        map[string]string
 	AttemptIndex        *int
+
+	// TerminalReason is an optional closed-enum reason the caller has
+	// already derived (e.g. the reconciler maps k8s Failed condition
+	// reason="DeadlineExceeded" to TerminalReason="deadline_exceeded").
+	// When set it overrides the generic conclusion-to-reason mapping at
+	// the store layer so RunJobExecution.Reason carries the precise
+	// failure mode the operator needs. Empty means the store derives
+	// the reason from Conclusion as before.
+	//
+	// Values are bounded to the JobTerminalReason* enum below so the
+	// metric label cardinality stays small.
+	TerminalReason string
+}
+
+// JobTerminalReason* is the closed enum for CompletionPayload.TerminalReason
+// and the matching glimmung_run_phase_job_terminal_total{reason} metric
+// label. Cardinality is bounded by construction; any other string
+// arriving from a caller collapses to JobTerminalReasonUnknown.
+const (
+	// Pod hit activeDeadlineSeconds and was killed by kubelet.
+	JobTerminalReasonDeadlineExceeded = "deadline_exceeded"
+	// Job controller exceeded its backoff limit (typically pod failed
+	// fast with backoffLimit=0).
+	JobTerminalReasonBackoffExceeded = "backoff_exceeded"
+	// The Job no longer exists in k8s — TTL'd or externally deleted —
+	// before the runner could deliver a callback.
+	JobTerminalReasonPodGone = "pod_gone"
+	// Job reached Complete=True in k8s but the runner never delivered
+	// the /completed callback. Surfaces as failed because evidence is
+	// missing.
+	JobTerminalReasonCallbackLost = "callback_lost"
+	// Catch-all for runner-reported failures with no specific reason.
+	JobTerminalReasonJobFailed = "job_failed"
+	// Verification evidence said pass — used for runner-reported
+	// success completions.
+	JobTerminalReasonSucceeded = ""
+	// Runner-reported timeout (not k8s-driven).
+	JobTerminalReasonTimeout = "timeout"
+	// Runner-reported cancellation.
+	JobTerminalReasonCancelled = "cancelled"
+	// Verification step explicitly failed.
+	JobTerminalReasonVerificationFailed = "verification_failed"
+	// Verification step errored.
+	JobTerminalReasonVerificationError = "verification_error"
+	// Catch-all when no reason can be derived.
+	JobTerminalReasonUnknown = "unknown"
+)
+
+// IsKnownJobTerminalReason reports whether reason is in the closed
+// JobTerminalReason* enum. Empty string maps to true (the success
+// sentinel).
+func IsKnownJobTerminalReason(reason string) bool {
+	switch reason {
+	case JobTerminalReasonSucceeded,
+		JobTerminalReasonDeadlineExceeded,
+		JobTerminalReasonBackoffExceeded,
+		JobTerminalReasonPodGone,
+		JobTerminalReasonCallbackLost,
+		JobTerminalReasonJobFailed,
+		JobTerminalReasonTimeout,
+		JobTerminalReasonCancelled,
+		JobTerminalReasonVerificationFailed,
+		JobTerminalReasonVerificationError,
+		JobTerminalReasonUnknown:
+		return true
+	}
+	return false
+}
+
+// NormalizeJobTerminalReason collapses an unknown reason string to
+// JobTerminalReasonUnknown so the metric label cardinality stays
+// bounded.
+func NormalizeJobTerminalReason(reason string) string {
+	if IsKnownJobTerminalReason(reason) {
+		return reason
+	}
+	return JobTerminalReasonUnknown
 }
 
 type NativeJobCompletionResult struct {
@@ -134,6 +212,11 @@ func nativeRunCompletedByCallbackToken(store ReadStore, nativeLauncher NativeLau
 			writeInternalError(w, r, err, "record native job completion failed")
 			return
 		}
+		// Bounded-cardinality terminal counter. Runner-driven
+		// completions rarely set TerminalReason explicitly; in that
+		// case we fall through to the conclusion-derived reason so
+		// the metric is still populated.
+		metrics.RecordRunPhaseJobTerminal(payload.Conclusion, NormalizeJobTerminalReason(deriveCallbackReason(payload)))
 		if !jobResult.CompletionReady {
 			phaseComplete := jobResult.PhaseComplete
 			decision := "wait_jobs"
@@ -179,6 +262,33 @@ func completionPayloadFromNative(req NativeRunCompletedRequest) CompletionPayloa
 	p.Evidence = append(p.Evidence, req.Evidence...)
 	p.EvidenceRefs = appendMissingStrings(p.EvidenceRefs, EvidenceRefsFromArtifacts(req.Evidence)...)
 	return p
+}
+
+// deriveCallbackReason picks the JobTerminalReason* enum value for a
+// runner-driven completion. Runner-driven callbacks do not currently
+// set TerminalReason explicitly; we infer from Conclusion and
+// VerificationStatus so the metric is populated without changing the
+// runner contract. Synthesized completions from the reconciler set
+// TerminalReason directly and bypass this helper.
+func deriveCallbackReason(p CompletionPayload) string {
+	if p.TerminalReason != "" {
+		return p.TerminalReason
+	}
+	switch p.VerificationStatus {
+	case "fail":
+		return JobTerminalReasonVerificationFailed
+	case "error":
+		return JobTerminalReasonVerificationError
+	}
+	switch p.Conclusion {
+	case "success":
+		return JobTerminalReasonSucceeded
+	case "timed_out":
+		return JobTerminalReasonTimeout
+	case "cancelled":
+		return JobTerminalReasonCancelled
+	}
+	return JobTerminalReasonJobFailed
 }
 
 func extractVerification(raw map[string]any, p *CompletionPayload) {

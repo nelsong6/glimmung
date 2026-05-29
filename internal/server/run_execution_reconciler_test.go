@@ -280,8 +280,110 @@ func TestExpireFailedActiveJobsSynthesizesTimedOutCompletion(t *testing.T) {
 	if got := store.nativeCompletions["llm-verify"]; got.Conclusion != "timed_out" {
 		t.Fatalf("conclusion=%q, want timed_out", got.Conclusion)
 	}
+	if got := store.nativeCompletions["llm-verify"]; got.TerminalReason != JobTerminalReasonBackoffExceeded {
+		t.Fatalf("terminal_reason=%q, want %q", got.TerminalReason, JobTerminalReasonBackoffExceeded)
+	}
 	if !launcher.called || launcher.req.Phase.Name != "cleanup" {
 		t.Fatalf("synthetic completion should have triggered cleanup phase; launcher.req=%#v", launcher.req)
+	}
+}
+
+func TestEvaluateActiveJobFailureMapsK8sReasonToEnum(t *testing.T) {
+	now := time.Date(2026, 5, 28, 18, 30, 0, 0, time.UTC)
+	terminal := now.Add(-2 * time.Minute)
+	cases := []struct {
+		name           string
+		status         NativeJobStatus
+		wantReady      bool
+		wantConclusion string
+		wantTerminal   string
+	}{
+		{
+			name: "DeadlineExceeded maps to deadline_exceeded",
+			status: NativeJobStatus{
+				Found:              true,
+				Failed:             1,
+				LastTransitionTime: terminal,
+				Conditions: []NativeJobCondition{
+					{Type: "Failed", Status: "True", Reason: "DeadlineExceeded", LastTransitionTime: terminal},
+				},
+			},
+			wantReady:      true,
+			wantConclusion: "timed_out",
+			wantTerminal:   JobTerminalReasonDeadlineExceeded,
+		},
+		{
+			name: "BackoffLimitExceeded maps to backoff_exceeded",
+			status: NativeJobStatus{
+				Found:              true,
+				Failed:             1,
+				LastTransitionTime: terminal,
+				Conditions: []NativeJobCondition{
+					{Type: "Failed", Status: "True", Reason: "BackoffLimitExceeded", LastTransitionTime: terminal},
+				},
+			},
+			wantReady:      true,
+			wantConclusion: "timed_out",
+			wantTerminal:   JobTerminalReasonBackoffExceeded,
+		},
+		{
+			name: "Job TTL-collected maps to pod_gone",
+			status: NativeJobStatus{
+				Found: false,
+			},
+			wantReady:      true,
+			wantConclusion: "failed",
+			wantTerminal:   JobTerminalReasonPodGone,
+		},
+		{
+			name: "Completed-but-callback-lost maps to callback_lost",
+			status: NativeJobStatus{
+				Found:              true,
+				Succeeded:          1,
+				CompletionTime:     terminal,
+				LastTransitionTime: terminal,
+				Conditions: []NativeJobCondition{
+					{Type: "Complete", Status: "True", LastTransitionTime: terminal},
+				},
+			},
+			wantReady:      true,
+			wantConclusion: "failed",
+			wantTerminal:   JobTerminalReasonCallbackLost,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			getter := &fakeJobStatusGetter{statuses: map[string]NativeJobStatus{"job": tc.status}}
+			ready, conclusion, terminal, _, err := evaluateActiveJobFailure(context.Background(), getter, "glimmung-runs", "job", time.Minute, now)
+			if err != nil {
+				t.Fatalf("evaluateActiveJobFailure: %v", err)
+			}
+			if ready != tc.wantReady {
+				t.Fatalf("ready=%v, want %v", ready, tc.wantReady)
+			}
+			if conclusion != tc.wantConclusion {
+				t.Fatalf("conclusion=%q, want %q", conclusion, tc.wantConclusion)
+			}
+			if terminal != tc.wantTerminal {
+				t.Fatalf("terminal=%q, want %q", terminal, tc.wantTerminal)
+			}
+			if !IsKnownJobTerminalReason(terminal) {
+				t.Fatalf("terminal reason %q is not in the closed enum", terminal)
+			}
+		})
+	}
+}
+
+func TestNormalizeJobTerminalReasonCollapsesUnknownInputs(t *testing.T) {
+	for _, in := range []string{"", "deadline_exceeded", "backoff_exceeded", "pod_gone", "callback_lost", "job_failed", "timeout", "cancelled", "verification_failed", "verification_error", "unknown"} {
+		if got := NormalizeJobTerminalReason(in); got != in {
+			t.Fatalf("NormalizeJobTerminalReason(%q)=%q, want %q", in, got, in)
+		}
+	}
+	for _, in := range []string{"unexpected", "DeadlineExceeded", "free text"} {
+		if got := NormalizeJobTerminalReason(in); got != JobTerminalReasonUnknown {
+			t.Fatalf("NormalizeJobTerminalReason(%q)=%q, want %q", in, got, JobTerminalReasonUnknown)
+		}
 	}
 }
 
