@@ -3543,7 +3543,7 @@ function NativeJobInspector({
                   <span>{nativeStepGlyph(step.state ?? "")}</span>
                   <strong>
                     {step.title || step.slug}
-                    {nativeSelectionIsLlm(job, step) && <span className="native-step-llm">llm</span>}
+                    {nativeStepLooksLlm(step) && <span className="native-step-llm">llm</span>}
                   </strong>
                   <small>
                     {step.exit_code !== null && step.exit_code !== undefined
@@ -3689,7 +3689,7 @@ function PlannedNativeJobInspector({
                   <span>{nativeStepGlyph(step.state ?? "")}</span>
                   <strong>
                     {step.title || step.slug}
-                    {nativeSelectionIsLlm(refJob, step) && <span className="native-step-llm">llm</span>}
+                    {nativeStepLooksLlm(step) && <span className="native-step-llm">llm</span>}
                   </strong>
                   <small>
                     {step.exit_code !== null && step.exit_code !== undefined
@@ -4202,12 +4202,16 @@ function isRawScreenshotArtifact(item: RunProjectionEvidence): boolean {
 }
 
 function nativeSelectionIsLlm(job: NativeAttemptJob | null, step: NativeAttemptStep): boolean {
+  if (nativeStepLooksLlm(step)) return true;
   const marker = [
     job?.job_id ?? "",
     job?.name ?? "",
-    step.slug,
-    step.title ?? "",
   ].join(" ").toLowerCase();
+  return marker.includes("llm") || marker.includes("run-agent") || marker.includes("claude");
+}
+
+function nativeStepLooksLlm(step: NativeAttemptStep): boolean {
+  const marker = `${step.slug} ${step.title ?? ""}`.toLowerCase();
   return marker.includes("llm") || marker.includes("run-agent") || marker.includes("claude");
 }
 
