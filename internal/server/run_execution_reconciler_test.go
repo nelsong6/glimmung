@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -267,7 +268,7 @@ func TestExpireFailedActiveJobsSynthesizesTimedOutCompletion(t *testing.T) {
 		}},
 	}
 
-	count, err := ExpireFailedActiveJobs(context.Background(), listStore, launcher, statusGetter, "glimmung-runs", time.Minute, now)
+	count, err := ExpireFailedActiveJobs(context.Background(), listStore, launcher, statusGetter, "glimmung-runs", nil, time.Minute, now)
 	if err != nil {
 		t.Fatalf("ExpireFailedActiveJobs: %v", err)
 	}
@@ -419,7 +420,7 @@ func TestExpireFailedActiveJobsRespectsGracePeriod(t *testing.T) {
 		}},
 	}
 
-	count, err := ExpireFailedActiveJobs(context.Background(), listStore, &fakeNativeLauncher{}, statusGetter, "glimmung-runs", time.Minute, now)
+	count, err := ExpireFailedActiveJobs(context.Background(), listStore, &fakeNativeLauncher{}, statusGetter, "glimmung-runs", nil, time.Minute, now)
 	if err != nil {
 		t.Fatalf("ExpireFailedActiveJobs: %v", err)
 	}
@@ -494,7 +495,7 @@ func TestExpireFailedActiveJobsIgnoresActiveAndSucceededJobs(t *testing.T) {
 		}},
 	}
 
-	count, err := ExpireFailedActiveJobs(context.Background(), listStore, &fakeNativeLauncher{}, statusGetter, "glimmung-runs", time.Minute, now)
+	count, err := ExpireFailedActiveJobs(context.Background(), listStore, &fakeNativeLauncher{}, statusGetter, "glimmung-runs", nil, time.Minute, now)
 	if err != nil {
 		t.Fatalf("ExpireFailedActiveJobs: %v", err)
 	}
@@ -704,7 +705,7 @@ func TestExpireInnerJobTerminationsEmitsForTerminalSucceededJob(t *testing.T) {
 	}
 	events := newInnerJobEventStore(listStore)
 
-	emitted, err := ExpireInnerJobTerminations(context.Background(), events, statusGetter, time.Minute, now)
+	emitted, err := ExpireInnerJobTerminations(context.Background(), events, statusGetter, nil, time.Minute, now)
 	if err != nil {
 		t.Fatalf("ExpireInnerJobTerminations: %v", err)
 	}
@@ -729,7 +730,7 @@ func TestExpireInnerJobTerminationsEmitsForTerminalSucceededJob(t *testing.T) {
 	}
 
 	// Re-running the reconciler must not emit a duplicate event.
-	emitted2, _ := ExpireInnerJobTerminations(context.Background(), events, statusGetter, time.Minute, now)
+	emitted2, _ := ExpireInnerJobTerminations(context.Background(), events, statusGetter, nil, time.Minute, now)
 	if emitted2 != 0 {
 		t.Fatalf("re-emission count=%d, want 0 (idempotency)", emitted2)
 	}
@@ -773,7 +774,7 @@ func TestExpireInnerJobTerminationsEmitsForFailedConditionWithMappedReason(t *te
 	}
 	events := newInnerJobEventStore(listStore)
 
-	emitted, err := ExpireInnerJobTerminations(context.Background(), events, statusGetter, time.Minute, now)
+	emitted, err := ExpireInnerJobTerminations(context.Background(), events, statusGetter, nil, time.Minute, now)
 	if err != nil {
 		t.Fatalf("ExpireInnerJobTerminations: %v", err)
 	}
@@ -817,7 +818,7 @@ func TestExpireInnerJobTerminationsSkipsAlreadyTerminatedAndStillActive(t *testi
 	}
 	events := newInnerJobEventStore(listStore)
 
-	emitted, err := ExpireInnerJobTerminations(context.Background(), events, statusGetter, time.Minute, now)
+	emitted, err := ExpireInnerJobTerminations(context.Background(), events, statusGetter, nil, time.Minute, now)
 	if err != nil {
 		t.Fatalf("ExpireInnerJobTerminations: %v", err)
 	}
@@ -844,5 +845,166 @@ func TestInnerJobTerminationSeqIsDeterministicAndAbove2to30(t *testing.T) {
 	other := innerJobTerminationSeq(InnerJobRef{Namespace: "ambience-slot-3", JobName: "agent-other"})
 	if other == got1 {
 		t.Fatalf("two different inner-Jobs collided on seq=%d", got1)
+	}
+}
+
+func TestSettingsLogArchiveURLBuilderProducesLokiExploreLink(t *testing.T) {
+	b := settingsLogArchiveURLBuilder{settings: Settings{
+		GrafanaBaseURL:        "https://grafana.romaine.life",
+		GrafanaLokiDatasource: "loki",
+	}}
+	from := time.Date(2026, 5, 28, 17, 12, 14, 0, time.UTC)
+	to := time.Date(2026, 5, 28, 17, 52, 14, 0, time.UTC)
+	got := b.BuildLogArchiveURL("ambience-slot-3", "glim-ambience-170-runs-1-1-2-llm-verify", from, to)
+	if got == "" {
+		t.Fatal("expected a Grafana Explore URL")
+	}
+	if !strings.HasPrefix(got, "https://grafana.romaine.life/explore?") {
+		t.Fatalf("url=%q", got)
+	}
+	if !strings.Contains(got, "orgId=1") {
+		t.Fatalf("url missing orgId: %q", got)
+	}
+	// Confirm the LogQL exposes namespace + pod=~"jobname-.*"
+	if !strings.Contains(got, "ambience-slot-3") {
+		t.Fatalf("url missing namespace: %q", got)
+	}
+	if !strings.Contains(got, "glim-ambience-170-runs-1-1-2-llm-verify") {
+		t.Fatalf("url missing job name: %q", got)
+	}
+}
+
+func TestSettingsLogArchiveURLBuilderEmptyWhenUnconfigured(t *testing.T) {
+	b := settingsLogArchiveURLBuilder{}
+	if got := b.BuildLogArchiveURL("ns", "job", time.Time{}, time.Time{}); got != "" {
+		t.Fatalf("expected empty URL when Grafana base is unset, got %q", got)
+	}
+}
+
+func TestExpireFailedActiveJobsStampsLogArchiveURLOnPayload(t *testing.T) {
+	leaseRef := "proj/leases/proj-1/1"
+	store := &fakeCompletionStore{
+		tokenRunID:         "r1",
+		tokenProject:       "proj",
+		appendIdx:          1,
+		nativeExpectedJobs: []string{"llm-verify"},
+		leaseResult:        Lease{Project: "proj", LeaseNumber: intPtr(1), State: "claimed", Metadata: map[string]any{}},
+	}
+	store.run = &RunReplayData{
+		ID:           "r1",
+		Project:      "proj",
+		WorkflowName: "wf",
+		IssueNumber:  170,
+		IssueRepo:    "owner/repo",
+		SlotLeaseRef: &leaseRef,
+		Attempts:     []RunAttemptData{{AttemptIndex: 2, Phase: "llm-verify"}},
+	}
+	store.wf = &Workflow{
+		Project: "proj",
+		Name:    "wf",
+		Phases: []PhaseSpec{
+			{Name: "llm-verify", Kind: "k8s_job", Jobs: []NativeJobSpec{{ID: "llm-verify"}}},
+			{Name: "cleanup", Kind: "k8s_job", Always: true, DependsOn: []string{"llm-verify"}, Jobs: []NativeJobSpec{{ID: "env-destroy"}}},
+		},
+		Budget: budget.Config{Total: 25},
+	}
+	launcher := &fakeNativeLauncher{}
+	now := time.Date(2026, 5, 28, 18, 30, 0, 0, time.UTC)
+	terminal := now.Add(-5 * time.Minute)
+	jobName := "glim-proj-170-runs-1-1-2-llm-verify"
+	statusGetter := &fakeJobStatusGetter{
+		statuses: map[string]NativeJobStatus{
+			jobName: {
+				Found:              true,
+				Failed:             1,
+				LastTransitionTime: terminal,
+				Conditions: []NativeJobCondition{
+					{Type: "Failed", Status: "True", Reason: "BackoffLimitExceeded", LastTransitionTime: terminal},
+				},
+			},
+		},
+	}
+	urlBuilder := settingsLogArchiveURLBuilder{settings: Settings{
+		GrafanaBaseURL:        "https://grafana.romaine.life",
+		GrafanaLokiDatasource: "loki",
+	}}
+	listStore := &runReportListStore{
+		fakeCompletionStore: store,
+		runs: []RunReport{{
+			ID:        "r1",
+			Project:   "proj",
+			State:     "in_progress",
+			StartedAt: now.Add(-40 * time.Minute),
+			PhaseExecutions: []RunPhaseExecution{{
+				Name:  "llm-verify",
+				State: "active",
+				Jobs:  []RunJobExecution{{ID: "llm-verify", State: "active", K8sJobName: stringPtr(jobName)}},
+			}},
+		}},
+	}
+
+	count, err := ExpireFailedActiveJobs(context.Background(), listStore, launcher, statusGetter, "glimmung-runs", urlBuilder, time.Minute, now)
+	if err != nil {
+		t.Fatalf("ExpireFailedActiveJobs: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("count=%d, want 1", count)
+	}
+	got, ok := store.nativeCompletions["llm-verify"]
+	if !ok {
+		t.Fatal("expected synthetic completion")
+	}
+	if got.LogArchiveURL == "" {
+		t.Fatal("LogArchiveURL was not stamped on payload")
+	}
+	if !strings.HasPrefix(got.LogArchiveURL, "https://grafana.romaine.life/explore?") {
+		t.Fatalf("LogArchiveURL=%q", got.LogArchiveURL)
+	}
+}
+
+func TestBuildInnerJobTerminationStampsLogArchiveURL(t *testing.T) {
+	now := time.Date(2026, 5, 29, 1, 30, 0, 0, time.UTC)
+	terminal := now.Add(-5 * time.Minute)
+	statusGetter := &fakeJobStatusGetter{
+		statuses: map[string]NativeJobStatus{
+			"agent-ve-2": {
+				Found:              true,
+				Succeeded:          1,
+				CompletionTime:     terminal,
+				LastTransitionTime: terminal,
+				Conditions: []NativeJobCondition{
+					{Type: "Complete", Status: "True", LastTransitionTime: terminal},
+				},
+			},
+		},
+	}
+	ij := InnerJobRef{
+		ParentJobID:  "llm-verify",
+		Namespace:    "ambience-slot-3",
+		JobName:      "agent-ve-2",
+		Intent:       "verification_agent",
+		State:        "active",
+		RegisteredAt: "2026-05-29T01:00:00Z",
+	}
+	urlBuilder := settingsLogArchiveURLBuilder{settings: Settings{
+		GrafanaBaseURL:        "https://grafana.romaine.life",
+		GrafanaLokiDatasource: "loki",
+	}}
+	event, ok, err := buildInnerJobTermination(context.Background(), statusGetter, "llm-verify", ij, urlBuilder, time.Minute, now)
+	if err != nil {
+		t.Fatalf("buildInnerJobTermination: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected an event to be built")
+	}
+	url, _ := event.Metadata["log_archive_url"].(string)
+	if url == "" {
+		t.Fatalf("log_archive_url missing: %#v", event.Metadata)
+	}
+	if !strings.HasPrefix(url, "https://grafana.romaine.life/explore?") {
+		t.Fatalf("url=%q", url)
+	}
+	if !strings.Contains(url, "ambience-slot-3") {
+		t.Fatalf("url missing namespace: %q", url)
 	}
 }

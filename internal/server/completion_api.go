@@ -41,6 +41,15 @@ type CompletionPayload struct {
 	// Values are bounded to the JobTerminalReason* enum below so the
 	// metric label cardinality stays small.
 	TerminalReason string
+
+	// LogArchiveURL is the durable pointer to where this attempt's
+	// logs can be reviewed. Today this is a Grafana Explore deep-link
+	// to the cluster Loki datasource scoped to the failing pod's
+	// namespace + time window. A future Stage 3 of the inner-Job
+	// observation contract may upgrade this to an artifact-store URL
+	// surviving Loki retention. Empty means the caller has no link to
+	// offer; the dashboard renders the archive surface as unavailable.
+	LogArchiveURL string
 }
 
 // JobTerminalReason* is the closed enum for CompletionPayload.TerminalReason
