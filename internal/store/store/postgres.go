@@ -4238,7 +4238,7 @@ func (s *Store) acquireNativeLease(ctx context.Context, req server.LeaseAcquireR
 	if err != nil {
 		return server.Lease{}, fmt.Errorf("next lease number: %w", err)
 	}
-	ttl := 900
+	ttl := server.DefaultNativeLeaseTTLSeconds
 	if req.TTLSeconds != nil && *req.TTLSeconds > 0 {
 		ttl = *req.TTLSeconds
 	}
@@ -6870,8 +6870,9 @@ func (s *Store) SetRunInProgress(ctx context.Context, project, runID string) err
 	return nil
 }
 
-// SetRunTerminalState sets the run's state (passed, review_required, or aborted) and
-// best-effort releases issue/PR locks. Mirrors AbortRunByID but for non-abort terminal states.
+// SetRunTerminalState sets the run's state (passed or aborted) and best-effort
+// releases issue/PR locks plus the run slot lease. Mirrors AbortRunByID but for
+// non-abort terminal states.
 func (s *Store) SetRunTerminalState(ctx context.Context, project, runID, state string, abortReason *string) (server.AbortRunResult, error) {
 	doc, _, err := s.readRunDoc(ctx, project, runID)
 	if err != nil {
@@ -6910,6 +6911,7 @@ func (s *Store) SetRunTerminalState(ctx context.Context, project, runID, state s
 		released := s.pgLocks.ReleaseLock(ctx, "pr", fmt.Sprintf("%s#%d", doc.IssueRepo, *doc.PRNumber), *doc.PRLockHolderID)
 		prLockReleased = &released
 	}
+	slotLeaseReleased := s.releaseRunSlotLease(ctx, doc)
 
 	return server.AbortRunResult{
 		State:             state,
@@ -6918,6 +6920,7 @@ func (s *Store) SetRunTerminalState(ctx context.Context, project, runID, state s
 		RunDisplayNumber:  doc.RunDisplayNumber,
 		IssueLockReleased: issueLockReleased,
 		PRLockReleased:    prLockReleased,
+		SlotLeaseReleased: slotLeaseReleased,
 	}, nil
 }
 

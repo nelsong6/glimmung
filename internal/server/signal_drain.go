@@ -407,7 +407,7 @@ func launchTouchpointGateMerge(
 		return fmt.Errorf("read lease for gate: %w", err)
 	}
 	if lease.State != "claimed" {
-		return fmt.Errorf("native lease was not claimed")
+		return nativeLeaseNotClaimedError(lease)
 	}
 	canonical := CanonicalNativePhase(gate)
 	started := runWithAttempt(run, newAttemptIdx, gate.Name)

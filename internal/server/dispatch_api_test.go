@@ -30,6 +30,7 @@ type fakeDispatchStore struct {
 
 	lockErr      error
 	lockReleased bool
+	lockTTL      int
 
 	run    *CreatedRun
 	runErr error
@@ -82,7 +83,8 @@ func (s *fakeDispatchStore) ListProjectWorkflows(context.Context, string) ([]Wor
 	return s.workflows, s.workflowsErr
 }
 
-func (s *fakeDispatchStore) ClaimIssueLock(context.Context, string, int, string, int) error {
+func (s *fakeDispatchStore) ClaimIssueLock(_ context.Context, _ string, _ int, _ string, ttlSeconds int) error {
+	s.lockTTL = ttlSeconds
 	return s.lockErr
 }
 
@@ -289,6 +291,64 @@ func TestDispatchRunDispatchedNativeK8sJob(t *testing.T) {
 	}
 	if store.leaseReq == nil || store.leaseReq.Metadata["native_k8s"] != true {
 		t.Fatalf("lease request=%#v", store.leaseReq)
+	}
+	wantTTL := nativeRunLeaseTTLSeconds(store.wf)
+	if wantTTL <= 900 {
+		t.Fatalf("test fixture ttl=%d, want larger than retired 15-minute default", wantTTL)
+	}
+	if store.lockTTL != wantTTL {
+		t.Fatalf("issue lock ttl=%d, want workflow ttl=%d", store.lockTTL, wantTTL)
+	}
+	if store.leaseReq.TTLSeconds == nil || *store.leaseReq.TTLSeconds != wantTTL {
+		t.Fatalf("lease ttl=%v, want %d", store.leaseReq.TTLSeconds, wantTTL)
+	}
+}
+
+func TestAdmitRunCycleAcquiresWorkflowTTLForQueuedRunWithoutLease(t *testing.T) {
+	store := minimalDispatchStore()
+	store.leaseReq = nil
+	launcher := &fakeNativeLauncher{}
+	callbackToken := "queued-token"
+	runNumber := 1
+	cycleNumber := 1
+	runCycleNumber := 1
+	runDisplayNumber := "1.1"
+	run := RunReplayData{
+		ID:               "queued-run",
+		Project:          "proj",
+		WorkflowName:     store.wf.Name,
+		IssueNumber:      1,
+		IssueRepo:        store.githubRepo,
+		CallbackToken:    &callbackToken,
+		RunNumber:        &runNumber,
+		CycleNumber:      &cycleNumber,
+		RunCycleNumber:   &runCycleNumber,
+		RunDisplayNumber: &runDisplayNumber,
+		TriggerSource:    map[string]any{"kind": "dispatch"},
+	}
+
+	admission, err := admitRunCycle(
+		context.Background(),
+		store,
+		launcher,
+		run,
+		store.wf,
+		*store.issue,
+		store.githubRepo,
+		LeasePurposeDispatch,
+	)
+	if err != nil {
+		t.Fatalf("admitRunCycle: %v", err)
+	}
+	if admission.State != "dispatched" {
+		t.Fatalf("state=%q detail=%v", admission.State, admission.Detail)
+	}
+	if !launcher.called {
+		t.Fatal("native launcher was not called")
+	}
+	wantTTL := nativeRunLeaseTTLSeconds(store.wf)
+	if store.leaseReq == nil || store.leaseReq.TTLSeconds == nil || *store.leaseReq.TTLSeconds != wantTTL {
+		t.Fatalf("lease ttl=%#v, want %d", store.leaseReq, wantTTL)
 	}
 }
 
