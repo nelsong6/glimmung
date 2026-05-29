@@ -234,7 +234,8 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, nativeLaun
 	}
 
 	holderID := newDispatchID()
-	if err := dispatchStore.ClaimIssueLock(ctx, req.Project, req.IssueNumber, holderID, defaultIssueLockTTLSeconds); err != nil {
+	leaseTTLSeconds := nativeRunLeaseTTLSeconds(wf)
+	if err := dispatchStore.ClaimIssueLock(ctx, req.Project, req.IssueNumber, holderID, leaseTTLSeconds); err != nil {
 		if errors.Is(err, ErrAlreadyRunning) {
 			return PublicDispatchResult{
 				State:    "already_running",
@@ -281,6 +282,7 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, nativeLaun
 			TriggerSource:        triggerSource,
 			EvidenceRequirements: evidenceRequirements,
 		}, issue, issueRepo, initPhase.Name, 0, nil),
+		TTLSeconds: nativeLeaseTTLP(leaseTTLSeconds),
 	}, dispatchStore.AcquireLease)
 	if err != nil {
 		dispatchStore.ReleaseIssueLock(ctx, req.Project, req.IssueNumber, holderID)
@@ -299,12 +301,13 @@ func dispatchRun(ctx context.Context, dispatchStore RunDispatchStore, nativeLaun
 	if initialLease.State != "claimed" {
 		_, _ = dispatchStore.CancelLeaseByRef(ctx, req.Project, initialLeaseRef)
 		dispatchStore.ReleaseIssueLock(ctx, req.Project, req.IssueNumber, holderID)
+		detail := nativeLeaseNotClaimedError(initialLease).Error() + "; run was not created"
 		return PublicDispatchResult{
 			State:       "dispatch_failed",
 			IssueRef:    &issueRef,
 			IssueNumber: &issueNum,
 			Workflow:    &wfNameStr,
-			Detail:      stringPtr("native lease was not claimed; run was not created"),
+			Detail:      &detail,
 		}, nil
 	}
 

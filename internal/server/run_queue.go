@@ -245,6 +245,7 @@ func admitRunCycle(
 		workflowFilename = fmt.Sprintf("%s:%s", phaseKind, initPhase.Name)
 	}
 	metadata := runCycleLeaseMetadata(run, issue, issueRepo, initPhase.Name, 0, nil)
+	leaseTTLSeconds := nativeRunLeaseTTLSeconds(wf)
 	var lease Lease
 	leaseRef := ""
 	acquiredLease := false
@@ -278,6 +279,7 @@ func admitRunCycle(
 			Workflow:     &wfName,
 			Requirements: requirements,
 			Metadata:     metadata,
+			TTLSeconds:   nativeLeaseTTLP(leaseTTLSeconds),
 		}, store.AcquireLease)
 		if err != nil {
 			if errors.Is(err, ErrUnavailable) {
@@ -293,8 +295,9 @@ func admitRunCycle(
 		if acquiredLease {
 			_, _ = store.CancelLeaseByRef(ctx, run.Project, leaseRef)
 		}
-		_, _ = store.AbortRunByID(ctx, run.Project, run.ID, "native_lease_not_claimed")
-		detail := "native lease was not claimed"
+		leaseErr := nativeLeaseNotClaimedError(lease)
+		_, _ = store.AbortRunByID(ctx, run.Project, run.ID, "native_lease_not_claimed: "+leaseErr.Error())
+		detail := leaseErr.Error()
 		return RunCycleAdmissionResult{State: "dispatch_failed", Detail: &detail}, nil
 	}
 	attemptIdx, err := store.StartRunCycle(ctx, StartRunCycleRequest{

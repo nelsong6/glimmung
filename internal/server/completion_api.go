@@ -995,7 +995,7 @@ func dispatchForwardPhase(
 		return fmt.Errorf("read lease for forward phase: %w", err)
 	}
 	if lease.State != "claimed" {
-		return fmt.Errorf("native lease was not claimed")
+		return nativeLeaseNotClaimedError(lease)
 	}
 	started := runWithAttempt(run, newAttemptIdx, targetPhase.Name)
 	launched, err := launchCommittedNativePhase(ctx, nativeLauncher, NativeLaunchRequest{
@@ -1167,7 +1167,7 @@ func dispatchRetry(
 		return fmt.Errorf("read lease for retry: %w", err)
 	}
 	if lease.State != "claimed" {
-		return fmt.Errorf("native lease was not claimed")
+		return nativeLeaseNotClaimedError(lease)
 	}
 	launched, err := launchCommittedNativePhase(ctx, nativeLauncher, NativeLaunchRequest{
 		Lease:    lease,
