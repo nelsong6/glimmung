@@ -58,7 +58,16 @@ type inspectionResponse struct {
 type createInspectionDeps struct {
 	store         InspectionStore
 	leases        InspectionLeaseResolver
+	runs          InspectionRunResolver
 	artifactWrite ArtifactWriter
+}
+
+// InspectionRunResolver validates a run_id supplied by a caller of
+// POST /v1/inspections and returns the project the run belongs to so
+// the handler can confirm the caller is allowed to attribute. Empty
+// project return + nil err is treated as "not found."
+type InspectionRunResolver interface {
+	ResolveInspectionRunProject(ctx context.Context, project, runID string) (string, error)
 }
 
 // InspectionStore is the server-side handle to slot_inspections, plus
@@ -120,6 +129,7 @@ func createInspection(deps createInspectionDeps) http.HandlerFunc {
 		var (
 			tankSessionID string
 			project       string
+			runID         string
 			reportBytes   []byte
 			reportType    string
 			screenshot    []byte
@@ -161,6 +171,15 @@ func createInspection(deps createInspectionDeps) http.HandlerFunc {
 					return
 				}
 				project = strings.TrimSpace(string(value))
+			case "run_id":
+				value, rerr := readPartBytes(part, 1024)
+				_ = part.Close()
+				if rerr != nil {
+					metrics.RecordInspectionWriteError(metrics.InspectionWritePhaseParse)
+					writeProblem(w, http.StatusBadRequest, "invalid run_id part: "+rerr.Error())
+					return
+				}
+				runID = strings.TrimSpace(string(value))
 			case "report":
 				buf, rerr := readPartBytes(part, maxInspectionReportBytes)
 				partType := part.Header.Get("Content-Type")
@@ -287,14 +306,48 @@ func createInspection(deps createInspectionDeps) http.HandlerFunc {
 		}
 		sessionID := tankSessionID
 
-		// V1 prefix decision: lease-scoped. Run-scoped follow-up tracked
-		// on glimmung#143.
-		blobPrefix := path.Join("inspections", leaseID, inspectionID)
-		if !strings.HasPrefix(blobPrefix, "inspections/") {
+		// Prefix decision: lease-scoped by default; run-scoped when the
+		// caller declared a Run context AND the Run exists for the
+		// lease's project. Run-scoped bytes land under
+		//   runs/<project>/<run_id>/inspections/<id>/{report.json, screenshot.png}
+		// and survive lease-cleanup sweeps. Lease-scoped bytes land
+		// under inspections/<lease_id>/<id>/... and are swept when
+		// the lease terminates.
+		scope := metrics.InspectionScopeLease
+		var blobPrefix, allowedPrefix string
+		if runID != "" {
+			if deps.runs == nil {
+				metrics.RecordInspectionWriteError(metrics.InspectionWritePhasePrefix)
+				writeInternalError(w, r, errors.New("run resolver not configured"), "run-scoped inspection unavailable")
+				return
+			}
+			runProject, runErr := deps.runs.ResolveInspectionRunProject(r.Context(), project, runID)
+			if runErr != nil {
+				metrics.RecordInspectionWriteError(metrics.InspectionWritePhaseRun)
+				if errors.Is(runErr, ErrNotFound) {
+					writeProblem(w, http.StatusNotFound, "run_id does not identify a known run for the supplied project")
+					return
+				}
+				writeInternalError(w, r, runErr, "resolve inspection run failed")
+				return
+			}
+			if runProject != project {
+				metrics.RecordInspectionWriteError(metrics.InspectionWritePhaseRun)
+				writeProblem(w, http.StatusForbidden, "run_id belongs to a different project than the lease")
+				return
+			}
+			scope = metrics.InspectionScopeRun
+			blobPrefix = path.Join("runs", project, runID, "inspections", inspectionID)
+			allowedPrefix = "runs/"
+		} else {
+			blobPrefix = path.Join("inspections", leaseID, inspectionID)
+			allowedPrefix = "inspections/"
+		}
+		if !strings.HasPrefix(blobPrefix, allowedPrefix) {
 			// Belt-and-braces check that none of the components escape
-			// the inspections/ prefix once joined.
+			// the allowed prefix once joined.
 			metrics.RecordInspectionWriteError(metrics.InspectionWritePhasePrefix)
-			writeInternalError(w, r, errors.New("derived prefix outside inspections/"), "inspection prefix derivation failed")
+			writeInternalError(w, r, errors.New("derived prefix outside allowed scope"), "inspection prefix derivation failed")
 			return
 		}
 		reportBlobPath := path.Join(blobPrefix, "report.json")
@@ -328,6 +381,8 @@ func createInspection(deps createInspectionDeps) http.HandlerFunc {
 			LeaseID:               leaseID,
 			SessionID:             sessionID,
 			RequestID:             requestID,
+			Scope:                 scope,
+			RunID:                 runID,
 			BlobPrefix:            blobPrefix,
 			ReportBlobPath:        reportBlobPath,
 			ScreenshotBlobPath:    screenshotBlobPath,
@@ -354,7 +409,7 @@ func createInspection(deps createInspectionDeps) http.HandlerFunc {
 			return
 		}
 
-		metrics.RecordInspectionWritten(metrics.InspectionScopeLease)
+		metrics.RecordInspectionWritten(scope)
 		writeJSON(w, http.StatusOK, inspectionResponseFromRecord(written))
 	}
 }
@@ -369,6 +424,7 @@ type inspectionDetailResponse struct {
 	LeaseID               string `json:"lease_id"`
 	SessionID             string `json:"session_id"`
 	RequestID             string `json:"request_id,omitempty"`
+	RunID                 string `json:"run_id,omitempty"`
 	BlobPrefix            string `json:"blob_prefix"`
 	ReportURL             string `json:"report_url"`
 	ScreenshotURL         string `json:"screenshot_url"`
@@ -388,6 +444,14 @@ type inspectionListResponse struct {
 }
 
 func inspectionDetailFromRecord(r SlotInspectionRecord) inspectionDetailResponse {
+	scope := r.Scope
+	if scope == "" {
+		scope = metrics.InspectionScopeLease
+	}
+	scopeRef := r.LeaseID
+	if scope == metrics.InspectionScopeRun {
+		scopeRef = r.RunID
+	}
 	return inspectionDetailResponse{
 		InspectionID:          r.ID,
 		Project:               r.Project,
@@ -395,14 +459,15 @@ func inspectionDetailFromRecord(r SlotInspectionRecord) inspectionDetailResponse
 		LeaseID:               r.LeaseID,
 		SessionID:             r.SessionID,
 		RequestID:             r.RequestID,
+		RunID:                 r.RunID,
 		BlobPrefix:            r.BlobPrefix,
 		ReportURL:             "/v1/artifacts/" + r.ReportBlobPath,
 		ScreenshotURL:         "/v1/artifacts/" + r.ScreenshotBlobPath,
 		ScreenshotContentType: r.ScreenshotContentType,
 		ByteSizeScreenshot:    r.ByteSizeScreenshot,
 		ByteSizeReport:        r.ByteSizeReport,
-		Scope:                 metrics.InspectionScopeLease,
-		ScopeRef:              r.LeaseID,
+		Scope:                 scope,
+		ScopeRef:              scopeRef,
 		CreatedAt:             r.CreatedAt.UTC().Format(time.RFC3339Nano),
 	}
 }
@@ -457,6 +522,8 @@ func listInspections(store SlotInspectionStore) http.HandlerFunc {
 		filter := SlotInspectionFilter{
 			Project: strings.TrimSpace(q.Get("project")),
 			LeaseID: strings.TrimSpace(q.Get("lease")),
+			RunID:   strings.TrimSpace(q.Get("run")),
+			Scope:   strings.TrimSpace(q.Get("scope")),
 		}
 		if raw := strings.TrimSpace(q.Get("limit")); raw != "" {
 			parsed, parseErr := strconv.Atoi(raw)
@@ -482,12 +549,20 @@ func listInspections(store SlotInspectionStore) http.HandlerFunc {
 }
 
 func inspectionResponseFromRecord(r SlotInspectionRecord) inspectionResponse {
+	scope := r.Scope
+	if scope == "" {
+		scope = metrics.InspectionScopeLease
+	}
+	scopeRef := r.LeaseID
+	if scope == metrics.InspectionScopeRun {
+		scopeRef = r.RunID
+	}
 	return inspectionResponse{
 		InspectionID:  r.ID,
 		ReportURL:     "/v1/artifacts/" + r.ReportBlobPath,
 		ScreenshotURL: "/v1/artifacts/" + r.ScreenshotBlobPath,
-		Scope:         metrics.InspectionScopeLease,
-		ScopeRef:      r.LeaseID,
+		Scope:         scope,
+		ScopeRef:      scopeRef,
 		BlobPrefix:    r.BlobPrefix,
 		CreatedAt:     r.CreatedAt.UTC().Format(time.RFC3339Nano),
 	}

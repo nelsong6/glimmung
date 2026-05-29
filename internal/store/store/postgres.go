@@ -156,6 +156,8 @@ func (s *Store) InsertSlotInspection(ctx context.Context, row server.SlotInspect
 		LeaseID:               row.LeaseID,
 		SessionID:             row.SessionID,
 		RequestID:             row.RequestID,
+		Scope:                 row.Scope,
+		RunID:                 row.RunID,
 		BlobPrefix:            row.BlobPrefix,
 		ReportBlobPath:        row.ReportBlobPath,
 		ScreenshotBlobPath:    row.ScreenshotBlobPath,
@@ -225,7 +227,7 @@ func (s *Store) ListSlotInspections(ctx context.Context, filter server.SlotInspe
 	if s == nil || s.pgSlotInspections == nil {
 		return nil, nil
 	}
-	rows, err := s.pgSlotInspections.List(ctx, filter.Project, filter.LeaseID, filter.Limit)
+	rows, err := s.pgSlotInspections.List(ctx, filter.Project, filter.LeaseID, filter.RunID, filter.Scope, filter.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -237,6 +239,10 @@ func (s *Store) ListSlotInspections(ctx context.Context, filter server.SlotInspe
 }
 
 func slotInspectionRecordFromPGRow(row pgstore.SlotInspectionRow) server.SlotInspectionRecord {
+	scope := row.Scope
+	if scope == "" {
+		scope = "lease"
+	}
 	return server.SlotInspectionRecord{
 		ID:                    row.ID,
 		Project:               row.Project,
@@ -244,6 +250,8 @@ func slotInspectionRecordFromPGRow(row pgstore.SlotInspectionRow) server.SlotIns
 		LeaseID:               row.LeaseID,
 		SessionID:             row.SessionID,
 		RequestID:             row.RequestID,
+		Scope:                 scope,
+		RunID:                 row.RunID,
 		BlobPrefix:            row.BlobPrefix,
 		ReportBlobPath:        row.ReportBlobPath,
 		ScreenshotBlobPath:    row.ScreenshotBlobPath,

@@ -337,6 +337,19 @@ var schemaMigrations = []string{
 	`CREATE UNIQUE INDEX IF NOT EXISTS slot_inspections_by_request
 		ON slot_inspections (lease_id, request_id)
 		WHERE request_id <> ''`,
+
+	// Run-scoped inspections. When a caller supplies a run_id at
+	// POST /v1/inspections, the row carries scope='run' + run_id and the
+	// bytes land under runs/<project>/<run_id>/inspections/<id>/...
+	// instead of inspections/<lease_id>/<id>/... The sweep at
+	// lease-cleanup deletes scope='lease' rows only; run-bound rows
+	// persist with the Run evidence retention semantics (same as run
+	// videos and screenshots).
+	`ALTER TABLE slot_inspections ADD COLUMN IF NOT EXISTS scope text NOT NULL DEFAULT 'lease'`,
+	`ALTER TABLE slot_inspections ADD COLUMN IF NOT EXISTS run_id text NOT NULL DEFAULT ''`,
+	`CREATE INDEX IF NOT EXISTS slot_inspections_by_run
+		ON slot_inspections (run_id)
+		WHERE run_id <> ''`,
 }
 
 // cronJobs are scheduled after the table migrations succeed. Each

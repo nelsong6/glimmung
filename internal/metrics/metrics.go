@@ -469,6 +469,7 @@ const (
 	InspectionWritePhaseUploadScreenshot = "upload_screenshot"
 	InspectionWritePhaseLedger           = "ledger"
 	InspectionWritePhaseLease            = "lease"
+	InspectionWritePhaseRun              = "run"
 )
 
 // Inspection sweep label values.

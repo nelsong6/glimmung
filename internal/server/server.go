@@ -371,6 +371,10 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 			if w, ok := artifactStore.(ArtifactWriter); ok {
 				artifactWriter = w
 			}
+			var runResolver InspectionRunResolver
+			if runReadStore, ok := store.(inspectionRunReadStore); ok {
+				runResolver = newInspectionRunResolver(runReadStore)
+			}
 			mux.Handle(
 				"GET /v1/inspections",
 				requireAdmin(adminAuthenticator, listInspections(inspectionStore)),
@@ -384,6 +388,7 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 				requireAdmin(adminAuthenticator, createInspection(createInspectionDeps{
 					store:         inspectionStore,
 					leases:        newInspectionLeaseResolver(stateStore),
+					runs:          runResolver,
 					artifactWrite: artifactWriter,
 				})),
 			)
