@@ -390,6 +390,142 @@ func TestNativeRunnerEmitsInnerJobRegisteredEventFromMarker(t *testing.T) {
 	}
 }
 
+func TestNativeRunnerSuppressesEvidenceTarPayloadLogs(t *testing.T) {
+	var (
+		mu     sync.Mutex
+		events []nativeEventRequest
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/events" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var event nativeEventRequest
+		_ = json.NewDecoder(r.Body).Decode(&event)
+		mu.Lock()
+		events = append(events, event)
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"accepted": true})
+	}))
+	defer server.Close()
+
+	workspace := t.TempDir()
+	r := &nativeRunner{
+		cfg: runnerConfig{
+			EventsURL: server.URL + "/events",
+			Workspace: workspace,
+			Job: jobSpec{
+				WorkingDirectory: workspace,
+				Shell:            "sh",
+			},
+		},
+		client:  server.Client(),
+		outputs: map[string]string{},
+	}
+
+	script := strings.Join([]string{
+		"printf '" + evidenceTarStartMarker + "\\n'",
+		"i=0; while [ \"$i\" -lt 25 ]; do printf 'payload-line-%s\\n' \"$i\"; i=$((i + 1)); done",
+		"printf '" + evidenceTarEndMarker + "\\n'",
+		"printf 'after-payload\\n'",
+	}, "\n")
+	exitCode, err := r.executeStep(context.Background(), stepSpec{Slug: "collect", Run: script}, filepath.Join(workspace, "out"), filepath.Join(workspace, "completion"))
+	if err != nil || exitCode != 0 {
+		t.Fatalf("executeStep exit=%d err=%v", exitCode, err)
+	}
+
+	var sawSummary bool
+	deadline := time.Now().Add(1 * time.Second)
+	for {
+		mu.Lock()
+		sawSummary = false
+		payloadLeaked := ""
+		for _, event := range events {
+			if event.Message == nil {
+				continue
+			}
+			if strings.Contains(*event.Message, "payload-line-") {
+				payloadLeaked = *event.Message
+				break
+			}
+			if strings.Contains(*event.Message, "omitted 25 payload lines") {
+				sawSummary = true
+			}
+		}
+		snapshot := append([]nativeEventRequest(nil), events...)
+		mu.Unlock()
+		if payloadLeaked != "" {
+			t.Fatalf("evidence payload leaked into log event: %q", payloadLeaked)
+		}
+		if sawSummary {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected omitted payload summary event, got %+v", snapshot)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestNativeRunnerDoesNotWaitForeverForBlockedLogEvent(t *testing.T) {
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	var once sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/events" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		once.Do(func() { close(requestStarted) })
+		<-releaseRequest
+		_ = json.NewEncoder(w).Encode(map[string]any{"accepted": true})
+	}))
+	defer server.Close()
+
+	workspace := t.TempDir()
+	r := &nativeRunner{
+		cfg: runnerConfig{
+			EventsURL: server.URL + "/events",
+			Workspace: workspace,
+			Job: jobSpec{
+				WorkingDirectory: workspace,
+				Shell:            "sh",
+			},
+		},
+		client:  server.Client(),
+		outputs: map[string]string{},
+	}
+
+	type result struct {
+		exitCode int
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		exitCode, err := r.executeStep(context.Background(), stepSpec{Slug: "run", Run: "printf 'blocked-log\\n'"}, filepath.Join(workspace, "out"), filepath.Join(workspace, "completion"))
+		done <- result{exitCode: exitCode, err: err}
+	}()
+
+	select {
+	case <-requestStarted:
+	case <-time.After(1 * time.Second):
+		close(releaseRequest)
+		t.Fatal("log event request was not started")
+	}
+
+	select {
+	case got := <-done:
+		if got.err != nil || got.exitCode != 0 {
+			close(releaseRequest)
+			t.Fatalf("executeStep exit=%d err=%v", got.exitCode, got.err)
+		}
+	case <-time.After(1 * time.Second):
+		close(releaseRequest)
+		t.Fatal("executeStep waited for blocked log drain after child exit")
+	}
+	close(releaseRequest)
+}
+
 // shellQuote produces a POSIX-shell-safe single-quoted form of s.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"

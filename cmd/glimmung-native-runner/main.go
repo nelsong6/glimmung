@@ -29,6 +29,11 @@ import (
 const (
 	defaultWorkspace        = "/workspace"
 	defaultAttemptTokenPath = "/var/run/glimmung/attempt-token"
+	maxForwardedLogBytes    = 64 * 1024
+	maxScannerTokenBytes    = 1024 * 1024
+	evidenceTarStartMarker  = "===EVIDENCE-TAR-START==="
+	evidenceTarEndMarker    = "===EVIDENCE-TAR-END==="
+	logEventPostTimeout     = 5 * time.Second
 	// shutdownCompleteBudget is the time we reserve from the kubelet's
 	// terminationGracePeriodSeconds (default 30s) to deliver the
 	// timed_out /completed callback when we receive SIGTERM. The
@@ -397,18 +402,74 @@ func shellCommand(shell, script string) (string, []string) {
 func (r *nativeRunner) streamLogs(ctx context.Context, wg *sync.WaitGroup, stepSlug, stream string, reader io.Reader) {
 	defer wg.Done()
 	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxScannerTokenBytes)
+	suppressEvidenceTar := false
+	suppressedEvidenceLines := 0
 	for scanner.Scan() {
 		line := scanner.Text()
-		r.observeLogCost(line)
-		r.observeInnerJobMarker(ctx, stepSlug, line)
-		if stream == "stderr" {
-			fmt.Fprintln(os.Stderr, line)
-		} else {
-			fmt.Println(line)
+		trimmed := strings.TrimSpace(line)
+		switch trimmed {
+		case evidenceTarStartMarker:
+			suppressEvidenceTar = true
+			suppressedEvidenceLines = 0
+			r.forwardLogLine(ctx, stepSlug, stream, evidenceTarStartMarker+" payload omitted from native runner logs")
+			continue
+		case evidenceTarEndMarker:
+			if suppressEvidenceTar {
+				r.forwardLogLine(ctx, stepSlug, stream, fmt.Sprintf("%s omitted %d payload lines", evidenceTarEndMarker, suppressedEvidenceLines))
+				suppressEvidenceTar = false
+				suppressedEvidenceLines = 0
+				continue
+			}
 		}
-		_ = r.postEvent(ctx, "log", &stepSlug, line, nil, map[string]any{"stream": stream})
+		if suppressEvidenceTar {
+			suppressedEvidenceLines++
+			continue
+		}
+		r.forwardLogLine(ctx, stepSlug, stream, line)
 	}
+	if suppressEvidenceTar {
+		r.forwardLogLine(ctx, stepSlug, stream, fmt.Sprintf("unterminated evidence tar payload omitted from native runner logs after %d lines", suppressedEvidenceLines))
+	}
+	if err := scanner.Err(); err != nil {
+		msg := "log stream read failed: " + err.Error()
+		_ = r.postEvent(ctx, "runner_warning", &stepSlug, msg, nil, map[string]any{
+			"warning": "log_stream_read_failed",
+			"stream":  stream,
+		})
+	}
+}
+
+func (r *nativeRunner) forwardLogLine(ctx context.Context, stepSlug, stream, line string) {
+	if line == "" {
+		line = " "
+	}
+	line = sanitizeForwardedLogLine(line)
+	r.observeLogCost(line)
+	r.observeInnerJobMarker(ctx, stepSlug, line)
+	if stream == "stderr" {
+		fmt.Fprintln(os.Stderr, line)
+	} else {
+		fmt.Println(line)
+	}
+	r.postLogEvent(ctx, stepSlug, stream, line)
+}
+
+func (r *nativeRunner) postLogEvent(ctx context.Context, stepSlug, stream, line string) {
+	go func() {
+		postCtx, cancel := context.WithTimeout(ctx, logEventPostTimeout)
+		defer cancel()
+		_ = r.postEvent(postCtx, "log", &stepSlug, line, nil, map[string]any{"stream": stream})
+	}()
+}
+
+func sanitizeForwardedLogLine(line string) string {
+	line = strings.ToValidUTF8(line, "?")
+	if len(line) <= maxForwardedLogBytes {
+		return line
+	}
+	omitted := len(line) - maxForwardedLogBytes
+	return line[:maxForwardedLogBytes] + fmt.Sprintf("... [truncated %d bytes]", omitted)
 }
 
 func (r *nativeRunner) publishOutputs(ctx context.Context, stepSlug string, outputs map[string]string) error {
