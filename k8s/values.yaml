@@ -16,7 +16,7 @@ replicas: 1
 nativeRunner:
   namespace: glimmung-runs
   serviceAccount: glimmung-native-runner
-  image: romainecr.azurecr.io/glimmung-native-runner:native-runner-4a662eb6ee498f15bb47c1e281c2dbb84fca50ca009b8d7930d97a54d3888f98
+  image: romainecr.azurecr.io/glimmung-native-runner:native-runner-b9ba3e3e14941679b9d7bc055ad11ab670f327c84411d5d0816291b17f2a1c1c
   entrypoint: /app/glimmung-native-runner
   callbackBaseUrl: http://glimmung.glimmung.svc.cluster.local
   projectConcurrency: 5
