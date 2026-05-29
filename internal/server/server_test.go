@@ -105,6 +105,25 @@ func TestPublicConfigPointsAtAuthRomaineLife(t *testing.T) {
 	}
 }
 
+func TestPublicConfigShipsGrafanaFields(t *testing.T) {
+	body := requestConfig(t, Settings{
+		TankOperatorBaseURL:   "https://tank.romaine.life",
+		GrafanaBaseURL:        "https://grafana.romaine.life/",
+		GrafanaLokiDatasource: "loki",
+		NativeRunnerNamespace: "glimmung-runs",
+	})
+
+	if body["grafana_base_url"] != "https://grafana.romaine.life" {
+		t.Fatalf("grafana_base_url=%q", body["grafana_base_url"])
+	}
+	if body["grafana_loki_datasource"] != "loki" {
+		t.Fatalf("grafana_loki_datasource=%q", body["grafana_loki_datasource"])
+	}
+	if body["native_runner_namespace"] != "glimmung-runs" {
+		t.Fatalf("native_runner_namespace=%q", body["native_runner_namespace"])
+	}
+}
+
 func TestStaticServingReturnsIndexAndAssets(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "index.html"), "<main>app</main>")

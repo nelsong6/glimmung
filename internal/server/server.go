@@ -17,6 +17,8 @@ const (
 	defaultPort                = "8000"
 	defaultAuthURL             = "https://auth.romaine.life"
 	defaultTankOperatorBaseURL = "https://tank.romaine.life"
+	defaultGrafanaBaseURL      = "https://grafana.romaine.life"
+	defaultGrafanaLokiDatasource = "loki"
 )
 
 type Settings struct {
@@ -32,6 +34,15 @@ type Settings struct {
 	K8sSATokenPath                     string
 	K8sCACertPath                      string
 	TankOperatorBaseURL                string
+	// GrafanaBaseURL is the base URL of the cluster Grafana installation
+	// (e.g. https://grafana.romaine.life). The frontend uses this plus the
+	// Loki datasource UID to render Explore deep-links from run-report
+	// step rows so operators do not have to discover by themselves that
+	// the data is in Loki. Empty disables the affordance.
+	GrafanaBaseURL string
+	// GrafanaLokiDatasource is the datasource name (or UID) the Explore
+	// link should target. Grafana resolves a name to a UID; both work.
+	GrafanaLokiDatasource string
 	StaticDir                          string
 	StaticOverrideDir                  string
 	ArtifactsStorageAccount            string
@@ -105,7 +116,9 @@ func SettingsFromEnv() Settings {
 		K8sAPIHost:          envOrDefault("K8S_API_HOST", "https://kubernetes.default.svc"),
 		K8sSATokenPath:      envOrDefault("K8S_SA_TOKEN_PATH", "/var/run/secrets/kubernetes.io/serviceaccount/token"),
 		K8sCACertPath:       envOrDefault("K8S_CA_CERT_PATH", "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"),
-		TankOperatorBaseURL: envOrDefault("TANK_OPERATOR_BASE_URL", defaultTankOperatorBaseURL),
+		TankOperatorBaseURL:   envOrDefault("TANK_OPERATOR_BASE_URL", defaultTankOperatorBaseURL),
+		GrafanaBaseURL:        envOrDefault("GRAFANA_BASE_URL", defaultGrafanaBaseURL),
+		GrafanaLokiDatasource: envOrDefault("GRAFANA_LOKI_DATASOURCE", defaultGrafanaLokiDatasource),
 		StaticDir:           os.Getenv("GLIMMUNG_STATIC_DIR"),
 		StaticOverrideDir:   os.Getenv("GLIMMUNG_STATIC_OVERRIDE_DIR"),
 		ArtifactsStorageAccount: envOrDefault(
@@ -436,11 +449,20 @@ func readStoreReady(ctx context.Context, store ReadStore) (ready bool) {
 // where the auth service lives (auth.romaine.life) and where to link out for
 // tank-operator. No per-host branching: slots delegate to auth.romaine.life
 // just like prod and pass their own URL via `callbackURL`.
+//
+// The Grafana fields ship the cluster Grafana base URL and the Loki
+// datasource name so the run-report UI can render Explore deep-links from
+// each native-phase step row. Without them, operators have no signal in
+// the dashboard that step logs exist in Loki — the data is durable, the
+// discovery path was not.
 func publicConfig(settings Settings) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{
-			"auth_url":               defaultAuthURL,
-			"tank_operator_base_url": strings.TrimRight(settings.TankOperatorBaseURL, "/"),
+			"auth_url":                 defaultAuthURL,
+			"tank_operator_base_url":   strings.TrimRight(settings.TankOperatorBaseURL, "/"),
+			"grafana_base_url":         strings.TrimRight(settings.GrafanaBaseURL, "/"),
+			"grafana_loki_datasource":  strings.TrimSpace(settings.GrafanaLokiDatasource),
+			"native_runner_namespace":  strings.TrimSpace(settings.NativeRunnerNamespace),
 		})
 	}
 }

@@ -14,9 +14,22 @@
 
 import { isMockMode, mockAccount } from "./mockApi";
 
-type GlimmungConfig = {
+export type GlimmungConfig = {
   auth_url: string;
   tank_operator_base_url: string;
+  // grafana_base_url is the cluster Grafana installation the run-report UI
+  // links to for per-step Loki Explore. Empty disables the affordance —
+  // the field is intentionally a sentinel rather than a UI guess, so a
+  // misconfigured environment surfaces as "no link" instead of a 404.
+  grafana_base_url?: string;
+  // grafana_loki_datasource is the Loki datasource name (or UID) Explore
+  // links should target.
+  grafana_loki_datasource?: string;
+  // native_runner_namespace is the kubernetes namespace native phase Jobs
+  // run in (settings.NativeRunnerNamespace on the server). Surfacing it
+  // here lets the UI build {namespace="...",pod="..."} LogQL without
+  // duplicating the constant.
+  native_runner_namespace?: string;
 };
 
 // Lightweight account shape preserves `username` and `name` for the
@@ -35,6 +48,9 @@ export function initAuth(): Promise<void> {
     _config = {
       auth_url: "https://auth.mock.local",
       tank_operator_base_url: "https://tank.mock.local",
+      grafana_base_url: "https://grafana.mock.local",
+      grafana_loki_datasource: "loki",
+      native_runner_namespace: "glimmung-runs",
     };
     const ms = mockAccount();
     _account = { username: ms.username, name: ms.name ?? ms.username };
@@ -68,6 +84,13 @@ export function initAuth(): Promise<void> {
     }
   })();
   return _initPromise;
+}
+
+// currentConfig returns the cached /v1/config response if initAuth() has
+// resolved, or null otherwise. Synchronous so component render paths can
+// read it without re-awaiting. The cache is populated once on boot.
+export function currentConfig(): GlimmungConfig | null {
+  return _config;
 }
 
 export function currentAccount(): Account | null {

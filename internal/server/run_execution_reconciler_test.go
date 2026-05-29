@@ -184,3 +184,317 @@ func TestCompleteDispatchTimedOutPhaseUsesCompletionPathForCleanup(t *testing.T)
 		t.Fatalf("native launch=%#v", launcher.req)
 	}
 }
+
+// fakeJobStatusGetter satisfies NativeJobStatusGetter for reconciler tests.
+type fakeJobStatusGetter struct {
+	statuses map[string]NativeJobStatus
+	calls    int
+	err      error
+}
+
+func (f *fakeJobStatusGetter) GetNativeJobStatus(_ context.Context, _, name string) (NativeJobStatus, error) {
+	f.calls++
+	if f.err != nil {
+		return NativeJobStatus{}, f.err
+	}
+	status, ok := f.statuses[name]
+	if !ok {
+		return NativeJobStatus{Found: false}, nil
+	}
+	return status, nil
+}
+
+func TestExpireFailedActiveJobsSynthesizesTimedOutCompletion(t *testing.T) {
+	leaseRef := "proj/leases/proj-1/1"
+	store := &fakeCompletionStore{
+		tokenRunID:         "r1",
+		tokenProject:       "proj",
+		appendIdx:          1,
+		nativeExpectedJobs: []string{"llm-verify"},
+		leaseResult:        Lease{Project: "proj", LeaseNumber: intPtr(1), State: "claimed", Metadata: map[string]any{}},
+	}
+	store.run = &RunReplayData{
+		ID:           "r1",
+		Project:      "proj",
+		WorkflowName: "wf",
+		IssueNumber:  170,
+		IssueRepo:    "owner/repo",
+		SlotLeaseRef: &leaseRef,
+		Attempts:     []RunAttemptData{{AttemptIndex: 2, Phase: "llm-verify"}},
+	}
+	store.wf = &Workflow{
+		Project: "proj",
+		Name:    "wf",
+		Phases: []PhaseSpec{
+			{Name: "llm-verify", Kind: "k8s_job", Jobs: []NativeJobSpec{{ID: "llm-verify"}}},
+			{Name: "cleanup", Kind: "k8s_job", Always: true, DependsOn: []string{"llm-verify"}, Jobs: []NativeJobSpec{{ID: "env-destroy"}}},
+		},
+		Budget: budget.Config{Total: 25},
+	}
+	launcher := &fakeNativeLauncher{}
+	now := time.Date(2026, 5, 28, 18, 30, 0, 0, time.UTC)
+	terminal := now.Add(-5 * time.Minute)
+	jobName := "glim-proj-170-runs-1-1-2-llm-verify"
+	statusGetter := &fakeJobStatusGetter{
+		statuses: map[string]NativeJobStatus{
+			jobName: {
+				Found:              true,
+				Failed:             1,
+				LastTransitionTime: terminal,
+				CompletionTime:     time.Time{},
+				Conditions: []NativeJobCondition{
+					{Type: "Failed", Status: "True", Reason: "BackoffLimitExceeded", Message: "Job has reached the specified backoff limit", LastTransitionTime: terminal},
+				},
+			},
+		},
+	}
+
+	listStore := &runReportListStore{
+		fakeCompletionStore: store,
+		runs: []RunReport{{
+			ID:      "r1",
+			Project: "proj",
+			State:   "in_progress",
+			PhaseExecutions: []RunPhaseExecution{{
+				Name:  "llm-verify",
+				State: "active",
+				Jobs: []RunJobExecution{{
+					ID:         "llm-verify",
+					State:      "active",
+					K8sJobName: stringPtr(jobName),
+				}},
+			}},
+		}},
+	}
+
+	count, err := ExpireFailedActiveJobs(context.Background(), listStore, launcher, statusGetter, "glimmung-runs", time.Minute, now)
+	if err != nil {
+		t.Fatalf("ExpireFailedActiveJobs: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("count=%d, want 1", count)
+	}
+	if statusGetter.calls != 1 {
+		t.Fatalf("status getter calls=%d, want 1", statusGetter.calls)
+	}
+	if got := store.nativeCompletions["llm-verify"]; got.Conclusion != "timed_out" {
+		t.Fatalf("conclusion=%q, want timed_out", got.Conclusion)
+	}
+	if !launcher.called || launcher.req.Phase.Name != "cleanup" {
+		t.Fatalf("synthetic completion should have triggered cleanup phase; launcher.req=%#v", launcher.req)
+	}
+}
+
+func TestExpireFailedActiveJobsRespectsGracePeriod(t *testing.T) {
+	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
+	now := time.Date(2026, 5, 28, 18, 30, 0, 0, time.UTC)
+	recent := now.Add(-10 * time.Second)
+	jobName := "glim-proj-170-runs-1-1-2-llm-verify"
+	statusGetter := &fakeJobStatusGetter{
+		statuses: map[string]NativeJobStatus{
+			jobName: {
+				Found:              true,
+				Failed:             1,
+				LastTransitionTime: recent,
+				Conditions: []NativeJobCondition{
+					{Type: "Failed", Status: "True", Reason: "BackoffLimitExceeded", LastTransitionTime: recent},
+				},
+			},
+		},
+	}
+
+	listStore := &runReportListStore{
+		fakeCompletionStore: store,
+		runs: []RunReport{{
+			ID:      "r1",
+			Project: "proj",
+			State:   "in_progress",
+			PhaseExecutions: []RunPhaseExecution{{
+				Name:  "llm-verify",
+				State: "active",
+				Jobs:  []RunJobExecution{{ID: "llm-verify", State: "active", K8sJobName: stringPtr(jobName)}},
+			}},
+		}},
+	}
+
+	count, err := ExpireFailedActiveJobs(context.Background(), listStore, &fakeNativeLauncher{}, statusGetter, "glimmung-runs", time.Minute, now)
+	if err != nil {
+		t.Fatalf("ExpireFailedActiveJobs: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected grace period to defer completion; count=%d", count)
+	}
+	if _, ok := store.nativeCompletions["llm-verify"]; ok {
+		t.Fatal("did not expect a synthetic completion within the grace period")
+	}
+}
+
+func TestExpireFailedActiveJobsIgnoresActiveAndSucceededJobs(t *testing.T) {
+	leaseRef := "proj/leases/proj-1/1"
+	store := &fakeCompletionStore{
+		tokenRunID:         "r1",
+		tokenProject:       "proj",
+		appendIdx:          1,
+		nativeExpectedJobs: []string{"already-done", "still-running"},
+		leaseResult:        Lease{Project: "proj", LeaseNumber: intPtr(1), State: "claimed", Metadata: map[string]any{}},
+	}
+	store.run = &RunReplayData{
+		ID:           "r1",
+		Project:      "proj",
+		WorkflowName: "wf",
+		IssueNumber:  170,
+		IssueRepo:    "owner/repo",
+		SlotLeaseRef: &leaseRef,
+		Attempts:     []RunAttemptData{{AttemptIndex: 2, Phase: "llm-verify"}},
+	}
+	store.wf = &Workflow{
+		Project: "proj",
+		Name:    "wf",
+		Phases: []PhaseSpec{
+			{Name: "llm-verify", Kind: "k8s_job", Jobs: []NativeJobSpec{{ID: "already-done"}, {ID: "still-running"}}},
+			{Name: "cleanup", Kind: "k8s_job", Always: true, DependsOn: []string{"llm-verify"}, Jobs: []NativeJobSpec{{ID: "env-destroy"}}},
+		},
+		Budget: budget.Config{Total: 25},
+	}
+	now := time.Date(2026, 5, 28, 18, 30, 0, 0, time.UTC)
+	terminal := now.Add(-5 * time.Minute)
+	statusGetter := &fakeJobStatusGetter{
+		statuses: map[string]NativeJobStatus{
+			"glim-proj-still-running": {
+				Found:  true,
+				Active: 1,
+			},
+			"glim-proj-already-done": {
+				Found:          true,
+				Succeeded:      1,
+				CompletionTime: terminal,
+				Conditions: []NativeJobCondition{
+					{Type: "Complete", Status: "True", LastTransitionTime: terminal},
+				},
+			},
+		},
+	}
+
+	listStore := &runReportListStore{
+		fakeCompletionStore: store,
+		runs: []RunReport{{
+			ID:      "r1",
+			Project: "proj",
+			State:   "in_progress",
+			PhaseExecutions: []RunPhaseExecution{{
+				Name:  "llm-verify",
+				State: "active",
+				Jobs: []RunJobExecution{
+					{ID: "still-running", State: "active", K8sJobName: stringPtr("glim-proj-still-running")},
+					{ID: "already-done", State: "active", K8sJobName: stringPtr("glim-proj-already-done")},
+				},
+			}},
+		}},
+	}
+
+	count, err := ExpireFailedActiveJobs(context.Background(), listStore, &fakeNativeLauncher{}, statusGetter, "glimmung-runs", time.Minute, now)
+	if err != nil {
+		t.Fatalf("ExpireFailedActiveJobs: %v", err)
+	}
+	// The actively-running Job is skipped; the succeeded-without-callback
+	// Job is past the grace period and gets synthesized as failed (callback lost).
+	if count != 1 {
+		t.Fatalf("count=%d, want 1 (succeeded-without-callback)", count)
+	}
+	got, ok := store.nativeCompletions["already-done"]
+	if !ok {
+		t.Fatal("expected synthetic completion for already-done")
+	}
+	if got.Conclusion != "failed" {
+		t.Fatalf("conclusion=%q, want failed for callback-lost Job", got.Conclusion)
+	}
+}
+
+func TestParseNativeJobStatusExtractsConditions(t *testing.T) {
+	raw := map[string]any{
+		"status": map[string]any{
+			"active":         0,
+			"succeeded":      0,
+			"failed":         1,
+			"completionTime": "2026-05-28T17:52:15Z",
+			"conditions": []any{
+				map[string]any{
+					"type":               "FailureTarget",
+					"status":             "True",
+					"reason":             "BackoffLimitExceeded",
+					"message":            "Job has reached the specified backoff limit",
+					"lastTransitionTime": "2026-05-28T17:52:15Z",
+				},
+				map[string]any{
+					"type":               "Failed",
+					"status":             "True",
+					"reason":             "BackoffLimitExceeded",
+					"message":            "Job has reached the specified backoff limit",
+					"lastTransitionTime": "2026-05-28T17:52:15Z",
+				},
+			},
+		},
+	}
+	status := parseNativeJobStatus(raw)
+	if !status.Found {
+		t.Fatal("expected Found=true")
+	}
+	if status.Failed != 1 {
+		t.Fatalf("Failed=%d, want 1", status.Failed)
+	}
+	if !status.IsTerminallyFailed() {
+		t.Fatal("expected IsTerminallyFailed")
+	}
+	if status.IsTerminallySucceeded() {
+		t.Fatal("did not expect IsTerminallySucceeded")
+	}
+	if got := status.FailureReason(); got != "BackoffLimitExceeded" {
+		t.Fatalf("FailureReason=%q", got)
+	}
+	if status.TerminalTime().IsZero() {
+		t.Fatal("expected non-zero TerminalTime")
+	}
+}
+
+// runReportListStore wraps a fakeCompletionStore + a static list of runs to
+// drive the reconciler's per-project scan. We only need the ListProjects and
+// ListProjectRuns methods to satisfy RunDispatchTimeoutStore; the rest is
+// inherited via embedding so the type also satisfies RunCompletionStore and
+// NativeJobCompletionStore.
+type runReportListStore struct {
+	*fakeCompletionStore
+	runs []RunReport
+}
+
+func (s *runReportListStore) store_() {}
+
+func (s *runReportListStore) ListProjects(_ context.Context) ([]Project, error) {
+	seen := map[string]struct{}{}
+	out := make([]Project, 0, len(s.runs))
+	for _, r := range s.runs {
+		if _, ok := seen[r.Project]; ok {
+			continue
+		}
+		seen[r.Project] = struct{}{}
+		out = append(out, Project{ID: r.Project})
+	}
+	return out, nil
+}
+
+func (s *runReportListStore) ListProjectRuns(_ context.Context, project string, _ int) ([]RunReport, error) {
+	out := make([]RunReport, 0, len(s.runs))
+	for _, r := range s.runs {
+		if r.Project == project {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+func (s *runReportListStore) AbortRunByID(_ context.Context, project, runID, reason string) (AbortRunResult, error) {
+	if s.fakeCompletionStore == nil {
+		return AbortRunResult{}, nil
+	}
+	return s.fakeCompletionStore.AbortRunByID(context.Background(), project, runID, reason)
+}
+

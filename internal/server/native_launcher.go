@@ -35,6 +35,96 @@ type NativeLauncher interface {
 	LaunchNativePhase(ctx context.Context, req NativeLaunchRequest) ([]string, error)
 }
 
+// NativeJobStatusGetter exposes the terminal status of a previously launched
+// native phase Job so the run-execution reconciler can detect Jobs that died
+// without the runner ever delivering its completion callback (DeadlineExceeded
+// killing the pod mid-step, OOM, eviction, etc.) and synthesize a failed
+// completion. KubernetesNativeLauncher implements this; the dispatch fakes
+// do not have to.
+type NativeJobStatusGetter interface {
+	GetNativeJobStatus(ctx context.Context, namespace, name string) (NativeJobStatus, error)
+}
+
+// NativeJobStatus is the small subset of batch/v1 Job status the reconciler
+// needs to decide whether to synthesize a completion. Zero value (Found=false)
+// means the Job has been garbage-collected from k8s; callers treat that as
+// "the run lost its execution surface" and should fail the phase.
+type NativeJobStatus struct {
+	Found              bool
+	Active             int
+	Succeeded          int
+	Failed             int
+	Conditions         []NativeJobCondition
+	CompletionTime     time.Time
+	LastTransitionTime time.Time
+}
+
+// NativeJobCondition mirrors the fields of batch/v1 JobCondition the
+// reconciler inspects.
+type NativeJobCondition struct {
+	Type               string
+	Status             string
+	Reason             string
+	Message            string
+	LastTransitionTime time.Time
+}
+
+// IsTerminallyFailed reports whether the Job has a Failed=True condition.
+func (s NativeJobStatus) IsTerminallyFailed() bool {
+	for _, c := range s.Conditions {
+		if strings.EqualFold(c.Type, "Failed") && strings.EqualFold(c.Status, "True") {
+			return true
+		}
+	}
+	return false
+}
+
+// IsTerminallySucceeded reports whether the Job has a Complete=True (or
+// SuccessCriteriaMet=True) condition. Used so the reconciler can tell a
+// "successful pod that simply lost its callback" from a real failure.
+func (s NativeJobStatus) IsTerminallySucceeded() bool {
+	for _, c := range s.Conditions {
+		if !strings.EqualFold(c.Status, "True") {
+			continue
+		}
+		if strings.EqualFold(c.Type, "Complete") || strings.EqualFold(c.Type, "SuccessCriteriaMet") {
+			return true
+		}
+	}
+	return false
+}
+
+// FailureReason returns the reason field of the first Failed=True condition,
+// or empty if there is none.
+func (s NativeJobStatus) FailureReason() string {
+	for _, c := range s.Conditions {
+		if strings.EqualFold(c.Type, "Failed") && strings.EqualFold(c.Status, "True") {
+			return c.Reason
+		}
+	}
+	return ""
+}
+
+// FailureMessage returns the message field of the first Failed=True condition.
+func (s NativeJobStatus) FailureMessage() string {
+	for _, c := range s.Conditions {
+		if strings.EqualFold(c.Type, "Failed") && strings.EqualFold(c.Status, "True") {
+			return c.Message
+		}
+	}
+	return ""
+}
+
+// TerminalTime returns the best timestamp for when the Job entered its
+// terminal state: completionTime when present, otherwise the most recent
+// condition transition time.
+func (s NativeJobStatus) TerminalTime() time.Time {
+	if !s.CompletionTime.IsZero() {
+		return s.CompletionTime
+	}
+	return s.LastTransitionTime
+}
+
 type TestSlotPreparer interface {
 	EnsureTestSlotPreliminaries(ctx context.Context, lease Lease, project Project) error
 	RepairTestSlotPreliminaries(ctx context.Context, lease Lease, project Project, minter NativeGitHubTokenMinter) error
@@ -943,6 +1033,70 @@ func (l *KubernetesNativeLauncher) createJob(ctx context.Context, manifest map[s
 		return nil
 	}
 	return err
+}
+
+// GetNativeJobStatus fetches the batch/v1 Job status for a previously
+// launched native-phase Job. Returns Found=false when the Job no longer
+// exists (TTL-collected by k8s). Used by the run-execution reconciler to
+// detect runs whose backing Job died (DeadlineExceeded, BackoffLimitExceeded,
+// eviction) without the runner ever delivering its completion callback.
+func (l *KubernetesNativeLauncher) GetNativeJobStatus(ctx context.Context, namespace, name string) (NativeJobStatus, error) {
+	if strings.TrimSpace(namespace) == "" || strings.TrimSpace(name) == "" {
+		return NativeJobStatus{}, fmt.Errorf("namespace and name are required")
+	}
+	path := "/apis/batch/v1/namespaces/" + namespace + "/jobs/" + name
+	status, job, err := l.request(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		if status == http.StatusNotFound {
+			return NativeJobStatus{Found: false}, nil
+		}
+		return NativeJobStatus{}, err
+	}
+	return parseNativeJobStatus(job), nil
+}
+
+// parseNativeJobStatus pulls the reconciler-relevant fields out of a
+// batch/v1 Job object returned by the kube apiserver.
+func parseNativeJobStatus(job map[string]any) NativeJobStatus {
+	out := NativeJobStatus{Found: true}
+	statusMap := anyMap(job["status"])
+	if active, ok := positiveIntFromMap(statusMap, "active"); ok {
+		out.Active = active
+	}
+	if succeeded, ok := positiveIntFromMap(statusMap, "succeeded"); ok {
+		out.Succeeded = succeeded
+	}
+	if failed, ok := positiveIntFromMap(statusMap, "failed"); ok {
+		out.Failed = failed
+	}
+	if ct := strings.TrimSpace(mapStringValueOrEmpty(statusMap, "completionTime")); ct != "" {
+		if ts, err := time.Parse(time.RFC3339Nano, ct); err == nil {
+			out.CompletionTime = ts.UTC()
+		} else if ts, err := time.Parse(time.RFC3339, ct); err == nil {
+			out.CompletionTime = ts.UTC()
+		}
+	}
+	for _, raw := range anySlice(statusMap["conditions"]) {
+		typed := anyMap(raw)
+		cond := NativeJobCondition{
+			Type:    strings.TrimSpace(mapStringValueOrEmpty(typed, "type")),
+			Status:  strings.TrimSpace(mapStringValueOrEmpty(typed, "status")),
+			Reason:  strings.TrimSpace(mapStringValueOrEmpty(typed, "reason")),
+			Message: strings.TrimSpace(mapStringValueOrEmpty(typed, "message")),
+		}
+		if lt := strings.TrimSpace(mapStringValueOrEmpty(typed, "lastTransitionTime")); lt != "" {
+			if ts, err := time.Parse(time.RFC3339Nano, lt); err == nil {
+				cond.LastTransitionTime = ts.UTC()
+			} else if ts, err := time.Parse(time.RFC3339, lt); err == nil {
+				cond.LastTransitionTime = ts.UTC()
+			}
+			if cond.LastTransitionTime.After(out.LastTransitionTime) {
+				out.LastTransitionTime = cond.LastTransitionTime
+			}
+		}
+		out.Conditions = append(out.Conditions, cond)
+	}
+	return out
 }
 
 func (l *KubernetesNativeLauncher) waitForJobComplete(ctx context.Context, namespace, name string, timeout time.Duration) error {
