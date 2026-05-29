@@ -142,9 +142,33 @@ PR with its own data-plumbing requirement:
   `run_cost_usd`): require the run's created-at timestamp and cumulative
   cost at every `SetRunTerminalState` caller. Plumbing them through is a
   refactor, not a metric addition.
-- **k8s Job apply/terminal metrics** (wired): glimmung#621's
-  run-execution reconciler and the runner-driven completion callback
-  site are now the two callers that emit
+
+### Why a Watch, not a poll
+
+The cluster-wide native-Job Watch in `internal/server/run_watcher.go`
+is glimmung's **primary** detection path for terminal `batch/v1.Job`
+events. A single persistent HTTP connection to the kube-apiserver
+streams events for Jobs labelled
+`app.kubernetes.io/managed-by in (glimmung, glimmung-inner)`. On a
+`MODIFIED` event with `condition=Complete=True` or
+`condition=Failed=True` the handler dispatches into the existing
+synthesis path within ~200ms of the kubelet stamping the condition.
+
+The 30s polling reconciler that originally caught these events has
+been relaxed to a 1h cadence as belt-and-braces. Sustained non-zero
+`glimmung_run_reconciler_caught_total` is the alert signal that the
+Watch is dropping events. The disconnect duration is observable via
+`glimmung_run_watch_disconnected_seconds`; event flow via
+`glimmung_run_watch_events_total{kind, action}`.
+
+This shape matches the rest of glimmung's event-driven model. The
+answer to "why did this transition fire at time T" is now grounded in
+event data — "apiserver pushed event UID=X resourceVersion=Y at
+T-200ms" — instead of "the 30s tick happened to hit."
+
+- **k8s Job apply/terminal metrics** (wired): the run-execution
+  reconciler and the runner-driven completion callback site are now
+  the two callers that emit
   `glimmung_run_phase_job_terminal_total{conclusion, reason}`. Reason is
   the closed enum `JobTerminalReason*` from `internal/server`
   (`deadline_exceeded` / `backoff_exceeded` / `pod_gone` /
