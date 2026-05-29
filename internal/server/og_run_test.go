@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -153,6 +154,46 @@ func TestRunOGImageRendersSVG(t *testing.T) {
 	}
 }
 
+func TestRunOGImagePNGRendersPNG(t *testing.T) {
+	now := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
+	store := &fakeRunStore{rows: []RunReport{{
+		Project:           "glimmung",
+		Workflow:          "issue-agent",
+		IssueNumber:       intPtr(141),
+		State:             "in_progress",
+		CurrentPhase:      stringPtr("implement"),
+		AttemptsCount:     2,
+		CumulativeCostUSD: 1.23,
+		StartedAt:         now,
+		UpdatedAt:         now,
+		PhaseExecutions: []RunPhaseExecution{
+			{Name: "plan", Kind: "plan", State: "completed"},
+			{Name: "implement", Kind: "code", State: "in_progress"},
+			{Name: "verify", Kind: "verify", State: "pending"},
+		},
+	}}}
+	handler := NewWithStore(Settings{}, store)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/og/runs/glimmung/141/3.png", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "image/png" {
+		t.Fatalf("content-type=%q", got)
+	}
+	body := rec.Body.Bytes()
+	// PNG magic: 0x89 'P' 'N' 'G' 0x0d 0x0a 0x1a 0x0a
+	pngSig := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}
+	if len(body) < len(pngSig) || !bytes.Equal(body[:len(pngSig)], pngSig) {
+		t.Fatalf("body does not start with PNG signature; first 8 bytes = % x", body[:min(8, len(body))])
+	}
+	if store.runNumber != "3" {
+		t.Fatalf("run number=%q", store.runNumber)
+	}
+}
+
 func TestRunOGImageNotFound(t *testing.T) {
 	handler := NewWithStore(Settings{}, &fakeRunStore{})
 	rec := httptest.NewRecorder()
@@ -196,9 +237,12 @@ func TestServeSPAWithOGInjectsRunTags(t *testing.T) {
 	wantSnippets := []string{
 		`<meta property="og:type" content="article">`,
 		`<meta property="og:title" content="issue-agent · glimmung #141 · run 1">`,
-		`<meta property="og:image" content="https://glimmung.example/og/runs/glimmung/141/1.svg">`,
+		// og:image points at the PNG variant so Discord and other
+		// strictly-raster unfurlers render the picture.
+		`<meta property="og:image" content="https://glimmung.example/og/runs/glimmung/141/1.png">`,
+		`<meta property="og:image:type" content="image/png">`,
 		`<meta name="twitter:card" content="summary_large_image">`,
-		`<meta name="twitter:image" content="https://glimmung.example/og/runs/glimmung/141/1.svg">`,
+		`<meta name="twitter:image" content="https://glimmung.example/og/runs/glimmung/141/1.png">`,
 	}
 	for _, snip := range wantSnippets {
 		if !strings.Contains(body, snip) {
