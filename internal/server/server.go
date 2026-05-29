@@ -412,21 +412,18 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	mux.Handle("POST /v1/projects/{project}/issues/{issue_number}/runs/{run_number}/replay", requireAdmin(adminAuthenticator, http.HandlerFunc(replayRunDecisionByNumber(store))))
 	mux.Handle("POST /v1/runs/dispatch", requireAdmin(adminAuthenticator, http.HandlerFunc(dispatchRunHandler(store, nativeLauncher))))
 	mux.HandleFunc("POST /v1/webhook/github", githubWebhook(settings))
-	// Per-run OpenGraph image: public, unauthenticated card matching the
-	// SPA's run-URL shape so unfurlers (Discord, Slack, etc.) get a
-	// scrapeable picture of the run's phase graph.
-	//
-	// Two formats served from one route. The handler inspects the
-	// suffix on {run_number} and dispatches to the PNG or SVG renderer.
-	// PNG is what the SPA HTML injection points og:image at, because
-	// Discord (and a few other unfurlers) only rasterise PNG/JPEG/GIF/WEBP
-	// and silently drop SVG. SVG stays around as a crisper alternate for
-	// clients that accept it. The same chart-style renderer drives both
-	// (see og_run.go and og_run_png.go). net/http.ServeMux can't have a
-	// literal extension after a `{wildcard}`, hence the in-handler split.
+	// Per-run OpenGraph image: public, unauthenticated PNG card matching
+	// the SPA's run-URL shape so unfurlers (Discord, Slack, etc.) get a
+	// scrapeable picture of the run's phase graph. The SPA HTML injection
+	// in serveSPAWithOG points og:image at this endpoint. PNG only — an
+	// earlier SVG renderer was retired because Discord drops SVG (see
+	// .tank/docs/migration-policy.md: no compatibility, no parallel
+	// format). net/http.ServeMux can't have a literal `.png` after a
+	// `{wildcard}`, so the route captures the suffix and the handler
+	// strips it. See og_run.go and og_run_png.go.
 	mux.HandleFunc(
 		"GET /og/runs/{project}/{issue_number}/{run_number}",
-		runOGImageDispatch(store),
+		runOGImagePNG(store),
 	)
 	if staticRoots(settings).enabled() {
 		mux.HandleFunc("GET /assets/", serveAsset(settings))

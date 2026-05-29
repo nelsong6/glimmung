@@ -20,11 +20,9 @@
 //     No TTF files shipped in the repo and no cgo. The fonts aren't IBM
 //     Plex Sans (the design-system head font), but they're a clean
 //     humanist sans that holds the design tokens' colors and layout.
-//   - Layout mirrors renderRunOGSVG so a side-by-side comparison stays
-//     intentional: same canvas, same header strip, same state pill, same
-//     phase row.
-//   - State colours come from the shared stateColors helper so a state
-//     palette update only has to happen once across SVG + PNG.
+//   - Layout: header strip + state pill + workflow headline + phase row
+//     + footer, on a 1200x630 canvas.
+//   - State colours come from the shared stateColors helper in og_run.go.
 
 package server
 
@@ -65,7 +63,16 @@ func runOGImagePNG(store ReadStore) http.HandlerFunc {
 			return
 		}
 		project := r.PathValue("project")
-		runNumber := strings.TrimSuffix(r.PathValue("run_number"), ".png")
+		raw := r.PathValue("run_number")
+		// PNG is the only format served. Any other suffix (notably the
+		// retired vector format) must 404, not silently fall through to
+		// PNG. Per .tank/docs/migration-policy.md the retired surface
+		// stays deleted — no alias, no fallback.
+		if !strings.HasSuffix(raw, ".png") {
+			writeProblem(w, http.StatusNotFound, "og image URL must end with .png")
+			return
+		}
+		runNumber := strings.TrimSuffix(raw, ".png")
 		report, err := runStore.GetRunReportByNumber(r.Context(), project, issueNumber, runNumber)
 		switch {
 		case errors.Is(err, ErrNotFound):

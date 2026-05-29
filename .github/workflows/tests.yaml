@@ -92,6 +92,17 @@ jobs:
       - name: Guard against prod/issue chart image.tag drift
         run: node scripts/check-chart-image-tag-sync.mjs
 
+  check-removed-og-svg:
+    name: Removed OG SVG renderer surface
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Guard against retired SVG OG renderer reintroduction
+        run: node scripts/check-removed-og-svg.mjs
+
   frontend:
     runs-on: ubuntu-latest
     steps:
