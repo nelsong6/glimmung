@@ -21,6 +21,12 @@ running, cleaning, and available explicit.
 - Kubernetes owns actual preliminary and lease-scoped resources.
 - `docs/test-slot-lifecycle.md` owns slot terms and lifecycle behavior.
 - `docs/test-slot-hot-swap.md` owns hot-swap metadata shape and apply behavior.
+- `Settings.ControlPlaneLoopsEnabled` (env `CONTROL_PLANE_LOOPS_ENABLED`,
+  enforced in `cmd/glimmung-go/main.go`) owns the boundary between processes
+  that join the control plane and processes that only serve HTTP handlers.
+  The prod glimmung Deployment leaves it at the default `true`; every
+  per-issue release rendered by `k8s/issue/` (hot and warm) sets it to
+  `false`.
 
 ## Migration Rules
 
@@ -31,6 +37,14 @@ running, cleaning, and available explicit.
 - Do not keep manual `kubectl cp` plus `kill -HUP` as the documented hot-swap
   path after the apply endpoint supports the project.
 - Do not add app/proxy/session/browser pods to unleased preliminary capacity.
+- Do not start a background reconciler, recovery sweep, or other goroutine
+  that mutates shared runtime state (Postgres rows owned by the run/signal
+  loop, `glimmung-runs` Kubernetes Jobs, prod-namespace Secrets) outside the
+  `settings.ControlPlaneLoopsEnabled` gate in `cmd/glimmung-go/main.go`. Slot
+  processes serve HTTP handlers against the same Postgres and the same
+  apiserver as prod; running the control plane in a slot races prod for the
+  same rows and Jobs. Add new reconcilers to the gated `switch`, not next to
+  it.
 
 ## Live Behavior
 
@@ -56,6 +70,11 @@ running, cleaning, and available explicit.
   into the selected leased slot, restarts as configured, records history on
   every outcome, and extends short leases to the configured minimum remaining
   TTL.
+- A slot process (the binary running inside any `k8s/issue/` release, hot or
+  warm) starts the HTTP server, applies database migrations a hot-swap may
+  need to land, and serves request-driven code paths. It does not start the
+  signal-drain, run-queue, dispatch-timeout, or test-slot recovery
+  reconcilers; those run only in the prod glimmung Deployment.
 - Lease cleanup is the single retention boundary for free
   (lease-scoped) inspections produced by `POST /v1/inspections`. The
   cleanup goroutine deletes every matching `slot_inspections` row and the
@@ -97,3 +116,8 @@ running, cleaning, and available explicit.
 - Helm/chart changes run `helm template` or equivalent rendering evidence.
 - Changes prove that unleased provisioned slots do not run long-lived runtime
   workload.
+- A new background reconciler or recovery sweep adds a test that proves the
+  Start… function is unreachable when `Settings.ControlPlaneLoopsEnabled` is
+  false (either the gate in `cmd/glimmung-go/main.go` skips the call, or the
+  Start… function itself returns early). See
+  [Test Slots capabilities → slot-control-plane-isolation](capabilities.md).

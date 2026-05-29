@@ -55,6 +55,13 @@ spec:
             - name: POSTGRES_USER
               value: {{ .Values.postgres.user | quote }}
             {{- if (eq (include "glimmung-issue.isTestEnv" .) "true") }}
+            # Test slots share Postgres and the glimmung-runs namespace
+            # with prod. Setting CONTROL_PLANE_LOOPS_ENABLED=false stops
+            # the slot binary from starting the signal-drain, run-queue,
+            # dispatch-timeout, and test-slot recovery reconcilers, so a
+            # hot-swap can exercise HTTP handlers without racing prod for
+            # the same rows or Kubernetes Jobs. The gate is enforced in
+            # cmd/glimmung-go/main.go via Settings.ControlPlaneLoopsEnabled.
             - name: CONTROL_PLANE_LOOPS_ENABLED
               value: "false"
             {{- end }}

@@ -73,6 +73,26 @@ type Settings struct {
 	GitHubAppInstallationID  string
 	GitHubAppPrivateKey      string
 	GitHubWebhookSecret      string
+	// ControlPlaneLoopsEnabled gates every background reconciler and the
+	// test-slot recovery sweep started from cmd/glimmung-go/main.go.
+	//
+	// True (the default) is the prod posture: signal drain, run queue,
+	// dispatch-timeout, and the test-slot recovery sweep all run and own
+	// the shared runtime state in Postgres + the glimmung-runs namespace.
+	//
+	// False is the test-slot posture. Test slots run a hot-swappable copy
+	// of the glimmung binary against the same Postgres database and the
+	// same Kubernetes apiserver as prod. If a slot also ran the control
+	// loops, two processes would race on the same rows and Jobs — the
+	// slot would mutate real run state, and any new reconciler that
+	// touches the prod runtime namespace would either succeed and corrupt
+	// state or fail RBAC and emit noise. The k8s/issue chart sets
+	// CONTROL_PLANE_LOOPS_ENABLED=false on every per-issue release so a
+	// hot-swap can exercise HTTP handlers and code paths without joining
+	// the control plane.
+	//
+	// Any new background reconciler must be started inside this gate.
+	ControlPlaneLoopsEnabled bool
 }
 
 func SettingsFromEnv() Settings {
@@ -162,6 +182,10 @@ func SettingsFromEnv() Settings {
 		GitHubAppInstallationID: os.Getenv("GITHUB_APP_INSTALLATION_ID"),
 		GitHubAppPrivateKey:     os.Getenv("GITHUB_APP_PRIVATE_KEY"),
 		GitHubWebhookSecret:     os.Getenv("GITHUB_WEBHOOK_SECRET"),
+		ControlPlaneLoopsEnabled: envBoolOrDefault(
+			"CONTROL_PLANE_LOOPS_ENABLED",
+			true,
+		),
 	}
 }
 
