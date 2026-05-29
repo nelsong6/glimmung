@@ -1953,6 +1953,7 @@ function RunsPane({
   const projectionRuns = (graph.projection?.runs ?? [])
     .slice()
     .sort((a, b) => (b.started_at ?? "").localeCompare(a.started_at ?? ""));
+  const projectionRunsByRef = new Map(projectionRuns.map((run) => [run.run_ref, run]));
   const runs = graph.nodes
     .filter((n) => n.kind === "run")
     .slice()
@@ -2028,7 +2029,9 @@ function RunsPane({
         </thead>
         <tbody>
           {(projectionRuns.length > 0 ? projectionRuns : []).map((r, index) => {
-            const path = projectionRunCyclePath("", r);
+            const recycledTarget = recycledProjectionTarget(graph, projectionRunsByRef, r);
+            const stateTarget = recycledTarget ?? r;
+            const statePath = projectionRunCyclePath("", stateTarget);
             const cost = r.cost_usd;
             return (
               <tr key={r.run_ref}>
@@ -2048,8 +2051,8 @@ function RunsPane({
                   <button
                     type="button"
                     className="link"
-                    onClick={() => onSelectProjectionRun(r)}
-                    title={`View ${path}`}
+                    onClick={() => onSelectProjectionRun(stateTarget)}
+                    title={recycledTarget ? `View recycled run ${projectionRunLabel(recycledTarget)}` : `View ${statePath}`}
                   >
                     <span className={`pill ${runStatePill(r.state ?? "")}`}>{r.state ?? "—"}</span>
                   </button>
@@ -2077,6 +2080,8 @@ function RunsPane({
             const cost = numberOrNull(meta.cumulative_cost_usd);
             const prNumber = numberOrNull(meta.pr_number);
             const lineage = computeCycleLineage(graph, id);
+            const recycledTarget = recycledGraphRunTarget(graph, id);
+            const stateTargetId = recycledTarget ? runIdFromNode(recycledTarget) : id;
             return (
               <tr key={r.id}>
                 <td className="mono">{graphRunHistoryCountDisplay(r, index, runs.length)}</td>
@@ -2095,8 +2100,12 @@ function RunsPane({
                   <button
                     type="button"
                     className="link"
-                    onClick={() => onSelectRun(id)}
-                    title={`View ${runSlugDisplay(slug)}`}
+                    onClick={() => onSelectRun(stateTargetId)}
+                    title={
+                      recycledTarget
+                        ? `View recycled run ${runSlugDisplay(issueRunSlug(graph, recycledTarget))}`
+                        : `View ${runSlugDisplay(slug)}`
+                    }
                   >
                     <span className={`pill ${runStatePill(r.state ?? "")}`}>{r.state ?? "—"}</span>
                   </button>
@@ -3112,6 +3121,31 @@ function latestProjectionRun(projection: RunGraphProjection | undefined | null):
 
 function projectionActiveRun(projection: RunGraphProjection | undefined | null): RunProjectionRun | null {
   return projection?.runs.find((run) => runStateIsActive(run.state)) ?? null;
+}
+
+function recycledProjectionTarget(
+  graph: IssueGraph,
+  runsByRef: Map<string, RunProjectionRun>,
+  run: RunProjectionRun,
+): RunProjectionRun | null {
+  if (run.state !== "recycled") return null;
+  const targetRef = recycledTargetRunRef(graph, run.run_ref);
+  return targetRef ? runsByRef.get(targetRef) ?? null : null;
+}
+
+function recycledGraphRunTarget(graph: IssueGraph, runRef: string): GraphNode | null {
+  const targetRef = recycledTargetRunRef(graph, runRef);
+  if (!targetRef) return null;
+  return graph.nodes.find((node) => node.kind === "run" && runIdFromNode(node) === targetRef) ?? null;
+}
+
+function recycledTargetRunRef(graph: IssueGraph, runRef: string): string | null {
+  const edge = graph.edges.find((candidate) =>
+    candidate.kind === "cycled_from" &&
+    candidate.source === `run:${runRef}` &&
+    candidate.target.startsWith("run:"),
+  );
+  return edge ? edge.target.slice("run:".length) : null;
 }
 
 function projectionRunByLegacySlug(projection: RunGraphProjection, slug: string): RunProjectionRun | null {

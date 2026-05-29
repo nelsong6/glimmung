@@ -405,7 +405,9 @@ describe("IssueDetailView run execution graph", () => {
           },
         })),
       ],
-      edges: [],
+      edges: [
+        { source: "run:ambience#172/runs/2.1", target: "run:ambience#172/runs/2.2", kind: "cycled_from" },
+      ],
       projection: historyProjection,
     };
 
@@ -418,6 +420,9 @@ describe("IssueDetailView run execution graph", () => {
             : new URL(input.url);
       if (url.pathname === "/v1/issues/by-number/ambience/172") return json(issueDetail);
       if (url.pathname === "/v1/issues/by-number/ambience/172/graph") return json(historyGraph);
+      if (url.pathname === "/v1/projects/ambience/issues/172/runs/2/cycles/2/graph") {
+        return json({ ...historyProjection, runs: [historyRuns[2]] });
+      }
       if (url.pathname === "/v1/workflows") return json([]);
       throw new Error(`unhandled fetch ${url.pathname}`);
     }));
@@ -442,6 +447,13 @@ describe("IssueDetailView run execution graph", () => {
 
     expect(oldestCells[0]).toHaveTextContent(/^1$/);
     expect(within(oldestCells[1]).getByRole("button")).toHaveTextContent(/^1$/);
+
+    await userEvent.click(within(middleCells[3]).getByRole("button", { name: /recycled/i }));
+    await waitFor(() => {
+      expect(screen.getByTestId("path")).toHaveTextContent(
+        "/projects/ambience/issues/172/runs/2/cycles/2",
+      );
+    });
   });
 
   it("routes a dispatching job click to its job path and keeps step clicks specific", async () => {
