@@ -3,9 +3,10 @@ package agentops
 const AgentBashScript = `set -euo pipefail
 
 # Pre-create evidence dirs the agent writes into. Sibling of /workspace/repo
-# (the clone root) so git add -A does not pick PNGs/notes up. Workflow extracts
-# /workspace/evidence from pod stdout via base64-tar markers emitted at the end
-# of this script.
+# (the clone root) so git add -A does not pick PNGs/notes up. The production
+# evidence flow is glimmung-native-runner → GLIMMUNG_COMPLETION_FILE refs →
+# POST /v1/run-callbacks/.../native/completed; this developer-CLI agent
+# script just leaves the files on disk for inspection in the live pod.
 mkdir -p /workspace/evidence/screenshots /workspace/evidence/videos
 
 # Seed claude state with placeholder credentials so claude never tries to
@@ -143,16 +144,6 @@ git fetch origin main
 git rebase origin/main
 
 git push origin "HEAD:${BRANCH_NAME}"
-
-# Stream evidence as a base64-tar to stdout between markers the workflow
-# extracts via sed. kubectl cp from a Succeeded pod is not available because
-# exec-tar requires a live container, so logs are the side-channel. Empty
-# evidence dir is fine.
-if [ -d /workspace/evidence ]; then
-  echo "===EVIDENCE-TAR-START==="
-  tar -czf - -C /workspace/evidence . | base64
-  echo "===EVIDENCE-TAR-END==="
-fi
 `
 
 func AgentJobSpec(opts ApplyAgentJobOptions) map[string]any {

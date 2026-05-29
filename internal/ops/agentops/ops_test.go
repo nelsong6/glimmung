@@ -199,8 +199,8 @@ func TestApplyAgentJobAppliesRenderedJobJSON(t *testing.T) {
 		t.Fatalf("unexpected image %#v", container["image"])
 	}
 	command := container["command"].([]any)
-	if !strings.Contains(command[2].(string), "===EVIDENCE-TAR-START===") {
-		t.Fatal("agent script did not include evidence streaming marker")
+	if strings.Contains(command[2].(string), "===EVIDENCE-TAR-START===") {
+		t.Fatal("agent script still contains the retired stdout-base64-tar evidence emission — see glimmung#143 follow-up")
 	}
 }
 
