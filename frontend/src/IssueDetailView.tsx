@@ -17,7 +17,7 @@
  *
  * Routed canonically via `/projects/<project>/issues/<number>`.
  */
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { authedFetch, currentConfig } from "./auth";
 import { lokiExploreUrl } from "./grafanaLinks";
@@ -30,6 +30,8 @@ import {
   workflowToPhaseGraphModel,
 } from "./workflowGraphModel";
 import { resolveProjectWorkflow } from "./workflowLookup";
+
+const NATIVE_EVENT_PAGE_LIMIT = 200;
 
 type IssueDetail = {
   ref: string;
@@ -243,7 +245,7 @@ type NativeRunEvent = {
   phase: string;
   job_id: string;
   seq: number;
-  event: "step_started" | "log" | "step_completed" | "step_skipped" | "step_failed";
+  event: string;
   step_slug: string;
   message: string;
   exit_code: number | null;
@@ -258,6 +260,23 @@ type NativeRunEventsResponse = {
   job_id: string | null;
   events: NativeRunEvent[];
   archive_url: string | null;
+};
+
+type NativeLogViewMode = "transcript" | "raw";
+type AgentTranscriptFilter = "all" | "assistant";
+
+type AgentTranscriptEntry = {
+  id: string;
+  kind: "assistant" | "tool_call" | "tool_result" | "result" | "reasoning" | "raw";
+  seq: number;
+  createdAt: string;
+  title: string;
+  text?: string;
+  toolName?: string;
+  toolUseId?: string;
+  input?: unknown;
+  raw?: unknown;
+  costUsd?: number | null;
 };
 
 type Workflow = {
@@ -721,7 +740,7 @@ export function IssueDetailView() {
                 selectedStepId={params.stepId ?? null}
                 executionLoading={Boolean(runGraphUrl) && runProjection === null && !error}
                 onSelectProjectionRun={(run) => navigate(projectionRunCyclePath(baseUrl, run))}
-                onSelectProjectionNode={(run, selection) => navigate(projectionSelectionPath(baseUrl, run, selection))}
+                onSelectProjectionNode={(run, selection) => navigate(projectionSelectionPath(baseUrl, run, selection), { preventScrollReset: true })}
                 onViewRunWorkflow={selectWorkflowRun}
                 onDispatch={() => void dispatchRun()}
                 onOpenTouchpoint={() => setTab("touchpoint")}
@@ -2156,12 +2175,10 @@ function RunExecutionView({
     : selectedPhase
       ? `phase:${selectedPhase.name}`
       : null;
-  const selectedRouteKey = [selectedPhaseId, selectedJobId, selectedStepId].filter(Boolean).join(":");
-
   useEffect(() => {
     if (!selectedPhaseId) return;
     inspectorRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
-  }, [selectedPhaseId, selectedRouteKey]);
+  }, [selectedPhaseId, selectedJobId]);
 
   return (
     <>
@@ -3399,6 +3416,9 @@ function NativeJobInspector({
 }) {
   const [logs, setLogs] = useState<NativeRunEventsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loadingMinHeight, setLoadingMinHeight] = useState<number | null>(null);
+  const inspectorElementRef = useRef<HTMLDivElement | null>(null);
+  const inspectorHeightRef = useRef(0);
   const scopedJobs = useMemo(
     () => selectedJobId ? jobs.filter((job) => job.job_id === selectedJobId) : jobs,
     [jobs, selectedJobId],
@@ -3411,13 +3431,31 @@ function NativeJobInspector({
     [selectedStepSlug, stepRefs],
   );
   const [selectedKey, setSelectedKey] = useState<string | null>(defaultSelection);
+  const [viewMode, setViewMode] = useState<NativeLogViewMode>("transcript");
+  const [transcriptFilter, setTranscriptFilter] = useState<AgentTranscriptFilter>("all");
+  const [pageCursors, setPageCursors] = useState<number[]>([]);
+  const pageAfterSeq = pageCursors[pageCursors.length - 1] ?? null;
   const selected = stepRefs.find((step) => step.key === selectedKey) ?? stepRefs[0] ?? null;
+  const selectedStepSlugForEvents = selected?.step.slug ?? null;
+
+  useLayoutEffect(() => {
+    if (!inspectorElementRef.current) return;
+    inspectorHeightRef.current = Math.ceil(inspectorElementRef.current.getBoundingClientRect().height);
+  });
+
+  useEffect(() => {
+    setSelectedKey(defaultSelection);
+  }, [defaultSelection]);
+
+  useEffect(() => {
+    setPageCursors([]);
+  }, [project, runId, issueNumber, runNumber, attemptIndex, selectedJobId, selectedStepSlugForEvents]);
 
   useEffect(() => {
     let cancelled = false;
+    setLoadingMinHeight(inspectorHeightRef.current > 0 ? inspectorHeightRef.current : null);
     setLogs(null);
     setError(null);
-    setSelectedKey(defaultSelection);
     const base = runNumber && issueNumber !== null
       ? nativeRunApiBaseForNumber(project, issueNumber, runNumber)
       : nativeRunApiBase(project, runId);
@@ -3428,16 +3466,24 @@ function NativeJobInspector({
       };
     }
     const jobParam = selectedJobId ? `&job_id=${encodeURIComponent(selectedJobId)}` : "";
-    const url = `${base}/events?attempt_index=${attemptIndex}&limit=200${jobParam}`;
+    const stepParam = selectedStepSlugForEvents ? `&step_slug=${encodeURIComponent(selectedStepSlugForEvents)}` : "";
+    const cursorParam = pageAfterSeq !== null ? `&after_seq=${pageAfterSeq}` : "";
+    const url = `${base}/events?attempt_index=${attemptIndex}&limit=${NATIVE_EVENT_PAGE_LIMIT}${jobParam}${stepParam}${cursorParam}`;
     const load = () => {
       fetch(url)
       .then(async (res) => {
         if (!res.ok) throw new Error(`events ${res.status}`);
         const body = await res.json() as NativeRunEventsResponse;
-        if (!cancelled) setLogs(body);
+        if (!cancelled) {
+          setLogs(body);
+          setLoadingMinHeight(null);
+        }
       })
       .catch((err: unknown) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : String(err));
+          setLoadingMinHeight(null);
+        }
       });
     };
     load();
@@ -3446,7 +3492,11 @@ function NativeJobInspector({
       cancelled = true;
       if (timer !== null) window.clearInterval(timer);
     };
-  }, [project, runId, issueNumber, runNumber, attemptIndex, defaultSelection, live, selectedJobId]);
+  }, [project, runId, issueNumber, runNumber, attemptIndex, live, selectedJobId, selectedStepSlugForEvents, pageAfterSeq]);
+
+  useEffect(() => {
+    setViewMode("transcript");
+  }, [selectedKey]);
 
   if (error) {
     return (
@@ -3457,35 +3507,112 @@ function NativeJobInspector({
     );
   }
   if (!logs) {
-    return <div className="native-log-panel dim mono">loading native events…</div>;
+    return (
+      <div
+        className="native-log-panel dim mono"
+        style={loadingMinHeight ? { minHeight: `${loadingMinHeight}px` } : undefined}
+      >
+        loading native events…
+      </div>
+    );
   }
   const events = logs.events;
+  const lastEventSeq = events[events.length - 1]?.seq ?? null;
+  const hasPreviousBatch = pageCursors.length > 0;
+  const hasNextBatch = events.length === NATIVE_EVENT_PAGE_LIMIT && lastEventSeq !== null;
   const selectedEvents = selected
     ? events.filter((event) => (
         event.job_id === selected.job.job_id
         && (event.step_slug === selected.step.slug || (event.event === "log" && !event.step_slug))
       ))
     : events;
+  const transcriptEntries = selected && nativeSelectionUsesTranscript(selected.job, selected.step)
+    ? agentTranscriptEntries(selectedEvents)
+    : [];
+  const transcriptAvailable = Boolean(selected && nativeSelectionUsesTranscript(selected.job, selected.step) && transcriptEntries.length > 0);
+  const visibleTranscriptEntries = transcriptFilter === "assistant"
+    ? transcriptEntries.filter((entry) => entry.kind === "assistant")
+    : transcriptEntries;
+  const activeViewMode: NativeLogViewMode = transcriptAvailable ? viewMode : "raw";
   return (
-    <div className="native-inspector">
+    <div className="native-inspector" ref={inspectorElementRef}>
       <div className="native-inspector-head">
         <div>
           <span className="key">native job inspector</span>
           <span className="mono dim">
             {events.length} event{events.length === 1 ? "" : "s"}
+            {" · "}batch {pageCursors.length + 1}
             {live ? " · live" : ""}
           </span>
         </div>
-        {(logs.archive_url || archiveUrl) && (
-          <a
-            className="mono"
-            href={`/v1/artifacts/${artifactPathFromUrl(logs.archive_url || archiveUrl || "")}`}
-            target="_blank"
-            rel="noreferrer"
-          >
-            archive
-          </a>
-        )}
+        <div className="native-inspector-actions">
+          <div className="native-page-controls" role="group" aria-label="native event batches">
+            <button
+              type="button"
+              disabled={!hasPreviousBatch}
+              onClick={() => setPageCursors((current) => current.slice(0, -1))}
+            >
+              previous batch
+            </button>
+            <button
+              type="button"
+              disabled={!hasNextBatch}
+              onClick={() => {
+                if (lastEventSeq !== null) {
+                  setPageCursors((current) => [...current, lastEventSeq]);
+                }
+              }}
+            >
+              next batch
+            </button>
+          </div>
+          {transcriptAvailable && (
+            <div className="native-view-toggle" role="group" aria-label="native log view">
+              <button
+                type="button"
+                aria-pressed={activeViewMode === "transcript"}
+                onClick={() => setViewMode("transcript")}
+              >
+                transcript
+              </button>
+              <button
+                type="button"
+                aria-pressed={activeViewMode === "raw"}
+                onClick={() => setViewMode("raw")}
+              >
+                raw
+              </button>
+            </div>
+          )}
+          {transcriptAvailable && activeViewMode === "transcript" && (
+            <div className="native-view-toggle" role="group" aria-label="transcript filter">
+              <button
+                type="button"
+                aria-pressed={transcriptFilter === "all"}
+                onClick={() => setTranscriptFilter("all")}
+              >
+                all
+              </button>
+              <button
+                type="button"
+                aria-pressed={transcriptFilter === "assistant"}
+                onClick={() => setTranscriptFilter("assistant")}
+              >
+                assistant
+              </button>
+            </div>
+          )}
+          {(logs.archive_url || archiveUrl) && (
+            <a
+              className="mono"
+              href={`/v1/artifacts/${artifactPathFromUrl(logs.archive_url || archiveUrl || "")}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              archive
+            </a>
+          )}
+        </div>
       </div>
       <div className="step-log-layout native-step-log-layout">
         <aside className="step-list" aria-label="native job steps">
@@ -3516,7 +3643,7 @@ function NativeJobInspector({
                   <span>{nativeStepGlyph(step.state ?? "")}</span>
                   <strong>
                     {step.title || step.slug}
-                    {nativeStepIsLlm(step) && <span className="native-step-llm">llm</span>}
+                    {nativeStepLooksLlm(step) && <span className="native-step-llm">llm</span>}
                   </strong>
                   <small>
                     {step.exit_code !== null && step.exit_code !== undefined
@@ -3528,12 +3655,92 @@ function NativeJobInspector({
             ))
           )}
         </aside>
-        <pre className="step-terminal native-step-terminal">
-          {selected
-            ? nativeTerminalText(selected.job, selected.step, selectedEvents)
-            : nativeTerminalText(null, null, events)}
-        </pre>
+        {activeViewMode === "transcript" ? (
+          <AgentTranscriptView
+            entries={visibleTranscriptEntries}
+            emptyLabel={transcriptFilter === "assistant" ? "No assistant text in this batch." : "No transcript rows in this batch."}
+          />
+        ) : (
+          <pre className="step-terminal native-step-terminal">
+            {selected
+              ? nativeTerminalText(selected.job, selected.step, selectedEvents)
+              : nativeTerminalText(null, null, events)}
+          </pre>
+        )}
       </div>
+    </div>
+  );
+}
+
+function AgentTranscriptView({
+  entries,
+  emptyLabel,
+}: {
+  entries: AgentTranscriptEntry[];
+  emptyLabel: string;
+}) {
+  return (
+    <div className="agent-transcript" aria-label="agent transcript">
+      {entries.length === 0 && (
+        <div className="agent-transcript-empty mono dim">{emptyLabel}</div>
+      )}
+      {entries.map((entry) => {
+        if (entry.kind === "assistant") {
+          return (
+            <article key={entry.id} className="agent-transcript-entry assistant">
+              <div className="agent-transcript-entry-head">
+                <strong>{entry.title}</strong>
+                <span className="mono dim">#{entry.seq}</span>
+              </div>
+              <div className="agent-transcript-text">{entry.text}</div>
+            </article>
+          );
+        }
+        if (entry.kind === "result") {
+          return (
+            <article key={entry.id} className="agent-transcript-entry result">
+              <div className="agent-transcript-entry-head">
+                <strong>{entry.title}</strong>
+                <span className="mono dim">#{entry.seq}</span>
+              </div>
+              <div className="agent-transcript-result">
+                {entry.costUsd !== null && entry.costUsd !== undefined && (
+                  <span className="mono">{formatUsd4(entry.costUsd)}</span>
+                )}
+                {entry.text && <span>{entry.text}</span>}
+              </div>
+            </article>
+          );
+        }
+        if (entry.kind === "reasoning") {
+          const body = [
+            entry.text,
+            entry.raw ? formatAgentJson(entry.raw) : "",
+          ].filter(Boolean).join("\n\n");
+          return (
+            <details key={entry.id} className="agent-transcript-entry reasoning">
+              <summary>
+                <span>{entry.title}</span>
+                <span className="mono dim">#{entry.seq}</span>
+              </summary>
+              <pre>{body}</pre>
+            </details>
+          );
+        }
+        const body = entry.kind === "tool_call"
+          ? formatAgentJson(entry.input ?? entry.raw)
+          : entry.text ?? formatAgentJson(entry.raw);
+        return (
+          <details key={entry.id} className={`agent-transcript-entry ${entry.kind}`}>
+            <summary>
+              <span>{entry.title}</span>
+              {entry.toolName && <strong>{entry.toolName}</strong>}
+              <span className="mono dim">#{entry.seq}</span>
+            </summary>
+            <pre>{body}</pre>
+          </details>
+        );
+      })}
     </div>
   );
 }
@@ -3598,7 +3805,7 @@ function PlannedNativeJobInspector({
                   <span>{nativeStepGlyph(step.state ?? "")}</span>
                   <strong>
                     {step.title || step.slug}
-                    {nativeStepIsLlm(step) && <span className="native-step-llm">llm</span>}
+                    {nativeStepLooksLlm(step) && <span className="native-step-llm">llm</span>}
                   </strong>
                   <small>
                     {step.exit_code !== null && step.exit_code !== undefined
@@ -3696,7 +3903,7 @@ function nativeTerminalText(
   const heading = job && step
     ? [`# ${job.name || job.job_id}`, `$ step ${step.slug}`]
     : ["# native events"];
-  if (step && nativeStepIsLlm(step)) {
+  if (job && step && nativeSelectionUsesTranscript(job, step)) {
     heading.push("# llm step");
   }
   const stepMessage = step?.message ? [`# ${step.message}`] : [];
@@ -3716,6 +3923,352 @@ function nativeEventLine(event: NativeRunEvent): string {
   if (!event.message) return `${prefix}${suffix}`;
   if (event.event === "log") return event.message;
   return `${prefix}: ${event.message}${suffix}`;
+}
+
+function agentTranscriptEntries(events: NativeRunEvent[]): AgentTranscriptEntry[] {
+  const entries: AgentTranscriptEntry[] = [];
+  const toolNamesById = new Map<string, string>();
+  events.forEach((event) => {
+    if (event.event !== "log") return;
+    const payloads = parseAgentLogPayloads(event.message);
+    if (payloads.length === 0) {
+      entries.push({
+        id: `raw-${event.seq}`,
+        kind: "raw",
+        seq: event.seq,
+        createdAt: event.created_at,
+        title: logStreamTitle(event),
+        text: event.message,
+      });
+      return;
+    }
+    const before = entries.length;
+    payloads.forEach((payload, index) => {
+      appendAgentPayloadEntries(entries, event, payload, index, toolNamesById);
+    });
+    if (entries.length === before) {
+      entries.push({
+        id: `raw-${event.seq}`,
+        kind: "raw",
+        seq: event.seq,
+        createdAt: event.created_at,
+        title: "json event",
+        raw: payloads.length === 1 ? payloads[0] : payloads,
+      });
+    }
+  });
+  return entries.filter((entry) => entry.kind !== "raw");
+}
+
+function appendAgentPayloadEntries(
+  entries: AgentTranscriptEntry[],
+  event: NativeRunEvent,
+  payload: unknown,
+  payloadIndex: number,
+  toolNamesById: Map<string, string>,
+) {
+  const obj = recordValue(payload);
+  if (!obj) {
+    entries.push({
+      id: `raw-${event.seq}-${payloadIndex}`,
+      kind: "raw",
+      seq: event.seq,
+      createdAt: event.created_at,
+      title: "json value",
+      raw: payload,
+    });
+    return;
+  }
+
+  const type = stringValue(obj.type);
+  if (type === "assistant") {
+    const message = recordValue(obj.message);
+    const content = arrayValue(message?.content);
+    content.forEach((block, blockIndex) => {
+      const blockObj = recordValue(block);
+      if (!blockObj) return;
+      const blockType = stringValue(blockObj.type);
+      if (blockType === "text") {
+        entries.push({
+          id: `assistant-${event.seq}-${payloadIndex}-${blockIndex}`,
+          kind: "assistant",
+          seq: event.seq,
+          createdAt: event.created_at,
+          title: "assistant",
+          text: stringValue(blockObj.text) ?? "",
+        });
+        return;
+      }
+      if (blockType === "tool_use") {
+        const id = stringValue(blockObj.id);
+        const name = stringValue(blockObj.name) ?? "tool";
+        if (id) toolNamesById.set(id, name);
+        entries.push({
+          id: `tool-call-${event.seq}-${payloadIndex}-${blockIndex}`,
+          kind: "tool_call",
+          seq: event.seq,
+          createdAt: event.created_at,
+          title: "tool call",
+          toolName: name,
+          toolUseId: id ?? undefined,
+          input: blockObj.input,
+        });
+        return;
+      }
+      if (blockType === "thinking") {
+        const thinking = stringValue(blockObj.thinking)?.trim() ?? "";
+        const signature = stringValue(blockObj.signature)?.trim() ?? "";
+        entries.push({
+          id: `reasoning-${event.seq}-${payloadIndex}-${blockIndex}`,
+          kind: "reasoning",
+          seq: event.seq,
+          createdAt: event.created_at,
+          title: thinking ? "reasoning" : signature ? "reasoning signature" : "reasoning",
+          text: thinking || (signature
+            ? "No readable thinking text; provider emitted a signature only."
+            : "No readable thinking text was emitted."),
+          raw: blockObj,
+        });
+        return;
+      }
+      entries.push({
+        id: `assistant-raw-${event.seq}-${payloadIndex}-${blockIndex}`,
+        kind: "raw",
+        seq: event.seq,
+        createdAt: event.created_at,
+        title: blockType ? `assistant ${blockType}` : "assistant block",
+        raw: blockObj,
+      });
+    });
+    return;
+  }
+
+  if (type === "user") {
+    const message = recordValue(obj.message);
+    const content = arrayValue(message?.content);
+    content.forEach((block, blockIndex) => {
+      const blockObj = recordValue(block);
+      if (!blockObj) return;
+      const blockType = stringValue(blockObj.type);
+      if (blockType === "tool_result") {
+        const toolUseId = stringValue(blockObj.tool_use_id);
+        const toolName = toolUseId ? toolNamesById.get(toolUseId) : undefined;
+        entries.push({
+          id: `tool-result-${event.seq}-${payloadIndex}-${blockIndex}`,
+          kind: "tool_result",
+          seq: event.seq,
+          createdAt: event.created_at,
+          title: "tool result",
+          toolName,
+          toolUseId: toolUseId ?? undefined,
+          text: toolResultText(blockObj.content),
+        });
+        return;
+      }
+      if (blockType === "text") {
+        entries.push({
+          id: `user-text-${event.seq}-${payloadIndex}-${blockIndex}`,
+          kind: "raw",
+          seq: event.seq,
+          createdAt: event.created_at,
+          title: "user text",
+          text: stringValue(blockObj.text) ?? "",
+        });
+        return;
+      }
+      entries.push({
+        id: `user-raw-${event.seq}-${payloadIndex}-${blockIndex}`,
+        kind: "raw",
+        seq: event.seq,
+        createdAt: event.created_at,
+        title: blockType ? `user ${blockType}` : "user block",
+        raw: blockObj,
+      });
+    });
+    return;
+  }
+
+  if (type === "result") {
+    entries.push({
+      id: `result-${event.seq}-${payloadIndex}`,
+      kind: "result",
+      seq: event.seq,
+      createdAt: event.created_at,
+      title: "result",
+      costUsd: numberValue(obj.total_cost_usd) ?? numberValue(obj.cost_usd),
+      text: resultSummaryText(obj),
+      raw: obj,
+    });
+    return;
+  }
+
+  if (type === "system") {
+    entries.push({
+      id: `system-${event.seq}-${payloadIndex}`,
+      kind: "raw",
+      seq: event.seq,
+      createdAt: event.created_at,
+      title: stringValue(obj.subtype) ? `system ${stringValue(obj.subtype)}` : "system event",
+      raw: obj,
+    });
+    return;
+  }
+
+  entries.push({
+    id: `json-${event.seq}-${payloadIndex}`,
+    kind: "raw",
+    seq: event.seq,
+    createdAt: event.created_at,
+    title: type ? `${type} event` : "json event",
+    raw: obj,
+  });
+}
+
+function parseAgentLogPayloads(message: string): unknown[] {
+  const trimmed = message.trim();
+  if (!trimmed) return [];
+  try {
+    return [JSON.parse(trimmed) as unknown];
+  } catch {
+    const chunks = balancedJsonChunks(trimmed);
+    return chunks.flatMap((chunk) => {
+      try {
+        return [JSON.parse(chunk) as unknown];
+      } catch {
+        return [];
+      }
+    });
+  }
+}
+
+function balancedJsonChunks(input: string): string[] {
+  const chunks: string[] = [];
+  const stack: string[] = [];
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < input.length; index += 1) {
+    const ch = input[index];
+    if (start === -1) {
+      if (ch === "{" || ch === "[") {
+        start = index;
+        stack.push(ch);
+      }
+      continue;
+    }
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === "\"") {
+      inString = true;
+      continue;
+    }
+    if (ch === "{" || ch === "[") {
+      stack.push(ch);
+      continue;
+    }
+    if (ch === "}" || ch === "]") {
+      const opener = stack.pop();
+      if (!opener || (opener === "{" && ch !== "}") || (opener === "[" && ch !== "]")) {
+        start = -1;
+        stack.length = 0;
+        continue;
+      }
+      if (stack.length === 0) {
+        chunks.push(input.slice(start, index + 1));
+        start = -1;
+      }
+    }
+  }
+  return chunks;
+}
+
+function toolResultText(value: unknown): string {
+  const text = contentText(value);
+  const parsed = parseJsonString(text);
+  const parsedObj = recordValue(parsed);
+  if (parsedObj) {
+    const sections = ["stdout", "stderr", "output", "content"]
+      .map((key) => {
+        const section = stringValue(parsedObj[key]);
+        return section ? `# ${key}\n${section}` : "";
+      })
+      .filter(Boolean);
+    if (sections.length > 0) return sections.join("\n\n");
+  }
+  return text;
+}
+
+function contentText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return value.map((item) => {
+      const obj = recordValue(item);
+      if (!obj) return String(item);
+      if (stringValue(obj.type) === "text") return stringValue(obj.text) ?? "";
+      return formatAgentJson(obj);
+    }).filter(Boolean).join("\n\n");
+  }
+  return formatAgentJson(value);
+}
+
+function resultSummaryText(obj: Record<string, unknown>): string {
+  const subtype = stringValue(obj.subtype);
+  const durationMs = numberValue(obj.duration_ms);
+  const pieces = [
+    subtype,
+    durationMs !== null ? `${Math.round(durationMs / 1000)}s` : null,
+  ].filter(Boolean);
+  return pieces.join(" · ");
+}
+
+function parseJsonString(text: string): unknown {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function formatAgentJson(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function logStreamTitle(event: NativeRunEvent): string {
+  const stream = stringValue(event.metadata?.stream);
+  return stream ? `${stream} log` : "log";
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function arrayValue(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function StructuredScreenshotEvidence({ items }: { items: RunProjectionEvidence[] }) {
@@ -3769,7 +4322,22 @@ function isRawScreenshotArtifact(item: RunProjectionEvidence): boolean {
   return /\.(png|jpe?g|webp|gif)$/i.test(item.ref.split(/[?#]/)[0] ?? "");
 }
 
-function nativeStepIsLlm(step: NativeAttemptStep): boolean {
+function nativeSelectionUsesTranscript(job: NativeAttemptJob | null, step: NativeAttemptStep): boolean {
+  if (nativeStepLooksLlm(step)) return true;
+  if (!nativeJobLooksLlm(job)) return false;
+  const marker = `${step.slug} ${step.title ?? ""}`.toLowerCase();
+  return step.slug.startsWith("run-") || marker.startsWith("run ");
+}
+
+function nativeJobLooksLlm(job: NativeAttemptJob | null): boolean {
+  const marker = [
+    job?.job_id ?? "",
+    job?.name ?? "",
+  ].join(" ").toLowerCase();
+  return marker.includes("llm") || marker.includes("run-agent") || marker.includes("claude");
+}
+
+function nativeStepLooksLlm(step: NativeAttemptStep): boolean {
   const marker = `${step.slug} ${step.title ?? ""}`.toLowerCase();
   return marker.includes("llm") || marker.includes("run-agent") || marker.includes("claude");
 }

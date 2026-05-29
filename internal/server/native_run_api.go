@@ -18,7 +18,7 @@ type NativeRunStore interface {
 	// RecordNativeEventByID writes one idempotent native event. The store resolves attempt context from the run doc.
 	RecordNativeEventByID(ctx context.Context, project, runID string, req NativeRunEventRequest) (NativeRunEventResult, error)
 	// ListNativeEventsByID returns ordered native events for a run with optional filters.
-	ListNativeEventsByID(ctx context.Context, project, runID string, attemptIndex *int, jobID *string, limit *int) (NativeRunLogsResponse, error)
+	ListNativeEventsByID(ctx context.Context, project, runID string, attemptIndex *int, jobID *string, stepSlug *string, afterSeq *int, limit *int) (NativeRunLogsResponse, error)
 }
 
 // NativeRunEventRequest is the body for POST /native/events.
@@ -92,6 +92,8 @@ func nativeRunEventsByNumber(store ReadStore) http.HandlerFunc {
 		resp, err := nativeStore.ListNativeEventsByID(r.Context(), project, runID,
 			parseOptionalIntQuery(r, "attempt_index"),
 			parseOptionalStringQuery(r, "job_id"),
+			parseOptionalStringQuery(r, "step_slug"),
+			parseOptionalIntQuery(r, "after_seq"),
 			parseOptionalIntQuery(r, "limit"),
 		)
 		writeNativeLogsOrError(w, r, resp, err)

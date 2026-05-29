@@ -198,7 +198,7 @@ func numericInt(value any) (int, bool) {
 }
 
 func repairEvents(ctx context.Context, store *pgstore.RunEventsStore, runID string) ([]nativecostrepair.Event, error) {
-	rows, err := store.List(ctx, runID, nil, nil, nil)
+	rows, err := store.List(ctx, runID, nil, nil, nil, nil, nil)
 	if err != nil {
 		return nil, err
 	}
