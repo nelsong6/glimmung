@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
@@ -60,6 +62,17 @@ describe("PhaseGraph", () => {
       width: "1768px",
       height: "216px",
     });
+  });
+
+  it("keeps highlighted SVG edge paths unfilled", () => {
+    const indexCss = readFileSync(join(process.cwd(), "src/index.css"), "utf8");
+    expect(indexCss).toMatch(/\.dag-rf \.react-flow__edge-path\s*\{[^}]*fill:\s*none;/s);
+
+    const highlightedPathRule = indexCss.match(
+      /\.dag-rf \.react-flow__edge\.dag-rf-edge\.entry \.react-flow__edge-path,\s*\.dag-rf \.react-flow__edge\.dag-rf-edge\.fired \.react-flow__edge-path\s*\{([^}]*)\}/s,
+    );
+    expect(highlightedPathRule?.[1]).toContain("fill: none");
+    expect(highlightedPathRule?.[1]).not.toContain("fill: var(--state-success-fg)");
   });
 });
 
