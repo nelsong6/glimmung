@@ -56,10 +56,6 @@ const federationAudiencePrefix = "api.tailscale.com"
 // and returns an auth.romaine.life-signed JWT with the requested `aud`.
 const federationExchangePath = "/api/auth/exchange/federation"
 
-// tailscaleJWTBearerAssertionType is the RFC 7523 client_assertion_type
-// value Tailscale expects on the JWT-bearer exchange.
-const tailscaleJWTBearerAssertionType = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
-
 // TailscaleAuthKeyMinter mints ephemeral, pre-authorized auth keys via
 // an OIDC workload-identity federation flow:
 //
@@ -69,8 +65,9 @@ const tailscaleJWTBearerAssertionType = "urn:ietf:params:oauth:client-assertion-
 //     endpoint with the desired Tailscale audience; receive an
 //     auth.romaine.life-signed JWT (iss = https://auth.romaine.life,
 //     aud = api.tailscale.com/<oidc_client_id>).
-//  3. POST that JWT to api.tailscale.com /api/v2/oauth/token as an
-//     RFC 7523 client_assertion; receive a Tailscale API access token.
+//  3. POST that JWT to api.tailscale.com /api/v2/oauth/token-exchange
+//     with the trust credential's client_id; receive a Tailscale API
+//     access token.
 //  4. Use the access token to call Tailscale's auth-key mint endpoint.
 //
 // No long-lived client secret is stored anywhere. The Tailscale OIDC
@@ -183,10 +180,10 @@ func (m *TailscaleAuthKeyMinter) accessToken(ctx context.Context) (string, error
 	}
 
 	// Step 2: exchange that JWT for a Tailscale API access token via
-	// the RFC 7523 JWT-bearer flow.
+	// Tailscale's workload identity token-exchange endpoint.
 	tsAccessToken, expiresIn, err := m.exchangeForTailscaleAccessToken(ctx, federationJWT)
 	if err != nil {
-		return "", fmt.Errorf("tailscale jwt-bearer exchange: %w", err)
+		return "", fmt.Errorf("tailscale token exchange: %w", err)
 	}
 
 	m.mu.Lock()
@@ -247,15 +244,14 @@ func (m *TailscaleAuthKeyMinter) exchangeForFederationJWT(ctx context.Context, s
 }
 
 // exchangeForTailscaleAccessToken POSTs the auth.romaine.life-signed
-// JWT to Tailscale's OAuth token endpoint as an RFC 7523 client
-// assertion and returns the resulting Tailscale API access token.
+// JWT to Tailscale's workload identity token-exchange endpoint and
+// returns the resulting Tailscale API access token.
 func (m *TailscaleAuthKeyMinter) exchangeForTailscaleAccessToken(ctx context.Context, federationJWT string) (string, int, error) {
 	form := url.Values{}
-	form.Set("grant_type", "client_credentials")
-	form.Set("client_assertion_type", tailscaleJWTBearerAssertionType)
-	form.Set("client_assertion", federationJWT)
+	form.Set("client_id", m.OIDCClientID)
+	form.Set("jwt", federationJWT)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.BaseURL+"/api/v2/oauth/token", strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.BaseURL+"/api/v2/oauth/token-exchange", strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", 0, err
 	}

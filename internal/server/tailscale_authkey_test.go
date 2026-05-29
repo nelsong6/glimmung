@@ -16,27 +16,27 @@ import (
 // fakeFederationAndTailscale stubs both upstreams the
 // TailscaleAuthKeyMinter calls: auth.romaine.life's federation
 // exchange (which mints the JWT) and api.tailscale.com's
-// /api/v2/oauth/token + /api/v2/tailnet/.../keys. The handlers live on
-// one mux because the minter takes two separate base URLs that happen
-// to point at the same test server here.
+// /api/v2/oauth/token-exchange + /api/v2/tailnet/.../keys. The handlers
+// live on one mux because the minter takes two separate base URLs that
+// happen to point at the same test server here.
 type fakeFederationAndTailscale struct {
-	t                  *testing.T
-	server             *httptest.Server
-	wantOIDCClientID   string
-	wantSAToken        string
-	federationToken    string
-	federationHits     int32
-	tailscaleOAuthHits int32
-	tailscaleMintHits  int32
-	lastAssertion      atomic.Value // string
-	lastMintBody       atomic.Value // map[string]any
-	lastMintTag        atomic.Value // string
-	federationStatus   int
-	oauthStatus        int
-	mintStatus         int
-	tailscaleToken     string
-	mintKey            string
-	mintExpires        time.Time
+	t                     *testing.T
+	server                *httptest.Server
+	wantOIDCClientID      string
+	wantSAToken           string
+	federationToken       string
+	federationHits        int32
+	tailscaleExchangeHits int32
+	tailscaleMintHits     int32
+	lastJWT               atomic.Value // string
+	lastMintBody          atomic.Value // map[string]any
+	lastMintTag           atomic.Value // string
+	federationStatus      int
+	exchangeStatus        int
+	mintStatus            int
+	tailscaleToken        string
+	mintKey               string
+	mintExpires           time.Time
 }
 
 func newFakeFederationAndTailscale(t *testing.T) *fakeFederationAndTailscale {
@@ -47,7 +47,7 @@ func newFakeFederationAndTailscale(t *testing.T) *fakeFederationAndTailscale {
 		wantSAToken:      "sa-token-fake-XXXX",
 		federationToken:  "fed-jwt-fake-XXXX",
 		federationStatus: http.StatusOK,
-		oauthStatus:      http.StatusOK,
+		exchangeStatus:   http.StatusOK,
 		mintStatus:       http.StatusOK,
 		tailscaleToken:   "tsapi-access-token",
 		mintKey:          "tskey-auth-fake-1",
@@ -55,7 +55,7 @@ func newFakeFederationAndTailscale(t *testing.T) *fakeFederationAndTailscale {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/auth/exchange/federation", f.handleFederation)
-	mux.HandleFunc("/api/v2/oauth/token", f.handleTailscaleOAuth)
+	mux.HandleFunc("/api/v2/oauth/token-exchange", f.handleTailscaleTokenExchange)
 	mux.HandleFunc("/api/v2/tailnet/", f.handleTailscaleMint)
 	f.server = httptest.NewServer(mux)
 	t.Cleanup(f.server.Close)
@@ -96,13 +96,13 @@ func (f *fakeFederationAndTailscale) handleFederation(w http.ResponseWriter, r *
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"token":      f.federationToken,
 		"expires_at": time.Now().Add(5 * time.Minute).Unix(),
-		"sub":        "system:serviceaccount:glimmung:infra-shared",
+		"sub":        "k8s:glimmung/infra-shared",
 		"aud":        body.Audience,
 	})
 }
 
-func (f *fakeFederationAndTailscale) handleTailscaleOAuth(w http.ResponseWriter, r *http.Request) {
-	atomic.AddInt32(&f.tailscaleOAuthHits, 1)
+func (f *fakeFederationAndTailscale) handleTailscaleTokenExchange(w http.ResponseWriter, r *http.Request) {
+	atomic.AddInt32(&f.tailscaleExchangeHits, 1)
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -111,26 +111,22 @@ func (f *fakeFederationAndTailscale) handleTailscaleOAuth(w http.ResponseWriter,
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	if r.Form.Get("grant_type") != "client_credentials" {
+	if r.Form.Get("client_id") != f.wantOIDCClientID {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	if r.Form.Get("client_assertion_type") != tailscaleJWTBearerAssertionType {
+	jwt := r.Form.Get("jwt")
+	if jwt == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	assertion := r.Form.Get("client_assertion")
-	if assertion == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-	f.lastAssertion.Store(assertion)
-	if assertion != f.federationToken {
+	f.lastJWT.Store(jwt)
+	if jwt != f.federationToken {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	if f.oauthStatus != http.StatusOK {
-		w.WriteHeader(f.oauthStatus)
+	if f.exchangeStatus != http.StatusOK {
+		w.WriteHeader(f.exchangeStatus)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -261,14 +257,14 @@ func TestTailscaleAuthKeyMinterMintsKeyEndToEnd(t *testing.T) {
 	if got := atomic.LoadInt32(&f.federationHits); got != 1 {
 		t.Fatalf("federationHits=%d", got)
 	}
-	if got := atomic.LoadInt32(&f.tailscaleOAuthHits); got != 1 {
-		t.Fatalf("tailscaleOAuthHits=%d", got)
+	if got := atomic.LoadInt32(&f.tailscaleExchangeHits); got != 1 {
+		t.Fatalf("tailscaleExchangeHits=%d", got)
 	}
 	if got := atomic.LoadInt32(&f.tailscaleMintHits); got != 1 {
 		t.Fatalf("tailscaleMintHits=%d", got)
 	}
-	if v := f.lastAssertion.Load(); v == nil || v.(string) != f.federationToken {
-		t.Fatalf("client_assertion=%v, want %q", v, f.federationToken)
+	if v := f.lastJWT.Load(); v == nil || v.(string) != f.federationToken {
+		t.Fatalf("jwt=%v, want %q", v, f.federationToken)
 	}
 }
 
@@ -283,8 +279,8 @@ func TestTailscaleAuthKeyMinterCachesAccessToken(t *testing.T) {
 	if got := atomic.LoadInt32(&f.federationHits); got != 1 {
 		t.Fatalf("federationHits=%d, want 1 (SA→JWT exchange should be cached behind the access token)", got)
 	}
-	if got := atomic.LoadInt32(&f.tailscaleOAuthHits); got != 1 {
-		t.Fatalf("tailscaleOAuthHits=%d, want 1 (access token should be cached)", got)
+	if got := atomic.LoadInt32(&f.tailscaleExchangeHits); got != 1 {
+		t.Fatalf("tailscaleExchangeHits=%d, want 1 (access token should be cached)", got)
 	}
 	if got := atomic.LoadInt32(&f.tailscaleMintHits); got != 3 {
 		t.Fatalf("tailscaleMintHits=%d, want 3", got)
@@ -304,16 +300,16 @@ func TestTailscaleAuthKeyMinterFederationError(t *testing.T) {
 	}
 }
 
-func TestTailscaleAuthKeyMinterTailscaleOAuthError(t *testing.T) {
+func TestTailscaleAuthKeyMinterTailscaleTokenExchangeError(t *testing.T) {
 	f := newFakeFederationAndTailscale(t)
-	f.oauthStatus = http.StatusUnauthorized
+	f.exchangeStatus = http.StatusUnauthorized
 	m := newTestMinter(t, f)
 	_, err := m.MintAuthKey(context.Background(), "tag:spirelens-orchestrator")
 	if err == nil {
 		t.Fatalf("expected error on tailscale 401")
 	}
-	if !strings.Contains(err.Error(), "tailscale jwt-bearer exchange") {
-		t.Fatalf("error should mention tailscale jwt-bearer: %v", err)
+	if !strings.Contains(err.Error(), "tailscale token exchange") {
+		t.Fatalf("error should mention tailscale token exchange: %v", err)
 	}
 }
 

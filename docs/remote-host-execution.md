@@ -185,10 +185,8 @@ in-process until just before its expiry):
    `iss=https://auth.romaine.life`, `aud=<the requested audience>`, and
    bounded `exp`.
 3. **Exchange for a Tailscale API access token.** Glimmung POSTs the
-   JWT to `https://api.tailscale.com/api/v2/oauth/token` with
-   `grant_type=client_credentials`,
-   `client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer`,
-   `client_assertion=<the JWT>` (RFC 7523). Tailscale validates the JWT
+   JWT to `https://api.tailscale.com/api/v2/oauth/token-exchange` with
+   `client_id=<oidc_client_id>` and `jwt=<the JWT>`. Tailscale validates the JWT
    against its OIDC trust credential (signature checked against the
    `iss`-discovered JWKS at
    `https://auth.romaine.life/.well-known/openid-configuration`).
