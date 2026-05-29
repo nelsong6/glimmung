@@ -36,7 +36,11 @@ func (s *inspectionSweepFakeStore) DeleteSlotInspectionsByLease(_ context.Contex
 	out := []SlotInspectionRecord{}
 	remaining := s.rows[:0]
 	for _, row := range s.rows {
-		if row.LeaseID == leaseID {
+		scope := row.Scope
+		if scope == "" {
+			scope = "lease"
+		}
+		if row.LeaseID == leaseID && scope == "lease" {
 			out = append(out, row)
 			continue
 		}
@@ -124,6 +128,41 @@ func TestSweepLeaseInspectionsHandlesNoRows(t *testing.T) {
 	sweepLeaseInspections(context.Background(), store, Lease{ID: "L-1"}, nil)
 	if len(writer.deletes) != 0 {
 		t.Fatalf("expected no deletes, got %v", writer.deletes)
+	}
+}
+
+func TestSweepLeaseInspectionsLeavesRunScopedRows(t *testing.T) {
+	prevWriter := inspectionSweepArtifactWriter()
+	t.Cleanup(func() { SetInspectionSweepArtifactWriter(prevWriter) })
+
+	store := &inspectionSweepFakeStore{}
+	store.rows = []SlotInspectionRecord{
+		{ID: "lease-i", LeaseID: "L-1", Scope: "lease", BlobPrefix: "inspections/L-1/lease-i", ReportBlobPath: "inspections/L-1/lease-i/report.json", ScreenshotBlobPath: "inspections/L-1/lease-i/screenshot.png"},
+		{ID: "run-i", LeaseID: "L-1", Scope: "run", RunID: "01R", BlobPrefix: "runs/p1/01R/inspections/run-i", ReportBlobPath: "runs/p1/01R/inspections/run-i/report.json", ScreenshotBlobPath: "runs/p1/01R/inspections/run-i/screenshot.png"},
+	}
+	writer := newInspectionFakeWriter()
+	writer.uploads["inspections/L-1/lease-i/report.json"] = []byte("r1")
+	writer.uploads["inspections/L-1/lease-i/screenshot.png"] = []byte("s1")
+	writer.uploads["runs/p1/01R/inspections/run-i/report.json"] = []byte("r2")
+	writer.uploads["runs/p1/01R/inspections/run-i/screenshot.png"] = []byte("s2")
+	SetInspectionSweepArtifactWriter(writer)
+
+	sweepLeaseInspections(context.Background(), store, Lease{ID: "L-1"}, nil)
+
+	// Run-scoped row survived.
+	if len(store.rows) != 1 || store.rows[0].ID != "run-i" {
+		t.Fatalf("expected run-scoped row to survive, got %+v", store.rows)
+	}
+	// Run-scoped blobs survived.
+	if _, ok := writer.uploads["runs/p1/01R/inspections/run-i/report.json"]; !ok {
+		t.Fatalf("run-scoped report wrongly deleted")
+	}
+	if _, ok := writer.uploads["runs/p1/01R/inspections/run-i/screenshot.png"]; !ok {
+		t.Fatalf("run-scoped screenshot wrongly deleted")
+	}
+	// Lease-scoped blobs gone.
+	if _, ok := writer.uploads["inspections/L-1/lease-i/report.json"]; ok {
+		t.Fatalf("lease-scoped report not deleted")
 	}
 }
 

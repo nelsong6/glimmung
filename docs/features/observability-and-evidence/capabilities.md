@@ -6,7 +6,7 @@ stable handle for planning, review, tests, incident follow-up, or retirement.
 
 ## durable-inspections
 
-Status: in progress
+Status: active
 
 Intent:
 Make every `inspect_browser_url` invocation a durable artifact record so the
@@ -28,15 +28,26 @@ Contract impact:
   evidence is still uploaded by agent runners via the stdout base64-tar
   side-channel; convergence onto a single write surface is a documented
   follow-up.
-- `slot_inspections` is the durable Postgres ledger for lease-scoped
-  inspections. Run-bound inspections (caller in a Run context) are not
-  tracked here in V1 because lease metadata does not carry a stable
-  `run_id` — that path is the documented follow-up alongside the
-  convergence above.
-- Lease-cleanup is the single retention boundary for free inspections:
-  every `slot_inspections` row plus its `report.json` + `screenshot.png`
-  is deleted as part of `cleanupTestSlotRuntime`. No wall-clock TTL, no
-  "unless referenced" branch.
+- `slot_inspections` is the durable Postgres ledger for every
+  inspection record. Lease-scoped (`scope='lease'`, `lease_id` set) and
+  run-scoped (`scope='run'`, `run_id` set) rows live in the same table;
+  the `scope` column distinguishes them at query time.
+- Run binding is **caller-declared** at POST time, not derived from
+  lease metadata. Test-slot leases intentionally live across multiple
+  runs (a slot is a session-owned reservation, not a run-owned
+  reservation), so the test-slot lease has no stable `run_id`. The
+  POST `/v1/inspections` handler accepts an optional `run_id` form
+  field; when supplied, glimmung validates the run exists under the
+  lease's project and writes the bytes under
+  `runs/<project>/<run_id>/inspections/<id>/...`. When absent, bytes
+  land under `inspections/<lease_id>/<id>/...` (the default).
+- Lease-cleanup is the retention boundary for **lease-scoped**
+  inspections: every `scope='lease'` row matching the lease + its
+  `report.json` + `screenshot.png` is deleted as part of
+  `cleanupTestSlotRuntime`. **Run-scoped rows survive lease cleanup**
+  and follow Run evidence retention semantics (the same as Run videos
+  and screenshots): no per-row sweep, governed by whatever global
+  retention policy the artifact store implements.
 - Artifact-path whitelist grows by one prefix (`inspections/`).
   `touchpoint_evidence` resolver canonicalizes `inspections/` refs into
   the standard `blob://artifacts/...` shape so a testing job that emits
@@ -59,5 +70,13 @@ Evidence:
 - `internal/server/route_inventory_test.go` — `POST /v1/inspections`,
   `GET /v1/inspections`, and `GET /v1/inspections/{inspection_id}`
   routes registered in the expected order.
-- Follow-up: run-scoped inspection prefix (`runs/<project>/<run>/inspections/...`)
-  once leases carry a stable `run_id`. Tracked under glimmung#143.
+- Run-scoped path evidence:
+  `internal/server/inspection_api_test.go::TestCreateInspectionRunScopedWritesUnderRunPrefix`
+  asserts run-bound bytes land under `runs/<project>/<run>/inspections/...`
+  and the ledger row carries `scope='run'` + `run_id`.
+  `TestCreateInspectionRunScopedRejectsMissingRun` and
+  `TestCreateInspectionRunScopedRejectsCrossProject` pin the
+  validation contract.
+  `internal/server/inspection_sweep_test.go::TestSweepLeaseInspectionsLeavesRunScopedRows`
+  pins the retention boundary: lease cleanup deletes lease-scoped rows
+  and blobs while run-scoped rows persist.

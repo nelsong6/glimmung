@@ -88,9 +88,33 @@ func (s *inspectionFakeStore) ListSlotInspections(_ context.Context, filter Slot
 		if filter.LeaseID != "" && row.LeaseID != filter.LeaseID {
 			continue
 		}
+		if filter.RunID != "" && row.RunID != filter.RunID {
+			continue
+		}
+		if filter.Scope != "" && row.Scope != filter.Scope {
+			continue
+		}
 		out = append(out, row)
 	}
 	return out, nil
+}
+
+// inspectionFakeRunResolver lets tests stub the run-id validation
+// hook without spinning up a real runs store.
+type inspectionFakeRunResolver struct {
+	knownRuns map[string]string // run_id -> project
+	err       error
+}
+
+func (r *inspectionFakeRunResolver) ResolveInspectionRunProject(_ context.Context, _, runID string) (string, error) {
+	if r.err != nil {
+		return "", r.err
+	}
+	project, ok := r.knownRuns[runID]
+	if !ok {
+		return "", ErrNotFound
+	}
+	return project, nil
 }
 
 // inspectionFakeWriter implements ArtifactWriter for the handler
@@ -144,6 +168,10 @@ func (r *inspectionFakeLeaseResolver) ResolveTestSlotLeaseByTankSession(_ contex
 }
 
 func buildInspectionRequest(t *testing.T, tankSessionID, project string, reportJSON, screenshot []byte, screenshotType string, headers map[string]string) *http.Request {
+	return buildInspectionRequestWithRun(t, tankSessionID, project, "", reportJSON, screenshot, screenshotType, headers)
+}
+
+func buildInspectionRequestWithRun(t *testing.T, tankSessionID, project, runID string, reportJSON, screenshot []byte, screenshotType string, headers map[string]string) *http.Request {
 	t.Helper()
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
@@ -155,6 +183,11 @@ func buildInspectionRequest(t *testing.T, tankSessionID, project string, reportJ
 	if project != "" {
 		if err := writer.WriteField("project", project); err != nil {
 			t.Fatalf("write project: %v", err)
+		}
+	}
+	if runID != "" {
+		if err := writer.WriteField("run_id", runID); err != nil {
+			t.Fatalf("write run_id: %v", err)
 		}
 	}
 	if reportJSON != nil {
@@ -379,6 +412,81 @@ func (s *inspectionFakeStateStore) ListLeases(context.Context) ([]Lease, error) 
 	out := make([]Lease, len(s.leases))
 	copy(out, s.leases)
 	return out, nil
+}
+
+func TestCreateInspectionRunScopedWritesUnderRunPrefix(t *testing.T) {
+	store := &inspectionFakeStore{}
+	writer := newInspectionFakeWriter()
+	resolver := &inspectionFakeLeaseResolver{lease: Lease{ID: "lease-1", Project: "p1", Metadata: map[string]any{"native_slot_name": "p1-slot-1"}}}
+	runs := &inspectionFakeRunResolver{knownRuns: map[string]string{"01R": "p1"}}
+
+	handler := createInspection(createInspectionDeps{store: store, leases: resolver, runs: runs, artifactWrite: writer})
+	rec := httptest.NewRecorder()
+	req := buildInspectionRequestWithRun(t, "sess-1", "p1", "01R", []byte(`{"final_url":"https://example.test/"}`), []byte("PNG-BYTES"), "image/png", map[string]string{
+		inspectionRequestIDHeader: "req-run",
+	})
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp inspectionResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Scope != "run" {
+		t.Fatalf("scope=%q want run", resp.Scope)
+	}
+	if resp.ScopeRef != "01R" {
+		t.Fatalf("scope_ref=%q want 01R", resp.ScopeRef)
+	}
+	wantReport := "/v1/artifacts/runs/p1/01R/inspections/" + resp.InspectionID + "/report.json"
+	if resp.ReportURL != wantReport {
+		t.Fatalf("report url=%q want=%q", resp.ReportURL, wantReport)
+	}
+	wantScreenshot := "/v1/artifacts/runs/p1/01R/inspections/" + resp.InspectionID + "/screenshot.png"
+	if resp.ScreenshotURL != wantScreenshot {
+		t.Fatalf("screenshot url=%q want=%q", resp.ScreenshotURL, wantScreenshot)
+	}
+	// Ledger persisted with run-scoped fields.
+	if store.insertRecorded.Scope != "run" || store.insertRecorded.RunID != "01R" {
+		t.Fatalf("ledger row: scope=%q run=%q", store.insertRecorded.Scope, store.insertRecorded.RunID)
+	}
+}
+
+func TestCreateInspectionRunScopedRejectsMissingRun(t *testing.T) {
+	store := &inspectionFakeStore{}
+	writer := newInspectionFakeWriter()
+	resolver := &inspectionFakeLeaseResolver{lease: Lease{ID: "lease-1", Project: "p1"}}
+	runs := &inspectionFakeRunResolver{knownRuns: map[string]string{}}
+	handler := createInspection(createInspectionDeps{store: store, leases: resolver, runs: runs, artifactWrite: writer})
+
+	req := buildInspectionRequestWithRun(t, "sess-1", "p1", "ghost", []byte("{}"), []byte("png"), "image/png", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(writer.uploads) != 0 {
+		t.Fatalf("uploads happened despite unknown run: %v", writer.uploads)
+	}
+}
+
+func TestCreateInspectionRunScopedRejectsCrossProject(t *testing.T) {
+	store := &inspectionFakeStore{}
+	writer := newInspectionFakeWriter()
+	resolver := &inspectionFakeLeaseResolver{lease: Lease{ID: "lease-1", Project: "p1"}}
+	// Run is registered under a different project.
+	runs := &inspectionFakeRunResolver{knownRuns: map[string]string{"01R": "p2"}}
+	handler := createInspection(createInspectionDeps{store: store, leases: resolver, runs: runs, artifactWrite: writer})
+
+	req := buildInspectionRequestWithRun(t, "sess-1", "p1", "01R", []byte("{}"), []byte("png"), "image/png", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(writer.uploads) != 0 {
+		t.Fatalf("uploads happened despite cross-project run: %v", writer.uploads)
+	}
 }
 
 func TestGetInspectionByIDReturnsDetail(t *testing.T) {

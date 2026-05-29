@@ -7,9 +7,10 @@ import (
 )
 
 // SlotInspectionRecord is the server-domain view of a row in the
-// slot_inspections ledger. Free (lease-scoped) inspections only;
-// run-bound inspections flow through the existing Run evidence
-// machinery and are not indexed here.
+// slot_inspections ledger. Both lease-scoped and run-scoped inspections
+// are indexed here; the `Scope` + `RunID` fields distinguish them at
+// query time. Run-scoped rows survive lease-cleanup sweeps; their
+// retention follows Run evidence semantics.
 type SlotInspectionRecord struct {
 	ID                    string
 	Project               string
@@ -17,6 +18,8 @@ type SlotInspectionRecord struct {
 	LeaseID               string
 	SessionID             string
 	RequestID             string
+	Scope                 string
+	RunID                 string
 	BlobPrefix            string
 	ReportBlobPath        string
 	ScreenshotBlobPath    string
@@ -46,5 +49,7 @@ type SlotInspectionStore interface {
 type SlotInspectionFilter struct {
 	Project string
 	LeaseID string
+	RunID   string
+	Scope   string
 	Limit   int
 }

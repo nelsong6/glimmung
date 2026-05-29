@@ -28,6 +28,8 @@ type SlotInspectionRow struct {
 	LeaseID               string
 	SessionID             string
 	RequestID             string
+	Scope                 string
+	RunID                 string
 	BlobPrefix            string
 	ReportBlobPath        string
 	ScreenshotBlobPath    string
@@ -54,14 +56,20 @@ func (s *SlotInspectionsStore) Insert(ctx context.Context, row SlotInspectionRow
 	if s == nil || s.pool == nil {
 		return SlotInspectionRow{}, fmt.Errorf("slot_inspections store not configured")
 	}
+	scope := row.Scope
+	if scope == "" {
+		scope = "lease"
+	}
 	const insertSQL = `
 		INSERT INTO slot_inspections (
 			id, project, slot, lease_id, session_id, request_id,
+			scope, run_id,
 			blob_prefix, report_blob_path, screenshot_blob_path,
 			screenshot_content_type, byte_size_screenshot, byte_size_report
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		RETURNING id, project, slot, lease_id, session_id, request_id,
+			scope, run_id,
 			blob_prefix, report_blob_path, screenshot_blob_path,
 			screenshot_content_type, byte_size_screenshot, byte_size_report,
 			created_at
@@ -69,10 +77,12 @@ func (s *SlotInspectionsStore) Insert(ctx context.Context, row SlotInspectionRow
 	var out SlotInspectionRow
 	err := s.pool.QueryRow(ctx, insertSQL,
 		row.ID, row.Project, row.Slot, row.LeaseID, row.SessionID, row.RequestID,
+		scope, row.RunID,
 		row.BlobPrefix, row.ReportBlobPath, row.ScreenshotBlobPath,
 		row.ScreenshotContentType, row.ByteSizeScreenshot, row.ByteSizeReport,
 	).Scan(
 		&out.ID, &out.Project, &out.Slot, &out.LeaseID, &out.SessionID, &out.RequestID,
+		&out.Scope, &out.RunID,
 		&out.BlobPrefix, &out.ReportBlobPath, &out.ScreenshotBlobPath,
 		&out.ScreenshotContentType, &out.ByteSizeScreenshot, &out.ByteSizeReport,
 		&out.CreatedAt,
@@ -96,6 +106,7 @@ func (s *SlotInspectionsStore) LookupByRequest(ctx context.Context, leaseID, req
 	}
 	const sql = `
 		SELECT id, project, slot, lease_id, session_id, request_id,
+			scope, run_id,
 			blob_prefix, report_blob_path, screenshot_blob_path,
 			screenshot_content_type, byte_size_screenshot, byte_size_report,
 			created_at
@@ -105,6 +116,7 @@ func (s *SlotInspectionsStore) LookupByRequest(ctx context.Context, leaseID, req
 	var out SlotInspectionRow
 	err := s.pool.QueryRow(ctx, sql, leaseID, requestID).Scan(
 		&out.ID, &out.Project, &out.Slot, &out.LeaseID, &out.SessionID, &out.RequestID,
+		&out.Scope, &out.RunID,
 		&out.BlobPrefix, &out.ReportBlobPath, &out.ScreenshotBlobPath,
 		&out.ScreenshotContentType, &out.ByteSizeScreenshot, &out.ByteSizeReport,
 		&out.CreatedAt,
@@ -126,6 +138,7 @@ func (s *SlotInspectionsStore) GetByID(ctx context.Context, id string) (SlotInsp
 	}
 	const sql = `
 		SELECT id, project, slot, lease_id, session_id, request_id,
+			scope, run_id,
 			blob_prefix, report_blob_path, screenshot_blob_path,
 			screenshot_content_type, byte_size_screenshot, byte_size_report,
 			created_at
@@ -135,6 +148,7 @@ func (s *SlotInspectionsStore) GetByID(ctx context.Context, id string) (SlotInsp
 	var out SlotInspectionRow
 	err := s.pool.QueryRow(ctx, sql, id).Scan(
 		&out.ID, &out.Project, &out.Slot, &out.LeaseID, &out.SessionID, &out.RequestID,
+		&out.Scope, &out.RunID,
 		&out.BlobPrefix, &out.ReportBlobPath, &out.ScreenshotBlobPath,
 		&out.ScreenshotContentType, &out.ByteSizeScreenshot, &out.ByteSizeReport,
 		&out.CreatedAt,
@@ -149,10 +163,10 @@ func (s *SlotInspectionsStore) GetByID(ctx context.Context, id string) (SlotInsp
 }
 
 // List returns rows newest-first, narrowed by the supplied filter.
-// Project and LeaseID filters are AND-combined; empty strings mean "no
-// filter on this dimension." Limit defaults to 50 when <= 0 and is
-// capped at 200 to keep list responses bounded.
-func (s *SlotInspectionsStore) List(ctx context.Context, project, leaseID string, limit int) ([]SlotInspectionRow, error) {
+// Project, LeaseID, RunID, and Scope filters are AND-combined; empty
+// strings mean "no filter on this dimension." Limit defaults to 50 when
+// <= 0 and is capped at 200 to keep list responses bounded.
+func (s *SlotInspectionsStore) List(ctx context.Context, project, leaseID, runID, scope string, limit int) ([]SlotInspectionRow, error) {
 	if s == nil || s.pool == nil {
 		return nil, nil
 	}
@@ -172,9 +186,18 @@ func (s *SlotInspectionsStore) List(ctx context.Context, project, leaseID string
 		args = append(args, leaseID)
 		where = append(where, fmt.Sprintf("lease_id = $%d", len(args)))
 	}
+	if strings.TrimSpace(runID) != "" {
+		args = append(args, runID)
+		where = append(where, fmt.Sprintf("run_id = $%d", len(args)))
+	}
+	if strings.TrimSpace(scope) != "" {
+		args = append(args, scope)
+		where = append(where, fmt.Sprintf("scope = $%d", len(args)))
+	}
 	args = append(args, limit)
 	sqlText := `
 		SELECT id, project, slot, lease_id, session_id, request_id,
+			scope, run_id,
 			blob_prefix, report_blob_path, screenshot_blob_path,
 			screenshot_content_type, byte_size_screenshot, byte_size_report,
 			created_at
@@ -194,6 +217,7 @@ func (s *SlotInspectionsStore) List(ctx context.Context, project, leaseID string
 		var row SlotInspectionRow
 		if err := rows.Scan(
 			&row.ID, &row.Project, &row.Slot, &row.LeaseID, &row.SessionID, &row.RequestID,
+			&row.Scope, &row.RunID,
 			&row.BlobPrefix, &row.ReportBlobPath, &row.ScreenshotBlobPath,
 			&row.ScreenshotContentType, &row.ByteSizeScreenshot, &row.ByteSizeReport,
 			&row.CreatedAt,
@@ -208,9 +232,11 @@ func (s *SlotInspectionsStore) List(ctx context.Context, project, leaseID string
 	return out, nil
 }
 
-// DeleteByLease removes every row whose lease_id matches and returns
-// them. Callers iterate the returned blob paths and delete each blob
-// from object storage. Idempotent at the row level (re-running after a
+// DeleteByLease removes every lease-scoped row whose lease_id matches
+// and returns them. Run-scoped rows are intentionally excluded — they
+// live with Run evidence retention semantics, not the lease lifecycle.
+// Callers iterate the returned blob paths and delete each blob from
+// object storage. Idempotent at the row level (re-running after a
 // partial sweep returns nothing because the rows are already gone).
 func (s *SlotInspectionsStore) DeleteByLease(ctx context.Context, leaseID string) ([]SlotInspectionRow, error) {
 	if s == nil || s.pool == nil {
@@ -218,7 +244,7 @@ func (s *SlotInspectionsStore) DeleteByLease(ctx context.Context, leaseID string
 	}
 	const sql = `
 		DELETE FROM slot_inspections
-		WHERE lease_id = $1
+		WHERE lease_id = $1 AND scope = 'lease'
 		RETURNING id, project, slot, lease_id, session_id, request_id,
 			blob_prefix, report_blob_path, screenshot_blob_path,
 			screenshot_content_type, byte_size_screenshot, byte_size_report,
@@ -234,6 +260,7 @@ func (s *SlotInspectionsStore) DeleteByLease(ctx context.Context, leaseID string
 		var row SlotInspectionRow
 		if err := rows.Scan(
 			&row.ID, &row.Project, &row.Slot, &row.LeaseID, &row.SessionID, &row.RequestID,
+			&row.Scope, &row.RunID,
 			&row.BlobPrefix, &row.ReportBlobPath, &row.ScreenshotBlobPath,
 			&row.ScreenshotContentType, &row.ByteSizeScreenshot, &row.ByteSizeReport,
 			&row.CreatedAt,
