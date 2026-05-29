@@ -571,7 +571,7 @@ function returnTargetFromState(state: unknown, currentPath: string): { to: strin
   return { to: candidate.returnTo, label };
 }
 
-function buildBreadcrumbs(pathname: string): Breadcrumb[] {
+export function buildBreadcrumbs(pathname: string): Breadcrumb[] {
   const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
   if (parts.length === 0) return [{ label: "Home" }];
   if (parts[0] === "dashboard") {
@@ -623,7 +623,7 @@ function buildBreadcrumbs(pathname: string): Breadcrumb[] {
           label: "Runs",
           to: `/projects/${encodeURIComponent(parts[1] ?? "")}/issues/${encodeURIComponent(parts[3] ?? "")}/runs`,
         });
-        if (parts[5]) crumbs.push({ label: runSlugDisplay(parts[5]) });
+        appendIssueRunBreadcrumbs(crumbs, parts);
       } else if (parts[4] === "workflow") {
         crumbs.push({
           label: "Workflow",
@@ -656,6 +656,48 @@ function buildBreadcrumbs(pathname: string): Breadcrumb[] {
     return [{ label: "Home", to: "/" }, { label: "Playbooks", to: "/playbooks" }];
   }
   return [{ label: "Home", to: "/" }, { label: parts[0] }];
+}
+
+function appendIssueRunBreadcrumbs(crumbs: Breadcrumb[], parts: string[]): void {
+  const project = encodeURIComponent(parts[1] ?? "");
+  const issue = encodeURIComponent(parts[3] ?? "");
+  const runId = parts[5];
+  if (!runId) return;
+
+  const runsPath = `/projects/${project}/issues/${issue}/runs`;
+  const runPath = `${runsPath}/${encodeURIComponent(runId)}`;
+  const hasCycle = parts[6] === "cycles" && Boolean(parts[7]);
+  crumbs.push({
+    label: hasCycle ? `run ${runId}` : runSlugDisplay(runId),
+    to: parts[6] ? runPath : undefined,
+  });
+
+  if (!hasCycle) return;
+  const cycleId = parts[7] ?? "";
+  const cyclePath = `${runPath}/cycles/${encodeURIComponent(cycleId)}`;
+  crumbs.push({
+    label: `cycle ${cycleId}`,
+    to: parts[8] ? cyclePath : undefined,
+  });
+
+  if (parts[8] !== "phases" || !parts[9]) return;
+  const phaseId = parts[9];
+  const phasePath = `${cyclePath}/phases/${encodeURIComponent(phaseId)}`;
+  crumbs.push({
+    label: `phase ${phaseId}`,
+    to: parts[10] ? phasePath : undefined,
+  });
+
+  if (parts[10] !== "jobs" || !parts[11]) return;
+  const jobId = parts[11];
+  const jobPath = `${phasePath}/jobs/${encodeURIComponent(jobId)}`;
+  crumbs.push({
+    label: `job ${jobId}`,
+    to: parts[12] ? jobPath : undefined,
+  });
+
+  if (parts[12] !== "steps" || !parts[13]) return;
+  crumbs.push({ label: `step ${parts[13]}` });
 }
 
 function HomeRoute() {

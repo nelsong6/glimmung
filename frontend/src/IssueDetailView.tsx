@@ -2167,6 +2167,7 @@ function RunExecutionView({
       <ProjectionPipelineDag
         run={run}
         selectedKey={selectedKey}
+        selectedPhaseName={selectedPhase?.name ?? null}
         onSelectNode={onSelectNode}
       />
       <div ref={inspectorRef}>
@@ -2180,6 +2181,7 @@ function RunExecutionView({
             issueNumber={issueNumber}
             repo={repo}
             onClose={() => onSelectNode({})}
+            onSelectStep={(jobId, stepSlug) => onSelectNode({ phase: selectedPhase.name, job: jobId, step: stepSlug })}
           />
         ) : (
           <ProjectionRunMetaSummary run={run} repo={repo} />
@@ -2192,10 +2194,12 @@ function RunExecutionView({
 function ProjectionPipelineDag({
   run,
   selectedKey,
+  selectedPhaseName,
   onSelectNode,
 }: {
   run: RunProjectionRun;
   selectedKey: string | null;
+  selectedPhaseName: string | null;
   onSelectNode: (selection: ProjectionSelection) => void;
 }) {
   const executionPhaseByName = useMemo(() => {
@@ -2256,6 +2260,8 @@ function ProjectionPipelineDag({
         phases={graphModel.phases}
         renderPhase={renderPhase}
         ariaLabel="run execution"
+        selectedPhaseName={selectedPhaseName}
+        onSelectPhase={(phase) => onSelectNode({ phase: phase.name })}
         entryPhaseName={run.current_phase ?? null}
         entryArrows={graphModel.entryArrows}
         recycleArrows={graphModel.recycleArrows}
@@ -2335,6 +2341,7 @@ function ProjectionInspector({
   issueNumber,
   repo,
   onClose,
+  onSelectStep,
 }: {
   run: RunProjectionRun;
   phase: RunProjectionPhase;
@@ -2344,6 +2351,7 @@ function ProjectionInspector({
   issueNumber: number | null;
   repo: string | null;
   onClose: () => void;
+  onSelectStep: (jobId: string, stepSlug: string) => void;
 }) {
   const latestAttempt = phase.attempts[phase.attempts.length - 1] ?? null;
   const selectedJob = job ?? phase.jobs[0] ?? null;
@@ -2448,11 +2456,13 @@ function ProjectionInspector({
             live={selectedJob.state === "active" || selectedJob.state === "dispatching"}
             selectedJobId={selectedJob.id}
             selectedStepSlug={step?.slug ?? null}
+            onSelectStep={onSelectStep}
           />
         ) : (
           <PlannedNativeJobInspector
             job={nativeJob}
             selectedStepSlug={step?.slug ?? null}
+            onSelectStep={onSelectStep}
           />
         )
       ) : (
@@ -3369,6 +3379,7 @@ function NativeJobInspector({
   live,
   selectedJobId = null,
   selectedStepSlug = null,
+  onSelectStep,
 }: {
   project: string;
   runId: string;
@@ -3380,6 +3391,7 @@ function NativeJobInspector({
   live: boolean;
   selectedJobId?: string | null;
   selectedStepSlug?: string | null;
+  onSelectStep?: (jobId: string, stepSlug: string) => void;
 }) {
   const [logs, setLogs] = useState<NativeRunEventsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -3492,7 +3504,10 @@ function NativeJobInspector({
                 <button
                   type="button"
                   className={`step-row ${nativeStepRowClass(step.state ?? "")}${key === selected?.key ? " selected" : ""}`}
-                  onClick={() => setSelectedKey(key)}
+                  onClick={() => {
+                    setSelectedKey(key);
+                    onSelectStep?.(job.job_id, step.slug);
+                  }}
                 >
                   <span>{nativeStepGlyph(step.state ?? "")}</span>
                   <strong>
@@ -3522,9 +3537,11 @@ function NativeJobInspector({
 function PlannedNativeJobInspector({
   job,
   selectedStepSlug = null,
+  onSelectStep,
 }: {
   job: NativeAttemptJob;
   selectedStepSlug?: string | null;
+  onSelectStep?: (jobId: string, stepSlug: string) => void;
 }) {
   const stepRefs = useMemo(() => nativeStepRefs([job]), [job]);
   const defaultSelection = useMemo(
@@ -3569,7 +3586,10 @@ function PlannedNativeJobInspector({
                 <button
                   type="button"
                   className={`step-row ${nativeStepRowClass(step.state ?? "")}${key === selected?.key ? " selected" : ""}`}
-                  onClick={() => setSelectedKey(key)}
+                  onClick={() => {
+                    setSelectedKey(key);
+                    onSelectStep?.(refJob.job_id, step.slug);
+                  }}
                 >
                   <span>{nativeStepGlyph(step.state ?? "")}</span>
                   <strong>
