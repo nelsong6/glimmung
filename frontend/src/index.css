@@ -1713,6 +1713,9 @@ h2 .inline-action,
   flex-wrap: wrap;
   gap: 8px;
   min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 .breadcrumb-return {
   flex: 0 0 auto;
@@ -2097,6 +2100,9 @@ h2 .inline-action,
   border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
   border-radius: 5px;
 }
+.dag-phase.selected {
+  border-color: var(--state-success-fg);
+}
 .dag-phase-parallel {
   border-left: 2px solid var(--state-info-fg);
 }
@@ -2106,6 +2112,19 @@ h2 .inline-action,
   justify-content: space-between;
   gap: 10px;
   min-height: 18px;
+}
+.dag-phase-head-button {
+  width: 100%;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+.dag-phase-head-button:hover .dag-phase-title,
+.dag-phase-head-button.selected .dag-phase-title {
+  color: var(--state-success-fg);
 }
 .dag-phase-kicker {
   color: var(--fg-dimmer);

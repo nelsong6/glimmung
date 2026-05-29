@@ -22,6 +22,7 @@ import { Link, useLocation, useNavigate, useOutletContext, useParams } from "rea
 import { authedFetch, currentConfig } from "./auth";
 import { lokiExploreUrl } from "./grafanaLinks";
 import { PhaseGraph, type PhaseGraphPhase } from "./PhaseGraph";
+import { issueRunSelectionPath } from "./routes";
 import {
   runTopologyToPhaseGraphModel,
   type RunProjectionTopologySource,
@@ -2169,6 +2170,7 @@ function RunExecutionView({
       <ProjectionPipelineDag
         run={run}
         selectedKey={selectedKey}
+        selectedPhaseName={selectedPhase?.name ?? null}
         onSelectNode={onSelectNode}
       />
       <div ref={inspectorRef}>
@@ -2182,6 +2184,7 @@ function RunExecutionView({
             issueNumber={issueNumber}
             repo={repo}
             onClose={() => onSelectNode({})}
+            onSelectStep={(jobId, stepSlug) => onSelectNode({ phase: selectedPhase.name, job: jobId, step: stepSlug })}
           />
         ) : (
           <ProjectionRunMetaSummary run={run} repo={repo} />
@@ -2194,10 +2197,12 @@ function RunExecutionView({
 function ProjectionPipelineDag({
   run,
   selectedKey,
+  selectedPhaseName,
   onSelectNode,
 }: {
   run: RunProjectionRun;
   selectedKey: string | null;
+  selectedPhaseName: string | null;
   onSelectNode: (selection: ProjectionSelection) => void;
 }) {
   const executionPhaseByName = useMemo(() => {
@@ -2214,7 +2219,7 @@ function ProjectionPipelineDag({
           name: job.name ?? job.id,
           state: job.state,
           reason: job.reason,
-          selection: { phase: phase.name, job: job.id, step: preferredProjectionStepSlug(job) },
+          selection: { phase: phase.name, job: job.id },
         }))
       : (graphPhase.jobs && graphPhase.jobs.length > 0
           ? graphPhase.jobs
@@ -2224,7 +2229,7 @@ function ProjectionPipelineDag({
           name: job.name ?? job.id,
           state: phase?.state ?? "not_started",
           reason: phase?.reason ?? null,
-          selection: { phase: graphPhase.name, job: job.id, step: "job" },
+          selection: { phase: graphPhase.name, job: job.id },
         }));
     return (
       <>
@@ -2258,28 +2263,13 @@ function ProjectionPipelineDag({
         phases={graphModel.phases}
         renderPhase={renderPhase}
         ariaLabel="run execution"
+        selectedPhaseName={selectedPhaseName}
+        onSelectPhase={(phase) => onSelectNode({ phase: phase.name })}
         entryPhaseName={run.current_phase ?? null}
         entryArrows={graphModel.entryArrows}
         recycleArrows={graphModel.recycleArrows}
       />
     </div>
-  );
-}
-
-function preferredProjectionStepSlug(job: RunProjectionPhase["jobs"][number]): string | null {
-  const observedStep = (
-    job.steps.find((step) => step.state === "active")
-    ?? job.steps.find((step) => step.state === "failed")
-    ?? job.steps.find((step) => step.state === "dispatching" || step.state === "claimed")
-  );
-  if (observedStep) return observedStep.slug;
-  if (job.state === "failed" && isDispatchFailureReason(job.reason)) {
-    return null;
-  }
-  return (
-    job.steps.find((step) => step.state === "not_started")?.slug
-    ?? job.steps[0]?.slug
-    ?? null
   );
 }
 
@@ -2338,6 +2328,7 @@ function ProjectionInspector({
   issueNumber,
   repo,
   onClose,
+  onSelectStep,
 }: {
   run: RunProjectionRun;
   phase: RunProjectionPhase;
@@ -2347,6 +2338,7 @@ function ProjectionInspector({
   issueNumber: number | null;
   repo: string | null;
   onClose: () => void;
+  onSelectStep: (jobId: string, stepSlug: string) => void;
 }) {
   const latestAttempt = phase.attempts[phase.attempts.length - 1] ?? null;
   const selectedJob = job ?? phase.jobs[0] ?? null;
@@ -2451,11 +2443,13 @@ function ProjectionInspector({
             live={selectedJob.state === "active" || selectedJob.state === "dispatching"}
             selectedJobId={selectedJob.id}
             selectedStepSlug={step?.slug ?? null}
+            onSelectStep={onSelectStep}
           />
         ) : (
           <PlannedNativeJobInspector
             job={nativeJob}
             selectedStepSlug={step?.slug ?? null}
+            onSelectStep={onSelectStep}
           />
         )
       ) : (
@@ -3119,22 +3113,20 @@ function projectionCycleSegment(run: RunProjectionRun): string {
 }
 
 function projectionRunCyclePath(baseUrl: string, run: RunProjectionRun): string {
-  const prefix = baseUrl || "";
-  return `${prefix}/runs/${encodeURIComponent(projectionRunNumberSegment(run))}/cycles/${encodeURIComponent(projectionCycleSegment(run))}`;
+  return issueRunSelectionPath(baseUrl, {
+    runId: projectionRunNumberSegment(run),
+    cycleId: projectionCycleSegment(run),
+  });
 }
 
 function projectionSelectionPath(baseUrl: string, run: RunProjectionRun, selection: ProjectionSelection): string {
-  let path = projectionRunCyclePath(baseUrl, run);
-  if (selection.phase) {
-    path += `/phases/${encodeURIComponent(selection.phase)}`;
-  }
-  if (selection.phase && selection.job) {
-    path += `/jobs/${encodeURIComponent(selection.job)}`;
-  }
-  if (selection.phase && selection.job && selection.step) {
-    path += `/steps/${encodeURIComponent(selection.step)}`;
-  }
-  return path;
+  return issueRunSelectionPath(baseUrl, {
+    runId: projectionRunNumberSegment(run),
+    cycleId: projectionCycleSegment(run),
+    phaseId: selection.phase,
+    jobId: selection.job,
+    stepId: selection.step,
+  });
 }
 
 function projectionRunLabel(run: RunProjectionRun): string {
@@ -3372,6 +3364,7 @@ function NativeJobInspector({
   live,
   selectedJobId = null,
   selectedStepSlug = null,
+  onSelectStep,
 }: {
   project: string;
   runId: string;
@@ -3383,6 +3376,7 @@ function NativeJobInspector({
   live: boolean;
   selectedJobId?: string | null;
   selectedStepSlug?: string | null;
+  onSelectStep?: (jobId: string, stepSlug: string) => void;
 }) {
   const [logs, setLogs] = useState<NativeRunEventsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -3495,7 +3489,10 @@ function NativeJobInspector({
                 <button
                   type="button"
                   className={`step-row ${nativeStepRowClass(step.state ?? "")}${key === selected?.key ? " selected" : ""}`}
-                  onClick={() => setSelectedKey(key)}
+                  onClick={() => {
+                    setSelectedKey(key);
+                    onSelectStep?.(job.job_id, step.slug);
+                  }}
                 >
                   <span>{nativeStepGlyph(step.state ?? "")}</span>
                   <strong>
@@ -3525,9 +3522,11 @@ function NativeJobInspector({
 function PlannedNativeJobInspector({
   job,
   selectedStepSlug = null,
+  onSelectStep,
 }: {
   job: NativeAttemptJob;
   selectedStepSlug?: string | null;
+  onSelectStep?: (jobId: string, stepSlug: string) => void;
 }) {
   const stepRefs = useMemo(() => nativeStepRefs([job]), [job]);
   const defaultSelection = useMemo(
@@ -3572,7 +3571,10 @@ function PlannedNativeJobInspector({
                 <button
                   type="button"
                   className={`step-row ${nativeStepRowClass(step.state ?? "")}${key === selected?.key ? " selected" : ""}`}
-                  onClick={() => setSelectedKey(key)}
+                  onClick={() => {
+                    setSelectedKey(key);
+                    onSelectStep?.(refJob.job_id, step.slug);
+                  }}
                 >
                   <span>{nativeStepGlyph(step.state ?? "")}</span>
                   <strong>

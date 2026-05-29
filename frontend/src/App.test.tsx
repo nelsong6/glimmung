@@ -7,6 +7,7 @@ import {
   App,
   CONNECTION_DEAD_AFTER_MS,
   CONNECTION_STALE_AFTER_MS,
+  buildBreadcrumbs,
   connectionStateFromSnapshotClock,
 } from "./App";
 import { installMockFetch, isMockMode } from "./mockApi";
@@ -37,6 +38,56 @@ describe("mock mode", () => {
     window.history.pushState({}, "", "/");
 
     expect(isMockMode()).toBe(false);
+  });
+});
+
+describe("breadcrumbs", () => {
+  it("tracks issue run selections down to phase, job, and step", () => {
+    const jobCrumbs = buildBreadcrumbs(
+      "/projects/ambience/issues/170/runs/3/cycles/3/phases/env-prep/jobs/env-prep",
+    );
+    expect(jobCrumbs.map((crumb) => crumb.label)).toEqual([
+      "Home",
+      "Projects",
+      "ambience",
+      "Issues",
+      "#170",
+      "Runs",
+      "run 3",
+      "cycle 3",
+      "phase env-prep",
+      "job env-prep",
+    ]);
+
+    const crumbs = buildBreadcrumbs(
+      "/projects/ambience/issues/170/runs/3/cycles/3/phases/env-prep/jobs/env-prep/steps/clone-repo",
+    );
+
+    expect(crumbs.map((crumb) => crumb.label)).toEqual([
+      "Home",
+      "Projects",
+      "ambience",
+      "Issues",
+      "#170",
+      "Runs",
+      "run 3",
+      "cycle 3",
+      "phase env-prep",
+      "job env-prep",
+      "step clone-repo",
+    ]);
+    expect(crumbs[7]).toEqual({
+      label: "cycle 3",
+      to: "/projects/ambience/issues/170/runs/3/cycles/3",
+    });
+    expect(crumbs[8]).toEqual({
+      label: "phase env-prep",
+      to: "/projects/ambience/issues/170/runs/3/cycles/3/phases/env-prep",
+    });
+    expect(crumbs[9]).toEqual({
+      label: "job env-prep",
+      to: "/projects/ambience/issues/170/runs/3/cycles/3/phases/env-prep/jobs/env-prep",
+    });
   });
 });
 

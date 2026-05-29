@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Outlet, Route, Routes, useLocation } from "react-router-dom";
 
 import { IssueDetailView } from "./IssueDetailView";
+import { ISSUE_DETAIL_CHILD_ROUTES } from "./routes";
 
 const issueDetail = {
   ref: "ambience#172",
@@ -338,7 +339,7 @@ describe("IssueDetailView run execution graph", () => {
     expect(within(oldestCells[1]).getByRole("button")).toHaveTextContent(/^1$/);
   });
 
-  it("routes a dispatching job click to its selected step log", async () => {
+  it("routes a dispatching job click to its job path and keeps step clicks specific", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url =
         typeof input === "string"
@@ -363,11 +364,49 @@ describe("IssueDetailView run execution graph", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("path")).toHaveTextContent(
-        "/projects/ambience/issues/172/runs/7/cycles/1/phases/env-prep/jobs/env-prep/steps/clone-repo",
+        "/projects/ambience/issues/172/runs/7/cycles/1/phases/env-prep/jobs/env-prep",
       );
     });
     expect(await screen.findByText("native job inspector")).toBeInTheDocument();
     expect(await screen.findByText(/cloning repo/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /Build validation image/ }));
+    await waitFor(() => {
+      expect(screen.getByTestId("path")).toHaveTextContent(
+        "/projects/ambience/issues/172/runs/7/cycles/1/phases/env-prep/jobs/env-prep/steps/build-validation-image",
+      );
+    });
+  });
+
+  it("routes a phase header click to its phase breadcrumb path", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string"
+          ? new URL(input, "https://glimmung.test")
+          : input instanceof URL
+            ? input
+            : new URL(input.url);
+      if (url.pathname === "/v1/issues/by-number/ambience/172") return json(issueDetail);
+      if (url.pathname === "/v1/issues/by-number/ambience/172/graph") return json(issueGraph);
+      if (url.pathname === "/v1/projects/ambience/issues/172/runs/7/cycles/1/graph") return json(runProjection);
+      if (url.pathname === "/v1/workflows") return json([]);
+      if (url.pathname === "/v1/projects/ambience/issues/172/runs/7.1/native/events") return json(nativeEvents);
+      throw new Error(`unhandled fetch ${url.pathname}`);
+    }));
+
+    renderIssueDetail("/projects/ambience/issues/172/runs/7/cycles/1");
+
+    const phaseTitle = await screen.findByText("env-prep", { selector: ".dag-phase-title" });
+    const phaseButton = phaseTitle.closest("button");
+    if (!phaseButton) throw new Error("missing phase header button");
+    await userEvent.click(phaseButton);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("path")).toHaveTextContent(
+        "/projects/ambience/issues/172/runs/7/cycles/1/phases/env-prep",
+      );
+    });
+    expect(await screen.findByText("native job inspector")).toBeInTheDocument();
   });
 
   it("surfaces completed job cost in the selected job log section", async () => {
@@ -458,13 +497,20 @@ describe("IssueDetailView run execution graph", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("path")).toHaveTextContent(
-        "/projects/ambience/issues/172/runs/7/cycles/1/phases/agent-execute/jobs/agent/steps/checkout",
+        "/projects/ambience/issues/172/runs/7/cycles/1/phases/agent-execute/jobs/agent",
       );
     });
     expect(await screen.findByText("native job inspector")).toBeInTheDocument();
     expect(screen.getByText("planned")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Checkout workspace/ })).toBeInTheDocument();
     expect(screen.getByText(/No hot native events recorded/)).toBeInTheDocument();
+
+    await userEvent.click(within(screen.getByLabelText("native job steps")).getByRole("button", { name: /Run agent/ }));
+    await waitFor(() => {
+      expect(screen.getByTestId("path")).toHaveTextContent(
+        "/projects/ambience/issues/172/runs/7/cycles/1/phases/agent-execute/jobs/agent/steps/run-agent",
+      );
+    });
   });
 });
 
@@ -474,16 +520,16 @@ function renderIssueDetail(initialPath: string) {
       <Routes>
         <Route element={<TestLayout />}>
           <Route path="/projects/:project/issues/:issueNumber" element={<IssueDetailView />}>
-            <Route path="summary" element={null} />
-            <Route path="runs" element={null} />
-            <Route path="runs/:runId" element={null} />
-            <Route path="runs/:runId/cycles/:cycleId" element={null} />
-            <Route path="runs/:runId/cycles/:cycleId/phases/:phaseId" element={null} />
-            <Route path="runs/:runId/cycles/:cycleId/phases/:phaseId/jobs/:jobId" element={null} />
-            <Route path="runs/:runId/cycles/:cycleId/phases/:phaseId/jobs/:jobId/steps/:stepId" element={null} />
-            <Route path="workflow" element={null} />
-            <Route path="workflow/:workflowRunId" element={null} />
-            <Route path="touchpoint" element={null} />
+            <Route path={ISSUE_DETAIL_CHILD_ROUTES.summary} element={null} />
+            <Route path={ISSUE_DETAIL_CHILD_ROUTES.runs} element={null} />
+            <Route path={ISSUE_DETAIL_CHILD_ROUTES.run} element={null} />
+            <Route path={ISSUE_DETAIL_CHILD_ROUTES.runCycle} element={null} />
+            <Route path={ISSUE_DETAIL_CHILD_ROUTES.runPhase} element={null} />
+            <Route path={ISSUE_DETAIL_CHILD_ROUTES.runJob} element={null} />
+            <Route path={ISSUE_DETAIL_CHILD_ROUTES.runStep} element={null} />
+            <Route path={ISSUE_DETAIL_CHILD_ROUTES.workflow} element={null} />
+            <Route path={ISSUE_DETAIL_CHILD_ROUTES.workflowRun} element={null} />
+            <Route path={ISSUE_DETAIL_CHILD_ROUTES.touchpoint} element={null} />
           </Route>
         </Route>
       </Routes>

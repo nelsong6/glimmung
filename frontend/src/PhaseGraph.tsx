@@ -55,6 +55,8 @@ export type PhaseGraphProps = {
   phaseRef?: (phase: PhaseGraphPhase, el: HTMLDivElement | null) => void;
   dagClassName?: string;
   ariaLabel?: string;
+  selectedPhaseName?: string | null;
+  onSelectPhase?: (phase: PhaseGraphPhase) => void;
   entryPhaseName?: string | null;
   entryArrows?: EntryArrow[];
   recycleArrows?: RecycleArrow[];
@@ -66,6 +68,8 @@ type PhaseNodeData = {
   title: string;
   renderPhase: (phase: PhaseGraphPhase) => ReactNode;
   phaseRef?: (phase: PhaseGraphPhase, el: HTMLDivElement | null) => void;
+  selectedPhaseName?: string | null;
+  onSelectPhase?: (phase: PhaseGraphPhase) => void;
   recycleTargets: number;
 };
 
@@ -210,9 +214,17 @@ function phaseHandles(height: number, recycleTargets: number): GraphNodeHandle[]
 
 function PhaseFlowNode({ data }: NodeProps<Node<PhaseNodeData>>) {
   const hasParallelJobs = data.col.some((phase) => (phase.jobs?.length ?? 0) > 1);
+  const selected = data.col.some((phase) => phase.name === data.selectedPhaseName);
+  const primaryPhase = data.col[0] ?? null;
+  const phaseHead = (
+    <>
+      <span className="dag-phase-title">{data.title}</span>
+      <span className="dag-phase-kicker">phase</span>
+    </>
+  );
   return (
     <div
-      className={`dag-phase dag-phase-column${hasParallelJobs ? " dag-phase-parallel" : ""}`}
+      className={`dag-phase dag-phase-column${hasParallelJobs ? " dag-phase-parallel" : ""}${selected ? " selected" : ""}`}
       ref={(el) => {
         for (const phase of data.col) data.phaseRef?.(phase, el);
       }}
@@ -236,10 +248,18 @@ function PhaseFlowNode({ data }: NodeProps<Node<PhaseNodeData>>) {
           style={{ top: `${recycleHandleTopPercent(idx, data.recycleTargets)}%` }}
         />
       ))}
-      <div className="dag-phase-head">
-        <span className="dag-phase-title">{data.title}</span>
-        <span className="dag-phase-kicker">phase</span>
-      </div>
+      {data.onSelectPhase && primaryPhase ? (
+        <button
+          type="button"
+          className={`dag-phase-head dag-phase-head-button${selected ? " selected" : ""}`}
+          onClick={() => data.onSelectPhase?.(primaryPhase)}
+          aria-pressed={selected}
+        >
+          {phaseHead}
+        </button>
+      ) : (
+        <div className="dag-phase-head">{phaseHead}</div>
+      )}
       <div className="dag-phase-body">
         {data.col.map((phase) => (
           <Fragment key={phase.name}>{data.renderPhase(phase)}</Fragment>
@@ -384,6 +404,8 @@ export function PhaseGraph({
   phaseRef,
   dagClassName,
   ariaLabel,
+  selectedPhaseName = null,
+  onSelectPhase,
   entryPhaseName = null,
   entryArrows = [],
   recycleArrows = [],
@@ -474,12 +496,14 @@ export function PhaseGraph({
           title: col.length > 1 ? `phase ${idx + 1}` : (col[0]?.name ?? `phase ${idx + 1}`),
           renderPhase,
           phaseRef,
+          selectedPhaseName,
+          onSelectPhase,
           recycleTargets,
         },
       };
     });
     return [...entryNodes, ...phaseNodes];
-  }, [columns, leftGutter, nodeHeights, phaseRef, phaseToColumn, recycleTargetCounts, renderPhase, visibleEntryArrows]);
+  }, [columns, leftGutter, nodeHeights, onSelectPhase, phaseRef, phaseToColumn, recycleTargetCounts, renderPhase, selectedPhaseName, visibleEntryArrows]);
 
   const edges = useMemo<GraphEdge[]>(() => {
     const out: GraphEdge[] = [];
