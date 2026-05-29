@@ -103,54 +103,32 @@ func TestInjectOGTags(t *testing.T) {
 	}
 }
 
-func TestRunOGImageRendersSVG(t *testing.T) {
+// TestRetiredOGSVGRouteStaysDeleted is the migration guard for the
+// retired SVG OG renderer. Per .tank/docs/migration-policy.md the old
+// /og/runs/.../{slug}.svg surface is deleted end to end. A live route
+// that silently serves a different format would be the "fallback /
+// compatibility" smell the policy rejects, so the assertion here is:
+// the SVG URL returns 404 and the response body is not SVG.
+func TestRetiredOGSVGRouteStaysDeleted(t *testing.T) {
 	now := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
 	store := &fakeRunStore{rows: []RunReport{{
-		Ref:               "glimmung#141/runs/3/report",
-		Project:           "glimmung",
-		RunRef:            "glimmung#141/runs/3",
-		RunNumber:         intPtr(3),
-		Workflow:          "issue-agent",
-		IssueRef:          stringPtr("glimmung#141"),
-		IssueNumber:       intPtr(141),
-		State:             "in_progress",
-		CurrentPhase:      stringPtr("implement"),
-		AttemptsCount:     2,
-		CumulativeCostUSD: 1.23,
-		StartedAt:         now,
-		UpdatedAt:         now,
-		PhaseExecutions: []RunPhaseExecution{
-			{Name: "plan", Kind: "plan", State: "completed"},
-			{Name: "implement", Kind: "code", State: "in_progress"},
-			{Name: "verify", Kind: "verify", State: "pending"},
-		},
+		Project:     "glimmung",
+		Workflow:    "issue-agent",
+		IssueNumber: intPtr(141),
+		State:       "passed",
+		StartedAt:   now,
+		UpdatedAt:   now,
 	}}}
 	handler := NewWithStore(Settings{}, store)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/og/runs/glimmung/141/3.svg", nil))
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("retired SVG URL must 404, got status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if got := rec.Header().Get("Content-Type"); !strings.HasPrefix(got, "image/svg+xml") {
-		t.Fatalf("content-type=%q", got)
-	}
-	if store.project != "glimmung" || store.issueNumber != 141 || store.runNumber != "3" {
-		t.Fatalf("lookup args wrong: project=%q issue=%d run=%q", store.project, store.issueNumber, store.runNumber)
-	}
-	body := rec.Body.String()
-	if !strings.HasPrefix(body, "<svg ") {
-		t.Fatalf("body does not start with <svg: %s", body[:min(200, len(body))])
-	}
-	if !strings.Contains(body, "issue-agent") {
-		t.Fatalf("workflow name missing from svg: %s", body)
-	}
-	if !strings.Contains(body, "implement") {
-		t.Fatalf("phase name missing from svg: %s", body)
-	}
-	if !strings.Contains(body, "in_progress") {
-		t.Fatalf("state missing from svg: %s", body)
+	if strings.HasPrefix(rec.Body.String(), "<svg ") {
+		t.Fatalf("retired SVG URL must not serve SVG; body=%s", rec.Body.String())
 	}
 }
 
@@ -194,10 +172,10 @@ func TestRunOGImagePNGRendersPNG(t *testing.T) {
 	}
 }
 
-func TestRunOGImageNotFound(t *testing.T) {
+func TestRunOGImagePNGNotFound(t *testing.T) {
 	handler := NewWithStore(Settings{}, &fakeRunStore{})
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/og/runs/glimmung/141/3.svg", nil))
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/og/runs/glimmung/141/3.png", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
