@@ -167,6 +167,24 @@ type RunProjectionPhase = {
       phase_outputs?: Record<string, string>;
     }>;
   }>;
+  inner_jobs?: RunProjectionInnerJob[];
+};
+
+// RunProjectionInnerJob mirrors server.InnerJobRef — the child k8s Job
+// a phase script spawned in a slot namespace. See
+// docs/inner-job-observation.md.
+type RunProjectionInnerJob = {
+  parent_job_id: string;
+  parent_step_slug?: string | null;
+  namespace: string;
+  job_name: string;
+  intent: string;
+  label?: string;
+  selector?: string;
+  registered_at: string;
+  state?: string; // active | succeeded | failed | unknown
+  reason?: string;
+  completed_at?: string | null;
 };
 
 type RunProjectionEvidence = {
@@ -2396,6 +2414,9 @@ function ProjectionInspector({
             <span className="key">step</span> <span className="mono">{step.slug}</span>
           </div>
         )}
+        {selectedJob && phase.inner_jobs && phase.inner_jobs.length > 0 && (
+          <InnerJobsRow innerJobs={phase.inner_jobs.filter((ij) => ij.parent_job_id === selectedJob.id)} run={run} />
+        )}
         {latestAttempt && (
           <div>
             <span className="key">attempt</span> <span className="mono">{latestAttempt.attempt_index}</span>
@@ -2436,6 +2457,78 @@ function ProjectionInspector({
       ) : (
         <div className="native-log-panel dim mono">No job logs are available for this selection.</div>
       )}
+    </div>
+  );
+}
+
+// InnerJobsRow renders the child k8s Jobs a phase script spawned in a
+// slot namespace (the ambience verification-agent pattern). Each row
+// shows the child's namespace + job_name + intent + state, and a
+// Grafana Explore deep-link scoped to the child's namespace so logs
+// are one click away even though the child runs outside glimmung-runs.
+function InnerJobsRow({
+  innerJobs,
+  run,
+}: {
+  innerJobs: RunProjectionInnerJob[];
+  run: RunProjectionRun;
+}) {
+  if (!innerJobs.length) return null;
+  return (
+    <div style={{ width: "100%" }}>
+      <div>
+        <span className="key">inner jobs</span>
+      </div>
+      <ul style={{ listStyle: "none", margin: "0.25rem 0 0", padding: "0 0 0 0.5rem" }}>
+        {innerJobs.map((ij) => {
+          const lokiUrl = lokiExploreUrl(
+            currentConfig(),
+            ij.job_name,
+            { from: ij.registered_at, to: ij.completed_at ?? undefined },
+            ij.namespace,
+          );
+          const state = (ij.state ?? "unknown").trim() || "unknown";
+          const pill = state === "succeeded" ? "free" : state === "failed" ? "drain" : "busy";
+          return (
+            <li key={`${ij.namespace}/${ij.job_name}`} className="run-panel-meta" style={{ padding: "0.15rem 0" }}>
+              <div>
+                <span className={`pill ${pill}`}>{state}</span>{" "}
+                <span className="mono">{ij.namespace}/{ij.job_name}</span>
+              </div>
+              <div>
+                <span className="key">intent</span> <span className="mono">{ij.intent || "unknown"}</span>
+                {ij.label && (
+                  <>
+                    {" "}
+                    <span className="key">label</span> <span className="mono">{ij.label}</span>
+                  </>
+                )}
+                {ij.reason && (
+                  <>
+                    {" "}
+                    <span className="key">reason</span> <span className="mono">{ij.reason}</span>
+                  </>
+                )}
+                {lokiUrl && (
+                  <a
+                    href={lokiUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="link"
+                    style={{ marginLeft: "0.5rem" }}
+                    title={`open ${ij.namespace}/${ij.job_name} logs in Grafana Explore`}
+                  >
+                    logs ↗
+                  </a>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      {/* run.started_at is referenced only so the prop is typed; the
+          inner job's registered_at is the authoritative start. */}
+      <span style={{ display: "none" }}>{run.started_at}</span>
     </div>
   );
 }

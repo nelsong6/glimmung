@@ -43,6 +43,34 @@ type RunPhaseExecution struct {
 	StartedAt    *string           `json:"started_at,omitempty"`
 	CompletedAt  *string           `json:"completed_at,omitempty"`
 	Jobs         []RunJobExecution `json:"jobs"`
+	// InnerJobs is the read-path aggregation of inner_job_registered +
+	// inner_job_terminated events scoped to this phase. Phase scripts
+	// that spawn child k8s Jobs in a slot namespace (the ambience
+	// verification-agent pattern) emit the registration marker; the
+	// run-execution reconciler polls each child's k8s Job status and
+	// emits inner_job_terminated. See docs/inner-job-observation.md
+	// stage 2.
+	InnerJobs []InnerJobRef `json:"inner_jobs,omitempty"`
+}
+
+// InnerJobRef is one registered child k8s Job that a phase script
+// spawned. Populated at read time from the native event stream;
+// reconciler is the source of truth for the terminal fields.
+type InnerJobRef struct {
+	ParentJobID    string  `json:"parent_job_id"`
+	ParentStepSlug *string `json:"parent_step_slug,omitempty"`
+	Namespace      string  `json:"namespace"`
+	JobName        string  `json:"job_name"`
+	Intent         string  `json:"intent"`
+	Label          string  `json:"label,omitempty"`
+	Selector       string  `json:"selector,omitempty"`
+	RegisteredAt   string  `json:"registered_at"`
+	// Terminal fields are populated once the reconciler observes the
+	// child Job's `.status.conditions[]`. Empty means still active /
+	// not yet polled / k8s status unreadable from this glimmung's SA.
+	State       string  `json:"state,omitempty"`        // active | succeeded | failed | unknown
+	Reason      string  `json:"reason,omitempty"`       // JobTerminalReason* enum
+	CompletedAt *string `json:"completed_at,omitempty"`
 }
 
 type RunJobExecution struct {
