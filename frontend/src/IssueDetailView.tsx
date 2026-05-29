@@ -17,7 +17,7 @@
  *
  * Routed canonically via `/projects/<project>/issues/<number>`.
  */
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { authedFetch, currentConfig } from "./auth";
 import { lokiExploreUrl } from "./grafanaLinks";
@@ -737,7 +737,7 @@ export function IssueDetailView() {
                 selectedStepId={params.stepId ?? null}
                 executionLoading={Boolean(runGraphUrl) && runProjection === null && !error}
                 onSelectProjectionRun={(run) => navigate(projectionRunCyclePath(baseUrl, run))}
-                onSelectProjectionNode={(run, selection) => navigate(projectionSelectionPath(baseUrl, run, selection))}
+                onSelectProjectionNode={(run, selection) => navigate(projectionSelectionPath(baseUrl, run, selection), { preventScrollReset: true })}
                 onViewRunWorkflow={selectWorkflowRun}
                 onDispatch={() => void dispatchRun()}
                 onOpenTouchpoint={() => setTab("touchpoint")}
@@ -3396,6 +3396,9 @@ function NativeJobInspector({
 }) {
   const [logs, setLogs] = useState<NativeRunEventsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loadingMinHeight, setLoadingMinHeight] = useState<number | null>(null);
+  const inspectorElementRef = useRef<HTMLDivElement | null>(null);
+  const inspectorHeightRef = useRef(0);
   const scopedJobs = useMemo(
     () => selectedJobId ? jobs.filter((job) => job.job_id === selectedJobId) : jobs,
     [jobs, selectedJobId],
@@ -3414,6 +3417,11 @@ function NativeJobInspector({
   const selected = stepRefs.find((step) => step.key === selectedKey) ?? stepRefs[0] ?? null;
   const selectedStepSlugForEvents = selected?.step.slug ?? null;
 
+  useLayoutEffect(() => {
+    if (!inspectorElementRef.current) return;
+    inspectorHeightRef.current = Math.ceil(inspectorElementRef.current.getBoundingClientRect().height);
+  });
+
   useEffect(() => {
     setSelectedKey(defaultSelection);
   }, [defaultSelection]);
@@ -3424,6 +3432,7 @@ function NativeJobInspector({
 
   useEffect(() => {
     let cancelled = false;
+    setLoadingMinHeight(inspectorHeightRef.current > 0 ? inspectorHeightRef.current : null);
     setLogs(null);
     setError(null);
     const base = runNumber && issueNumber !== null
@@ -3444,10 +3453,16 @@ function NativeJobInspector({
       .then(async (res) => {
         if (!res.ok) throw new Error(`events ${res.status}`);
         const body = await res.json() as NativeRunEventsResponse;
-        if (!cancelled) setLogs(body);
+        if (!cancelled) {
+          setLogs(body);
+          setLoadingMinHeight(null);
+        }
       })
       .catch((err: unknown) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : String(err));
+          setLoadingMinHeight(null);
+        }
       });
     };
     load();
@@ -3471,7 +3486,14 @@ function NativeJobInspector({
     );
   }
   if (!logs) {
-    return <div className="native-log-panel dim mono">loading native events…</div>;
+    return (
+      <div
+        className="native-log-panel dim mono"
+        style={loadingMinHeight ? { minHeight: `${loadingMinHeight}px` } : undefined}
+      >
+        loading native events…
+      </div>
+    );
   }
   const events = logs.events;
   const lastEventSeq = events[events.length - 1]?.seq ?? null;
@@ -3489,7 +3511,7 @@ function NativeJobInspector({
   const transcriptAvailable = Boolean(selected && nativeSelectionUsesTranscript(selected.job, selected.step) && transcriptEntries.length > 0);
   const activeViewMode: NativeLogViewMode = transcriptAvailable ? viewMode : "raw";
   return (
-    <div className="native-inspector">
+    <div className="native-inspector" ref={inspectorElementRef}>
       <div className="native-inspector-head">
         <div>
           <span className="key">native job inspector</span>
