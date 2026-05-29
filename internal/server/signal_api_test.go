@@ -163,10 +163,10 @@ func (s *fakeSignalDrainStore) GetWorkflowByName(context.Context, string, string
 		Phases: []PhaseSpec{
 			{Name: "env-prep", Kind: "k8s_job"},
 			{Name: "impl", Kind: "k8s_job", Verify: true, DependsOn: []string{"env-prep"}},
-			{Name: "cleanup_early", Kind: "k8s_job", Always: true, SkipWhenPreserveTestEnv: true, DependsOn: []string{"impl"}, Jobs: []NativeJobSpec{{ID: "cleanup-early"}}},
-			{Name: "touchpoint", Kind: "k8s_job", Always: true, DependsOn: []string{"cleanup_early"}, Jobs: []NativeJobSpec{{ID: "pr-touchpoint", Primitive: JobPrimitivePRTouchpoint, Managed: true}}},
+			{Name: "cleanup_early", Kind: "k8s_job", RunOn: PhaseRunOnAlways, Purpose: PhasePurposeTeardown, SkipWhenPreserveTestEnv: true, DependsOn: []string{"impl"}, Jobs: []NativeJobSpec{{ID: "cleanup-early"}}},
+			{Name: "touchpoint", Kind: "k8s_job", RunOn: PhaseRunOnSuccess, Purpose: PhasePurposeReviewTouchpoint, DependsOn: []string{"cleanup_early"}, Jobs: []NativeJobSpec{{ID: "pr-touchpoint", Primitive: JobPrimitivePRTouchpoint, Managed: true}}},
 			{Name: "touchpoint_gate", Kind: "touchpoint_gate", DependsOn: []string{"touchpoint"}, Jobs: []NativeJobSpec{{ID: "pr-merge", Primitive: JobPrimitivePRMerge, Managed: true}}},
-			{Name: "cleanup_final", Kind: "k8s_job", Always: true, DependsOn: []string{"touchpoint_gate"}, Jobs: []NativeJobSpec{{ID: "cleanup-final"}}},
+			{Name: "cleanup_final", Kind: "k8s_job", RunOn: PhaseRunOnAlways, Purpose: PhasePurposeTeardown, DependsOn: []string{"touchpoint_gate"}, Jobs: []NativeJobSpec{{ID: "cleanup-final"}}},
 		},
 		PR: PrPrimitive{RecyclePolicy: &RecyclePolicy{MaxAttempts: 3, LandsAt: "impl"}},
 	}, nil

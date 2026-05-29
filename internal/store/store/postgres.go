@@ -1559,6 +1559,8 @@ type verificationDoc struct {
 type phaseDoc struct {
 	Name                     string            `json:"name"`
 	Kind                     string            `json:"kind"`
+	RunOn                    string            `json:"runOn"`
+	Purpose                  string            `json:"purpose"`
 	WorkflowFilename         string            `json:"workflowFilename"`
 	WorkflowRef              string            `json:"workflowRef"`
 	Inputs                   map[string]string `json:"inputs"`
@@ -1566,7 +1568,6 @@ type phaseDoc struct {
 	Requirements             map[string]any    `json:"requirements"`
 	Verify                   bool              `json:"verify"`
 	RecyclePolicy            *recyclePolicyDoc `json:"recyclePolicy"`
-	Always                   bool              `json:"always"`
 	EvidenceVerificationGate bool              `json:"evidenceVerificationGate"`
 	DependsOn                []string          `json:"dependsOn"`
 	Jobs                     []nativeJobDoc    `json:"jobs"`
@@ -2366,6 +2367,8 @@ func phaseDocFromSpec(phase server.PhaseSpec) phaseDoc {
 	return phaseDoc{
 		Name:                     phase.Name,
 		Kind:                     firstNonEmpty(phase.Kind, "k8s_job"),
+		RunOn:                    phase.RunOn,
+		Purpose:                  phase.Purpose,
 		WorkflowFilename:         phase.WorkflowFilename,
 		WorkflowRef:              firstNonEmpty(phase.WorkflowRef, "main"),
 		Inputs:                   stringMapOrEmpty(phase.Inputs),
@@ -2373,7 +2376,6 @@ func phaseDocFromSpec(phase server.PhaseSpec) phaseDoc {
 		Requirements:             mapOrEmpty(phase.Requirements),
 		Verify:                   phase.Verify,
 		RecyclePolicy:            recyclePolicyDocFromSpec(phase.RecyclePolicy),
-		Always:                   phase.Always,
 		EvidenceVerificationGate: phase.EvidenceVerificationGate,
 		DependsOn:                sliceOrEmpty(phase.DependsOn),
 		Jobs:                     jobs,
@@ -2469,6 +2471,8 @@ func normalizeWorkflowRegister(req *server.WorkflowRegister) {
 		if req.Phases[i].Kind == "" {
 			req.Phases[i].Kind = "k8s_job"
 		}
+		req.Phases[i].RunOn = strings.TrimSpace(req.Phases[i].RunOn)
+		req.Phases[i].Purpose = strings.TrimSpace(req.Phases[i].Purpose)
 		if req.Phases[i].WorkflowRef == "" {
 			req.Phases[i].WorkflowRef = "main"
 		}
@@ -2482,6 +2486,12 @@ func normalizeWorkflowRegister(req *server.WorkflowRegister) {
 			req.Phases[i].Jobs[j].Primitive = strings.TrimSpace(req.Phases[i].Jobs[j].Primitive)
 		}
 		req.Phases[i] = server.CanonicalNativePhase(req.Phases[i])
+		if req.Phases[i].Purpose == "" {
+			req.Phases[i].Purpose = server.NormalizePhasePurpose(req.Phases[i])
+		}
+		if req.Phases[i].RunOn == "" {
+			req.Phases[i].RunOn = server.NormalizePhaseRunOn(req.Phases[i])
+		}
 	}
 }
 
@@ -2566,6 +2576,8 @@ func phaseFromDoc(doc phaseDoc) server.PhaseSpec {
 	return server.PhaseSpec{
 		Name:                     doc.Name,
 		Kind:                     firstNonEmpty(doc.Kind, "k8s_job"),
+		RunOn:                    doc.RunOn,
+		Purpose:                  doc.Purpose,
 		WorkflowFilename:         doc.WorkflowFilename,
 		WorkflowRef:              firstNonEmpty(doc.WorkflowRef, "main"),
 		Inputs:                   stringMapOrEmpty(doc.Inputs),
@@ -2573,7 +2585,6 @@ func phaseFromDoc(doc phaseDoc) server.PhaseSpec {
 		Requirements:             doc.Requirements,
 		Verify:                   doc.Verify,
 		RecyclePolicy:            recyclePolicyFromDoc(doc.RecyclePolicy),
-		Always:                   doc.Always,
 		EvidenceVerificationGate: doc.EvidenceVerificationGate,
 		DependsOn:                sliceOrEmpty(doc.DependsOn),
 		Jobs:                     jobs,
@@ -5711,7 +5722,16 @@ func (s *Store) RecordNativeJobCompletion(ctx context.Context, project, runID st
 			conflictMsg = server.ErrConflict
 			return errAbortPatch
 		}
-		expectedJobIDs, eErr := s.expectedNativeJobIDs(ctx, project, doc.Workflow, doc.WorkflowSchemaRef, attempt.Phase)
+		wf, eErr := s.workflowForRunExecution(ctx, project, doc.Workflow, doc.WorkflowSchemaRef)
+		if eErr != nil {
+			validationErr = eErr
+			return errAbortPatch
+		}
+		if wf == nil {
+			validationErr = server.ValidationError{Message: fmt.Sprintf("workflow %q is not registered", doc.Workflow)}
+			return errAbortPatch
+		}
+		expectedJobIDs, eErr := expectedNativeJobIDsFromWorkflow(wf, attempt.Phase)
 		if eErr != nil {
 			validationErr = eErr
 			return errAbortPatch
@@ -5747,7 +5767,7 @@ func (s *Store) RecordNativeJobCompletion(ctx context.Context, project, runID st
 		attempts[idx] = attemptMap
 		raw["attempts"] = attempts
 		raw["updated_at"] = newCompletion.CompletedAt
-		executionState, executionReason := nativeJobExecutionStateAndReason(newCompletion)
+		executionState, executionReason := nativeJobExecutionStateAndReason(newCompletion, !phaseFollowedByEvidenceGate(wf.Phases, attempt.Phase))
 		markJobCompletionInExecutionsRaw(raw, attempt.Phase, jobID, executionState, executionReason, newCompletion.CompletedAt)
 		writtenCompletions = completions
 		writtenExpectedJobIDs = expectedJobIDs
@@ -5812,6 +5832,10 @@ func (s *Store) expectedNativeJobIDs(ctx context.Context, project, workflowName,
 	if wf == nil {
 		return nil, server.ValidationError{Message: fmt.Sprintf("workflow %q is not registered", workflowName)}
 	}
+	return expectedNativeJobIDsFromWorkflow(wf, phaseName)
+}
+
+func expectedNativeJobIDsFromWorkflow(wf *server.Workflow, phaseName string) ([]string, error) {
 	for _, phase := range wf.Phases {
 		if phase.Name != phaseName {
 			continue
@@ -5835,7 +5859,17 @@ func (s *Store) expectedNativeJobIDs(ctx context.Context, project, workflowName,
 		}
 		return ids, nil
 	}
-	return nil, server.ValidationError{Message: fmt.Sprintf("phase %q is not registered on workflow %q", phaseName, workflowName)}
+	return nil, server.ValidationError{Message: fmt.Sprintf("phase %q is not registered on workflow %q", phaseName, wf.Name)}
+}
+
+func phaseFollowedByEvidenceGate(phases []server.PhaseSpec, phaseName string) bool {
+	for i, phase := range phases {
+		if phase.Name != phaseName {
+			continue
+		}
+		return i+1 < len(phases) && phases[i+1].EvidenceVerificationGate
+	}
+	return false
 }
 
 func nativeJobCompletionDocFromPayload(jobID string, p server.CompletionPayload, completedAt string) nativeJobCompletionDoc {
@@ -5862,8 +5896,8 @@ func nativeJobCompletionDocFromPayload(jobID string, p server.CompletionPayload,
 	}
 }
 
-func nativeJobExecutionStateAndReason(completion nativeJobCompletionDoc) (string, string) {
-	state, fallbackReason := genericNativeJobStateAndReason(completion)
+func nativeJobExecutionStateAndReason(completion nativeJobCompletionDoc, verificationControlsExecution bool) (string, string) {
+	state, fallbackReason := genericNativeJobStateAndReason(completion, verificationControlsExecution)
 	// Caller-supplied TerminalReason takes precedence over the
 	// conclusion-based fallback so RunJobExecution.Reason carries the
 	// precise failure mode (e.g. "deadline_exceeded") rather than a
@@ -5882,8 +5916,8 @@ func nativeJobExecutionStateAndReason(completion nativeJobCompletionDoc) (string
 // verification mapping that runner-driven completions have always used.
 // It is split out so the precedence policy lives in one place
 // (nativeJobExecutionStateAndReason).
-func genericNativeJobStateAndReason(completion nativeJobCompletionDoc) (string, string) {
-	if completion.Verification != nil {
+func genericNativeJobStateAndReason(completion nativeJobCompletionDoc, verificationControlsExecution bool) (string, string) {
+	if verificationControlsExecution && completion.Verification != nil {
 		switch completion.Verification.Status {
 		case "pass":
 			return "succeeded", ""
@@ -6915,7 +6949,7 @@ func (s *Store) AppendRunAttempt(ctx context.Context, project, runID, phase, pha
 
 // StampLatestAttemptSkipped marks the latest attempt on a run as completed
 // with conclusion="skipped" and decision="advance" without launching any
-// jobs. Used when an always-run phase with SkipWhenPreserveTestEnv is
+// jobs. Used when a teardown phase with SkipWhenPreserveTestEnv is
 // dispatched against a run whose preserve_test_env snapshot is true: the
 // phase appears in run history with a deliberate "skipped" outcome and the
 // workflow advances past it like a success. The skip is durable in the

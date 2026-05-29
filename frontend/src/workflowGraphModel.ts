@@ -99,7 +99,8 @@ export function workflowToPhaseGraphModel(
     name: phase.name,
     kind: phase.kind,
     verify: phase.verify,
-    always: phase.always,
+    run_on: phase.run_on,
+    purpose: phase.purpose,
     evidence_verification_gate: phase.evidence_verification_gate,
     depends_on: phase.depends_on ?? [],
     jobs: (phase.jobs ?? []).map((job) => ({

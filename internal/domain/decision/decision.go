@@ -46,7 +46,7 @@ type PhaseSpec struct {
 	Name                     string
 	Verify                   bool
 	EvidenceVerificationGate bool
-	Always                   bool
+	Purpose                  string
 	RecyclePolicy            *RecyclePolicy
 }
 
@@ -201,7 +201,7 @@ func primaryAttemptForExplanation(run Run, workflow Workflow) *Attempt {
 	for i := len(run.Attempts) - 1; i >= 0; i-- {
 		attempt := &run.Attempts[i]
 		phase, ok := phaseByName(workflow, attempt.Phase)
-		if !ok || !phase.Always {
+		if !ok || phaseIsPrimary(phase) {
 			return attempt
 		}
 	}
@@ -209,6 +209,15 @@ func primaryAttemptForExplanation(run Run, workflow Workflow) *Attempt {
 		return &run.Attempts[len(run.Attempts)-1]
 	}
 	return nil
+}
+
+func phaseIsPrimary(phase PhaseSpec) bool {
+	switch phase.Purpose {
+	case "teardown", "review_touchpoint", "review_gate":
+		return false
+	default:
+		return true
+	}
 }
 
 func phaseByName(workflow Workflow, name string) (PhaseSpec, bool) {

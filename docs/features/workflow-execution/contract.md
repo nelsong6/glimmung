@@ -47,7 +47,7 @@ after registration changes.
 
 ## Live Behavior
 
-- Registration rejects missing entry, verify, or always-run cleanup phases.
+- Registration rejects missing entry, verify, or teardown cleanup phases.
 - Registration rejects invalid dependencies, duplicate phases, duplicate job
   IDs, invalid inputs, and unsupported executor kinds before they become a
   runtime contract.

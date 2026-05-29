@@ -449,9 +449,9 @@ func processRunCompletion(
 		if hasInFlightAttempts(run) {
 			return &RunCallbackResult{RunRef: runRef, Decision: &verdictStr}
 		}
-		// Always-run cleanup can finish successfully after a primary phase abort;
-		// it must not convert that earlier abort into a reviewable success.
-		if abortDecision, ok := latestNonAlwaysAbortDecision(wf.Phases, run); ok {
+		// Teardown can finish successfully after a primary phase abort; it
+		// must not convert that earlier abort into a reviewable success.
+		if abortDecision, ok := latestPrimaryAbortDecision(wf.Phases, run); ok {
 			explanation, _ := decision.AbortExplanation(decisionRun, decisionWorkflow, abortDecision)
 			var abortReason *string
 			if explanation != "" {
@@ -698,18 +698,18 @@ func allReadyDispatchTargets(wf *Workflow, run RunReplayData, verdict decision.R
 	}
 	completed := run.Attempts[len(run.Attempts)-1]
 	completedPhase := phaseSpecByName(wf.Phases, completed.Phase)
-	if completedPhase != nil && completedPhase.Always {
-		return listReadyPhases(wf.Phases, run, true)
-	}
-	onAbortPath := verdict != decision.Advance || runHasNonAlwaysAbort(wf.Phases, run)
+	onAbortPath := verdict != decision.Advance || runHasPrimaryAbort(wf.Phases, run)
 	if onAbortPath {
 		if hasInFlightAttempts(run) {
 			return nil
 		}
-		if phase := firstUnattemptedAlwaysPhase(wf.Phases, run); phase != nil {
+		if phase := firstUnattemptedAbortPhase(wf.Phases, run); phase != nil {
 			return []PhaseSpec{*phase}
 		}
 		return nil
+	}
+	if completedPhase != nil && phaseRunsOnAbortPath(*completedPhase) {
+		return listReadyPhases(wf.Phases, run, true)
 	}
 	if ready := listReadyPhases(wf.Phases, run, false); len(ready) > 0 {
 		return ready
@@ -727,7 +727,10 @@ func listReadyPhases(phases []PhaseSpec, run RunReplayData, includeAlways bool) 
 		if attempted[phase.Name] {
 			continue
 		}
-		if phase.Always && !includeAlways {
+		if !phaseRunsOnSuccessPath(phase) {
+			continue
+		}
+		if phaseRunsOnAbortPath(phase) && !includeAlways {
 			continue
 		}
 		if i == 0 {
@@ -769,16 +772,16 @@ func attemptedPhases(run RunReplayData) map[string]bool {
 	return attempted
 }
 
-func runHasNonAlwaysAbort(phases []PhaseSpec, run RunReplayData) bool {
-	_, ok := latestNonAlwaysAbortDecision(phases, run)
+func runHasPrimaryAbort(phases []PhaseSpec, run RunReplayData) bool {
+	_, ok := latestPrimaryAbortDecision(phases, run)
 	return ok
 }
 
-func latestNonAlwaysAbortDecision(phases []PhaseSpec, run RunReplayData) (decision.RunDecision, bool) {
+func latestPrimaryAbortDecision(phases []PhaseSpec, run RunReplayData) (decision.RunDecision, bool) {
 	for i := len(run.Attempts) - 1; i >= 0; i-- {
 		attempt := run.Attempts[i]
 		phase := phaseSpecByName(phases, attempt.Phase)
-		if phase != nil && phase.Always {
+		if phase != nil && !phaseIsPrimary(*phase) {
 			continue
 		}
 		if isAbortDecision(attempt.Decision) {
@@ -797,22 +800,22 @@ func hasInFlightAttempts(run RunReplayData) bool {
 	return false
 }
 
-func firstUnattemptedAlwaysPhase(phases []PhaseSpec, run RunReplayData) *PhaseSpec {
+func firstUnattemptedAbortPhase(phases []PhaseSpec, run RunReplayData) *PhaseSpec {
 	completed := completedAdvancePhases(run)
 	attempted := attemptedPhases(run)
-	alwaysNames := map[string]bool{}
+	abortNames := map[string]bool{}
 	for _, phase := range phases {
-		if phase.Always {
-			alwaysNames[phase.Name] = true
+		if phaseRunsOnAbortPath(phase) {
+			abortNames[phase.Name] = true
 		}
 	}
 	for _, phase := range phases {
-		if !phase.Always || attempted[phase.Name] {
+		if !phaseRunsOnAbortPath(phase) || attempted[phase.Name] {
 			continue
 		}
 		ok := true
 		for _, dep := range phase.DependsOn {
-			if alwaysNames[dep] && !completed[dep] {
+			if abortNames[dep] && !completed[dep] {
 				ok = false
 				break
 			}
@@ -823,6 +826,70 @@ func firstUnattemptedAlwaysPhase(phases []PhaseSpec, run RunReplayData) *PhaseSp
 		}
 	}
 	return nil
+}
+
+func phaseRunsOnSuccessPath(phase PhaseSpec) bool {
+	switch phaseRunOn(phase) {
+	case PhaseRunOnSuccess, PhaseRunOnAlways:
+		return true
+	default:
+		return false
+	}
+}
+
+func phaseRunsOnAbortPath(phase PhaseSpec) bool {
+	if phasePurpose(phase) != PhasePurposeTeardown {
+		return false
+	}
+	switch phaseRunOn(phase) {
+	case PhaseRunOnFailure, PhaseRunOnAlways:
+		return true
+	default:
+		return false
+	}
+}
+
+func phaseIsPrimary(phase PhaseSpec) bool {
+	switch phasePurpose(phase) {
+	case PhasePurposeTeardown, PhasePurposeReviewTouchpoint, PhasePurposeReviewGate:
+		return false
+	default:
+		return true
+	}
+}
+
+func phaseRunOn(phase PhaseSpec) string {
+	value := strings.TrimSpace(phase.RunOn)
+	if validPhaseRunOn(value) {
+		return value
+	}
+	if phasePurpose(phase) == PhasePurposeTeardown {
+		return PhaseRunOnAlways
+	}
+	return PhaseRunOnSuccess
+}
+
+func phasePurpose(phase PhaseSpec) string {
+	value := strings.TrimSpace(phase.Purpose)
+	if validPhasePurpose(value) {
+		return value
+	}
+	if workflowPhaseKind(phase.Kind) == workflowKindTouchpointGate {
+		return PhasePurposeReviewGate
+	}
+	if phase.EvidenceVerificationGate {
+		return PhasePurposeEvidenceGate
+	}
+	if phaseHasPrimitive(phase, JobPrimitivePRTouchpoint) {
+		return PhasePurposeReviewTouchpoint
+	}
+	if phase.Verify {
+		return PhasePurposeVerification
+	}
+	if phase.SkipWhenPreserveTestEnv {
+		return PhasePurposeTeardown
+	}
+	return PhasePurposeWork
 }
 
 func phaseSpecByName(phases []PhaseSpec, name string) *PhaseSpec {
@@ -880,7 +947,7 @@ func dispatchForwardPhase(
 		}
 		return nil
 	}
-	// Skip-when-preserve: an always-run phase (typically cleanup_early)
+	// Skip-when-preserve: a teardown phase (typically cleanup_early)
 	// flagged with SkipWhenPreserveTestEnv is appended as a synthesized
 	// "skipped" attempt instead of launching its jobs, whenever the run's
 	// preserve_test_env snapshot is true. The attempt is durable so run

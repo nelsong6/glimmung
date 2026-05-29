@@ -22,6 +22,23 @@ func TestNativeEventAttemptIndexAcceptsExplicitOrMetadataValue(t *testing.T) {
 	}
 }
 
+func TestNativeJobExecutionStateVerificationControl(t *testing.T) {
+	completion := nativeJobCompletionDoc{
+		Conclusion:   "success",
+		Verification: &verificationDoc{Status: "fail"},
+	}
+
+	state, reason := nativeJobExecutionStateAndReason(completion, false)
+	if state != "succeeded" || reason != "" {
+		t.Fatalf("non-controlling verification state=(%q,%q), want succeeded with no reason", state, reason)
+	}
+
+	state, reason = nativeJobExecutionStateAndReason(completion, true)
+	if state != "failed" || reason != "verification_failed" {
+		t.Fatalf("controlling verification state=(%q,%q), want failed verification_failed", state, reason)
+	}
+}
+
 func TestApplyNativePhaseOutputSetRawStoresAndRejectsDuplicateKeys(t *testing.T) {
 	raw := map[string]any{
 		"attempts": []any{
@@ -380,7 +397,8 @@ func TestWorkflowFromDocConvertsNestedShape(t *testing.T) {
 			},
 			{
 				"name": "cleanup",
-				"always": true,
+				"runOn": "always",
+				"purpose": "teardown",
 				"dependsOn": ["agent"]
 			}
 		],
@@ -446,10 +464,10 @@ func TestNormalizeWorkflowRegisterForProjectDefaultsToK8sJob(t *testing.T) {
 		Phases: []server.PhaseSpec{
 			{Name: "prepare"},
 			{Name: "test", Verify: true, DependsOn: []string{"prepare"}},
-			{Name: "cleanup_early", Always: true, SkipWhenPreserveTestEnv: true, DependsOn: []string{"test"}, Jobs: []server.NativeJobSpec{{ID: "cleanup-early"}}},
-			{Name: "touchpoint", Always: true, DependsOn: []string{"cleanup_early"}, Jobs: []server.NativeJobSpec{{ID: "pr-touchpoint", Primitive: "pr_touchpoint"}}},
+			{Name: "cleanup_early", RunOn: server.PhaseRunOnAlways, Purpose: server.PhasePurposeTeardown, SkipWhenPreserveTestEnv: true, DependsOn: []string{"test"}, Jobs: []server.NativeJobSpec{{ID: "cleanup-early"}}},
+			{Name: "touchpoint", RunOn: server.PhaseRunOnSuccess, Purpose: server.PhasePurposeReviewTouchpoint, DependsOn: []string{"cleanup_early"}, Jobs: []server.NativeJobSpec{{ID: "pr-touchpoint", Primitive: "pr_touchpoint"}}},
 			{Name: "touchpoint_gate", Kind: "touchpoint_gate", DependsOn: []string{"touchpoint"}, Jobs: []server.NativeJobSpec{{ID: "pr-merge", Primitive: "pr_merge"}}},
-			{Name: "cleanup_final", Always: true, DependsOn: []string{"touchpoint_gate"}, Jobs: []server.NativeJobSpec{{ID: "cleanup-final"}}},
+			{Name: "cleanup_final", RunOn: server.PhaseRunOnAlways, Purpose: server.PhasePurposeTeardown, DependsOn: []string{"touchpoint_gate"}, Jobs: []server.NativeJobSpec{{ID: "cleanup-final"}}},
 		},
 	}
 	normalizeWorkflowRegister(&req)
@@ -473,7 +491,7 @@ func TestValidateWorkflowRegisterRejectsNonNativeKind(t *testing.T) {
 		Phases: []server.PhaseSpec{
 			{Name: "prepare", Kind: "container"},
 			{Name: "test", Kind: "k8s_job", Verify: true, DependsOn: []string{"prepare"}},
-			{Name: "cleanup", Kind: "k8s_job", Always: true, DependsOn: []string{"test"}},
+			{Name: "cleanup", Kind: "k8s_job", RunOn: server.PhaseRunOnAlways, Purpose: server.PhasePurposeTeardown, DependsOn: []string{"test"}},
 		},
 	}
 

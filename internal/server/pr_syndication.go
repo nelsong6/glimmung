@@ -89,7 +89,7 @@ type PRPrimitiveResult struct {
 // Status is one of:
 //   - "merged"          — Glimmung performed the merge in this call.
 //   - "already_merged"  — the PR was merged on a prior call; idempotent
-//                         no-op success.
+//     no-op success.
 //
 // Non-success outcomes are surfaced as a problem response (4xx/5xx) rather
 // than this body.
@@ -435,7 +435,7 @@ func prPrimitiveReadyForRun(wf *Workflow, run RunReplayData) (bool, string) {
 	for i := range run.Attempts {
 		attempt := &run.Attempts[i]
 		phase := phaseSpecByName(wf.Phases, attempt.Phase)
-		if phase != nil && phase.Always {
+		if phase != nil && !phaseIsPrimary(*phase) {
 			continue
 		}
 		if !attempt.Completed && attempt.Decision == "" {

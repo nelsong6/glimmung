@@ -24,7 +24,7 @@ Glimmung shape.
   phase, and every later phase depends on the immediately previous phase. Jobs
   inside one phase run in parallel and do not depend on each other.
 - **Required safety rails:** Every workflow has an entry phase, a verifying
-  phase, and an always-run cleanup phase.
+  phase, and a teardown cleanup phase.
 - **Human surface:** Touchpoints and run reports explain what a reviewer needs
   to inspect or decide. CI-style logs are inputs to that surface, not the
   surface itself.
@@ -86,7 +86,8 @@ these questions:
 - Are jobs within a phase still strictly parallel?
 - Is verification explicit and self-enforcing or gated by a Glimmung-owned
   gate?
-- Does cleanup run on every terminal outcome?
+- Does cleanup run on every terminal outcome without running review touchpoints
+  after aborts?
 - Are capacity decisions modeled as Glimmung queue/lease decisions?
 - Does evidence flow into run reports and touchpoints instead of disappearing
   into executor-native logs?
