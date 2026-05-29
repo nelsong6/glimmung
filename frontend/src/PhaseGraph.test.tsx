@@ -92,6 +92,7 @@ describe("PhaseGraph", () => {
 
     expect(await edgeGroup(container, "rf__edge-entry:manual-entry:0")).toHaveClass("entry");
     expect(await edgeGroup(container, "rf__edge-entry:default-entry:1")).not.toHaveClass("entry");
+    expect(await edgeGroup(container, "rf__edge-advance:0:1")).not.toHaveClass("entry");
   });
 });
 
