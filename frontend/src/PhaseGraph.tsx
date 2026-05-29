@@ -57,7 +57,6 @@ export type PhaseGraphProps = {
   ariaLabel?: string;
   selectedPhaseName?: string | null;
   onSelectPhase?: (phase: PhaseGraphPhase) => void;
-  entryPhaseName?: string | null;
   entryArrows?: EntryArrow[];
   recycleArrows?: RecycleArrow[];
 };
@@ -406,7 +405,6 @@ export function PhaseGraph({
   ariaLabel,
   selectedPhaseName = null,
   onSelectPhase,
-  entryPhaseName = null,
   entryArrows = [],
   recycleArrows = [],
 }: PhaseGraphProps) {
@@ -530,7 +528,6 @@ export function PhaseGraph({
       });
     });
     for (let idx = 0; idx < columns.length - 1; idx += 1) {
-      const entry = columns[idx + 1].some((phase) => entryPhaseName != null && phase.name === entryPhaseName);
       out.push({
         id: `advance:${idx}:${idx + 1}`,
         source: `phase:${idx}`,
@@ -539,7 +536,7 @@ export function PhaseGraph({
         targetHandle: "advance-in",
         type: "advance",
         markerEnd: { type: MarkerType.ArrowClosed },
-        className: `dag-rf-edge${entry ? " entry" : ""}`,
+        className: "dag-rf-edge",
       });
     }
     const orderedByTarget = new Map<string, RecycleArrow[]>();
@@ -573,7 +570,7 @@ export function PhaseGraph({
       });
     });
     return out;
-  }, [columns, entryPhaseName, nodeHeights, phaseToColumn, visibleEntryArrows, visibleRecycleArrows]);
+  }, [columns, nodeHeights, phaseToColumn, visibleEntryArrows, visibleRecycleArrows]);
 
   useLayoutEffect(() => {
     const root = graphRef.current;

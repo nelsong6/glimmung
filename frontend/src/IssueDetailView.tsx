@@ -1401,9 +1401,6 @@ function PipelineDag({
       </div>
     );
   }
-  const activeEntry = stringOrNull(meta.entrypoint_phase)
-    ?? graphModel.phases[0]?.name
-    ?? null;
   // Render-phase callback paints the phase's current job/attempt state.
   // The visible phase container ref is wired on PhaseGraph itself so
   // entry/recycle arrows target the phase surface, not this child job.
@@ -1484,7 +1481,6 @@ function PipelineDag({
         phases={graphModel.phases}
         renderPhase={renderPhase}
         ariaLabel="pipeline"
-        entryPhaseName={activeEntry}
         entryArrows={graphModel.entryArrows}
         recycleArrows={graphModel.recycleArrows}
       />
@@ -2287,7 +2283,6 @@ function ProjectionPipelineDag({
         ariaLabel="run execution"
         selectedPhaseName={selectedPhaseName}
         onSelectPhase={(phase) => onSelectNode({ phase: phase.name })}
-        entryPhaseName={run.current_phase ?? null}
         entryArrows={graphModel.entryArrows}
         recycleArrows={graphModel.recycleArrows}
       />
