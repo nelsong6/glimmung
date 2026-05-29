@@ -95,18 +95,21 @@ the child terminated.
 
 ### Stage 3: evidence linkage
 
-The inner-Job watcher (and the outer-phase reconciler) now stamps a
-`log_archive_url` on every terminal completion — a Grafana Explore
-deep-link to the cluster Loki datasource scoped to the child's
-namespace + life window. The dashboard reads it off the persisted
-inner-Job row when present, falling back to a client-built link only
-while the child is still active.
+When the reconciler observes an inner Job reaching a terminal
+condition, it now captures the pod's stdout into the artifact store
+under
+`runs/{project}/{runID}/inner_jobs/{namespace}/{jobName}.log` (bounded
+to 8 MiB; server-side `tailLines=20000` + a client-side
+`LimitReader`). The `log_archive_url` on the inner-Job row points at
+the resulting `/v1/artifacts/...` blob; the dashboard's existing
+artifact-download surface dereferences it.
 
-This satisfies the "durable pointer to the logs" goal as far as Loki
-retention reaches. Capturing the actual log bytes into the artifact
-store (so the link survives Loki TTL) remains an open follow-up; that
-work is the only piece left when a Loki retention window passes before
-a touchpoint review.
+When the artifact writer is unconfigured or the launcher cannot fetch
+logs (RBAC, pod GC race, transport error), the watcher falls back to
+the Grafana Explore deep-link as the `log_archive_url`. The Grafana
+link works while Loki has the data; the artifact link works forever.
+
+There is no remaining outstanding piece in the inner-Job contract.
 
 ## What does *not* live in this contract
 

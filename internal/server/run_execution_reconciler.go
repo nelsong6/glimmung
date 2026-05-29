@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nelsong6/glimmung/internal/metrics"
@@ -107,10 +108,89 @@ func grafanaRangeBound(t time.Time, fallback string) string {
 	return strconv.FormatInt(t.UTC().UnixMilli(), 10)
 }
 
+// runReconcilerArtifactRegistry holds the artifact writer the
+// reconciler delegates to for durable log capture (inner-Job Stage 3).
+// Mirrors the inspection-sweep registry shape so the wiring code in
+// server.go has one consistent pattern for cross-cutting hooks that
+// reach background goroutines.
+var runReconcilerArtifactRegistry struct {
+	mu     sync.RWMutex
+	writer ArtifactWriter
+}
+
+// SetRunReconcilerArtifactWriter registers the artifact writer the
+// run-execution reconciler uses to capture inner-Job pod logs on
+// terminal transitions. Called once at handler construction; safe to
+// call again with the same value during tests. Passing nil disables
+// log capture; the inner-Job watcher then falls back to the Grafana
+// Loki deep-link as its log_archive_url.
+func SetRunReconcilerArtifactWriter(writer ArtifactWriter) {
+	runReconcilerArtifactRegistry.mu.Lock()
+	runReconcilerArtifactRegistry.writer = writer
+	runReconcilerArtifactRegistry.mu.Unlock()
+}
+
+func currentRunReconcilerArtifactWriter() ArtifactWriter {
+	runReconcilerArtifactRegistry.mu.RLock()
+	defer runReconcilerArtifactRegistry.mu.RUnlock()
+	return runReconcilerArtifactRegistry.writer
+}
+
+// captureInnerJobLogs fetches the inner Job's pod stdout (bounded),
+// uploads it to the artifact store under
+// runs/{project}/{runID}/inner_jobs/{namespace}/{jobName}.log, and
+// returns the /v1/artifacts/... URL the run-report UI dereferences.
+// Empty return means the caller should keep the Grafana Loki fallback
+// link — either because the artifact writer is unconfigured, the
+// launcher does not implement NativeJobLogsFetcher, the fetch
+// returned no bytes (TTL'd pod), or the upload failed transiently.
+// Errors from the upload path are logged via logf but not returned;
+// the caller does not block the watcher tick on capture failures.
+func captureInnerJobLogs(ctx context.Context, fetcher NativeJobLogsFetcher, writer ArtifactWriter, project, runID, namespace, jobName string, logf func(string, ...any)) string {
+	if fetcher == nil || writer == nil {
+		return ""
+	}
+	project = strings.TrimSpace(project)
+	runID = strings.TrimSpace(runID)
+	namespace = strings.TrimSpace(namespace)
+	jobName = strings.TrimSpace(jobName)
+	if project == "" || runID == "" || namespace == "" || jobName == "" {
+		return ""
+	}
+	body, err := fetcher.GetNativeJobLogs(ctx, namespace, jobName, 0)
+	if err != nil {
+		if logf != nil {
+			logf("inner-job log capture fetch failed namespace=%s job=%s: %v", namespace, jobName, err)
+		}
+		return ""
+	}
+	if len(body) == 0 {
+		return ""
+	}
+	blobPath := innerJobLogBlobPath(project, runID, namespace, jobName)
+	if _, err := writer.Upload(ctx, blobPath, body, "text/plain; charset=utf-8"); err != nil {
+		if logf != nil {
+			logf("inner-job log capture upload failed namespace=%s job=%s: %v", namespace, jobName, err)
+		}
+		return ""
+	}
+	return "/v1/artifacts/" + blobPath
+}
+
+// innerJobLogBlobPath derives the canonical artifact blob path for an
+// inner-Job log capture. The runs/{project}/{runID}/ prefix matches
+// the existing inspection artifact layout and is allowlisted by the
+// artifact-download route's prefix validator.
+func innerJobLogBlobPath(project, runID, namespace, jobName string) string {
+	return "runs/" + url.PathEscape(project) + "/" + url.PathEscape(runID) +
+		"/inner_jobs/" + url.PathEscape(namespace) + "/" + url.PathEscape(jobName) + ".log"
+}
+
 func StartRunDispatchTimeoutReconciler(ctx context.Context, settings Settings, store ReadStore, nativeLauncher NativeLauncher, logf func(string, ...any)) {
 	timeout := time.Duration(settings.NativeRunnerDispatchTimeoutSeconds) * time.Second
 	timeoutStore, _ := store.(RunDispatchTimeoutStore)
 	jobStatusGetter, _ := nativeLauncher.(NativeJobStatusGetter)
+	logsFetcher, _ := nativeLauncher.(NativeJobLogsFetcher)
 	if timeout <= 0 && jobStatusGetter == nil {
 		return
 	}
@@ -142,7 +222,8 @@ func StartRunDispatchTimeoutReconciler(ctx context.Context, settings Settings, s
 				}
 			}
 			if jobStatusGetter != nil {
-				emitted, err := ExpireInnerJobTerminations(ctx, timeoutStore, jobStatusGetter, urlBuilder, activeJobFailureGracePeriod, time.Now().UTC())
+				artifactWriter := currentRunReconcilerArtifactWriter()
+				emitted, err := ExpireInnerJobTerminations(ctx, timeoutStore, jobStatusGetter, logsFetcher, artifactWriter, urlBuilder, activeJobFailureGracePeriod, time.Now().UTC(), logf)
 				if err != nil && logf != nil {
 					logf("inner-job termination reconcile failed: %v", err)
 				}
@@ -507,7 +588,7 @@ func evaluateActiveJobFailure(ctx context.Context, statusGetter NativeJobStatusG
 // identity means the same termination emitted twice collides on the
 // docID and the second write is silently dropped. The next reconciler
 // tick sees the inner Job in state=succeeded/failed and skips it.
-func ExpireInnerJobTerminations(ctx context.Context, store RunDispatchTimeoutStore, statusGetter NativeJobStatusGetter, urlBuilder LogArchiveURLBuilder, grace time.Duration, now time.Time) (int, error) {
+func ExpireInnerJobTerminations(ctx context.Context, store RunDispatchTimeoutStore, statusGetter NativeJobStatusGetter, logsFetcher NativeJobLogsFetcher, artifactWriter ArtifactWriter, urlBuilder LogArchiveURLBuilder, grace time.Duration, now time.Time, logf func(string, ...any)) (int, error) {
 	if statusGetter == nil {
 		return 0, nil
 	}
@@ -541,7 +622,7 @@ func ExpireInnerJobTerminations(ctx context.Context, store RunDispatchTimeoutSto
 					if strings.TrimSpace(ij.Namespace) == "" || strings.TrimSpace(ij.JobName) == "" {
 						continue
 					}
-					event, ok, err := buildInnerJobTermination(ctx, statusGetter, phase.Name, ij, urlBuilder, grace, now)
+					event, ok, err := buildInnerJobTermination(ctx, statusGetter, logsFetcher, artifactWriter, run.Project, run.ID, phase.Name, ij, urlBuilder, grace, now, logf)
 					if err != nil {
 						// RBAC / transient errors: skip this child
 						// on this tick; the next tick retries.
@@ -568,7 +649,7 @@ func ExpireInnerJobTerminations(ctx context.Context, store RunDispatchTimeoutSto
 // buildInnerJobTermination polls the inner Job's k8s status and, if
 // terminal past the grace period, constructs the inner_job_terminated
 // event the store applies via applyNativeEventToExecutionsRaw.
-func buildInnerJobTermination(ctx context.Context, statusGetter NativeJobStatusGetter, phaseName string, ij InnerJobRef, urlBuilder LogArchiveURLBuilder, grace time.Duration, now time.Time) (NativeRunEventRequest, bool, error) {
+func buildInnerJobTermination(ctx context.Context, statusGetter NativeJobStatusGetter, logsFetcher NativeJobLogsFetcher, artifactWriter ArtifactWriter, project, runID, phaseName string, ij InnerJobRef, urlBuilder LogArchiveURLBuilder, grace time.Duration, now time.Time, logf func(string, ...any)) (NativeRunEventRequest, bool, error) {
 	status, err := statusGetter.GetNativeJobStatus(ctx, ij.Namespace, ij.JobName)
 	if err != nil {
 		return NativeRunEventRequest{}, false, err
@@ -612,10 +693,15 @@ func buildInnerJobTermination(ctx context.Context, statusGetter NativeJobStatusG
 		"completed_at": completedAt,
 		"phase":        phaseName,
 	}
-	if urlBuilder != nil {
-		// Anchor the log window on the registration time when known so
-		// the link covers the child's whole life. Falls back to a
-		// sensible "now-24h" via grafanaRangeBound.
+	// Prefer the durable artifact-store capture (stage 3 of the
+	// inner-Job contract); fall back to the Grafana Loki deep-link
+	// when either the launcher cannot fetch logs (no NativeJobLogsFetcher
+	// support) or the artifact writer is unconfigured, or the upload
+	// failed transiently. The Grafana fallback works while Loki has the
+	// data; the artifact URL works forever.
+	if logURL := captureInnerJobLogs(ctx, logsFetcher, artifactWriter, project, runID, ij.Namespace, ij.JobName, logf); logURL != "" {
+		metadata["log_archive_url"] = logURL
+	} else if urlBuilder != nil {
 		from := parseInnerJobRegisteredAt(ij.RegisteredAt)
 		toTime := now
 		if state == "succeeded" || state == "failed" {

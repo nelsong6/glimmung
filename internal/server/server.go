@@ -246,8 +246,10 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	}
 	if writer, ok := artifactStore.(ArtifactWriter); ok {
 		SetInspectionSweepArtifactWriter(writer)
+		SetRunReconcilerArtifactWriter(writer)
 	} else {
 		SetInspectionSweepArtifactWriter(nil)
+		SetRunReconcilerArtifactWriter(nil)
 	}
 	var nativeTokenMinter NativeGitHubTokenMinter
 	if m, ok := ghClient.(NativeGitHubTokenMinter); ok {
