@@ -146,7 +146,11 @@ PR with its own data-plumbing requirement:
   terminal state propagates back through callbacks with no single
   in-process site that owns "the Job is now terminal." The lease metric
   covers the queue side until the run-callback surface grows a
-  job-terminal signal.
+  job-terminal signal. Stage 1 of that wiring is the run-execution
+  reconciler in glimmung#621; the deferred terminal-job counter is
+  scoped to that PR. Inner Jobs spawned by phase scripts (see
+  `docs/inner-job-observation.md`) are covered separately by
+  `glimmung_run_inner_jobs_registered_total{intent}`.
 - **OpenTelemetry traces**: separate decision; metrics alone cover the
   operator questions above.
 - **Per-metric alert rules**: belong with the Prometheus deployment, not

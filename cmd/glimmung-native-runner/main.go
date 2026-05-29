@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/nelsong6/glimmung/internal/domain/agentcost"
+	"github.com/nelsong6/glimmung/internal/domain/innerjob"
 )
 
 const (
@@ -375,6 +376,7 @@ func (r *nativeRunner) streamLogs(ctx context.Context, wg *sync.WaitGroup, stepS
 	for scanner.Scan() {
 		line := scanner.Text()
 		r.observeLogCost(line)
+		r.observeInnerJobMarker(ctx, stepSlug, line)
 		if stream == "stderr" {
 			fmt.Fprintln(os.Stderr, line)
 		} else {
@@ -541,6 +543,32 @@ func (r *nativeRunner) observeLogCost(line string) {
 	r.mu.Lock()
 	r.costUSD += cost
 	r.mu.Unlock()
+}
+
+// observeInnerJobMarker inspects every streamed log line for the
+// inner-Job registration sentinel emitted by phase scripts (see
+// docs/inner-job-observation.md). When one is found, we forward it as
+// an `inner_job_registered` event so glimmung records the child k8s
+// Job alongside the outer one.
+//
+// Hot path: the prefix check is cheap; we only allocate when the
+// marker is present. Malformed markers are surfaced as
+// runner_warning events with the parse error so the operator knows
+// the registration was attempted but rejected. The pipeline does not
+// fail.
+func (r *nativeRunner) observeInnerJobMarker(ctx context.Context, stepSlug, line string) {
+	if !strings.HasPrefix(line, innerjob.Marker) {
+		return
+	}
+	reg, err := innerjob.Parse(line)
+	if err != nil {
+		msg := "inner-job marker rejected: " + err.Error()
+		_ = r.postEvent(ctx, "runner_warning", &stepSlug, msg, nil, map[string]any{
+			"warning": "inner_job_marker_invalid",
+		})
+		return
+	}
+	_ = r.postEvent(ctx, "inner_job_registered", &stepSlug, "", nil, reg.Metadata())
 }
 
 func (r *nativeRunner) observedCostUSD() float64 {

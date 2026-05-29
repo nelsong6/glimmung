@@ -200,3 +200,114 @@ func TestNativeRunnerPostsTimedOutOnContextCancel(t *testing.T) {
 		t.Fatalf("expected runner_failed event; events=%v", events)
 	}
 }
+
+// TestNativeRunnerEmitsInnerJobRegisteredEventFromMarker pins the
+// inner-Job observation contract (docs/inner-job-observation.md): when
+// a phase script prints the marker line on stdout, the runner forwards
+// it as an inner_job_registered event with the parsed metadata, so
+// glimmung records the child Job alongside the outer one. Without this
+// the dashboard has no record of inner Jobs and operators cannot
+// discover their logs.
+func TestNativeRunnerEmitsInnerJobRegisteredEventFromMarker(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		events   []nativeEventRequest
+		complete completedRequest
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/events":
+			var event nativeEventRequest
+			_ = json.NewDecoder(r.Body).Decode(&event)
+			mu.Lock()
+			events = append(events, event)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"accepted": true})
+		case "/completed":
+			mu.Lock()
+			_ = json.NewDecoder(r.Body).Decode(&complete)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"decision": "done"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	workspace := t.TempDir()
+	marker := `===GLIMMUNG-INNER-JOB=== {"namespace":"ambience-slot-3","job_name":"agent-ve-2","intent":"verification_agent","label":"verify-agent"}`
+	r := &nativeRunner{
+		cfg: runnerConfig{
+			JobID:        "test",
+			EventsURL:    server.URL + "/events",
+			CompletedURL: server.URL + "/completed",
+			Workspace:    workspace,
+			Job: jobSpec{
+				WorkingDirectory: workspace,
+				Shell:            "sh",
+				Steps: []stepSpec{{
+					Slug: "spawn-child",
+					Type: "run",
+					// Print marker + an unrelated log line + an
+					// invalid marker (missing job_name). The runner
+					// should emit one inner_job_registered for the
+					// valid marker and a runner_warning for the
+					// invalid one.
+					Run: "printf '%s\\n' " + shellQuote(marker) +
+						" && printf 'a normal log line\\n'" +
+						" && printf '%s\\n' " + shellQuote(`===GLIMMUNG-INNER-JOB=== {"namespace":"ns"}`),
+				}},
+			},
+		},
+		client:  server.Client(),
+		outputs: map[string]string{},
+	}
+
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if complete.Conclusion != "success" {
+		t.Fatalf("conclusion=%q", complete.Conclusion)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	var (
+		registered *nativeEventRequest
+		warning    *nativeEventRequest
+	)
+	for i := range events {
+		switch events[i].Event {
+		case "inner_job_registered":
+			ev := events[i]
+			registered = &ev
+		case "runner_warning":
+			ev := events[i]
+			warning = &ev
+		}
+	}
+	if registered == nil {
+		t.Fatalf("expected inner_job_registered event; events=%+v", events)
+	}
+	if got := registered.Metadata["namespace"]; got != "ambience-slot-3" {
+		t.Fatalf("registered.namespace=%v", got)
+	}
+	if got := registered.Metadata["job_name"]; got != "agent-ve-2" {
+		t.Fatalf("registered.job_name=%v", got)
+	}
+	if got := registered.Metadata["intent"]; got != "verification_agent" {
+		t.Fatalf("registered.intent=%v", got)
+	}
+	if warning == nil {
+		t.Fatalf("expected runner_warning for invalid marker; events=%+v", events)
+	}
+	if msg := warning.Message; msg == nil || !strings.Contains(*msg, "job_name") {
+		t.Fatalf("warning.message=%v", warning.Message)
+	}
+}
+
+// shellQuote produces a POSIX-shell-safe single-quoted form of s.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
