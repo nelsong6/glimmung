@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/nelsong6/glimmung/internal/domain/hotswap"
@@ -51,6 +52,10 @@ func registerProject(store ReadStore, managedOrigins ManagedOriginReconciler) ht
 			writeProblem(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
+		if err := validateTestSlotHelmMetadata(req.Metadata); err != nil {
+			writeProblem(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 
 		project, err := writer.UpsertProject(r.Context(), ProjectRegister{
 			Name:       *req.Name,
@@ -72,6 +77,64 @@ func registerProject(store ReadStore, managedOrigins ManagedOriginReconciler) ht
 		}
 		writeJSON(w, http.StatusOK, project)
 	}
+}
+
+// validateTestSlotHelmMetadata enforces the chart-image-tag drift fix
+// at the project write surface: `image.tag` (and its `imageTag` /
+// nested `image: {tag: ...}` spellings) must not appear in
+// `test_slot_helm.values` or `test_slot_helm.set_string_values`.
+//
+// History: warm test slots install each project's chart with `--set
+// image.tag=<value pulled from this metadata>`. That literal was set
+// once per project and never bumped, so slots ran a stale image while
+// prod moved on. Two SPA bugs already-fixed upstream surfaced on slots
+// because of it (investigated 2026-05-28). The fix shipped in PRs
+// glimmung#622 + ambience#258: the chart's own `image.tag` default
+// tracks prod via CI lockstep, and the Postgres pin was deleted from
+// every project. This guard prevents the pin from being re-introduced
+// via a future `register_project` upsert.
+//
+// Per .tank/docs/migration-policy.md the retired path stays deleted at
+// every layer — CI guards in each repo cover the chart files; this
+// guard covers the durable Postgres write path.
+func validateTestSlotHelmMetadata(metadata map[string]any) error {
+	const retiredFieldMessage = "test_slot_helm.%s.image.tag is a retired field — project image tags must come from the chart's own default, which the per-repo build workflow keeps in lockstep with prod (see .tank/docs/migration-policy.md, glimmung#622, ambience#258)"
+	helmRaw, ok := metadata["test_slot_helm"]
+	if !ok {
+		helmRaw, ok = metadata["testSlotHelm"]
+	}
+	if !ok {
+		return nil
+	}
+	helm, ok := helmRaw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	for _, key := range []string{"values", "set_string_values", "setStringValues"} {
+		raw, ok := helm[key]
+		if !ok {
+			continue
+		}
+		vals, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, has := vals["image.tag"]; has {
+			return fmt.Errorf(retiredFieldMessage, key)
+		}
+		if _, has := vals["imageTag"]; has {
+			return fmt.Errorf(retiredFieldMessage, key)
+		}
+		// Nested form: image: {tag: "..."}. Helm flattens both forms
+		// to the same effective `--set image.tag=...`, so either is
+		// equivalent drift surface and forbidden.
+		if image, ok := vals["image"].(map[string]any); ok {
+			if _, has := image["tag"]; has {
+				return fmt.Errorf(retiredFieldMessage, key)
+			}
+		}
+	}
+	return nil
 }
 
 // reconcileManagedAuthOrigins runs the managed-origin reconciler and

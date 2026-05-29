@@ -104,6 +104,80 @@ func TestRegisterProjectRejectsInvalidHotSwapMetadata(t *testing.T) {
 	}
 }
 
+func TestRegisterProjectRejectsRetiredImageTagInTestSlotHelm(t *testing.T) {
+	// Migration guard: image.tag must never reappear in
+	// test_slot_helm.values / .set_string_values / .values.image.tag.
+	// Project image tags come from the chart's own default; the
+	// per-repo build workflow keeps that default in lockstep with
+	// prod (see glimmung#622 + ambience#258).
+	cases := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "values.image.tag flat",
+			body: `{"name":"glimmung","github_repo":"nelsong6/glimmung","metadata":{"test_slot_helm":{"enabled":true,"values":{"image.tag":"app-abc"}}}}`,
+		},
+		{
+			name: "values.imageTag camelCase",
+			body: `{"name":"glimmung","github_repo":"nelsong6/glimmung","metadata":{"test_slot_helm":{"enabled":true,"values":{"imageTag":"app-abc"}}}}`,
+		},
+		{
+			name: "values.image.tag nested",
+			body: `{"name":"glimmung","github_repo":"nelsong6/glimmung","metadata":{"test_slot_helm":{"enabled":true,"values":{"image":{"tag":"app-abc"}}}}}`,
+		},
+		{
+			name: "set_string_values.image.tag",
+			body: `{"name":"glimmung","github_repo":"nelsong6/glimmung","metadata":{"test_slot_helm":{"enabled":true,"set_string_values":{"image.tag":"app-abc"}}}}`,
+		},
+		{
+			name: "setStringValues camelCase block",
+			body: `{"name":"glimmung","github_repo":"nelsong6/glimmung","metadata":{"test_slot_helm":{"enabled":true,"setStringValues":{"image.tag":"app-abc"}}}}`,
+		},
+		{
+			name: "testSlotHelm camelCase top-level",
+			body: `{"name":"glimmung","github_repo":"nelsong6/glimmung","metadata":{"testSlotHelm":{"enabled":true,"values":{"image.tag":"app-abc"}}}}`,
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			handler := NewWithDependencies(
+				Settings{},
+				&fakeProjectStore{},
+				fakeAdminAuthenticator{user: auth.User{Sub: "admin"}},
+			)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/projects", strings.NewReader(tc.body)))
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "image.tag is a retired field") {
+				t.Fatalf("body did not name the retired field: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestRegisterProjectAcceptsTestSlotHelmWithoutImageTag(t *testing.T) {
+	// Negative control: the same shape minus image.tag must pass.
+	store := &fakeProjectStore{project: Project{Name: "glimmung", GitHubRepo: "nelsong6/glimmung"}}
+	handler := NewWithDependencies(
+		Settings{},
+		store,
+		fakeAdminAuthenticator{user: auth.User{Sub: "admin"}},
+	)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/projects", strings.NewReader(`{
+		"name":"glimmung",
+		"github_repo":"nelsong6/glimmung",
+		"metadata":{"test_slot_helm":{"enabled":true,"chart_path":"k8s/issue","values":{"hostname":"{host}","prNumber":"test-slot"}}}
+	}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestRegisterProjectStoreErrorsReturn500(t *testing.T) {
 	handler := NewWithDependencies(
 		Settings{},
