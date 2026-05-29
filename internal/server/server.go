@@ -382,8 +382,6 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	mux.HandleFunc("GET /v1/lease-callbacks/{callback_token}", readLeaseByCallbackToken(store))
 	mux.HandleFunc("POST /v1/lease-callbacks/{callback_token}/heartbeat", heartbeatLeaseByCallbackToken(store))
 	mux.HandleFunc("POST /v1/lease-callbacks/{callback_token}/release", releaseLeaseByCallbackToken(store, testSlotPreparer))
-	mux.HandleFunc("POST /v1/lease-callbacks/{callback_token}/ssh-cert", mintLeaseCallbackSSHCert(store, sshCertSigner))
-	mux.HandleFunc("POST /v1/lease-callbacks/{callback_token}/tailscale-authkey", mintLeaseCallbackTailscaleAuthKey(store, tailscaleAuthKeyMinter))
 	mux.HandleFunc("GET /v1/state", stateSnapshot(settings, store))
 	mux.HandleFunc("GET /v1/projects/{project}/test-environments/{slot_name}", testEnvironmentStatus(settings, store))
 	mux.HandleFunc("GET /v1/events", stateEvents(settings, store))
@@ -415,6 +413,8 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/github-token", nativeGitHubTokenByCallbackToken(store, nativeTokenMinter))
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/pr-touchpoint", nativePRTouchpointByCallbackToken(store, prClient, artifactStore))
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/pr-merge", nativePRMergeByCallbackToken(store, prClient))
+	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/ssh-cert", mintRunCallbackSSHCert(store, sshCertSigner))
+	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/tailscale-authkey", mintRunCallbackTailscaleAuthKey(store, tailscaleAuthKeyMinter))
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/completed", nativeRunCompletedByCallbackToken(store, nativeLauncher))
 	if stateStore, ok := store.(StateStore); ok {
 		if inspectionStore, ok := store.(SlotInspectionStore); ok {

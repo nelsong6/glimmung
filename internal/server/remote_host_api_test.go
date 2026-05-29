@@ -8,50 +8,46 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"golang.org/x/crypto/ssh"
 )
 
-// remoteHostCallbackStore is a minimal LeaseCallbackReadStore for the
-// remote-host endpoint tests. It returns the same lease for any token
-// equal to .token; everything else returns ErrNotFound. Keeping it
-// local avoids coupling to evolving fakeLeaseCallbackStore in
-// lease_callback_api_test.go.
-type remoteHostCallbackStore struct {
+// remoteHostRunCallbackStore is a minimal RunCompletionStore that returns
+// a fixed (runID, project) for the configured token and ErrNotFound for
+// anything else. The remote-host endpoints don't read the full run
+// payload, so we leave ReadRunForReplay unimplemented and rely on the
+// shorter token→ids path the handler actually uses.
+type remoteHostRunCallbackStore struct {
 	fakeReadStore
-	token string
-	lease Lease
-	err   error
+	token   string
+	runID   string
+	project string
+	err     error
 }
 
-func (s remoteHostCallbackStore) ReadLeaseByCallbackToken(_ context.Context, token string) (Lease, error) {
+func (s remoteHostRunCallbackStore) ReadRunIDForCallbackToken(_ context.Context, token string) (string, string, string, error) {
 	if s.err != nil {
-		return Lease{}, s.err
+		return "", "", "", s.err
 	}
 	if token != s.token {
-		return Lease{}, ErrNotFound
+		return "", "", "", ErrNotFound
 	}
-	return s.lease, nil
+	return s.runID, s.project, "", nil
 }
 
-func newClaimedLease(project string) Lease {
-	return Lease{
-		ID:      "lse_test_01",
-		Kind:    "native",
-		Project: project,
-		State:   "claimed",
-	}
+
+func newRunCallbackStore(token, project string) remoteHostRunCallbackStore {
+	return remoteHostRunCallbackStore{token: token, runID: "run_test_01", project: project}
 }
 
 func TestSSHCertHandlerHappyPath(t *testing.T) {
 	signer := mustNewCertSigner(t)
-	store := remoteHostCallbackStore{token: "tok-1", lease: newClaimedLease("spirelens")}
-	handler := mintLeaseCallbackSSHCert(store, signer)
+	store := newRunCallbackStore("tok-1", "spirelens")
+	handler := mintRunCallbackSSHCert(store, signer)
 
 	pubKey, _ := generateUserPubKeyForTest(t)
 	body := mustEncodeJSON(t, SSHCertRequest{PublicKey: pubKey})
-	req := httptest.NewRequest(http.MethodPost, "/v1/lease-callbacks/tok-1/ssh-cert", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/v1/run-callbacks/tok-1/native/ssh-cert", bytes.NewReader(body))
 	req.SetPathValue("callback_token", "tok-1")
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
@@ -67,13 +63,12 @@ func TestSSHCertHandlerHappyPath(t *testing.T) {
 	if len(got.Principals) != 1 || got.Principals[0] != "spirelens-agent" {
 		t.Fatalf("Principals=%v", got.Principals)
 	}
-	if got.KeyID != "glimmung-lease:spirelens/lse_test_01" {
+	if got.KeyID != "glimmung-run:spirelens/run_test_01" {
 		t.Fatalf("KeyID=%q", got.KeyID)
 	}
 	if got.ValidBefore.Before(got.ValidAfter) || got.ValidBefore.Equal(got.ValidAfter) {
 		t.Fatalf("ValidBefore <= ValidAfter")
 	}
-	// Cert verifies under the same CA signer.
 	parsed, _, _, _, err := ssh.ParseAuthorizedKey([]byte(got.Certificate))
 	if err != nil {
 		t.Fatalf("re-parse: %v", err)
@@ -93,8 +88,8 @@ func TestSSHCertHandlerHappyPath(t *testing.T) {
 }
 
 func TestSSHCertHandlerSignerDisabledReturns503(t *testing.T) {
-	store := remoteHostCallbackStore{token: "tok-1", lease: newClaimedLease("spirelens")}
-	handler := mintLeaseCallbackSSHCert(store, nil)
+	store := newRunCallbackStore("tok-1", "spirelens")
+	handler := mintRunCallbackSSHCert(store, nil)
 	rr := doSSHCertReq(t, handler, "tok-1", `{"public_key":"ssh-ed25519 AAAA"}`)
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
@@ -103,8 +98,8 @@ func TestSSHCertHandlerSignerDisabledReturns503(t *testing.T) {
 
 func TestSSHCertHandlerUnknownTokenReturns404(t *testing.T) {
 	signer := mustNewCertSigner(t)
-	store := remoteHostCallbackStore{token: "real", lease: newClaimedLease("spirelens")}
-	handler := mintLeaseCallbackSSHCert(store, signer)
+	store := newRunCallbackStore("real", "spirelens")
+	handler := mintRunCallbackSSHCert(store, signer)
 	pub, _ := generateUserPubKeyForTest(t)
 	rr := doSSHCertReq(t, handler, "wrong", `{"public_key":"`+pub+`"}`)
 	if rr.Code != http.StatusNotFound {
@@ -112,23 +107,10 @@ func TestSSHCertHandlerUnknownTokenReturns404(t *testing.T) {
 	}
 }
 
-func TestSSHCertHandlerLeaseNotClaimedReturns409(t *testing.T) {
-	signer := mustNewCertSigner(t)
-	lease := newClaimedLease("spirelens")
-	lease.State = "released"
-	store := remoteHostCallbackStore{token: "tok-1", lease: lease}
-	handler := mintLeaseCallbackSSHCert(store, signer)
-	pub, _ := generateUserPubKeyForTest(t)
-	rr := doSSHCertReq(t, handler, "tok-1", `{"public_key":"`+pub+`"}`)
-	if rr.Code != http.StatusConflict {
-		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
-	}
-}
-
 func TestSSHCertHandlerMissingPubKeyReturns400(t *testing.T) {
 	signer := mustNewCertSigner(t)
-	store := remoteHostCallbackStore{token: "tok-1", lease: newClaimedLease("spirelens")}
-	handler := mintLeaseCallbackSSHCert(store, signer)
+	store := newRunCallbackStore("tok-1", "spirelens")
+	handler := mintRunCallbackSSHCert(store, signer)
 
 	for name, body := range map[string]string{
 		"empty body":    ``,
@@ -146,11 +128,10 @@ func TestSSHCertHandlerMissingPubKeyReturns400(t *testing.T) {
 	}
 }
 
-func TestSSHCertHandlerRejectsLeaseWithoutProject(t *testing.T) {
+func TestSSHCertHandlerRejectsRunWithoutProject(t *testing.T) {
 	signer := mustNewCertSigner(t)
-	lease := newClaimedLease("")
-	store := remoteHostCallbackStore{token: "tok-1", lease: lease}
-	handler := mintLeaseCallbackSSHCert(store, signer)
+	store := newRunCallbackStore("tok-1", "")
+	handler := mintRunCallbackSSHCert(store, signer)
 	pub, _ := generateUserPubKeyForTest(t)
 	rr := doSSHCertReq(t, handler, "tok-1", `{"public_key":"`+pub+`"}`)
 	if rr.Code != http.StatusConflict {
@@ -161,10 +142,10 @@ func TestSSHCertHandlerRejectsLeaseWithoutProject(t *testing.T) {
 func TestTailscaleAuthKeyHandlerHappyPath(t *testing.T) {
 	f := newFakeFederationAndTailscale(t)
 	minter := newTestMinter(t, f)
-	store := remoteHostCallbackStore{token: "tok-1", lease: newClaimedLease("spirelens")}
-	handler := mintLeaseCallbackTailscaleAuthKey(store, minter)
+	store := newRunCallbackStore("tok-1", "spirelens")
+	handler := mintRunCallbackTailscaleAuthKey(store, minter)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/lease-callbacks/tok-1/tailscale-authkey", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/run-callbacks/tok-1/native/tailscale-authkey", nil)
 	req.SetPathValue("callback_token", "tok-1")
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
@@ -188,9 +169,9 @@ func TestTailscaleAuthKeyHandlerHappyPath(t *testing.T) {
 }
 
 func TestTailscaleAuthKeyHandlerMinterDisabledReturns503(t *testing.T) {
-	store := remoteHostCallbackStore{token: "tok-1", lease: newClaimedLease("spirelens")}
-	handler := mintLeaseCallbackTailscaleAuthKey(store, nil)
-	req := httptest.NewRequest(http.MethodPost, "/v1/lease-callbacks/tok-1/tailscale-authkey", nil)
+	store := newRunCallbackStore("tok-1", "spirelens")
+	handler := mintRunCallbackTailscaleAuthKey(store, nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/run-callbacks/tok-1/native/tailscale-authkey", nil)
 	req.SetPathValue("callback_token", "tok-1")
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
@@ -199,18 +180,16 @@ func TestTailscaleAuthKeyHandlerMinterDisabledReturns503(t *testing.T) {
 	}
 }
 
-func TestTailscaleAuthKeyHandlerLeaseNotClaimedReturns409(t *testing.T) {
+func TestTailscaleAuthKeyHandlerUnknownTokenReturns404(t *testing.T) {
 	f := newFakeFederationAndTailscale(t)
 	minter := newTestMinter(t, f)
-	lease := newClaimedLease("spirelens")
-	lease.State = "released"
-	store := remoteHostCallbackStore{token: "tok-1", lease: lease}
-	handler := mintLeaseCallbackTailscaleAuthKey(store, minter)
-	req := httptest.NewRequest(http.MethodPost, "/v1/lease-callbacks/tok-1/tailscale-authkey", nil)
-	req.SetPathValue("callback_token", "tok-1")
+	store := newRunCallbackStore("real", "spirelens")
+	handler := mintRunCallbackTailscaleAuthKey(store, minter)
+	req := httptest.NewRequest(http.MethodPost, "/v1/run-callbacks/wrong/native/tailscale-authkey", nil)
+	req.SetPathValue("callback_token", "wrong")
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
-	if rr.Code != http.StatusConflict {
+	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
 }
@@ -219,9 +198,9 @@ func TestTailscaleAuthKeyHandlerPropagatesAPIError(t *testing.T) {
 	f := newFakeFederationAndTailscale(t)
 	f.mintStatus = http.StatusForbidden
 	minter := newTestMinter(t, f)
-	store := remoteHostCallbackStore{token: "tok-1", lease: newClaimedLease("spirelens")}
-	handler := mintLeaseCallbackTailscaleAuthKey(store, minter)
-	req := httptest.NewRequest(http.MethodPost, "/v1/lease-callbacks/tok-1/tailscale-authkey", nil)
+	store := newRunCallbackStore("tok-1", "spirelens")
+	handler := mintRunCallbackTailscaleAuthKey(store, minter)
+	req := httptest.NewRequest(http.MethodPost, "/v1/run-callbacks/tok-1/native/tailscale-authkey", nil)
 	req.SetPathValue("callback_token", "tok-1")
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
@@ -241,7 +220,7 @@ func TestRemoteHostPrincipalAndTag(t *testing.T) {
 
 func doSSHCertReq(t *testing.T, handler http.HandlerFunc, token, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/v1/lease-callbacks/"+token+"/ssh-cert", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/v1/run-callbacks/"+token+"/native/ssh-cert", strings.NewReader(body))
 	req.SetPathValue("callback_token", token)
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
@@ -263,6 +242,3 @@ func mustDecodeJSON(t *testing.T, raw []byte, v any) {
 		t.Fatalf("decode: %v body=%s", err, string(raw))
 	}
 }
-
-// avoid unused imports if the file is edited later
-var _ = time.Time{}

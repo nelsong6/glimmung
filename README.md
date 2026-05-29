@@ -135,8 +135,6 @@ surface.
 | GET    | `/v1/lease-callbacks/{callback_token}` | Read the public lease by callback token. Used by runner clients. |
 | POST   | `/v1/lease-callbacks/{callback_token}/heartbeat` | Keep the lease alive. |
 | POST   | `/v1/lease-callbacks/{callback_token}/release` | Release the lease. Idempotent. |
-| POST   | `/v1/lease-callbacks/{callback_token}/ssh-cert` | Sign a short-TTL OpenSSH user cert over a caller-supplied public key. See [Remote-host execution](docs/remote-host-execution.md). |
-| POST   | `/v1/lease-callbacks/{callback_token}/tailscale-authkey` | Mint a one-shot, ephemeral, pre-authorized Tailscale auth key tagged for the lease's project. |
 | POST   | `/v1/leases/cancel`               | Cancel a lease by public ref. Admin-auth guarded. |
 | PATCH  | `/v1/leases/ttl`                  | Update a claimed lease TTL by public ref. Admin-auth guarded. |
 | PATCH  | `/v1/test-slots/default-ttl`      | Set or reset the default TTL for generated test-slot leases globally or for one project. Admin-auth guarded. |
