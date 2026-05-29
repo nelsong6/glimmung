@@ -5,10 +5,16 @@
 
 image:
   repository: romainecr.azurecr.io/glimmung
-  # Set per-install to the issue tag (e.g. issue-12-RUNID-abc1234). No
-  # default — `helm install` should fail loudly if the workflow forgot
-  # to pass it, rather than silently deploy a stale tag.
-  tag: ""
+  # SHA-pinned, kept in lockstep with k8s/values.yaml. The build workflow
+  # rewrites BOTH files on every push to main via a `[skip ci]` follow-up
+  # commit (see .github/workflows/build.yaml), so the per-issue chart
+  # always defaults to the same image prod is running. Per-PR installs
+  # (agent-run.yml) and Glimmung-managed test slots still override this
+  # via --set image.tag=<their tag> when they want a different image.
+  # The chart's deployment template fails if the resolved tag is empty,
+  # so an unsynced bump or a misconfigured override still fails loudly.
+  # Quote so all-digit short SHAs aren't reformatted as scientific notation.
+  tag: "app-b5da7825274fbfbcdb2822a752d41c562549b20e636b1ead81c63efb535317d8"
   pullPolicy: IfNotPresent
 
 # Public hostname for the validation env. Set per-install to
