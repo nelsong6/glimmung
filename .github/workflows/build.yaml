@@ -22,6 +22,12 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # GitHub Environment scopes the OIDC token's `sub` claim presented to
+    # Azure. The per-app Entra App provisioned by infra-bootstrap has two
+    # federated credentials — `repo:nelsong6/<repo>:environment:dev` and
+    # `repo:nelsong6/<repo>:environment:prod`. Declaring `environment:`
+    # is what causes the issued token's `sub` to match one of those.
+    environment: ${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
     env:
       REGISTRY: romainecr.azurecr.io
       IMAGE: glimmung

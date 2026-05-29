@@ -21,6 +21,11 @@ jobs:
   build:
     name: Build ${{ matrix.name }} image
     runs-on: ubuntu-latest
+    # This workflow only runs from non-main triggers (pull_request,
+    # workflow_dispatch against a feature branch), so it always evaluates
+    # to `dev` here. The conditional form is kept for symmetry with the
+    # release workflows.
+    environment: ${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
     strategy:
       fail-fast: false
       matrix:

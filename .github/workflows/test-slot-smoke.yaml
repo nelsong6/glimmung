@@ -28,6 +28,7 @@ permissions:
 jobs:
   smoke:
     runs-on: ubuntu-latest
+    environment: ${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
     env:
       GLIMMUNG_BASE_URL: https://glimmung.romaine.life
       PROJECT: ${{ inputs.project || 'tank-operator' }}
