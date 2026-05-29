@@ -54,6 +54,7 @@ RUN apt-retry update \
         golang-go \
         gnupg \
         jq \
+        openssh-client \
         python3 \
         python3-pip \
         python3-venv \
@@ -76,6 +77,20 @@ RUN KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)" \
     && chmod +x /usr/local/bin/kubectl
 
 RUN curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+# Tailscale client + tailscaled. Project workflows that need to reach
+# a project-pinned host outside the cluster (see
+# docs/remote-host-execution.md) bring tailscaled up in userspace
+# networking mode per-run; the daemon is not started in the image. The
+# install path follows Tailscale's published apt repo so we get signed
+# packages without curl|sh.
+RUN curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.noarmor.gpg \
+        -o /usr/share/keyrings/tailscale-archive-keyring.gpg \
+    && curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.tailscale-keyring.list \
+        -o /etc/apt/sources.list.d/tailscale.list \
+    && apt-retry update \
+    && apt-retry install tailscale \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p -m 755 /etc/apt/keyrings \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \

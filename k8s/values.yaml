@@ -144,6 +144,19 @@ externalSecret:
       kvKey: glimmung-pg-host
     - envVar: POSTGRES_DATABASE
       kvKey: glimmung-pg-database
+    # Remote-host execution primitives (docs/remote-host-execution.md).
+    # The SSH CA private key signs short-TTL OpenSSH user certs for
+    # orchestrator pods reaching project-pinned hosts. The Tailscale
+    # OAuth client pair mints ephemeral pre-authorized auth keys for
+    # those same pods. Both endpoints fail closed with HTTP 503 when
+    # their secret is empty so missing values do not silently bypass
+    # the credential mint.
+    - envVar: GLIMMUNG_SSH_CA_PRIVATE_KEY
+      kvKey: glimmung-ssh-ca-private-key
+    - envVar: GLIMMUNG_TAILSCALE_OAUTH_CLIENT_ID
+      kvKey: glimmung-tailscale-oauth-client-id
+    - envVar: GLIMMUNG_TAILSCALE_OAUTH_CLIENT_SECRET
+      kvKey: glimmung-tailscale-oauth-client-secret
 
 # Postgres workload-identity user. This is the name of the UAMI
 # (azurerm_user_assigned_identity.glimmung_dedicated) registered as

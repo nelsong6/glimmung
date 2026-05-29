@@ -135,6 +135,8 @@ surface.
 | GET    | `/v1/lease-callbacks/{callback_token}` | Read the public lease by callback token. Used by runner clients. |
 | POST   | `/v1/lease-callbacks/{callback_token}/heartbeat` | Keep the lease alive. |
 | POST   | `/v1/lease-callbacks/{callback_token}/release` | Release the lease. Idempotent. |
+| POST   | `/v1/lease-callbacks/{callback_token}/ssh-cert` | Sign a short-TTL OpenSSH user cert over a caller-supplied public key. See [Remote-host execution](docs/remote-host-execution.md). |
+| POST   | `/v1/lease-callbacks/{callback_token}/tailscale-authkey` | Mint a one-shot, ephemeral, pre-authorized Tailscale auth key tagged for the lease's project. |
 | POST   | `/v1/leases/cancel`               | Cancel a lease by public ref. Admin-auth guarded. |
 | PATCH  | `/v1/leases/ttl`                  | Update a claimed lease TTL by public ref. Admin-auth guarded. |
 | PATCH  | `/v1/test-slots/default-ttl`      | Set or reset the default TTL for generated test-slot leases globally or for one project. Admin-auth guarded. |
@@ -413,6 +415,9 @@ KV keys consumed by glimmung:
 | `glimmung-github-app-installation-id` | same                                                                      |
 | `glimmung-github-app-private-key`  | same                                                                         |
 | `glimmung-github-webhook-secret`   | same                                                                         |
+| `glimmung-ssh-ca-private-key`      | OpenSSH-format ed25519 CA private key. Signs short-TTL user certs for orchestrator pods (see [Remote-host execution](docs/remote-host-execution.md)). |
+| `glimmung-tailscale-oauth-client-id`     | Tailscale OAuth client ID with `auth_keys:write` over the orchestrator tag. |
+| `glimmung-tailscale-oauth-client-secret` | Tailscale OAuth client secret pair to the ID above.                          |
 
 The GitHub App is created via the GitHub UI — one webhook URL per App means glimmung needs its own (the shared `github-app-*` keys still serve mcp-github / diagrams). Configure the App with:
 
