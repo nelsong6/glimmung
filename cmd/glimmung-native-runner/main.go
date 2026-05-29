@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/nelsong6/glimmung/internal/domain/agentcost"
+	"github.com/nelsong6/glimmung/internal/domain/decision"
 	"github.com/nelsong6/glimmung/internal/domain/innerjob"
 )
 
@@ -231,8 +232,32 @@ func (r *nativeRunner) run(ctx context.Context) error {
 			_ = r.complete(ctx, "failure", err.Error())
 			return err
 		}
+		// A step can short-circuit the whole phase by emitting a
+		// non-empty `abort_reason` phase output (the spirelens env-prep
+		// guards do this: host asleep, unexpected mod on disk). This is a
+		// fail-closed signal — the remaining steps in the phase must NOT
+		// run. We stop here and report a terminal abort completion so the
+		// decision engine routes the run to teardown-then-abort with the
+		// phase's own reason, rather than letting later steps execute as
+		// if nothing happened.
+		if reason := r.requestedAbortReason(); reason != "" {
+			slug := strings.TrimSpace(step.Slug)
+			msg := fmt.Sprintf("step %q requested run abort: %s", slug, reason)
+			_ = r.postEvent(ctx, "phase_aborted", &slug, msg, nil, map[string]any{
+				"abort_reason": reason,
+			})
+			return r.complete(ctx, decision.ConclusionAborted, msg)
+		}
 	}
 	return r.complete(ctx, "success", "completed")
+}
+
+// requestedAbortReason returns the phase's `abort_reason` output if a step
+// has set it to a non-empty value, signalling a fail-closed abort. Outputs
+// are only written on the main goroutine (publishOutputs runs synchronously
+// after each step), so an unlocked read here is race-free.
+func (r *nativeRunner) requestedAbortReason() string {
+	return strings.TrimSpace(r.outputs[decision.AbortReasonOutputKey])
 }
 
 // shutdownRequested reports whether the supplied (signal-aware) context

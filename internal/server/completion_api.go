@@ -82,6 +82,9 @@ const (
 	JobTerminalReasonVerificationFailed = "verification_failed"
 	// Verification step errored.
 	JobTerminalReasonVerificationError = "verification_error"
+	// A phase script requested a fail-closed abort by emitting a
+	// non-empty `abort_reason` phase output (decision.AbortRequested).
+	JobTerminalReasonAborted = "aborted"
 	// Catch-all when no reason can be derived.
 	JobTerminalReasonUnknown = "unknown"
 )
@@ -101,6 +104,7 @@ func IsKnownJobTerminalReason(reason string) bool {
 		JobTerminalReasonCancelled,
 		JobTerminalReasonVerificationFailed,
 		JobTerminalReasonVerificationError,
+		JobTerminalReasonAborted,
 		JobTerminalReasonUnknown:
 		return true
 	}
@@ -296,6 +300,8 @@ func deriveCallbackReason(p CompletionPayload) string {
 		return JobTerminalReasonTimeout
 	case "cancelled":
 		return JobTerminalReasonCancelled
+	case decision.ConclusionAborted:
+		return JobTerminalReasonAborted
 	}
 	return JobTerminalReasonJobFailed
 }
@@ -904,7 +910,10 @@ func phaseSpecByName(phases []PhaseSpec, name string) *PhaseSpec {
 
 func isAbortDecision(value string) bool {
 	switch value {
-	case string(decision.AbortBudgetAttempts), string(decision.AbortBudgetCost), string(decision.AbortMalformed):
+	case string(decision.AbortBudgetAttempts),
+		string(decision.AbortBudgetCost),
+		string(decision.AbortMalformed),
+		string(decision.AbortRequested):
 		return true
 	default:
 		return false
