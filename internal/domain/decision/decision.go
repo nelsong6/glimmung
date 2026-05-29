@@ -16,7 +16,30 @@ const (
 	AbortBudgetAttempts RunDecision = "abort_budget_attempts"
 	AbortBudgetCost     RunDecision = "abort_budget_cost"
 	AbortMalformed      RunDecision = "abort_malformed"
+	// AbortRequested is a phase-requested ("fail-closed") abort. A phase
+	// script emits a non-empty `abort_reason` phase output to declare the
+	// run cannot proceed (e.g. spirelens env-prep finding the warm host
+	// asleep, or an unexpected mod on disk). It is distinct from the
+	// budget/malformed aborts: it is not driven by verification status or
+	// retry/cost ceilings, so it overrides the verify-loop routing
+	// entirely and short-circuits straight to teardown-then-abort. The
+	// operator-facing reason is the phase's own `abort_reason` string, not
+	// a generic decision-engine explanation.
+	AbortRequested RunDecision = "abort_requested"
 )
+
+// AbortReasonOutputKey is the phase-output key a phase script sets to
+// request a fail-closed run abort. The native runner stops the remaining
+// steps in the phase when it sees this key set to a non-empty value and
+// reports the completion with conclusion=ConclusionAborted; the decision
+// engine then routes the run to AbortRequested.
+const AbortReasonOutputKey = "abort_reason"
+
+// ConclusionAborted is the completion conclusion the native runner reports
+// for a phase-requested abort. It is recorded on the attempt for
+// observability; the load-bearing routing signal is the per-attempt
+// AbortReason (sourced from the AbortReasonOutputKey phase output).
+const ConclusionAborted = "aborted"
 
 type VerificationStatus string
 
@@ -35,6 +58,11 @@ type Attempt struct {
 	Phase        string
 	Conclusion   string
 	Verification *Verification
+	// AbortReason carries the phase's `abort_reason` output (empty when
+	// the phase did not request an abort). A non-empty value on the
+	// deciding attempt forces the AbortRequested verdict ahead of any
+	// verify/budget routing.
+	AbortReason string
 }
 
 type RecyclePolicy struct {
@@ -85,6 +113,17 @@ func Decide(run Run, workflow Workflow, attemptIndex ...int) (decision RunDecisi
 	}
 
 	last := run.Attempts[index]
+
+	// A phase-requested abort overrides every other routing rule. The
+	// phase emitted a non-empty `abort_reason`, so there is nothing to
+	// verify, retry, or advance — the run short-circuits to
+	// teardown-then-abort regardless of phase shape or budget. Honor it
+	// before the workflow phase lookup so a phase-requested abort still
+	// aborts cleanly even under workflow drift.
+	if strings.TrimSpace(last.AbortReason) != "" {
+		return AbortRequested, nil
+	}
+
 	phaseSpec, ok := phaseByName(workflow, last.Phase)
 	if !ok {
 		return "", fmt.Errorf("attempt phase %q not found in workflow.phases", last.Phase)
@@ -163,6 +202,19 @@ func AbortExplanation(run Run, workflow Workflow, decision RunDecision) (string,
 	}
 
 	switch decision {
+	case AbortRequested:
+		reason := ""
+		phaseName := "?"
+		if last != nil {
+			reason = strings.TrimSpace(last.AbortReason)
+			if last.Phase != "" {
+				phaseName = last.Phase
+			}
+		}
+		if reason == "" {
+			return fmt.Sprintf("Aborting run: phase %q requested a fail-closed abort.%s", phaseName, detail), nil
+		}
+		return fmt.Sprintf("Aborting run: phase %q requested a fail-closed abort (%s).%s", phaseName, reason, detail), nil
 	case AbortBudgetAttempts:
 		if last == nil {
 			return "Aborting verify-loop on phase '?': no retry path available for the latest verification result." + detail, nil

@@ -74,6 +74,25 @@ describe("PhaseGraph", () => {
     expect(highlightedPathRule?.[1]).toContain("fill: none");
     expect(highlightedPathRule?.[1]).not.toContain("fill: var(--state-success-fg)");
   });
+
+  it("highlights only active entry arrows", async () => {
+    const { container } = render(
+      <PhaseGraph
+        ariaLabel="workflow graph"
+        phases={[
+          { name: "manual-entry", kind: "k8s_job", jobs: [{ id: "manual-entry" }] },
+          { name: "default-entry", kind: "k8s_job", depends_on: ["manual-entry"], jobs: [{ id: "default-entry" }] },
+        ]}
+        entryArrows={[
+          { target: "manual-entry", active: true, kind: "manual" },
+          { target: "default-entry", active: false, kind: "default" },
+        ]}
+      />,
+    );
+
+    expect(await edgeGroup(container, "rf__edge-entry:manual-entry:0")).toHaveClass("entry");
+    expect(await edgeGroup(container, "rf__edge-entry:default-entry:1")).not.toHaveClass("entry");
+  });
 });
 
 type Point = { x: number; y: number };
@@ -81,12 +100,24 @@ type Segment = { from: Point; to: Point };
 
 async function edgePathD(container: HTMLElement, testId: string): Promise<string> {
   return waitFor(() => {
-    const edge = Array.from(container.querySelectorAll<SVGGElement>("[data-testid]"))
-      .find((el) => el.getAttribute("data-testid") === testId);
+    const edge = edgeByTestId(container, testId);
     const d = edge?.querySelector<SVGPathElement>(".react-flow__edge-path")?.getAttribute("d");
     expect(d).toBeTruthy();
     return d ?? "";
   });
+}
+
+async function edgeGroup(container: HTMLElement, testId: string): Promise<SVGGElement> {
+  return waitFor(() => {
+    const edge = edgeByTestId(container, testId);
+    expect(edge).toBeTruthy();
+    return edge as SVGGElement;
+  });
+}
+
+function edgeByTestId(container: HTMLElement, testId: string): SVGGElement | undefined {
+  return Array.from(container.querySelectorAll<SVGGElement>("[data-testid]"))
+    .find((el) => el.getAttribute("data-testid") === testId);
 }
 
 function pathsIntersect(a: string, b: string): boolean {

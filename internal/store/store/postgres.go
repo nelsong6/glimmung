@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/nelsong6/glimmung/internal/domain/budget"
+	"github.com/nelsong6/glimmung/internal/domain/decision"
 	"github.com/nelsong6/glimmung/internal/domain/publicids"
 	"github.com/nelsong6/glimmung/internal/server"
 	pgstore "github.com/nelsong6/glimmung/internal/store/pg"
@@ -5939,6 +5940,12 @@ func genericNativeJobStateAndReason(completion nativeJobCompletionDoc, verificat
 		return "failed", "timeout"
 	case "cancelled":
 		return "failed", "cancelled"
+	case decision.ConclusionAborted:
+		// Phase-requested fail-closed abort: the job process ran but the
+		// phase declared the run cannot proceed. Surfaced as failed with
+		// the dedicated aborted reason so the dashboard distinguishes it
+		// from a crashed job.
+		return "failed", server.JobTerminalReasonAborted
 	default:
 		return "failed", "job_failed"
 	}

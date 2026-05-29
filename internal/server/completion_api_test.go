@@ -469,6 +469,20 @@ func prWorkflowForCompletion(name string) *Workflow {
 	return &canonical
 }
 
+func abortWorkflowWithCleanup(primary string) *Workflow {
+	wf := singlePhaseWorkflowForCompletion(primary, false)
+	wf.Phases = append(wf.Phases, PhaseSpec{
+		Name:      "cleanup",
+		Kind:      "k8s_job",
+		RunOn:     PhaseRunOnAlways,
+		Purpose:   PhasePurposeTeardown,
+		DependsOn: []string{primary},
+		Jobs:      []NativeJobSpec{{ID: "cleanup", Image: "runner:latest"}},
+	})
+	canonical := CanonicalWorkflow(*wf)
+	return &canonical
+}
+
 func runDataForCompletion(phase string) *RunReplayData {
 	callback := "run-token"
 	leaseRef := "proj/leases/proj-1/1"
@@ -587,6 +601,71 @@ func TestNativeRunCompletedByCallbackTokenAdvanceOnSkipped(t *testing.T) {
 			got = *result.Decision
 		}
 		t.Fatalf("decision=%q, want advance for skipped conclusion", got)
+	}
+}
+
+func TestNativeRunCompletedByCallbackTokenPhaseRequestedAbort(t *testing.T) {
+	// A primary phase (the spirelens env-prep shape: verify=false) emits a
+	// non-empty abort_reason and reports conclusion=aborted. With no
+	// teardown phase to run, completion routing must mark the run aborted
+	// straight away, carrying the phase's own reason — NOT advance to a
+	// downstream phase.
+	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
+	store.run = runDataForCompletion("env-prep")
+	store.wf = singlePhaseWorkflowForCompletion("env-prep", false)
+	store.terminalResult = AbortRunResult{State: "aborted", RunRef: "proj#7/runs/1"}
+	rec := httptest.NewRecorder()
+	newCompletionHandler(store, nil).ServeHTTP(rec, nativeCompletionRequest("tok",
+		completedJob("env-prep", decision.ConclusionAborted, nil, map[string]string{
+			"abort_reason": "unexpected_mod:godotexplorer",
+		})))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	result := readCallbackResult(t, rec)
+	if result.Decision == nil || *result.Decision != string(decision.AbortRequested) {
+		t.Fatalf("decision=%v, want abort_requested", result.Decision)
+	}
+	if store.terminalState != "aborted" {
+		t.Fatalf("terminal state=%q, want aborted", store.terminalState)
+	}
+	if store.terminalReason == nil || !strings.Contains(*store.terminalReason, "unexpected_mod:godotexplorer") {
+		t.Fatalf("terminal reason=%v, want it to carry the phase abort_reason", store.terminalReason)
+	}
+}
+
+func TestNativeRunCompletedByCallbackTokenAbortRunsTeardownThenAborts(t *testing.T) {
+	// After a primary phase requested an abort, its teardown cleanup phase
+	// runs on the abort path. When that cleanup completes successfully, the
+	// run must settle to terminal "aborted" with the ORIGINAL primary
+	// abort_reason — teardown success must not launder the abort into a
+	// pass.
+	store := &fakeCompletionStore{tokenRunID: "r1", tokenProject: "proj"}
+	store.run = runDataForCompletion("cleanup")
+	store.run.Attempts = []RunAttemptData{
+		{
+			AttemptIndex: 0,
+			Phase:        "env-prep",
+			Conclusion:   decision.ConclusionAborted,
+			Decision:     string(decision.AbortRequested),
+			Completed:    true,
+			PhaseOutputs: map[string]string{"abort_reason": "host_unavailable"},
+		},
+		{AttemptIndex: 1, Phase: "cleanup", Conclusion: "failure"},
+	}
+	store.wf = abortWorkflowWithCleanup("env-prep")
+	store.terminalResult = AbortRunResult{State: "aborted", RunRef: "proj#7/runs/1"}
+	rec := httptest.NewRecorder()
+	newCompletionHandler(store, nil).ServeHTTP(rec, nativeCompletionRequest("tok",
+		completedJob("cleanup", "success", nil, nil)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.terminalState != "aborted" {
+		t.Fatalf("terminal state=%q, want aborted", store.terminalState)
+	}
+	if store.terminalReason == nil || !strings.Contains(*store.terminalReason, "host_unavailable") {
+		t.Fatalf("terminal reason=%v, want the original primary abort_reason", store.terminalReason)
 	}
 }
 
