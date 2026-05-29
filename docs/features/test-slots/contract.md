@@ -85,6 +85,12 @@ running, cleaning, and available explicit.
 
 - Process start resumes in-flight provisioning, activation, cleaning, and TTL
   timers from durable state.
+- Process start also expires every lease whose durable `expires_at` deadline
+  has passed but whose state is still `active` or `claimed` (orphaned
+  callback releases, AfterFunc timers killed with the previous process,
+  pre-test-slot-lifecycle lease shapes). The sweep is gated by
+  `Settings.ControlPlaneLoopsEnabled` so slot processes never run it. See
+  `server.ExpireStaleLeases`.
 - Admin repair may retry preliminary-resource errors, but cleanup-error slots
   remain on the runtime cleanup path.
 - Activation failure records error state and releases or cleans up the lease

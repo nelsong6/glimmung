@@ -173,6 +173,24 @@ func main() {
 	case !settings.ControlPlaneLoopsEnabled:
 		log.Printf("control-plane reconcilers disabled (CONTROL_PLANE_LOOPS_ENABLED=false); signal drain, run queue, dispatch timeout, and test-slot recovery will not run in this process")
 	default:
+		// One-shot lease-orphan sweep at startup. Transitions every
+		// lease past its durable expires_at deadline whose state is
+		// still active or claimed to state=expired. Covers active
+		// dispatch leases whose completion callback never arrived and
+		// claimed test-slot leases whose AfterFunc timer died with the
+		// previous glimmung process. RecoverInFlightTestSlots below only
+		// re-arms timers for claimed leases carrying
+		// test_slot_checkout=true metadata; older lease shapes need
+		// this sweep. See server.ExpireStaleLeases for the full
+		// contract.
+		expireCtx, cancelExpire := context.WithTimeout(context.Background(), 60*time.Second)
+		expired, expireErr := server.ExpireStaleLeases(expireCtx, rt, time.Now().UTC(), log.Printf)
+		cancelExpire()
+		if expireErr != nil {
+			log.Printf("stale-lease expiry sweep failed: %v", expireErr)
+		} else {
+			log.Printf("stale-lease expiry sweep ok: expired=%d", expired)
+		}
 		server.StartSignalDrainReconciler(context.Background(), rt, nativeLauncher, log.Printf)
 		server.StartRunQueueReconciler(context.Background(), rt, nativeLauncher, log.Printf)
 		server.StartRunDispatchTimeoutReconciler(context.Background(), settings, rt, nativeLauncher, log.Printf)

@@ -4409,6 +4409,51 @@ func (s *Store) CancelLeaseByRef(ctx context.Context, project, ref string) (serv
 	}, nil
 }
 
+// ListLeasesForExpirySweep returns every lease across all projects with
+// just the durable fields the expire-stale-leases sweep needs (state,
+// expires_at, identity). Satisfies server.StaleLeaseStore; see
+// server.ExpireStaleLeases for the contract and the lease-orphan sources
+// the sweep recovers.
+func (s *Store) ListLeasesForExpirySweep(ctx context.Context) ([]server.StaleLeaseExpiryRow, error) {
+	if s == nil || s.pgLeases == nil {
+		return nil, nil
+	}
+	rows, err := s.pgLeases.ListAll(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list leases: %w", err)
+	}
+	out := make([]server.StaleLeaseExpiryRow, 0, len(rows))
+	for _, row := range rows {
+		doc, derr := leaseDocFromPayload(row.Payload)
+		if derr != nil {
+			// Skip rows whose payload no longer decodes; the sweep is
+			// recovery, not validation. A separate audit query is the
+			// right tool for decode failures.
+			continue
+		}
+		out = append(out, server.StaleLeaseExpiryRow{
+			ID:        row.ID,
+			Project:   row.Project,
+			State:     doc.State,
+			ExpiresAt: row.ExpiresAt,
+		})
+	}
+	return out, nil
+}
+
+// PatchLeasePayload exposes pgLeases.PatchPayload as a server-package
+// interface method for server.ExpireStaleLeases. The mutate closure runs
+// inside a SELECT FOR UPDATE transaction so it can re-check the live
+// state and skip overwrites when a concurrent release/cancel/callback
+// has already terminalized the lease.
+func (s *Store) PatchLeasePayload(ctx context.Context, project, id string, mutate func(payload map[string]any) error) error {
+	if s == nil || s.pgLeases == nil {
+		return fmt.Errorf("leases store not configured")
+	}
+	_, err := s.pgLeases.PatchPayload(ctx, project, id, mutate)
+	return err
+}
+
 // listLeaseDocsForProject is a small helper used by ref-based methods
 // that scan all leases in a project to find the one matching a public
 // ref. Pulls the rows from pg + decodes payload into leaseDoc.
