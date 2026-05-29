@@ -329,7 +329,7 @@ func runCycleGraphProjectionByNumber(store ReadStore) http.HandlerFunc {
 		}
 		projection := buildRunGraphProjection(publicids.IssueRef(issue.Project, issue.Number), []RunReport{selected}, workflowsByKey, touchpoints, signals)
 		if nativeStore, ok := store.(NativeRunStore); ok && nativeStore != nil && len(projection.Runs) == 1 && selected.ID != "" {
-			logs, err := nativeStore.ListNativeEventsByID(r.Context(), selected.Project, selected.ID, nil, nil, nil)
+			logs, err := nativeStore.ListNativeEventsByID(r.Context(), selected.Project, selected.ID, nil, nil, nil, nil)
 			if err != nil && !errors.Is(err, ErrNotFound) {
 				writeInternalError(w, r, err, "list native events failed")
 				return

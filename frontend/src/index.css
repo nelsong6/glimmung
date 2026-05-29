@@ -2450,6 +2450,31 @@ h2 .inline-action,
   border-radius: 6px;
   background: var(--surface);
 }
+.native-page-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.native-page-controls button {
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--fg-muted);
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+.native-page-controls button:not(:disabled):hover {
+  background: var(--surface-hover);
+  color: var(--fg);
+}
+.native-page-controls button:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
 .native-view-toggle button {
   min-height: 28px;
   padding: 0 10px;

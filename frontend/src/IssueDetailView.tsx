@@ -30,6 +30,8 @@ import {
 } from "./workflowGraphModel";
 import { resolveProjectWorkflow } from "./workflowLookup";
 
+const NATIVE_EVENT_PAGE_LIMIT = 200;
+
 type IssueDetail = {
   ref: string;
   project: string;
@@ -3409,7 +3411,13 @@ function NativeJobInspector({
   );
   const [selectedKey, setSelectedKey] = useState<string | null>(defaultSelection);
   const [viewMode, setViewMode] = useState<NativeLogViewMode>("transcript");
+  const [pageCursors, setPageCursors] = useState<number[]>([]);
+  const pageAfterSeq = pageCursors[pageCursors.length - 1] ?? null;
   const selected = stepRefs.find((step) => step.key === selectedKey) ?? stepRefs[0] ?? null;
+
+  useEffect(() => {
+    setPageCursors([]);
+  }, [project, runId, issueNumber, runNumber, attemptIndex, selectedJobId, defaultSelection]);
 
   useEffect(() => {
     let cancelled = false;
@@ -3426,7 +3434,8 @@ function NativeJobInspector({
       };
     }
     const jobParam = selectedJobId ? `&job_id=${encodeURIComponent(selectedJobId)}` : "";
-    const url = `${base}/events?attempt_index=${attemptIndex}&limit=200${jobParam}`;
+    const cursorParam = pageAfterSeq !== null ? `&after_seq=${pageAfterSeq}` : "";
+    const url = `${base}/events?attempt_index=${attemptIndex}&limit=${NATIVE_EVENT_PAGE_LIMIT}${jobParam}${cursorParam}`;
     const load = () => {
       fetch(url)
       .then(async (res) => {
@@ -3444,7 +3453,7 @@ function NativeJobInspector({
       cancelled = true;
       if (timer !== null) window.clearInterval(timer);
     };
-  }, [project, runId, issueNumber, runNumber, attemptIndex, defaultSelection, live, selectedJobId]);
+  }, [project, runId, issueNumber, runNumber, attemptIndex, defaultSelection, live, selectedJobId, pageAfterSeq]);
 
   useEffect(() => {
     setViewMode("transcript");
@@ -3462,6 +3471,9 @@ function NativeJobInspector({
     return <div className="native-log-panel dim mono">loading native events…</div>;
   }
   const events = logs.events;
+  const lastEventSeq = events[events.length - 1]?.seq ?? null;
+  const hasPreviousBatch = pageCursors.length > 0;
+  const hasNextBatch = events.length === NATIVE_EVENT_PAGE_LIMIT && lastEventSeq !== null;
   const selectedEvents = selected
     ? events.filter((event) => (
         event.job_id === selected.job.job_id
@@ -3480,10 +3492,31 @@ function NativeJobInspector({
           <span className="key">native job inspector</span>
           <span className="mono dim">
             {events.length} event{events.length === 1 ? "" : "s"}
+            {" · "}batch {pageCursors.length + 1}
             {live ? " · live" : ""}
           </span>
         </div>
         <div className="native-inspector-actions">
+          <div className="native-page-controls" role="group" aria-label="native event batches">
+            <button
+              type="button"
+              disabled={!hasPreviousBatch}
+              onClick={() => setPageCursors((current) => current.slice(0, -1))}
+            >
+              previous batch
+            </button>
+            <button
+              type="button"
+              disabled={!hasNextBatch}
+              onClick={() => {
+                if (lastEventSeq !== null) {
+                  setPageCursors((current) => [...current, lastEventSeq]);
+                }
+              }}
+            >
+              next batch
+            </button>
+          </div>
           {transcriptAvailable && (
             <div className="native-view-toggle" role="group" aria-label="native log view">
               <button

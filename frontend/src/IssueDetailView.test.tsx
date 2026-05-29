@@ -637,6 +637,67 @@ describe("IssueDetailView run execution graph", () => {
     expect(screen.getByText((content) => content.includes("\\nline two"))).toBeInTheDocument();
   });
 
+  it("pages native events in fixed batches without accumulating prior rows", async () => {
+    const agentProjection = activeAgentProjection();
+    const agentGraph = { ...issueGraph, projection: agentProjection };
+    const firstPageEvents = {
+      ...agentNativeEvents,
+      events: Array.from({ length: 200 }, (_, index) => {
+        const seq = index + 1;
+        return agentPageEvent(seq, [{
+          type: "tool_use",
+          id: `toolu_${seq}`,
+          name: "Read",
+          input: { seq },
+        }]);
+      }),
+    };
+    const secondPageEvents = {
+      ...agentNativeEvents,
+      events: [
+        agentPageEvent(201, [{ type: "text", text: "Readable line on the second batch." }]),
+      ],
+    };
+    const eventSearches: string[] = [];
+
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string"
+          ? new URL(input, "https://glimmung.test")
+          : input instanceof URL
+            ? input
+            : new URL(input.url);
+      if (url.pathname === "/v1/issues/by-number/ambience/172") return json(issueDetail);
+      if (url.pathname === "/v1/issues/by-number/ambience/172/graph") return json(agentGraph);
+      if (url.pathname === "/v1/projects/ambience/issues/172/runs/7/cycles/1/graph") return json(agentProjection);
+      if (url.pathname === "/v1/workflows") return json([]);
+      if (url.pathname === "/v1/projects/ambience/issues/172/runs/7.1/native/events") {
+        eventSearches.push(url.search);
+        return json(url.searchParams.get("after_seq") === "200" ? secondPageEvents : firstPageEvents);
+      }
+      throw new Error(`unhandled fetch ${url.pathname}`);
+    }));
+
+    renderIssueDetail("/projects/ambience/issues/172/runs/7/cycles/1/phases/agent-execute/jobs/agent/steps/run-agent");
+
+    expect(await screen.findByLabelText("agent transcript")).toBeInTheDocument();
+    expect(screen.getByText(/200 events/)).toHaveTextContent(/batch 1/);
+    expect(screen.queryByText("Readable line on the second batch.")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "next batch" }));
+
+    expect(await screen.findByText("Readable line on the second batch.")).toBeInTheDocument();
+    expect(screen.getByText(/1 event/)).toHaveTextContent(/batch 2/);
+    expect(eventSearches.some((search) => search.includes("after_seq=200"))).toBe(true);
+
+    await userEvent.click(screen.getByRole("button", { name: "previous batch" }));
+
+    await waitFor(() => {
+      expect(screen.queryByText("Readable line on the second batch.")).not.toBeInTheDocument();
+    });
+    expect(screen.getByText(/200 events/)).toHaveTextContent(/batch 1/);
+  });
+
   it("omits the issue run rollup panel between the header and tabs", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url =
@@ -731,6 +792,74 @@ function TestLayout() {
       <Outlet context={{ signedIn: true, isAdmin: true, snap: { projects: [], workflows: [] } }} />
     </>
   );
+}
+
+function activeAgentProjection() {
+  return {
+    ...runProjection,
+    runs: [{
+      ...runProjection.runs[0],
+      current_phase: "agent-execute",
+      phases: runProjection.runs[0].phases.map((phase) => {
+        if (phase.name === "env-prep") {
+          return {
+            ...phase,
+            state: "succeeded",
+            jobs: phase.jobs.map((job) => ({
+              ...job,
+              state: "succeeded",
+              steps: job.steps.map((step) => ({ ...step, state: "succeeded" })),
+            })),
+          };
+        }
+        if (phase.name === "agent-execute") {
+          return {
+            ...phase,
+            state: "active",
+            jobs: phase.jobs.map((job) => ({
+              ...job,
+              state: "active",
+              steps: job.steps.map((step) => ({
+                ...step,
+                state: step.slug === "run-agent" ? "active" : "succeeded",
+              })),
+            })),
+            attempts: [{
+              attempt_index: 0,
+              state: "active",
+              conclusion: null,
+              verification_status: null,
+              decision: null,
+              log_archive_url: null,
+              evidence_refs: [],
+              job_completions: [],
+            }],
+          };
+        }
+        return phase;
+      }),
+    }],
+  };
+}
+
+function agentPageEvent(seq: number, content: unknown[]) {
+  return {
+    project: "ambience",
+    run_ref: "ambience#172/runs/7.1",
+    attempt_index: 0,
+    phase: "agent-execute",
+    job_id: "agent",
+    seq,
+    event: "log",
+    step_slug: "run-agent",
+    message: JSON.stringify({
+      type: "assistant",
+      message: { content },
+    }),
+    exit_code: null,
+    metadata: { stream: "stdout" },
+    created_at: "2026-05-20T17:24:10.000Z",
+  };
 }
 
 function json(body: unknown): Response {

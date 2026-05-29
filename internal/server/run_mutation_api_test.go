@@ -31,6 +31,8 @@ type fakeRunMutationStore struct {
 	nativeEventErr    error
 	nativeEvents      NativeRunLogsResponse
 	nativeEventsErr   error
+	nativeAfterSeq    *int
+	nativeLimit       *int
 }
 
 func (s *fakeRunMutationStore) ReadRunIDForNumber(_ context.Context, project string, issueNumber int, runNumber string) (string, string, error) {
@@ -59,7 +61,9 @@ func (s *fakeRunMutationStore) RecordNativeEventByID(_ context.Context, project,
 	return s.nativeEventResult, s.nativeEventErr
 }
 
-func (s *fakeRunMutationStore) ListNativeEventsByID(_ context.Context, project, runID string, attemptIndex *int, jobID *string, limit *int) (NativeRunLogsResponse, error) {
+func (s *fakeRunMutationStore) ListNativeEventsByID(_ context.Context, project, runID string, attemptIndex *int, jobID *string, afterSeq *int, limit *int) (NativeRunLogsResponse, error) {
+	s.nativeAfterSeq = afterSeq
+	s.nativeLimit = limit
 	return s.nativeEvents, s.nativeEventsErr
 }
 
@@ -304,6 +308,33 @@ func TestNativeRunEventsListByNumber(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"job1"`) {
 		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
+func TestNativeRunEventsListByNumberPassesSeqCursor(t *testing.T) {
+	store := &fakeRunMutationStore{
+		runID:  "run-ev",
+		runRef: "proj#11/runs/2",
+		nativeEvents: NativeRunLogsResponse{
+			Project: "proj",
+			RunRef:  "proj#11/runs/2",
+			Events:  []NativeRunLogEvent{{JobID: "job1", Seq: 201, Event: "log", Message: "next"}},
+		},
+	}
+	handler := newRunMutHandlerNoAuth(store)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet,
+		"/v1/projects/proj/issues/11/runs/2/native/events?after_seq=200&limit=200", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if store.nativeAfterSeq == nil || *store.nativeAfterSeq != 200 {
+		t.Fatalf("after_seq=%v, want 200", store.nativeAfterSeq)
+	}
+	if store.nativeLimit == nil || *store.nativeLimit != 200 {
+		t.Fatalf("limit=%v, want 200", store.nativeLimit)
 	}
 }
 
