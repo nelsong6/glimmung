@@ -3468,10 +3468,10 @@ function NativeJobInspector({
         && (event.step_slug === selected.step.slug || (event.event === "log" && !event.step_slug))
       ))
     : events;
-  const transcriptEntries = selected && nativeStepIsLlm(selected.step)
+  const transcriptEntries = selected && nativeSelectionIsLlm(selected.job, selected.step)
     ? agentTranscriptEntries(selectedEvents)
     : [];
-  const transcriptAvailable = Boolean(selected && nativeStepIsLlm(selected.step) && transcriptEntries.length > 0);
+  const transcriptAvailable = Boolean(selected && nativeSelectionIsLlm(selected.job, selected.step) && transcriptEntries.length > 0);
   const activeViewMode: NativeLogViewMode = transcriptAvailable ? viewMode : "raw";
   return (
     <div className="native-inspector">
@@ -3543,7 +3543,7 @@ function NativeJobInspector({
                   <span>{nativeStepGlyph(step.state ?? "")}</span>
                   <strong>
                     {step.title || step.slug}
-                    {nativeStepIsLlm(step) && <span className="native-step-llm">llm</span>}
+                    {nativeSelectionIsLlm(job, step) && <span className="native-step-llm">llm</span>}
                   </strong>
                   <small>
                     {step.exit_code !== null && step.exit_code !== undefined
@@ -3689,7 +3689,7 @@ function PlannedNativeJobInspector({
                   <span>{nativeStepGlyph(step.state ?? "")}</span>
                   <strong>
                     {step.title || step.slug}
-                    {nativeStepIsLlm(step) && <span className="native-step-llm">llm</span>}
+                    {nativeSelectionIsLlm(refJob, step) && <span className="native-step-llm">llm</span>}
                   </strong>
                   <small>
                     {step.exit_code !== null && step.exit_code !== undefined
@@ -3787,7 +3787,7 @@ function nativeTerminalText(
   const heading = job && step
     ? [`# ${job.name || job.job_id}`, `$ step ${step.slug}`]
     : ["# native events"];
-  if (step && nativeStepIsLlm(step)) {
+  if (job && step && nativeSelectionIsLlm(job, step)) {
     heading.push("# llm step");
   }
   const stepMessage = step?.message ? [`# ${step.message}`] : [];
@@ -4201,8 +4201,13 @@ function isRawScreenshotArtifact(item: RunProjectionEvidence): boolean {
   return /\.(png|jpe?g|webp|gif)$/i.test(item.ref.split(/[?#]/)[0] ?? "");
 }
 
-function nativeStepIsLlm(step: NativeAttemptStep): boolean {
-  const marker = `${step.slug} ${step.title ?? ""}`.toLowerCase();
+function nativeSelectionIsLlm(job: NativeAttemptJob | null, step: NativeAttemptStep): boolean {
+  const marker = [
+    job?.job_id ?? "",
+    job?.name ?? "",
+    step.slug,
+    step.title ?? "",
+  ].join(" ").toLowerCase();
   return marker.includes("llm") || marker.includes("run-agent") || marker.includes("claude");
 }
 
