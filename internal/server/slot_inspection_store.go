@@ -37,4 +37,14 @@ type SlotInspectionStore interface {
 	InsertSlotInspection(ctx context.Context, row SlotInspectionRecord) (SlotInspectionRecord, error)
 	LookupSlotInspectionByRequest(ctx context.Context, leaseID, requestID string) (SlotInspectionRecord, error)
 	DeleteSlotInspectionsByLease(ctx context.Context, leaseID string) ([]SlotInspectionRecord, error)
+	GetSlotInspectionByID(ctx context.Context, id string) (SlotInspectionRecord, error)
+	ListSlotInspections(ctx context.Context, filter SlotInspectionFilter) ([]SlotInspectionRecord, error)
+}
+
+// SlotInspectionFilter narrows a list query. Empty filter returns
+// every row up to the limit, newest first.
+type SlotInspectionFilter struct {
+	Project string
+	LeaseID string
+	Limit   int
 }

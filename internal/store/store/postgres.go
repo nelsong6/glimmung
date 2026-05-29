@@ -203,6 +203,39 @@ func (s *Store) DeleteSlotInspectionsByLease(ctx context.Context, leaseID string
 	return out, nil
 }
 
+// GetSlotInspectionByID returns one row by its public id, or
+// ErrSlotInspectionNotFound when nothing matches.
+func (s *Store) GetSlotInspectionByID(ctx context.Context, id string) (server.SlotInspectionRecord, error) {
+	if s == nil || s.pgSlotInspections == nil {
+		return server.SlotInspectionRecord{}, server.ErrSlotInspectionNotFound
+	}
+	row, err := s.pgSlotInspections.GetByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, pgstore.ErrSlotInspectionNotFound) {
+			return server.SlotInspectionRecord{}, server.ErrSlotInspectionNotFound
+		}
+		return server.SlotInspectionRecord{}, err
+	}
+	return slotInspectionRecordFromPGRow(row), nil
+}
+
+// ListSlotInspections returns rows newest-first, narrowed by the supplied
+// filter.
+func (s *Store) ListSlotInspections(ctx context.Context, filter server.SlotInspectionFilter) ([]server.SlotInspectionRecord, error) {
+	if s == nil || s.pgSlotInspections == nil {
+		return nil, nil
+	}
+	rows, err := s.pgSlotInspections.List(ctx, filter.Project, filter.LeaseID, filter.Limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]server.SlotInspectionRecord, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, slotInspectionRecordFromPGRow(row))
+	}
+	return out, nil
+}
+
 func slotInspectionRecordFromPGRow(row pgstore.SlotInspectionRow) server.SlotInspectionRecord {
 	return server.SlotInspectionRecord{
 		ID:                    row.ID,

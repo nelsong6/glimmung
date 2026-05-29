@@ -66,6 +66,33 @@ func (s *inspectionFakeStore) DeleteSlotInspectionsByLease(_ context.Context, le
 	return out, nil
 }
 
+func (s *inspectionFakeStore) GetSlotInspectionByID(_ context.Context, id string) (SlotInspectionRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, row := range s.rows {
+		if row.ID == id {
+			return row, nil
+		}
+	}
+	return SlotInspectionRecord{}, ErrSlotInspectionNotFound
+}
+
+func (s *inspectionFakeStore) ListSlotInspections(_ context.Context, filter SlotInspectionFilter) ([]SlotInspectionRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []SlotInspectionRecord{}
+	for _, row := range s.rows {
+		if filter.Project != "" && row.Project != filter.Project {
+			continue
+		}
+		if filter.LeaseID != "" && row.LeaseID != filter.LeaseID {
+			continue
+		}
+		out = append(out, row)
+	}
+	return out, nil
+}
+
 // inspectionFakeWriter implements ArtifactWriter for the handler
 // tests; in-memory only.
 type inspectionFakeWriter struct {
@@ -352,6 +379,132 @@ func (s *inspectionFakeStateStore) ListLeases(context.Context) ([]Lease, error) 
 	out := make([]Lease, len(s.leases))
 	copy(out, s.leases)
 	return out, nil
+}
+
+func TestGetInspectionByIDReturnsDetail(t *testing.T) {
+	store := &inspectionFakeStore{rows: []SlotInspectionRecord{
+		{
+			ID:                    "i-1",
+			Project:               "p1",
+			Slot:                  "p1-slot-1",
+			LeaseID:               "L-1",
+			SessionID:             "sess-1",
+			RequestID:             "req-A",
+			BlobPrefix:            "inspections/L-1/i-1",
+			ReportBlobPath:        "inspections/L-1/i-1/report.json",
+			ScreenshotBlobPath:    "inspections/L-1/i-1/screenshot.png",
+			ScreenshotContentType: "image/png",
+			ByteSizeScreenshot:    1234,
+			ByteSizeReport:        567,
+		},
+	}}
+
+	handler := getInspectionByID(store)
+	req := httptest.NewRequest(http.MethodGet, "/v1/inspections/i-1", nil)
+	req.SetPathValue("inspection_id", "i-1")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp inspectionDetailResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.InspectionID != "i-1" || resp.LeaseID != "L-1" {
+		t.Fatalf("got %+v", resp)
+	}
+	if resp.ReportURL != "/v1/artifacts/inspections/L-1/i-1/report.json" {
+		t.Fatalf("report url=%q", resp.ReportURL)
+	}
+	if resp.ScreenshotURL != "/v1/artifacts/inspections/L-1/i-1/screenshot.png" {
+		t.Fatalf("screenshot url=%q", resp.ScreenshotURL)
+	}
+	if resp.Scope != "lease" {
+		t.Fatalf("scope=%q", resp.Scope)
+	}
+	if resp.ByteSizeScreenshot != 1234 || resp.ByteSizeReport != 567 {
+		t.Fatalf("byte sizes wrong: %+v", resp)
+	}
+}
+
+func TestGetInspectionByIDMissing(t *testing.T) {
+	store := &inspectionFakeStore{}
+	handler := getInspectionByID(store)
+	req := httptest.NewRequest(http.MethodGet, "/v1/inspections/nope", nil)
+	req.SetPathValue("inspection_id", "nope")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGetInspectionByIDRequiresID(t *testing.T) {
+	store := &inspectionFakeStore{}
+	handler := getInspectionByID(store)
+	req := httptest.NewRequest(http.MethodGet, "/v1/inspections/", nil)
+	// No PathValue set — empty inspection_id.
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestListInspectionsFiltersByLease(t *testing.T) {
+	store := &inspectionFakeStore{rows: []SlotInspectionRecord{
+		{ID: "i-1", Project: "p1", LeaseID: "L-1", BlobPrefix: "inspections/L-1/i-1", ReportBlobPath: "inspections/L-1/i-1/report.json", ScreenshotBlobPath: "inspections/L-1/i-1/screenshot.png"},
+		{ID: "i-2", Project: "p1", LeaseID: "L-2", BlobPrefix: "inspections/L-2/i-2", ReportBlobPath: "inspections/L-2/i-2/report.json", ScreenshotBlobPath: "inspections/L-2/i-2/screenshot.png"},
+		{ID: "i-3", Project: "p2", LeaseID: "L-3", BlobPrefix: "inspections/L-3/i-3", ReportBlobPath: "inspections/L-3/i-3/report.json", ScreenshotBlobPath: "inspections/L-3/i-3/screenshot.png"},
+	}}
+	handler := listInspections(store)
+
+	t.Run("no_filter", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/inspections", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		var resp inspectionListResponse
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		if len(resp.Inspections) != 3 {
+			t.Fatalf("got %d inspections", len(resp.Inspections))
+		}
+	})
+
+	t.Run("filter_by_lease", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/inspections?lease=L-2", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		var resp inspectionListResponse
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		if len(resp.Inspections) != 1 || resp.Inspections[0].LeaseID != "L-2" {
+			t.Fatalf("got %+v", resp.Inspections)
+		}
+	})
+
+	t.Run("filter_by_project", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/inspections?project=p2", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		var resp inspectionListResponse
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		if len(resp.Inspections) != 1 || resp.Inspections[0].Project != "p2" {
+			t.Fatalf("got %+v", resp.Inspections)
+		}
+	})
+
+	t.Run("rejects_invalid_limit", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/inspections?limit=abc", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+	})
 }
 
 func TestInspectionLeaseResolverMatchesTankSession(t *testing.T) {
