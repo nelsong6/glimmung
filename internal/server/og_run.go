@@ -90,11 +90,29 @@ func matchRunURL(urlPath string) (runURLMatch, bool) {
 	return runURLMatch{}, false
 }
 
-// runOGImage serves the SVG OG image for a run. Public/no-auth so unfurlers
-// reach it directly. The endpoint matches the SPA route shape so the
-// og:image URL is trivially derivable from the dashboard URL.
+// runOGImageDispatch picks between the PNG and SVG OG renderers based on
+// the suffix of the {run_number} path segment. net/http.ServeMux can't
+// place a literal extension after a `{wildcard}`, so the format choice
+// has to happen in-handler.
 //
-// GET /og/runs/{project}/{issue_number}/{run_number}.svg
+// - {run_number} ends in `.png` → PNG (Discord, strictly-raster clients)
+// - {run_number} ends in `.svg` → SVG (Slack, browsers, crisper preview)
+// - no extension → SVG (preserves the original endpoint shape)
+func runOGImageDispatch(store ReadStore) http.HandlerFunc {
+	png := runOGImagePNG(store)
+	svg := runOGImage(store)
+	return func(w http.ResponseWriter, r *http.Request) {
+		run := r.PathValue("run_number")
+		if strings.HasSuffix(run, ".png") {
+			png(w, r)
+			return
+		}
+		svg(w, r)
+	}
+}
+
+// runOGImage serves the SVG OG image for a run. Public/no-auth so unfurlers
+// reach it directly.
 func runOGImage(store ReadStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		runStore, ok := store.(RunStore)
@@ -355,6 +373,12 @@ func serveSPAWithOG(settings Settings, store ReadStore) http.HandlerFunc {
 }
 
 // buildRunOGTags produces the og:* / twitter:* meta tag block for a run.
+//
+// og:image points at the PNG variant. Discord (and a few other unfurlers)
+// only rasterise PNG/JPEG/GIF/WEBP and silently drop SVG — pasting a run
+// URL there with og:image=...svg produced the title+description card with
+// a broken-image placeholder where the graph should be. PNG is universally
+// accepted.
 func buildRunOGTags(r *http.Request, match runURLMatch, report RunReport) string {
 	base := externalBaseURL(r)
 	pageURL := base + r.URL.Path
@@ -362,7 +386,7 @@ func buildRunOGTags(r *http.Request, match runURLMatch, report RunReport) string
 		"/og/runs",
 		url.PathEscape(match.project),
 		strconv.Itoa(match.issueNumber),
-		url.PathEscape(match.runSlug)+".svg",
+		url.PathEscape(match.runSlug)+".png",
 	)
 
 	workflow := report.Workflow
@@ -407,7 +431,7 @@ func buildRunOGTags(r *http.Request, match runURLMatch, report RunReport) string
 	addMeta("og:description", desc)
 	addMeta("og:url", pageURL)
 	addMeta("og:image", imageURL)
-	addMeta("og:image:type", "image/svg+xml")
+	addMeta("og:image:type", "image/png")
 	addMeta("og:image:width", "1200")
 	addMeta("og:image:height", "630")
 	addName("twitter:card", "summary_large_image")
