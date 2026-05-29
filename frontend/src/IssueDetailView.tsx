@@ -19,7 +19,8 @@
  */
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
-import { authedFetch } from "./auth";
+import { authedFetch, currentConfig } from "./auth";
+import { lokiExploreUrl } from "./grafanaLinks";
 import { PhaseGraph, type PhaseGraphPhase } from "./PhaseGraph";
 import {
   runTopologyToPhaseGraphModel,
@@ -2361,7 +2362,33 @@ function ProjectionInspector({
         )}
         {selectedJob?.k8s_job_name && (
           <div>
-            <span className="key">k8s</span> <span className="mono">{selectedJob.k8s_job_name}</span>
+            <span className="key">k8s</span> <span className="mono">{selectedJob.k8s_job_name}</span>{" "}
+            {(() => {
+              // Render a Grafana Explore deep-link to the pod's Loki
+              // stream so the data is one click away. We intentionally
+              // do not bound `to` for active jobs — Grafana follows
+              // "now" so a live stuck step keeps streaming. For
+              // completed jobs we still leave a generous window (the
+              // job projection does not carry started_at, so we anchor
+              // on the run's started_at — phases are short relative to
+              // the 24h default fallback).
+              const lokiUrl = lokiExploreUrl(currentConfig(), selectedJob.k8s_job_name, {
+                from: run.started_at,
+                to: selectedJob.completed_at ?? undefined,
+              });
+              return lokiUrl ? (
+                <a
+                  href={lokiUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="link"
+                  style={{ marginLeft: "0.5rem" }}
+                  title="open this pod's logs in Grafana Explore (Loki)"
+                >
+                  logs ↗
+                </a>
+              ) : null;
+            })()}
           </div>
         )}
         {step && (
