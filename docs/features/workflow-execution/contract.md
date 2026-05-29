@@ -36,6 +36,14 @@ after registration changes.
 - Do not allow project-owned arbitrary gate jobs to stand in for the managed
   evidence gate.
 - Do not delete historical schemas still referenced by run history.
+- Do not start a workflow-execution background reconciler (run queue,
+  dispatch timeout, completion sweep, native Job inspection, etc.) outside
+  the `settings.ControlPlaneLoopsEnabled` gate in `cmd/glimmung-go/main.go`.
+  The control-plane isolation boundary belongs to the
+  [Test Slots contract](../test-slots/contract.md); a workflow-execution
+  reconciler that ignores it lets a hot-swapped slot binary race the prod
+  glimmung Deployment on the same runs, Postgres rows, and `glimmung-runs`
+  Kubernetes Jobs.
 
 ## Live Behavior
 

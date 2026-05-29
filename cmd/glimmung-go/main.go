@@ -157,13 +157,25 @@ func main() {
 		}
 		log.Printf("slot-storage migration ok: %s", summary)
 	}
-	// Background reconcilers consume the combined runtime store.
-	if rt != nil {
+	// Background control-plane reconcilers and the test-slot recovery
+	// sweep. These mutate shared runtime state in Postgres and the
+	// glimmung-runs namespace and are owned by the prod glimmung
+	// deployment. Test slots (k8s/issue chart) set
+	// CONTROL_PLANE_LOOPS_ENABLED=false so a hot-swapped binary exercises
+	// HTTP handlers and code paths without racing prod for the same rows
+	// or Kubernetes Jobs. See Settings.ControlPlaneLoopsEnabled.
+	//
+	// Any new background reconciler must be started inside this gate.
+	switch {
+	case rt == nil:
+		// Runtime store unavailable — reconcilers have nothing to read.
+		// The earlier "runtime store disabled" log already explains why.
+	case !settings.ControlPlaneLoopsEnabled:
+		log.Printf("control-plane reconcilers disabled (CONTROL_PLANE_LOOPS_ENABLED=false); signal drain, run queue, dispatch timeout, and test-slot recovery will not run in this process")
+	default:
 		server.StartSignalDrainReconciler(context.Background(), rt, nativeLauncher, log.Printf)
 		server.StartRunQueueReconciler(context.Background(), rt, nativeLauncher, log.Printf)
 		server.StartRunDispatchTimeoutReconciler(context.Background(), settings, rt, nativeLauncher, log.Printf)
-	}
-	if rt != nil {
 		if nativeMinter, ok := ghClient.(server.NativeGitHubTokenMinter); ok {
 			// One-shot recovery sweep at startup: re-arm per-lease TTL
 			// timers, resume in-flight warming/activating/cleaning work, and
