@@ -1027,6 +1027,9 @@ function handleMockRequest(url: URL, init?: RequestInit): Response {
   const nativeIssueGraphMatch = path.match(/^\/v1\/issues\/by-number\/([^/]+)\/(\d+)\/graph$/);
   if (nativeIssueGraphMatch) return json(issueGraph);
 
+  const runCycleGraphMatch = path.match(/^\/v1\/projects\/([^/]+)\/issues\/\d+\/runs\/[^/]+\/cycles\/[^/]+\/graph$/);
+  if (runCycleGraphMatch) return json(issueGraph.projection);
+
   const nativeIssueNumberMatch = path.match(/^\/v1\/issues\/by-number\/([^/]+)\/(\d+)$/);
   if (nativeIssueNumberMatch) {
     const project = decodeURIComponent(nativeIssueNumberMatch[1]);
