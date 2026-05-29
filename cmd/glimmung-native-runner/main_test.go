@@ -7,7 +7,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestParseOutputFileAcceptsKeyValueAndJSON(t *testing.T) {
@@ -111,4 +114,89 @@ func sawEvent(events []nativeEventRequest, event string) bool {
 		}
 	}
 	return false
+}
+
+// TestNativeRunnerPostsTimedOutOnContextCancel pins the SIGTERM-handler
+// behaviour: when the context is cancelled mid-step (modelling the
+// kubelet sending SIGTERM after activeDeadlineSeconds), the runner must
+// deliver a /completed callback with conclusion=timed_out before
+// returning, rather than leaving the run with no terminal signal.
+//
+// The previous behaviour — no signal handler, so SIGTERM killed the
+// process before any callback fired — is what hung ambience#170/runs/1.1
+// even after the rest of verify.sh would have been able to clean up.
+func TestNativeRunnerPostsTimedOutOnContextCancel(t *testing.T) {
+	var events []nativeEventRequest
+	var completion completedRequest
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/events":
+			var event nativeEventRequest
+			_ = json.NewDecoder(r.Body).Decode(&event)
+			mu.Lock()
+			events = append(events, event)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"accepted": true})
+		case "/completed":
+			mu.Lock()
+			_ = json.NewDecoder(r.Body).Decode(&completion)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"decision": "done"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	workspace := t.TempDir()
+	r := &nativeRunner{
+		cfg: runnerConfig{
+			JobID:        "test-shutdown",
+			EventsURL:    server.URL + "/events",
+			CompletedURL: server.URL + "/completed",
+			Workspace:    workspace,
+			Job: jobSpec{
+				WorkingDirectory: workspace,
+				Shell:            "sh",
+				Steps: []stepSpec{{
+					Slug: "long-running",
+					Type: "run",
+					// Sleep longer than the cancel timer. The
+					// exec.CommandContext will kill it when ctx
+					// cancels; the runner then has to choose between
+					// "failure" and "timed_out". The signal-aware
+					// helper picks timed_out.
+					Run: "sleep 30",
+				}},
+			},
+		},
+		client:  server.Client(),
+		outputs: map[string]string{},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	if err := r.run(ctx); err == nil {
+		t.Fatal("expected run to return an error after cancellation")
+	}
+
+	mu.Lock()
+	got := completion
+	mu.Unlock()
+	if got.Conclusion != "timed_out" {
+		t.Fatalf("conclusion=%q, want timed_out", got.Conclusion)
+	}
+	if got.SummaryMarkdown == nil || !strings.Contains(*got.SummaryMarkdown, "shutdown") {
+		t.Fatalf("summary=%v, want it to mention shutdown", got.SummaryMarkdown)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !sawEvent(events, "runner_failed") {
+		t.Fatalf("expected runner_failed event; events=%v", events)
+	}
 }

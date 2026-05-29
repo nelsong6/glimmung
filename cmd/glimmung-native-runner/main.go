@@ -12,11 +12,13 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/nelsong6/glimmung/internal/domain/agentcost"
@@ -25,6 +27,12 @@ import (
 const (
 	defaultWorkspace        = "/workspace"
 	defaultAttemptTokenPath = "/var/run/glimmung/attempt-token"
+	// shutdownCompleteBudget is the time we reserve from the kubelet's
+	// terminationGracePeriodSeconds (default 30s) to deliver the
+	// timed_out /completed callback when we receive SIGTERM. The
+	// remainder of the grace period covers in-flight HTTP writes and
+	// child-process teardown.
+	shutdownCompleteBudget = 20 * time.Second
 )
 
 type jobSpec struct {
@@ -131,7 +139,19 @@ func main() {
 		client:  &http.Client{Timeout: 30 * time.Second},
 		outputs: map[string]string{},
 	}
-	if err := r.run(context.Background()); err != nil {
+	// Catch SIGTERM (kubelet activeDeadlineSeconds, pod eviction, node
+	// drain) and SIGINT (local dev) so we can report a terminal
+	// /completed callback before kubelet's SIGKILL lands.
+	//
+	// Without this, a pod killed mid-step delivers no callback at all
+	// and the run sits in_progress forever from glimmung's side.
+	// ambience#170/runs/1.1 is the canonical incident; the run-execution
+	// reconciler is the safety net for the truly violent paths
+	// (OOMKilled, node loss, eviction-without-grace) that fire SIGKILL
+	// straight away and skip this handler entirely.
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stopSignals()
+	if err := r.run(signalCtx); err != nil {
 		log.Printf("native runner failed: %v", err)
 		os.Exit(1)
 	}
@@ -179,10 +199,13 @@ func runnerConfigFromEnv() (runnerConfig, error) {
 
 func (r *nativeRunner) run(ctx context.Context) error {
 	if err := os.MkdirAll(r.cfg.Workspace, 0o755); err != nil {
-		_ = r.complete(ctx, "failure", "create workspace: "+err.Error())
+		_ = r.completeOrShutdown(ctx, "failure", "create workspace: "+err.Error())
 		return err
 	}
 	if err := r.prepareCheckouts(ctx); err != nil {
+		if r.shutdownRequested(ctx) {
+			return r.completeShutdown(ctx, "runner received shutdown during checkout: "+err.Error())
+		}
 		_ = r.postEvent(ctx, "runner_failed", nil, "checkout failed: "+err.Error(), nil, nil)
 		_ = r.complete(ctx, "failure", "checkout failed: "+err.Error())
 		return err
@@ -197,11 +220,59 @@ func (r *nativeRunner) run(ctx context.Context) error {
 			return err
 		}
 		if err := r.runStep(ctx, step); err != nil {
+			if r.shutdownRequested(ctx) {
+				slug := strings.TrimSpace(step.Slug)
+				return r.completeShutdown(
+					ctx,
+					fmt.Sprintf("runner received shutdown during step %q: %v", slug, err),
+				)
+			}
 			_ = r.complete(ctx, "failure", err.Error())
 			return err
 		}
 	}
 	return r.complete(ctx, "success", "completed")
+}
+
+// shutdownRequested reports whether the supplied (signal-aware) context
+// has been cancelled. NotifyContext cancels its returned context on the
+// first SIGTERM/SIGINT, so this is the precise distinction between
+// "child step failed on its own" and "we're being torn down."
+func (r *nativeRunner) shutdownRequested(ctx context.Context) bool {
+	return ctx.Err() != nil
+}
+
+// completeShutdown posts a terminal /completed callback with
+// conclusion=timed_out before the kubelet sends SIGKILL. The original
+// context has been cancelled by signal.NotifyContext, so we open a
+// fresh background context with a tight budget that fits inside the
+// pod's terminationGracePeriodSeconds — the in-flight HTTP write is
+// the only thing we promise to finish on the way out.
+//
+// Always returns a non-nil error so r.run propagates the shutdown up
+// to main() which exits non-zero. The Job's pod is already terminating;
+// the exit code is mostly cosmetic but a clean non-zero is correct
+// shape for "the runner was killed before it could finish its work."
+func (r *nativeRunner) completeShutdown(_ context.Context, summary string) error {
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownCompleteBudget)
+	defer cancel()
+	_ = r.postEvent(shutdownCtx, "runner_failed", nil, summary, nil, nil)
+	if err := r.complete(shutdownCtx, "timed_out", summary); err != nil {
+		log.Printf("shutdown completion callback failed: %v", err)
+		return fmt.Errorf("shutdown completion callback failed: %w", err)
+	}
+	log.Printf("shutdown completion callback delivered: %s", summary)
+	return errors.New(summary)
+}
+
+// completeOrShutdown picks the right conclusion based on whether the
+// supplied context has already been cancelled. Used for early-init
+// failures where we don't yet know if SIGTERM raced the failure.
+func (r *nativeRunner) completeOrShutdown(ctx context.Context, conclusion, summary string) error {
+	if r.shutdownRequested(ctx) {
+		return r.completeShutdown(ctx, summary)
+	}
+	return r.complete(ctx, conclusion, summary)
 }
 
 func (r *nativeRunner) runStep(ctx context.Context, step stepSpec) error {
