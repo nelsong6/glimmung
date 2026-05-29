@@ -185,6 +185,7 @@ type RunProjectionInnerJob = {
   state?: string; // active | succeeded | failed | unknown
   reason?: string;
   completed_at?: string | null;
+  log_archive_url?: string;
 };
 
 type RunProjectionEvidence = {
@@ -2481,12 +2482,19 @@ function InnerJobsRow({
       </div>
       <ul style={{ listStyle: "none", margin: "0.25rem 0 0", padding: "0 0 0 0.5rem" }}>
         {innerJobs.map((ij) => {
-          const lokiUrl = lokiExploreUrl(
-            currentConfig(),
-            ij.job_name,
-            { from: ij.registered_at, to: ij.completed_at ?? undefined },
-            ij.namespace,
-          );
+          // Prefer the durable URL the reconciler stamped on
+          // termination (it covers the child's full life window with
+          // the canonical reconciler-time bounds). Fall back to the
+          // client-built Loki link while the child is still active or
+          // when the reconciler hasn't observed it yet.
+          const lokiUrl =
+            ij.log_archive_url ??
+            lokiExploreUrl(
+              currentConfig(),
+              ij.job_name,
+              { from: ij.registered_at, to: ij.completed_at ?? undefined },
+              ij.namespace,
+            );
           const state = (ij.state ?? "unknown").trim() || "unknown";
           const pill = state === "succeeded" ? "free" : state === "failed" ? "drain" : "busy";
           return (

@@ -71,6 +71,12 @@ type InnerJobRef struct {
 	State       string  `json:"state,omitempty"`        // active | succeeded | failed | unknown
 	Reason      string  `json:"reason,omitempty"`       // JobTerminalReason* enum
 	CompletedAt *string `json:"completed_at,omitempty"`
+	// LogArchiveURL is the durable pointer to the child's logs, set by
+	// the inner-Job watcher when emitting inner_job_terminated. Today
+	// a Grafana Explore deep-link to the cluster Loki datasource
+	// scoped to the child's namespace + life window. Empty when the
+	// cluster Grafana base URL is unconfigured.
+	LogArchiveURL string `json:"log_archive_url,omitempty"`
 }
 
 type RunJobExecution struct {

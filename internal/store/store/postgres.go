@@ -1428,6 +1428,7 @@ type innerJobDoc struct {
 	State          string  `json:"state,omitempty"`
 	Reason         string  `json:"reason,omitempty"`
 	CompletedAt    *string `json:"completed_at,omitempty"`
+	LogArchiveURL  string  `json:"log_archive_url,omitempty"`
 }
 
 type jobExecutionDoc struct {
@@ -1989,6 +1990,7 @@ func innerJobRefsFromDoc(docs []innerJobDoc) []server.InnerJobRef {
 			State:          d.State,
 			Reason:         d.Reason,
 			CompletedAt:    emptyStringNil(d.CompletedAt),
+			LogArchiveURL:  d.LogArchiveURL,
 		}
 		out = append(out, ref)
 	}
@@ -6228,6 +6230,7 @@ func updateInnerJobTermination(phase map[string]any, event nativeEventDoc) {
 	if completedAt == "" {
 		completedAt = event.CreatedAt
 	}
+	logArchiveURL := stringValue(event.Metadata["log_archive_url"])
 	existing, _ := phase["inner_jobs"].([]any)
 	for i, raw := range existing {
 		ref, ok := raw.(map[string]any)
@@ -6242,6 +6245,9 @@ func updateInnerJobTermination(phase map[string]any, event nativeEventDoc) {
 			ref["reason"] = reason
 		}
 		ref["completed_at"] = completedAt
+		if logArchiveURL != "" {
+			ref["log_archive_url"] = logArchiveURL
+		}
 		existing[i] = ref
 		phase["inner_jobs"] = existing
 		return
@@ -6259,6 +6265,9 @@ func updateInnerJobTermination(phase map[string]any, event nativeEventDoc) {
 	}
 	if reason != "" {
 		stub["reason"] = reason
+	}
+	if logArchiveURL != "" {
+		stub["log_archive_url"] = logArchiveURL
 	}
 	if event.StepSlug != "" {
 		stub["parent_step_slug"] = event.StepSlug
@@ -6706,6 +6715,9 @@ func (s *Store) StampRunCompletion(ctx context.Context, project, runID string, p
 		attempt["conclusion"] = p.Conclusion
 		if p.SummaryMarkdown != nil {
 			attempt["summary_markdown"] = *p.SummaryMarkdown
+		}
+		if url := strings.TrimSpace(p.LogArchiveURL); url != "" {
+			attempt["log_archive_url"] = url
 		}
 		if p.PhaseOutputs != nil {
 			attempt["phase_outputs"] = p.PhaseOutputs

@@ -93,14 +93,20 @@ the child terminated.
   time.
 - Metric `glimmung_run_inner_jobs_terminal_total{intent, conclusion, reason}`.
 
-### Stage 3: evidence linkage (follow-up PR)
+### Stage 3: evidence linkage
 
-- Inner Job's pod logs (last N MB) and the child Job's `.status` are captured
-  into the artifact store on terminal transition.
-- Run report renders an `Evidence: inner-job logs` row with a durable link
-  surviving k8s TTL.
-- This is the durable counterpart to the Grafana deep-link — the deep-link
-  works while Loki has the data; this captures it forever.
+The inner-Job watcher (and the outer-phase reconciler) now stamps a
+`log_archive_url` on every terminal completion — a Grafana Explore
+deep-link to the cluster Loki datasource scoped to the child's
+namespace + life window. The dashboard reads it off the persisted
+inner-Job row when present, falling back to a client-built link only
+while the child is still active.
+
+This satisfies the "durable pointer to the logs" goal as far as Loki
+retention reaches. Capturing the actual log bytes into the artifact
+store (so the link survives Loki TTL) remains an open follow-up; that
+work is the only piece left when a Loki retention window passes before
+a touchpoint review.
 
 ## What does *not* live in this contract
 
