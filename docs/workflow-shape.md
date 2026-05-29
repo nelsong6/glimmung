@@ -306,6 +306,16 @@ Projects may use other names; these are the canonical defaults.
 The MCP `scaffold_workflow` tool (TODO) emits a starter template
 with these names pre-filled.
 
+## Remote-host execution
+
+Phase shell scripts that need to drive a host outside the Glimmung cluster
+(e.g. a desktop-game mod whose verify loop requires the warm game install)
+shell out to the host over SSH, with credentials minted per-run by two
+callback-token-gated endpoints on Glimmung. The phase shape stays
+`k8s_job`; only what the script does inside the pod changes. See
+[`remote-host-execution.md`](remote-host-execution.md) for the endpoint
+contracts, threat model, and orchestrator-side flow.
+
 ## Runtime source of truth
 
 Postgres workflow registrations are the runtime source of truth. The

@@ -47,6 +47,8 @@ var expectedGoRoutes = []string{
 	"GET /v1/lease-callbacks/{callback_token}",
 	"POST /v1/lease-callbacks/{callback_token}/heartbeat",
 	"POST /v1/lease-callbacks/{callback_token}/release",
+	"POST /v1/lease-callbacks/{callback_token}/ssh-cert",
+	"POST /v1/lease-callbacks/{callback_token}/tailscale-authkey",
 	"GET /v1/state",
 	"GET /v1/projects/{project}/test-environments/{slot_name}",
 	"GET /v1/events",
