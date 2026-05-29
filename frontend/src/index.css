@@ -2043,10 +2043,14 @@ h2 .inline-action,
 .dag-rf .react-flow__edge-path {
   stroke: var(--fg-dimmer);
   stroke-width: 1.5;
+  fill: none;
 }
 .dag-rf .react-flow__edge.dag-rf-edge.entry .react-flow__edge-path,
+.dag-rf .react-flow__edge.dag-rf-edge.fired .react-flow__edge-path {
+  stroke: var(--state-success-fg);
+  fill: none;
+}
 .dag-rf .react-flow__edge.dag-rf-edge.entry marker path,
-.dag-rf .react-flow__edge.dag-rf-edge.fired .react-flow__edge-path,
 .dag-rf .react-flow__edge.dag-rf-edge.fired marker path {
   stroke: var(--state-success-fg);
   fill: var(--state-success-fg);
