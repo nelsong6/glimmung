@@ -20,7 +20,8 @@ export type PhaseGraphPhase = {
   name: string;
   kind: string;
   verify?: boolean;
-  always?: boolean;
+  run_on?: string;
+  purpose?: string;
   evidence_verification_gate?: boolean;
   depends_on?: string[];
   jobs?: PhaseGraphJob[];
@@ -126,14 +127,15 @@ function columnsFor(phases: PhaseGraphPhase[]): PhaseGraphPhase[][] {
   return phases.map((phase) => [phase]);
 }
 
+function phaseMeta(phase: PhaseGraphPhase): string {
+  if (phase.purpose) return phase.purpose.replaceAll("_", "-");
+  if (phase.evidence_verification_gate) return "evidence-gate";
+  if (phase.verify) return "verification";
+  return phase.kind;
+}
+
 function defaultPhaseNode(phase: PhaseGraphPhase): ReactNode {
-  const meta = phase.evidence_verification_gate
-    ? "verify-gate"
-    : phase.always
-      ? "always"
-      : phase.verify
-        ? "verify"
-        : phase.kind;
+  const meta = phaseMeta(phase);
   const jobs = phase.jobs && phase.jobs.length > 0
     ? phase.jobs
     : [{ id: phase.name, name: phase.name }];

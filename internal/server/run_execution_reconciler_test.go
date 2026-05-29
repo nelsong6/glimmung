@@ -158,7 +158,7 @@ func TestCompleteDispatchTimedOutPhaseUsesCompletionPathForCleanup(t *testing.T)
 		Name:    "wf",
 		Phases: []PhaseSpec{
 			{Name: "env-prep", Kind: "k8s_job", Jobs: []NativeJobSpec{{ID: "env-prep"}}},
-			{Name: "cleanup", Kind: "k8s_job", Always: true, DependsOn: []string{"env-prep"}, Jobs: []NativeJobSpec{{ID: "cleanup"}}},
+			{Name: "cleanup", Kind: "k8s_job", RunOn: PhaseRunOnAlways, Purpose: PhasePurposeTeardown, DependsOn: []string{"env-prep"}, Jobs: []NativeJobSpec{{ID: "cleanup"}}},
 		},
 		Budget: budget.Config{Total: 25},
 	}
@@ -228,7 +228,7 @@ func TestExpireFailedActiveJobsSynthesizesTimedOutCompletion(t *testing.T) {
 		Name:    "wf",
 		Phases: []PhaseSpec{
 			{Name: "llm-verify", Kind: "k8s_job", Jobs: []NativeJobSpec{{ID: "llm-verify"}}},
-			{Name: "cleanup", Kind: "k8s_job", Always: true, DependsOn: []string{"llm-verify"}, Jobs: []NativeJobSpec{{ID: "env-destroy"}}},
+			{Name: "cleanup", Kind: "k8s_job", RunOn: PhaseRunOnAlways, Purpose: PhasePurposeTeardown, DependsOn: []string{"llm-verify"}, Jobs: []NativeJobSpec{{ID: "env-destroy"}}},
 		},
 		Budget: budget.Config{Total: 25},
 	}
@@ -455,7 +455,7 @@ func TestExpireFailedActiveJobsIgnoresActiveAndSucceededJobs(t *testing.T) {
 		Name:    "wf",
 		Phases: []PhaseSpec{
 			{Name: "llm-verify", Kind: "k8s_job", Jobs: []NativeJobSpec{{ID: "already-done"}, {ID: "still-running"}}},
-			{Name: "cleanup", Kind: "k8s_job", Always: true, DependsOn: []string{"llm-verify"}, Jobs: []NativeJobSpec{{ID: "env-destroy"}}},
+			{Name: "cleanup", Kind: "k8s_job", RunOn: PhaseRunOnAlways, Purpose: PhasePurposeTeardown, DependsOn: []string{"llm-verify"}, Jobs: []NativeJobSpec{{ID: "env-destroy"}}},
 		},
 		Budget: budget.Config{Total: 25},
 	}
@@ -600,7 +600,6 @@ func (s *runReportListStore) AbortRunByID(_ context.Context, project, runID, rea
 	}
 	return s.fakeCompletionStore.AbortRunByID(context.Background(), project, runID, reason)
 }
-
 
 // innerJobEventStore is a minimal NativeRunStore stand-in for the
 // inner-job watcher tests. It records events that were submitted plus
@@ -904,7 +903,7 @@ func TestExpireFailedActiveJobsStampsLogArchiveURLOnPayload(t *testing.T) {
 		Name:    "wf",
 		Phases: []PhaseSpec{
 			{Name: "llm-verify", Kind: "k8s_job", Jobs: []NativeJobSpec{{ID: "llm-verify"}}},
-			{Name: "cleanup", Kind: "k8s_job", Always: true, DependsOn: []string{"llm-verify"}, Jobs: []NativeJobSpec{{ID: "env-destroy"}}},
+			{Name: "cleanup", Kind: "k8s_job", RunOn: PhaseRunOnAlways, Purpose: PhasePurposeTeardown, DependsOn: []string{"llm-verify"}, Jobs: []NativeJobSpec{{ID: "env-destroy"}}},
 		},
 		Budget: budget.Config{Total: 25},
 	}

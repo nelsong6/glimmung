@@ -150,9 +150,9 @@ func TestWatchListAndSyncDispatchesTerminalJobsAndReturnsResourceVersion(t *test
 			"name":      "glim-proj-1-runs-1-1-1-llm-implement",
 			"namespace": "glimmung-runs",
 			"labels": map[string]any{
-				"app.kubernetes.io/managed-by": "glimmung",
+				"app.kubernetes.io/managed-by":  "glimmung",
 				"glimmung.romaine.life/project": "proj",
-				"glimmung.romaine.life/run-ref":  "proj#7/runs/1.1",
+				"glimmung.romaine.life/run-ref": "proj#7/runs/1.1",
 				"glimmung.romaine.life/phase":   "llm-work",
 				"glimmung.romaine.life/job-id":  "llm-implement",
 			},
@@ -202,7 +202,7 @@ func TestWatchListAndSyncDispatchesTerminalJobsAndReturnsResourceVersion(t *test
 		Name:    "wf",
 		Phases: []PhaseSpec{
 			{Name: "env-prep", Kind: "k8s_job", Jobs: []NativeJobSpec{{ID: "env-prep"}}},
-			{Name: "cleanup", Kind: "k8s_job", Always: true, DependsOn: []string{"env-prep"}, Jobs: []NativeJobSpec{{ID: "env-destroy"}}},
+			{Name: "cleanup", Kind: "k8s_job", RunOn: PhaseRunOnAlways, Purpose: PhasePurposeTeardown, DependsOn: []string{"env-prep"}, Jobs: []NativeJobSpec{{ID: "env-destroy"}}},
 		},
 	}
 	listStore := &runReportListStore{
@@ -225,17 +225,17 @@ func TestWatchListAndSyncDispatchesTerminalJobsAndReturnsResourceVersion(t *test
 
 	wch := &k8sJobWatcher{
 		watcherDeps: watcherDeps{
-		settings: Settings{
-			K8sAPIHost:     srv.URL,
-			K8sSATokenPath: tokenPath,
-		},
-		store:           events,
-		completionStore: store,
-		jobStore:        store,
-		eventStore:      events,
-		nativeLauncher:  launcher,
-		statusGetter:    &fakeJobStatusGetter{},
-		namespace:       "glimmung-runs",
+			settings: Settings{
+				K8sAPIHost:     srv.URL,
+				K8sSATokenPath: tokenPath,
+			},
+			store:           events,
+			completionStore: store,
+			jobStore:        store,
+			eventStore:      events,
+			nativeLauncher:  launcher,
+			statusGetter:    &fakeJobStatusGetter{},
+			namespace:       "glimmung-runs",
 		},
 		labelSelector: watchOuterSelector,
 	}
@@ -272,7 +272,7 @@ func TestWatchStreamDispatchesModifiedTerminalEvent(t *testing.T) {
 				"labels": map[string]any{
 					"app.kubernetes.io/managed-by":  "glimmung",
 					"glimmung.romaine.life/project": "proj",
-					"glimmung.romaine.life/run-ref":  labelValue("proj#7/runs/1.1"),
+					"glimmung.romaine.life/run-ref": labelValue("proj#7/runs/1.1"),
 					"glimmung.romaine.life/phase":   "env-prep",
 					"glimmung.romaine.life/job-id":  "env-prep",
 				},
@@ -321,7 +321,7 @@ func TestWatchStreamDispatchesModifiedTerminalEvent(t *testing.T) {
 		Name:    "wf",
 		Phases: []PhaseSpec{
 			{Name: "env-prep", Kind: "k8s_job", Jobs: []NativeJobSpec{{ID: "env-prep"}}},
-			{Name: "cleanup", Kind: "k8s_job", Always: true, DependsOn: []string{"env-prep"}, Jobs: []NativeJobSpec{{ID: "env-destroy"}}},
+			{Name: "cleanup", Kind: "k8s_job", RunOn: PhaseRunOnAlways, Purpose: PhasePurposeTeardown, DependsOn: []string{"env-prep"}, Jobs: []NativeJobSpec{{ID: "env-destroy"}}},
 		},
 	}
 	listStore := &runReportListStore{
@@ -341,17 +341,17 @@ func TestWatchStreamDispatchesModifiedTerminalEvent(t *testing.T) {
 	events := newInnerJobEventStore(listStore)
 	wch := &k8sJobWatcher{
 		watcherDeps: watcherDeps{
-		settings: Settings{
-			K8sAPIHost:     srv.URL,
-			K8sSATokenPath: tokenPath,
-		},
-		store:           events,
-		completionStore: store,
-		jobStore:        store,
-		eventStore:      events,
-		nativeLauncher:  &fakeNativeLauncher{},
-		statusGetter:    &fakeJobStatusGetter{},
-		namespace:       "glimmung-runs",
+			settings: Settings{
+				K8sAPIHost:     srv.URL,
+				K8sSATokenPath: tokenPath,
+			},
+			store:           events,
+			completionStore: store,
+			jobStore:        store,
+			eventStore:      events,
+			nativeLauncher:  &fakeNativeLauncher{},
+			statusGetter:    &fakeJobStatusGetter{},
+			namespace:       "glimmung-runs",
 		},
 		labelSelector: watchOuterSelector,
 	}
@@ -382,10 +382,10 @@ func TestWatchHandlesGoneResponse(t *testing.T) {
 
 	wch := &k8sJobWatcher{
 		watcherDeps: watcherDeps{
-		settings: Settings{
-			K8sAPIHost:     srv.URL,
-			K8sSATokenPath: tokenPath,
-		},
+			settings: Settings{
+				K8sAPIHost:     srv.URL,
+				K8sSATokenPath: tokenPath,
+			},
 		},
 		labelSelector: watchOuterSelector,
 	}

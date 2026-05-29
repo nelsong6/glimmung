@@ -121,7 +121,8 @@ type PhaseSpec = {
   outputs: string[];
   requirements: Record<string, unknown> | null;
   verify: boolean;
-  always?: boolean;
+  run_on?: string;
+  purpose?: string;
   evidence_verification_gate?: boolean;
   depends_on?: string[];
   recycle_policy: RecyclePolicy | null;
@@ -1274,12 +1275,12 @@ function WorkflowDefinitionGraph({ workflow }: { workflow: Workflow }) {
   const graphModel = workflowToPhaseGraphModel(workflow);
 
   const renderPhase = (phase: PhaseGraphPhase) => {
-    const meta = phase.evidence_verification_gate
-      ? "verify-gate"
-      : phase.always
-        ? "always"
+    const meta = phase.purpose
+      ? phase.purpose.replaceAll("_", "-")
+      : phase.evidence_verification_gate
+        ? "evidence-gate"
         : phase.verify
-          ? "verify"
+          ? "verification"
           : phase.kind;
     const jobs = phase.jobs && phase.jobs.length > 0
       ? phase.jobs

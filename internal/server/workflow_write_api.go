@@ -16,6 +16,17 @@ const (
 	workflowKindNativeK8sJob   = "k8s_job"
 	workflowKindTouchpointGate = "touchpoint_gate"
 
+	PhaseRunOnSuccess = "success"
+	PhaseRunOnFailure = "failure"
+	PhaseRunOnAlways  = "always"
+
+	PhasePurposeWork             = "work"
+	PhasePurposeVerification     = "verification"
+	PhasePurposeEvidenceGate     = "evidence_gate"
+	PhasePurposeTeardown         = "teardown"
+	PhasePurposeReviewTouchpoint = "review_touchpoint"
+	PhasePurposeReviewGate       = "review_gate"
+
 	// MinNativePhaseJobTimeoutSeconds is the floor for a phase job's
 	// activeDeadlineSeconds. Below this the kubelet grace period
 	// (30s default) doesn't leave enough room for the runner's SIGTERM
@@ -188,6 +199,8 @@ func normalizeWorkflowRegisterWithDefaultKind(req *WorkflowRegister, defaultKind
 		if req.Phases[i].Kind == "" {
 			req.Phases[i].Kind = defaultKind
 		}
+		req.Phases[i].RunOn = strings.TrimSpace(req.Phases[i].RunOn)
+		req.Phases[i].Purpose = strings.TrimSpace(req.Phases[i].Purpose)
 		if req.Phases[i].WorkflowRef == "" {
 			req.Phases[i].WorkflowRef = "main"
 		}
@@ -219,6 +232,12 @@ func normalizeWorkflowRegisterWithDefaultKind(req *WorkflowRegister, defaultKind
 			}
 		}
 		req.Phases[i] = CanonicalNativePhase(req.Phases[i])
+		if req.Phases[i].Purpose == "" {
+			req.Phases[i].Purpose = phasePurpose(req.Phases[i])
+		}
+		if req.Phases[i].RunOn == "" {
+			req.Phases[i].RunOn = phaseRunOn(req.Phases[i])
+		}
 	}
 }
 
@@ -266,18 +285,44 @@ func ValidateWorkflowRegister(req WorkflowRegister) error {
 			return ValidationError{Message: fmt.Sprintf("workflow %s phase %q duplicates phase[%d]", req.Name, name, prev)}
 		}
 		phaseNames[name] = i
-		if phase.Verify {
-			hasTesting = true
+		explicitRunOn := strings.TrimSpace(phase.RunOn)
+		explicitPurpose := strings.TrimSpace(phase.Purpose)
+		if explicitRunOn != "" && !validPhaseRunOn(explicitRunOn) {
+			return ValidationError{Message: fmt.Sprintf("workflow %s phase %q run_on=%q is not one of [success, failure, always]", req.Name, name, explicitRunOn)}
+		}
+		if explicitPurpose != "" && !validPhasePurpose(explicitPurpose) {
+			return ValidationError{Message: fmt.Sprintf("workflow %s phase %q purpose=%q is not one of [work, verification, evidence_gate, teardown, review_touchpoint, review_gate]", req.Name, name, explicitPurpose)}
 		}
 		if phase.Always {
+			return ValidationError{Message: fmt.Sprintf("workflow %s phase %q uses retired field always; use run_on and purpose instead", req.Name, name)}
+		}
+		runOn := phaseRunOn(phase)
+		purpose := phasePurpose(phase)
+		if workflowPhaseKind(phase.Kind) == workflowKindTouchpointGate && phase.Verify {
+			return ValidationError{Message: fmt.Sprintf("workflow %s phase %q is a touchpoint_gate and cannot also be the verify phase", req.Name, name)}
+		}
+		if phase.Verify {
+			if purpose != PhasePurposeVerification {
+				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q has verify=true and must set purpose=%q", req.Name, name, PhasePurposeVerification)}
+			}
+			hasTesting = true
+		} else if purpose == PhasePurposeVerification {
+			return ValidationError{Message: fmt.Sprintf("workflow %s phase %q purpose=%q must set verify=true", req.Name, name, PhasePurposeVerification)}
+		}
+		if purpose == PhasePurposeTeardown {
+			if runOn == PhaseRunOnSuccess {
+				return ValidationError{Message: fmt.Sprintf("workflow %s teardown phase %q cannot set run_on=%q; teardown must run on failure or always", req.Name, name, PhaseRunOnSuccess)}
+			}
 			hasCleanup = true
 			if len(phase.Inputs) > 0 {
-				return ValidationError{Message: fmt.Sprintf("workflow %s always phase %q cannot declare inputs; cleanup must be abort-safe", req.Name, name)}
+				return ValidationError{Message: fmt.Sprintf("workflow %s teardown phase %q cannot declare inputs; cleanup must be abort-safe", req.Name, name)}
 			}
+		} else if runOn != PhaseRunOnSuccess {
+			return ValidationError{Message: fmt.Sprintf("workflow %s phase %q purpose=%q cannot set run_on=%q; only teardown phases may run on failure paths", req.Name, name, purpose, runOn)}
 		}
 		if phase.SkipWhenPreserveTestEnv {
-			if !phase.Always {
-				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q sets skip_when_preserve_test_env but is not an always-run phase; the skip is only meaningful for cleanup phases", req.Name, name)}
+			if purpose != PhasePurposeTeardown {
+				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q sets skip_when_preserve_test_env but purpose is not teardown", req.Name, name)}
 			}
 			if phase.Verify {
 				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q cannot set both verify and skip_when_preserve_test_env", req.Name, name)}
@@ -293,8 +338,11 @@ func ValidateWorkflowRegister(req WorkflowRegister) error {
 			if phase.Verify {
 				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q is a touchpoint_gate and cannot also be the verify phase", req.Name, name)}
 			}
-			if phase.Always {
-				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q is a touchpoint_gate and cannot also be an always-run cleanup phase", req.Name, name)}
+			if purpose != PhasePurposeReviewGate {
+				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q is a touchpoint_gate and must set purpose=%q", req.Name, name, PhasePurposeReviewGate)}
+			}
+			if runOn != PhaseRunOnSuccess {
+				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q is a touchpoint_gate and must set run_on=%q", req.Name, name, PhaseRunOnSuccess)}
 			}
 			if phase.EvidenceVerificationGate {
 				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q is a touchpoint_gate and cannot also be an evidence_verification_gate", req.Name, name)}
@@ -305,6 +353,13 @@ func ValidateWorkflowRegister(req WorkflowRegister) error {
 			if len(phase.Jobs) != 1 || strings.TrimSpace(phase.Jobs[0].Primitive) != JobPrimitivePRMerge {
 				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q is a touchpoint_gate and must declare exactly one job with primitive %q", req.Name, name, JobPrimitivePRMerge)}
 			}
+		}
+		if phase.EvidenceVerificationGate {
+			if purpose != PhasePurposeEvidenceGate {
+				return ValidationError{Message: fmt.Sprintf("workflow %s phase %q is an evidence_verification_gate and must set purpose=%q", req.Name, name, PhasePurposeEvidenceGate)}
+			}
+		} else if purpose == PhasePurposeEvidenceGate {
+			return ValidationError{Message: fmt.Sprintf("workflow %s phase %q purpose=%q must set evidence_verification_gate=true", req.Name, name, PhasePurposeEvidenceGate)}
 		}
 		if len(phase.Jobs) > 0 {
 			seenJobs := map[string]int{}
@@ -321,8 +376,11 @@ func ValidateWorkflowRegister(req WorkflowRegister) error {
 				case "":
 				case JobPrimitivePRTouchpoint:
 					prTouchpointJobs++
-					if !phase.Always {
-						return ValidationError{Message: fmt.Sprintf("workflow %s phase %q job %q primitive %q must be in an always phase", req.Name, name, job.ID, JobPrimitivePRTouchpoint)}
+					if purpose != PhasePurposeReviewTouchpoint {
+						return ValidationError{Message: fmt.Sprintf("workflow %s phase %q job %q primitive %q must be in a purpose=%q phase", req.Name, name, job.ID, JobPrimitivePRTouchpoint, PhasePurposeReviewTouchpoint)}
+					}
+					if runOn != PhaseRunOnSuccess {
+						return ValidationError{Message: fmt.Sprintf("workflow %s phase %q job %q primitive %q must run only on successful verification paths", req.Name, name, job.ID, JobPrimitivePRTouchpoint)}
 					}
 				case JobPrimitivePRMerge:
 					if workflowPhaseKind(phase.Kind) != workflowKindTouchpointGate {
@@ -335,6 +393,9 @@ func ValidateWorkflowRegister(req WorkflowRegister) error {
 					return err
 				}
 			}
+		}
+		if purpose == PhasePurposeReviewTouchpoint && !phaseHasPrimitive(phase, JobPrimitivePRTouchpoint) {
+			return ValidationError{Message: fmt.Sprintf("workflow %s phase %q purpose=%q must declare exactly one job with primitive %q", req.Name, name, PhasePurposeReviewTouchpoint, JobPrimitivePRTouchpoint)}
 		}
 		if i == 0 {
 			if len(phase.DependsOn) != 0 {
@@ -366,7 +427,7 @@ func ValidateWorkflowRegister(req WorkflowRegister) error {
 		missing = append(missing, "verify")
 	}
 	if !hasCleanup {
-		missing = append(missing, "always-run cleanup")
+		missing = append(missing, "teardown cleanup")
 	}
 	if touchpointGateCount == 0 {
 		missing = append(missing, "touchpoint_gate")
@@ -458,6 +519,46 @@ func validateNativeWorkflowKind(kind string) error {
 		return nil
 	}
 	return ValidationError{Message: fmt.Sprintf("workflow phase kind %q is not one of [k8s_job, touchpoint_gate]", workflowPhaseKind(kind))}
+}
+
+func validPhaseRunOn(value string) bool {
+	switch value {
+	case PhaseRunOnSuccess, PhaseRunOnFailure, PhaseRunOnAlways:
+		return true
+	default:
+		return false
+	}
+}
+
+func validPhasePurpose(value string) bool {
+	switch value {
+	case PhasePurposeWork,
+		PhasePurposeVerification,
+		PhasePurposeEvidenceGate,
+		PhasePurposeTeardown,
+		PhasePurposeReviewTouchpoint,
+		PhasePurposeReviewGate:
+		return true
+	default:
+		return false
+	}
+}
+
+func NormalizePhaseRunOn(phase PhaseSpec) string {
+	return phaseRunOn(phase)
+}
+
+func NormalizePhasePurpose(phase PhaseSpec) string {
+	return phasePurpose(phase)
+}
+
+func phaseHasPrimitive(phase PhaseSpec, primitive string) bool {
+	for _, job := range phase.Jobs {
+		if strings.TrimSpace(job.Primitive) == primitive {
+			return true
+		}
+	}
+	return false
 }
 
 func projectRequiresNativeWorkflows(project Project) bool {

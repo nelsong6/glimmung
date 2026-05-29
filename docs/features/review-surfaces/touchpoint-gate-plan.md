@@ -26,14 +26,14 @@ prepare → work → testing → cleanup_early → touchpoint → touchpoint_gat
   is gone before the reviewer sees `review_required`.
 - `touchpoint` hosts the `pr_touchpoint` primitive (PR creation + Touchpoint
   linking). Today this primitive lives inside the single `cleanup` phase
-  alongside env teardown; this plan extracts it into its own always-run phase
-  so PR creation does not race the early teardown.
+  alongside env teardown; this plan extracts it into its own success-path phase
+  so PR creation does not race the early teardown or run after aborts.
 - `touchpoint_gate` is a new phase kind. It dispatches no jobs on its own and
   parks the Run with the slot lease intact when `cleanup_early` was skipped.
   An `approve` signal advances the gate by dispatching the managed `pr_merge`
   primitive job. A `reject` signal recycles through the existing
   PR-feedback path.
-- `cleanup_final` is always-run and always-executes. It is idempotent: if
+- `cleanup_final` is teardown and always-executes on merge or abort. It is idempotent: if
   `cleanup_early` already tore down the validation environment, `cleanup_final`
   is a no-op success that still records the cleanup decision in the
   run history.
@@ -46,8 +46,9 @@ workflow either matches the required shape or is rejected at registration time.
 ## Sources of truth (additions)
 
 - `workflows`: new phase kind `touchpoint_gate`. Validation requires the seven
-  named phases above in the listed order, with the listed `always` and `verify`
-  flags and a single `pr_touchpoint` job inside `touchpoint`.
+  named phases above in the listed order, with explicit `run_on`/`purpose`
+  values, the listed `verify` flags, and a single `pr_touchpoint` job inside
+  `touchpoint`.
 - `issues`: new column `preserve_test_env` (bool, default false). Mutable on
   any open Issue. Read at dispatch time and snapshotted onto the run record.
 - `runs`: new column `preserve_test_env` (bool, captured at dispatch). The
@@ -92,7 +93,7 @@ In flight in this branch.
    anything else.
 5. Delete the PR opt-out field, its conditional validations, and its tests.
 6. No runtime gate behavior yet. The `touchpoint_gate` phase, when dispatched,
-   currently behaves as an always-run no-op; gate semantics arrive in stage 3.
+   currently behaves as a success-path no-op; gate semantics arrive in stage 3.
 
 Projects must re-register their workflows against the new shape before their
 next dispatch. There is no auto-migration.

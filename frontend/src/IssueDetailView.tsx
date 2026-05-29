@@ -136,7 +136,8 @@ type RunProjectionPhase = {
   state: string;
   reason?: string | null;
   verify: boolean;
-  always: boolean;
+  run_on: string;
+  purpose: string;
   depends_on: string[];
   jobs: Array<{
     id: string;
@@ -274,7 +275,8 @@ type WorkflowPhase = {
   workflow_filename: string;
   workflow_ref: string;
   verify: boolean;
-  always?: boolean;
+  run_on?: string;
+  purpose?: string;
   evidence_verification_gate?: boolean;
   depends_on?: string[];
   recycle_policy: WorkflowRecyclePolicy | null;
@@ -2316,7 +2318,8 @@ function projectionPhaseForSelection(run: RunProjectionRun, phaseName: string): 
     kind: topologyPhase.kind,
     state: "not_started",
     verify: topologyPhase.verify ?? false,
-    always: topologyPhase.always ?? false,
+    run_on: topologyPhase.run_on ?? "success",
+    purpose: topologyPhase.purpose ?? "work",
     depends_on: topologyPhase.depends_on ?? [],
     jobs: jobs.map((job) => ({
       id: job.id,

@@ -295,7 +295,7 @@ func TestAbortExplanationMalformedSelfExplanatory(t *testing.T) {
 	}
 }
 
-func TestAbortExplanationSkipsAlwaysRunAttempts(t *testing.T) {
+func TestAbortExplanationSkipsTeardownAttempts(t *testing.T) {
 	wf := Workflow{Phases: []PhaseSpec{
 		{
 			Name:   "agent",
@@ -305,7 +305,7 @@ func TestAbortExplanationSkipsAlwaysRunAttempts(t *testing.T) {
 				On:          []string{"verify_fail"},
 			},
 		},
-		{Name: "cleanup", Always: true},
+		{Name: "cleanup", Purpose: "teardown"},
 	}}
 	text, err := AbortExplanation(
 		run([]Attempt{

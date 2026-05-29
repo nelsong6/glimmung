@@ -309,7 +309,7 @@ func serverPhasesToDecisionWorkflow(phases []PhaseSpec) decision.Workflow {
 			Name:                     p.Name,
 			Verify:                   p.Verify,
 			EvidenceVerificationGate: p.EvidenceVerificationGate,
-			Always:                   p.Always,
+			Purpose:                  phasePurpose(p),
 			RecyclePolicy:            rp,
 		})
 	}

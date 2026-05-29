@@ -350,6 +350,127 @@ var schemaMigrations = []string{
 	`CREATE INDEX IF NOT EXISTS slot_inspections_by_run
 		ON slot_inspections (run_id)
 		WHERE run_id <> ''`,
+
+	`ALTER TABLE workflow_schemas ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()`,
+
+	// Workflow phases used to encode teardown scheduling with `always`.
+	// Keep stored workflow JSON on the current run_on/purpose contract so
+	// runtime reads do not need legacy compatibility paths.
+	`WITH migrated AS (
+		SELECT
+			project,
+			name,
+			jsonb_set(
+				payload,
+				'{phases}',
+				(
+					SELECT COALESCE(jsonb_agg(
+						(phase - 'always') || jsonb_build_object(
+							'purpose', COALESCE(NULLIF(phase->>'purpose', ''), derived.purpose),
+							'runOn', COALESCE(
+								NULLIF(phase->>'runOn', ''),
+								CASE
+									WHEN COALESCE(NULLIF(phase->>'purpose', ''), derived.purpose) = 'teardown' THEN 'always'
+									ELSE 'success'
+								END
+							)
+						)
+						ORDER BY ord
+					), '[]'::jsonb)
+					FROM jsonb_array_elements(payload->'phases') WITH ORDINALITY AS elems(phase, ord)
+					CROSS JOIN LATERAL (
+						SELECT CASE
+							WHEN lower(phase->>'kind') = 'touchpoint_gate' THEN 'review_gate'
+							WHEN phase->>'evidenceVerificationGate' = 'true'
+								OR phase->>'evidence_verification_gate' = 'true' THEN 'evidence_gate'
+							WHEN EXISTS (
+								SELECT 1
+								FROM jsonb_array_elements(
+									CASE
+										WHEN jsonb_typeof(phase->'jobs') = 'array' THEN phase->'jobs'
+										ELSE '[]'::jsonb
+									END
+								) AS job
+								WHERE job->>'primitive' = 'pr_touchpoint'
+							) THEN 'review_touchpoint'
+							WHEN phase->>'verify' = 'true' THEN 'verification'
+							WHEN phase->>'skipWhenPreserveTestEnv' = 'true'
+								OR phase->>'skip_when_preserve_test_env' = 'true'
+								OR phase->>'always' = 'true' THEN 'teardown'
+							ELSE 'work'
+						END AS purpose
+					) AS derived
+				),
+				false
+			) AS payload
+		FROM workflows
+		WHERE jsonb_typeof(payload->'phases') = 'array'
+	)
+	UPDATE workflows AS w
+	SET payload = migrated.payload,
+	    updated_at = now()
+	FROM migrated
+	WHERE w.project = migrated.project
+	  AND w.name = migrated.name
+	  AND w.payload IS DISTINCT FROM migrated.payload`,
+
+	`WITH migrated AS (
+		SELECT
+			project,
+			schema_ref,
+			jsonb_set(
+				payload,
+				'{phases}',
+				(
+					SELECT COALESCE(jsonb_agg(
+						(phase - 'always') || jsonb_build_object(
+							'purpose', COALESCE(NULLIF(phase->>'purpose', ''), derived.purpose),
+							'runOn', COALESCE(
+								NULLIF(phase->>'runOn', ''),
+								CASE
+									WHEN COALESCE(NULLIF(phase->>'purpose', ''), derived.purpose) = 'teardown' THEN 'always'
+									ELSE 'success'
+								END
+							)
+						)
+						ORDER BY ord
+					), '[]'::jsonb)
+					FROM jsonb_array_elements(payload->'phases') WITH ORDINALITY AS elems(phase, ord)
+					CROSS JOIN LATERAL (
+						SELECT CASE
+							WHEN lower(phase->>'kind') = 'touchpoint_gate' THEN 'review_gate'
+							WHEN phase->>'evidenceVerificationGate' = 'true'
+								OR phase->>'evidence_verification_gate' = 'true' THEN 'evidence_gate'
+							WHEN EXISTS (
+								SELECT 1
+								FROM jsonb_array_elements(
+									CASE
+										WHEN jsonb_typeof(phase->'jobs') = 'array' THEN phase->'jobs'
+										ELSE '[]'::jsonb
+									END
+								) AS job
+								WHERE job->>'primitive' = 'pr_touchpoint'
+							) THEN 'review_touchpoint'
+							WHEN phase->>'verify' = 'true' THEN 'verification'
+							WHEN phase->>'skipWhenPreserveTestEnv' = 'true'
+								OR phase->>'skip_when_preserve_test_env' = 'true'
+								OR phase->>'always' = 'true' THEN 'teardown'
+							ELSE 'work'
+						END AS purpose
+					) AS derived
+				),
+				false
+			) AS payload
+		FROM workflow_schemas
+		WHERE jsonb_typeof(payload->'phases') = 'array'
+	)
+	UPDATE workflow_schemas AS s
+	SET payload = migrated.payload,
+	    updated_at = now()
+	FROM migrated
+	WHERE s.project = migrated.project
+	  AND s.schema_ref = migrated.schema_ref
+	  AND s.payload IS DISTINCT FROM migrated.payload`,
 }
 
 // cronJobs are scheduled after the table migrations succeed. Each
