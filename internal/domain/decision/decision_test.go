@@ -329,3 +329,78 @@ func TestAbortExplanationRejectsNonAbortDecision(t *testing.T) {
 		t.Fatalf("got error %v, want non-abort error", err)
 	}
 }
+
+// abortRequestAttempt builds an attempt that emitted a non-empty
+// abort_reason, i.e. a phase-requested fail-closed abort.
+func abortRequestAttempt(phase, reason string) Attempt {
+	return Attempt{
+		Phase:       phase,
+		Conclusion:  ConclusionAborted,
+		AbortReason: reason,
+	}
+}
+
+func TestPhaseRequestedAbortOverridesEverything(t *testing.T) {
+	// A verify phase whose recycle policy would otherwise retry: the
+	// abort_reason output must win, regardless of verification/budget.
+	mustDecide(t,
+		run([]Attempt{abortRequestAttempt("agent", "host_unavailable")}, 0, 25.0),
+		workflow(),
+		AbortRequested,
+	)
+	// A non-verify primary phase (the spirelens env-prep shape).
+	mustDecide(t,
+		run([]Attempt{abortRequestAttempt("env-prep", "unexpected_mod:godotexplorer")}, 0, 25.0),
+		workflow(withVerify(false)),
+		AbortRequested,
+	)
+}
+
+func TestPhaseRequestedAbortHonoredUnderWorkflowDrift(t *testing.T) {
+	// The aborting phase is not present in the workflow (drift). A
+	// fail-closed abort must still route to AbortRequested rather than
+	// erroring on the missing phase.
+	mustDecide(t,
+		run([]Attempt{abortRequestAttempt("phase-since-removed", "host_unavailable")}, 0, 25.0),
+		workflow(),
+		AbortRequested,
+	)
+}
+
+func TestEmptyAbortReasonDoesNotTriggerAbort(t *testing.T) {
+	// A whitespace-only abort_reason is not a request; normal routing
+	// applies (success advances).
+	mustDecide(t,
+		run([]Attempt{{Phase: "agent", Conclusion: "success", AbortReason: "   "}}, 0, 25.0),
+		workflow(withVerify(false)),
+		Advance,
+	)
+}
+
+func TestAbortExplanationRequestedUsesPhaseReason(t *testing.T) {
+	text, err := AbortExplanation(
+		run([]Attempt{abortRequestAttempt("env-prep", "unexpected_mod:godotexplorer")}, 0, 25.0),
+		workflow(withVerify(false)),
+		AbortRequested,
+	)
+	if err != nil {
+		t.Fatalf("AbortExplanation returned error: %v", err)
+	}
+	if !strings.Contains(text, "env-prep") || !strings.Contains(text, "unexpected_mod:godotexplorer") {
+		t.Fatalf("unexpected explanation: %s", text)
+	}
+}
+
+func TestAbortExplanationRequestedFallbackWhenReasonMissing(t *testing.T) {
+	text, err := AbortExplanation(
+		run([]Attempt{{Phase: "env-prep", Conclusion: ConclusionAborted}}, 0, 25.0),
+		workflow(withVerify(false)),
+		AbortRequested,
+	)
+	if err != nil {
+		t.Fatalf("AbortExplanation returned error: %v", err)
+	}
+	if !strings.Contains(text, "fail-closed abort") {
+		t.Fatalf("unexpected explanation: %s", text)
+	}
+}

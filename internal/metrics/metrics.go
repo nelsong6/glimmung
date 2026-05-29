@@ -126,7 +126,7 @@ var (
 	decisionsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "glimmung_decisions_total",
-			Help: "Verify-loop decisions emitted by the decision engine, labelled by outcome (retry, advance, abort_budget_attempts, abort_budget_cost, abort_malformed).",
+			Help: "Verify-loop decisions emitted by the decision engine, labelled by outcome (retry, advance, abort_budget_attempts, abort_budget_cost, abort_malformed, abort_requested).",
 		},
 		[]string{"decision"},
 	)

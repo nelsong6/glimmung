@@ -100,6 +100,18 @@ Default failure behavior is fail-fast. A non-zero step exits the job, records
 the failed step, and reports the job through the normal native completion
 contract. `allow_failure` can be added later when a concrete workflow needs it.
 
+A step may also short-circuit the phase **without** a non-zero exit by emitting
+a non-empty `abort_reason` phase output (`decision.AbortReasonOutputKey`). This
+is the fail-closed abort path: the runner finishes the current step, sees the
+`abort_reason` is set, stops the remaining steps in the phase, and reports the
+job with `conclusion=aborted` (`decision.ConclusionAborted`). The decision
+engine routes that to `decision.AbortRequested`, which overrides verify/budget
+routing and short-circuits the run to teardown-then-abort, surfacing the
+phase's own `abort_reason` as the operator-facing reason. This is what lets a
+guard step (for example spirelens env-prep finding the warm host asleep or an
+unexpected mod on disk) deliberately refuse to let downstream steps run while
+still releasing resources through the workflow's cleanup phases.
+
 Shell default should be pragmatic: `bash` with strict settings. The exact
 invocation can be refined in implementation, but shell choice must be explicit
 and overrideable.

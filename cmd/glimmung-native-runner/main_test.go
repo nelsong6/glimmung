@@ -107,6 +107,89 @@ func TestNativeRunnerExecutesStepsAndPublishesOutputs(t *testing.T) {
 	}
 }
 
+// TestNativeRunnerHaltsRemainingStepsOnAbortReason pins the fail-closed
+// abort short-circuit: when a step emits a non-empty abort_reason phase
+// output, the runner must stop and NOT run later steps in the phase, and
+// must report conclusion=aborted carrying the reason. This is the
+// spirelens env-prep guard contract — a probe that finds the host
+// unavailable / an unexpected mod must not let downstream steps run.
+func TestNativeRunnerHaltsRemainingStepsOnAbortReason(t *testing.T) {
+	var events []nativeEventRequest
+	var completion completedRequest
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/events":
+			var event nativeEventRequest
+			_ = json.NewDecoder(r.Body).Decode(&event)
+			mu.Lock()
+			events = append(events, event)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"accepted": true})
+		case "/completed":
+			mu.Lock()
+			_ = json.NewDecoder(r.Body).Decode(&completion)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"decision": "done"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	workspace := t.TempDir()
+	sentinel := filepath.Join(workspace, "second-step-ran")
+	r := &nativeRunner{
+		cfg: runnerConfig{
+			JobID:        "test-abort",
+			EventsURL:    server.URL + "/events",
+			CompletedURL: server.URL + "/completed",
+			Workspace:    workspace,
+			Job: jobSpec{
+				WorkingDirectory: workspace,
+				Shell:            "sh",
+				Steps: []stepSpec{
+					{
+						Slug: "probe-ssh",
+						Type: "run",
+						Run:  "printf 'abort_reason=host_unavailable\\n' >> \"$GLIMMUNG_OUTPUT_FILE\"",
+					},
+					{
+						Slug: "probe-mod-set",
+						Type: "run",
+						Run:  "touch \"" + sentinel + "\"",
+					},
+				},
+			},
+		},
+		client:  server.Client(),
+		outputs: map[string]string{},
+	}
+
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if completion.Conclusion != "aborted" {
+		t.Fatalf("conclusion=%q, want aborted", completion.Conclusion)
+	}
+	if completion.Outputs["abort_reason"] != "host_unavailable" {
+		t.Fatalf("outputs=%#v, want abort_reason=host_unavailable", completion.Outputs)
+	}
+	if _, err := os.Stat(sentinel); err == nil {
+		t.Fatalf("second step ran despite abort_reason from the first step")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !sawEvent(events, "phase_aborted") {
+		t.Fatalf("expected a phase_aborted event, got %#v", events)
+	}
+	for _, e := range events {
+		if e.Event == "step_started" && e.StepSlug != nil && *e.StepSlug == "probe-mod-set" {
+			t.Fatalf("probe-mod-set step was started despite abort")
+		}
+	}
+}
+
 func sawEvent(events []nativeEventRequest, event string) bool {
 	for _, candidate := range events {
 		if candidate.Event == event {

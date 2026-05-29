@@ -320,8 +320,9 @@ func decisionAttemptsForRun(run RunReplayData) []decision.Attempt {
 	attempts := make([]decision.Attempt, len(run.Attempts))
 	for i, a := range run.Attempts {
 		attempts[i] = decision.Attempt{
-			Phase:      a.Phase,
-			Conclusion: a.Conclusion,
+			Phase:       a.Phase,
+			Conclusion:  a.Conclusion,
+			AbortReason: a.PhaseOutputs[decision.AbortReasonOutputKey],
 		}
 		if a.Verification != nil {
 			attempts[i].Verification = &decision.Verification{

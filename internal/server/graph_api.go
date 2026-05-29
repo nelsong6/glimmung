@@ -1541,7 +1541,7 @@ func projectionPhaseState(run RunReport, phaseName string, attempts []RunReportA
 			return "succeeded"
 		case "skipped":
 			return "skipped"
-		case "cancelled", "failure", "timed_out":
+		case "cancelled", "failure", "timed_out", "aborted":
 			return "failed"
 		}
 	}
@@ -1601,6 +1601,8 @@ func projectionPhaseReason(state string, attempts []RunReportAttempt, abortReaso
 			return stringPointerOrNil("cancelled")
 		case "timed_out":
 			return stringPointerOrNil("timeout")
+		case "aborted":
+			return stringPointerOrNil("aborted")
 		case "failure":
 			return stringPointerOrNil("job_failed")
 		}
@@ -1806,6 +1808,8 @@ func projectionJobReason(state string, completion RunAttemptJobCompletion, fallb
 		return stringPointerOrNil("cancelled")
 	case "timed_out":
 		return stringPointerOrNil("timeout")
+	case "aborted":
+		return stringPointerOrNil("aborted")
 	case "failure":
 		return stringPointerOrNil("step_failed")
 	default:
@@ -1855,7 +1859,7 @@ func projectionAttemptState(attempt RunReportAttempt) string {
 			return "succeeded"
 		case "skipped":
 			return "skipped"
-		case "cancelled", "failure", "timed_out":
+		case "cancelled", "failure", "timed_out", "aborted":
 			return "failed"
 		}
 	}
