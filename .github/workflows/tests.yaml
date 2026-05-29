@@ -81,6 +81,17 @@ jobs:
       - name: Guard against retired legacy embedded-slot-array surface + PR #525 race-fix revert
         run: node scripts/check-slot-cleanup-migration.mjs
 
+  check-chart-image-tag-sync:
+    name: Chart image.tag lockstep contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Guard against prod/issue chart image.tag drift
+        run: node scripts/check-chart-image-tag-sync.mjs
+
   frontend:
     runs-on: ubuntu-latest
     steps:
