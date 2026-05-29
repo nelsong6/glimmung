@@ -108,11 +108,21 @@ type Settings struct {
 	ControlPlaneLoopsEnabled bool
 	// Remote-host execution primitives (docs/remote-host-execution.md).
 	// Empty values disable the corresponding endpoint cleanly (503).
-	SSHCAPrivateKey            string
-	TailscaleOAuthClientID     string
-	TailscaleOAuthClientSecret string
-	TailscaleTailnet           string
-	TailscaleAPIBaseURL        string
+	//
+	// TailscaleOIDCClientID is the client ID of the Tailscale "Trust
+	// credentials → OIDC" entry that pins this glimmung tenant. Not
+	// secret on its own — Tailscale validates the credential by JWT
+	// signature, not by possession of this ID. We mint JWTs against
+	// `api.tailscale.com/<TailscaleOIDCClientID>` audience, exchange
+	// them at Tailscale's OAuth token endpoint via RFC 7523, and use
+	// the returned access token to mint tailnet auth keys. The
+	// projected SA token + auth.romaine.life federation endpoint
+	// (`AuthRomaineLifeBaseURL`, `AuthRomaineLifeTokenPath`) supply the
+	// JWT mint step.
+	SSHCAPrivateKey      string
+	TailscaleOIDCClientID string
+	TailscaleTailnet      string
+	TailscaleAPIBaseURL   string
 }
 
 func SettingsFromEnv() Settings {
@@ -208,11 +218,10 @@ func SettingsFromEnv() Settings {
 			"CONTROL_PLANE_LOOPS_ENABLED",
 			true,
 		),
-		SSHCAPrivateKey:            os.Getenv("GLIMMUNG_SSH_CA_PRIVATE_KEY"),
-		TailscaleOAuthClientID:     os.Getenv("GLIMMUNG_TAILSCALE_OAUTH_CLIENT_ID"),
-		TailscaleOAuthClientSecret: os.Getenv("GLIMMUNG_TAILSCALE_OAUTH_CLIENT_SECRET"),
-		TailscaleTailnet:           envOrDefault("GLIMMUNG_TAILSCALE_TAILNET", "-"),
-		TailscaleAPIBaseURL:        envOrDefault("GLIMMUNG_TAILSCALE_API_BASE_URL", "https://api.tailscale.com"),
+		SSHCAPrivateKey:       os.Getenv("GLIMMUNG_SSH_CA_PRIVATE_KEY"),
+		TailscaleOIDCClientID: os.Getenv("GLIMMUNG_TAILSCALE_OIDC_CLIENT_ID"),
+		TailscaleTailnet:      envOrDefault("GLIMMUNG_TAILSCALE_TAILNET", "-"),
+		TailscaleAPIBaseURL:   envOrDefault("GLIMMUNG_TAILSCALE_API_BASE_URL", "https://api.tailscale.com"),
 	}
 }
 
@@ -289,11 +298,14 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	tailscaleAuthKeyMinter, tailscaleErr := NewTailscaleAuthKeyMinter(
 		settings.TailscaleAPIBaseURL,
 		settings.TailscaleTailnet,
-		settings.TailscaleOAuthClientID,
-		settings.TailscaleOAuthClientSecret,
+		settings.TailscaleOIDCClientID,
+		settings.AuthRomaineLifeBaseURL,
+		settings.AuthRomaineLifeTokenPath,
 		nil,
 	)
-	if tailscaleErr != nil && !errors.Is(tailscaleErr, errTailscaleUnconfigured) {
+	if tailscaleErr != nil &&
+		!errors.Is(tailscaleErr, errTailscaleUnconfigured) &&
+		!errors.Is(tailscaleErr, errAuthRomaineLifeUnconfigured) {
 		log.Printf("remote-host: tailscale auth-key minter disabled: %v", tailscaleErr)
 	}
 	mux := http.NewServeMux()

@@ -146,17 +146,28 @@ externalSecret:
       kvKey: glimmung-pg-database
     # Remote-host execution primitives (docs/remote-host-execution.md).
     # The SSH CA private key signs short-TTL OpenSSH user certs for
-    # orchestrator pods reaching project-pinned hosts. The Tailscale
-    # OAuth client pair mints ephemeral pre-authorized auth keys for
-    # those same pods. Both endpoints fail closed with HTTP 503 when
-    # their secret is empty so missing values do not silently bypass
-    # the credential mint.
+    # orchestrator pods reaching project-pinned hosts. Tailscale
+    # auth-key mints flow through the OIDC federation path against
+    # auth.romaine.life — no KV-resident Tailscale OAuth secret is
+    # needed. The endpoint fails closed (HTTP 503) when the CA key is
+    # empty so missing values do not silently bypass the cert mint.
     - envVar: GLIMMUNG_SSH_CA_PRIVATE_KEY
       kvKey: glimmung-ssh-ca-private-key
-    - envVar: GLIMMUNG_TAILSCALE_OAUTH_CLIENT_ID
-      kvKey: glimmung-tailscale-oauth-client-id
-    - envVar: GLIMMUNG_TAILSCALE_OAUTH_CLIENT_SECRET
-      kvKey: glimmung-tailscale-oauth-client-secret
+
+# Remote-host execution primitives (docs/remote-host-execution.md).
+# Identifies the Tailscale "Trust credentials → OIDC" entry that pins
+# this glimmung tenant. The client ID is not secret — Tailscale
+# validates the credential by JWT signature, not by possession of
+# this ID. Empty disables the tailscale-authkey endpoint cleanly
+# (HTTP 503), which is the prod-side state until a tailnet is wired.
+#
+# The full federation audience is `api.tailscale.com/<tailscaleOidcClientId>`,
+# constructed in code.
+remoteHost:
+  tailscaleOidcClientId: "T6vFBk1dAa11CNTRL-kf6kJRvG5T11CNTRL"
+  # Tailnet selector. "-" is Tailscale's convention for the credential's
+  # default tailnet.
+  tailscaleTailnet: "-"
 
 # Postgres workload-identity user. This is the name of the UAMI
 # (azurerm_user_assigned_identity.glimmung_dedicated) registered as

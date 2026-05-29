@@ -35,8 +35,11 @@ anchors only:
 Glimmung holds the corresponding private material:
 
 - The SSH CA private key (KV: `glimmung-ssh-ca-private-key`).
-- A Tailscale OAuth client credential pair (KV: `glimmung-tailscale-oauth-client-id`,
-  `glimmung-tailscale-oauth-client-secret`).
+- A projected Kubernetes ServiceAccount token, audience-pinned to
+  `https://auth.romaine.life`. The same mount the managed-origin reconciler
+  uses. No KV-resident Tailscale client secret — Tailscale auth-key mints
+  flow through an OIDC workload-identity federation handshake against
+  auth.romaine.life (see "Tailscale credential flow" below).
 
 Per run, glimmung produces:
 
@@ -164,6 +167,41 @@ spirelens, `scripts/glimmung-native/env-prep.sh` et al.). The project-side
 scripts are responsible for the keypair lifecycle, Tailscale bring-up, and
 SSH invocation. Glimmung only owns credential minting.
 
+## Tailscale credential flow
+
+The `tailscale-authkey` endpoint does NOT use a stored OAuth client secret.
+Instead it drives a four-step OIDC workload-identity federation flow per
+cold call (with the resulting Tailscale API access token cached
+in-process until just before its expiry):
+
+1. **Read SA token from disk.** The pod has a projected
+   ServiceAccount token mounted with audience
+   `https://auth.romaine.life` (the same token the managed-origin
+   reconciler uses).
+2. **Exchange for an auth.romaine.life-signed JWT.** Glimmung POSTs the
+   SA token to `https://auth.romaine.life/api/auth/exchange/federation`
+   with `{ "audience": "api.tailscale.com/<oidc_client_id>" }`. The
+   response contains an auth.romaine.life-signed JWT carrying
+   `iss=https://auth.romaine.life`, `aud=<the requested audience>`, and
+   bounded `exp`.
+3. **Exchange for a Tailscale API access token.** Glimmung POSTs the
+   JWT to `https://api.tailscale.com/api/v2/oauth/token` with
+   `grant_type=client_credentials`,
+   `client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer`,
+   `client_assertion=<the JWT>` (RFC 7523). Tailscale validates the JWT
+   against its OIDC trust credential (signature checked against the
+   `iss`-discovered JWKS at
+   `https://auth.romaine.life/.well-known/openid-configuration`).
+4. **Mint the tailnet auth key.** Glimmung uses the returned access
+   token as a normal Tailscale API bearer to call
+   `/api/v2/tailnet/<tailnet>/keys`, asking for an ephemeral,
+   pre-authorized, single-use key tagged `tag:<project>-orchestrator`.
+
+Tailscale's trust credential is identified by an OIDC client ID — not
+secret on its own, since Tailscale validates the JWT signature against
+auth.romaine.life's JWKS, not by possession of the client ID. We store
+the ID as a chart value rather than a KV secret.
+
 ## Configuration
 
 KV secrets (consumed via `ExternalSecret` → pod `envFrom`):
@@ -171,21 +209,39 @@ KV secrets (consumed via `ExternalSecret` → pod `envFrom`):
 | KV secret                                | Env var                                  | Required for          |
 |------------------------------------------|------------------------------------------|-----------------------|
 | `glimmung-ssh-ca-private-key`            | `GLIMMUNG_SSH_CA_PRIVATE_KEY`            | `ssh-cert` endpoint   |
-| `glimmung-tailscale-oauth-client-id`     | `GLIMMUNG_TAILSCALE_OAUTH_CLIENT_ID`     | `tailscale-authkey`   |
-| `glimmung-tailscale-oauth-client-secret` | `GLIMMUNG_TAILSCALE_OAUTH_CLIENT_SECRET` | `tailscale-authkey`   |
+
+Non-secret chart values (consumed via the deployment's `env`):
+
+| Chart value                          | Env var                                  | Required for          |
+|--------------------------------------|------------------------------------------|-----------------------|
+| `remoteHost.tailscaleOidcClientId`   | `GLIMMUNG_TAILSCALE_OIDC_CLIENT_ID`      | `tailscale-authkey`   |
+| `remoteHost.tailscaleTailnet`        | `GLIMMUNG_TAILSCALE_TAILNET`             | `tailscale-authkey`   |
+| `authRomaineLife.baseUrl`            | `AUTH_ROMAINE_LIFE_BASE_URL`             | `tailscale-authkey`   |
+| `authRomaineLife.tokenMountPath`     | `AUTH_ROMAINE_LIFE_TOKEN_PATH`           | `tailscale-authkey`   |
 
 Optional environment overrides:
 
 | Env var                              | Default                       | Purpose                                                 |
 |--------------------------------------|-------------------------------|---------------------------------------------------------|
-| `GLIMMUNG_TAILSCALE_TAILNET`         | `-`                           | Tailnet identifier. `-` selects the OAuth client's default tailnet. |
 | `GLIMMUNG_TAILSCALE_API_BASE_URL`    | `https://api.tailscale.com`   | Overridden in tests.                                    |
 | `GLIMMUNG_SSH_CERT_TTL_SECONDS`      | `600`                         | Bounded ceiling — clamped to `[60, 3600]`.              |
 | `GLIMMUNG_TAILSCALE_AUTHKEY_TTL_SECONDS` | `900`                     | Bounded ceiling — clamped to `[300, 3600]`.             |
 
-When any required KV secret is empty, the corresponding endpoint returns
-`503 service unavailable`. Both endpoints are independently gated: it is
-valid to deploy with one configured and the other not.
+When the SSH CA key is empty, `ssh-cert` returns `503 service
+unavailable`. When the Tailscale OIDC client ID or auth.romaine.life
+mount is empty, `tailscale-authkey` returns `503`. Both endpoints are
+independently gated.
+
+The auth.romaine.life federation endpoint
+(`POST /api/auth/exchange/federation`, added in `nelsong6/auth#63`) is
+the substrate this flow depends on. The federation handshake runs from
+glimmung's main pod (`glimmung/infra-shared`) — not the per-run native
+runner — because the `tailscale-authkey` handler executes inside the
+glimmung server process when an orchestrator calls the lease-callback
+endpoint. The auth.romaine.life side must therefore allowlist
+`glimmung/infra-shared` in `K8S_FEDERATION_SA_ALLOWLIST` and
+`api.tailscale.com/*` in `FEDERATION_AUDIENCE_ALLOWLIST` for this flow
+to succeed.
 
 ## Runner-image surface
 

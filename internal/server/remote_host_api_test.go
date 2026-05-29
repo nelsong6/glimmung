@@ -159,7 +159,7 @@ func TestSSHCertHandlerRejectsLeaseWithoutProject(t *testing.T) {
 }
 
 func TestTailscaleAuthKeyHandlerHappyPath(t *testing.T) {
-	f := newFakeTailscale(t)
+	f := newFakeFederationAndTailscale(t)
 	minter := newTestMinter(t, f)
 	store := remoteHostCallbackStore{token: "tok-1", lease: newClaimedLease("spirelens")}
 	handler := mintLeaseCallbackTailscaleAuthKey(store, minter)
@@ -200,7 +200,7 @@ func TestTailscaleAuthKeyHandlerMinterDisabledReturns503(t *testing.T) {
 }
 
 func TestTailscaleAuthKeyHandlerLeaseNotClaimedReturns409(t *testing.T) {
-	f := newFakeTailscale(t)
+	f := newFakeFederationAndTailscale(t)
 	minter := newTestMinter(t, f)
 	lease := newClaimedLease("spirelens")
 	lease.State = "released"
@@ -216,7 +216,7 @@ func TestTailscaleAuthKeyHandlerLeaseNotClaimedReturns409(t *testing.T) {
 }
 
 func TestTailscaleAuthKeyHandlerPropagatesAPIError(t *testing.T) {
-	f := newFakeTailscale(t)
+	f := newFakeFederationAndTailscale(t)
 	f.mintStatus = http.StatusForbidden
 	minter := newTestMinter(t, f)
 	store := remoteHostCallbackStore{token: "tok-1", lease: newClaimedLease("spirelens")}
