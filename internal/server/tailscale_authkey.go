@@ -56,6 +56,10 @@ const federationAudiencePrefix = "api.tailscale.com"
 // and returns an auth.romaine.life-signed JWT with the requested `aud`.
 const federationExchangePath = "/api/auth/exchange/federation"
 
+// tailscaleAuthKeyDescription must stay inside Tailscale's restricted
+// description charset. Keep the scoped tag in capabilities.tags instead.
+const tailscaleAuthKeyDescription = "glimmung remote host orchestrator"
+
 // TailscaleAuthKeyMinter mints ephemeral, pre-authorized auth keys via
 // an OIDC workload-identity federation flow:
 //
@@ -310,7 +314,7 @@ func (m *TailscaleAuthKeyMinter) MintAuthKey(ctx context.Context, tag string) (T
 			},
 		},
 		"expirySeconds": int(ttl.Seconds()),
-		"description":   fmt.Sprintf("glimmung remote-host orchestrator (%s)", tag),
+		"description":   tailscaleAuthKeyDescription,
 	}
 	raw, err := json.Marshal(body)
 	if err != nil {

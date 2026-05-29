@@ -266,6 +266,13 @@ func TestTailscaleAuthKeyMinterMintsKeyEndToEnd(t *testing.T) {
 	if v := f.lastJWT.Load(); v == nil || v.(string) != f.federationToken {
 		t.Fatalf("jwt=%v, want %q", v, f.federationToken)
 	}
+	mintBody, ok := f.lastMintBody.Load().(map[string]any)
+	if !ok {
+		t.Fatalf("lastMintBody missing or wrong type")
+	}
+	if got := mintBody["description"]; got != tailscaleAuthKeyDescription {
+		t.Fatalf("description=%v, want %q", got, tailscaleAuthKeyDescription)
+	}
 }
 
 func TestTailscaleAuthKeyMinterCachesAccessToken(t *testing.T) {
