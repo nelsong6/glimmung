@@ -637,6 +637,57 @@ describe("IssueDetailView run execution graph", () => {
     expect(screen.getByText((content) => content.includes("\\nline two"))).toBeInTheDocument();
   });
 
+  it("keeps raw stdout fragments out of the LLM transcript", async () => {
+    const agentProjection = activeAgentProjection();
+    const agentGraph = { ...issueGraph, projection: agentProjection };
+    const noisyAgentEvents = {
+      ...agentNativeEvents,
+      events: [
+        {
+          ...agentNativeEvents.events[0],
+          seq: 0,
+          message: "{",
+          metadata: { stream: "stdout" },
+        },
+        {
+          ...agentNativeEvents.events[0],
+          seq: 1,
+          message: "  \"namespace\": \"ambience-slot-2\",",
+          metadata: { stream: "stdout" },
+        },
+        ...agentNativeEvents.events.map((event) => ({ ...event, seq: event.seq + 10 })),
+      ],
+    };
+
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string"
+          ? new URL(input, "https://glimmung.test")
+          : input instanceof URL
+            ? input
+            : new URL(input.url);
+      if (url.pathname === "/v1/issues/by-number/ambience/172") return json(issueDetail);
+      if (url.pathname === "/v1/issues/by-number/ambience/172/graph") return json(agentGraph);
+      if (url.pathname === "/v1/projects/ambience/issues/172/runs/7/cycles/1/graph") return json(agentProjection);
+      if (url.pathname === "/v1/workflows") return json([]);
+      if (url.pathname === "/v1/projects/ambience/issues/172/runs/7.1/native/events") return json(noisyAgentEvents);
+      throw new Error(`unhandled fetch ${url.pathname}`);
+    }));
+
+    renderIssueDetail("/projects/ambience/issues/172/runs/7/cycles/1/phases/agent-execute/jobs/agent/steps/run-agent");
+
+    const transcript = await screen.findByLabelText("agent transcript");
+    const firstEntry = transcript.querySelector(".agent-transcript-entry");
+    expect(firstEntry).toHaveTextContent("assistant");
+    expect(within(transcript).queryByText(/stdout log/i)).not.toBeInTheDocument();
+    expect(within(transcript).queryByText(/system init/i)).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "raw" }));
+    expect(screen.getByText((content, element) => (
+      element?.tagName === "PRE" && content.includes("{")
+    ))).toBeInTheDocument();
+  });
+
   it("keeps non-agent steps in an LLM job on the raw terminal view", async () => {
     const agentProjection = activeAgentProjection();
     const agentGraph = { ...issueGraph, projection: agentProjection };

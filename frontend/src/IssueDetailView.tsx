@@ -3899,7 +3899,7 @@ function agentTranscriptEntries(events: NativeRunEvent[]): AgentTranscriptEntry[
       });
     }
   });
-  return entries;
+  return entries.filter((entry) => entry.kind !== "raw");
 }
 
 function appendAgentPayloadEntries(
