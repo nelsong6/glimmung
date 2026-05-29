@@ -125,8 +125,9 @@ type RunProjectionTopology struct {
 type RunProjectionTopologyPhase struct {
 	Name                     string                     `json:"name"`
 	Kind                     string                     `json:"kind"`
+	RunOn                    string                     `json:"run_on"`
+	Purpose                  string                     `json:"purpose"`
 	Verify                   bool                       `json:"verify"`
-	Always                   bool                       `json:"always"`
 	EvidenceVerificationGate bool                       `json:"evidence_verification_gate"`
 	DependsOn                []string                   `json:"depends_on"`
 	Jobs                     []RunProjectionTopologyJob `json:"jobs"`
@@ -156,10 +157,11 @@ type RunProjectionRecycle struct {
 type RunProjectionPhase struct {
 	Name      string                 `json:"name"`
 	Kind      string                 `json:"kind"`
+	RunOn     string                 `json:"run_on"`
+	Purpose   string                 `json:"purpose"`
 	State     string                 `json:"state"`
 	Reason    *string                `json:"reason,omitempty"`
 	Verify    bool                   `json:"verify"`
-	Always    bool                   `json:"always"`
 	DependsOn []string               `json:"depends_on"`
 	Jobs      []RunProjectionJob     `json:"jobs"`
 	Attempts  []RunProjectionAttempt `json:"attempts"`
@@ -1067,8 +1069,9 @@ func workflowTopologyFromWorkflow(workflow Workflow) RunProjectionTopology {
 		topology.Phases = append(topology.Phases, RunProjectionTopologyPhase{
 			Name:                     phase.Name,
 			Kind:                     workflowPhaseKind(phase.Kind),
+			RunOn:                    phaseRunOn(phase),
+			Purpose:                  phasePurpose(phase),
 			Verify:                   phase.Verify,
-			Always:                   phase.Always,
 			EvidenceVerificationGate: phase.EvidenceVerificationGate,
 			DependsOn:                sliceOrEmpty(phase.DependsOn),
 			Jobs:                     runProjectionTopologyJobs(phase),
@@ -1198,10 +1201,11 @@ func runProjectionPhases(run RunReport, workflow Workflow) []RunProjectionPhase 
 			phases = append(phases, RunProjectionPhase{
 				Name:      phase.Name,
 				Kind:      workflowPhaseKind(phase.Kind),
+				RunOn:     phaseRunOn(phase),
+				Purpose:   phasePurpose(phase),
 				State:     state,
 				Reason:    reason,
 				Verify:    phase.Verify,
-				Always:    phase.Always,
 				DependsOn: sliceOrEmpty(phase.DependsOn),
 				Jobs:      runProjectionJobs(phase, state, reason, attempts),
 				Attempts:  runProjectionAttempts(attempts),
@@ -1282,10 +1286,11 @@ func runProjectionPhasesFromExecutions(run RunReport, workflow Workflow) []RunPr
 			phases = append(phases, RunProjectionPhase{
 				Name:      spec.Name,
 				Kind:      workflowPhaseKind(spec.Kind),
+				RunOn:     phaseRunOn(spec),
+				Purpose:   phasePurpose(spec),
 				State:     state,
 				Reason:    reason,
 				Verify:    spec.Verify,
-				Always:    spec.Always,
 				DependsOn: sliceOrEmpty(spec.DependsOn),
 				Jobs:      runProjectionJobs(spec, state, reason, attempts),
 				Attempts:  runProjectionAttempts(attempts),
@@ -1324,10 +1329,11 @@ func projectionPhaseFromExecution(execution RunPhaseExecution, spec PhaseSpec, a
 	return RunProjectionPhase{
 		Name:      name,
 		Kind:      kind,
+		RunOn:     phaseRunOn(spec),
+		Purpose:   phasePurpose(spec),
 		State:     state,
 		Reason:    reason,
 		Verify:    spec.Verify,
-		Always:    spec.Always,
 		DependsOn: sliceOrEmpty(spec.DependsOn),
 		Jobs:      jobs,
 		Attempts:  runProjectionAttempts(attempts),

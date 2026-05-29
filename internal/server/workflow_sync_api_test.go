@@ -83,7 +83,8 @@ phases:
   - name: cleanup_early
     kind: k8s_job
     workflow_filename: cleanup_early.yaml
-    always: true
+    run_on: always
+    purpose: teardown
     skip_when_preserve_test_env: true
     depends_on: [test]
     jobs:
@@ -91,7 +92,8 @@ phases:
   - name: touchpoint
     kind: k8s_job
     workflow_filename: touchpoint.yaml
-    always: true
+    run_on: success
+    purpose: review_touchpoint
     depends_on: [cleanup_early]
     jobs:
       - id: pr-touchpoint
@@ -105,7 +107,8 @@ phases:
   - name: cleanup_final
     kind: k8s_job
     workflow_filename: cleanup_final.yaml
-    always: true
+    run_on: always
+    purpose: teardown
     depends_on: [touchpoint_gate]
     jobs:
       - id: cleanup-final
@@ -126,14 +129,16 @@ phases:
       - id: test
   - name: cleanup_early
     workflow_filename: cleanup_early.yaml
-    always: true
+    run_on: always
+    purpose: teardown
     skip_when_preserve_test_env: true
     depends_on: [test]
     jobs:
       - id: cleanup-early
   - name: touchpoint
     workflow_filename: touchpoint.yaml
-    always: true
+    run_on: success
+    purpose: review_touchpoint
     depends_on: [cleanup_early]
     jobs:
       - id: pr-touchpoint
@@ -146,7 +151,8 @@ phases:
         primitive: pr_merge
   - name: cleanup_final
     workflow_filename: cleanup_final.yaml
-    always: true
+    run_on: always
+    purpose: teardown
     depends_on: [touchpoint_gate]
     jobs:
       - id: cleanup-final
@@ -256,7 +262,8 @@ phases:
     depends_on: [entry]
   - name: cleanup
     kind: k8s_job
-    always: true
+    run_on: always
+    purpose: teardown
     depends_on: [test]
 `), statusCode: 200}
 	handler := newHandlerWithSyncClientAdmin(store, client)

@@ -460,7 +460,8 @@ func prWorkflowForCompletion(name string) *Workflow {
 	wf.Phases = append(wf.Phases, PhaseSpec{
 		Name:      "cleanup",
 		Kind:      "k8s_job",
-		Always:    true,
+		RunOn:     PhaseRunOnSuccess,
+		Purpose:   PhasePurposeReviewTouchpoint,
 		DependsOn: []string{name},
 		Jobs:      []NativeJobSpec{{ID: PRTouchpointJobID, Primitive: JobPrimitivePRTouchpoint}},
 	})
@@ -1217,7 +1218,8 @@ func TestNativeRunCompletedByCallbackTokenFailureDispatchesCleanup(t *testing.T)
 				Name:             "env-destroy",
 				Kind:             "k8s_job",
 				WorkflowFilename: "k8s_job:env-destroy",
-				Always:           true,
+				RunOn:            PhaseRunOnAlways,
+				Purpose:          PhasePurposeTeardown,
 				DependsOn:        []string{"env-prep"},
 				Jobs:             []NativeJobSpec{{ID: "env-destroy", Image: "runner:latest"}},
 			},
@@ -1276,7 +1278,8 @@ func TestNativeRunCompletedByCallbackTokenCleanupAfterAbortKeepsRunAborted(t *te
 			{
 				Name:      "env-destroy",
 				Kind:      "k8s_job",
-				Always:    true,
+				RunOn:     PhaseRunOnAlways,
+				Purpose:   PhasePurposeTeardown,
 				DependsOn: []string{"env-prep"},
 				Jobs:      []NativeJobSpec{{ID: "env-destroy"}},
 			},
@@ -1305,7 +1308,7 @@ func TestAllReadyDispatchTargetsHandlesLinearPhasesAndTeardown(t *testing.T) {
 		{Name: "prepare"},
 		{Name: "work", DependsOn: []string{"prepare"}},
 		{Name: "verify", Verify: true, DependsOn: []string{"work"}},
-		{Name: "cleanup", Always: true, DependsOn: []string{"verify"}},
+		{Name: "cleanup", RunOn: PhaseRunOnAlways, Purpose: PhasePurposeTeardown, DependsOn: []string{"verify"}},
 	}}
 	run := RunReplayData{Attempts: []RunAttemptData{{AttemptIndex: 0, Phase: "prepare", Completed: true, Decision: string(decision.Advance)}}}
 	assertPhaseTargets(t, allReadyDispatchTargets(wf, run, decision.Advance), "work")
@@ -1317,13 +1320,38 @@ func TestAllReadyDispatchTargetsHandlesLinearPhasesAndTeardown(t *testing.T) {
 	assertPhaseTargets(t, allReadyDispatchTargets(wf, run, decision.AbortBudgetAttempts), "cleanup")
 }
 
+func TestAllReadyDispatchTargetsAbortPathSkipsReviewPhases(t *testing.T) {
+	wf := &Workflow{Phases: []PhaseSpec{
+		{Name: "prepare"},
+		{Name: "verify", Verify: true, Purpose: PhasePurposeVerification, DependsOn: []string{"prepare"}},
+		{Name: "evidence-gate", EvidenceVerificationGate: true, Purpose: PhasePurposeEvidenceGate, DependsOn: []string{"verify"}},
+		{Name: "cleanup_early", RunOn: PhaseRunOnAlways, Purpose: PhasePurposeTeardown, DependsOn: []string{"evidence-gate"}},
+		{Name: "touchpoint", RunOn: PhaseRunOnSuccess, Purpose: PhasePurposeReviewTouchpoint, DependsOn: []string{"cleanup_early"}, Jobs: []NativeJobSpec{{ID: PRTouchpointJobID, Primitive: JobPrimitivePRTouchpoint}}},
+		{Name: "touchpoint_gate", Kind: "touchpoint_gate", RunOn: PhaseRunOnSuccess, Purpose: PhasePurposeReviewGate, DependsOn: []string{"touchpoint"}},
+		{Name: "cleanup_final", RunOn: PhaseRunOnAlways, Purpose: PhasePurposeTeardown, DependsOn: []string{"touchpoint_gate"}},
+	}}
+	run := RunReplayData{Attempts: []RunAttemptData{
+		{AttemptIndex: 0, Phase: "prepare", Completed: true, Decision: string(decision.Advance)},
+		{AttemptIndex: 1, Phase: "verify", Completed: true, Decision: string(decision.Advance)},
+		{AttemptIndex: 2, Phase: "evidence-gate", Completed: true, Decision: string(decision.AbortBudgetAttempts)},
+	}}
+
+	assertPhaseTargets(t, allReadyDispatchTargets(wf, run, decision.AbortBudgetAttempts), "cleanup_early")
+
+	run.Attempts = append(run.Attempts, RunAttemptData{AttemptIndex: 3, Phase: "cleanup_early", Completed: true, Decision: string(decision.Advance)})
+	assertPhaseTargets(t, allReadyDispatchTargets(wf, run, decision.Advance), "cleanup_final")
+
+	run.Attempts = append(run.Attempts, RunAttemptData{AttemptIndex: 4, Phase: "cleanup_final", Completed: true, Decision: string(decision.Advance)})
+	assertPhaseTargets(t, allReadyDispatchTargets(wf, run, decision.Advance))
+}
+
 func TestAllReadyDispatchTargetsUsesPhaseOrderNotDependencyDepth(t *testing.T) {
 	wf := &Workflow{Phases: []PhaseSpec{
 		{Name: "prepare"},
 		{Name: "plan", DependsOn: []string{"prepare"}},
 		{Name: "implement", DependsOn: []string{"prepare"}},
 		{Name: "verify", Verify: true, DependsOn: []string{"plan", "implement"}},
-		{Name: "cleanup", Always: true, DependsOn: []string{"verify"}},
+		{Name: "cleanup", RunOn: PhaseRunOnAlways, Purpose: PhasePurposeTeardown, DependsOn: []string{"verify"}},
 	}}
 	run := RunReplayData{Attempts: []RunAttemptData{{AttemptIndex: 0, Phase: "prepare", Completed: true, Decision: string(decision.Advance)}}}
 
@@ -1495,7 +1523,7 @@ func TestNativeRunCompletedByCallbackTokenEvidenceGateRetryCarriesPriorOutputs(t
 				RecyclePolicy:            &RecyclePolicy{MaxAttempts: 3, On: []string{"verify_fail"}, LandsAt: "llm-work"},
 				Jobs:                     []NativeJobSpec{{ID: EvidenceGateJobID}},
 			},
-			{Name: "cleanup", Kind: "k8s_job", Always: true, DependsOn: []string{"evidence-gate"}, Jobs: []NativeJobSpec{{ID: "cleanup"}}},
+			{Name: "cleanup", Kind: "k8s_job", RunOn: PhaseRunOnAlways, Purpose: PhasePurposeTeardown, DependsOn: []string{"evidence-gate"}, Jobs: []NativeJobSpec{{ID: "cleanup"}}},
 		},
 	}
 	launcher := &fakeNativeLauncher{}
@@ -1585,7 +1613,7 @@ func TestNativeRunCompletedByCallbackTokenEvidenceGateRetryCanRestartAtEnvPrep(t
 				RecyclePolicy:            &RecyclePolicy{MaxAttempts: 3, On: []string{"verify_fail"}, LandsAt: "env-prep"},
 				Jobs:                     []NativeJobSpec{{ID: EvidenceGateJobID}},
 			},
-			{Name: "cleanup", Kind: "k8s_job", Always: true, DependsOn: []string{"evidence-gate"}, Jobs: []NativeJobSpec{{ID: "cleanup"}}},
+			{Name: "cleanup", Kind: "k8s_job", RunOn: PhaseRunOnAlways, Purpose: PhasePurposeTeardown, DependsOn: []string{"evidence-gate"}, Jobs: []NativeJobSpec{{ID: "cleanup"}}},
 		},
 	}
 	launcher := &fakeNativeLauncher{}

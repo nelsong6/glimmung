@@ -49,16 +49,16 @@ Glimmung-managed workflows must declare:
    emits `verification.json` and exits non-zero on bad verdict
    (self-enforcing). Even `npm build` or `go test` is enough; what
    matters is that the workflow produces a verdict.
-3. **cleanup** — at least one phase with `always=True`. Runs on
-   every terminal outcome (success / abort / fail). Tears down
-   the validation environment.
+3. **cleanup** — at least one phase with `purpose: teardown` and
+   `run_on: always` or `run_on: failure`. Runs on terminal cleanup paths and
+   tears down the validation environment.
 
 Any number of `work` phases between prepare and testing — that's
 where the actual implementation happens.
 
 The mandatory-phase and linear-topology enforcement is active in the Go workflow
 writer, sync path, and Postgres upsert path. Registrations that miss the entry
-phase, a `verify: true` testing phase, or an always-run cleanup phase are
+phase, a `verify: true` testing phase, or a teardown cleanup phase are
 rejected before they can become the project runtime contract. Registrations with
 multiple entry phases, fan-in/fan-out phase dependencies, invalid cross-phase
 input refs, duplicate phase names, or duplicate job IDs are rejected too.
@@ -157,19 +157,19 @@ own recycle policy, or its own budget separately from the verifier.
 
 Every Glimmung workflow ends in a human-reviewed PR — there is no opt-out.
 Workflows must declare exactly one native job with `primitive: pr_touchpoint`,
-and that job must live in an `always` phase. The usual shape is to place it
-beside environment teardown so PR creation and touchpoint linking are visible
-in native job logs while cleanup runs:
+and that job must live in a `purpose: review_touchpoint`, `run_on: success`
+phase. Review touchpoints are not teardown; when verification or an evidence
+gate aborts the run, Glimmung runs only teardown phases and then terminates the
+run as aborted.
 
 ```yaml
 phases:
-  - name: cleanup
+  - name: touchpoint
     kind: k8s_job
-    always: true
+    run_on: success
+    purpose: review_touchpoint
     depends_on: [testing]
     jobs:
-      - id: env-destroy
-        # normal teardown job
       - id: pr-touchpoint
         primitive: pr_touchpoint
 ```
@@ -228,14 +228,16 @@ phases:
 
   - name: cleanup_early
     kind: k8s_job
-    always: true
+    run_on: always
+    purpose: teardown
     depends_on: [testing]
     jobs:
       - id: env-destroy
 
   - name: touchpoint
     kind: k8s_job
-    always: true
+    run_on: success
+    purpose: review_touchpoint
     depends_on: [cleanup_early]
     jobs:
       - id: pr-touchpoint
@@ -243,6 +245,8 @@ phases:
 
   - name: touchpoint_gate
     kind: touchpoint_gate
+    run_on: success
+    purpose: review_gate
     depends_on: [touchpoint]
     jobs:
       - id: pr-merge
@@ -250,7 +254,8 @@ phases:
 
   - name: cleanup_final
     kind: k8s_job
-    always: true
+    run_on: always
+    purpose: teardown
     depends_on: [touchpoint_gate]
     jobs:
       - id: env-destroy-final
@@ -273,17 +278,20 @@ Runtime behavior:
     target.
 - The `pr_merge` primitive is idempotent. A second approve when the PR is
   already merged returns `status: already_merged` and is a benign no-op.
+- If any primary phase aborts before the review surface, Glimmung dispatches
+  only remaining teardown phases. It does not run `touchpoint` or
+  `touchpoint_gate`, so an aborted run cannot park in `review_required`.
 
 The cleanup-execution split:
 
-- `cleanup_early` runs as a normal always-run cleanup phase. If the issue has
+- `cleanup_early` runs as a normal teardown phase. If the issue has
   `preserve_test_env=true`, the runner emits conclusion `"skipped"` for the
   env-destroy job; the phase still advances and the run history shows the
   deliberate skip. With `preserve_test_env=false` (the default) the env is
   torn down here, before the reviewer sees the touchpoint.
-- `cleanup_final` always runs and always actually-runs (it is the catch-all
-  teardown after merge or abort). When `cleanup_early` already destroyed the
-  validation environment, `cleanup_final` is a no-op success that still
+- `cleanup_final` is the catch-all teardown phase after merge or abort. It
+  always actually runs on those paths. When `cleanup_early` already destroyed
+  the validation environment, `cleanup_final` is a no-op success that still
   records the cleanup decision in the run history.
 
 The `pr_merge` primitive is also exposed as an admin repair/control endpoint:
@@ -300,7 +308,7 @@ The reference names for the four mandatory phases are:
 - **work** — implementation labor (1+ phases between prepare and
   testing)
 - **testing** — the verdict-rendering phase
-- **cleanup** — always-run teardown
+- **cleanup** — teardown
 
 Projects may use other names; these are the canonical defaults.
 The MCP `scaffold_workflow` tool (TODO) emits a starter template

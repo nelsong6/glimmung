@@ -523,8 +523,10 @@ cost exceeds $X. The substrate that lands here is reused by every other
 Register a workflow with explicit phases, marking the verification phase with
 `verify: true` and adding `recycle_policy` on the phase or PR primitive where
 needed. Every workflow must declare one `primitive: pr_touchpoint` job in an
-always phase so PR/touchpoint materialization is visible in job logs. The current
-workflow shape is documented in [`docs/workflow-shape.md`](docs/workflow-shape.md).
+explicit `purpose: review_touchpoint`, `run_on: success` phase so
+PR/touchpoint materialization is visible in job logs only after verification
+passes. The current workflow shape is documented in
+[`docs/workflow-shape.md`](docs/workflow-shape.md).
 Older fields such as `retry_workflow_filename`, `default_budget`, and
 trigger-label dispatch are retired.
 

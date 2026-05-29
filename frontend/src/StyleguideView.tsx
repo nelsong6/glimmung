@@ -190,8 +190,8 @@ const DESIGN_SYSTEM_ITEMS: PortfolioItem[] = [
               { name: "llm-work", kind: "k8s_job", depends_on: ["env-prep"], jobs: [{ id: "llm-work", name: "LLM work" }] },
 	              { name: "llm-verify", kind: "k8s_job", verify: true, depends_on: ["llm-work"], jobs: [{ id: "llm-verify", name: "LLM verify" }] },
 	              { name: "evidence-gate", kind: "k8s_job", evidence_verification_gate: true, depends_on: ["llm-verify"], jobs: [{ id: "evidence-gate", name: "Evidence gate" }] },
-	              { name: "env-destroy", kind: "k8s_job", always: true, depends_on: ["evidence-gate"], jobs: [{ id: "env-destroy", name: "Environment destroy" }] },
-	              { name: "touchpoint", kind: "k8s_job", always: true, depends_on: ["env-destroy"], jobs: [{ id: "pr-touchpoint", name: "PR touchpoint", primitive: "pr_touchpoint" }] },
+	              { name: "env-destroy", kind: "k8s_job", run_on: "always", purpose: "teardown", depends_on: ["evidence-gate"], jobs: [{ id: "env-destroy", name: "Environment destroy" }] },
+	              { name: "touchpoint", kind: "k8s_job", run_on: "success", purpose: "review_touchpoint", depends_on: ["env-destroy"], jobs: [{ id: "pr-touchpoint", name: "PR touchpoint", primitive: "pr_touchpoint" }] },
 	            ]}
 	            entryArrows={[{
               target: "env-prep",

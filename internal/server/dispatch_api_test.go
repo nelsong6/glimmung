@@ -139,20 +139,20 @@ func gatedTestPhases() []PhaseSpec {
 	return []PhaseSpec{
 		{Name: "prep", Kind: "k8s_job", WorkflowFilename: "k8s_job:prep", Jobs: []NativeJobSpec{{ID: "prep", Image: "runner:latest"}}},
 		{Name: "verify", Kind: "k8s_job", WorkflowFilename: "k8s_job:verify", DependsOn: []string{"prep"}, Verify: true, Jobs: []NativeJobSpec{{ID: "verify", Image: "runner:latest"}}},
-		{Name: "cleanup_early", Kind: "k8s_job", WorkflowFilename: "k8s_job:cleanup_early", DependsOn: []string{"verify"}, Always: true, SkipWhenPreserveTestEnv: true, Jobs: []NativeJobSpec{{ID: "cleanup", Image: "runner:latest"}}},
-		{Name: "touchpoint", Kind: "k8s_job", WorkflowFilename: "k8s_job:touchpoint", DependsOn: []string{"cleanup_early"}, Always: true, Jobs: []NativeJobSpec{{ID: PRTouchpointJobID, Primitive: JobPrimitivePRTouchpoint, Managed: true}}},
+		{Name: "cleanup_early", Kind: "k8s_job", WorkflowFilename: "k8s_job:cleanup_early", DependsOn: []string{"verify"}, RunOn: PhaseRunOnAlways, Purpose: PhasePurposeTeardown, SkipWhenPreserveTestEnv: true, Jobs: []NativeJobSpec{{ID: "cleanup", Image: "runner:latest"}}},
+		{Name: "touchpoint", Kind: "k8s_job", WorkflowFilename: "k8s_job:touchpoint", DependsOn: []string{"cleanup_early"}, RunOn: PhaseRunOnSuccess, Purpose: PhasePurposeReviewTouchpoint, Jobs: []NativeJobSpec{{ID: PRTouchpointJobID, Primitive: JobPrimitivePRTouchpoint, Managed: true}}},
 		{Name: "touchpoint_gate", Kind: "touchpoint_gate", WorkflowFilename: "touchpoint_gate:touchpoint_gate", DependsOn: []string{"touchpoint"}, Jobs: []NativeJobSpec{{ID: PRMergeJobID, Primitive: JobPrimitivePRMerge, Managed: true}}},
-		{Name: "cleanup_final", Kind: "k8s_job", WorkflowFilename: "k8s_job:cleanup_final", DependsOn: []string{"touchpoint_gate"}, Always: true, Jobs: []NativeJobSpec{{ID: "cleanup-final", Image: "runner:latest"}}},
+		{Name: "cleanup_final", Kind: "k8s_job", WorkflowFilename: "k8s_job:cleanup_final", DependsOn: []string{"touchpoint_gate"}, RunOn: PhaseRunOnAlways, Purpose: PhasePurposeTeardown, Jobs: []NativeJobSpec{{ID: "cleanup-final", Image: "runner:latest"}}},
 	}
 }
 
 func minimalDispatchStore() *fakeDispatchStore {
 	leaseNum := 1
 	wf := &Workflow{
-		Name:    "main",
-		Project: "proj",
-		Budget:  budget.Config{Total: 25},
-		Phases: gatedTestPhases(),
+		Name:                "main",
+		Project:             "proj",
+		Budget:              budget.Config{Total: 25},
+		Phases:              gatedTestPhases(),
 		DefaultRequirements: map[string]any{},
 		Metadata:            map[string]any{},
 	}

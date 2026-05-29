@@ -51,25 +51,30 @@ type Workflow struct {
 }
 
 type PhaseSpec struct {
-	Name                     string            `json:"name"`
-	Kind                     string            `json:"kind"`
-	WorkflowFilename         string            `json:"workflow_filename"`
-	WorkflowRef              string            `json:"workflow_ref"`
-	Inputs                   map[string]string `json:"inputs"`
-	Outputs                  []string          `json:"outputs"`
-	Requirements             map[string]any    `json:"requirements"`
-	Verify                   bool              `json:"verify"`
-	RecyclePolicy            *RecyclePolicy    `json:"recycle_policy"`
-	Always                   bool              `json:"always"`
-	EvidenceVerificationGate bool              `json:"evidence_verification_gate"`
-	DependsOn                []string          `json:"depends_on"`
-	Jobs                     []NativeJobSpec   `json:"jobs"`
-	// SkipWhenPreserveTestEnv flags an always-run phase as conditional.
+	Name             string            `json:"name"`
+	Kind             string            `json:"kind"`
+	RunOn            string            `json:"run_on"`
+	Purpose          string            `json:"purpose"`
+	WorkflowFilename string            `json:"workflow_filename"`
+	WorkflowRef      string            `json:"workflow_ref"`
+	Inputs           map[string]string `json:"inputs"`
+	Outputs          []string          `json:"outputs"`
+	Requirements     map[string]any    `json:"requirements"`
+	Verify           bool              `json:"verify"`
+	RecyclePolicy    *RecyclePolicy    `json:"recycle_policy"`
+	// Always is retired. It remains only so registration can reject stale
+	// callers with a precise error instead of silently accepting the old
+	// overloaded cleanup/review contract.
+	Always                   bool            `json:"always,omitempty"`
+	EvidenceVerificationGate bool            `json:"evidence_verification_gate"`
+	DependsOn                []string        `json:"depends_on"`
+	Jobs                     []NativeJobSpec `json:"jobs"`
+	// SkipWhenPreserveTestEnv flags a teardown phase as conditional.
 	// When the originating Issue's preserve_test_env flag is true (and
 	// thus the Run's PreserveTestEnv snapshot is true), Glimmung
 	// synthesizes a "skipped" attempt for this phase instead of
 	// launching its jobs. The workflow advances past the skipped phase
-	// like a success. Used to gate the early cleanup phase so the
+	// like a success. Used to gate the early teardown phase so the
 	// validation environment stays alive through the touchpoint gate.
 	SkipWhenPreserveTestEnv bool `json:"skip_when_preserve_test_env,omitempty"`
 }
