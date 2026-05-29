@@ -12,6 +12,9 @@ import { workflowToPhaseGraphModel } from "./workflowGraphModel";
 import { resolveProjectWorkflow } from "./workflowLookup";
 import { authedFetch, currentAccount, initAuth, signIn, signOut, type Account } from "./auth";
 import { isMockMode, mockRuns, mockSnapshot } from "./mockApi";
+import { ISSUE_DETAIL_CHILD_ROUTES, buildBreadcrumbs } from "./routes";
+
+export { buildBreadcrumbs } from "./routes";
 
 type Lease = {
   ref: string;
@@ -308,16 +311,16 @@ export function App() {
         <Route path="projects/:project/portfolio" element={<ProjectPortfolioRoute />} />
         <Route path="projects/:project/issues/new" element={<IssueOnboardingRoute />} />
         <Route path="projects/:project/issues/:issueNumber" element={<IssueDetailView />}>
-          <Route path="summary" element={null} />
-          <Route path="runs" element={null} />
-          <Route path="runs/:runId" element={null} />
-          <Route path="runs/:runId/cycles/:cycleId" element={null} />
-          <Route path="runs/:runId/cycles/:cycleId/phases/:phaseId" element={null} />
-          <Route path="runs/:runId/cycles/:cycleId/phases/:phaseId/jobs/:jobId" element={null} />
-          <Route path="runs/:runId/cycles/:cycleId/phases/:phaseId/jobs/:jobId/steps/:stepId" element={null} />
-          <Route path="workflow" element={null} />
-          <Route path="workflow/:workflowRunId" element={null} />
-          <Route path="touchpoint" element={null} />
+          <Route path={ISSUE_DETAIL_CHILD_ROUTES.summary} element={null} />
+          <Route path={ISSUE_DETAIL_CHILD_ROUTES.runs} element={null} />
+          <Route path={ISSUE_DETAIL_CHILD_ROUTES.run} element={null} />
+          <Route path={ISSUE_DETAIL_CHILD_ROUTES.runCycle} element={null} />
+          <Route path={ISSUE_DETAIL_CHILD_ROUTES.runPhase} element={null} />
+          <Route path={ISSUE_DETAIL_CHILD_ROUTES.runJob} element={null} />
+          <Route path={ISSUE_DETAIL_CHILD_ROUTES.runStep} element={null} />
+          <Route path={ISSUE_DETAIL_CHILD_ROUTES.workflow} element={null} />
+          <Route path={ISSUE_DETAIL_CHILD_ROUTES.workflowRun} element={null} />
+          <Route path={ISSUE_DETAIL_CHILD_ROUTES.touchpoint} element={null} />
         </Route>
         <Route path="projects/:project/needs-attention" element={<ProjectNeedsAttentionRoute />} />
         <Route path="projects/:project/runs" element={<ProjectRunsRoute />} />
@@ -498,18 +501,21 @@ function Layout() {
         </header>
 
         <nav className="workspace-breadcrumb app-breadcrumb" aria-label="breadcrumb">
-          <div className="breadcrumb-trail">
-            {breadcrumbs.map((crumb, index) => (
-              <span className="breadcrumb-segment" key={`${crumb.label}:${index}`}>
-                {index > 0 && <span className="breadcrumb-sep">/</span>}
-                {crumb.to && index < breadcrumbs.length - 1 ? (
-                  <Link to={crumb.to}>{crumb.label}</Link>
-                ) : (
-                  <strong>{crumb.label}</strong>
-                )}
-              </span>
-            ))}
-          </div>
+          <ol className="breadcrumb-trail">
+            {breadcrumbs.map((crumb, index) => {
+              const isCurrent = index === breadcrumbs.length - 1;
+              return (
+                <li className="breadcrumb-segment" key={`${crumb.label}:${index}`}>
+                  {index > 0 && <span className="breadcrumb-sep">/</span>}
+                  {crumb.to && !isCurrent ? (
+                    <Link to={crumb.to}>{crumb.label}</Link>
+                  ) : (
+                    <strong aria-current={isCurrent ? "page" : undefined}>{crumb.label}</strong>
+                  )}
+                </li>
+              );
+            })}
+          </ol>
           {returnTarget && (
             <Link className="breadcrumb-return" to={returnTarget.to}>
               ← return to {returnTarget.label}
@@ -551,11 +557,6 @@ function Layout() {
   );
 }
 
-type Breadcrumb = {
-  label: string;
-  to?: string;
-};
-
 type ReturnNavigationState = {
   returnTo?: unknown;
   returnLabel?: unknown;
@@ -570,135 +571,6 @@ function returnTargetFromState(state: unknown, currentPath: string): { to: strin
     ? candidate.returnLabel
     : "previous view";
   return { to: candidate.returnTo, label };
-}
-
-export function buildBreadcrumbs(pathname: string): Breadcrumb[] {
-  const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
-  if (parts.length === 0) return [{ label: "Home" }];
-  if (parts[0] === "dashboard") {
-    return [{ label: "Home", to: "/" }, { label: "Test leases" }];
-  }
-  if (parts[0] === "leases") {
-    const kind = parts[1] === "agent" ? "Agent leases" : "Test leases";
-    const crumbs: Breadcrumb[] = [{ label: "Home", to: "/" }, { label: kind, to: `/leases/${parts[1] ?? "test"}` }];
-    if (parts[2]) crumbs.push({ label: `Lease ${parts[2]}` });
-    return crumbs;
-  }
-  if (parts[0] === "needs-attention") {
-    return [{ label: "Home", to: "/" }, { label: "Needs attention" }];
-  }
-  if (parts[0] === "projects") {
-    const crumbs: Breadcrumb[] = [
-      { label: "Home", to: "/" },
-      { label: "Projects", to: "/projects" },
-    ];
-    if (parts[1]) crumbs.push({ label: parts[1], to: `/projects/${encodeURIComponent(parts[1])}` });
-    if (parts[1] === "new") {
-      crumbs[crumbs.length - 1] = { label: "New project" };
-    } else if (parts[2] === "leases") {
-      const leaseKind = parts[3] === "agent" ? "Agent leases" : "Test leases";
-      crumbs.push({
-        label: leaseKind,
-        to: `/projects/${encodeURIComponent(parts[1] ?? "")}/leases/${parts[3] ?? "test"}`,
-      });
-      if (parts[4] === "slots") {
-        if (parts[5]) crumbs.push({ label: `Slot ${parts[5]}` });
-      } else if (parts[4]) {
-        crumbs.push({ label: `Lease ${parts[4]}` });
-      }
-    } else if (parts[2] === "workflows") {
-      crumbs.push({ label: "Workflows", to: `/projects/${encodeURIComponent(parts[1] ?? "")}/workflows` });
-      if (parts[3]) crumbs.push({ label: parts[3] });
-    } else if (parts[2] === "issues") {
-      crumbs.push({ label: "Issues", to: `/projects/${encodeURIComponent(parts[1] ?? "")}/issues` });
-      if (parts[3] === "new") {
-        crumbs.push({ label: "New issue" });
-      } else if (parts[3]) {
-        crumbs.push({
-          label: `#${parts[3]}`,
-          to: parts[4] ? `/projects/${encodeURIComponent(parts[1] ?? "")}/issues/${encodeURIComponent(parts[3])}` : undefined,
-        });
-      }
-      if (parts[4] === "runs") {
-        crumbs.push({
-          label: "Runs",
-          to: `/projects/${encodeURIComponent(parts[1] ?? "")}/issues/${encodeURIComponent(parts[3] ?? "")}/runs`,
-        });
-        appendIssueRunBreadcrumbs(crumbs, parts);
-      } else if (parts[4] === "workflow") {
-        crumbs.push({
-          label: "Workflow",
-          to: `/projects/${encodeURIComponent(parts[1] ?? "")}/issues/${encodeURIComponent(parts[3] ?? "")}/workflow`,
-        });
-        if (parts[5]) crumbs.push({ label: runSlugDisplay(parts[5]) });
-      } else if (parts[4]) {
-        crumbs.push({ label: titleCase(parts[4]) });
-      }
-    } else if (parts[2] === "playbooks") {
-      crumbs.push({ label: "Playbooks", to: `/projects/${encodeURIComponent(parts[1] ?? "")}/playbooks` });
-      if (parts[3]) crumbs.push({ label: parts[3] });
-    } else if (parts[2] === "needs-attention") {
-      crumbs.push({ label: "Needs attention" });
-    } else if (parts[2] === "portfolio") {
-      crumbs.push({ label: "Portfolio" });
-    } else if (parts[2] === "runs") {
-      crumbs.push({ label: "Runs", to: `/projects/${encodeURIComponent(parts[1] ?? "")}/runs` });
-      if (parts[3]) crumbs.push({ label: runSlugDisplay(parts[3]) });
-    }
-    return crumbs;
-  }
-  if (parts[0] === "touchpoints") {
-    return [{ label: "Home", to: "/" }, { label: "Touchpoints", to: "/touchpoints" }];
-  }
-  if (parts[0] === "portfolio") {
-    return [{ label: "Home", to: "/" }, { label: "Portfolio", to: "/portfolio" }];
-  }
-  if (parts[0] === "playbooks") {
-    return [{ label: "Home", to: "/" }, { label: "Playbooks", to: "/playbooks" }];
-  }
-  return [{ label: "Home", to: "/" }, { label: parts[0] }];
-}
-
-function appendIssueRunBreadcrumbs(crumbs: Breadcrumb[], parts: string[]): void {
-  const project = encodeURIComponent(parts[1] ?? "");
-  const issue = encodeURIComponent(parts[3] ?? "");
-  const runId = parts[5];
-  if (!runId) return;
-
-  const runsPath = `/projects/${project}/issues/${issue}/runs`;
-  const runPath = `${runsPath}/${encodeURIComponent(runId)}`;
-  const hasCycle = parts[6] === "cycles" && Boolean(parts[7]);
-  crumbs.push({
-    label: hasCycle ? `run ${runId}` : runSlugDisplay(runId),
-    to: parts[6] ? runPath : undefined,
-  });
-
-  if (!hasCycle) return;
-  const cycleId = parts[7] ?? "";
-  const cyclePath = `${runPath}/cycles/${encodeURIComponent(cycleId)}`;
-  crumbs.push({
-    label: `cycle ${cycleId}`,
-    to: parts[8] ? cyclePath : undefined,
-  });
-
-  if (parts[8] !== "phases" || !parts[9]) return;
-  const phaseId = parts[9];
-  const phasePath = `${cyclePath}/phases/${encodeURIComponent(phaseId)}`;
-  crumbs.push({
-    label: `phase ${phaseId}`,
-    to: parts[10] ? phasePath : undefined,
-  });
-
-  if (parts[10] !== "jobs" || !parts[11]) return;
-  const jobId = parts[11];
-  const jobPath = `${phasePath}/jobs/${encodeURIComponent(jobId)}`;
-  crumbs.push({
-    label: `job ${jobId}`,
-    to: parts[12] ? jobPath : undefined,
-  });
-
-  if (parts[12] !== "steps" || !parts[13]) return;
-  crumbs.push({ label: `step ${parts[13]}` });
 }
 
 function HomeRoute() {
@@ -1857,14 +1729,6 @@ function projectRunHref(run: ProjectRun, runSlug: string): string {
 
 function runSlugDisplay(slug: string): string {
   return /^\d+(\.\d+)?$/.test(slug) ? `cycle ${slug}` : slug;
-}
-
-function titleCase(value: string): string {
-  return value
-    .split("-")
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
 }
 
 function resolveProjectRun(runs: ProjectRun[], runIdOrSlug: string): ProjectRun | null {

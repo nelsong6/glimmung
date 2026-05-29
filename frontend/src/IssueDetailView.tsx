@@ -22,6 +22,7 @@ import { Link, useLocation, useNavigate, useOutletContext, useParams } from "rea
 import { authedFetch, currentConfig } from "./auth";
 import { lokiExploreUrl } from "./grafanaLinks";
 import { PhaseGraph, type PhaseGraphPhase } from "./PhaseGraph";
+import { issueRunSelectionPath } from "./routes";
 import {
   runTopologyToPhaseGraphModel,
   type RunProjectionTopologySource,
@@ -2218,7 +2219,7 @@ function ProjectionPipelineDag({
           name: job.name ?? job.id,
           state: job.state,
           reason: job.reason,
-          selection: { phase: phase.name, job: job.id, step: preferredProjectionStepSlug(job) },
+          selection: { phase: phase.name, job: job.id },
         }))
       : (graphPhase.jobs && graphPhase.jobs.length > 0
           ? graphPhase.jobs
@@ -2228,7 +2229,7 @@ function ProjectionPipelineDag({
           name: job.name ?? job.id,
           state: phase?.state ?? "not_started",
           reason: phase?.reason ?? null,
-          selection: { phase: graphPhase.name, job: job.id, step: "job" },
+          selection: { phase: graphPhase.name, job: job.id },
         }));
     return (
       <>
@@ -2269,23 +2270,6 @@ function ProjectionPipelineDag({
         recycleArrows={graphModel.recycleArrows}
       />
     </div>
-  );
-}
-
-function preferredProjectionStepSlug(job: RunProjectionPhase["jobs"][number]): string | null {
-  const observedStep = (
-    job.steps.find((step) => step.state === "active")
-    ?? job.steps.find((step) => step.state === "failed")
-    ?? job.steps.find((step) => step.state === "dispatching" || step.state === "claimed")
-  );
-  if (observedStep) return observedStep.slug;
-  if (job.state === "failed" && isDispatchFailureReason(job.reason)) {
-    return null;
-  }
-  return (
-    job.steps.find((step) => step.state === "not_started")?.slug
-    ?? job.steps[0]?.slug
-    ?? null
   );
 }
 
@@ -3129,22 +3113,20 @@ function projectionCycleSegment(run: RunProjectionRun): string {
 }
 
 function projectionRunCyclePath(baseUrl: string, run: RunProjectionRun): string {
-  const prefix = baseUrl || "";
-  return `${prefix}/runs/${encodeURIComponent(projectionRunNumberSegment(run))}/cycles/${encodeURIComponent(projectionCycleSegment(run))}`;
+  return issueRunSelectionPath(baseUrl, {
+    runId: projectionRunNumberSegment(run),
+    cycleId: projectionCycleSegment(run),
+  });
 }
 
 function projectionSelectionPath(baseUrl: string, run: RunProjectionRun, selection: ProjectionSelection): string {
-  let path = projectionRunCyclePath(baseUrl, run);
-  if (selection.phase) {
-    path += `/phases/${encodeURIComponent(selection.phase)}`;
-  }
-  if (selection.phase && selection.job) {
-    path += `/jobs/${encodeURIComponent(selection.job)}`;
-  }
-  if (selection.phase && selection.job && selection.step) {
-    path += `/steps/${encodeURIComponent(selection.step)}`;
-  }
-  return path;
+  return issueRunSelectionPath(baseUrl, {
+    runId: projectionRunNumberSegment(run),
+    cycleId: projectionCycleSegment(run),
+    phaseId: selection.phase,
+    jobId: selection.job,
+    stepId: selection.step,
+  });
 }
 
 function projectionRunLabel(run: RunProjectionRun): string {

@@ -1713,6 +1713,9 @@ h2 .inline-action,
   flex-wrap: wrap;
   gap: 8px;
   min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 .breadcrumb-return {
   flex: 0 0 auto;
