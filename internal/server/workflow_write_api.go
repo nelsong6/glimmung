@@ -15,6 +15,21 @@ import (
 const (
 	workflowKindNativeK8sJob   = "k8s_job"
 	workflowKindTouchpointGate = "touchpoint_gate"
+
+	// MinNativePhaseJobTimeoutSeconds is the floor for a phase job's
+	// activeDeadlineSeconds. Below this the kubelet grace period
+	// (30s default) doesn't leave enough room for the runner's SIGTERM
+	// handler (glimmung#624) to deliver a /completed callback before
+	// SIGKILL, so the run loses its terminal signal even when the
+	// timeout trips for a benign reason. 60s = 30s grace + 30s margin
+	// for the actual HTTP write + child reap.
+	MinNativePhaseJobTimeoutSeconds = 60
+
+	// MaxNativePhaseJobTimeoutSeconds is the ceiling. Six hours is
+	// already well past the longest agent-run timeout we ship; values
+	// above it are almost certainly a typo (e.g. milliseconds instead
+	// of seconds inverted).
+	MaxNativePhaseJobTimeoutSeconds = 6 * 60 * 60
 )
 
 // validPhaseKinds is the closed set of phase kinds Glimmung dispatches.
@@ -378,6 +393,29 @@ func validateNativeJobSpec(workflowName, phaseName string, jobIndex int, job Nat
 	if job.Managed {
 		if len(job.Command) > 0 || len(job.Args) > 0 {
 			return ValidationError{Message: fmt.Sprintf("workflow %s phase %q job %q is managed and cannot declare command or args", workflowName, phaseName, job.ID)}
+		}
+	}
+	// Timeout guardrail. activeDeadlineSeconds = job.TimeoutSeconds when
+	// set; below MinNativePhaseJobTimeoutSeconds there is not enough
+	// kubelet grace for the runner's SIGTERM handler (glimmung#624) to
+	// deliver /completed before SIGKILL, so the run loses its terminal
+	// signal even on a normal deadline trip. The ceiling catches typos.
+	// Nil means "no deadline"; we still allow that — the dispatch-timeout
+	// reconciler is the safety net.
+	if job.TimeoutSeconds != nil {
+		t := *job.TimeoutSeconds
+		if t < MinNativePhaseJobTimeoutSeconds {
+			return ValidationError{Message: fmt.Sprintf(
+				"workflow %s phase %q job %q timeout_seconds=%d is below minimum %d; "+
+					"the runner needs at least %d seconds of kubelet grace to deliver /completed before SIGKILL",
+				workflowName, phaseName, job.ID, t, MinNativePhaseJobTimeoutSeconds, MinNativePhaseJobTimeoutSeconds,
+			)}
+		}
+		if t > MaxNativePhaseJobTimeoutSeconds {
+			return ValidationError{Message: fmt.Sprintf(
+				"workflow %s phase %q job %q timeout_seconds=%d exceeds maximum %d (6h); likely a typo",
+				workflowName, phaseName, job.ID, t, MaxNativePhaseJobTimeoutSeconds,
+			)}
 		}
 	}
 	seenSteps := map[string]int{}

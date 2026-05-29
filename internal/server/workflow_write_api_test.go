@@ -219,7 +219,7 @@ func TestCanonicalWorkflowCanonicalizesDeclaredPRTouchpointPrimitive(t *testing.
 			{Name: "work", Jobs: []NativeJobSpec{{ID: "work"}}},
 			{Name: "cleanup", Always: true, DependsOn: []string{"work"}, Jobs: []NativeJobSpec{
 				{ID: "env-destroy"},
-				{ID: "publish-pr", Primitive: JobPrimitivePRTouchpoint, Image: "ignored:latest", Command: []string{"ignored"}, TimeoutSeconds: intPtr(30)},
+				{ID: "publish-pr", Primitive: JobPrimitivePRTouchpoint, Image: "ignored:latest", Command: []string{"ignored"}, TimeoutSeconds: intPtr(60)},
 			}},
 		},
 	}
@@ -240,8 +240,8 @@ func TestCanonicalWorkflowCanonicalizesDeclaredPRTouchpointPrimitive(t *testing.
 	if job.ID != "publish-pr" || job.Primitive != JobPrimitivePRTouchpoint || !job.Managed || job.Image != "" || len(job.Command) != 0 {
 		t.Fatalf("pr touchpoint job=%#v", job)
 	}
-	if job.TimeoutSeconds == nil || *job.TimeoutSeconds != 30 {
-		t.Fatalf("timeout=%v, want 30", job.TimeoutSeconds)
+	if job.TimeoutSeconds == nil || *job.TimeoutSeconds != 60 {
+		t.Fatalf("timeout=%v, want 60", job.TimeoutSeconds)
 	}
 	if len(job.Steps) != 1 || job.Steps[0].Slug != PRTouchpointStepSlug || !strings.Contains(job.Steps[0].Run, "GLIMMUNG_PR_TOUCHPOINT_URL") {
 		t.Fatalf("pr touchpoint job=%#v", job)
@@ -686,5 +686,49 @@ func TestDeleteWorkflowStoreErrorsReturn500(t *testing.T) {
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status=%d, want 500", rec.Code)
+	}
+}
+
+// workflowWithJobTimeout produces a valid workflow shape with a single
+// configurable timeout on the entry phase's job — used by the timeout
+// guardrail tests below.
+func workflowWithJobTimeout(timeout *int) WorkflowRegister {
+	return WorkflowRegister{
+		Project: "ambience",
+		Name:    "agent-run",
+		Phases: []PhaseSpec{
+			{Name: "prep", Jobs: []NativeJobSpec{{ID: "prep", TimeoutSeconds: timeout}}},
+			{Name: "verify", Verify: true, DependsOn: []string{"prep"}, Jobs: []NativeJobSpec{{ID: "verify"}}},
+			{Name: "cleanup_early", Always: true, SkipWhenPreserveTestEnv: true, DependsOn: []string{"verify"}, Jobs: []NativeJobSpec{{ID: "cleanup-early"}}},
+			{Name: "touchpoint", Always: true, DependsOn: []string{"cleanup_early"}, Jobs: []NativeJobSpec{{ID: "pr-touchpoint", Primitive: JobPrimitivePRTouchpoint}}},
+			{Name: "touchpoint_gate", Kind: "touchpoint_gate", DependsOn: []string{"touchpoint"}, Jobs: []NativeJobSpec{{ID: "pr-merge", Primitive: JobPrimitivePRMerge}}},
+			{Name: "cleanup_final", Always: true, DependsOn: []string{"touchpoint_gate"}, Jobs: []NativeJobSpec{{ID: "cleanup-final"}}},
+		},
+	}
+}
+
+func TestValidateWorkflowRejectsTimeoutBelowFloor(t *testing.T) {
+	err := ValidateWorkflowRegister(workflowWithJobTimeout(intPtr(MinNativePhaseJobTimeoutSeconds - 1)))
+	if err == nil || !strings.Contains(err.Error(), "below minimum") {
+		t.Fatalf("err=%v, want below-minimum rejection", err)
+	}
+}
+
+func TestValidateWorkflowRejectsTimeoutAboveCeiling(t *testing.T) {
+	err := ValidateWorkflowRegister(workflowWithJobTimeout(intPtr(MaxNativePhaseJobTimeoutSeconds + 1)))
+	if err == nil || !strings.Contains(err.Error(), "exceeds maximum") {
+		t.Fatalf("err=%v, want above-maximum rejection", err)
+	}
+}
+
+func TestValidateWorkflowAcceptsTimeoutAtFloor(t *testing.T) {
+	if err := ValidateWorkflowRegister(workflowWithJobTimeout(intPtr(MinNativePhaseJobTimeoutSeconds))); err != nil {
+		t.Fatalf("ValidateWorkflowRegister: %v", err)
+	}
+}
+
+func TestValidateWorkflowAcceptsNilTimeout(t *testing.T) {
+	if err := ValidateWorkflowRegister(workflowWithJobTimeout(nil)); err != nil {
+		t.Fatalf("ValidateWorkflowRegister: %v", err)
 	}
 }
