@@ -31,9 +31,10 @@ func TestNativeRunLeaseTTLSecondsSumsPhaseTimeoutsWithOverhead(t *testing.T) {
 			Jobs: []NativeJobSpec{{ID: "verify", TimeoutSeconds: ptrInt(5000)}},
 		},
 		{
-			Name: "merge",
-			Kind: "touchpoint_gate",
-			Jobs: []NativeJobSpec{{ID: PRMergeJobID, Primitive: JobPrimitivePRMerge}},
+			Name:    "merge",
+			Kind:    "k8s_job",
+			Purpose: PhasePurposeReviewGate,
+			Jobs:    []NativeJobSpec{{ID: PRMergeJobID, Primitive: JobPrimitivePRMerge}},
 		},
 	}}
 

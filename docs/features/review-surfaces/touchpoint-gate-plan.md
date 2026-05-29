@@ -28,10 +28,11 @@ prepare → work → testing → cleanup_early → touchpoint → touchpoint_gat
   linking). Today this primitive lives inside the single `cleanup` phase
   alongside env teardown; this plan extracts it into its own success-path phase
   so PR creation does not race the early teardown or run after aborts.
-- `touchpoint_gate` is a new phase kind. It dispatches no jobs on its own and
-  parks the Run with the slot lease intact when `cleanup_early` was skipped.
-  An `approve` signal advances the gate by dispatching the managed `pr_merge`
-  primitive job. A `reject` signal recycles through the existing
+- `touchpoint_gate` is a `k8s_job` phase with `purpose: review_gate`, not a
+  separate executor kind. It creates a durable parked attempt without launching
+  jobs, keeping the slot lease intact when `cleanup_early` was skipped. An
+  `approve` signal releases that same attempt by dispatching the managed
+  `pr_merge` primitive job. A `reject` signal recycles through the existing
   PR-feedback path.
 - `cleanup_final` is teardown and always-executes on merge or abort. It is idempotent: if
   `cleanup_early` already tore down the validation environment, `cleanup_final`
@@ -45,10 +46,11 @@ workflow either matches the required shape or is rejected at registration time.
 
 ## Sources of truth (additions)
 
-- `workflows`: new phase kind `touchpoint_gate`. Validation requires the seven
-  named phases above in the listed order, with explicit `run_on`/`purpose`
-  values, the listed `verify` flags, and a single `pr_touchpoint` job inside
-  `touchpoint`.
+- `workflows`: review gates are `k8s_job` phases with `purpose: review_gate`.
+  Validation requires the seven named phases above in the listed order, with
+  explicit `run_on`/`purpose` values, the listed `verify` flags, a single
+  `pr_touchpoint` job inside `touchpoint`, and a single `pr_merge` job inside
+  the review gate.
 - `issues`: new column `preserve_test_env` (bool, default false). Mutable on
   any open Issue. Read at dispatch time and snapshotted onto the run record.
 - `runs`: new column `preserve_test_env` (bool, captured at dispatch). The
@@ -84,7 +86,8 @@ verify runs at every stage.
 
 In flight in this branch.
 
-1. Register `touchpoint_gate` as a valid phase kind.
+1. Register `purpose: review_gate` on ordinary `k8s_job` phases; reject
+   `kind: touchpoint_gate`.
 2. Add `skipped` as a first-class attempt conclusion plumbed through
    completion routing, projection, and UI projection types.
 3. Add `issues.preserve_test_env` (mutable bool) and `runs.preserve_test_env`
@@ -92,7 +95,7 @@ In flight in this branch.
 4. Tighten registered workflow validation to the required shape and reject
    anything else.
 5. Delete the PR opt-out field, its conditional validations, and its tests.
-6. No runtime gate behavior yet. The `touchpoint_gate` phase, when dispatched,
+6. No runtime gate behavior yet. The `touchpoint_gate` phase, when reached,
    currently behaves as a success-path no-op; gate semantics arrive in stage 3.
 
 Projects must re-register their workflows against the new shape before their

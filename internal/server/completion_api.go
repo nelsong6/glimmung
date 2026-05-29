@@ -141,8 +141,8 @@ type RunCompletionStore interface {
 	StampRunCompletion(ctx context.Context, project, runID string, p CompletionPayload) (RunReplayData, error)
 	StampRunDecision(ctx context.Context, project, runID, decision string) error
 	SetRunTerminalState(ctx context.Context, project, runID, state string, abortReason *string) (AbortRunResult, error)
-	SetRunReviewRequired(ctx context.Context, project, runID string) error
-	SetRunInProgress(ctx context.Context, project, runID string) error
+	ParkRunAtReviewGate(ctx context.Context, project, runID, phase, phaseKind, workflowFilename string) (int, error)
+	ReleaseReviewGate(ctx context.Context, project, runID, phase string, attemptIndex int) error
 	StampLatestAttemptSkipped(ctx context.Context, project, runID string) error
 	CreateRecycleCycle(ctx context.Context, req CreateRecycleCycleRequest) (CreatedRun, error)
 	AppendRunAttempt(ctx context.Context, project, runID, phase, phaseKind, workflowFilename string) (int, error)
@@ -455,9 +455,9 @@ func processRunCompletion(
 		if hasInFlightAttempts(run) {
 			return &RunCallbackResult{RunRef: runRef, Decision: &verdictStr}
 		}
-		// Teardown can finish successfully after a primary phase abort; it
-		// must not convert that earlier abort into a reviewable success.
-		if abortDecision, ok := latestPrimaryAbortDecision(wf.Phases, run); ok {
+		// Teardown can finish successfully after an earlier phase abort; it
+		// must not convert that abort into a reviewable success.
+		if abortDecision, ok := latestAbortDecision(run); ok {
 			explanation, _ := decision.AbortExplanation(decisionRun, decisionWorkflow, abortDecision)
 			var abortReason *string
 			if explanation != "" {
@@ -477,10 +477,9 @@ func processRunCompletion(
 				SlotLeaseReleased: result.SlotLeaseReleased,
 			}
 		}
-		// Every workflow ends at the touchpoint_gate. Reaching this code
-		// path means the gate was approved, the pr_merge primitive ran,
-		// and cleanup_final completed. Terminal state is always "passed";
-		// the issue is closed downstream by closeIssueOnGatedTerminal.
+		// Every gated workflow ends after cleanup_final. Reaching this code
+		// path with no prior abort means the gate was approved, the pr_merge
+		// primitive ran successfully, and final cleanup completed.
 		// Reaching this with no linked PR is malformed: the pr_touchpoint
 		// primitive in the touchpoint phase should have set run.PRNumber.
 		if run.PRNumber == nil || *run.PRNumber < 1 {
@@ -626,7 +625,7 @@ func markRunAborted(
 }
 
 // closeIssueOnGatedTerminal flips the issue to state=closed when a workflow
-// that includes a touchpoint_gate phase reaches terminal "passed." That
+// that includes a review_gate phase reaches terminal "passed." That
 // state is only reachable by going through the gate (approve → pr_merge →
 // cleanup), so the merge has happened and the issue should reflect it.
 // Non-gated workflows leave their issue state alone — those workflows don't
@@ -641,7 +640,7 @@ func closeIssueOnGatedTerminal(ctx context.Context, store RunCompletionStore, wf
 	}
 	hasGate := false
 	for _, phase := range wf.Phases {
-		if workflowPhaseKind(phase.Kind) == workflowKindTouchpointGate {
+		if phasePurpose(phase) == PhasePurposeReviewGate {
 			hasGate = true
 			break
 		}
@@ -708,7 +707,7 @@ func allReadyDispatchTargets(wf *Workflow, run RunReplayData, verdict decision.R
 	}
 	completed := run.Attempts[len(run.Attempts)-1]
 	completedPhase := phaseSpecByName(wf.Phases, completed.Phase)
-	onAbortPath := verdict != decision.Advance || runHasPrimaryAbort(wf.Phases, run)
+	onAbortPath := verdict != decision.Advance || runHasAbortDecision(run)
 	if onAbortPath {
 		if hasInFlightAttempts(run) {
 			return nil
@@ -782,18 +781,14 @@ func attemptedPhases(run RunReplayData) map[string]bool {
 	return attempted
 }
 
-func runHasPrimaryAbort(phases []PhaseSpec, run RunReplayData) bool {
-	_, ok := latestPrimaryAbortDecision(phases, run)
+func runHasAbortDecision(run RunReplayData) bool {
+	_, ok := latestAbortDecision(run)
 	return ok
 }
 
-func latestPrimaryAbortDecision(phases []PhaseSpec, run RunReplayData) (decision.RunDecision, bool) {
+func latestAbortDecision(run RunReplayData) (decision.RunDecision, bool) {
 	for i := len(run.Attempts) - 1; i >= 0; i-- {
 		attempt := run.Attempts[i]
-		phase := phaseSpecByName(phases, attempt.Phase)
-		if phase != nil && !phaseIsPrimary(*phase) {
-			continue
-		}
 		if isAbortDecision(attempt.Decision) {
 			return decision.RunDecision(attempt.Decision), true
 		}
@@ -884,9 +879,6 @@ func phasePurpose(phase PhaseSpec) string {
 	if validPhasePurpose(value) {
 		return value
 	}
-	if workflowPhaseKind(phase.Kind) == workflowKindTouchpointGate {
-		return PhasePurposeReviewGate
-	}
 	if phase.EvidenceVerificationGate {
 		return PhasePurposeEvidenceGate
 	}
@@ -947,16 +939,14 @@ func dispatchForwardPhase(
 	if err != nil {
 		return err
 	}
-	// Touchpoint gate: the workflow has reached a human-decision boundary.
-	// Do NOT append an attempt and do NOT launch jobs. Set the run to the
-	// non-terminal review_required sub-state and return. The gate is
-	// released by an approve signal in the signal drain, which calls back
-	// into dispatchTouchpointGateApprove to append the attempt and launch
-	// the pr_merge primitive. review_required does NOT release issue/PR
-	// locks — the run is still in flight, just parked at the human gate.
-	if phaseKind == workflowKindTouchpointGate {
-		if err := store.SetRunReviewRequired(ctx, run.Project, run.ID); err != nil {
-			return fmt.Errorf("set review_required: %w", err)
+	// Review gate: the workflow has reached a human-decision boundary.
+	// Persist the gate attempt immediately so the current phase is durable,
+	// but do not launch its pr_merge job until an approve signal releases it.
+	// review_required does NOT release issue/PR locks — the run is still in
+	// flight, just parked at the human gate.
+	if phasePurpose(targetPhase) == PhasePurposeReviewGate {
+		if _, err := store.ParkRunAtReviewGate(ctx, run.Project, run.ID, targetPhase.Name, phaseKind, workflowFilename); err != nil {
+			return fmt.Errorf("park review gate: %w", err)
 		}
 		return nil
 	}
@@ -1232,6 +1222,22 @@ func cloneStringMap(values map[string]string) map[string]string {
 func runWithAttempt(run RunReplayData, attemptIndex int, phase string) RunReplayData {
 	out := run
 	out.Attempts = append(append([]RunAttemptData{}, run.Attempts...), RunAttemptData{
+		AttemptIndex: attemptIndex,
+		Phase:        phase,
+	})
+	return out
+}
+
+func runWithLatestAttempt(run RunReplayData, attemptIndex int, phase string) RunReplayData {
+	out := run
+	out.Attempts = append([]RunAttemptData{}, run.Attempts...)
+	if len(out.Attempts) > 0 {
+		latest := out.Attempts[len(out.Attempts)-1]
+		if latest.AttemptIndex == attemptIndex && latest.Phase == phase {
+			return out
+		}
+	}
+	out.Attempts = append(out.Attempts, RunAttemptData{
 		AttemptIndex: attemptIndex,
 		Phase:        phase,
 	})

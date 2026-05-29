@@ -27,10 +27,11 @@ after registration changes.
 ## Migration Rules
 
 - Do not make repo workflow files the dispatch source of truth.
-- Do not register executor kinds other than `k8s_job` or `touchpoint_gate`.
-  `touchpoint_gate` phases must declare exactly one `pr_merge` primitive job
-  and no other jobs; the `pr_merge` primitive must live inside a
-  `touchpoint_gate` phase and nowhere else.
+- Do not register executor kinds other than `k8s_job`. Review gates are
+  `k8s_job` phases with `purpose: review_gate`; a review-gate phase must
+  declare exactly one `pr_merge` primitive job and no other jobs. The
+  `pr_merge` primitive must live inside a `purpose: review_gate` phase and
+  nowhere else.
 - Do not add phase fan-in, fan-out, job-level dependencies, or non-linear DAG
   behavior without replacing this contract.
 - Do not allow project-owned arbitrary gate jobs to stand in for the managed
@@ -52,6 +53,11 @@ after registration changes.
   IDs, invalid inputs, and unsupported executor kinds before they become a
   runtime contract.
 - Jobs inside one phase launch in parallel and complete independently.
+- `touchpoint_gate` is a gated native phase name, not an executor kind:
+  reaching the `purpose: review_gate` phase creates a durable parked `k8s_job`
+  attempt at the human decision boundary, and approve later releases that same
+  attempt's managed `pr_merge` job through the ordinary native event,
+  completion, watcher, and recovery paths.
 - Phase advancement happens only after all registered jobs in the phase reach
   terminal callback state.
 - Evidence verification gates are canonicalized into managed Glimmung runner

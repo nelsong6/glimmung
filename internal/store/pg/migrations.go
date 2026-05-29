@@ -471,6 +471,212 @@ var schemaMigrations = []string{
 	WHERE s.project = migrated.project
 	  AND s.schema_ref = migrated.schema_ref
 	  AND s.payload IS DISTINCT FROM migrated.payload`,
+
+	// Review gates are phase behavior, not executor identity. Rewrite the
+	// retired touchpoint_gate executor kind out of stored workflow JSON so the
+	// runtime does not need a compatibility branch after this migration.
+	`WITH migrated AS (
+		SELECT
+			project,
+			name,
+			jsonb_set(
+				payload,
+				'{phases}',
+				(
+					SELECT COALESCE(jsonb_agg(
+						CASE
+							WHEN lower(phase->>'kind') = 'touchpoint_gate' THEN
+								phase || jsonb_build_object(
+									'kind', 'k8s_job',
+									'purpose', 'review_gate',
+									'workflowFilename', 'k8s_job:' || COALESCE(NULLIF(phase->>'name', ''), 'touchpoint_gate')
+								)
+							ELSE phase
+						END
+						ORDER BY ord
+					), '[]'::jsonb)
+					FROM jsonb_array_elements(payload->'phases') WITH ORDINALITY AS elems(phase, ord)
+				),
+				false
+			) AS payload
+		FROM workflows
+		WHERE jsonb_typeof(payload->'phases') = 'array'
+	)
+	UPDATE workflows AS w
+	SET payload = migrated.payload,
+	    updated_at = now()
+	FROM migrated
+	WHERE w.project = migrated.project
+	  AND w.name = migrated.name
+	  AND w.payload IS DISTINCT FROM migrated.payload`,
+
+	`WITH migrated AS (
+		SELECT
+			project,
+			schema_ref,
+			jsonb_set(
+				payload,
+				'{phases}',
+				(
+					SELECT COALESCE(jsonb_agg(
+						CASE
+							WHEN lower(phase->>'kind') = 'touchpoint_gate' THEN
+								phase || jsonb_build_object(
+									'kind', 'k8s_job',
+									'purpose', 'review_gate',
+									'workflowFilename', 'k8s_job:' || COALESCE(NULLIF(phase->>'name', ''), 'touchpoint_gate')
+								)
+							ELSE phase
+						END
+						ORDER BY ord
+					), '[]'::jsonb)
+					FROM jsonb_array_elements(payload->'phases') WITH ORDINALITY AS elems(phase, ord)
+				),
+				false
+			) AS payload
+		FROM workflow_schemas
+		WHERE jsonb_typeof(payload->'phases') = 'array'
+	)
+	UPDATE workflow_schemas AS s
+	SET payload = migrated.payload,
+	    updated_at = now()
+	FROM migrated
+	WHERE s.project = migrated.project
+	  AND s.schema_ref = migrated.schema_ref
+	  AND s.payload IS DISTINCT FROM migrated.payload`,
+
+	`WITH migrated AS (
+		SELECT
+			project,
+			id,
+			jsonb_set(
+				payload,
+				'{attempts}',
+				(
+					SELECT COALESCE(jsonb_agg(
+						CASE
+							WHEN lower(attempt->>'phase_kind') = 'touchpoint_gate' THEN
+								attempt || jsonb_build_object(
+									'phase_kind', 'k8s_job',
+									'workflow_filename', 'k8s_job:' || COALESCE(NULLIF(attempt->>'phase', ''), 'touchpoint_gate')
+								)
+							ELSE attempt
+						END
+						ORDER BY ord
+					), '[]'::jsonb)
+					FROM jsonb_array_elements(payload->'attempts') WITH ORDINALITY AS elems(attempt, ord)
+				),
+				false
+			) AS payload
+		FROM runs
+		WHERE jsonb_typeof(payload->'attempts') = 'array'
+	)
+	UPDATE runs AS r
+	SET payload = migrated.payload,
+	    updated_at = now()
+	FROM migrated
+	WHERE r.project = migrated.project
+	  AND r.id = migrated.id
+	  AND r.payload IS DISTINCT FROM migrated.payload`,
+
+	`WITH migrated AS (
+		SELECT
+			project,
+			id,
+			jsonb_set(
+				payload,
+				'{phase_executions}',
+				(
+					SELECT COALESCE(jsonb_agg(
+						CASE
+							WHEN lower(phase->>'kind') = 'touchpoint_gate' THEN
+								phase || jsonb_build_object('kind', 'k8s_job')
+							ELSE phase
+						END
+						ORDER BY ord
+					), '[]'::jsonb)
+					FROM jsonb_array_elements(payload->'phase_executions') WITH ORDINALITY AS elems(phase, ord)
+				),
+				false
+			) AS payload
+		FROM runs
+		WHERE jsonb_typeof(payload->'phase_executions') = 'array'
+	)
+	UPDATE runs AS r
+	SET payload = migrated.payload,
+	    updated_at = now()
+	FROM migrated
+	WHERE r.project = migrated.project
+	  AND r.id = migrated.id
+	  AND r.payload IS DISTINCT FROM migrated.payload`,
+
+	// Runs parked by the retired gate implementation reached review_required
+	// without an attempt row for the gate. Materialize that attempt once during
+	// migration so approve can release an existing k8s_job attempt instead of
+	// preserving a runtime compatibility path.
+	`WITH candidates AS (
+		SELECT
+			project,
+			id,
+			payload,
+			to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS ts,
+			(
+				SELECT COALESCE(MAX((attempt->>'attempt_index')::int), -1) + 1
+				FROM jsonb_array_elements(COALESCE(payload->'attempts', '[]'::jsonb)) AS attempt
+				WHERE attempt ? 'attempt_index'
+			) AS next_idx
+		FROM runs
+		WHERE payload->>'state' = 'review_required'
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM jsonb_array_elements(COALESCE(payload->'attempts', '[]'::jsonb)) AS attempt
+			WHERE attempt->>'phase' = 'touchpoint_gate'
+		  )
+	), migrated AS (
+		SELECT
+			project,
+			id,
+			jsonb_set(
+				jsonb_set(
+					payload,
+					'{attempts}',
+					COALESCE(payload->'attempts', '[]'::jsonb) || jsonb_build_array(jsonb_build_object(
+						'attempt_index', next_idx,
+						'phase', 'touchpoint_gate',
+						'phase_kind', 'k8s_job',
+						'workflow_filename', 'k8s_job:touchpoint_gate',
+						'dispatched_at', ts
+					)),
+					true
+				),
+				'{phase_executions}',
+				(
+					SELECT COALESCE(jsonb_agg(
+						CASE
+							WHEN phase->>'name' = 'touchpoint_gate' THEN
+								phase || jsonb_build_object(
+									'kind', 'k8s_job',
+									'state', 'active',
+									'dispatched_at', ts,
+									'started_at', ts
+								)
+							ELSE phase
+						END
+						ORDER BY ord
+					), COALESCE(payload->'phase_executions', '[]'::jsonb))
+					FROM jsonb_array_elements(COALESCE(payload->'phase_executions', '[]'::jsonb)) WITH ORDINALITY AS elems(phase, ord)
+				),
+				true
+			) AS payload
+		FROM candidates
+	)
+	UPDATE runs AS r
+	SET payload = migrated.payload,
+	    updated_at = now()
+	FROM migrated
+	WHERE r.project = migrated.project
+	  AND r.id = migrated.id
+	  AND r.payload IS DISTINCT FROM migrated.payload`,
 }
 
 // cronJobs are scheduled after the table migrations succeed. Each

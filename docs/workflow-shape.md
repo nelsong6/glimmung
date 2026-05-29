@@ -244,7 +244,7 @@ phases:
         primitive: pr_touchpoint
 
   - name: touchpoint_gate
-    kind: touchpoint_gate
+    kind: k8s_job
     run_on: success
     purpose: review_gate
     depends_on: [touchpoint]
@@ -263,16 +263,17 @@ phases:
 
 Runtime behavior:
 
-- When the workflow advances into the gate, Glimmung sets the Run state to
-  `review_required` and does NOT launch the gate's job. `review_required` is
-  an in-progress sub-state — locks stay held and the slot may still be alive
-  if the issue had `preserve_test_env=true`. Projections treat it as active.
+- When the workflow advances into the gate, Glimmung appends the durable
+  `touchpoint_gate` attempt, sets the Run state to `review_required`, and does
+  NOT launch the gate's job. `review_required` is an in-progress sub-state —
+  locks stay held and the slot may still be alive if the issue had
+  `preserve_test_env=true`. Projections treat it as active.
 - The signal bus carries the reviewer's decision:
-  - `payload.kind: "approve"` releases the gate. Glimmung flips the Run back
-    to `in_progress`, appends an attempt for the gate phase, and launches the
-    managed `pr_merge` job. The job calls back through the normal completion
-    callback, the workflow advances to `cleanup_final`, and the Run terminates
-    `passed`. The Issue is closed on that terminal transition.
+  - `payload.kind: "approve"` releases the existing gate attempt. Glimmung
+    flips the Run back to `in_progress` and launches the managed `pr_merge`
+    job through the normal `k8s_job` path. The job calls back through the normal
+    completion callback, the workflow advances to `cleanup_final`, and the Run
+    terminates `passed`. The Issue is closed on that terminal transition.
   - `payload.kind: "reject"` follows today's PR-feedback recycle path: a new
     cycle is created landing at the workflow's configured `pr.recycle_policy`
     target.

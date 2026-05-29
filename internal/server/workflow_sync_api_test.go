@@ -99,7 +99,8 @@ phases:
       - id: pr-touchpoint
         primitive: pr_touchpoint
   - name: touchpoint_gate
-    kind: touchpoint_gate
+    kind: k8s_job
+    purpose: review_gate
     depends_on: [touchpoint]
     jobs:
       - id: pr-merge
@@ -144,7 +145,7 @@ phases:
       - id: pr-touchpoint
         primitive: pr_touchpoint
   - name: touchpoint_gate
-    kind: touchpoint_gate
+    purpose: review_gate
     depends_on: [touchpoint]
     jobs:
       - id: pr-merge
@@ -239,11 +240,8 @@ func TestSyncWorkflowDefaultsOmittedKindsToK8sJob(t *testing.T) {
 		t.Fatalf("expected workflow to be upserted")
 	}
 	for _, phase := range store.upserted.Phases {
-		// touchpoint_gate is its own valid kind (introduced by the
-		// gated-workflow migration); the omitted-kind default only
-		// applies to non-gate phases.
-		if phase.Kind != "k8s_job" && phase.Kind != "touchpoint_gate" {
-			t.Fatalf("phase %q kind=%q, want k8s_job or touchpoint_gate", phase.Name, phase.Kind)
+		if phase.Kind != "k8s_job" {
+			t.Fatalf("phase %q kind=%q, want k8s_job", phase.Name, phase.Kind)
 		}
 	}
 }
