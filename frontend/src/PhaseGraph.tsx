@@ -525,7 +525,7 @@ export function PhaseGraph({
         targetHandle: "advance-in",
         type: "entry",
         markerEnd: { type: MarkerType.ArrowClosed },
-        className: "dag-rf-edge dag-rf-entry-edge",
+        className: `dag-rf-edge dag-rf-entry-edge${arrow.active ? " entry" : ""}`,
         data: { recycleTargets },
       });
     });
