@@ -496,6 +496,34 @@ func RecordInspectionSwept(piece, outcome string) {
 	inspectionsSweptTotal.WithLabelValues(safeLabel(piece), safeLabel(outcome)).Inc()
 }
 
+// --- Inner-job observation --------------------------------------------------
+//
+// Phase scripts may spawn child k8s Jobs in other namespaces (the
+// canonical example is ambience's verification-agent pod in the slot
+// namespace). docs/inner-job-observation.md defines a marker channel the
+// runner parses; this counter is its bounded-cardinality metric surface
+// so an operator can see at a glance which workflows have inner-Job
+// activity and how often.
+//
+// Label cardinality is explicitly bounded: intent is the closed enum
+// from innerjob.Intent (verification_agent | helper | tooling | unknown).
+
+var runInnerJobsRegisteredTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "glimmung_run_inner_jobs_registered_total",
+		Help: "Inner k8s Jobs that phase scripts registered with the runner via the inner-job marker, labelled by intent (verification_agent | helper | tooling | unknown).",
+	},
+	[]string{"intent"},
+)
+
+// RecordRunInnerJobRegistered counts one inner-job registration. The
+// caller passes the intent string from the marker after the runner has
+// normalised it through innerjob.Parse, so out-of-enum values arrive
+// as "unknown" rather than expanding label cardinality.
+func RecordRunInnerJobRegistered(intent string) {
+	runInnerJobsRegisteredTotal.WithLabelValues(safeLabel(intent)).Inc()
+}
+
 // --- Registration ------------------------------------------------------------
 //
 // k8s Job apply/terminal metrics are not in V1: the dispatch path emits a
@@ -530,6 +558,7 @@ func init() {
 		inspectionsWrittenTotal,
 		inspectionsWriteErrorsTotal,
 		inspectionsSweptTotal,
+		runInnerJobsRegisteredTotal,
 	)
 }
 

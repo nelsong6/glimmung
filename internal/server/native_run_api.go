@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/nelsong6/glimmung/internal/metrics"
 )
 
 // NativeRunStore handles native k8s_job runner event recording and status.
@@ -241,6 +243,15 @@ func postNativeEvent(w http.ResponseWriter, r *http.Request, store NativeRunStor
 	if err != nil {
 		writeInternalError(w, r, err, "record native event failed")
 		return
+	}
+	// Bounded-cardinality metric for inner-Job registrations
+	// (docs/inner-job-observation.md). The intent label has already
+	// been normalised by the runner against the closed enum in
+	// innerjob.Parse, so safeLabel in the metrics package only catches
+	// the empty-string case.
+	if req.Event == "inner_job_registered" {
+		intent, _ := req.Metadata["intent"].(string)
+		metrics.RecordRunInnerJobRegistered(intent)
 	}
 	writeJSON(w, http.StatusOK, result)
 }
