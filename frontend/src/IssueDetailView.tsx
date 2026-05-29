@@ -262,6 +262,7 @@ type NativeRunEventsResponse = {
 };
 
 type NativeLogViewMode = "transcript" | "raw";
+type AgentTranscriptFilter = "all" | "assistant";
 
 type AgentTranscriptEntry = {
   id: string;
@@ -3412,6 +3413,7 @@ function NativeJobInspector({
   );
   const [selectedKey, setSelectedKey] = useState<string | null>(defaultSelection);
   const [viewMode, setViewMode] = useState<NativeLogViewMode>("transcript");
+  const [transcriptFilter, setTranscriptFilter] = useState<AgentTranscriptFilter>("all");
   const [pageCursors, setPageCursors] = useState<number[]>([]);
   const pageAfterSeq = pageCursors[pageCursors.length - 1] ?? null;
   const selected = stepRefs.find((step) => step.key === selectedKey) ?? stepRefs[0] ?? null;
@@ -3509,6 +3511,9 @@ function NativeJobInspector({
     ? agentTranscriptEntries(selectedEvents)
     : [];
   const transcriptAvailable = Boolean(selected && nativeSelectionUsesTranscript(selected.job, selected.step) && transcriptEntries.length > 0);
+  const visibleTranscriptEntries = transcriptFilter === "assistant"
+    ? transcriptEntries.filter((entry) => entry.kind === "assistant")
+    : transcriptEntries;
   const activeViewMode: NativeLogViewMode = transcriptAvailable ? viewMode : "raw";
   return (
     <div className="native-inspector" ref={inspectorElementRef}>
@@ -3557,6 +3562,24 @@ function NativeJobInspector({
                 onClick={() => setViewMode("raw")}
               >
                 raw
+              </button>
+            </div>
+          )}
+          {transcriptAvailable && activeViewMode === "transcript" && (
+            <div className="native-view-toggle" role="group" aria-label="transcript filter">
+              <button
+                type="button"
+                aria-pressed={transcriptFilter === "all"}
+                onClick={() => setTranscriptFilter("all")}
+              >
+                all
+              </button>
+              <button
+                type="button"
+                aria-pressed={transcriptFilter === "assistant"}
+                onClick={() => setTranscriptFilter("assistant")}
+              >
+                assistant
               </button>
             </div>
           )}
@@ -3614,7 +3637,10 @@ function NativeJobInspector({
           )}
         </aside>
         {activeViewMode === "transcript" ? (
-          <AgentTranscriptView entries={transcriptEntries} />
+          <AgentTranscriptView
+            entries={visibleTranscriptEntries}
+            emptyLabel={transcriptFilter === "assistant" ? "No assistant text in this batch." : "No transcript rows in this batch."}
+          />
         ) : (
           <pre className="step-terminal native-step-terminal">
             {selected
@@ -3627,9 +3653,18 @@ function NativeJobInspector({
   );
 }
 
-function AgentTranscriptView({ entries }: { entries: AgentTranscriptEntry[] }) {
+function AgentTranscriptView({
+  entries,
+  emptyLabel,
+}: {
+  entries: AgentTranscriptEntry[];
+  emptyLabel: string;
+}) {
   return (
     <div className="agent-transcript" aria-label="agent transcript">
+      {entries.length === 0 && (
+        <div className="agent-transcript-empty mono dim">{emptyLabel}</div>
+      )}
       {entries.map((entry) => {
         if (entry.kind === "assistant") {
           return (

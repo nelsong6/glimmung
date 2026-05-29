@@ -636,6 +636,14 @@ describe("IssueDetailView run execution graph", () => {
     await userEvent.click(toolResultSummary);
     expect(screen.getByText(/line two/)).toBeInTheDocument();
 
+    await userEvent.click(within(screen.getByRole("group", { name: "transcript filter" })).getByRole("button", { name: "assistant" }));
+    const filteredTranscript = screen.getByLabelText("agent transcript");
+    expect(within(filteredTranscript).getByText("I will inspect the file.")).toBeInTheDocument();
+    expect(within(filteredTranscript).getByText("Done.")).toBeInTheDocument();
+    expect(within(filteredTranscript).queryByText("tool call")).not.toBeInTheDocument();
+    expect(within(filteredTranscript).queryByText("tool result")).not.toBeInTheDocument();
+    expect(within(filteredTranscript).queryByText("reasoning signature")).not.toBeInTheDocument();
+
     await userEvent.click(screen.getByRole("button", { name: "raw" }));
     expect(screen.getByText((content) => content.includes("\"tool_use\""))).toBeInTheDocument();
     expect(screen.getByText((content) => content.includes("\\nline two"))).toBeInTheDocument();

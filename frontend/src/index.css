@@ -2557,6 +2557,12 @@ h2 .inline-action,
   gap: 10px;
   flex-wrap: wrap;
 }
+.agent-transcript-empty {
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 6px;
+  background: #0b0b0e;
+}
 .agent-transcript-entry pre {
   margin: 0;
   padding: 0 10px 10px;
