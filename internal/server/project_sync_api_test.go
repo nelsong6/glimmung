@@ -4,6 +4,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -314,5 +317,66 @@ func TestProjectsInSyncDetectsAuthoredDrift(t *testing.T) {
 	}
 	if projectsInSync(upstream, current) {
 		t.Fatalf("expected drift on differing authored config")
+	}
+}
+
+// TestCommittedProjectYAMLParsesAndCarriesHotSwap guards the real, checked-in
+// `.glimmung/project.yaml` for the glimmung project. The Stage-3 reconcile (CI
+// POST .../v1/projects/glimmung/sync) replaces authored config wholesale from
+// this file, so it must parse through the exact register-path validators and
+// must carry the test_slot_hot_swap block that a partial register previously
+// dropped. This keeps the committed source of truth honest at CI time.
+func TestCommittedProjectYAMLParsesAndCarriesHotSwap(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve test filename")
+	}
+	repoRoot := filepath.Join(filepath.Dir(thisFile), "..", "..")
+	data, err := os.ReadFile(filepath.Join(repoRoot, ".glimmung", "project.yaml"))
+	if err != nil {
+		t.Fatalf("read .glimmung/project.yaml: %v", err)
+	}
+
+	reg, err := parseProjectYAML(data, "glimmung")
+	if err != nil {
+		t.Fatalf("parseProjectYAML(committed file): %v", err)
+	}
+	if reg.GitHubRepo != "nelsong6/glimmung" {
+		t.Fatalf("github_repo=%q, want nelsong6/glimmung", reg.GitHubRepo)
+	}
+
+	// The complete authored config must be present (sync replaces wholesale).
+	for _, key := range []string{
+		"native_standby_dns",
+		"native_standby_workload_identity",
+		"test_slot_helm",
+		"test_slot_hot_swap",
+	} {
+		if _, ok := reg.Metadata[key]; !ok {
+			t.Fatalf("committed project.yaml missing authored key %q", key)
+		}
+	}
+
+	// No reconciler-owned status key may be authored in the file.
+	for _, key := range serverManagedProjectStatusKeys {
+		if _, ok := reg.Metadata[key]; ok {
+			t.Fatalf("committed project.yaml must not author status key %q", key)
+		}
+	}
+
+	// The restored hot-swap block must describe the supervisor backend path.
+	hs, ok := reg.Metadata["test_slot_hot_swap"].(map[string]any)
+	if !ok {
+		t.Fatalf("test_slot_hot_swap is %T, want map", reg.Metadata["test_slot_hot_swap"])
+	}
+	backend, ok := hs["backend"].(map[string]any)
+	if !ok {
+		t.Fatalf("test_slot_hot_swap.backend is %T, want map", hs["backend"])
+	}
+	if backend["strategy"] != "supervisor" {
+		t.Fatalf("backend.strategy=%v, want supervisor", backend["strategy"])
+	}
+	if backend["health_path"] != "/healthz" {
+		t.Fatalf("backend.health_path=%v, want /healthz", backend["health_path"])
 	}
 }

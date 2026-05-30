@@ -1,7 +1,8 @@
 # Durable Project Configuration
 
 Status: design + staged implementation. Stage 1 shipped (merged, migrated on
-prod). Stage 2 (declarative import/sync surface) in progress.
+prod). Stage 2 (declarative import/sync surface) shipped (merged, live on prod).
+Stage 3 (glimmung's own `.glimmung/project.yaml` + CI reconcile) in progress.
 
 Owner surface: `internal/store/pg/projects.go`, `internal/store/store/postgres.go`,
 `internal/server/project_write_api.go`, and a new project sync surface mirroring
@@ -188,15 +189,28 @@ Still pending for full parity: the actual `.glimmung/project.yaml` file for
 glimmung carrying `test_slot_hot_swap` (Stage 3), and the matching
 `*_project` sync/upstream MCP wrappers in tank-operator (cross-repo).
 
-### Stage 3 — Reconcile + restore
+### Stage 3 — Reconcile + restore (this PR)
 
-1. Add `.glimmung/project.yaml` to the glimmung repo carrying the
+1. `.glimmung/project.yaml` added to the glimmung repo. It carries the
+   **complete** authored config (`native_standby_dns`,
+   `native_standby_workload_identity`, `test_slot_helm`) plus the restored
    `test_slot_hot_swap` block (static `frontend/dist →
    /var/run/glimmung-static-override`; backend supervisor `go build … →
-   /var/run/glimmung-hot/glimmung`, health `/healthz`) and sync it in through
-   the new durable path.
-2. CI reconcile on merge to main so the file and the durable row cannot drift,
-   with drift surfaced via the upstream endpoint.
+   /var/run/glimmung-hot/glimmung`, health `/healthz`). Completeness is
+   load-bearing: sync replaces authored config wholesale, so a partial file
+   would drop the other fields. A guard test
+   (`TestCommittedProjectYAMLParsesAndCarriesHotSwap`) parses the checked-in
+   file through the exact register-path validators and asserts every authored
+   key — including `test_slot_hot_swap` — is present and no status key is
+   authored.
+2. `.github/workflows/project-config-reconcile.yaml` reconciles the file into
+   the durable row on merge to main (path-filtered on `.glimmung/project.yaml`).
+   It mints an admin token for the allowlisted `mcp-glimmung/mcp-glimmung`
+   service account (same Azure-OIDC → AKS-admin → `kubectl create token`
+   pattern as `test-slot-smoke.yaml`), POSTs `/v1/projects/glimmung/sync`, and
+   then asserts `/v1/projects/glimmung/upstream` reports `in_sync` — failing
+   the job on any residual drift. The file is the reviewable source of truth;
+   Postgres stays the runtime contract; the two cannot silently diverge.
 
 ## Cross-repo note
 

@@ -1,0 +1,62 @@
+# Glimmung's own declarative project configuration.
+#
+# This is the complete authored-config source of truth for the `glimmung`
+# project row in Postgres. It is reconciled into the durable row by the
+# project sync path (`POST /v1/projects/glimmung/sync`), mirroring the
+# workflow `.glimmung/workflows/<name>.yaml` model. See
+# docs/durable-project-config.md.
+#
+# Authored config only. Reconciler-owned status keys
+# (managed_auth_origin_status, native_standby_workload_identity_status) live
+# in the durable `projects.status` column and are NEVER authored here; the
+# sync path strips any that leak in and never overwrites the status column.
+#
+# A full sync replaces authored config wholesale, so this document must carry
+# EVERY authored field — a partial file would drop the others.
+name: glimmung
+github_repo: nelsong6/glimmung
+metadata:
+  # Warmed standby DNS records for test slots.
+  native_standby_dns:
+    count: 5
+    record_base: glimmung.dev.romaine.life
+    slot_prefix: glimmung
+
+  # Azure workload-identity federated credentials for warmed standby slots.
+  native_standby_workload_identity:
+    enabled: true
+    count: 5
+    issuer: https://westus2.oic.prod-aks.azure.com/2236b5e4-81d2-4d82-bde5-17b1037999ea/5aced6d5-4299-421b-84a9-6638aebbf4f0/
+    resource_group: glimmung
+    subscription: aee0cbd2-8074-4001-b610-0f8edb4eaa3c
+    credentials:
+      - credential_name: "{slot_name}-infra-shared"
+        identity_name: glimmung-identity
+        subject: "system:serviceaccount:{slot_name}:infra-shared"
+
+  # Per-issue test environment Helm install (chart + values).
+  test_slot_helm:
+    enabled: true
+    chart_path: k8s/issue
+    values:
+      hostname: "{host}"
+      prNumber: test-slot
+
+  # No-rollout hot-swap contract for test slots. Restores the dogfood block
+  # documented in README.md that a partial register previously dropped.
+  test_slot_hot_swap:
+    enabled: true
+    static:
+      enabled: true
+      source: frontend/dist
+      target: /var/run/glimmung-static-override
+    backend:
+      enabled: true
+      strategy: supervisor
+      build_command: go build -o /tmp/glimmung ./cmd/glimmung-go
+      artifact: /tmp/glimmung
+      target: /var/run/glimmung-hot/glimmung
+      health_path: /healthz
+    fidelity_classifier:
+      enabled: false
+      command: ""
