@@ -18,7 +18,9 @@
  * Routed canonically via `/projects/<project>/issues/<number>`.
  */
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
 import { Link, useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
+import remarkGfm from "remark-gfm";
 import { authedFetch, currentConfig } from "./auth";
 import { lokiExploreUrl } from "./grafanaLinks";
 import { PhaseGraph, type PhaseGraphPhase } from "./PhaseGraph";
@@ -32,6 +34,7 @@ import {
 import { resolveProjectWorkflow } from "./workflowLookup";
 
 const NATIVE_EVENT_PAGE_LIMIT = 200;
+const MARKDOWN_PLUGINS = [remarkGfm];
 
 type IssueDetail = {
   ref: string;
@@ -826,6 +829,16 @@ function TabButton({
   );
 }
 
+function MarkdownBody({ className = "", children }: { className?: string; children: string }) {
+  return (
+    <div className={`markdown-body${className ? ` ${className}` : ""}`}>
+      <ReactMarkdown remarkPlugins={MARKDOWN_PLUGINS} skipHtml>
+        {children}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
 function DescriptionTab({
   detail,
   signedIn,
@@ -856,19 +869,7 @@ function DescriptionTab({
         </div>
       )}
       {detail.body.trim() ? (
-        <pre
-          style={{
-            whiteSpace: "pre-wrap",
-            fontFamily: "inherit",
-            background: "#0a0a0c",
-            padding: "0.75rem 1rem",
-            border: "1px solid #2a2a2e",
-            borderRadius: "4px",
-            margin: 0,
-          }}
-        >
-          {detail.body}
-        </pre>
+        <MarkdownBody className="issue-body">{detail.body}</MarkdownBody>
       ) : (
         <div className="empty dim">(no description)</div>
       )}
@@ -1010,7 +1011,7 @@ function IssueComments({
                     </div>
                   </div>
                 ) : (
-                  <pre className="comment-body">{comment.body}</pre>
+                  <MarkdownBody className="comment-body">{comment.body}</MarkdownBody>
                 )}
                 {signedIn && !isEditing && (
                   <div className="comment-actions">
