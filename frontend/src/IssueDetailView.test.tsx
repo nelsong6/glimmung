@@ -345,6 +345,49 @@ describe("IssueDetailView run execution graph", () => {
     expect(document.querySelector(".issue-hero .project-facts")).not.toBeInTheDocument();
   });
 
+  it("renders issue descriptions and comments as markdown", async () => {
+    const markdownIssue = {
+      ...issueDetail,
+      body: [
+        "## Concept",
+        "",
+        "Read clearly as `slimes` on grass.",
+        "",
+        "- [ ] Define config",
+        "- hop on event",
+      ].join("\n"),
+      comments: [{
+        id: "comment-1",
+        author: "nelsong6",
+        body: "Please see **rendered** notes.",
+        created_at: "2026-05-20T17:24:09.336Z",
+        updated_at: "2026-05-20T17:24:09.336Z",
+      }],
+    };
+
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string"
+          ? new URL(input, "https://glimmung.test")
+          : input instanceof URL
+            ? input
+            : new URL(input.url);
+      if (url.pathname === "/v1/issues/by-number/ambience/172") return json(markdownIssue);
+      if (url.pathname === "/v1/issues/by-number/ambience/172/graph") return json(issueGraph);
+      if (url.pathname === "/v1/workflows") return json([]);
+      throw new Error(`unhandled fetch ${url.pathname}`);
+    }));
+
+    renderIssueDetail("/projects/ambience/issues/172/summary");
+
+    expect(await screen.findByRole("heading", { name: "Concept", level: 2 })).toBeInTheDocument();
+    expect(screen.queryByText("## Concept")).not.toBeInTheDocument();
+    expect(screen.getByText("slimes").tagName).toBe("CODE");
+    const taskItem = screen.getByText("Define config").closest("li");
+    expect(taskItem?.querySelector('input[type="checkbox"]')).toBeTruthy();
+    expect(screen.getByText("rendered").tagName).toBe("STRONG");
+  });
+
   it("shows run history as flat run counts, base cycle values, and run-cycle ordinals", async () => {
     const baseRun = runProjection.runs[0];
     const historyRuns = [
