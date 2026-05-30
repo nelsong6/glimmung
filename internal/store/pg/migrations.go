@@ -353,6 +353,56 @@ var schemaMigrations = []string{
 
 	`ALTER TABLE workflow_schemas ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()`,
 
+	// ------------------------------------------------------------------
+	// Durable project config (docs/durable-project-config.md). Project
+	// authored-config gets the same version-history + content-hash
+	// treatment workflows already have, and reconciler-owned status moves
+	// out of the authored `payload.metadata` blob into a dedicated `status`
+	// column so a register/sync can replace authored config wholesale
+	// without clobbering reconciled status.
+	//
+	//   - config_schema_ref: pointer to the current authored-config version.
+	//     Seeded by ProjectsStore.BackfillConfigSchemas at startup (the hash
+	//     is computed in Go so it matches the live write path exactly).
+	//   - status: reconciler-owned jsonb (managed_auth_origin_status,
+	//     native_standby_workload_identity_status).
+	//   - project_config_schemas: immutable authored-config history, mirroring
+	//     workflow_schemas.
+	// ------------------------------------------------------------------
+	`ALTER TABLE projects ADD COLUMN IF NOT EXISTS config_schema_ref text NOT NULL DEFAULT ''`,
+	`ALTER TABLE projects ADD COLUMN IF NOT EXISTS status jsonb NOT NULL DEFAULT '{}'::jsonb`,
+	`CREATE TABLE IF NOT EXISTS project_config_schemas (
+		name              text NOT NULL,
+		schema_ref        text NOT NULL,
+		payload           jsonb NOT NULL DEFAULT '{}'::jsonb,
+		created_at        timestamptz NOT NULL DEFAULT now(),
+		PRIMARY KEY (name, schema_ref)
+	)`,
+	// One-time backfill: move reconciler status out of payload.metadata into
+	// the status column, then delete those keys from authored config. Idempotent
+	// — once the keys are gone from metadata the WHERE clause no longer matches.
+	// jsonb_strip_nulls drops keys whose source value was absent (SQL NULL), so
+	// only the present status blobs migrate. No old interleaved-layout read path
+	// survives this (migration-policy compliant).
+	`UPDATE projects
+		SET status = status || jsonb_strip_nulls(jsonb_build_object(
+				'managed_auth_origin_status', payload->'metadata'->'managed_auth_origin_status',
+				'native_standby_workload_identity_status', payload->'metadata'->'native_standby_workload_identity_status'
+			)),
+		    payload = jsonb_set(
+				payload,
+				'{metadata}',
+				COALESCE(payload->'metadata', '{}'::jsonb)
+					- 'managed_auth_origin_status'
+					- 'native_standby_workload_identity_status'
+			),
+		    updated_at = now()
+		WHERE kind = 'project'
+		  AND (
+				payload->'metadata' ? 'managed_auth_origin_status'
+				OR payload->'metadata' ? 'native_standby_workload_identity_status'
+		  )`,
+
 	// Workflow phases used to encode teardown scheduling with `always`.
 	// Keep stored workflow JSON on the current run_on/purpose contract so
 	// runtime reads do not need legacy compatibility paths.

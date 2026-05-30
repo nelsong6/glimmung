@@ -67,6 +67,16 @@ func main() {
 			poolCancel()
 			if poolErr != nil {
 				log.Printf("postgres pool disabled: %v", poolErr)
+			} else if !settings.ControlPlaneLoopsEnabled {
+				// Test-slot posture: this process shares the prod Postgres
+				// database (see Settings.ControlPlaneLoopsEnabled). Schema
+				// migrations mutate that shared schema and data, so only the
+				// prod control plane owns them — a slot must never apply a
+				// migration carried in a hot-swapped binary against the prod
+				// database. Slots serve HTTP against the prod-owned schema.
+				log.Printf("postgres pool ready (host=%s database=%s user=%s); schema migrations skipped (CONTROL_PLANE_LOOPS_ENABLED=false; prod owns schema)",
+					settings.PostgresHost, settings.PostgresDatabase, settings.PostgresUsername)
+				pgPool = pool
 			} else {
 				migCtx, migCancel := context.WithTimeout(context.Background(), 60*time.Second)
 				if migErr := pgstore.RunMigrations(migCtx, pool); migErr != nil {
@@ -96,6 +106,24 @@ func main() {
 
 		pgProjects := pgstore.NewProjectsStore(pgPool)
 		store.SetPGProjects(pgProjects)
+		// Seed authored-config version history for any project row that has
+		// no version yet. The hash is computed in Go so it matches the live
+		// write path exactly (the SQL migration deliberately does not try to
+		// reproduce it). Idempotent. See docs/durable-project-config.md.
+		//
+		// This mutates shared project rows, so — like schema migrations — it
+		// is owned by the prod control plane only. Slots
+		// (CONTROL_PLANE_LOOPS_ENABLED=false) share the prod database and must
+		// not seed it from a hot-swapped binary.
+		if settings.ControlPlaneLoopsEnabled {
+			backfillCtx, backfillCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			if seeded, backErr := pgProjects.BackfillConfigSchemas(backfillCtx); backErr != nil {
+				log.Printf("project config-schema backfill failed: %v", backErr)
+			} else if seeded > 0 {
+				log.Printf("project config-schema backfill ok: seeded %d project version(s)", seeded)
+			}
+			backfillCancel()
+		}
 
 		pgWorkflows := pgstore.NewWorkflowsStore(pgPool)
 		store.SetPGWorkflows(pgWorkflows)
@@ -155,10 +183,15 @@ func main() {
 		ServiceAccountTokenPath: settings.AuthRomaineLifeTokenPath,
 	}
 	nativeLauncher := server.NewKubernetesNativeLauncher(settings)
-	if store != nil {
+	if store != nil && settings.ControlPlaneLoopsEnabled {
 		// One-shot slot-storage cleanup: copy any project's embedded
 		// `metadata.native_standby_dns.slots[]` array into `slots`, then
 		// strip the embedded array before readiness goes live.
+		//
+		// Like schema migrations and the config-schema backfill, this mutates
+		// shared project rows, so it is owned by the prod control plane only.
+		// Slots (CONTROL_PLANE_LOOPS_ENABLED=false) share the prod database and
+		// must not run it from a hot-swapped binary.
 		migrationCtx, cancelMigration := context.WithTimeout(context.Background(), 60*time.Second)
 		summary, err := server.MigrateProjectSlotsIntoCollection(migrationCtx, store)
 		cancelMigration()
