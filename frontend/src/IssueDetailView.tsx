@@ -26,6 +26,7 @@ import { lokiExploreUrl } from "./grafanaLinks";
 import { PhaseGraph, type PhaseGraphPhase } from "./PhaseGraph";
 import { RecyclePolicyPanel } from "./RecyclePolicyPanel";
 import { issueRunSelectionPath } from "./routes";
+import { useHorizontalDragScroll } from "./useHorizontalDragScroll";
 import {
   runTopologyToPhaseGraphModel,
   type RunProjectionTopologySource,
@@ -2233,6 +2234,7 @@ function ProjectionPipelineDag({
   selectedPhaseName: string | null;
   onSelectNode: (selection: ProjectionSelection) => void;
 }) {
+  const { ref: panRef, onClickCapture: onPanClickCapture } = useHorizontalDragScroll<HTMLDivElement>();
   const executionPhaseByName = useMemo(() => {
     const phasesByName = new Map<string, RunProjectionPhase>();
     for (const phase of run.phases) phasesByName.set(phase.name, phase);
@@ -2286,7 +2288,7 @@ function ProjectionPipelineDag({
     );
   };
   return (
-    <div className="dag-wrap">
+    <div className="dag-wrap dag-pan" ref={panRef} onClickCapture={onPanClickCapture}>
       <PhaseGraph
         phases={graphModel.phases}
         renderPhase={renderPhase}

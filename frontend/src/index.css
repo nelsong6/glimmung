@@ -2117,6 +2117,20 @@ h2 .inline-action,
 .dag-wrap {
   margin: 12px 0;
 }
+/* Run-detail DAG: left-click-drag horizontal panning (see
+   useHorizontalDragScroll). Wide run graphs overflow the viewport; grabbing
+   the surface and dragging is the expected way to move it. Horizontal only —
+   the vertical axis stays put. */
+.dag-pan {
+  overflow-x: auto;
+  overflow-y: hidden;
+  cursor: grab;
+  overscroll-behavior-x: contain;
+}
+.dag-pan.dragging {
+  cursor: grabbing;
+  user-select: none;
+}
 .dag {
   position: relative;
   display: flex;
