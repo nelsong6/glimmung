@@ -12,7 +12,7 @@
  * route: `/projects/<project>/issues/<number>/summary`.
  */
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 import { authedFetch } from "./auth";
 
 type IssueRow = {
@@ -73,7 +73,6 @@ export function IssuesView({
   needsAttentionOnly?: boolean;
   allowStateFilter?: boolean;
 }) {
-  const navigate = useNavigate();
   const [rows, setRows] = useState<IssueRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -132,13 +131,6 @@ export function IssuesView({
     } catch (e) {
       setDispatchStatus({ kind: "error", key, message: String(e) });
     }
-  };
-
-  const openDetail = (row: IssueRow) => {
-    if (row.number === null) return;
-    navigate(
-      `/projects/${encodeURIComponent(row.project)}/issues/${row.number}/summary`
-    );
   };
 
   const discard = async (row: IssueRow) => {
@@ -235,14 +227,17 @@ export function IssuesView({
                     {row.number !== null ? row.number : "—"}
                   </td>
                   <td>
-                    <button
-                      type="button"
-                      className="link"
-                      onClick={() => openDetail(row)}
-                      style={{ textAlign: "left" }}
-                    >
-                      {row.title}
-                    </button>
+                    {row.number !== null ? (
+                      <Link
+                        className="link"
+                        to={`/projects/${encodeURIComponent(row.project)}/issues/${row.number}/summary`}
+                        style={{ textAlign: "left" }}
+                      >
+                        {row.title}
+                      </Link>
+                    ) : (
+                      row.title
+                    )}
                   </td>
                   <td className="mono dim">
                     {row.labels.length === 0 ? "—" : row.labels.join(", ")}
