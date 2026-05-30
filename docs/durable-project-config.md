@@ -1,6 +1,7 @@
 # Durable Project Configuration
 
-Status: design + staged implementation. Stage 1 in progress.
+Status: design + staged implementation. Stage 1 shipped (merged, migrated on
+prod). Stage 2 (declarative import/sync surface) in progress.
 
 Owner surface: `internal/store/pg/projects.go`, `internal/store/store/postgres.go`,
 `internal/server/project_write_api.go`, and a new project sync surface mirroring
@@ -165,6 +166,27 @@ complete authored source, which is Stage 2.
 3. The repo file becomes the reviewable source of truth; Postgres stays the
    runtime contract. A partial register can no longer be the source of authored
    config drift because the file is complete by construction.
+
+Delivered by the glimmung-side surface (this PR):
+
+- `GET /v1/projects/{project}/upstream` (drift) and
+  `POST /v1/projects/{project}/sync` (admin-gated apply), in
+  `internal/server/project_sync_api.go`, mirroring the workflow routes.
+- `ProjectSyncClient.FetchProjectFile` reads `.glimmung/project.yaml`; the
+  same GitHub adapter already satisfies `WorkflowSyncClient`, so the router
+  passes one `ghClient`.
+- `parseProjectYAML` runs the same authored-config validators as
+  `register_project` (`hotswap.FromMetadata`, `validateTestSlotHelmMetadata`)
+  and strips any server-managed status key that leaked into the file.
+- `projectsInSync` compares the canonical authored document
+  (`{name, github_repo, metadata}` minus status keys) so a reconciler status
+  write never registers as authored drift. Sync uses the Stage-1
+  `UpsertProject` path, so it versions authored config and never touches the
+  `status` column.
+
+Still pending for full parity: the actual `.glimmung/project.yaml` file for
+glimmung carrying `test_slot_hot_swap` (Stage 3), and the matching
+`*_project` sync/upstream MCP wrappers in tank-operator (cross-repo).
 
 ### Stage 3 — Reconcile + restore
 
