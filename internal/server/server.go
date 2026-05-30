@@ -16,10 +16,10 @@ import (
 )
 
 const (
-	defaultPort                = "8000"
-	defaultAuthURL             = "https://auth.romaine.life"
-	defaultTankOperatorBaseURL = "https://tank.romaine.life"
-	defaultGrafanaBaseURL      = "https://grafana.romaine.life"
+	defaultPort                  = "8000"
+	defaultAuthURL               = "https://auth.romaine.life"
+	defaultTankOperatorBaseURL   = "https://tank.romaine.life"
+	defaultGrafanaBaseURL        = "https://grafana.romaine.life"
 	defaultGrafanaLokiDatasource = "loki"
 )
 
@@ -28,14 +28,14 @@ type Settings struct {
 	// Postgres connection settings. The pool is constructed in
 	// cmd/glimmung-go/main.go and RunMigrations applies the schema.
 	// All durable runtime reads and writes flow through Postgres.
-	PostgresHost                       string
-	PostgresDatabase                   string
-	PostgresUsername                   string
-	K8sSAAllowlist                     string
-	K8sAPIHost                         string
-	K8sSATokenPath                     string
-	K8sCACertPath                      string
-	TankOperatorBaseURL                string
+	PostgresHost        string
+	PostgresDatabase    string
+	PostgresUsername    string
+	K8sSAAllowlist      string
+	K8sAPIHost          string
+	K8sSATokenPath      string
+	K8sCACertPath       string
+	TankOperatorBaseURL string
 	// GrafanaBaseURL is the base URL of the cluster Grafana installation
 	// (e.g. https://grafana.romaine.life). The frontend uses this plus the
 	// Loki datasource UID to render Explore deep-links from run-report
@@ -44,7 +44,7 @@ type Settings struct {
 	GrafanaBaseURL string
 	// GrafanaLokiDatasource is the datasource name (or UID) the Explore
 	// link should target. Grafana resolves a name to a UID; both work.
-	GrafanaLokiDatasource string
+	GrafanaLokiDatasource              string
 	StaticDir                          string
 	StaticOverrideDir                  string
 	ArtifactsStorageAccount            string
@@ -119,7 +119,6 @@ type Settings struct {
 	// projected SA token + auth.romaine.life federation endpoint
 	// (`AuthRomaineLifeBaseURL`, `AuthRomaineLifeTokenPath`) supply the
 	// JWT mint step.
-	SSHCAPrivateKey      string
 	TailscaleOIDCClientID string
 	TailscaleTailnet      string
 	TailscaleAPIBaseURL   string
@@ -127,19 +126,19 @@ type Settings struct {
 
 func SettingsFromEnv() Settings {
 	return Settings{
-		Port:                envOrDefault("PORT", defaultPort),
-		PostgresHost:        os.Getenv("POSTGRES_HOST"),
-		PostgresDatabase:    os.Getenv("POSTGRES_DATABASE"),
-		PostgresUsername:    os.Getenv("POSTGRES_USER"),
-		K8sSAAllowlist:      os.Getenv("K8S_SA_ALLOWLIST"),
-		K8sAPIHost:          envOrDefault("K8S_API_HOST", "https://kubernetes.default.svc"),
-		K8sSATokenPath:      envOrDefault("K8S_SA_TOKEN_PATH", "/var/run/secrets/kubernetes.io/serviceaccount/token"),
-		K8sCACertPath:       envOrDefault("K8S_CA_CERT_PATH", "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"),
+		Port:                  envOrDefault("PORT", defaultPort),
+		PostgresHost:          os.Getenv("POSTGRES_HOST"),
+		PostgresDatabase:      os.Getenv("POSTGRES_DATABASE"),
+		PostgresUsername:      os.Getenv("POSTGRES_USER"),
+		K8sSAAllowlist:        os.Getenv("K8S_SA_ALLOWLIST"),
+		K8sAPIHost:            envOrDefault("K8S_API_HOST", "https://kubernetes.default.svc"),
+		K8sSATokenPath:        envOrDefault("K8S_SA_TOKEN_PATH", "/var/run/secrets/kubernetes.io/serviceaccount/token"),
+		K8sCACertPath:         envOrDefault("K8S_CA_CERT_PATH", "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"),
 		TankOperatorBaseURL:   envOrDefault("TANK_OPERATOR_BASE_URL", defaultTankOperatorBaseURL),
 		GrafanaBaseURL:        envOrDefault("GRAFANA_BASE_URL", defaultGrafanaBaseURL),
 		GrafanaLokiDatasource: envOrDefault("GRAFANA_LOKI_DATASOURCE", defaultGrafanaLokiDatasource),
-		StaticDir:           os.Getenv("GLIMMUNG_STATIC_DIR"),
-		StaticOverrideDir:   os.Getenv("GLIMMUNG_STATIC_OVERRIDE_DIR"),
+		StaticDir:             os.Getenv("GLIMMUNG_STATIC_DIR"),
+		StaticOverrideDir:     os.Getenv("GLIMMUNG_STATIC_OVERRIDE_DIR"),
 		ArtifactsStorageAccount: envOrDefault(
 			"ARTIFACTS_STORAGE_ACCOUNT",
 			"romaineglimmungartifacts",
@@ -218,7 +217,6 @@ func SettingsFromEnv() Settings {
 			"CONTROL_PLANE_LOOPS_ENABLED",
 			true,
 		),
-		SSHCAPrivateKey:       os.Getenv("GLIMMUNG_SSH_CA_PRIVATE_KEY"),
 		TailscaleOIDCClientID: os.Getenv("GLIMMUNG_TAILSCALE_OIDC_CLIENT_ID"),
 		TailscaleTailnet:      envOrDefault("GLIMMUNG_TAILSCALE_TAILNET", "-"),
 		TailscaleAPIBaseURL:   envOrDefault("GLIMMUNG_TAILSCALE_API_BASE_URL", "https://api.tailscale.com"),
@@ -287,15 +285,19 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 		testSlotPreparer = p
 	}
 	// Remote-host execution primitives (docs/remote-host-execution.md).
-	// Both endpoints fail closed (503) if their secret is empty; the
-	// signer/minter constructors return errSSHCAUnconfigured /
-	// errTailscaleUnconfigured in that case, which we treat as "endpoint
-	// disabled" rather than logging at error. Any other parse failure
-	// (malformed CA private key, etc.) is logged because it indicates a
-	// real misconfiguration the operator needs to see.
-	sshCertSigner, sshCertErr := NewCertSignerFromPEM(settings.SSHCAPrivateKey)
-	if sshCertErr != nil && !errors.Is(sshCertErr, errSSHCAUnconfigured) {
-		log.Printf("remote-host: ssh ca disabled: %v", sshCertErr)
+	// Both endpoints fail closed (503) if their upstream wiring is empty.
+	// auth.romaine.life is the sole SSH CA issuer: glimmung holds no CA
+	// private material and instead exchanges its projected SA token for a
+	// signed cert. NewSSHCertExchanger returns errSSHCertGatewayUnconfigured
+	// when the auth base URL or SA-token path is empty, which we treat as
+	// "endpoint disabled" rather than logging at error.
+	sshCertExchanger, sshCertErr := NewSSHCertExchanger(
+		settings.AuthRomaineLifeBaseURL,
+		settings.AuthRomaineLifeTokenPath,
+		nil,
+	)
+	if sshCertErr != nil && !errors.Is(sshCertErr, errSSHCertGatewayUnconfigured) {
+		log.Printf("remote-host: ssh cert gateway disabled: %v", sshCertErr)
 	}
 	tailscaleAuthKeyMinter, tailscaleErr := NewTailscaleAuthKeyMinter(
 		settings.TailscaleAPIBaseURL,
@@ -413,7 +415,7 @@ func newHandlerWithReconcilers(settings Settings, store ReadStore, authResolver 
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/github-token", nativeGitHubTokenByCallbackToken(store, nativeTokenMinter))
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/pr-touchpoint", nativePRTouchpointByCallbackToken(store, prClient, artifactStore))
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/pr-merge", nativePRMergeByCallbackToken(store, prClient))
-	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/ssh-cert", mintRunCallbackSSHCert(store, sshCertSigner))
+	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/ssh-cert", mintRunCallbackSSHCert(store, sshCertExchanger))
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/tailscale-authkey", mintRunCallbackTailscaleAuthKey(store, tailscaleAuthKeyMinter))
 	mux.HandleFunc("POST /v1/run-callbacks/{callback_token}/native/completed", nativeRunCompletedByCallbackToken(store, nativeLauncher))
 	if stateStore, ok := store.(StateStore); ok {
@@ -528,11 +530,11 @@ func readStoreReady(ctx context.Context, store ReadStore) (ready bool) {
 func publicConfig(settings Settings) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{
-			"auth_url":                 defaultAuthURL,
-			"tank_operator_base_url":   strings.TrimRight(settings.TankOperatorBaseURL, "/"),
-			"grafana_base_url":         strings.TrimRight(settings.GrafanaBaseURL, "/"),
-			"grafana_loki_datasource":  strings.TrimSpace(settings.GrafanaLokiDatasource),
-			"native_runner_namespace":  strings.TrimSpace(settings.NativeRunnerNamespace),
+			"auth_url":                defaultAuthURL,
+			"tank_operator_base_url":  strings.TrimRight(settings.TankOperatorBaseURL, "/"),
+			"grafana_base_url":        strings.TrimRight(settings.GrafanaBaseURL, "/"),
+			"grafana_loki_datasource": strings.TrimSpace(settings.GrafanaLokiDatasource),
+			"native_runner_namespace": strings.TrimSpace(settings.NativeRunnerNamespace),
 		})
 	}
 }

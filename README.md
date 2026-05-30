@@ -413,7 +413,15 @@ KV keys consumed by glimmung:
 | `glimmung-github-app-installation-id` | same                                                                      |
 | `glimmung-github-app-private-key`  | same                                                                         |
 | `glimmung-github-webhook-secret`   | same                                                                         |
-| `glimmung-ssh-ca-private-key`      | OpenSSH-format ed25519 CA private key. Signs short-TTL user certs for orchestrator pods (see [Remote-host execution](docs/remote-host-execution.md)). Tailscale auth-key mints flow through the OIDC federation path against auth.romaine.life — no KV-resident Tailscale client secret is needed. The Tailscale OIDC trust credential ID lives in `chart/values.yaml` (`remoteHost.tailscaleOidcClientId`), since it is not secret. |
+
+glimmung holds **no SSH CA private key**. auth.romaine.life is the sole SSH CA
+issuer; the `ssh-cert` callback is a gateway that authenticates to auth with
+glimmung's projected SA token and relays the signed cert (see
+[Remote-host execution](docs/remote-host-execution.md)). Tailscale auth-key
+mints flow through the same OIDC federation path against auth.romaine.life — no
+KV-resident SSH CA key or Tailscale client secret is needed. The Tailscale
+OIDC trust credential ID lives in `k8s/values.yaml`
+(`remoteHost.tailscaleOidcClientId`), since it is not secret.
 
 The GitHub App is created via the GitHub UI — one webhook URL per App means glimmung needs its own (the shared `github-app-*` keys still serve mcp-github / diagrams). Configure the App with:
 

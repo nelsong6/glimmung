@@ -32,6 +32,17 @@ type runtimeStore struct {
 }
 
 func main() {
+	// Migration guard: auth.romaine.life is the sole SSH CA issuer.
+	// glimmung no longer signs SSH certs in-process and holds no CA
+	// private material. Refuse to boot if the retired
+	// GLIMMUNG_SSH_CA_PRIVATE_KEY env var is still wired — a stale
+	// chart/ExternalSecret/KV path must surface loudly, never silently
+	// re-establish a second signing authority. See
+	// docs/remote-host-execution.md.
+	if err := server.GuardRetiredSSHCAEnv(os.Getenv); err != nil {
+		log.Fatalf("startup migration guard: %v", err)
+	}
+
 	settings := server.SettingsFromEnv()
 	store, err := glimmungstore.NewFromSettings(settings)
 	if err != nil {
