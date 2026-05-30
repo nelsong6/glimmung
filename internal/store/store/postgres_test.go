@@ -440,9 +440,9 @@ func rawStep(t *testing.T, job map[string]any, slug string) map[string]any {
 
 func TestWorkflowFromDocConvertsNestedShape(t *testing.T) {
 	raw := []byte(`{
-		"id": "issue-agent",
+		"id": "default",
 		"project": "ambience",
-		"name": "issue-agent",
+		"name": "default",
 		"phases": [
 			{
 				"name": "plan",
@@ -718,7 +718,7 @@ func TestRunReportsFromDocsBuildsPublicRefsAndAttempts(t *testing.T) {
 		{
 			ID:                "new",
 			Project:           "glimmung",
-			Workflow:          "issue-agent",
+			Workflow:          "default",
 			RunNumber:         intPtr(2),
 			IssueRepo:         "nelsong6/glimmung",
 			IssueNumber:       141,
@@ -754,7 +754,7 @@ func TestRunReportsFromDocsBuildsPublicRefsAndAttempts(t *testing.T) {
 		{
 			ID:          "old",
 			Project:     "glimmung",
-			Workflow:    "issue-agent",
+			Workflow:    "default",
 			IssueRepo:   "nelsong6/glimmung",
 			IssueNumber: 141,
 			State:       "in_progress",
@@ -919,7 +919,7 @@ func TestIssueRunContextMapsLatestRunAndNeedsAttention(t *testing.T) {
 		{
 			ID:          "old",
 			Project:     "glimmung",
-			Workflow:    "issue-agent",
+			Workflow:    "default",
 			IssueID:     "issue-1",
 			IssueNumber: 17,
 			State:       "in_progress",
@@ -928,7 +928,7 @@ func TestIssueRunContextMapsLatestRunAndNeedsAttention(t *testing.T) {
 		{
 			ID:          "new",
 			Project:     "glimmung",
-			Workflow:    "issue-agent",
+			Workflow:    "default",
 			RunNumber:   &runNumber,
 			IssueID:     "issue-1",
 			IssueNumber: 17,

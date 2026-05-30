@@ -67,9 +67,9 @@ func TestListWorkflowsFiltersAndLimits(t *testing.T) {
 	created := time.Date(2026, 5, 11, 3, 0, 0, 0, time.UTC)
 	store := fakeReadStore{workflows: []Workflow{
 		{
-			ID:      "issue-agent",
+			ID:      "default",
 			Project: "ambience",
-			Name:    "issue-agent",
+			Name:    "default",
 			Budget:  budget.Config{Total: 40},
 			Phases: []PhaseSpec{
 				{
@@ -96,10 +96,10 @@ func TestListWorkflowsFiltersAndLimits(t *testing.T) {
 	handler := NewWithStore(Settings{}, store)
 
 	var rows []Workflow
-	getJSON(t, handler, "/v1/workflows?project=ambience&name=ISSUE&limit=1", &rows)
+	getJSON(t, handler, "/v1/workflows?project=ambience&name=DEF&limit=1", &rows)
 
-	if len(rows) != 1 || rows[0].Name != "issue-agent" {
-		t.Fatalf("rows=%#v, want issue-agent only", rows)
+	if len(rows) != 1 || rows[0].Name != "default" {
+		t.Fatalf("rows=%#v, want default only", rows)
 	}
 	if rows[0].Budget.Total != 40 {
 		t.Fatalf("budget=%#v", rows[0].Budget)

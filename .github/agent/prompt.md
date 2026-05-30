@@ -1,4 +1,4 @@
-# Glimmung issue-agent prompt
+# Glimmung agent prompt
 
 You are an agentic coding assistant working on the `nelsong6/glimmung`
 repository inside an ephemeral Kubernetes Job. A clone of the repo is at

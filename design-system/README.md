@@ -80,7 +80,7 @@ Glimmung's voice is **terse, lowercase, technical, with one note of literary aff
 
 - Page header: `glimmung` + connection pill + epigraph + auth links — all in one row.
 - Empty state: "No hosts registered. Sign in and use the admin panel to add one."
-- Filter hint: "— filtered to spirelens" / "— filtered to spirelens.issue-agent" (lowercase, mono dot-separator, em-dash prefix).
+- Filter hint: "— filtered to spirelens" / "— filtered to spirelens.default" (lowercase, mono dot-separator, em-dash prefix).
 - Cancel confirm: `cancel` → click → `cancel?` / `keep` (two buttons, slash separator).
 - Run states (pills): `passed`, `in_progress`, `aborted`, `manual`.
 - Decision outputs: `ADVANCE`, `RETRY`, `ABORT_BUDGET_ATTEMPTS`, `ABORT_BUDGET_COST`, `ABORT_MALFORMED` — these decision tokens are SHOUTING-CASE constants, the only place in the UI where uppercase is used in narrative copy.

@@ -113,7 +113,7 @@ func TestRetiredOGSVGRouteStaysDeleted(t *testing.T) {
 	now := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
 	store := &fakeRunStore{rows: []RunReport{{
 		Project:     "glimmung",
-		Workflow:    "issue-agent",
+		Workflow:    "default",
 		IssueNumber: intPtr(141),
 		State:       "passed",
 		StartedAt:   now,
@@ -136,7 +136,7 @@ func TestRunOGImagePNGRendersPNG(t *testing.T) {
 	now := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
 	store := &fakeRunStore{rows: []RunReport{{
 		Project:           "glimmung",
-		Workflow:          "issue-agent",
+		Workflow:          "default",
 		IssueNumber:       intPtr(141),
 		State:             "in_progress",
 		CurrentPhase:      stringPtr("implement"),
@@ -190,7 +190,7 @@ func TestServeSPAWithOGInjectsRunTags(t *testing.T) {
 	now := time.Now()
 	store := &fakeRunStore{rows: []RunReport{{
 		Project:       "glimmung",
-		Workflow:      "issue-agent",
+		Workflow:      "default",
 		IssueNumber:   intPtr(141),
 		State:         "passed",
 		AttemptsCount: 1,
@@ -214,7 +214,7 @@ func TestServeSPAWithOGInjectsRunTags(t *testing.T) {
 	body := rec.Body.String()
 	wantSnippets := []string{
 		`<meta property="og:type" content="article">`,
-		`<meta property="og:title" content="issue-agent · glimmung #141 · run 1">`,
+		`<meta property="og:title" content="default · glimmung #141 · run 1">`,
 		// og:image points at the PNG variant so Discord and other
 		// strictly-raster unfurlers render the picture.
 		`<meta property="og:image" content="https://glimmung.example/og/runs/glimmung/141/1.png">`,
