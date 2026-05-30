@@ -22,8 +22,8 @@ function AdminPanel({ projects, onClose }) {
           <Field label="project">
             <select>{projects.map(p => <option key={p.name}>{p.name}</option>)}</select>
           </Field>
-          <Field label="name"><input type="text" placeholder="issue-agent" /></Field>
-          <Field label="workflow_filename"><input type="text" className="mono" placeholder="issue-agent.yml" /></Field>
+          <Field label="name"><input type="text" placeholder="default" /></Field>
+          <Field label="workflow_filename"><input type="text" className="mono" placeholder="default.yml" /></Field>
           <Field label="requirements (json)"><input type="text" className="mono" placeholder='{"runtime":"x11","gpu":true}' /></Field>
           <Button type="submit">register workflow</Button>
         </form>

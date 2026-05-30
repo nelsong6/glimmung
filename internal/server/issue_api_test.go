@@ -106,12 +106,12 @@ func TestListIssues(t *testing.T) {
 	handler := NewWithStore(Settings{}, store)
 
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/issues?project=glimmung&workflow=issue-agent&limit=10&needs_attention=true", nil))
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/issues?project=glimmung&workflow=default&limit=10&needs_attention=true", nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if store.filter.Project != "glimmung" || store.filter.Workflow != "issue-agent" || store.filter.Limit == nil || *store.filter.Limit != 10 || !store.filter.NeedsAttention {
+	if store.filter.Project != "glimmung" || store.filter.Workflow != "default" || store.filter.Limit == nil || *store.filter.Limit != 10 || !store.filter.NeedsAttention {
 		t.Fatalf("filter=%#v", store.filter)
 	}
 	if !strings.Contains(rec.Body.String(), `"ref":"glimmung#17"`) {

@@ -43,7 +43,7 @@ export const mockSnapshot = {
       ref: "glimmung/leases/11",
       lease_number: 11,
       project: "glimmung",
-      workflow: "issue-agent",
+      workflow: "default",
       host: "native-k8s",
       state: "claimed",
       requirements: { os: "windows", apps: ["sts2"] },
@@ -227,14 +227,14 @@ export const mockSnapshot = {
   ],
   workflows: [
     {
-      id: "workflow-glimmung-issue-agent",
+      id: "workflow-glimmung-default",
       project: "glimmung",
-      name: "issue-agent",
+      name: "default",
       phases: [
         {
           name: "design",
           kind: "k8s_job",
-          workflow_filename: "issue-agent.yaml",
+          workflow_filename: "default.yaml",
           workflow_ref: "main",
           inputs: {},
           outputs: ["design_brief"],
@@ -245,7 +245,7 @@ export const mockSnapshot = {
         {
           name: "implement",
           kind: "k8s_job",
-          workflow_filename: "issue-agent.yaml",
+          workflow_filename: "default.yaml",
           workflow_ref: "main",
           inputs: { design_brief: "${{ phases.design.outputs.design_brief }}" },
           outputs: ["branch", "summary"],
@@ -256,7 +256,7 @@ export const mockSnapshot = {
 	        {
 	          name: "verify",
 	          kind: "k8s_job",
-          workflow_filename: "issue-agent.yaml",
+          workflow_filename: "default.yaml",
           workflow_ref: "main",
           inputs: { branch: "${{ phases.implement.outputs.branch }}" },
           outputs: ["verification"],
@@ -267,7 +267,7 @@ export const mockSnapshot = {
 	        {
 	          name: "touchpoint",
 	          kind: "k8s_job",
-	          workflow_filename: "issue-agent.yaml",
+	          workflow_filename: "default.yaml",
 	          workflow_ref: "main",
 	          inputs: {},
 	          outputs: [],
@@ -282,7 +282,7 @@ export const mockSnapshot = {
 		        {
 		          name: "touchpoint_gate",
 		          kind: "k8s_job",
-		          workflow_filename: "issue-agent.yaml",
+		          workflow_filename: "default.yaml",
 		          workflow_ref: "main",
 	          inputs: {},
 	          outputs: [],
@@ -297,7 +297,7 @@ export const mockSnapshot = {
 	        {
 	          name: "cleanup_final",
 	          kind: "k8s_job",
-	          workflow_filename: "issue-agent.yaml",
+	          workflow_filename: "default.yaml",
 	          workflow_ref: "main",
 	          inputs: {},
 	          outputs: [],
@@ -313,7 +313,7 @@ export const mockSnapshot = {
 	      pr: {
 	        recycle_policy: { max_attempts: 2, on: ["changes_requested"], lands_at: "implement" },
 	      },
-      workflow_filename: "issue-agent.yaml",
+      workflow_filename: "default.yaml",
       workflow_ref: "main",
       default_requirements: { os: "windows", apps: ["sts2"] },
       metadata: { phases: ["design", "implement", "verify"] },
@@ -466,12 +466,12 @@ const mockIssues = [
     id: "issue-glimmung-206",
     ref: "glimmung#206",
     project: "glimmung",
-    workflow: "issue-agent",
+    workflow: "default",
     repo: null,
     number: 206,
     title: "Display native run graph and step-level execution",
     state: "open",
-    labels: ["design-system", "run-graph", "issue-agent"],
+    labels: ["design-system", "run-graph", "agent-run"],
     html_url: null,
     last_run_id: "run-glimmung-206-live",
     last_run_ref: "glimmung#206/runs/1.1",
@@ -502,7 +502,7 @@ const mockIssues = [
     id: "issue-glimmung-198",
     ref: "glimmung#198",
     project: "glimmung",
-    workflow: "issue-agent",
+    workflow: "default",
     repo: null,
     number: 198,
     title: "Archive completed issue list rows",
@@ -598,7 +598,7 @@ const mockPlaybooks = [
       {
         id: "projection",
         title: "run projection",
-        issue: { title: "Expose RunGraphProjection", body: "", labels: ["backend"], workflow: "issue-agent", metadata: {} },
+        issue: { title: "Expose RunGraphProjection", body: "", labels: ["backend"], workflow: "default", metadata: {} },
         depends_on: [],
         manual_gate: false,
         state: "succeeded",
@@ -610,7 +610,7 @@ const mockPlaybooks = [
       {
         id: "playbook-ui",
         title: "operator ui",
-        issue: { title: "Add Playbook operator UI", body: "", labels: ["frontend"], workflow: "issue-agent", metadata: {} },
+        issue: { title: "Add Playbook operator UI", body: "", labels: ["frontend"], workflow: "default", metadata: {} },
         depends_on: ["projection"],
         manual_gate: true,
         state: "pending",
@@ -633,7 +633,7 @@ export const mockRuns = [
   {
     id: "run-glimmung-206-live",
     project: "glimmung",
-    workflow: "issue-agent",
+    workflow: "default",
     run_number: 1,
     run_display_number: "1.1",
     cycle_number: 1,
@@ -667,7 +667,7 @@ export const mockRuns = [
   {
     id: "run-glimmung-184-passed",
     project: "glimmung",
-    workflow: "issue-agent",
+    workflow: "default",
     run_number: 1,
     run_display_number: "1.1",
     cycle_number: 3,
@@ -802,7 +802,7 @@ const issueGraph = {
       state: "in_progress",
       timestamp: ago(24),
       metadata: {
-        workflow: "issue-agent",
+        workflow: "default",
         cycles_count: 2,
         cumulative_cost_usd: 8.91,
         entrypoint_phase: "design",
@@ -860,7 +860,7 @@ const issueGraph = {
       run_display_number: "1.1",
       cycle_number: 1,
       run_cycle_number: 1,
-      workflow: "issue-agent",
+      workflow: "default",
       state: "in_progress",
       current_phase: "verify",
       validation_url: "https://design-portfolio-pr-216.glimmung.dev.romaine.life/?mock=1",
@@ -1001,7 +1001,7 @@ function handleMockRequest(url: URL, init?: RequestInit): Response {
   }
   if (path === "/v1/graph" && method === "GET") return json(filterGraph(url.searchParams.get("project")));
   if (path === "/v1/runs/dispatch" && method === "POST") {
-    return json({ state: "dispatched", lease: "claimed", issue_ref: "glimmung#206", issue_number: 206, run_number: 1, cycle_number: 1, run_cycle_number: 1, run_ref: "glimmung#206/runs/1.1", host: null, workflow: "issue-agent", detail: null });
+    return json({ state: "dispatched", lease: "claimed", issue_ref: "glimmung#206", issue_number: 206, run_number: 1, cycle_number: 1, run_cycle_number: 1, run_ref: "glimmung#206/runs/1.1", host: null, workflow: "default", detail: null });
   }
   if (path === "/v1/portfolio/elements/dispatch" && method === "POST") {
     return json({ state: "dispatched", lease: "claimed", issue_ref: "glimmung#217", issue_number: 217, run_number: 1, cycle_number: 2, run_cycle_number: 1, run_ref: "glimmung#217/runs/1.1", host: null, workflow: "portfolio-agent", detail: null });

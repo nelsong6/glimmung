@@ -84,7 +84,7 @@ const DESIGN_SYSTEM_ITEMS: PortfolioItem[] = [
           <span className="pill free">free</span>
           <span className="pill busy">busy</span>
           <span className="pill drain">drained</span>
-          <span className="pill info">issue-agent</span>
+          <span className="pill info">default</span>
         </Row>
       </Specimen>
     ),
@@ -309,7 +309,7 @@ const DESIGN_SYSTEM_ITEMS: PortfolioItem[] = [
             <span className="pill free">passed</span>
             <span className="pill busy">in_progress</span>
             <span className="pill drain">aborted</span>
-            <span className="pill info">issue-agent</span>
+            <span className="pill info">default</span>
           </Row>
           <span className="matrix-key">atoms</span>
           <Row>
@@ -506,7 +506,7 @@ const DESIGN_FILE_ITEMS: PortfolioItem[] = [
             <tr><th>Name</th><th>File</th><th>Trigger</th><th>Work</th></tr>
           </thead>
           <tbody>
-            <tr><td>issue-agent</td><td className="mono dim">issue-agent.yaml@main</td><td className="mono dim">issue-agent</td><td className="mono dim">1 active</td></tr>
+            <tr><td>default</td><td className="mono dim">default.yaml@main</td><td className="mono dim">default</td><td className="mono dim">1 active</td></tr>
             <tr><td>portfolio-agent</td><td className="mono dim">design-portfolio.yaml@main</td><td className="mono dim">design-portfolio</td><td className="mono dim">0 active</td></tr>
           </tbody>
         </table>

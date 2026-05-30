@@ -9,7 +9,7 @@ import {
 describe("workflowToPhaseGraphModel", () => {
   it("maps registered phases without leaking recycle policy fields into graph phases", () => {
     const workflow: WorkflowGraphSource = {
-      name: "issue-agent",
+      name: "default",
       phases: [
         {
           name: "implementation",
