@@ -1,0 +1,152 @@
+name: project-config-reconcile
+
+# Stage 3 of docs/durable-project-config.md: reconcile the checked-in
+# declarative project config (`.glimmung/project.yaml`) into the durable
+# Postgres project row so the file and the runtime row cannot drift.
+#
+# The repo file is the reviewable source of truth; Postgres stays the runtime
+# contract. On merge to main this POSTs the admin-gated project sync route,
+# which replaces authored config from the file via the Stage-1 versioned
+# write path (it never touches the reconciler-owned status column). It then
+# asserts the upstream endpoint reports in_sync, surfacing any residual drift.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".glimmung/project.yaml"
+      - ".github/workflows/project-config-reconcile.yaml"
+  workflow_dispatch:
+    inputs:
+      project:
+        description: "Project whose .glimmung/project.yaml to reconcile"
+        required: false
+        default: "glimmung"
+        type: string
+      ref:
+        description: "Git ref to read .glimmung/project.yaml from"
+        required: false
+        default: "main"
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    environment: prod
+    env:
+      GLIMMUNG_BASE_URL: https://glimmung.romaine.life
+      PROJECT: ${{ inputs.project || 'glimmung' }}
+      SYNC_REF: ${{ inputs.ref || 'main' }}
+      # Admin-allowlisted service account (K8S_SA_ALLOWLIST) that owns the
+      # glimmung MCP surface — the natural identity for a glimmung self-sync.
+      SERVICE_ACCOUNT_NAMESPACE: mcp-glimmung
+      SERVICE_ACCOUNT_NAME: mcp-glimmung
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: "1.9.0"
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.ARM_CLIENT_ID }}
+          tenant-id: ${{ vars.ARM_TENANT_ID }}
+          subscription-id: ${{ vars.ARM_SUBSCRIPTION_ID }}
+
+      - name: Read AKS outputs
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ vars.ARM_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ vars.ARM_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.ARM_SUBSCRIPTION_ID }}
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d)
+          cat > "${work}/main.tf" <<'EOF'
+          terraform {
+            backend "azurerm" {}
+          }
+          EOF
+          (
+            cd "${work}"
+            tofu init \
+              -backend-config="resource_group_name=infra" \
+              -backend-config="storage_account_name=nelsontofu" \
+              -backend-config="container_name=tfstate" \
+              -backend-config="key=infra-bootstrap.tfstate"
+            resource_group="$(tofu output -raw resource_group_name)"
+            cluster_name="$(tofu output -raw aks_cluster_name)"
+            aks_subscription=""
+            for subscription in $(az account list --query '[].id' -o tsv); do
+              if az aks show \
+                  --subscription "$subscription" \
+                  --resource-group "$resource_group" \
+                  --name "$cluster_name" \
+                  >/dev/null 2>&1; then
+                aks_subscription="$subscription"
+                break
+              fi
+            done
+            if [ -z "$aks_subscription" ]; then
+              echo "Unable to find AKS cluster ${resource_group}/${cluster_name} in accessible Azure subscriptions."
+              exit 1
+            fi
+            {
+              echo "AZURE_AKS_RESOURCE_GROUP=${resource_group}"
+              echo "AZURE_AKS_CLUSTER_NAME=${cluster_name}"
+              echo "AZURE_AKS_SUBSCRIPTION_ID=${aks_subscription}"
+            } >> "$GITHUB_ENV"
+          )
+
+      - name: Set AKS context
+        run: |
+          set -euo pipefail
+          az aks get-credentials \
+            --subscription "$AZURE_AKS_SUBSCRIPTION_ID" \
+            --resource-group "$AZURE_AKS_RESOURCE_GROUP" \
+            --name "$AZURE_AKS_CLUSTER_NAME" \
+            --admin \
+            --overwrite-existing
+
+      - name: Reconcile project config
+        run: |
+          set -euo pipefail
+
+          token="$(kubectl -n "$SERVICE_ACCOUNT_NAMESPACE" create token "$SERVICE_ACCOUNT_NAME" --duration=20m)"
+          auth_header="Authorization: Bearer ${token}"
+
+          echo "Syncing ${PROJECT} from ${SYNC_REF}..."
+          sync="$(curl -fsS \
+            -X POST "${GLIMMUNG_BASE_URL}/v1/projects/${PROJECT}/sync?ref=${SYNC_REF}" \
+            -H "$auth_header")"
+          echo "$sync" | jq '{project,ref,repo,in_sync,fetch_error}'
+
+          if [ "$(echo "$sync" | jq -r '.fetch_error // empty')" != "" ]; then
+            echo "sync reported fetch_error"
+            exit 1
+          fi
+          if [ "$(echo "$sync" | jq -r '.in_sync')" != "true" ]; then
+            echo "sync did not converge to in_sync=true"
+            exit 1
+          fi
+
+          echo "Verifying upstream reports no drift..."
+          upstream="$(curl -fsS \
+            "${GLIMMUNG_BASE_URL}/v1/projects/${PROJECT}/upstream?ref=${SYNC_REF}")"
+          echo "$upstream" | jq '{project,in_sync,fetch_error}'
+          if [ "$(echo "$upstream" | jq -r '.in_sync')" != "true" ]; then
+            echo "upstream still reports drift after sync"
+            exit 1
+          fi
+
+          echo "Reconcile OK: ${PROJECT} authored config matches .glimmung/project.yaml@${SYNC_REF}"
