@@ -2,6 +2,7 @@ package pg
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,13 +13,22 @@ import (
 )
 
 // ProjectsStore is the Postgres-backed projects + test-lease-defaults store.
-// Two tables back it: `projects` for per-project rows and
-// `test_lease_defaults` for the singleton global settings row.
+// Three tables back it: `projects` for per-project rows,
+// `project_config_schemas` for the immutable authored-config version history,
+// and `test_lease_defaults` for the singleton global settings row.
 //
-// Read-modify-write helpers for the SetProject* methods take a
-// SERIALIZABLE-equivalent shape via `SELECT ... FOR UPDATE` inside a
-// transaction. Postgres row locking gives these metadata updates strict
-// serialization.
+// Authored config and reconciler-owned status are kept in separate columns:
+// `payload` holds the authored config a register/sync replaces wholesale (with
+// an immutable version minted in `project_config_schemas` on every change),
+// while `status` holds the reconciler outputs (managed_auth_origin_status,
+// native_standby_workload_identity_status) that the status setters own. Reads
+// merge the two so the returned shape is unchanged. See
+// docs/durable-project-config.md.
+//
+// Read-modify-write helpers (mutateProject for authored config, mutateStatus
+// for reconciler status) take a SERIALIZABLE-equivalent shape via
+// `SELECT ... FOR UPDATE` inside a transaction. Postgres row locking gives
+// these updates strict serialization.
 type ProjectsStore struct {
 	pool *pgxpool.Pool
 }
@@ -26,6 +36,86 @@ type ProjectsStore struct {
 // TestLeaseDefaultsSingletonID is the row id under which the global
 // test-lease defaults live.
 const TestLeaseDefaultsSingletonID = "test-lease-defaults"
+
+// projectSelectColumns is the canonical column list every project read returns,
+// kept in one place so List/Read/Upsert/mutate* stay in lockstep with
+// scanProjectRow.
+const projectSelectColumns = "name, github_repo, payload, status, config_schema_ref, created_at, updated_at"
+
+// insertProjectConfigSchemaSQL mints an immutable authored-config version. The
+// (name, schema_ref) conflict is a no-op because schema_ref is the content
+// hash: re-registering identical config does not duplicate history.
+const insertProjectConfigSchemaSQL = `
+	INSERT INTO project_config_schemas (name, schema_ref, payload, created_at)
+	VALUES ($1, $2, $3, now())
+	ON CONFLICT (name, schema_ref) DO NOTHING
+`
+
+// serverManagedProjectStatusKeys are reconciler-owned outputs that live in the
+// projects.status column, never in authored config. They are stripped from any
+// inbound register/sync metadata (so a round-tripped read cannot pollute
+// authored config or its content hash) and merged back into the returned
+// metadata on read so the API shape is unchanged. See
+// docs/durable-project-config.md.
+var serverManagedProjectStatusKeys = []string{
+	"managed_auth_origin_status",
+	"native_standby_workload_identity_status",
+}
+
+func isServerManagedProjectStatusKey(key string) bool {
+	for _, k := range serverManagedProjectStatusKeys {
+		if k == key {
+			return true
+		}
+	}
+	return false
+}
+
+// stripServerManagedStatus returns a copy of metadata with the reconciler-owned
+// status keys removed. Authored config never carries these.
+func stripServerManagedStatus(metadata map[string]any) map[string]any {
+	out := make(map[string]any, len(metadata))
+	for k, v := range metadata {
+		if isServerManagedProjectStatusKey(k) {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// mergeStatusIntoMetadata overlays the reconciler-owned status column onto a
+// copy of the authored metadata so callers see the unified historical shape.
+// Status values win — they are the live reconciled outputs.
+func mergeStatusIntoMetadata(metadata, status map[string]any) map[string]any {
+	out := make(map[string]any, len(metadata)+len(status))
+	for k, v := range metadata {
+		out[k] = v
+	}
+	for k, v := range status {
+		out[k] = v
+	}
+	return out
+}
+
+// projectConfigSchemaRef is the content hash of the authored-config document.
+// Identical to workflowSchemaRef in spirit: a stable JSON canonicalization
+// hashed with sha256. encoding/json sorts map keys, so the byte sequence is
+// deterministic for a given authored config.
+func projectConfigSchemaRef(name, githubRepo string, authoredMetadata map[string]any) string {
+	canonical := struct {
+		Name       string         `json:"name"`
+		GitHubRepo string         `json:"githubRepo"`
+		Metadata   map[string]any `json:"metadata"`
+	}{
+		Name:       name,
+		GitHubRepo: githubRepo,
+		Metadata:   ensureMap(authoredMetadata),
+	}
+	payload, _ := json.Marshal(canonical)
+	sum := sha256.Sum256(payload)
+	return fmt.Sprintf("pcs_%x", sum[:8])
+}
 
 // ProjectRow is the row shape ProjectsStore persists and returns.
 type ProjectRow struct {
@@ -56,14 +146,28 @@ type ProjectRegister struct {
 
 // ProjectRecord is the canonical return shape. Store's
 // SetProject* wrappers convert this back to server.Project at the
-// call site.
+// call site. Metadata is the unified read shape (authored config + reconciler
+// status merged); Status is the reconciler-owned subset on its own for callers
+// that need it.
 type ProjectRecord struct {
-	Name       string
-	GitHubRepo string
-	ArgoCDApp  string
-	Metadata   map[string]any
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	Name            string
+	GitHubRepo      string
+	ArgoCDApp       string
+	Metadata        map[string]any
+	Status          map[string]any
+	ConfigSchemaRef string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+// ProjectWriteOutcome describes what an Upsert did, for observability. Created
+// is true when the row did not exist; Versioned is true when the authored
+// config content changed (the schema_ref pointer moved).
+type ProjectWriteOutcome struct {
+	Created       bool
+	Versioned     bool
+	SchemaRef     string
+	PrevSchemaRef string
 }
 
 var ErrProjectNotFound = errors.New("project not found")
@@ -77,7 +181,7 @@ func (s *ProjectsStore) List(ctx context.Context) ([]ProjectRecord, error) {
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("projects store not configured")
 	}
-	const sql = `SELECT name, github_repo, payload, created_at, updated_at FROM projects WHERE kind = 'project'`
+	sql := `SELECT ` + projectSelectColumns + ` FROM projects WHERE kind = 'project'`
 	rows, err := s.pool.Query(ctx, sql)
 	if err != nil {
 		return nil, fmt.Errorf("projects: list: %w", err)
@@ -130,7 +234,7 @@ func (s *ProjectsStore) Read(ctx context.Context, name string) (ProjectRecord, e
 	if s == nil || s.pool == nil {
 		return ProjectRecord{}, fmt.Errorf("projects store not configured")
 	}
-	const sql = `SELECT name, github_repo, payload, created_at, updated_at FROM projects WHERE kind = 'project' AND name = $1`
+	sql := `SELECT ` + projectSelectColumns + ` FROM projects WHERE kind = 'project' AND name = $1`
 	rows, err := s.pool.Query(ctx, sql, name)
 	if err != nil {
 		return ProjectRecord{}, fmt.Errorf("projects: read: %w", err)
@@ -159,50 +263,88 @@ func (s *ProjectsStore) ReadGitHubRepo(ctx context.Context, name string) (string
 	return repo, nil
 }
 
-// Upsert creates or updates a project row. On update, the original
-// CreatedAt is preserved; updated_at is set to now(). The github_repo
-// column gets mirrored from req.GitHubRepo for indexed lookup; the
-// canonical value also lives in payload.
-func (s *ProjectsStore) Upsert(ctx context.Context, req ProjectRegister) (ProjectRecord, error) {
+// Upsert creates or updates a project's authored config. The write is
+// transactional: it mints an immutable project_config_schemas version, moves
+// the config_schema_ref pointer, and replaces `payload` — while leaving the
+// reconciler-owned `status` column untouched. Server-managed status keys in the
+// inbound metadata are stripped so a round-tripped read cannot pollute authored
+// config. On update the original CreatedAt is preserved; updated_at is set to
+// now(). The github_repo column is mirrored for indexed lookup; the canonical
+// value also lives in payload.
+func (s *ProjectsStore) Upsert(ctx context.Context, req ProjectRegister) (ProjectRecord, ProjectWriteOutcome, error) {
 	if s == nil || s.pool == nil {
-		return ProjectRecord{}, fmt.Errorf("projects store not configured")
+		return ProjectRecord{}, ProjectWriteOutcome{}, fmt.Errorf("projects store not configured")
 	}
-	if req.Metadata == nil {
-		req.Metadata = map[string]any{}
-	}
+	authored := stripServerManagedStatus(ensureMap(req.Metadata))
 	payload, err := json.Marshal(map[string]any{
 		"name":       req.Name,
 		"githubRepo": req.GitHubRepo,
-		"metadata":   req.Metadata,
+		"metadata":   authored,
 	})
 	if err != nil {
-		return ProjectRecord{}, fmt.Errorf("projects: marshal payload: %w", err)
+		return ProjectRecord{}, ProjectWriteOutcome{}, fmt.Errorf("projects: marshal payload: %w", err)
 	}
-	const upsertSQL = `
-		INSERT INTO projects (name, kind, payload, github_repo, created_at, updated_at)
-		VALUES ($1, 'project', $2, $3, now(), now())
-		ON CONFLICT (name) DO UPDATE
-		  SET payload     = EXCLUDED.payload,
-		      github_repo = EXCLUDED.github_repo,
-		      updated_at  = now()
-		RETURNING name, github_repo, payload, created_at, updated_at
-	`
-	rows, err := s.pool.Query(ctx, upsertSQL, req.Name, payload, req.GitHubRepo)
+	schemaRef := projectConfigSchemaRef(req.Name, req.GitHubRepo, authored)
+
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return ProjectRecord{}, fmt.Errorf("projects: upsert: %w", err)
+		return ProjectRecord{}, ProjectWriteOutcome{}, fmt.Errorf("projects: begin upsert: %w", err)
 	}
-	defer rows.Close()
-	if !rows.Next() {
-		return ProjectRecord{}, fmt.Errorf("projects: upsert returned no row")
+	defer tx.Rollback(ctx)
+
+	// Lock the row (if any) and capture prior pointer for the outcome.
+	var prevRef string
+	existed := true
+	if err := tx.QueryRow(ctx, `SELECT config_schema_ref FROM projects WHERE kind = 'project' AND name = $1 FOR UPDATE`, req.Name).Scan(&prevRef); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			existed = false
+		} else {
+			return ProjectRecord{}, ProjectWriteOutcome{}, fmt.Errorf("projects: lock for upsert: %w", err)
+		}
 	}
-	return scanProjectRow(rows)
+
+	if _, err := tx.Exec(ctx, insertProjectConfigSchemaSQL, req.Name, schemaRef, payload); err != nil {
+		return ProjectRecord{}, ProjectWriteOutcome{}, fmt.Errorf("projects: mint config schema: %w", err)
+	}
+
+	const upsertSQL = `
+		INSERT INTO projects (name, kind, payload, status, github_repo, config_schema_ref, created_at, updated_at)
+		VALUES ($1, 'project', $2, '{}'::jsonb, $3, $4, now(), now())
+		ON CONFLICT (name) DO UPDATE
+		  SET payload           = EXCLUDED.payload,
+		      github_repo       = EXCLUDED.github_repo,
+		      config_schema_ref = EXCLUDED.config_schema_ref,
+		      updated_at        = now()
+		RETURNING ` + projectSelectColumns + `
+	`
+	rows, err := tx.Query(ctx, upsertSQL, req.Name, payload, req.GitHubRepo, schemaRef)
+	if err != nil {
+		return ProjectRecord{}, ProjectWriteOutcome{}, fmt.Errorf("projects: upsert: %w", err)
+	}
+	rec, scanErr := scanProjectFirstRow(rows)
+	rows.Close()
+	if scanErr != nil {
+		return ProjectRecord{}, ProjectWriteOutcome{}, scanErr
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ProjectRecord{}, ProjectWriteOutcome{}, fmt.Errorf("projects: commit upsert: %w", err)
+	}
+	outcome := ProjectWriteOutcome{
+		Created:       !existed,
+		Versioned:     schemaRef != prevRef,
+		SchemaRef:     schemaRef,
+		PrevSchemaRef: prevRef,
+	}
+	return rec, outcome, nil
 }
 
-// mutateProject is the shared read-modify-write helper. Wraps the
-// operation in a transaction with `SELECT ... FOR UPDATE` so concurrent
-// writers serialize at the row level. The mutator receives the current
-// metadata map and returns the new metadata; it does not need to worry
-// about the surrounding payload structure.
+// mutateProject is the shared read-modify-write helper for authored config.
+// Wraps the operation in a transaction with `SELECT ... FOR UPDATE` so
+// concurrent writers serialize at the row level. The mutator receives the
+// current authored metadata map and returns the new metadata; it does not need
+// to worry about the surrounding payload structure or the status column. Each
+// mutation re-versions: a new project_config_schemas row is minted and the
+// pointer moved, keeping config_schema_ref consistent with payload.
 func (s *ProjectsStore) mutateProject(ctx context.Context, name string, mutate func(metadata map[string]any) error) (ProjectRecord, error) {
 	if s == nil || s.pool == nil {
 		return ProjectRecord{}, fmt.Errorf("projects store not configured")
@@ -234,34 +376,33 @@ func (s *ProjectsStore) mutateProject(ctx context.Context, name string, mutate f
 	if err := mutate(metadata); err != nil {
 		return ProjectRecord{}, err
 	}
-	doc["metadata"] = metadata
+	authored := stripServerManagedStatus(metadata)
+	doc["metadata"] = authored
 
 	newPayload, err := json.Marshal(doc)
 	if err != nil {
 		return ProjectRecord{}, fmt.Errorf("projects: marshal mutated payload: %w", err)
 	}
+	canonicalRepo := stringFromMap(doc, "githubRepo", githubRepo)
+	schemaRef := projectConfigSchemaRef(name, canonicalRepo, authored)
+	if _, err := tx.Exec(ctx, insertProjectConfigSchemaSQL, name, schemaRef, newPayload); err != nil {
+		return ProjectRecord{}, fmt.Errorf("projects: mint config schema: %w", err)
+	}
+
 	const updateSQL = `
 		UPDATE projects
-		SET payload = $2, updated_at = now()
+		SET payload = $2, config_schema_ref = $3, updated_at = now()
 		WHERE kind = 'project' AND name = $1
-		RETURNING name, github_repo, payload, created_at, updated_at
+		RETURNING ` + projectSelectColumns + `
 	`
-	rows, err := tx.Query(ctx, updateSQL, name, newPayload)
+	rows, err := tx.Query(ctx, updateSQL, name, newPayload, schemaRef)
 	if err != nil {
 		return ProjectRecord{}, fmt.Errorf("projects: update mutated: %w", err)
 	}
-	if !rows.Next() {
-		rows.Close()
-		return ProjectRecord{}, fmt.Errorf("projects: update returned no row")
-	}
-	rec, err := scanProjectRow(rows)
-	if err != nil {
-		rows.Close()
-		return ProjectRecord{}, err
-	}
+	rec, scanErr := scanProjectFirstRow(rows)
 	rows.Close()
-	if err := rows.Err(); err != nil {
-		return ProjectRecord{}, fmt.Errorf("projects: update mutated rows: %w", err)
+	if scanErr != nil {
+		return ProjectRecord{}, scanErr
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return ProjectRecord{}, fmt.Errorf("projects: commit mutate: %w", err)
@@ -269,10 +410,67 @@ func (s *ProjectsStore) mutateProject(ctx context.Context, name string, mutate f
 	return rec, nil
 }
 
+// mutateStatus is the shared read-modify-write helper for the reconciler-owned
+// status column. It never touches authored config (payload) or the
+// config_schema_ref version pointer.
+func (s *ProjectsStore) mutateStatus(ctx context.Context, name string, mutate func(status map[string]any) error) (ProjectRecord, error) {
+	if s == nil || s.pool == nil {
+		return ProjectRecord{}, fmt.Errorf("projects store not configured")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ProjectRecord{}, fmt.Errorf("projects: begin status mutate: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	const selectSQL = `SELECT status FROM projects WHERE kind = 'project' AND name = $1 FOR UPDATE`
+	var statusBytes []byte
+	if err := tx.QueryRow(ctx, selectSQL, name).Scan(&statusBytes); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ProjectRecord{}, ErrProjectNotFound
+		}
+		return ProjectRecord{}, fmt.Errorf("projects: select status for update: %w", err)
+	}
+
+	status := map[string]any{}
+	if len(statusBytes) > 0 {
+		if err := json.Unmarshal(statusBytes, &status); err != nil {
+			return ProjectRecord{}, fmt.Errorf("projects: unmarshal status: %w", err)
+		}
+	}
+	if err := mutate(status); err != nil {
+		return ProjectRecord{}, err
+	}
+	newStatus, err := json.Marshal(status)
+	if err != nil {
+		return ProjectRecord{}, fmt.Errorf("projects: marshal mutated status: %w", err)
+	}
+
+	const updateSQL = `
+		UPDATE projects
+		SET status = $2, updated_at = now()
+		WHERE kind = 'project' AND name = $1
+		RETURNING ` + projectSelectColumns + `
+	`
+	rows, err := tx.Query(ctx, updateSQL, name, newStatus)
+	if err != nil {
+		return ProjectRecord{}, fmt.Errorf("projects: update status: %w", err)
+	}
+	rec, scanErr := scanProjectFirstRow(rows)
+	rows.Close()
+	if scanErr != nil {
+		return ProjectRecord{}, scanErr
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ProjectRecord{}, fmt.Errorf("projects: commit status mutate: %w", err)
+	}
+	return rec, nil
+}
+
 // SetTestEnvironmentCount updates metadata.native_standby_dns.count and
 // strips the embedded `slots` array. The count under
 // metadata.native_standby_workload_identity is mirrored when that nested map
-// exists.
+// exists. This is authored config, so it re-versions.
 func (s *ProjectsStore) SetTestEnvironmentCount(ctx context.Context, name string, count int) (ProjectRecord, error) {
 	return s.mutateProject(ctx, name, func(metadata map[string]any) error {
 		standbyDNS, _ := metadata["native_standby_dns"].(map[string]any)
@@ -290,20 +488,20 @@ func (s *ProjectsStore) SetTestEnvironmentCount(ctx context.Context, name string
 	})
 }
 
-// SetNativeWorkloadIdentityStatus sets the
-// metadata.native_standby_workload_identity_status field.
+// SetNativeWorkloadIdentityStatus sets the reconciler-owned
+// native_standby_workload_identity_status in the status column.
 func (s *ProjectsStore) SetNativeWorkloadIdentityStatus(ctx context.Context, name string, status any) (ProjectRecord, error) {
-	return s.mutateProject(ctx, name, func(metadata map[string]any) error {
-		metadata["native_standby_workload_identity_status"] = status
+	return s.mutateStatus(ctx, name, func(current map[string]any) error {
+		current["native_standby_workload_identity_status"] = status
 		return nil
 	})
 }
 
-// SetManagedAuthOriginStatus sets the
-// metadata.managed_auth_origin_status field.
+// SetManagedAuthOriginStatus sets the reconciler-owned
+// managed_auth_origin_status in the status column.
 func (s *ProjectsStore) SetManagedAuthOriginStatus(ctx context.Context, name string, status any) (ProjectRecord, error) {
-	return s.mutateProject(ctx, name, func(metadata map[string]any) error {
-		metadata["managed_auth_origin_status"] = status
+	return s.mutateStatus(ctx, name, func(current map[string]any) error {
+		current["managed_auth_origin_status"] = status
 		return nil
 	})
 }
@@ -350,6 +548,93 @@ func (s *ProjectsStore) StripLegacySlotsArray(ctx context.Context, name string) 
 		return nil
 	})
 	return err
+}
+
+// BackfillConfigSchemas seeds config_schema_ref + project_config_schemas for
+// any project row that has no version yet (config_schema_ref = ”). Computing
+// the content hash in Go keeps it identical to the live write path — the
+// migration deliberately does not try to reproduce the hash in SQL. Idempotent:
+// rows that already carry a version are skipped, and the schema insert is a
+// no-op on conflict. Returns the number of rows seeded.
+func (s *ProjectsStore) BackfillConfigSchemas(ctx context.Context) (int, error) {
+	if s == nil || s.pool == nil {
+		return 0, fmt.Errorf("projects store not configured")
+	}
+	const selectSQL = `SELECT name, github_repo, payload FROM projects WHERE kind = 'project' AND config_schema_ref = ''`
+	rows, err := s.pool.Query(ctx, selectSQL)
+	if err != nil {
+		return 0, fmt.Errorf("projects: backfill select: %w", err)
+	}
+	type pending struct {
+		name      string
+		schemaRef string
+		payload   []byte
+	}
+	var todo []pending
+	for rows.Next() {
+		var name, githubRepo string
+		var payloadBytes []byte
+		if err := rows.Scan(&name, &githubRepo, &payloadBytes); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("projects: backfill scan: %w", err)
+		}
+		var doc map[string]any
+		if len(payloadBytes) > 0 {
+			if err := json.Unmarshal(payloadBytes, &doc); err != nil {
+				rows.Close()
+				return 0, fmt.Errorf("projects: backfill unmarshal %q: %w", name, err)
+			}
+		}
+		authored := stripServerManagedStatus(mapFromMap(doc, "metadata"))
+		canonicalRepo := stringFromMap(doc, "githubRepo", githubRepo)
+		// Re-marshal so the stored version payload matches the live write
+		// path (authored metadata only, status keys removed).
+		versionPayload, err := json.Marshal(map[string]any{
+			"name":       name,
+			"githubRepo": canonicalRepo,
+			"metadata":   authored,
+		})
+		if err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("projects: backfill marshal %q: %w", name, err)
+		}
+		todo = append(todo, pending{
+			name:      name,
+			schemaRef: projectConfigSchemaRef(name, canonicalRepo, authored),
+			payload:   versionPayload,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, fmt.Errorf("projects: backfill iterate: %w", err)
+	}
+	rows.Close()
+
+	seeded := 0
+	for _, p := range todo {
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return seeded, fmt.Errorf("projects: backfill begin %q: %w", p.name, err)
+		}
+		if _, err := tx.Exec(ctx, insertProjectConfigSchemaSQL, p.name, p.schemaRef, p.payload); err != nil {
+			_ = tx.Rollback(ctx)
+			return seeded, fmt.Errorf("projects: backfill mint %q: %w", p.name, err)
+		}
+		// Only move the pointer if it is still empty — avoid clobbering a
+		// concurrent live write that already versioned this row.
+		if _, err := tx.Exec(ctx,
+			`UPDATE projects SET config_schema_ref = $2 WHERE kind = 'project' AND name = $1 AND config_schema_ref = ''`,
+			p.name, p.schemaRef,
+		); err != nil {
+			_ = tx.Rollback(ctx)
+			return seeded, fmt.Errorf("projects: backfill point %q: %w", p.name, err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return seeded, fmt.Errorf("projects: backfill commit %q: %w", p.name, err)
+		}
+		seeded++
+	}
+	return seeded, nil
 }
 
 // ReadTestLeaseDefaults returns the global settings row. Returns
@@ -429,10 +714,24 @@ func (s *ProjectsStore) upsertGlobalDefault(ctx context.Context, column string, 
 	return row, nil
 }
 
+func scanProjectFirstRow(rows pgx.Rows) (ProjectRecord, error) {
+	if !rows.Next() {
+		return ProjectRecord{}, fmt.Errorf("projects: returned no row")
+	}
+	rec, err := scanProjectRow(rows)
+	if err != nil {
+		return ProjectRecord{}, err
+	}
+	if err := rows.Err(); err != nil {
+		return ProjectRecord{}, fmt.Errorf("projects: rows err: %w", err)
+	}
+	return rec, nil
+}
+
 func scanProjectRow(rows pgx.Rows) (ProjectRecord, error) {
 	var rec ProjectRecord
-	var payloadBytes []byte
-	if err := rows.Scan(&rec.Name, &rec.GitHubRepo, &payloadBytes, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+	var payloadBytes, statusBytes []byte
+	if err := rows.Scan(&rec.Name, &rec.GitHubRepo, &payloadBytes, &statusBytes, &rec.ConfigSchemaRef, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
 		return ProjectRecord{}, fmt.Errorf("projects: scan row: %w", err)
 	}
 	doc := map[string]any{}
@@ -441,9 +740,19 @@ func scanProjectRow(rows pgx.Rows) (ProjectRecord, error) {
 			return ProjectRecord{}, fmt.Errorf("projects: unmarshal payload: %w", err)
 		}
 	}
+	status := map[string]any{}
+	if len(statusBytes) > 0 {
+		if err := json.Unmarshal(statusBytes, &status); err != nil {
+			return ProjectRecord{}, fmt.Errorf("projects: unmarshal status: %w", err)
+		}
+	}
 	rec.GitHubRepo = stringFromMap(doc, "githubRepo", rec.GitHubRepo)
 	rec.ArgoCDApp = stringFromMap(doc, "argocdApp", "")
-	rec.Metadata = mapFromMap(doc, "metadata")
+	authored := mapFromMap(doc, "metadata")
+	rec.Status = status
+	// Merge reconciler status back under metadata so the returned shape is
+	// unchanged for every existing reader and the frontend.
+	rec.Metadata = mergeStatusIntoMetadata(authored, status)
 	return rec, nil
 }
 

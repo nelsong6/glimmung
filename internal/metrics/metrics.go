@@ -392,6 +392,30 @@ func RecordUnavailable(route, reason string) {
 	unavailableTotal.WithLabelValues(safeLabel(route), safeLabel(reason)).Inc()
 }
 
+// --- Project config writes ---------------------------------------------------
+//
+// Project authored-config is durable Postgres state written through
+// register/sync. Each write mints an immutable version in
+// project_config_schemas and moves the config_schema_ref pointer. This counter
+// makes config churn observable so a silent overwrite (the failure mode that
+// dropped glimmung's own test_slot_hot_swap block) surfaces on a dashboard.
+// outcome is a closed enum: created | updated | unchanged. See
+// docs/durable-project-config.md.
+
+var projectConfigWritesTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "glimmung_project_config_writes_total",
+		Help: "Project authored-config writes via register/sync, labelled by outcome (created = new project row, updated = authored config content changed, unchanged = idempotent re-register of identical config).",
+	},
+	[]string{"outcome"},
+)
+
+// RecordProjectConfigWrite counts one project authored-config write. outcome is
+// one of created | updated | unchanged (closed enum, bounded cardinality).
+func RecordProjectConfigWrite(outcome string) {
+	projectConfigWritesTotal.WithLabelValues(safeLabel(outcome)).Inc()
+}
+
 // --- Auth (auth.romaine.life JWT verifier) -----------------------------------
 
 var authRomaineLifeRequestsTotal = prometheus.NewCounterVec(
@@ -629,6 +653,7 @@ func init() {
 		postgresQueriesTotal,
 		postgresQueryDurationSeconds,
 		unavailableTotal,
+		projectConfigWritesTotal,
 		authRomaineLifeRequestsTotal,
 		testSlotActivationCancelledTotal,
 		testSlotCleanupClaimTotal,

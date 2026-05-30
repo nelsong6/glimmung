@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"sort"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 	"github.com/nelsong6/glimmung/internal/domain/budget"
 	"github.com/nelsong6/glimmung/internal/domain/decision"
 	"github.com/nelsong6/glimmung/internal/domain/publicids"
+	"github.com/nelsong6/glimmung/internal/metrics"
 	"github.com/nelsong6/glimmung/internal/server"
 	pgstore "github.com/nelsong6/glimmung/internal/store/pg"
 )
@@ -456,7 +458,7 @@ func (s *Store) listProjectNames(ctx context.Context) ([]string, error) {
 }
 
 func (s *Store) UpsertProject(ctx context.Context, req server.ProjectRegister) (server.Project, error) {
-	rec, err := s.pgProjects.Upsert(ctx, pgstore.ProjectRegister{
+	rec, outcome, err := s.pgProjects.Upsert(ctx, pgstore.ProjectRegister{
 		Name:       req.Name,
 		GitHubRepo: req.GitHubRepo,
 		Metadata:   req.Metadata,
@@ -464,7 +466,32 @@ func (s *Store) UpsertProject(ctx context.Context, req server.ProjectRegister) (
 	if err != nil {
 		return server.Project{}, err
 	}
+	// Observability for project authored-config transitions. The metric
+	// label is a closed enum; the structured log carries the content-hash
+	// pointers so an operator can answer "what changed and when" and recover
+	// a prior version from project_config_schemas. See
+	// docs/durable-project-config.md and docs/observability.md.
+	writeKind := projectConfigWriteKind(outcome)
+	metrics.RecordProjectConfigWrite(writeKind)
+	slog.Info("project config write",
+		"project", rec.Name,
+		"outcome", writeKind,
+		"schema_ref", outcome.SchemaRef,
+		"prev_schema_ref", outcome.PrevSchemaRef,
+	)
 	return projectFromRecord(rec), nil
+}
+
+// projectConfigWriteKind maps a pg write outcome to the bounded metric label.
+func projectConfigWriteKind(outcome pgstore.ProjectWriteOutcome) string {
+	switch {
+	case outcome.Created:
+		return "created"
+	case outcome.Versioned:
+		return "updated"
+	default:
+		return "unchanged"
+	}
 }
 
 func (s *Store) SetProjectTestEnvironmentCount(ctx context.Context, project string, count int) (server.Project, error) {

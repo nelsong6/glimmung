@@ -1132,3 +1132,22 @@ func TestUpdateInnerJobTerminationSynthesizesStubWhenUnregistered(t *testing.T) 
 		t.Fatalf("stub intent=%q, want unknown", stub["intent"])
 	}
 }
+
+func TestProjectConfigWriteKind(t *testing.T) {
+	cases := []struct {
+		name    string
+		outcome pgstore.ProjectWriteOutcome
+		want    string
+	}{
+		{"new row", pgstore.ProjectWriteOutcome{Created: true, Versioned: true}, "created"},
+		{"content changed", pgstore.ProjectWriteOutcome{Created: false, Versioned: true}, "updated"},
+		{"idempotent re-register", pgstore.ProjectWriteOutcome{Created: false, Versioned: false}, "unchanged"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := projectConfigWriteKind(tc.outcome); got != tc.want {
+				t.Fatalf("projectConfigWriteKind=%q, want %q", got, tc.want)
+			}
+		})
+	}
+}

@@ -96,6 +96,17 @@ func main() {
 
 		pgProjects := pgstore.NewProjectsStore(pgPool)
 		store.SetPGProjects(pgProjects)
+		// Seed authored-config version history for any project row that has
+		// no version yet. The hash is computed in Go so it matches the live
+		// write path exactly (the SQL migration deliberately does not try to
+		// reproduce it). Idempotent. See docs/durable-project-config.md.
+		backfillCtx, backfillCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if seeded, backErr := pgProjects.BackfillConfigSchemas(backfillCtx); backErr != nil {
+			log.Printf("project config-schema backfill failed: %v", backErr)
+		} else if seeded > 0 {
+			log.Printf("project config-schema backfill ok: seeded %d project version(s)", seeded)
+		}
+		backfillCancel()
 
 		pgWorkflows := pgstore.NewWorkflowsStore(pgPool)
 		store.SetPGWorkflows(pgWorkflows)
