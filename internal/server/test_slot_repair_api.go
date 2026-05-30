@@ -140,6 +140,13 @@ func configuredSlotIndexForName(projectName string, project Project, slotName st
 	return 0, ErrNotFound
 }
 
+// activeTestSlotLeaseForSlot reports whether a live lease is currently
+// holding the slot, so repair can refuse to revalidate capacity that is in
+// use. "Live" is any non-terminal lease (claimed or active) referencing the
+// slot — both test-slot checkout leases and native run leases (env-prep and
+// later phases reserve a slot with a non-checkout native lease). A terminal
+// (released/expired) lease never matches: its reservation is an orphan that
+// repair is allowed to clear, not a live hold it must protect.
 func activeTestSlotLeaseForSlot(ctx context.Context, store StateStore, project Project, projectName string, slotIndex int, slotName string) (Lease, bool, error) {
 	leases, err := store.ListLeases(ctx)
 	if err != nil {
@@ -152,7 +159,7 @@ func activeTestSlotLeaseForSlot(ctx context.Context, store StateStore, project P
 		}
 	}
 	for _, lease := range leases {
-		if lease.State != "claimed" || !boolFromMap(lease.Metadata, "test_slot_checkout") {
+		if lease.State != "claimed" && lease.State != "active" {
 			continue
 		}
 		if !projectNames[lease.Project] {
@@ -178,21 +185,35 @@ func claimSlotPreliminaryRepair(ctx context.Context, store ReadStore, project st
 		return Slot{}, errSlotStoreNotConfigured
 	}
 	return slotStore.UpdateIfMatch(ctx, project, slotIndex, func(slot Slot) (Slot, error) {
-		if slot.ActiveLeaseRef != nil && strings.TrimSpace(*slot.ActiveLeaseRef) != "" {
-			return slot, fmt.Errorf("%w: slot %s is leased", ErrConflict, slotName)
-		}
 		switch slot.State {
 		case SlotStateUnseeded, SlotStateProvisioning, SlotStateProvisioned:
-			return slot.MarkProvisioning(now)
+			return repairProvisioning(slot, now)
 		case SlotStateError:
 			if slot.CleanupError != nil && strings.TrimSpace(*slot.CleanupError) != "" {
 				return slot, fmt.Errorf("%w: slot %s has a cleanup error; retry return or cleanup first", ErrConflict, slotName)
 			}
-			return slot.MarkProvisioning(now)
+			return repairProvisioning(slot, now)
 		case SlotStateActivating, SlotStateRunning, SlotStateCleaning:
 			return slot, fmt.Errorf("%w: slot %s is %s", ErrConflict, slotName, slot.State)
 		default:
 			return slot, fmt.Errorf("%w: slot %s is in unknown state %q", ErrConflict, slotName, slot.State)
 		}
 	})
+}
+
+// repairProvisioning walks a repairable slot back to provisioning and clears
+// any active_lease_ref it still carries. The repair handler has already
+// verified via activeTestSlotLeaseForSlot that no live lease holds this slot,
+// so a non-empty ref here is an orphaned reservation — the canonical case
+// being the stale-lease startup sweep terminalizing a lease without releasing
+// its slot. The subsequent provisioned transition (MarkProvisioned) also
+// clears the ref; doing it here keeps the intermediate provisioning state
+// honest and makes the orphan-recovery intent explicit.
+func repairProvisioning(slot Slot, now time.Time) (Slot, error) {
+	next, err := slot.MarkProvisioning(now)
+	if err != nil {
+		return slot, err
+	}
+	next.ActiveLeaseRef = nil
+	return next, nil
 }

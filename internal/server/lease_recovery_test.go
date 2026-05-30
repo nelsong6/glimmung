@@ -9,10 +9,12 @@ import (
 )
 
 type fakeStaleLeaseStore struct {
-	rows    []StaleLeaseExpiryRow
-	docs    map[string]map[string]any
-	patches int
-	listErr error
+	rows          []StaleLeaseExpiryRow
+	docs          map[string]map[string]any
+	patches       int
+	listErr       error
+	releasedSlots []string
+	releaseErr    error
 }
 
 func newFakeStaleLeaseStore() *fakeStaleLeaseStore {
@@ -56,6 +58,14 @@ func (s *fakeStaleLeaseStore) PatchLeasePayload(_ context.Context, project, id s
 	return nil
 }
 
+func (s *fakeStaleLeaseStore) ReleaseExpiredNativeSlotReservation(_ context.Context, project, id string) error {
+	if s.releaseErr != nil {
+		return s.releaseErr
+	}
+	s.releasedSlots = append(s.releasedSlots, project+"|"+id)
+	return nil
+}
+
 func TestExpireStaleLeases_TransitionsExpiredActiveAndClaimed(t *testing.T) {
 	now := time.Date(2026, 5, 29, 0, 0, 0, 0, time.UTC)
 	past := now.Add(-7 * 24 * time.Hour)
@@ -81,6 +91,23 @@ func TestExpireStaleLeases_TransitionsExpiredActiveAndClaimed(t *testing.T) {
 	}
 	if count != 2 {
 		t.Fatalf("expired count=%d, want 2", count)
+	}
+
+	// Reservation release is attempted exactly for the leases the sweep
+	// terminalized — never for rows it left alone (already-terminal,
+	// future-deadline, or no-deadline).
+	gotReleased := map[string]bool{}
+	for _, key := range store.releasedSlots {
+		gotReleased[key] = true
+	}
+	wantReleased := map[string]bool{"ambience|a1": true, "ambience|c1": true}
+	if len(store.releasedSlots) != len(wantReleased) {
+		t.Fatalf("released slots=%v, want keys %v", store.releasedSlots, wantReleased)
+	}
+	for key := range wantReleased {
+		if !gotReleased[key] {
+			t.Errorf("expected reservation release for %s, got %v", key, store.releasedSlots)
+		}
 	}
 
 	wantExpired := map[string]bool{"ambience|a1": true, "ambience|c1": true}
@@ -118,6 +145,26 @@ func TestExpireStaleLeases_TransitionsExpiredActiveAndClaimed(t *testing.T) {
 			}
 		}
 		_ = wantExpired
+	}
+}
+
+func TestExpireStaleLeases_ReservationReleaseFailureDoesNotFailSweep(t *testing.T) {
+	now := time.Date(2026, 5, 29, 0, 0, 0, 0, time.UTC)
+	past := now.Add(-time.Hour)
+
+	store := newFakeStaleLeaseStore()
+	store.seed(StaleLeaseExpiryRow{ID: "a1", Project: "ambience", State: "active", ExpiresAt: &past})
+	store.releaseErr = errors.New("slot row CAS exhausted")
+
+	count, err := ExpireStaleLeases(context.Background(), store, now, nil)
+	if err != nil {
+		t.Fatalf("ExpireStaleLeases err=%v, want nil (release failure is best-effort)", err)
+	}
+	if count != 1 {
+		t.Fatalf("expired count=%d, want 1", count)
+	}
+	if state, _ := store.docs["ambience|a1"]["state"].(string); state != "expired" {
+		t.Fatalf("lease state=%s, want expired even though reservation release failed", state)
 	}
 }
 

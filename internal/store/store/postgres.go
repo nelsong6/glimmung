@@ -4541,6 +4541,38 @@ func (s *Store) listLeaseDocsForProject(ctx context.Context, project string) ([]
 	return out, nil
 }
 
+// ReleaseExpiredNativeSlotReservation satisfies server.StaleLeaseStore. The
+// expire-stale-leases startup sweep calls it after terminalizing a lease so
+// a native slot lease's reservation is released the same way CancelLeaseByRef
+// and ReleaseLeaseByCallbackToken release it. Without this the slot keeps a
+// stale active_lease_ref and never rejoins the available pool. No-op when the
+// lease is missing, not native-k8s, or a test-slot checkout lease (whose slot
+// reservation is owned by the cleanup state machine, not a bare release).
+func (s *Store) ReleaseExpiredNativeSlotReservation(ctx context.Context, project, id string) error {
+	if s == nil || s.pgLeases == nil {
+		return nil
+	}
+	docs, err := s.listLeaseDocsForProject(ctx, project)
+	if err != nil {
+		return err
+	}
+	var found *leaseDoc
+	for i := range docs {
+		if docs[i].ID == id {
+			found = &docs[i]
+			break
+		}
+	}
+	if found == nil {
+		return nil
+	}
+	lease := leaseFromDoc(*found)
+	if !boolValue(lease.Metadata["native_k8s"]) || boolValue(lease.Metadata["test_slot_checkout"]) {
+		return nil
+	}
+	return s.releaseNativeSlotReservation(ctx, lease, time.Now().UTC())
+}
+
 func (s *Store) releaseNativeSlotReservation(ctx context.Context, lease server.Lease, now time.Time) error {
 	slot := nativeSlotIndex(lease.Metadata)
 	if slot == nil {

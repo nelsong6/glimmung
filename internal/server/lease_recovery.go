@@ -24,6 +24,17 @@ type StaleLeaseExpiryRow struct {
 type StaleLeaseStore interface {
 	ListLeasesForExpirySweep(ctx context.Context) ([]StaleLeaseExpiryRow, error)
 	PatchLeasePayload(ctx context.Context, project, id string, mutate func(payload map[string]any) error) error
+	// ReleaseExpiredNativeSlotReservation clears the native slot
+	// reservation a just-expired lease was still holding. Terminalizing
+	// the lease row is not enough: a native, non-checkout slot lease also
+	// pins `active_lease_ref` on its slot, and without releasing it the
+	// slot stays `provisioned` forever and never returns to the available
+	// pool. This mirrors the reservation release CancelLeaseByRef and
+	// ReleaseLeaseByCallbackToken perform when they terminalize the same
+	// lease shape. The implementation is a no-op when the lease is missing,
+	// not native-k8s, or a test-slot checkout lease (whose slot is released
+	// through the cleanup state machine instead).
+	ReleaseExpiredNativeSlotReservation(ctx context.Context, project, id string) error
 }
 
 // ExpireStaleLeases transitions every lease whose durable expires_at
@@ -98,6 +109,16 @@ func ExpireStaleLeases(ctx context.Context, store StaleLeaseStore, now time.Time
 			count++
 			if logf != nil {
 				logf("expired stale lease project=%s id=%s prior_state=%s expires_at=%s", row.Project, row.ID, priorState, row.ExpiresAt.UTC().Format(time.RFC3339Nano))
+			}
+			// The lease is now terminal, but a native, non-checkout slot
+			// lease also pins active_lease_ref on its slot. Release that
+			// reservation so the slot returns to the available pool; a
+			// terminalized lease whose slot stays reserved is exactly the
+			// orphan this sweep exists to recover. Best-effort and logged:
+			// a failure here leaves the lease correctly expired and the
+			// slot recoverable via the repair endpoint.
+			if err := store.ReleaseExpiredNativeSlotReservation(ctx, row.Project, row.ID); err != nil && logf != nil {
+				logf("release native slot reservation for expired lease failed project=%s id=%s: %v", row.Project, row.ID, err)
 			}
 		}
 	}

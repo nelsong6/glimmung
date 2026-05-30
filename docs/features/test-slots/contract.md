@@ -89,10 +89,21 @@ running, cleaning, and available explicit.
   has passed but whose state is still `active` or `claimed` (orphaned
   callback releases, AfterFunc timers killed with the previous process,
   pre-test-slot-lifecycle lease shapes). The sweep is gated by
-  `Settings.ControlPlaneLoopsEnabled` so slot processes never run it. See
-  `server.ExpireStaleLeases`.
+  `Settings.ControlPlaneLoopsEnabled` so slot processes never run it. After
+  terminalizing such a lease, the sweep also releases any native slot
+  reservation the lease still pinned (`native_k8s` and not a test-slot
+  checkout): terminalizing the lease row alone leaves the slot's
+  `active_lease_ref` set, stranding the slot in `provisioned` outside the
+  available pool forever. Reservation release is best-effort and logged; a
+  failure leaves the lease correctly expired and the slot recoverable via
+  admin repair. See `server.ExpireStaleLeases`.
 - Admin repair may retry preliminary-resource errors, but cleanup-error slots
-  remain on the runtime cleanup path.
+  remain on the runtime cleanup path. Repair refuses any slot a live
+  (`claimed`/`active`) lease still holds — checkout lease or native run lease
+  alike — but a slot whose `active_lease_ref` points only at a terminal
+  (`released`/`expired`) lease is an orphaned reservation: repair clears the
+  stale ref as it walks the slot back to `provisioned`, returning the slot to
+  the available pool.
 - Activation failure records error state and releases or cleans up the lease
   through the lifecycle path.
 - Cleanup failure leaves the slot unavailable with visible error state rather
