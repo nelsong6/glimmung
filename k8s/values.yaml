@@ -3,7 +3,7 @@ image:
   # SHA-pinned. The build workflow rewrites this line on every push to main
   # via a `[skip ci]` follow-up commit. Quote the value so all-digit short
   # SHAs aren't reformatted as scientific notation by YAML.
-  tag: "app-c9039a99350b8ec30f9e73adfaaca22cac6aafe8d249694dee267200e8ea85e6"
+  tag: "app-b23803483ed84828715425fe001238607bc664c045e5fd2cba28fb6910275f83"
   pullPolicy: IfNotPresent
 
 namespace: glimmung
@@ -16,7 +16,7 @@ replicas: 1
 nativeRunner:
   namespace: glimmung-runs
   serviceAccount: glimmung-native-runner
-  image: romainecr.azurecr.io/glimmung-native-runner:native-runner-2a5b8b9205b53308bce7420d63802e93c7c52a36b95e7a3f14d43be3b41e8718
+  image: romainecr.azurecr.io/glimmung-native-runner:native-runner-f5b6766983af31a288bb076e588e25ec7326d1ebe75a3c8fc5b25bc75c90faaa
   entrypoint: /app/glimmung-native-runner
   callbackBaseUrl: http://glimmung.glimmung.svc.cluster.local
   projectConcurrency: 5
@@ -145,14 +145,12 @@ externalSecret:
     - envVar: POSTGRES_DATABASE
       kvKey: glimmung-pg-database
     # Remote-host execution primitives (docs/remote-host-execution.md).
-    # The SSH CA private key signs short-TTL OpenSSH user certs for
-    # orchestrator pods reaching project-pinned hosts. Tailscale
-    # auth-key mints flow through the OIDC federation path against
-    # auth.romaine.life — no KV-resident Tailscale OAuth secret is
-    # needed. The endpoint fails closed (HTTP 503) when the CA key is
-    # empty so missing values do not silently bypass the cert mint.
-    - envVar: GLIMMUNG_SSH_CA_PRIVATE_KEY
-      kvKey: glimmung-ssh-ca-private-key
+    # glimmung holds NO SSH CA private material: auth.romaine.life is the
+    # sole SSH CA issuer. The ssh-cert callback is a gateway that proves
+    # glimmung's identity with the projected SA token (audience-pinned to
+    # auth.romaine.life, mounted below) and asks auth to sign the cert.
+    # Tailscale auth-key mints flow through the same OIDC federation path
+    # — no KV-resident SSH CA key or Tailscale OAuth secret is needed.
 
 # Remote-host execution primitives (docs/remote-host-execution.md).
 # Identifies the Tailscale "Trust credentials → OIDC" entry that pins

@@ -8,8 +8,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"golang.org/x/crypto/ssh"
 )
 
 // remoteHostRunCallbackStore is a minimal RunCompletionStore that returns
@@ -35,18 +33,17 @@ func (s remoteHostRunCallbackStore) ReadRunIDForCallbackToken(_ context.Context,
 	return s.runID, s.project, "", nil
 }
 
-
 func newRunCallbackStore(token, project string) remoteHostRunCallbackStore {
 	return remoteHostRunCallbackStore{token: token, runID: "run_test_01", project: project}
 }
 
 func TestSSHCertHandlerHappyPath(t *testing.T) {
-	signer := mustNewCertSigner(t)
+	f := newFakeSSHCertAuth(t)
+	exchanger := newTestSSHCertExchanger(t, f, "sa-token-abc")
 	store := newRunCallbackStore("tok-1", "spirelens")
-	handler := mintRunCallbackSSHCert(store, signer)
+	handler := mintRunCallbackSSHCert(store, exchanger)
 
-	pubKey, _ := generateUserPubKeyForTest(t)
-	body := mustEncodeJSON(t, SSHCertRequest{PublicKey: pubKey})
+	body := mustEncodeJSON(t, SSHCertRequest{PublicKey: "ssh-ed25519 AAAAUSERKEY"})
 	req := httptest.NewRequest(http.MethodPost, "/v1/run-callbacks/tok-1/native/ssh-cert", bytes.NewReader(body))
 	req.SetPathValue("callback_token", "tok-1")
 	rr := httptest.NewRecorder()
@@ -57,8 +54,8 @@ func TestSSHCertHandlerHappyPath(t *testing.T) {
 	}
 	var got SSHCertResponse
 	mustDecodeJSON(t, rr.Body.Bytes(), &got)
-	if !strings.HasPrefix(got.Certificate, "ssh-ed25519-cert-v01@openssh.com ") {
-		t.Fatalf("unexpected certificate prefix: %s", got.Certificate)
+	if got.Certificate != f.certPEM {
+		t.Fatalf("Certificate=%q want %q", got.Certificate, f.certPEM)
 	}
 	if len(got.Principals) != 1 || got.Principals[0] != "spirelens-agent" {
 		t.Fatalf("Principals=%v", got.Principals)
@@ -66,28 +63,24 @@ func TestSSHCertHandlerHappyPath(t *testing.T) {
 	if got.KeyID != "glimmung-run:spirelens/run_test_01" {
 		t.Fatalf("KeyID=%q", got.KeyID)
 	}
-	if got.ValidBefore.Before(got.ValidAfter) || got.ValidBefore.Equal(got.ValidAfter) {
-		t.Fatalf("ValidBefore <= ValidAfter")
+	if got.ValidBefore.IsZero() {
+		t.Fatal("ValidBefore zero")
 	}
-	parsed, _, _, _, err := ssh.ParseAuthorizedKey([]byte(got.Certificate))
-	if err != nil {
-		t.Fatalf("re-parse: %v", err)
+	// The gateway must have authenticated to auth with the projected SA
+	// token and derived the principal/key_id server-side.
+	if f.gotAuthHeader != "Bearer sa-token-abc" {
+		t.Fatalf("auth Authorization=%q", f.gotAuthHeader)
 	}
-	cert, ok := parsed.(*ssh.Certificate)
-	if !ok {
-		t.Fatalf("not a cert: %T", parsed)
+	if got := f.gotBody["key_id"]; got != "glimmung-run:spirelens/run_test_01" {
+		t.Fatalf("auth saw key_id=%v", got)
 	}
-	checker := &ssh.CertChecker{
-		IsUserAuthority: func(auth ssh.PublicKey) bool {
-			return string(auth.Marshal()) == string(signer.Signer.PublicKey().Marshal())
-		},
-	}
-	if err := checker.CheckCert("spirelens-agent", cert); err != nil {
-		t.Fatalf("CertChecker: %v", err)
+	principals, ok := f.gotBody["principals"].([]any)
+	if !ok || len(principals) != 1 || principals[0] != "spirelens-agent" {
+		t.Fatalf("auth saw principals=%v", f.gotBody["principals"])
 	}
 }
 
-func TestSSHCertHandlerSignerDisabledReturns503(t *testing.T) {
+func TestSSHCertHandlerExchangerDisabledReturns503(t *testing.T) {
 	store := newRunCallbackStore("tok-1", "spirelens")
 	handler := mintRunCallbackSSHCert(store, nil)
 	rr := doSSHCertReq(t, handler, "tok-1", `{"public_key":"ssh-ed25519 AAAA"}`)
@@ -97,26 +90,31 @@ func TestSSHCertHandlerSignerDisabledReturns503(t *testing.T) {
 }
 
 func TestSSHCertHandlerUnknownTokenReturns404(t *testing.T) {
-	signer := mustNewCertSigner(t)
+	f := newFakeSSHCertAuth(t)
+	exchanger := newTestSSHCertExchanger(t, f, "sa-token-abc")
 	store := newRunCallbackStore("real", "spirelens")
-	handler := mintRunCallbackSSHCert(store, signer)
-	pub, _ := generateUserPubKeyForTest(t)
-	rr := doSSHCertReq(t, handler, "wrong", `{"public_key":"`+pub+`"}`)
+	handler := mintRunCallbackSSHCert(store, exchanger)
+	rr := doSSHCertReq(t, handler, "wrong", `{"public_key":"ssh-ed25519 AAAA"}`)
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
 }
 
+// TestSSHCertHandlerMissingPubKeyReturns400 covers the local presence /
+// shape checks glimmung still owns before it ever calls auth: empty body,
+// missing field, empty value, unknown field. The *cryptographic* validity
+// of the public key is auth.romaine.life's responsibility now — see
+// TestSSHCertHandlerPropagatesAuthBadRequest for the "garbage key" case.
 func TestSSHCertHandlerMissingPubKeyReturns400(t *testing.T) {
-	signer := mustNewCertSigner(t)
+	f := newFakeSSHCertAuth(t)
+	exchanger := newTestSSHCertExchanger(t, f, "sa-token-abc")
 	store := newRunCallbackStore("tok-1", "spirelens")
-	handler := mintRunCallbackSSHCert(store, signer)
+	handler := mintRunCallbackSSHCert(store, exchanger)
 
 	for name, body := range map[string]string{
 		"empty body":    ``,
 		"missing field": `{}`,
 		"empty value":   `{"public_key":""}`,
-		"garbage":       `{"public_key":"not a key"}`,
 		"unknown field": `{"public_key":"x","other":"y"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -128,12 +126,55 @@ func TestSSHCertHandlerMissingPubKeyReturns400(t *testing.T) {
 	}
 }
 
+// TestSSHCertHandlerPropagatesAuthBadRequest confirms a 400 from auth
+// (e.g. an unparsable public key, a disallowed extension, or a ttl out of
+// range) surfaces to the orchestrator as a 400 — never masked as a 502.
+func TestSSHCertHandlerPropagatesAuthBadRequest(t *testing.T) {
+	f := newFakeSSHCertAuth(t)
+	f.status = http.StatusBadRequest
+	exchanger := newTestSSHCertExchanger(t, f, "sa-token-abc")
+	store := newRunCallbackStore("tok-1", "spirelens")
+	handler := mintRunCallbackSSHCert(store, exchanger)
+	rr := doSSHCertReq(t, handler, "tok-1", `{"public_key":"not a real key"}`)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestSSHCertHandlerPropagatesAuthUnavailable confirms a 503 from auth
+// (auth has no CA private key configured) surfaces as a 503.
+func TestSSHCertHandlerPropagatesAuthUnavailable(t *testing.T) {
+	f := newFakeSSHCertAuth(t)
+	f.status = http.StatusServiceUnavailable
+	exchanger := newTestSSHCertExchanger(t, f, "sa-token-abc")
+	store := newRunCallbackStore("tok-1", "spirelens")
+	handler := mintRunCallbackSSHCert(store, exchanger)
+	rr := doSSHCertReq(t, handler, "tok-1", `{"public_key":"ssh-ed25519 AAAA"}`)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestSSHCertHandlerPropagatesAuthUpstreamFault confirms an unexpected
+// auth status (e.g. 500) surfaces as a 502 bad gateway.
+func TestSSHCertHandlerPropagatesAuthUpstreamFault(t *testing.T) {
+	f := newFakeSSHCertAuth(t)
+	f.status = http.StatusInternalServerError
+	exchanger := newTestSSHCertExchanger(t, f, "sa-token-abc")
+	store := newRunCallbackStore("tok-1", "spirelens")
+	handler := mintRunCallbackSSHCert(store, exchanger)
+	rr := doSSHCertReq(t, handler, "tok-1", `{"public_key":"ssh-ed25519 AAAA"}`)
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestSSHCertHandlerRejectsRunWithoutProject(t *testing.T) {
-	signer := mustNewCertSigner(t)
+	f := newFakeSSHCertAuth(t)
+	exchanger := newTestSSHCertExchanger(t, f, "sa-token-abc")
 	store := newRunCallbackStore("tok-1", "")
-	handler := mintRunCallbackSSHCert(store, signer)
-	pub, _ := generateUserPubKeyForTest(t)
-	rr := doSSHCertReq(t, handler, "tok-1", `{"public_key":"`+pub+`"}`)
+	handler := mintRunCallbackSSHCert(store, exchanger)
+	rr := doSSHCertReq(t, handler, "tok-1", `{"public_key":"ssh-ed25519 AAAA"}`)
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
