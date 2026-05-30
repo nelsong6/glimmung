@@ -191,5 +191,29 @@ idempotent. The existing `projects` row is never dropped or replaced by the
 migration — it is read, split, and rewritten in place under the same advisory
 lock the rest of `RunMigrations` uses. No old interleaved-layout read path
 survives the backfill (migration-policy compliant).
-</content>
-</invoke>
+
+### Who runs the migration: only the prod control plane
+
+Glimmung test slots run a hot-swappable copy of the binary against the **same
+Postgres database** as prod (see `Settings.ControlPlaneLoopsEnabled`). Anything
+that mutates that shared schema or data must therefore be owned by exactly one
+process — the prod control plane. Before this work, `RunMigrations`, the
+slot-storage one-shot, and (newly) `BackfillConfigSchemas` ran unconditionally,
+so every slot re-applied migrations against the prod database on boot. That was
+harmless only because those migrations were already applied and idempotent; a
+slot hot-swapped with a binary carrying an *unshipped* migration would apply it
+to prod early — and, while the still-old prod reader was live, prod would lose
+visibility of any column the migration moved data into.
+
+So all three startup DB mutators (`RunMigrations`, `BackfillConfigSchemas`, and
+the slot-storage `MigrateProjectSlotsIntoCollection`) are gated behind
+`ControlPlaneLoopsEnabled`. Prod (loops enabled, the default) owns schema
+changes; slots (loops disabled) skip them and serve HTTP against the
+prod-owned schema.
+
+A direct consequence: **a new migration cannot be validated in a slot.** A slot
+running new code that needs new columns will not have them until prod migrates,
+and it no longer applies them itself. New-migration changes are validated by
+unit tests + CI and land atomically at prod rollout, where the same process
+both migrates and reads the new shape under the advisory lock. This is an
+accepted property of the shared-database slot model, not a gap to paper over.
